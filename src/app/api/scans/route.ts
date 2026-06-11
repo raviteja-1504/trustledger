@@ -6,6 +6,10 @@ import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { validateBody, CreateScanSchema } from "@/lib/validation";
 import { logger } from "@/lib/logger";
+import { cacheDel, cacheKeys } from "@/lib/cache";
+
+// Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
+const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -221,6 +225,9 @@ export async function POST(req: NextRequest) {
   if (scanErr || !scan) {
     return NextResponse.json({ error: "scan_insert_failed" }, { status: 500 });
   }
+
+  // Invalidate cached dashboard stats so this scan shows up immediately
+  await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
 
   // Insert scan files
   if (result.files.length > 0) {
