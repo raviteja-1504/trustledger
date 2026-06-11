@@ -54,3 +54,5 @@ Thumbs.db
 
 # Sentry
 .sentryclirc
+
+.deploy-tmp

@@ -41,7 +41,11 @@ async function main() {
 
   // Dynamic import to avoid bundling issues
   const { createClient } = await import("@supabase/supabase-js");
-  const db = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+  const ws = await import("ws");
+  const db = createClient(supabaseUrl, serviceKey, {
+    auth: { persistSession: false },
+    realtime: { transport: ws.default as any },
+  });
 
   // Ensure migrations tracking table exists
   try {

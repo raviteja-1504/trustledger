@@ -11,7 +11,7 @@ import { createClient } from "@supabase/supabase-js";
 const SKIP_AUTH  = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 const IS_PROD    = process.env.NODE_ENV === "production";
 
-const PUBLIC_PATHS = new Set(["/login", "/api/auth/callback", "/api/webhook", "/changelog", "/docs", "/status"]);
+const PUBLIC_PATHS = new Set(["/login", "/api/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz"]);
 
 // Routes blocked in production (dev/seed tools)
 const DEV_ONLY_PATHS = new Set(["/seed", "/dev-seed"]);

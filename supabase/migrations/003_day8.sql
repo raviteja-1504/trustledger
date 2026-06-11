@@ -24,7 +24,7 @@ alter table org_members add constraint org_members_role_check
   check (role in ('platform_admin','admin','security_reviewer','developer','auditor','viewer'));
 
 -- ── Scan schedule cron table (created in 002, adding indexes) ─────────────────
-create index if not exists on scan_schedules (org_id, enabled);
+create index if not exists scan_schedules_org_enabled_idx on scan_schedules (org_id, enabled);
 
 -- ── GDPR audit events ─────────────────────────────────────────────────────────
 -- Existing audit_log table covers this — no schema change needed.
