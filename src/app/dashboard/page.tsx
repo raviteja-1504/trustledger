@@ -943,26 +943,6 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    // Check for dev-seed forced data BEFORE making any API call
-    const seedRaw = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1"
-      ? localStorage.getItem("tl_notif_snapshot") : null;
-    if (seedRaw) {
-      try {
-        const seed = JSON.parse(seedRaw) as DashboardData;
-        if (Array.isArray(seed?.repos) && seed.repos.length > 0) {
-          setData(seed); setIsDemo(false); setLastRefreshed(new Date()); setLoading(false);
-          return;
-        }
-      } catch {}
-    }
-
-    setData(null); setError(null); setLoading(true);
-    const sd = rangeMode === "custom" ? startDate : undefined;
-    const ed = rangeMode === "custom" ? endDate   : undefined;
-    api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed)
-      .then(d => { setData(d); setIsDemo(false); setLastRefreshed(new Date()); })
-      .catch(() => { setData(MOCK_DATA); setIsDemo(true); setLastRefreshed(new Date()); })
-      .finally(() => setLoading(false));
     // Merge local attestation events (from PR page) with API/seed events
     function mergeWithLocal(base: ActivityEvent[]): ActivityEvent[] {
       try {
@@ -977,14 +957,34 @@ export default function DashboardPage() {
       } catch { return base.slice(0, 15); }
     }
 
-    if (typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") {
-      const seedSnap = (() => { try { return JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null; } catch { return null; } })();
-      setActivity(mergeWithLocal(seedSnap ? deriveActivity(seedSnap) : MOCK_ACTIVITY));
-    } else {
-      api.activity(ORG, 15)
-        .then(r => setActivity(mergeWithLocal(r.events.length > 0 ? r.events : MOCK_ACTIVITY)))
-        .catch(() => setActivity(mergeWithLocal(MOCK_ACTIVITY)));
+    // Check for dev-seed forced data BEFORE making any API call
+    const seedRaw = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1"
+      ? localStorage.getItem("tl_notif_snapshot") : null;
+    if (seedRaw) {
+      try {
+        const seed = JSON.parse(seedRaw) as DashboardData;
+        if (Array.isArray(seed?.repos) && seed.repos.length > 0) {
+          setData(seed); setIsDemo(false); setLastRefreshed(new Date()); setLoading(false);
+          setActivity(mergeWithLocal(deriveActivity(seed)));
+          return;
+        }
+      } catch {}
     }
+
+    setData(null); setError(null); setLoading(true);
+    const sd = rangeMode === "custom" ? startDate : undefined;
+    const ed = rangeMode === "custom" ? endDate   : undefined;
+    api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed)
+      .then(d => {
+        setData(d); setIsDemo(false); setLastRefreshed(new Date());
+        // Activity is derived from real scan/attestation data — empty when the org has none yet.
+        setActivity(mergeWithLocal(d.repos.length > 0 ? deriveActivity(d) : []));
+      })
+      .catch(() => {
+        setData(MOCK_DATA); setIsDemo(true); setLastRefreshed(new Date());
+        setActivity(mergeWithLocal(MOCK_ACTIVITY));
+      })
+      .finally(() => setLoading(false));
   }, [days, rangeMode, startDate, endDate]);
 
   // Refresh-ago ticker
@@ -1108,7 +1108,7 @@ export default function DashboardPage() {
 
   // Merge local attestations (always fresh from state) with base activity — newest first
   const displayActivity = useMemo(() => {
-    const base = activity.length > 0 ? activity : MOCK_ACTIVITY;
+    const base = activity;
     if (localActivity.length === 0) return base.slice(0, 15);
     const seen = new Set<string>();
     return [...localActivity, ...base]
