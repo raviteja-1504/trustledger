@@ -47,7 +47,7 @@ export default function ProfilePage() {
     if (!user) { setLoading(false); return; }
     async function load() {
       // Load profile
-      const { data: p } = await supabase.from("user_profiles").select("*").eq("user_id", user!.id).single() as { data: Profile | null };
+      const { data: p } = await supabase.from("user_profiles").select("*").eq("user_id", user!.id).maybeSingle() as { data: Profile | null };
       if (p) setProf(p);
       else if (authProfile) {
         setProf(prev => ({
