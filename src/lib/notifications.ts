@@ -20,9 +20,29 @@ const SNAP_KEY   = "tl_notif_snapshot";
 const POLL_MS    = 30_000;
 const MAX_STORED = 50;
 
+// One-time cleanup of duplicates accumulated by old timestamp-based notification
+// IDs (pre-dedupe fix) — collapses repeats of the same title+body, keeping the
+// most recent, and re-saves so the unread badge stops over-counting.
+function dedupeStored(ns: Notification[]): Notification[] {
+  const byKey = new Map<string, Notification>();
+  for (const n of ns) {
+    const key = `${n.title}::${n.body}`;
+    const existing = byKey.get(key);
+    if (!existing || n.time > existing.time || (n.read === false && existing.read === true)) {
+      byKey.set(key, existing ? { ...n, read: n.read && existing.read } : n);
+    }
+  }
+  return Array.from(byKey.values()).sort((a, b) => b.time - a.time).slice(0, MAX_STORED);
+}
+
 function load(): Notification[] {
   if (typeof window === "undefined") return [];
-  try { return JSON.parse(localStorage.getItem(STORE_KEY) ?? "[]"); } catch { return []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORE_KEY) ?? "[]") as Notification[];
+    const deduped = dedupeStored(raw);
+    if (deduped.length !== raw.length) save(deduped);
+    return deduped;
+  } catch { return []; }
 }
 
 function save(ns: Notification[]) {
