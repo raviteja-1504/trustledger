@@ -1,0 +1,37 @@
+{
+  "framework":   "nextjs",
+  "buildCommand": "next build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install",
+  "regions": ["iad1"],
+  "nodeVersion": "20.x",
+  "env": {
+    "NEXT_PUBLIC_APP_URL": "@trustledger-app-url"
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options",  "value": "nosniff" },
+        { "key": "X-Frame-Options",         "value": "DENY" },
+        { "key": "X-XSS-Protection",        "value": "1; mode=block" },
+        { "key": "Referrer-Policy",         "value": "strict-origin-when-cross-origin" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" },
+        { "key": "X-Content-Type-Options",    "value": "nosniff" },
+        { "key": "X-Frame-Options",           "value": "SAMEORIGIN" }
+      ]
+    }
+  ],
+  "crons": [
+    { "path": "/api/cron/sla",                  "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/weekly-report",        "schedule": "0 8 * * 1"   },
+    { "path": "/api/cron/compliance-reminders", "schedule": "0 9 * * *"   },
+    { "path": "/api/cron/webhook-retry",        "schedule": "*/5 * * * *"  },
+    { "path": "/api/cron/scheduled-scans",     "schedule": "0 * * * *"    }
+  ]
+}
