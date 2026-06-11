@@ -332,7 +332,8 @@ export default function IncidentsPage() {
     }
 
     function loadLocalFallback() {
-      let base: Incident[] = DEFAULT_INCIDENTS;
+      // Real orgs with no incidents shouldn't see the demo's fake DEFAULT_INCIDENTS.
+      let base: Incident[] = isSeedMode() ? DEFAULT_INCIDENTS : [];
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
         if (Array.isArray(saved) && saved.length > 0) base = saved;

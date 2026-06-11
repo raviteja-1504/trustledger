@@ -247,18 +247,16 @@ export default function SecretsPage() {
       return;
     }
 
-    // 2. Not seed mode — start with MOCK_FINDINGS, replace with live data
-    setFindings(applyOverrides(MOCK_FINDINGS));
-    localStorage.setItem("tl_secret_total", String(MOCK_FINDINGS.length));
+    // 2. Not seed mode — start empty, populate from live scan data only
+    setFindings([]);
+    localStorage.setItem("tl_secret_total", "0");
 
-    // Try to fetch real scan data and detect secrets
-    if (typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") return;
     (async () => {
       try {
         const data = await api.dashboard(ORG, 90);
         const scanIds = data.repos.filter(r => r.latest_scan_id).slice(0, 5).map(r => r.latest_scan_id);
         const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
-        const existingKeys = new Set(MOCK_FINDINGS.map(f => `${f.scan_id}::${f.file_path}`));
+        const existingKeys = new Set<string>();
         const liveFindings: SecretFinding[] = [];
 
         results.forEach(r => {
@@ -292,9 +290,11 @@ export default function SecretsPage() {
         });
 
         if (liveFindings.length > 0) {
-          setFindings(prev => [...prev, ...liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] } : f)]);
+          const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] } : f);
+          setFindings(merged);
+          localStorage.setItem("tl_secret_total", String(merged.length));
         }
-      } catch { /* offline — keep mock findings */ }
+      } catch { /* offline — keep empty */ }
     })();
   }, []);
 

@@ -6,6 +6,7 @@ import { useState, useEffect } from "react";
 import clsx from "clsx";
 import { useRole, ROLE_LABELS, ROLE_COLORS, type UserRole } from "@/lib/roles";
 import { useSidebar } from "@/lib/sidebar";
+import { isSeedMode } from "@/lib/useRealData";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -280,10 +281,13 @@ export default function Sidebar() {
         setPendingCount(openCount);
 
         // ── Secrets ──────────────────────────────────────────────────────────
+        // tl_secret_total is only set once the /secrets page has loaded (mock or live);
+        // a real org that hasn't visited it yet has no findings to show.
+        const seed = isSeedMode();
         const secretStatuses = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
         const resolvedSecrets = Object.values(secretStatuses).filter(v => v === "resolved").length;
-        const rawSecretTotal = parseInt(localStorage.getItem("tl_secret_total") ?? "8", 10);
-        const secretTotal = isNaN(rawSecretTotal) ? 8 : rawSecretTotal;
+        const rawSecretTotal = parseInt(localStorage.getItem("tl_secret_total") ?? (seed ? "8" : "0"), 10);
+        const secretTotal = isNaN(rawSecretTotal) ? 0 : rawSecretTotal;
         setOpenSecrets(Math.max(0, secretTotal - resolvedSecrets));
 
         // ── Alerts: derive firing count from snapshot ─────────────────────
@@ -326,7 +330,7 @@ export default function Sidebar() {
           setActiveIncidents(rawIncidents.filter((i: { status: string }) =>
             i.status === "active" || i.status === "contained"
           ).length);
-        } else if (!rawIncidents) {
+        } else if (!rawIncidents && seed) {
           // No incidents persisted yet — use DEFAULT_INCIDENTS baseline (2 active in seed)
           setActiveIncidents(2);
         } else {
