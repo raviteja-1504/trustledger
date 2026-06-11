@@ -32,6 +32,33 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+// ── Session cookie sync ──────────────────────────────────────────────────────
+// The Supabase JS client persists sessions in localStorage, but
+// src/middleware.ts (Edge runtime) checks a `sb-<project-ref>-auth-token`
+// cookie to gate protected routes. Mirror the session into that cookie so
+// server-side route protection works for email/password and OAuth sign-ins.
+function authCookieName(): string {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+  const ref = url ? new URL(url).hostname.split(".")[0] : "";
+  return `sb-${ref}-auth-token`;
+}
+
+function syncSessionCookie(session: Session | null) {
+  if (typeof document === "undefined") return;
+  const name = authCookieName();
+  if (!session) {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`;
+    return;
+  }
+  const value = encodeURIComponent(JSON.stringify({
+    access_token:  session.access_token,
+    refresh_token: session.refresh_token,
+  }));
+  const maxAge = Math.max(60, session.expires_in ?? 3600);
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=${value}; path=/; max-age=${maxAge}; SameSite=Lax${secure}`;
+}
+
 // ── Demo / skip-auth mode ──────────────────────────────────────────────────────
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -126,6 +153,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
+      syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) loadProfile(session.user.id).finally(() => setLoading(false));
@@ -134,6 +162,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) loadProfile(session.user.id);
@@ -168,6 +197,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
   async function signOut() {
     await supabase.auth.signOut();
+    syncSessionCookie(null);
     setProfile(null);
   }
 
