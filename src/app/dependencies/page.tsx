@@ -5,6 +5,7 @@ import InfoTooltip from "@/components/InfoTooltip";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
+import { isSeedMode } from "@/lib/useRealData";
 import type { DashboardData, ScanResult } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -414,7 +415,7 @@ function healthBar(score: number) {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function DependenciesPage() {
-  const [findings,    setFindings]    = useState<DepFinding[]>(() => makeOffline());
+  const [findings,    setFindings]    = useState<DepFinding[]>(() => isSeedMode() ? makeOffline() : []);
   const [loading,     setLoading]     = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
@@ -437,9 +438,11 @@ export default function DependenciesPage() {
       const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
       const derived = deriveFindings(scans);
-      setFindings(derived.length > 0 ? derived : makeOffline());
+      // Real orgs may legitimately have zero dependency findings — only fall
+      // back to the offline mock list on an actual fetch failure (catch below).
+      setFindings(derived.length > 0 || !isSeedMode() ? derived : makeOffline());
       setLastRefreshed(new Date());
-    } catch { setLastRefreshed(new Date()); }
+    } catch { setLastRefreshed(new Date()); if (isSeedMode()) setFindings(makeOffline()); }
     finally { setLoading(false); if (spinner) setRefreshing(false); }
   }, []);
 

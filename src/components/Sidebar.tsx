@@ -252,7 +252,7 @@ export default function Sidebar() {
     function refresh() {
       try {
         type RiskFile = { attested: boolean; risk_score: string; file_path: string; scan_id: string; repo: string };
-        type RepoRow  = { ai_pct: number };
+        type RepoRow  = { ai_pct: number; attestation_rate: number; scan_count: number };
         const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as {
           top_risk_files?: RiskFile[];
           repos?: RepoRow[];
@@ -277,11 +277,21 @@ export default function Sidebar() {
         const highUnatt = riskFiles.filter(f => f.risk_score === "HIGH"     && !f.attested && !resolvedFiles.has(f.file_path));
         const openCount = critUnatt.length + highUnatt.length;
 
-        // Violations: unresolved CRITICAL + HIGH files
-        setOpenViolations(openCount);
-
         // Reports: files pending attestation (same set)
         setPendingCount(openCount);
+
+        // Mirror dashboard logic: a repo clears once ALL its CRIT/HIGH files are attested
+        const unresolvedDeployRepos = new Set(
+          riskFiles
+            .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !resolvedFiles.has(f.file_path))
+            .map(f => f.repo)
+        );
+
+        // ── Violations: mirror deriveViolations() from src/app/violations/page.tsx ──
+        // unattested CRIT/HIGH files + deploy-blocked (1 entry) + AI-threshold repos (>80%) + low-attestation repos (<60%)
+        const aiThresholdRepos = (snap?.repos ?? []).filter(r => r.ai_pct > 0.8).length;
+        const lowAttestViolationRepos = (snap?.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
+        setOpenViolations(openCount + (unresolvedDeployRepos.size > 0 ? 1 : 0) + aiThresholdRepos + lowAttestViolationRepos);
 
         // ── Secrets ──────────────────────────────────────────────────────────
         // tl_secret_total is only set once the /secrets page has loaded (mock or live);
@@ -296,23 +306,21 @@ export default function Sidebar() {
         // ── Alerts: derive firing count from snapshot ─────────────────────
         // "firing" is default — tl_alerts_state only stores explicit overrides
         if (snap) {
-          // Mirror dashboard logic: a repo clears once ALL its CRIT/HIGH files are attested
-          const unresolvedDeployRepos = new Set(
-            riskFiles
-              .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !resolvedFiles.has(f.file_path))
-              .map(f => f.repo)
-          );
           const deployBlocked = unresolvedDeployRepos.size === 0
             ? 0
             : Math.min(snap.unattested_deploy_count ?? 0, unresolvedDeployRepos.size);
+          // Mirror deriveAlerts() from src/app/alerts/page.tsx exactly so this
+          // badge count matches what the /alerts page actually shows.
           const aiCritRepos   = (snap.repos ?? []).filter(r => r.ai_pct > 0.85).length;
-          // P1: each CRIT file + deploy gate + AI-threshold repos
-          // P2: HIGH files batched (1 notification per 3 files, capped) + SLA breaches for CRITs
-          let baseFiring = critUnatt.length
-            + (deployBlocked > 0 ? 1 : 0)
-            + aiCritRepos
-            + Math.ceil(highUnatt.length / 3)       // batch HIGH files
-            + Math.min(critUnatt.length, 2);         // SLA breach alerts for crits
+          const aiSpikeRepos  = (snap.repos ?? []).filter(r => r.ai_pct > 0.7 && r.ai_pct <= 0.85).length;
+          const lowAttestRepos = (snap.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
+          let baseFiring = Math.min(critUnatt.length, 3)   // P1 secret (slice 0,3)
+            + (deployBlocked > 0 ? 1 : 0)                   // P1 deploy-blocked
+            + aiCritRepos                                   // P1 ai-critical
+            + Math.min(highUnatt.length, 3)                 // P2 HIGH (slice 0,3)
+            + Math.min(critUnatt.length, 2)                 // P2 SLA breach (slice 0,2)
+            + aiSpikeRepos                                  // P2 AI spike
+            + lowAttestRepos;                               // P3 low attestation
 
           // Subtract alerts already actioned (non-firing overrides in tl_alerts_state)
           const alertState = JSON.parse(localStorage.getItem("tl_alerts_state") ?? "null") as {
