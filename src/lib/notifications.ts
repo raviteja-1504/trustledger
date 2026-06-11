@@ -68,24 +68,28 @@ function calcHealth(d: DashboardData): number {
   ));
 }
 
-// Generate notifications from absolute state (first load or session refresh)
+// Generate notifications from absolute state (first load or session refresh).
+// IDs are derived from stable content (not the current timestamp) so that
+// re-running this on every new session doesn't pile up duplicate unread
+// notifications for the same underlying condition.
 function stateNotifications(data: DashboardData): Notification[] {
   const notes: Notification[] = [];
   const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
   const resolved = resolvedViolationCount();
 
-  // Connected banner
+  // Connected banner — once per day
   notes.push({
-    id: `connected-${now}`, level: "info", read: false, time: now,
+    id: `connected-${today}`, level: "info", read: false, time: now,
     title: "TrustLedger monitoring active",
     body: `${data.repos.length} repos · ${data.file_count} files · health ${calcHealth(data)}`,
   });
 
-  // CRITICAL unattested files → individual notifications
+  // CRITICAL unattested files → individual notifications, one per file
   const crit = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested);
   crit.slice(0, 5).forEach((f, i) => {
     notes.push({
-      id: `crit-${f.file_path}-${now}-${i}`, level: "critical", read: false,
+      id: `crit-${f.scan_id}-${f.file_path}`, level: "critical", read: false,
       time: now - i * 1000,
       title: "CRITICAL file needs attestation",
       body: `${f.file_path.split("/").pop()} in ${f.repo.split("/").pop()} · ${(f.ai_pct * 100).toFixed(0)}% AI`,
@@ -93,44 +97,44 @@ function stateNotifications(data: DashboardData): Notification[] {
     });
   });
 
-  // HIGH unattested files (batched)
+  // HIGH unattested files (batched) — once per day
   const high = data.top_risk_files.filter(f => f.risk_score === "HIGH" && !f.attested);
   if (high.length > 0) {
     notes.push({
-      id: `high-${now}`, level: "high", read: false, time: now - 6000,
+      id: `high-${today}`, level: "high", read: false, time: now - 6000,
       title: `${high.length} HIGH-risk file${high.length > 1 ? "s" : ""} awaiting attestation`,
       body: high.slice(0, 3).map(f => f.file_path.split("/").pop()).join(", ") + (high.length > 3 ? ` +${high.length - 3} more` : ""),
       href: "/violations",
     });
   }
 
-  // Deploys blocked
+  // Deploys blocked — once per day
   const effectiveBlocked = Math.max(0, data.unattested_deploy_count - resolved);
   if (effectiveBlocked > 0) {
     notes.push({
-      id: `deploys-${now}`, level: "warning", read: false, time: now - 10000,
+      id: `deploys-${today}`, level: "warning", read: false, time: now - 10000,
       title: `${effectiveBlocked} deploy${effectiveBlocked > 1 ? "s" : ""} pending attestation`,
       body: "Merge gate is blocking deploys until CRITICAL and HIGH files are reviewed.",
       href: "/dashboard",
     });
   }
 
-  // Repos with AI content above 80%
+  // Repos with AI content above 80% — once per day
   const highAiRepos = data.repos.filter(r => r.ai_pct > 0.8);
   if (highAiRepos.length > 0) {
     notes.push({
-      id: `ai-threshold-${now}`, level: "warning", read: false, time: now - 15000,
+      id: `ai-threshold-${today}`, level: "warning", read: false, time: now - 15000,
       title: `${highAiRepos.length} repo${highAiRepos.length > 1 ? "s" : ""} exceed AI content threshold`,
       body: highAiRepos.map(r => `${r.repo.split("/").pop()} (${(r.ai_pct * 100).toFixed(0)}%)`).join(", "),
       href: "/posture",
     });
   }
 
-  // Low attestation coverage
+  // Low attestation coverage — once per day
   const lowAttest = data.repos.filter(r => r.attestation_rate < 0.6);
   if (lowAttest.length > 0) {
     notes.push({
-      id: `low-attest-${now}`, level: "high", read: false, time: now - 20000,
+      id: `low-attest-${today}`, level: "high", read: false, time: now - 20000,
       title: `${lowAttest.length} repo${lowAttest.length > 1 ? "s" : ""} below 60% attestation`,
       body: lowAttest.map(r => `${r.repo.split("/").pop()} ${Math.round(r.attestation_rate * 100)}%`).join(", "),
       href: "/posture",

@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import clsx from "clsx";
 import { useRole, ROLE_LABELS, ROLE_COLORS, type UserRole } from "@/lib/roles";
 import { useSidebar } from "@/lib/sidebar";
+import { useAuth } from "@/lib/auth";
 import { isSeedMode } from "@/lib/useRealData";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -235,9 +236,11 @@ const ALL_LINKS = [
 
 export default function Sidebar() {
   const pathname   = usePathname() ?? "/";
+  const router     = useRouter();
   const { role, setRole, permissions } = useRole();
   const roleColor  = ROLE_COLORS[role];
   const { collapsed, toggle } = useSidebar();
+  const { signOut } = useAuth();
   const [pendingCount,    setPendingCount]    = useState(0);
   const [openSecrets,     setOpenSecrets]     = useState(0);
   const [openViolations,  setOpenViolations]  = useState(0);
@@ -359,6 +362,11 @@ export default function Sidebar() {
   }, []);
 
   const visibleLinks = ALL_LINKS.filter(l => l.permission === null || permissions[l.permission]);
+
+  async function handleSignOut() {
+    await signOut();
+    router.push("/login");
+  }
 
   function badge(count: number, color: string, pulse = false): JSX.Element | null {
     if (!Number.isFinite(count) || count <= 0) return null;
@@ -506,9 +514,19 @@ export default function Sidebar() {
           </div>
         )}
         {collapsed ? (
-          /* Collapsed: just a color dot */
-          <div className="flex justify-center">
+          /* Collapsed: role dot + sign-out icon */
+          <div className="flex flex-col items-center gap-2">
             <span className={clsx("w-2 h-2 rounded-full", roleColor.dot)} title={ROLE_LABELS[role]} />
+            <button
+              onClick={handleSignOut}
+              title="Sign out"
+              aria-label="Sign out"
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hover:bg-white/[0.08]"
+              style={{ color: "rgba(255,255,255,0.35)" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+            </button>
           </div>
         ) : (
           <div className="relative rounded-xl overflow-hidden"
@@ -534,6 +552,17 @@ export default function Sidebar() {
               <option value="admin">Admin</option>
             </select>
           </div>
+        )}
+        {!collapsed && (
+          <button
+            onClick={handleSignOut}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold transition-colors hover:bg-white/[0.06] hover:text-white"
+            style={{ color: "rgba(255,255,255,0.42)" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            Sign out
+          </button>
         )}
       </div>
     </aside>
