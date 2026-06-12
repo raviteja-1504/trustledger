@@ -300,12 +300,16 @@ function auditLogToAuditEvent(row: AuditLogRow): AuditEvent {
 
   let description: string;
   let detail: string | undefined;
+  let severity: AuditEvent["severity"] | undefined;
   switch (row.event_type) {
-    case "scan_complete":
+    case "scan_complete": {
       description = `Scan completed${prNumber ? ` — PR #${prNumber}` : ""}`;
       detail = [payload.file_count ? `${payload.file_count} files` : null, payload.overall_risk ? `${payload.overall_risk} risk` : null, repoShort]
         .filter(Boolean).join(" · ");
+      const risk = typeof payload.overall_risk === "string" ? payload.overall_risk : "";
+      severity = risk === "CRITICAL" ? "critical" : risk === "HIGH" ? "warning" : "info";
       break;
+    }
     case "attestation":
       description = filePath ? "File attested" : `PR #${prNumber} attested`;
       detail = [filePath?.split("/").pop(), repoShort, actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
@@ -327,7 +331,7 @@ function auditLogToAuditEvent(row: AuditLogRow): AuditEvent {
     timestamp:   row.created_at,
     repo,
     actor,
-    severity:    SEVERITY_BY_TYPE[type] ?? "info",
+    severity:    severity ?? SEVERITY_BY_TYPE[type] ?? "info",
     scan_id:     scanId,
     pr_number:   prNumber,
     description,
