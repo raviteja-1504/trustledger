@@ -131,7 +131,7 @@ function addSecurityHeaders(res: NextResponse, pathname: string): void {
     "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.github.com https://api.sendgrid.com https://api.linear.app https://posthog.com https://eu.posthog.com https://*.sentry.io",
     "frame-ancestors 'none'",
     "base-uri 'self'",
-    "form-action 'self'",
+    "form-action 'self' https://github.com https://*.github.com",
   ].join("; ");
 
   res.headers.set("Content-Security-Policy",          csp);
