@@ -450,19 +450,12 @@ export default function AuditPage() {
         : MOCK_EVENTS;
     }
 
-    // Non-seed mode: show live events only (no fallback MOCK contamination)
+    // Non-seed mode: show live events only — MOCK_EVENTS span a fabricated
+    // week of history and would reappear as stale "5 days ago" entries once
+    // real audit data exists.
     if (liveEvents.length === 0) return MOCK_EVENTS;
 
-    // Deduplicate live + mock by scan_id + type + pr_number
-    const liveKeys = new Set(
-      liveEvents.filter(e => e.scan_id).map(e => `${e.type}::${e.scan_id}::${e.pr_number ?? ""}`)
-    );
-    const filteredMock = MOCK_EVENTS.filter(e => {
-      if (!e.scan_id) return true;
-      return !liveKeys.has(`${e.type}::${e.scan_id}::${e.pr_number ?? ""}`);
-    });
-
-    return [...liveEvents, ...filteredMock]
+    return [...liveEvents]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [liveEvents, profile?.org_id]);
 
