@@ -231,6 +231,7 @@ export async function POST(req: NextRequest) {
 
   // Insert scan files
   if (result.files.length > 0) {
+    const contentByPath = new Map(body.files.map(f => [f.path, f.content]));
     const { error: filesErr } = await db.from("scan_files").insert(
       result.files.map(f => ({
         scan_id:         scan.id,
@@ -242,6 +243,7 @@ export async function POST(req: NextRequest) {
         risk_indicators: f.risk_indicators,
         content_hash:    f.content_hash,
         line_count:      f.line_count,
+        content:         contentByPath.get(f.file_path) ?? null,
       })),
     );
     if (filesErr) logger.warn("scan_files insert failed", { scan_id: scan.id, error: filesErr.message });

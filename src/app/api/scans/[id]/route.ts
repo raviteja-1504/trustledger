@@ -48,6 +48,7 @@ export async function GET(
       risk_score:      f.risk_score,
       risk_indicators: f.risk_indicators ?? [],
       attested:        attestedSet.has(f.file_path),
+      content:         f.content ?? undefined,
     })),
   });
 }
