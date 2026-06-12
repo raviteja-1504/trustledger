@@ -311,24 +311,23 @@ function makeOfflineData(): DashboardData {
 }
 const OFFLINE_DATA: DashboardData = makeOfflineData();
 
-async function fetchDashboard(): Promise<DashboardData> {
-  // When seed is forced, use the seeded snapshot — never overwrite it with OFFLINE_DATA
-  if (typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") {
-    const seeded = loadSnap();
-    if (seeded?.repos?.length) return seeded;
-  }
+async function fetchDashboard(): Promise<{ data: DashboardData; hasSession: boolean }> {
   try {
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token ?? null;
+    // When seed is forced and there's no real logged-in session, use the seeded snapshot
+    if (!token && typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") {
+      const seeded = loadSnap();
+      if (seeded?.repos?.length) return { data: seeded, hasSession: false };
+    }
     const res = await fetch(`${BASE_URL}/api/dashboard`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
-    if (!res.ok) return loadSnap() ?? OFFLINE_DATA;
+    if (!res.ok) return { data: loadSnap() ?? OFFLINE_DATA, hasSession: !!token };
     const data = await res.json() as DashboardData;
-    // Only save snap when using live data (not when seed is active)
-    return data;
+    return { data, hasSession: !!token };
   } catch {
-    return loadSnap() ?? OFFLINE_DATA;
+    return { data: loadSnap() ?? OFFLINE_DATA, hasSession: false };
   }
 }
 
@@ -360,12 +359,13 @@ export function useNotifications() {
   }, []);
 
   const poll = useCallback(async () => {
-    const data  = await fetchDashboard();
+    const { data, hasSession } = await fetchDashboard();
     const snap  = loadSnap();
     // On a fresh session, always regenerate state-based notifications
     const fresh = isNewSession() ? stateNotifications(data) : diff(snap, data);
-    // Never overwrite the seed snapshot — only save live API data
-    if (typeof window === "undefined" || localStorage.getItem("tl_force_seed") !== "1") {
+    // Never overwrite the seed snapshot with seed/offline data — but a real
+    // logged-in session's data is always live and safe to persist.
+    if (hasSession || typeof window === "undefined" || localStorage.getItem("tl_force_seed") !== "1") {
       saveSnap(data);
     }
     addNew(fresh);
