@@ -59,7 +59,7 @@ export default function SLAPage() {
 
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true); else setLoading(true);
-    if (isSeedMode()) {
+    if (isSeedMode() && !profile?.org_id) {
       const now = Date.now();
       const demo: SLAViolation[] = [
         { id:"v1", file_path:"src/processors/card_validator.py", risk_score:"CRITICAL", status:"open",     scan_id:"sc_mock_001", sla_deadline:new Date(now - 26*3600_000).toISOString(), created_at:new Date(now-50*3600_000).toISOString(), repo:`${ORG}/payments-api`,    assigned_email:`alice@${ORG}.io`, hours_overdue:26 },

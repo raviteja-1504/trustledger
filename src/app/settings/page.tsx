@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useToastHelpers } from "@/lib/toast";
 import AuthGuard from "@/components/AuthGuard";
@@ -662,7 +662,7 @@ function JiraIntegration() {
   async function save() {
     localStorage.setItem(JIRA_KEY, JSON.stringify({ host, email, token, project, connected: true }));
     // Also store in org settings for server-side ticket creation
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       await authedFetch("/api/settings", {
         method: "PATCH",
         body:   JSON.stringify({ jira_base_url: host, jira_email: email, jira_project_key: project }),
@@ -754,7 +754,7 @@ function LinearIntegration() {
 
   async function save() {
     localStorage.setItem(LINEAR_KEY, JSON.stringify({ apiKey, teamId, connected: true }));
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       await authedFetch("/api/settings", {
         method: "PATCH",
         body:   JSON.stringify({ linear_api_key: apiKey, linear_team_id: teamId || undefined }),
@@ -937,7 +937,7 @@ function NotificationPrefsCard() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    if (!profile?.org_id || isSeedMode()) return;
+    if (!profile?.org_id) return;
     authedFetch<{ preferences: typeof prefs }>("/api/preferences")
       .then(r => setPrefs(p => ({ ...p, ...r.preferences })))
       .catch(() => {});
@@ -1049,7 +1049,7 @@ function TeamTab() {
     setAddError(""); setInviting(true);
 
     // Real API invite (sends magic link email)
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         await authedFetch("/api/settings", {
           method: "POST",
@@ -1073,7 +1073,7 @@ function TeamTab() {
   }
 
   async function handleRemove(userId: string, email: string) {
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         await authedFetch("/api/settings", {
           method: "POST",
@@ -1085,7 +1085,7 @@ function TeamTab() {
   }
 
   async function handleRoleChange(userId: string, email: string, newR: UserRole) {
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         await authedFetch("/api/settings", {
           method: "POST",
@@ -1249,7 +1249,7 @@ function TeamTab() {
                 disabled={inviting}
                 className="px-5 py-2.5 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 transition-all shadow-sm shrink-0 disabled:opacity-60"
               >
-                {inviting ? "Sending…" : !isSeedMode() && profile?.org_id ? "Send invite" : "Add member"}
+                {inviting ? "Sending…" : profile?.org_id ? "Send invite" : "Add member"}
               </button>
             </div>
             {addError && (
@@ -1260,7 +1260,7 @@ function TeamTab() {
                 ✓ Invite email sent — they'll receive a magic link to join {ORG_SETTINGS}.
               </p>
             )}
-            {!isSeedMode() && profile?.org_id && (
+            {profile?.org_id && (
               <p className="text-xs text-gray-400">A magic link will be emailed to the invitee via Supabase Auth.</p>
             )}
           </form>
@@ -1289,7 +1289,7 @@ function APIAccessTab() {
 
   // Load real API keys on mount
   useEffect(() => {
-    if (isSeedMode() || !profile?.org_id) return;
+    if (!profile?.org_id) return;
     authedFetch<{ keys: typeof realKeys }>("/api/keys")
       .then(r => setRealKeys(r.keys ?? []))
       .catch(() => {});
@@ -1309,7 +1309,7 @@ function APIAccessTab() {
     if (!newName.trim() || newScopes.length === 0) return;
 
     // Real API if authenticated
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         const res = await authedFetch<{ raw_key: string; id: string; key_prefix: string; created_at: string }>("/api/keys", {
           method: "POST",
@@ -1339,7 +1339,7 @@ function APIAccessTab() {
 
   async function revokeKey(id: string) {
     // Real API
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         await authedFetch("/api/keys", { method: "DELETE", body: JSON.stringify({ id }) });
         setRealKeys(prev => prev.filter(k => k.id !== id));
@@ -1425,18 +1425,18 @@ function APIAccessTab() {
         <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
           <p className="text-sm font-bold text-gray-900">Active Keys</p>
           <span className="text-xs text-gray-400">
-            {(!isSeedMode() && profile?.org_id ? realKeys.length : keys.length)} key
-            {(!isSeedMode() && profile?.org_id ? realKeys.length : keys.length) !== 1 ? "s" : ""}
+            {(profile?.org_id ? realKeys.length : keys.length)} key
+            {(profile?.org_id ? realKeys.length : keys.length) !== 1 ? "s" : ""}
           </span>
         </div>
-        {(!isSeedMode() && profile?.org_id ? realKeys.length === 0 : keys.length === 0) ? (
+        {(profile?.org_id ? realKeys.length === 0 : keys.length === 0) ? (
           <div className="py-10 text-center">
             <p className="text-sm text-gray-400">No API keys yet</p>
             <p className="text-xs text-gray-400 mt-1">Create a key above to start using the REST API</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-50">
-            {(!isSeedMode() && profile?.org_id ? realKeys : keys).map(k => {
+            {(profile?.org_id ? realKeys : keys).map(k => {
               const isReal  = "key_prefix" in k;
               const id      = k.id;
               const name    = k.name;
@@ -1864,7 +1864,7 @@ function WebhooksTab() {
   const [saved,    setSaved]    = useState(false);
 
   useEffect(() => {
-    if (!profile?.org_id || isSeedMode()) return;
+    if (!profile?.org_id) return;
     authedFetch<{ webhooks: WHook[] }>("/api/webhooks")
       .then(r => setHooks(r.webhooks ?? []))
       .catch(() => {});
@@ -1928,7 +1928,7 @@ function WebhooksTab() {
             ))}
           </div>
         )}
-        {hooks.length === 0 && !isSeedMode() && <p className="text-xs text-gray-400 mt-2">No webhooks configured yet.</p>}
+        {hooks.length === 0 && <p className="text-xs text-gray-400 mt-2">No webhooks configured yet.</p>}
       </SectionCard>
     </div>
   );
@@ -1965,7 +1965,7 @@ function SchedulesTab() {
   const [adding,     setAdding]     = useState(false);
 
   useEffect(() => {
-    if (!profile?.org_id || isSeedMode()) return;
+    if (!profile?.org_id) return;
     authedFetch<{ repos: typeof repos }>("/api/repos")
       .then(r => setRepos(r.repos ?? []))
       .catch(() => {});
@@ -2169,7 +2169,7 @@ function CustomRolesTab() {
   const [saved,  setSaved]  = useState(false);
 
   useEffect(() => {
-    if (!profile?.org_id || isSeedMode()) return;
+    if (!profile?.org_id) return;
     import("@/lib/supabase").then(({ supabase }) => {
       supabase.from("custom_roles")
         .select("id, name, description, can_attest_critical, can_attest_high, can_view_secrets, can_export_data, can_manage_policies")
@@ -2266,7 +2266,7 @@ function GitLabIntegration() {
 
   async function save() {
     localStorage.setItem("tl_gitlab_config", JSON.stringify({ token, connected: !!token }));
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       await authedFetch("/api/settings", { method:"PATCH", body: JSON.stringify({ gitlab_api_token: token }) }).catch(() => {});
     }
     setSaved(true); setTimeout(() => setSaved(false), 2500);
@@ -2349,7 +2349,7 @@ export default function SettingsPage() {
   useEffect(() => {
     setPolicy(loadPolicy());
     // Sync real org settings into policy if authenticated
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       authedFetch<{ org: { ai_threshold: number; attest_sla_hours: number; block_on_critical: boolean; block_on_high: boolean; require_two_reviewers: boolean } }>("/api/settings")
         .then(res => {
           if (!res.org) return;
@@ -2372,7 +2372,7 @@ export default function SettingsPage() {
   function handleSave() {
     savePolicy(policy);
     // Also persist to real API
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       authedFetch("/api/settings", {
         method: "PATCH",
         body:   JSON.stringify({

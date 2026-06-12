@@ -103,7 +103,7 @@ export default function ROIDashboard() {
     async function load() {
       setLoading(true);
 
-      if (isSeedMode()) {
+      if (isSeedMode() && !profile?.org_id) {
         // Demo metrics
         setMetrics({
           totalScans: 171, totalFiles: 1067, totalAttestations: 384,

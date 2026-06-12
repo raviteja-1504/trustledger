@@ -4,6 +4,7 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
 
 interface AuditEvent {
   id:         string;
@@ -63,6 +64,7 @@ function daysUntil(dateStr: string): number {
 const CAL_KEY = "tl_compliance_calendar";
 
 export default function ComplianceCalendarPage() {
+  const { profile }   = useAuth();
   const [view,        setView]        = useState<"timeline" | "list">("timeline");
   const [filter,      setFilter]      = useState<string>("all");
   const [events,      setEvents]      = useState<AuditEvent[]>([]);
@@ -71,8 +73,8 @@ export default function ComplianceCalendarPage() {
 
   // Load: seed key → API → DEFAULT_EVENTS fallback
   useEffect(() => {
-    // Seed mode: read from tl_compliance_calendar
-    if (isSeedMode()) {
+    // Seed mode (no real org): read from tl_compliance_calendar
+    if (isSeedMode() && !profile?.org_id) {
       try {
         const raw = localStorage.getItem(CAL_KEY);
         if (raw) { setEvents(JSON.parse(raw) as AuditEvent[]); return; }
@@ -90,7 +92,8 @@ export default function ComplianceCalendarPage() {
         } catch {}
         setEvents(DEFAULT_EVENTS);
       });
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   // Persist event list to localStorage whenever it changes (so user-added events survive refresh)
   const persistEvents = useCallback((updated: AuditEvent[]) => {

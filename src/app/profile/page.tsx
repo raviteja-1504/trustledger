@@ -58,7 +58,7 @@ export default function ProfilePage() {
         }));
       }
       // Load 2FA status
-      if (!isSeedMode()) {
+      if (!isSeedMode() || authProfile?.org_id) {
         try {
           const r = await authedFetch<TwoFAStatus>("/api/auth/2fa");
           setTwoFA(r);
@@ -190,7 +190,7 @@ export default function ProfilePage() {
               </div>
 
               {!twoFA.enabled && !otpData && (
-                <button onClick={setup2FA} disabled={isSeedMode()}
+                <button onClick={setup2FA} disabled={isSeedMode() && !authProfile?.org_id}
                   className="px-5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-60">
                   Set up 2FA
                 </button>

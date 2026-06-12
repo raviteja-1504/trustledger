@@ -74,7 +74,7 @@ function BillingContent() {
   const [billing, setBilling] = useState<"monthly"|"annual">("monthly");
 
   useEffect(() => {
-    if (isSeedMode()) {
+    if (isSeedMode() && !profile?.org_id) {
       // Demo data
       setData({
         org:    { name: profile?.org_name ?? "Org", plan:"growth", member_since:"2026-01-15T00:00:00Z" },
@@ -106,7 +106,7 @@ function BillingContent() {
   const period    = new Date(data.period.start).toLocaleDateString("en-GB", { month:"long", year:"numeric" });
 
   async function startCheckout(planKey: string) {
-    if (isSeedMode()) { warning("Demo mode", "Connect Stripe in production: set STRIPE_SECRET_KEY and STRIPE_PRICE_* env vars."); return; }
+    if (isSeedMode() && !profile?.org_id) { warning("Demo mode", "Connect Stripe in production: set STRIPE_SECRET_KEY and STRIPE_PRICE_* env vars."); return; }
     try {
       const res = await authedFetch<{ url: string }>("/api/stripe", {
         method: "POST",
@@ -117,7 +117,7 @@ function BillingContent() {
   }
 
   async function openPortal() {
-    if (isSeedMode()) { warning("Demo mode", "Connect Stripe in production."); return; }
+    if (isSeedMode() && !profile?.org_id) { warning("Demo mode", "Connect Stripe in production."); return; }
     try {
       const res = await authedFetch<{ url: string }>("/api/stripe?portal=1", { method: "POST" });
       if (res.url) window.location.href = res.url;

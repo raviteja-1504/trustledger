@@ -44,7 +44,7 @@ export default function OrgsPage() {
   const [error,   setError]   = useState<string | null>(null);
 
   useEffect(() => {
-    if (isSeedMode()) {
+    if (isSeedMode() && !profile?.org_id) {
       // Demo mode — show current org only
       if (profile) {
         setOrgs([{

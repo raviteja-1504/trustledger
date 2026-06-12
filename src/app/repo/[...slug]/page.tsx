@@ -8,6 +8,7 @@ import RiskBadge from "@/components/RiskBadge";
 import ProgressBar from "@/components/ProgressBar";
 import { api } from "@/lib/api";
 import { isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
 import type { ScanResult, FileResult, RiskLevel, DashboardData } from "@/types";
 
 const RISK_ORDER: RiskLevel[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
@@ -95,6 +96,7 @@ function BackIcon() {
 }
 
 export default function RepoDetailPage() {
+  const { profile } = useAuth();
   const { slug } = (useParams<{ slug: string[] }>() ?? { slug: [] });
   const repo = Array.isArray(slug) ? slug.join("/") : slug;
   const [scans, setScans] = useState<ScanResult[]>([]);
@@ -102,7 +104,7 @@ export default function RepoDetailPage() {
   const [offline, setOffline] = useState(false);
 
   useEffect(() => {
-    if (isSeedMode()) {
+    if (isSeedMode() && !profile?.org_id) {
       setScans(buildScansFromSeed(repo));
       setOffline(true);
       setLoading(false);
@@ -123,7 +125,7 @@ export default function RepoDetailPage() {
         setOffline(true);
       })
       .finally(() => setLoading(false));
-  }, [repo]);
+  }, [repo, profile?.org_id]);
 
   const repoShort = repo.split("/").slice(1).join("/");
   const org = repo.split("/")[0];

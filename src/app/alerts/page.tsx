@@ -8,7 +8,7 @@ import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useAlertsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { patchDataWithAttestations } from "@/lib/trustScore";
@@ -347,7 +347,7 @@ export default function AlertsPage() {
     if (spinner) setRefreshing(true);
 
     // Try real API first when authenticated
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         const res = await authedFetch<{ alerts: Alert[] }>("/api/alerts?limit=100");
         if (res.alerts.length > 0) {

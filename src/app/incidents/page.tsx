@@ -317,7 +317,7 @@ export default function IncidentsPage() {
 
   useEffect(() => {
     // Try real API first, fall back to localStorage, then defaults
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       authedFetch<{ incidents: Incident[] }>("/api/incidents")
         .then(res => {
           if (res.incidents.length > 0) {
@@ -333,7 +333,7 @@ export default function IncidentsPage() {
 
     function loadLocalFallback() {
       // Real orgs with no incidents shouldn't see the demo's fake DEFAULT_INCIDENTS.
-      let base: Incident[] = isSeedMode() ? DEFAULT_INCIDENTS : [];
+      let base: Incident[] = isSeedMode() && !profile?.org_id ? DEFAULT_INCIDENTS : [];
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
         if (Array.isArray(saved) && saved.length > 0) base = saved;
@@ -350,7 +350,7 @@ export default function IncidentsPage() {
 
   // Realtime — refresh when incidents change in DB
   useIncidentsRealtime(profile?.org_id, () => {
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       authedFetch<{ incidents: Incident[] }>("/api/incidents")
         .then(res => { if (res.incidents.length > 0) setIncidents(res.incidents); })
         .catch(() => {});
@@ -412,7 +412,7 @@ export default function IncidentsPage() {
     };
     save([inc, ...incidents]);
     // Also persist to real API
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       authedFetch("/api/incidents", {
         method: "POST",
         body: JSON.stringify({

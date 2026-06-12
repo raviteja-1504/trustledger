@@ -6,6 +6,7 @@ import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import RiskBadge from "@/components/RiskBadge";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
 import type { RiskLevel } from "@/types";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
@@ -253,6 +254,7 @@ function effectiveAttestedCount(s: ScanSummary, statuses: Record<string, string>
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ScansPage() {
+  const { profile } = useAuth();
   const [scans,            setScans]            = useState<ScanSummary[]>([]);
   const [loading,          setLoading]          = useState(true);
   const [repoFilter,       setRepoFilter]       = useState("all");
@@ -286,7 +288,7 @@ export default function ScansPage() {
 
   useEffect(() => {
     async function load() {
-      if (isSeedMode()) {
+      if (isSeedMode() && !profile?.org_id) {
         const stored = typeof window !== "undefined" ? localStorage.getItem("tl_scans") : null;
         if (stored) {
           try { setScans(JSON.parse(stored)); setLoading(false); return; } catch { /* fall through */ }
@@ -309,7 +311,7 @@ export default function ScansPage() {
       setLoading(false);
     }
     load();
-  }, []);
+  }, [profile?.org_id]);
 
   const repos = useMemo(() => {
     const set = new Set(scans.map(s => s.repo));
