@@ -6,6 +6,7 @@ import InfoTooltip from "@/components/InfoTooltip";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -217,6 +218,7 @@ function timeAgo(iso: string) {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function SecretsPage() {
+  const { profile } = useAuth();
   const [findings, setFindings] = useState<SecretFinding[]>([]);
   const [filterSev,    setFilterSev]    = useState<SecretSeverity | "all">("all");
   const [filterStatus, setFilterStatus] = useState<SecretStatus | "all">("all");
@@ -225,7 +227,7 @@ export default function SecretsPage() {
 
   // Load seed findings → live scan detections → MOCK_FINDINGS fallback
   useEffect(() => {
-    const isSeed = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1";
+    const isSeed = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id;
 
     // Status overrides (resolved/open) — applied on top of whatever base we load
     const raw  = (() => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Record<string, SecretStatus>; } catch { return {} as Record<string, SecretStatus>; } })();
@@ -296,7 +298,8 @@ export default function SecretsPage() {
         }
       } catch { /* offline — keep empty */ }
     })();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   function setStatus(id: string, status: SecretStatus) {
     setFindings(prev => {
