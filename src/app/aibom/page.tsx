@@ -141,7 +141,7 @@ export default function AIBOMPage() {
   useEffect(() => {
     async function load() {
       setLoading(true);
-      if (isSeedMode()) {
+      if (isSeedMode() && !profile?.org_id) {
         setEntries(DEMO_ENTRIES);
         setLoading(false);
         return;
@@ -159,7 +159,6 @@ export default function AIBOMPage() {
 
   // Keep attested status in sync with attestations made on Reports/PR pages
   useEffect(() => {
-    if (!isSeedMode()) return;
     function sync() {
       try {
         const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
@@ -182,7 +181,6 @@ export default function AIBOMPage() {
   // Patch entries with locally-attested status so the AIBOM page reflects
   // attestations made elsewhere without a backend round-trip
   const effectiveEntries = useMemo(() => {
-    if (!isSeedMode()) return entries;
     return entries.map(e => {
       if (e.attested) return e;
       const status = violationStatuses[`${riskPfx(e.risk_score)}::${e.scan_id}::${e.file_path}`];

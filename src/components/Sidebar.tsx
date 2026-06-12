@@ -299,7 +299,10 @@ export default function Sidebar() {
         // ── Secrets ──────────────────────────────────────────────────────────
         // tl_secret_total is only set once the /secrets page has loaded (mock or live);
         // a real org that hasn't visited it yet has no findings to show.
-        const seed = isSeedMode();
+        // tl_notif_snapshot with repos means this org has real data, so a stale
+        // tl_force_seed flag must not inject the demo "8" default.
+        const hasRealData = !!(snap?.repos && snap.repos.length > 0);
+        const seed = isSeedMode() && !hasRealData;
         const secretStatuses = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
         const resolvedSecrets = Object.values(secretStatuses).filter(v => v === "resolved").length;
         const rawSecretTotal = parseInt(localStorage.getItem("tl_secret_total") ?? (seed ? "8" : "0"), 10);

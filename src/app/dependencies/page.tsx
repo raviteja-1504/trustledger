@@ -415,7 +415,7 @@ function healthBar(score: number) {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function DependenciesPage() {
-  const [findings,    setFindings]    = useState<DepFinding[]>(() => isSeedMode() ? makeOffline() : []);
+  const [findings,    setFindings]    = useState<DepFinding[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
@@ -438,9 +438,9 @@ export default function DependenciesPage() {
       const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
       const derived = deriveFindings(scans);
-      // Real orgs may legitimately have zero dependency findings — only fall
-      // back to the offline mock list on an actual fetch failure (catch below).
-      setFindings(derived.length > 0 || !isSeedMode() ? derived : makeOffline());
+      // A successful fetch means real data, even if it's an empty list — only
+      // fall back to the offline mock list on an actual fetch failure (catch below).
+      setFindings(derived);
       setLastRefreshed(new Date());
     } catch { setLastRefreshed(new Date()); if (isSeedMode()) setFindings(makeOffline()); }
     finally { setLoading(false); if (spinner) setRefreshing(false); }

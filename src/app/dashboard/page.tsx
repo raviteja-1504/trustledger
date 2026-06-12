@@ -957,8 +957,10 @@ export default function DashboardPage() {
       } catch { return base.slice(0, 15); }
     }
 
-    // Check for dev-seed forced data BEFORE making any API call
-    const seedRaw = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1"
+    // Check for dev-seed forced data BEFORE making any API call. Real orgs
+    // (profile.org_id set) always go through api.dashboard() below so the
+    // selected date range is respected, instead of a stale cached snapshot.
+    const seedRaw = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id
       ? localStorage.getItem("tl_notif_snapshot") : null;
     if (seedRaw) {
       try {
@@ -985,7 +987,7 @@ export default function DashboardPage() {
         setActivity(mergeWithLocal(MOCK_ACTIVITY));
       })
       .finally(() => setLoading(false));
-  }, [days, rangeMode, startDate, endDate]);
+  }, [days, rangeMode, startDate, endDate, profile?.org_id]);
 
   // Refresh-ago ticker
   useEffect(() => {
@@ -1640,7 +1642,7 @@ export default function DashboardPage() {
                         <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
                       </div>
                     </div>
-                    <RiskTrendChart data={effectiveData.risk_trend.length >= 2 ? effectiveData.risk_trend : MOCK_DATA.risk_trend} />
+                    <RiskTrendChart data={effectiveData.risk_trend} />
                   </div>
                   <div className="section-card p-5">
                     <div className="mb-3">
