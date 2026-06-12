@@ -1206,7 +1206,7 @@ export default function DashboardPage() {
               Live
             </span>
             <span className="text-xs font-semibold uppercase tracking-widest text-indigo-500 bg-indigo-50 px-2.5 py-1 rounded-full">
-              {ORG}
+              {profile?.org_id ? (profile.org_name || profile.org_slug || ORG) : ORG}
             </span>
             <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ring-1 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${roleColor.dot}`} />

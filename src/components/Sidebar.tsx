@@ -240,7 +240,7 @@ export default function Sidebar() {
   const { role, setRole, permissions } = useRole();
   const roleColor  = ROLE_COLORS[role];
   const { collapsed, toggle } = useSidebar();
-  const { signOut } = useAuth();
+  const { signOut, profile } = useAuth();
   const [pendingCount,    setPendingCount]    = useState(0);
   const [openSecrets,     setOpenSecrets]     = useState(0);
   const [openViolations,  setOpenViolations]  = useState(0);
@@ -520,7 +520,7 @@ export default function Sidebar() {
           <div className="flex items-center gap-2.5 px-1">
             <div className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-glow-pulse"
               style={{ boxShadow:"0 0 6px rgba(52,211,153,0.6)" }} />
-            <p className="text-xs font-medium truncate" style={{ color:"rgba(255,255,255,0.38)" }}>{process.env.NEXT_PUBLIC_ORG ?? "novapay"}</p>
+            <p className="text-xs font-medium truncate" style={{ color:"rgba(255,255,255,0.38)" }}>{profile?.org_id ? (profile.org_name || profile.org_slug || (process.env.NEXT_PUBLIC_ORG ?? "novapay")) : (process.env.NEXT_PUBLIC_ORG ?? "novapay")}</p>
             <span className="ml-auto text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md"
               style={{ color:"rgba(165,180,252,0.7)", background:"rgba(99,102,241,0.15)" }}>
               v1.0
