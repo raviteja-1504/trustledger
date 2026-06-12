@@ -6,6 +6,7 @@ import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
 import type { DashboardData, ScanResult } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -415,6 +416,7 @@ function healthBar(score: number) {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function DependenciesPage() {
+  const { profile } = useAuth();
   const [findings,    setFindings]    = useState<DepFinding[]>([]);
   const [loading,     setLoading]     = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
@@ -442,9 +444,9 @@ export default function DependenciesPage() {
       // fall back to the offline mock list on an actual fetch failure (catch below).
       setFindings(derived);
       setLastRefreshed(new Date());
-    } catch { setLastRefreshed(new Date()); if (isSeedMode()) setFindings(makeOffline()); }
+    } catch { setLastRefreshed(new Date()); if (isSeedMode() && !profile?.org_id) setFindings(makeOffline()); }
     finally { setLoading(false); if (spinner) setRefreshing(false); }
-  }, []);
+  }, [profile?.org_id]);
 
   useEffect(() => {
     fetchFindings();

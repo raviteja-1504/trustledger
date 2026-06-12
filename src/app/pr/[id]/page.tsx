@@ -12,7 +12,7 @@ import { api } from "@/lib/api";
 import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@/lib/policy";
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { SEED_FILE_SAMPLES } from "@/lib/seedFileSamples";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
@@ -2012,7 +2012,7 @@ function PRDetailContent() {
       recordActivityEvent(path, email);
 
       // Persist to real API (fire-and-forget)
-      if (!isSeedMode() && profile?.org_id) {
+      if (profile?.org_id) {
         authedFetch("/api/attest", {
           method: "POST",
           body:   JSON.stringify({
