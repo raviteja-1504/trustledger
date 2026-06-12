@@ -241,6 +241,100 @@ function activityToAuditEvent(a: ActivityEvent, idx: number): AuditEvent {
   };
 }
 
+// ── Convert raw /api/audit row → AuditEvent ───────────────────────────────────
+
+interface AuditLogRow {
+  id: number;
+  event_type: string;
+  actor_email: string | null;
+  resource_type?: string;
+  resource_id?: string;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+// Server-side event types (src/lib/audit.ts AuditEventType) are a superset of
+// the page's display AuditEventType — map each onto the closest display type
+// so EVENT_CONFIG/EVENT_SOC2 lookups never miss.
+const RAW_TYPE_MAP: Record<string, AuditEventType> = {
+  scan_complete:         "scan_complete",
+  attestation:           "attestation",
+  merge_blocked:         "merge_blocked",
+  merge_allowed:         "attestation",
+  policy_violation:      "policy_violation",
+  policy_change:         "policy_change",
+  secret_detected:       "secret_detected",
+  integration_connected: "integration_connected",
+  user_added:            "user_added",
+  user_removed:          "user_added",
+  sla_breach:            "sla_breach",
+  alert_fired:           "policy_violation",
+  alert_resolved:        "policy_change",
+  incident_created:      "merge_blocked",
+  incident_resolved:     "policy_change",
+  api_key_created:       "integration_connected",
+  api_key_revoked:       "integration_connected",
+  violation_resolved:    "policy_change",
+  violation_escalated:   "policy_violation",
+  report_generated:      "policy_change",
+  org_settings_changed:  "policy_change",
+};
+
+const SEVERITY_BY_TYPE: Partial<Record<AuditEventType, AuditEvent["severity"]>> = {
+  merge_blocked:    "critical",
+  policy_violation: "critical",
+  secret_detected:  "critical",
+  sla_breach:       "critical",
+  policy_change:    "warning",
+};
+
+function auditLogToAuditEvent(row: AuditLogRow): AuditEvent {
+  const type    = RAW_TYPE_MAP[row.event_type] ?? "policy_change";
+  const payload = row.payload ?? {};
+  const repo    = typeof payload.repo === "string" ? payload.repo : undefined;
+  const scanId  = typeof payload.scan_id === "string" ? payload.scan_id : undefined;
+  const filePath = typeof payload.file_path === "string" ? payload.file_path : undefined;
+  const prNumber = typeof payload.pr_number === "number" ? payload.pr_number : undefined;
+  const actor   = row.actor_email?.trim() || undefined;
+  const repoShort = repo?.split("/").pop() ?? repo;
+
+  let description: string;
+  let detail: string | undefined;
+  switch (row.event_type) {
+    case "scan_complete":
+      description = `Scan completed${prNumber ? ` — PR #${prNumber}` : ""}`;
+      detail = [payload.file_count ? `${payload.file_count} files` : null, payload.overall_risk ? `${payload.overall_risk} risk` : null, repoShort]
+        .filter(Boolean).join(" · ");
+      break;
+    case "attestation":
+      description = filePath ? "File attested" : `PR #${prNumber} attested`;
+      detail = [filePath?.split("/").pop(), repoShort, actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
+      break;
+    case "api_key_created":
+      description = `API key created${payload.name ? ` — ${payload.name}` : ""}`;
+      break;
+    case "api_key_revoked":
+      description = `API key revoked${payload.name ? ` — ${payload.name}` : ""}`;
+      break;
+    default:
+      description = row.event_type.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+      detail = repoShort ?? (row.resource_id ? `resource ${row.resource_id}` : undefined);
+  }
+
+  return {
+    id:          `audit-${row.id}`,
+    type,
+    timestamp:   row.created_at,
+    repo,
+    actor,
+    severity:    SEVERITY_BY_TYPE[type] ?? "info",
+    scan_id:     scanId,
+    pr_number:   prNumber,
+    description,
+    detail,
+  };
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function AuditPage() {
@@ -286,8 +380,9 @@ export default function AuditPage() {
     // a stale tl_force_seed flag, so real orgs always see their actual log.
     if (profile?.org_id) {
       try {
-        const res = await authedFetch<{ events: AuditEvent[]; total: number }>("/api/audit?limit=200");
-        const merged = [...localEvents, ...res.events].filter((e, i, arr) =>
+        const res = await authedFetch<{ events: AuditLogRow[]; total: number }>("/api/audit?limit=200");
+        const remoteEvents = res.events.map(auditLogToAuditEvent);
+        const merged = [...localEvents, ...remoteEvents].filter((e, i, arr) =>
           arr.findIndex(x => x.id === e.id) === i
         );
         setLiveEvents(merged);
