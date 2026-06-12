@@ -282,8 +282,9 @@ export default function AuditPage() {
     const localRaw = (() => { try { return JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[]; } catch { return [] as ActivityEvent[]; } })();
     const localEvents = localRaw.map((a, i) => activityToAuditEvent(a, 10000 + i));
 
-    // Try real audit log from Supabase
-    if (!isSeedMode() && profile?.org_id) {
+    // Try real audit log from Supabase — a real org_id takes precedence over
+    // a stale tl_force_seed flag, so real orgs always see their actual log.
+    if (profile?.org_id) {
       try {
         const res = await authedFetch<{ events: AuditEvent[]; total: number }>("/api/audit?limit=200");
         const merged = [...localEvents, ...res.events].filter((e, i, arr) =>
@@ -336,9 +337,10 @@ export default function AuditPage() {
   // Dedup only on concrete scan_id — never drop mock events that have no scan_id,
   // otherwise historical records are wiped out when live events return empty scan_ids.
   const allEvents = useMemo<AuditEvent[]>(() => {
-    // In seed mode: liveEvents come from tl_local_activity (seed-populated).
-    // Never merge hardcoded MOCK_EVENTS on top — that would double-count.
-    if (isSeedMode()) {
+    // In true seed/demo mode (no real org): liveEvents come from
+    // tl_local_activity (seed-populated). Never merge hardcoded MOCK_EVENTS
+    // on top — that would double-count.
+    if (isSeedMode() && !profile?.org_id) {
       return liveEvents.length > 0
         ? [...liveEvents].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
         : MOCK_EVENTS;
@@ -358,7 +360,7 @@ export default function AuditPage() {
 
     return [...liveEvents, ...filteredMock]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [liveEvents]);
+  }, [liveEvents, profile?.org_id]);
 
   const repos  = useMemo(() => Array.from(new Set(allEvents.filter(e => e.repo).map(e => e.repo!))), [allEvents]);
   const actors = useMemo(() => Array.from(new Set(allEvents.filter(e => e.actor).map(e => e.actor!))), [allEvents]);
@@ -404,7 +406,7 @@ export default function AuditPage() {
   // seed/demo mode recomputes the client-side SHA-256 chain from scratch and compares to the cached result.
   const verifyChain = useCallback(async () => {
     setVerifyState("checking");
-    if (!isSeedMode() && profile?.org_id) {
+    if (profile?.org_id) {
       try {
         const res = await authedFetch<{ valid: boolean; broken_at?: number; total: number }>("/api/audit", { method: "POST" });
         setVerifyState(res.valid ? "valid" : "invalid");
