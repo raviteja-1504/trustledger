@@ -1888,7 +1888,11 @@ function PRDetailContent() {
       return;
     }
     // Map real backend IDs (sc_NNN) to the nearest mock scan using snapshot data
-    const snapData = (() => { try { return JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null"); } catch { return null; } })();
+    // — seed/demo mode only; real orgs should always hit api.getScan() below
+    // so they get their actual stored file content rather than MOCK_FILE_CONTENT.
+    const snapData = isSeedMode()
+      ? (() => { try { return JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null"); } catch { return null; } })()
+      : null;
     if (snapData?.top_risk_files) {
       const snapFiles = (snapData.top_risk_files as Array<{ scan_id:string; repo:string; file_path:string; ai_pct:number; risk_score:string; attested:boolean; pr_number:number }>)
         .filter(f => f.scan_id === id);
