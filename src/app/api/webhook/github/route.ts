@@ -179,11 +179,13 @@ export async function POST(req: NextRequest) {
 
         if (scan) {
           if (result.files.length > 0) {
+            const contentByPath = new Map(fileContents.map(f => [f.path, f.content]));
             await db.from("scan_files").insert(result.files.map(f => ({
               scan_id: scan.id, org_id: orgId,
               file_path: f.file_path, language: f.language,
               ai_percentage: f.ai_percentage, risk_score: f.risk_score,
               risk_indicators: f.risk_indicators, content_hash: f.content_hash, line_count: f.line_count,
+              content: contentByPath.get(f.file_path) ?? null,
             })));
           }
 
