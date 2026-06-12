@@ -299,13 +299,8 @@ export default function ScansPage() {
         return;
       }
       try {
-        const res = await authedFetch("/api/scans?limit=200") as Response;
-        if (res.ok) {
-          const json = await res.json() as { scans: ScanSummary[] };
-          setScans(json.scans ?? []);
-        } else {
-          setScans(makeMockScans());
-        }
+        const json = await authedFetch<{ scans: ScanSummary[] }>("/api/scans?limit=200");
+        setScans(json.scans ?? []);
       } catch {
         setScans(makeMockScans());
       }
