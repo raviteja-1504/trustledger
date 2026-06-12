@@ -260,6 +260,7 @@ export default function ScansPage() {
   const [repoFilter,       setRepoFilter]       = useState("all");
   const [riskFilter,       setRiskFilter]       = useState<RiskLevel | "all">("all");
   const [trigFilter,       setTrigFilter]       = useState<"all" | "webhook" | "push">("all");
+  const [dateFilter,       setDateFilter]       = useState<"7" | "30" | "90" | "all">("30");
   const [search,           setSearch]           = useState("");
   const [sortKey,          setSortKey]          = useState<"date" | "risk" | "ai" | "files">("date");
   const [violationStatuses,setViolationStatuses]= useState<Record<string,string>>({});
@@ -325,6 +326,10 @@ export default function ScansPage() {
         if (riskFilter !== "all" && s.overall_risk !== riskFilter) return false;
         if (trigFilter === "webhook" && s.triggered_by !== "webhook") return false;
         if (trigFilter === "push"    && s.triggered_by !== "push")   return false;
+        if (dateFilter !== "all") {
+          const cutoff = Date.now() - Number(dateFilter) * 86400000;
+          if (new Date(s.created_at).getTime() < cutoff) return false;
+        }
         if (search) {
           const q = search.toLowerCase();
           if (!s.repo.toLowerCase().includes(q) &&
@@ -340,7 +345,7 @@ export default function ScansPage() {
         if (sortKey === "files") return b.file_count - a.file_count;
         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
-  }, [scans, repoFilter, riskFilter, trigFilter, search, sortKey]);
+  }, [scans, repoFilter, riskFilter, trigFilter, dateFilter, search, sortKey]);
 
   // Build date-grouped list (only when sorted by date)
   const groupedRows = useMemo(() => {
@@ -537,6 +542,14 @@ export default function ScansPage() {
             <option value="all">All triggers</option>
             <option value="webhook">PR scans</option>
             <option value="push">Direct push</option>
+          </select>
+
+          <select value={dateFilter} onChange={e => setDateFilter(e.target.value as typeof dateFilter)}
+            className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-200 bg-white">
+            <option value="7">Last 7 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="all">All time</option>
           </select>
 
           <div className="flex items-center gap-1 ml-auto">
