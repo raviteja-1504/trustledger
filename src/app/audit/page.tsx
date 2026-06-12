@@ -117,13 +117,18 @@ const WEEKDAYS  = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","
 
 function pad2(n: number) { return String(n).padStart(2,"0"); }
 
+// Audit timestamps are displayed in UTC (matches the hash-chain panel and
+// the underlying audit_log.created_at) so they're unambiguous regardless
+// of the viewer's local timezone.
 function formatTime(iso: string) {
   const d = new Date(iso);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())} UTC`;
 }
 
 function relTime(iso: string) {
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  // Clamp to 0 so future-dated timestamps (e.g. mock events generated for
+  // "today") never display as negative durations.
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (s < 60)    return "just now";
   if (s < 3600)  return `${Math.floor(s/60)}m ago`;
   if (s < 86400) return `${Math.floor(s/3600)}h ago`;

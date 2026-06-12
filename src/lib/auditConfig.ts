@@ -53,10 +53,14 @@ export const EVENT_SOC2: Partial<Record<AuditEventType, string[]>> = {
 export function makeMockEvents(org: string): AuditEvent[] {
   const o = org;
   function ago(daysBack: number, hhmm: string): string {
-    const d = new Date();
+    const now = new Date();
+    const d = new Date(now);
     d.setUTCDate(d.getUTCDate() - daysBack);
     const [h, m, s = "00"] = hhmm.split(":");
     d.setUTCHours(Number(h), Number(m), Number(s), 0);
+    // A "daysBack ago" timestamp should never land in the future — if hhmm
+    // hasn't happened yet today (UTC), push it back one more day.
+    if (d.getTime() > now.getTime()) d.setUTCDate(d.getUTCDate() - 1);
     return d.toISOString().replace(/\.\d{3}Z$/, "Z");
   }
   return [
