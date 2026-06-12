@@ -8,7 +8,7 @@ import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import type { DashboardData } from "@/types";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -506,7 +506,7 @@ export default function EvidencePage() {
     let storedUrl = uploadUrl.trim();
 
     // Upload file to Supabase Storage if one is attached
-    if (uploadFile && !isSeedMode() && profile?.org_id) {
+    if (uploadFile && profile?.org_id) {
       try {
         const form = new FormData();
         form.append("file",  uploadFile);
@@ -713,7 +713,7 @@ export default function EvidencePage() {
               <input type="file" className="sr-only" accept=".pdf,.png,.jpg,.csv,.xlsx,.docx,.txt"
                 onChange={e => setUploadFile(e.target.files?.[0] ?? null)} />
             </label>
-            {uploadFile && !isSeedMode() && profile?.org_id && (
+            {uploadFile && profile?.org_id && (
               <p className="text-[9px] text-emerald-600">File will be uploaded to Supabase Storage (evidence vault) on confirm.</p>
             )}
             <div className="flex gap-2">

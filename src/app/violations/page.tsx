@@ -11,7 +11,7 @@ import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import type { DashboardData } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 
@@ -743,7 +743,7 @@ export default function ViolationsPage() {
 
   // Sync violation status resolution to real API (alongside localStorage)
   const syncViolationToAPI = useCallback(async (id: string, status: string, note?: string) => {
-    if (isSeedMode() || !profile?.org_id) return;
+    if (!profile?.org_id) return;
     try {
       await authedFetch("/api/violations", {
         method: "PATCH",
