@@ -252,7 +252,7 @@ export default function Sidebar() {
     function refresh() {
       try {
         type RiskFile = { attested: boolean; risk_score: string; file_path: string; scan_id: string; repo: string };
-        type RepoRow  = { ai_pct: number; attestation_rate: number; scan_count: number };
+        type RepoRow  = { repo: string; ai_pct: number; attestation_rate: number; scan_count: number };
         const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as {
           top_risk_files?: RiskFile[];
           repos?: RepoRow[];
@@ -270,6 +270,9 @@ export default function Sidebar() {
             if (second !== -1) resolvedFiles.add(key.slice(second + 2));
           }
         }
+        // A repo/deploy-level violation is "open" unless explicitly marked
+        // resolved/in_review on the Violations page — mirrors `status === "open"`.
+        const isOpenViolation = (vid: string) => vstats[vid] !== "resolved" && vstats[vid] !== "in_review";
 
         // ── Risk file counts (excluding attested + resolved) ─────────────────
         const riskFiles = snap?.top_risk_files ?? [];
@@ -289,9 +292,9 @@ export default function Sidebar() {
 
         // ── Violations: mirror deriveViolations() from src/app/violations/page.tsx ──
         // unattested CRIT/HIGH files + deploy-blocked (1 entry) + AI-threshold repos (>80%) + low-attestation repos (<60%)
-        const aiThresholdRepos = (snap?.repos ?? []).filter(r => r.ai_pct > 0.8).length;
-        const lowAttestViolationRepos = (snap?.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
-        setOpenViolations(openCount + (unresolvedDeployRepos.size > 0 ? 1 : 0) + aiThresholdRepos + lowAttestViolationRepos);
+        const aiThresholdRepos = (snap?.repos ?? []).filter(r => r.ai_pct > 0.8 && isOpenViolation(`ai-thresh::${r.repo}`)).length;
+        const lowAttestViolationRepos = (snap?.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0 && isOpenViolation(`low-attest::${r.repo}`)).length;
+        setOpenViolations(openCount + (unresolvedDeployRepos.size > 0 && isOpenViolation("deploy::blocked") ? 1 : 0) + aiThresholdRepos + lowAttestViolationRepos);
 
         // ── Secrets ──────────────────────────────────────────────────────────
         // tl_secret_total is only set once the /secrets page has loaded (mock or live);
