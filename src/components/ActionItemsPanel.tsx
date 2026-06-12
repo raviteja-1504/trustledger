@@ -1,8 +1,10 @@
 "use client";
 
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useRole } from "@/lib/roles";
-import type { DashboardData } from "@/types";
+import { api } from "@/lib/api";
+import type { DashboardData, ScanResult } from "@/types";
 
 interface Props {
   data: DashboardData;
@@ -76,6 +78,41 @@ function ArrowIcon() {
   );
 }
 
+// ── AI Pattern Breakdown ─────────────────────────────────────────────────────
+
+const PATTERN_CATS = [
+  { key: "sql-injection",   label: "SQL Injection",  color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+  { key: "hardcoded-secret", label: "Hardcoded Keys", color: "#ef4444", bg: "#fef2f2", border: "#fecdd3" },
+  { key: "jwt-none-alg",    label: "JWT Bypass",     color: "#f97316", bg: "#fff7ed", border: "#fed7aa" },
+  { key: "eval-exec",       label: "Eval / Exec",    color: "#f59e0b", bg: "#fffbeb", border: "#fde68a" },
+  { key: "access-control",  label: "Access Control", color: "#6366f1", bg: "#eef2ff", border: "#c7d2fe" },
+] as const;
+
+// Indicators that don't have a dedicated bucket above roll up into "Access Control"
+// (cookie/session/auth-adjacent and other misc findings).
+function bucketFor(indicator: string): typeof PATTERN_CATS[number]["key"] {
+  if (indicator === "sql-injection") return "sql-injection";
+  if (indicator === "hardcoded-secret" || indicator === "high-entropy-secret") return "hardcoded-secret";
+  if (indicator === "jwt-none-alg") return "jwt-none-alg";
+  if (indicator === "eval-exec") return "eval-exec";
+  return "access-control";
+}
+
+function computePatternBreakdown(scans: ScanResult[]) {
+  const counts: Record<string, number> = {};
+  let total = 0;
+  scans.forEach(s => s.files.forEach(f => f.risk_indicators.forEach(ind => {
+    const bucket = bucketFor(ind);
+    counts[bucket] = (counts[bucket] ?? 0) + 1;
+    total++;
+  })));
+  if (total === 0) return [];
+  return PATTERN_CATS
+    .map(c => ({ ...c, pct: Math.round(((counts[c.key] ?? 0) / total) * 100) }))
+    .filter(c => c.pct > 0)
+    .sort((a, b) => b.pct - a.pct);
+}
+
 function computeSla(repos: DashboardData["repos"], affectedRepos: string[], slaHours: number) {
   const matched = repos.filter(r => affectedRepos.includes(r.repo) && r.last_scan);
   if (!matched.length) return null;
@@ -109,6 +146,18 @@ function SlaChip({ sla }: { sla: { remainingH: number; overdue: boolean } }) {
 
 export default function ActionItemsPanel({ data, violationStatuses = {} }: Props) {
   const { role, permissions } = useRole();
+
+  const [scans, setScans] = useState<ScanResult[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const scanIds = [...new Set(data.repos.filter(r => r.latest_scan_id).map(r => r.latest_scan_id))];
+    Promise.all(scanIds.map(id => api.getScan(id).catch(() => null))).then(results => {
+      if (!cancelled) setScans(results.filter((s): s is ScanResult => s !== null));
+    });
+    return () => { cancelled = true; };
+  }, [data.repos]);
+
+  const patterns = useMemo(() => computePatternBreakdown(scans), [scans]);
 
   const unattested  = data.top_risk_files.filter(f => !f.attested);
   const critUnatt   = unattested.filter(f => f.risk_score === "CRITICAL");
@@ -337,38 +386,33 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
       {/* ── AI Pattern Breakdown ── */}
       <div className="flex-1 flex flex-col border-t border-gray-100 px-3 pt-2 pb-3 min-h-0">
         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2 px-1">AI Pattern Breakdown</p>
-        {(() => {
-          const patterns = [
-            { label: "SQL Injection",  pct: 31, color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
-            { label: "Hardcoded Keys", pct: 27, color: "#ef4444", bg: "#fef2f2", border: "#fecdd3" },
-            { label: "JWT Bypass",     pct: 19, color: "#f97316", bg: "#fff7ed", border: "#fed7aa" },
-            { label: "Eval / Exec",    pct: 14, color: "#f59e0b", bg: "#fffbeb", border: "#fde68a" },
-            { label: "Access Control", pct: 9,  color: "#6366f1", bg: "#eef2ff", border: "#c7d2fe" },
-          ];
-          return (
-            <>
-              <div className="flex h-2 rounded-full overflow-hidden gap-px mb-3">
-                {patterns.map(p => (
-                  <div key={p.label} className="h-full transition-all duration-700"
-                    style={{ width: `${p.pct}%`, background: p.color }} />
-                ))}
-              </div>
-              <div className="flex-1 grid grid-cols-2 gap-1.5" style={{ gridAutoRows: "1fr" }}>
-                {patterns.map(p => (
-                  <div key={p.label}
-                    className="rounded-xl px-2.5 py-2 border flex flex-col justify-between"
-                    style={{ background: p.bg, borderColor: p.border }}>
-                    <span className="text-lg font-black tabular-nums leading-none" style={{ color: p.color }}>{p.pct}%</span>
-                    <div className="h-1 rounded-full overflow-hidden my-1.5" style={{ background: p.border }}>
-                      <div className="h-full rounded-full" style={{ width: `${p.pct}%`, background: p.color }} />
-                    </div>
-                    <span className="text-[9px] font-bold leading-snug" style={{ color: p.color, opacity: 0.8 }}>{p.label}</span>
+        {patterns.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center">
+            <p className="text-[10px] text-gray-400">No risk patterns detected in recent scans</p>
+          </div>
+        ) : (
+          <>
+            <div className="flex h-2 rounded-full overflow-hidden gap-px mb-3">
+              {patterns.map(p => (
+                <div key={p.label} className="h-full transition-all duration-700"
+                  style={{ width: `${p.pct}%`, background: p.color }} />
+              ))}
+            </div>
+            <div className="flex-1 grid grid-cols-2 gap-1.5" style={{ gridAutoRows: "1fr" }}>
+              {patterns.map(p => (
+                <div key={p.label}
+                  className="rounded-xl px-2.5 py-2 border flex flex-col justify-between"
+                  style={{ background: p.bg, borderColor: p.border }}>
+                  <span className="text-lg font-black tabular-nums leading-none" style={{ color: p.color }}>{p.pct}%</span>
+                  <div className="h-1 rounded-full overflow-hidden my-1.5" style={{ background: p.border }}>
+                    <div className="h-full rounded-full" style={{ width: `${p.pct}%`, background: p.color }} />
                   </div>
-                ))}
-              </div>
-            </>
-          );
-        })()}
+                  <span className="text-[9px] font-bold leading-snug" style={{ color: p.color, opacity: 0.8 }}>{p.label}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
     </div>
