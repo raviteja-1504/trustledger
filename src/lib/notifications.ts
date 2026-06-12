@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { DashboardData } from "@/types";
+import { supabase } from "./supabase";
 
 export type NotifLevel = "critical" | "high" | "warning" | "info" | "success";
 
@@ -317,7 +318,8 @@ async function fetchDashboard(): Promise<DashboardData> {
     if (seeded?.repos?.length) return seeded;
   }
   try {
-    const token = localStorage.getItem("tl_token");
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token ?? null;
     const res = await fetch(`${BASE_URL}/api/dashboard`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
