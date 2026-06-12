@@ -195,6 +195,56 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 
 // ── Tab: Policies ──────────────────────────────────────────────────────────────
 
+function OrganizationSection() {
+  const { profile } = useAuth();
+  const toast = useToastHelpers();
+  const [orgName, setOrgName] = useState("");
+  const [saving, setSaving]   = useState(false);
+
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ org: { name: string } }>("/api/settings")
+      .then(res => setOrgName(res.org?.name ?? ""))
+      .catch(() => {});
+  }, [profile?.org_id]);
+
+  if (!profile?.org_id) return null;
+
+  async function save() {
+    setSaving(true);
+    try {
+      await authedFetch("/api/settings", { method: "PATCH", body: JSON.stringify({ name: orgName }) });
+      toast.success("Organization name updated");
+    } catch {
+      toast.error("Failed to update organization name");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SectionCard title="Organization" subtitle="The display name shown across your dashboard.">
+      <Row label="Organization name" hint="Shown in the header and sidebar">
+        <div className="flex items-center gap-2">
+          <input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="Acme Corp"
+            className="text-sm border border-gray-200 rounded-xl px-3.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 w-56"
+          />
+          <button
+            onClick={save}
+            disabled={saving || !orgName.trim()}
+            className="px-3.5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </Row>
+    </SectionCard>
+  );
+}
+
 function PoliciesTab({ policy, setPolicy }: {
   policy: OrgPolicy;
   setPolicy: React.Dispatch<React.SetStateAction<OrgPolicy>>;
@@ -208,6 +258,8 @@ function PoliciesTab({ policy, setPolicy }: {
 
   return (
     <div className="space-y-5">
+      <OrganizationSection />
+
       {/* Preset cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {([
