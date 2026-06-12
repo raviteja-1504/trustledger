@@ -175,6 +175,8 @@ export async function POST(req: NextRequest) {
           file_count:          result.files.length,
           triggered_by:        "webhook",
           duration_ms:         result.duration_ms,
+          check_run_id:        checkRunId,
+          installation_id:     installation?.id ?? null,
         }).select("id").single();
 
         if (scan) {

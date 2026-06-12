@@ -5,6 +5,7 @@ import { buildAttestationHash } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { validateBody, AttestSchema } from "@/lib/validation";
+import { getInstallationToken, updateCheckRun } from "@/lib/github";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
   // Verify scan belongs to this org
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, overall_risk")
+    .select("id, repo_full_name, overall_risk, check_run_id, installation_id")
     .eq("id", body.scan_id)
     .eq("org_id", org_id)
     .single();
@@ -66,6 +67,36 @@ export async function POST(req: NextRequest) {
     .update({ status: "resolved", resolved_at: now, resolved_by: user_id ?? null })
     .eq("scan_id", body.scan_id)
     .eq("file_path", body.file_path);
+
+  // If this scan came from a GitHub PR and all CRITICAL/HIGH files are now
+  // attested, flip the Check Run from "action_required" to "success" so the
+  // PR is unblocked.
+  if (scan.check_run_id && scan.installation_id) {
+    const { count: remaining } = await db
+      .from("violations")
+      .select("id", { count: "exact", head: true })
+      .eq("scan_id", body.scan_id)
+      .neq("status", "resolved")
+      .in("risk_score", ["CRITICAL", "HIGH"]);
+
+    if (!remaining) {
+      try {
+        const { token } = await getInstallationToken(scan.installation_id);
+        const [owner, repoName] = scan.repo_full_name.split("/");
+        await updateCheckRun(token, owner, repoName, scan.check_run_id, {
+          name:       "TrustLedger AI Governance",
+          status:     "completed",
+          conclusion: "success",
+          output: {
+            title:   "TrustLedger: All required files attested",
+            summary: "All CRITICAL and HIGH risk files in this PR have been reviewed and attested. This check no longer blocks merging.",
+          },
+        });
+      } catch (e) {
+        console.error("Failed to update check run after attestation:", e);
+      }
+    }
+  }
 
   // Audit log
   await writeAuditLog(db, {
