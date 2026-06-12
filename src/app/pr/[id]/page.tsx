@@ -1887,81 +1887,38 @@ function PRDetailContent() {
       setScan(MOCK_SCANS[id]);
       return;
     }
-    // Map real backend IDs (sc_NNN) to the nearest mock scan using snapshot data
-    // — seed/demo mode only; real orgs should always hit api.getScan() below
-    // so they get their actual stored file content rather than MOCK_FILE_CONTENT.
-    const snapData = isSeedMode()
-      ? (() => { try { return JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null"); } catch { return null; } })()
-      : null;
-    if (snapData?.top_risk_files) {
-      const snapFiles = (snapData.top_risk_files as Array<{ scan_id:string; repo:string; file_path:string; ai_pct:number; risk_score:string; attested:boolean; pr_number:number }>)
-        .filter(f => f.scan_id === id);
-      if (snapFiles.length > 0) {
-        const first = snapFiles[0];
-        // Find a mock scan for the same repo to get realistic file content
-        const repoName = first.repo.split("/").pop() ?? "";
-        const repoMock = Object.values(MOCK_SCANS).find(s => s.repo.includes(repoName)) ?? Object.values(MOCK_SCANS)[0];
-        setScan({
-          ...repoMock,
-          scan_id: id,
-          repo: first.repo,
-          pr_number: first.pr_number,
-          overall_risk: first.risk_score as ScanResult["overall_risk"],
-          total_ai_percentage: first.ai_pct,
-          // Override files with snapshot files so attesting the right ones
-          files: snapFiles.map(f => ({
-            file_path: f.file_path,
-            language: f.file_path.endsWith(".py") ? "python"
-              : f.file_path.endsWith(".ts") || f.file_path.endsWith(".tsx") ? "typescript"
-              : f.file_path.endsWith(".go") ? "go"
-              : f.file_path.endsWith(".java") ? "java"
-              : f.file_path.endsWith(".rs") ? "rust"
-              : f.file_path.endsWith(".js") || f.file_path.endsWith(".jsx") ? "javascript"
-              : f.file_path.endsWith(".rb") ? "ruby"
-              : f.file_path.endsWith(".kt") || f.file_path.endsWith(".kts") ? "kotlin"
-              : "unknown",
-            ai_percentage: f.ai_pct,
-            risk_score: f.risk_score as ScanResult["files"][0]["risk_score"],
-            risk_indicators: ["hardcoded-secret"],
-            attested: f.attested,
-            content: MOCK_FILE_CONTENT[f.file_path],
-          })),
-        });
-        return;
-      }
-    }
     // Check localStorage for a freshly submitted demo scan before hitting the API
     try {
       const local = localStorage.getItem(`tl_demo_scan_${id}`);
       if (local) { setScan(JSON.parse(local) as ScanResult); return; }
     } catch {}
 
+    // Always try the real API first — real scan IDs (UUIDs) resolve here with
+    // their actual stored file content. Only fall back to snapshot/mock
+    // reconstruction below for synthetic ids (e.g. seeded "sc_NNN") that
+    // don't exist as DB rows.
     api.getScan(id)
       .then(setScan)
       .catch(() => {
-        // 1. Check if any mock scan has a matching scan_id
-        const mockFallback = Object.values(MOCK_SCANS).find(s => s.scan_id === id);
-        if (mockFallback) { setScan(mockFallback); return; }
-
-        // 2. Build a scan from tl_notif_snapshot top_risk_files (works for live or seeded IDs)
+        // Build a scan from tl_notif_snapshot top_risk_files (seeded/demo ids)
         try {
           const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null");
-          const snapFiles = (snap?.top_risk_files ?? []) as Array<{
-            scan_id: string; repo: string; file_path: string;
-            ai_pct: number; risk_score: string; attested: boolean; pr_number: number;
-          }>;
-          const matching = snapFiles.filter(f => f.scan_id === id);
-          if (matching.length > 0) {
-            const first = matching[0];
+          const snapFiles = (snap?.top_risk_files as Array<{ scan_id:string; repo:string; file_path:string; ai_pct:number; risk_score:string; attested:boolean; pr_number:number }> ?? [])
+            .filter(f => f.scan_id === id);
+          if (snapFiles.length > 0) {
+            const first = snapFiles[0];
+            // Find a mock scan for the same repo to get realistic file content
+            const repoName = first.repo.split("/").pop() ?? "";
+            const repoMock = Object.values(MOCK_SCANS).find(s => s.repo.includes(repoName)) ?? Object.values(MOCK_SCANS)[0];
             setScan({
+              ...repoMock,
               scan_id: id,
               repo: first.repo,
               pr_number: first.pr_number,
-              commit_sha: "snapshot",
               overall_risk: first.risk_score as ScanResult["overall_risk"],
               total_ai_percentage: first.ai_pct,
-              timestamp: new Date().toISOString(),
-              files: matching.map(f => ({
+              // Override files with snapshot files so attesting the right ones
+              files: snapFiles.map(f => ({
                 file_path: f.file_path,
                 language: f.file_path.endsWith(".py") ? "python"
                   : f.file_path.endsWith(".ts") || f.file_path.endsWith(".tsx") ? "typescript"
@@ -1974,7 +1931,7 @@ function PRDetailContent() {
                   : "unknown",
                 ai_percentage: f.ai_pct,
                 risk_score: f.risk_score as ScanResult["files"][0]["risk_score"],
-                risk_indicators: [],
+                risk_indicators: ["hardcoded-secret"],
                 attested: f.attested,
                 content: MOCK_FILE_CONTENT[f.file_path],
               })),
@@ -1982,6 +1939,10 @@ function PRDetailContent() {
             return;
           }
         } catch {}
+
+        // Check if any mock scan has a matching scan_id
+        const mockFallback = Object.values(MOCK_SCANS).find(s => s.scan_id === id);
+        if (mockFallback) { setScan(mockFallback); return; }
 
         setError("404 Not Found");
       });
