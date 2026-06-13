@@ -111,6 +111,11 @@ function PencilIcon() {
 
 // ── Reviewer Bar ──────────────────────────────────────────────────────────────
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidEmail(email: string): boolean {
+  return EMAIL_RE.test(email);
+}
+
 function ReviewerBar({ email, github, onSave }: {
   email: string; github: string; onSave: (e: string, g: string) => void;
 }) {
@@ -163,12 +168,15 @@ function ReviewerBar({ email, github, onSave }: {
           className="w-36 text-xs border border-amber-200 bg-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-amber-400"
         />
         <button
-          disabled={!draftEmail || !draftGithub}
+          disabled={!isValidEmail(draftEmail) || !draftGithub}
           onClick={() => { onSave(draftEmail, draftGithub); setEditing(false); }}
           className="px-3.5 py-1.5 text-xs font-bold bg-amber-500 text-white rounded-lg disabled:opacity-40 hover:bg-amber-600 transition-colors"
         >
           Save
         </button>
+        {draftEmail && !isValidEmail(draftEmail) && (
+          <span className="text-[11px] text-rose-600 w-full">Enter a valid email address (e.g. you@company.com)</span>
+        )}
       </div>
     </div>
   );
@@ -1856,7 +1864,15 @@ function PRDetailContent() {
 
   // Restore reviewer + policy from localStorage
   useEffect(() => {
-    setReviewerEmail(localStorage.getItem("tl_reviewer_email")  ?? "");
+    const storedEmail = localStorage.getItem("tl_reviewer_email") ?? "";
+    if (storedEmail && !isValidEmail(storedEmail)) {
+      // Previously-saved value isn't a valid email (e.g. a GitHub username was
+      // entered by mistake) — clear it so attest calls don't fail validation
+      // and the reviewer bar prompts for a correct value.
+      localStorage.removeItem("tl_reviewer_email");
+    } else {
+      setReviewerEmail(storedEmail);
+    }
     setReviewerGithub(localStorage.getItem("tl_reviewer_github") ?? "");
     setPolicy(loadPolicy());
     // Re-sync attestedSet in case localStorage was updated while away
