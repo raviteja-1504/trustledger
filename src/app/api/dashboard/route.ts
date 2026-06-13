@@ -53,15 +53,16 @@ async function fetchDashboard(org_id: string, days: number) {
     .eq("org_id", org_id)
     .in("status", ["open", "in_review"]);
 
-  // Scan files for top risk
+  // Scan files for top risk. Fetch recent-first so that, once deduped by
+  // repo+file_path below, we keep each file's most recent occurrence.
   const { data: riskFiles } = await db
     .from("scan_files")
-    .select("scan_id, file_path, ai_percentage, risk_score, risk_indicators, scans(repo_full_name, pr_number)")
+    .select("scan_id, file_path, ai_percentage, risk_score, risk_indicators, created_at, scans(repo_full_name, pr_number)")
     .eq("org_id", org_id)
     .in("risk_score", ["CRITICAL", "HIGH"])
     .gte("created_at", since)
-    .order("ai_percentage", { ascending: false })
-    .limit(20) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; scans: { repo_full_name: string; pr_number: number } | null }> | null };
+    .order("created_at", { ascending: false })
+    .limit(200) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
 
   if (!scans) return { repos:[], overall_ai_pct:0, attestation_rate:0, unattested_deploy_count:0, risk_trend:[], scan_count:0, file_count:0, top_risk_files:[] };
 
@@ -129,20 +130,32 @@ async function fetchDashboard(org_id: string, days: number) {
     .slice(-10)
     .map(([date, t]) => ({ date, high_count: t.high, critical_count: t.critical, medium_count: t.medium }));
 
-  // Top risk files
-  const top_risk_files = (riskFiles ?? []).map(f => {
-    const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
-    const attested = attestedFileSet.has(`${f.scan_id}::${f.file_path}`);
-    return {
-      repo:       scan?.repo_full_name ?? "",
-      file_path:  f.file_path,
-      ai_pct:     f.ai_percentage,
-      risk_score: f.risk_score,
-      attested,
-      scan_id:    f.scan_id,
-      pr_number:  scan?.pr_number ?? 0, // 0 = no PR (direct push); UI guards with > 0
-    };
-  });
+  // Top risk files — dedupe by repo+file_path, keeping each file's most
+  // recent scan (riskFiles is ordered created_at desc), then rank by AI%.
+  const seenFiles = new Set<string>();
+  const top_risk_files = (riskFiles ?? [])
+    .filter(f => {
+      const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
+      const key  = `${scan?.repo_full_name ?? ""}::${f.file_path}`;
+      if (seenFiles.has(key)) return false;
+      seenFiles.add(key);
+      return true;
+    })
+    .sort((a, b) => b.ai_percentage - a.ai_percentage)
+    .slice(0, 20)
+    .map(f => {
+      const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
+      const attested = attestedFileSet.has(`${f.scan_id}::${f.file_path}`);
+      return {
+        repo:       scan?.repo_full_name ?? "",
+        file_path:  f.file_path,
+        ai_pct:     f.ai_percentage,
+        risk_score: f.risk_score,
+        attested,
+        scan_id:    f.scan_id,
+        pr_number:  scan?.pr_number ?? 0, // 0 = no PR (direct push); UI guards with > 0
+      };
+    });
 
   const totalFiles   = scans.reduce((s, sc) => s + sc.file_count, 0);
   const avgAI        = scans.length === 0 ? 0 : scans.reduce((s, sc) => s + sc.total_ai_percentage, 0) / scans.length;
