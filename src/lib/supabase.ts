@@ -71,7 +71,7 @@ function makeStubClient(): SupabaseClient<any> {
 // Browser client — uses anon key, respects RLS
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const supabase: SupabaseClient<any> = SUPABASE_CONFIGURED
-  ? createClient(url, anon, { auth: { persistSession: true, autoRefreshToken: true } })
+  ? createClient(url, anon, { auth: { persistSession: true, autoRefreshToken: true, flowType: "pkce" } })
   : makeStubClient();
 
 // Server-side client — uses service role key, bypasses RLS.

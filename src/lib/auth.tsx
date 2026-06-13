@@ -176,7 +176,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signInWithOAuth({
       provider: "github",
       options: {
-        redirectTo: `${window.location.origin}/api/auth/callback`,
+        redirectTo: `${window.location.origin}/auth/callback`,
         scopes: "read:user user:email read:org",
       },
     });
