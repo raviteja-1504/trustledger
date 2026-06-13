@@ -2020,25 +2020,30 @@ function PRDetailContent() {
     } catch {}
   }
 
+  // Persist an attestation to the real API so it's recorded in Supabase and,
+  // for GitHub-sourced scans, can flip the PR's Check Run to "success".
+  function persistAttestation(path: string, email: string, github: string) {
+    if (scan && profile?.org_id) {
+      return authedFetch("/api/attest", {
+        method: "POST",
+        body:   JSON.stringify({
+          scan_id:         scan.scan_id,
+          file_path:       path,
+          reviewer_email:  email,
+          reviewer_github: github || undefined,
+        }),
+      }).catch(() => {});
+    }
+    return Promise.resolve();
+  }
+
   function markAttested(path: string) {
     setAttestedSet(s => { const n = new Set(s); n.add(path); return n; });
     if (scan) {
       resolveOneFile(path);
       const email = reviewerEmail || "reviewer@trustledger.dev";
       recordActivityEvent(path, email);
-
-      // Persist to real API (fire-and-forget)
-      if (profile?.org_id) {
-        authedFetch("/api/attest", {
-          method: "POST",
-          body:   JSON.stringify({
-            scan_id:         scan.scan_id,
-            file_path:       path,
-            reviewer_email:  email,
-            reviewer_github: reviewerGithub || undefined,
-          }),
-        }).catch(() => {});
-      }
+      persistAttestation(path, email, reviewerGithub);
     }
   }
 
@@ -2083,16 +2088,10 @@ function PRDetailContent() {
     } catch {}
   }
 
-  // pr_id format the backend uses: "repo/pulls/number"
-  const prId = scan ? `${scan.repo}/pulls/${scan.pr_number}` : "";
-
   async function performAttest(file: FileResult) {
     const email  = reviewerEmail  || "reviewer@trustledger.dev";
     const github = reviewerGithub || "reviewer";
     if (!reviewerEmail || !reviewerGithub) saveReviewer(email, github);
-    try {
-      await api.attest({ pr_id: prId, file_path: file.file_path, reviewer_email: email, reviewer_github_login: github });
-    } catch {}
     markAttested(file.file_path);
     setAttestTarget(null);
   }
@@ -2108,9 +2107,7 @@ function PRDetailContent() {
            !f.attested && !attestedSet.has(f.file_path)
     );
     for (const f of toAttest) {
-      try {
-        await api.attest({ pr_id: prId, file_path: f.file_path, reviewer_email: email, reviewer_github_login: github });
-      } catch { /* backend unavailable — mark locally */ }
+      await persistAttestation(f.file_path, email, github);
       setAttestedSet(s => { const n = new Set(s); n.add(f.file_path); return n; });
       recordActivityEvent(f.file_path, email);
     }
