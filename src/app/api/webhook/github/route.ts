@@ -22,6 +22,10 @@ import {
 } from "@/lib/github";
 import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
+import { cacheDel, cacheKeys } from "@/lib/cache";
+
+// Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
+const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 // File extensions we scan
 const SCANNABLE_EXTS = new Set([
@@ -180,6 +184,9 @@ export async function POST(req: NextRequest) {
         }).select("id").single();
 
         if (scan) {
+          // Invalidate cached dashboard stats so this scan shows up immediately
+          await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+
           if (result.files.length > 0) {
             const contentByPath = new Map(fileContents.map(f => [f.path, f.content]));
             await db.from("scan_files").insert(result.files.map(f => ({

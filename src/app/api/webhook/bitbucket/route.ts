@@ -16,7 +16,11 @@ import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
+import { cacheDel, cacheKeys } from "@/lib/cache";
 import crypto from "crypto";
+
+// Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
+const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 const SCANNABLE_EXTS = new Set([
   "py","ts","tsx","js","jsx","rb","go","rs","java","kt","cs","php","cpp","c","swift",
@@ -190,6 +194,9 @@ export async function POST(req: NextRequest) {
       }).select("id").single() as { data: { id: string } | null };
 
       if (scan) {
+        // Invalidate cached dashboard stats so this scan shows up immediately
+        await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+
         await db.from("scan_files").insert(result.files.map(f => ({
           scan_id: scan.id, org_id: orgId, file_path: f.file_path, language: f.language,
           ai_percentage: f.ai_percentage, risk_score: f.risk_score,

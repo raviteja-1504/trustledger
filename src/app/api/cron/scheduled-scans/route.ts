@@ -11,6 +11,10 @@ import { getInstallationToken, getPRFiles, fetchFileContents } from "@/lib/githu
 import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
+import { cacheDel, cacheKeys } from "@/lib/cache";
+
+// Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
+const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 const SCANNABLE_EXTS = new Set(["py","ts","tsx","js","jsx","rb","go","rs","java","kt","cs","php"]);
 
@@ -140,6 +144,11 @@ export async function GET(req: NextRequest) {
         triggered_by:        "scheduled",
         duration_ms:         result.duration_ms,
       }).select("id").single() as { data: { id: string } | null };
+
+      if (scanRow) {
+        // Invalidate cached dashboard stats so this scan shows up immediately
+        await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+      }
 
       if (scanRow && result.files.length > 0) {
         await db.from("scan_files").insert(result.files.map(f => ({
