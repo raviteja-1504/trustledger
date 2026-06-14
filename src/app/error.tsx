@@ -14,6 +14,19 @@ export default function ErrorPage({
     import("@/lib/observability").then(({ captureError }) => {
       captureError(error, { digest: error.digest });
     }).catch(() => {});
+
+    // Stale JS chunks (e.g. mid-navigation after a deploy, or a transient
+    // network blip) surface as ChunkLoadError. A hard reload re-fetches the
+    // current manifest and usually resolves it — guard against loop with a
+    // one-shot sessionStorage flag.
+    const isChunkError = error.name === "ChunkLoadError" || /Loading chunk [\d]+ failed/.test(error.message);
+    if (isChunkError && typeof window !== "undefined") {
+      const key = "tl_chunk_reload";
+      if (!sessionStorage.getItem(key)) {
+        sessionStorage.setItem(key, "1");
+        window.location.reload();
+      }
+    }
   }, [error]);
 
   return (
