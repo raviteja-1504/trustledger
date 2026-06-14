@@ -43,7 +43,7 @@ function authCookieName(): string {
   return `sb-${ref}-auth-token`;
 }
 
-function syncSessionCookie(session: Session | null) {
+export function syncSessionCookie(session: Session | null) {
   if (typeof document === "undefined") return;
   const name = authCookieName();
   if (!session) {

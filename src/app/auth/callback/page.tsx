@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { syncSessionCookie } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 
 // GitHub OAuth lands here with ?code=... (PKCE flow). We exchange it for a
@@ -37,14 +38,22 @@ export default function AuthCallbackPage() {
         return;
       }
 
+      // Write the auth cookie ourselves right away — onAuthStateChange's
+      // listener may not have run yet, and middleware needs this cookie on
+      // the very next request to avoid bouncing back to /login.
+      syncSessionCookie(data.session);
+
+      let destination = next;
       try {
         const { is_new_user } = await authedFetch<{ is_new_user: boolean }>("/api/auth/bootstrap", {
           method: "POST",
         });
-        router.replace(is_new_user && next === "/dashboard" ? "/onboarding" : next);
-      } catch {
-        router.replace(next);
-      }
+        destination = is_new_user && next === "/dashboard" ? "/onboarding" : next;
+      } catch { /* fall back to `next` */ }
+
+      // Full navigation (not router.replace) so middleware re-evaluates
+      // with the cookie we just set.
+      window.location.assign(destination);
     })();
   }, [router, searchParams]);
 
