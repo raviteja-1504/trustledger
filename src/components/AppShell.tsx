@@ -9,17 +9,27 @@ import StatusBar from "@/components/StatusBar";
 import { SidebarProvider } from "@/lib/sidebar";
 import { KeyboardShortcutsProvider } from "@/components/keyboard/KeyboardShortcuts";
 import { SkipNav, LiveRegion } from "@/components/Accessibility";
+import { useAuth } from "@/lib/auth";
+
+const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname   = usePathname() ?? "/";
-  const isPublic   = pathname === "/" || pathname === "/login" || pathname === "/onboarding" || pathname === "/status" || pathname === "/docs";
+  const isPublic   = pathname === "/" || pathname === "/login" || pathname === "/onboarding" || pathname === "/status" || pathname === "/docs" || pathname === "/auth/callback";
   const [mobileNav, setMobileNav] = useState(false);
+  const { user, loading } = useAuth();
 
   // Close mobile nav on route change
   useEffect(() => { setMobileNav(false); }, [pathname]);
 
   if (isPublic) {
     return <>{children}</>;
+  }
+
+  // Not signed in (or still resolving) — show the page's AuthGuard prompt
+  // full-screen, without the sidebar/nav chrome of an authenticated session.
+  if (!SKIP_AUTH && (loading || !user)) {
+    return <div className="flex h-screen overflow-hidden">{children}</div>;
   }
 
   return (
