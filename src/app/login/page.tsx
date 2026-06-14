@@ -235,7 +235,11 @@ function ProductionLoginPage() {
 
           {errorParam && (
             <div className="mb-4 px-3 py-2.5 rounded-xl text-sm text-rose-300 bg-rose-900/30 border border-rose-700/40">
-              Sign-in failed: {errorParam.replace(/_/g, " ")}
+              {errorParam === "session_revoked"
+                ? "You've been signed out because your account signed in from another device or browser."
+                : errorParam === "session_timeout"
+                ? "You've been signed out due to inactivity."
+                : `Sign-in failed: ${errorParam.replace(/_/g, " ")}`}
             </div>
           )}
           {formErr && (

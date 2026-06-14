@@ -1,19 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { getJwtSessionId } from "@/lib/jwt";
 
 // Called once by the client right after exchangeCodeForSession() succeeds.
-// Ensures a brand-new GitHub OAuth user gets an org membership.
+// Ensures org membership exists, and records this session as the user's sole
+// active session — any previously issued token is rejected by verifyApiKey().
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
     return NextResponse.json({ error: "missing_token" }, { status: 401 });
   }
 
+  const token = authHeader.slice(7);
   const db = createServiceClient();
-  const { data: { user }, error } = await db.auth.getUser(authHeader.slice(7));
+  const { data: { user }, error } = await db.auth.getUser(token);
   if (error || !user) {
     return NextResponse.json({ error: "invalid_token" }, { status: 401 });
   }
+
+  const sessionId = getJwtSessionId(token);
 
   const { data: existing } = await db
     .from("org_members")
@@ -22,6 +27,12 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (existing) {
+    if (sessionId) {
+      await db
+        .from("org_members")
+        .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
+        .eq("user_id", user.id);
+    }
     return NextResponse.json({ is_new_user: false });
   }
 
@@ -61,6 +72,8 @@ export async function POST(req: NextRequest) {
       role:         count === 0 ? "admin" : "developer",
       github_login: githubLogin ?? null,
       avatar_url:   (user.user_metadata?.avatar_url as string) ?? null,
+      active_session_id: sessionId,
+      active_session_at: new Date().toISOString(),
     });
   }
 

@@ -5,6 +5,7 @@ import {
 } from "react";
 import type { User, Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
+import { authedFetch } from "./useRealData";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,10 @@ export function syncSessionCookie(session: Session | null) {
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
   document.cookie = `${name}=${value}; path=/; max-age=${maxAge}; SameSite=Lax${secure}`;
 }
+
+// ── Idle timeout ─────────────────────────────────────────────────────────────
+// Auto sign-out after this much inactivity (no mouse/keyboard/touch events).
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 // ── Demo / skip-auth mode ──────────────────────────────────────────────────────
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
@@ -183,16 +188,32 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signInWithEmail(email: string, password: string) {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error && data.session) {
+      syncSessionCookie(data.session);
+      await registerSession();
+    }
     return { error: error?.message ?? null };
   }
 
   async function signUpWithEmail(email: string, password: string, name: string) {
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email, password,
       options: { data: { name } },
     });
+    if (!error && data.session) {
+      syncSessionCookie(data.session);
+      await registerSession();
+    }
     return { error: error?.message ?? null };
+  }
+
+  // Record this session as the user's sole active session (kicks out any
+  // previously issued token — see verifyApiKey's session_revoked check).
+  async function registerSession() {
+    try {
+      await authedFetch("/api/auth/bootstrap", { method: "POST" });
+    } catch { /* best-effort */ }
   }
 
   async function signOut() {
@@ -200,6 +221,28 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     syncSessionCookie(null);
     setProfile(null);
   }
+
+  // Auto sign-out after IDLE_TIMEOUT_MS with no user activity.
+  useEffect(() => {
+    if (!user) return;
+
+    let lastActivity = Date.now();
+    const onActivity = () => { lastActivity = Date.now(); };
+    const events: (keyof WindowEventMap)[] = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    events.forEach(e => window.addEventListener(e, onActivity, { passive: true }));
+
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivity >= IDLE_TIMEOUT_MS) {
+        clearInterval(interval);
+        signOut().then(() => { window.location.href = "/login?error=session_timeout"; });
+      }
+    }, 30_000);
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, onActivity));
+      clearInterval(interval);
+    };
+  }, [user]);
 
   return (
     <AuthContext.Provider value={{ user, session, profile, loading, signInWithGitHub, signInWithEmail, signUpWithEmail, signOut }}>

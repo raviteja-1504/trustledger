@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { getJwtSessionId } from "@/lib/jwt";
 import crypto from "crypto";
 
 // ── Global per-IP rate limit (applied to ALL API routes) ────────────────────
@@ -93,11 +94,21 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
 
     const { data: member } = await db
       .from("org_members")
-      .select("org_id, email")
+      .select("org_id, email, active_session_id")
       .eq("user_id", user.id)
       .single();
 
     if (!member) return { org_id: "", error: "no_org_membership" };
+
+    // ── Single active session enforcement ─────────────────────────────────
+    // A newer login (via /api/auth/bootstrap) overwrites active_session_id.
+    // If this token's session_id no longer matches, this session has been
+    // superseded by a login elsewhere — reject it.
+    const tokenSessionId = getJwtSessionId(token);
+    if (member.active_session_id && tokenSessionId && member.active_session_id !== tokenSessionId) {
+      return { org_id: "", error: "session_revoked" };
+    }
+
     return { org_id: member.org_id, user_id: user.id, actor_email: member.email };
   }
 
