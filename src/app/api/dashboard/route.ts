@@ -42,7 +42,7 @@ async function fetchDashboard(org_id: string, days: number) {
   // Attestations in period
   const { data: attests } = await db
     .from("attestations")
-    .select("scan_id, file_path, created_at")
+    .select("scan_id, file_path, reviewer_email, created_at")
     .eq("org_id", org_id)
     .gte("created_at", since);
 
@@ -73,6 +73,9 @@ async function fetchDashboard(org_id: string, days: number) {
   }>();
 
   const attestedFileSet = new Set((attests ?? []).map(a => `${a.scan_id}::${a.file_path}`));
+  const attestationByFile = new Map(
+    (attests ?? []).map(a => [`${a.scan_id}::${a.file_path}`, { reviewer_email: a.reviewer_email, created_at: a.created_at }]),
+  );
 
   scans.forEach(s => {
     const r = repoMap.get(s.repo_full_name) ?? {
@@ -145,7 +148,9 @@ async function fetchDashboard(org_id: string, days: number) {
     .slice(0, 20)
     .map(f => {
       const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
-      const attested = attestedFileSet.has(`${f.scan_id}::${f.file_path}`);
+      const key  = `${f.scan_id}::${f.file_path}`;
+      const attested = attestedFileSet.has(key);
+      const attestation = attestationByFile.get(key);
       return {
         repo:       scan?.repo_full_name ?? "",
         file_path:  f.file_path,
@@ -154,6 +159,8 @@ async function fetchDashboard(org_id: string, days: number) {
         attested,
         scan_id:    f.scan_id,
         pr_number:  scan?.pr_number ?? 0, // 0 = no PR (direct push); UI guards with > 0
+        attested_by: attestation?.reviewer_email,
+        attested_at: attestation?.created_at,
       };
     });
 

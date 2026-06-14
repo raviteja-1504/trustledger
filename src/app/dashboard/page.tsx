@@ -111,12 +111,14 @@ function deriveActivity(data: DashboardData): ActivityEvent[] {
     });
   });
 
-  // Attestation events from attested top_risk_files
+  // Attestation events from attested top_risk_files. Use the real reviewer/
+  // timestamp recorded on the attestation when available, falling back to
+  // synthetic placeholders only for demo/mock data that has neither.
   data.top_risk_files.filter(f => f.attested).forEach((f, i) => {
     const tsOffset = (i + 1) * 3600000 * 2;
     events.push({
       type: "attestation",
-      timestamp: new Date(now - tsOffset).toISOString(),
+      timestamp: f.attested_at ?? new Date(now - tsOffset).toISOString(),
       repo: f.repo,
       pr_number: f.pr_number,
       scan_id: f.scan_id,
@@ -124,7 +126,7 @@ function deriveActivity(data: DashboardData): ActivityEvent[] {
       file_count: 0,
       total_ai_pct: f.ai_pct,
       file_path: f.file_path,
-      reviewer_email: getReviewers()[i % getReviewers().length],
+      reviewer_email: f.attested_by ?? getReviewers()[i % getReviewers().length],
     });
   });
 

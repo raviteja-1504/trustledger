@@ -75,6 +75,8 @@ export interface TopRiskFile {
   attested: boolean;
   scan_id: string;
   pr_number: number;
+  attested_by?: string;
+  attested_at?: string;
 }
 
 export interface DashboardData {
