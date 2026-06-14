@@ -6,6 +6,51 @@ import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
 
 // ── GET — list alerts ──────────────────────────────────────────────────────────
 
+// Alert sources recognised by the dashboard UI (src/app/alerts/page.tsx AlertSource)
+const KNOWN_SOURCES = new Set(["scan", "policy", "secret", "dependency", "sla", "anomaly", "exploit"]);
+
+interface AlertRow {
+  id: string;
+  alert_type: string | null;
+  severity: string;
+  status: string;
+  title: string;
+  body: string;
+  repo: string | null;
+  scan_id: string | null;
+  runbook_url: string | null;
+  escalation_emails: string[] | null;
+  fired_at: string;
+  acknowledged_by: string | null;
+  snooze_until: string | null;
+  resolved_at: string | null;
+}
+
+// Normalise a raw `alerts` table row into the shape the alerts page UI expects
+// (Alert interface in src/app/alerts/page.tsx) — DB rows lack notes/history/
+// channel/pr_number/group_id and use different column names for runbook/escalation.
+function toUiAlert(row: AlertRow) {
+  return {
+    id:               row.id,
+    title:            row.title,
+    body:             row.body,
+    severity:         row.severity,
+    source:           row.alert_type && KNOWN_SOURCES.has(row.alert_type) ? row.alert_type : "policy",
+    status:           row.status,
+    repo:             row.repo ?? undefined,
+    scan_id:          row.scan_id ?? undefined,
+    fired_at:         row.fired_at,
+    acknowledged_by:  row.acknowledged_by ?? undefined,
+    snooze_until:     row.snooze_until ?? undefined,
+    resolved_at:      row.resolved_at ?? undefined,
+    channel:          "in-app",
+    runbook:          row.runbook_url ?? undefined,
+    escalation:       row.escalation_emails ?? undefined,
+    notes:            [] as string[],
+    history:          [{ action: "Alert created", at: row.fired_at }],
+  };
+}
+
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
@@ -29,7 +74,7 @@ export async function GET(req: NextRequest) {
   const { data, error: qErr } = await query;
   if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
 
-  return NextResponse.json({ alerts: data ?? [] });
+  return NextResponse.json({ alerts: (data ?? []).map(row => toUiAlert(row as AlertRow)) });
 }
 
 // ── POST — fire a new alert + deliver it ──────────────────────────────────────
