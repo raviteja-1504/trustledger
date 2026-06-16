@@ -97,17 +97,22 @@ export const api = {
   repoScans: async (repo: string): Promise<ScanResult[]> => {
     const json = await apiFetch<{ scans: Array<{
       scan_id: string; repo: string; pr_number: number; commit_sha: string;
-      overall_risk: ScanResult["overall_risk"]; total_ai_percentage: number; created_at: string;
+      branch?: string; overall_risk: ScanResult["overall_risk"]; total_ai_percentage: number;
+      file_count?: number; attested_count?: number; triggered_by?: string; created_at: string;
     }> }>(`/api/scans?repo=${encodeURIComponent(repo)}`);
     return (json.scans ?? []).map(s => ({
-      scan_id: s.scan_id,
-      repo: s.repo,
-      pr_number: s.pr_number,
-      commit_sha: s.commit_sha,
-      files: [],
-      overall_risk: s.overall_risk,
+      scan_id:             s.scan_id,
+      repo:                s.repo,
+      pr_number:           s.pr_number,
+      commit_sha:          s.commit_sha,
+      branch:              s.branch,
+      files:               [],
+      overall_risk:        s.overall_risk,
       total_ai_percentage: s.total_ai_percentage,
-      timestamp: s.created_at,
+      file_count:          s.file_count,
+      attested_count:      s.attested_count,
+      triggered_by:        s.triggered_by,
+      timestamp:           s.created_at,
     }));
   },
 

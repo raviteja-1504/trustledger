@@ -95,6 +95,23 @@ function BackIcon() {
   );
 }
 
+function BranchIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+      <path d="M18 9a9 9 0 0 1-9 9"/>
+    </svg>
+  );
+}
+
+function WebhookIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/>
+    </svg>
+  );
+}
+
 export default function RepoDetailPage() {
   const { profile } = useAuth();
   const { slug } = (useParams<{ slug: string[] }>() ?? { slug: [] });
@@ -211,7 +228,7 @@ export default function RepoDetailPage() {
           </div>
         )}
 
-        {/* Scan history table */}
+        {/* Scan history */}
         <div className="animate-fade-up section-card">
           <div className="px-5 py-4 border-b border-gray-100">
             <p className="font-bold text-gray-900 text-sm">Scan History</p>
@@ -221,7 +238,7 @@ export default function RepoDetailPage() {
           {loading ? (
             <div className="p-5 space-y-3">
               {[0, 1, 2].map(i => (
-                <div key={i} className="h-10 bg-gray-100 rounded-lg animate-pulse" />
+                <div key={i} className="h-16 bg-gray-100 rounded-lg animate-pulse" />
               ))}
             </div>
           ) : scans.length === 0 ? (
@@ -230,70 +247,101 @@ export default function RepoDetailPage() {
               <p className="text-xs text-gray-400 mt-1">Submit a scan via the API or dashboard form</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-100 bg-gray-50/60">
-                    {["PR", "Commit", "Risk", "Files", "AI%", "Attested", "Date", ""].map(h => (
-                      <th key={h} className="px-4 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-5 last:pr-5 last:text-right">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {scans.map(sc => (
-                    <tr key={sc.scan_id} className="hover:bg-gray-50/70 group transition-colors">
-                      <td className="px-4 py-3 pl-5">
-                        <span className="text-xs font-bold text-indigo-600">#{sc.pr_number}</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="font-mono text-[11px] text-gray-500 bg-gray-100 px-2 py-0.5 rounded-md">
-                          {sc.commit_sha.slice(0, 7)}
+            <div className="divide-y divide-gray-50">
+              {scans.map((sc, idx) => {
+                const fileCount    = sc.file_count ?? sc.files.length;
+                const attestedCount = sc.attested_count ?? sc.files.filter(f => f.attested).length;
+                const attPct       = fileCount > 0 ? Math.round((attestedCount / fileCount) * 100) : 0;
+                const attColor     = attPct === 100 ? "#10b981" : attPct >= 50 ? "#f59e0b" : "#ef4444";
+                const riskAccent   = sc.overall_risk === "CRITICAL" ? "#7c3aed"
+                  : sc.overall_risk === "HIGH"     ? "#f97316"
+                  : sc.overall_risk === "MEDIUM"   ? "#f59e0b" : "#10b981";
+                const isLatest     = idx === 0;
+                const absDate      = sc.timestamp ? new Date(sc.timestamp).toLocaleString("en-GB", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" }) : "—";
+                const triggerLabel = sc.triggered_by === "webhook" || sc.triggered_by === "github-app" ? "GitHub" : sc.triggered_by === "scheduled" ? "Scheduled" : "API";
+                const triggerColor = triggerLabel === "GitHub" ? "text-violet-600 bg-violet-50 border-violet-200"
+                  : triggerLabel === "Scheduled" ? "text-sky-600 bg-sky-50 border-sky-200"
+                  : "text-gray-500 bg-gray-50 border-gray-200";
+
+                return (
+                  <div key={sc.scan_id} className="group hover:bg-gray-50/60 transition-colors"
+                    style={{ borderLeft: `3px solid ${riskAccent}` }}>
+                    <div className="flex items-center gap-4 px-5 py-3.5 flex-wrap">
+
+                      {/* PR + branch */}
+                      <div className="min-w-[120px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-extrabold text-indigo-600">#{sc.pr_number}</span>
+                          {isLatest && (
+                            <span className="text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200 px-1.5 py-0.5 rounded-full leading-none">
+                              LATEST
+                            </span>
+                          )}
+                        </div>
+                        {sc.branch && (
+                          <div className="flex items-center gap-1 mt-0.5 text-[10px] text-gray-400 font-mono">
+                            <BranchIcon />
+                            <span className="truncate max-w-[100px]">{sc.branch}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Commit */}
+                      <div className="shrink-0">
+                        <span className="font-mono text-[12px] text-gray-700 bg-gray-100 px-2 py-1 rounded-md font-bold tracking-tight">
+                          {sc.commit_sha.slice(0, 9)}
                         </span>
-                      </td>
-                      <td className="px-4 py-3">
+                      </div>
+
+                      {/* Risk */}
+                      <div className="shrink-0">
                         <RiskBadge level={sc.overall_risk as RiskLevel} />
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="text-xs text-gray-600 font-semibold tabular-nums">{sc.files.length}</span>
-                      </td>
-                      <td className="px-4 py-3 min-w-[120px]">
+                      </div>
+
+                      {/* Files + attested */}
+                      <div className="shrink-0 min-w-[90px]">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-16 h-1.5 rounded-full overflow-hidden bg-gray-100">
+                            <div className="h-full rounded-full transition-all" style={{ width: `${attPct}%`, background: attColor }} />
+                          </div>
+                          <span className="text-[11px] font-bold tabular-nums" style={{ color: attColor }}>
+                            {attestedCount}/{fileCount}
+                          </span>
+                        </div>
+                        <p className="text-[9px] text-gray-400 mt-0.5">attested</p>
+                      </div>
+
+                      {/* AI% */}
+                      <div className="shrink-0 min-w-[100px]">
                         <ProgressBar value={sc.total_ai_percentage} mode="ai" />
-                      </td>
-                      <td className="px-4 py-3">
-                        {(() => {
-                          const att = sc.files.filter(f => f.attested).length;
-                          const total = sc.files.length;
-                          const pct = total > 0 ? Math.round((att / total) * 100) : 0;
-                          const color = pct === 100 ? "#10b981" : pct >= 50 ? "#f59e0b" : "#ef4444";
-                          return (
-                            <div className="flex items-center gap-1.5">
-                              <div className="w-12 h-1.5 rounded-full overflow-hidden bg-gray-100">
-                                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
-                              </div>
-                              <span className="text-[11px] font-bold tabular-nums" style={{ color }}>
-                                {att}/{total}
-                              </span>
-                            </div>
-                          );
-                        })()}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="text-xs text-gray-400 tabular-nums">{relDate(sc.timestamp)}</span>
-                      </td>
-                      <td className="px-4 py-3 pr-5 text-right">
-                        <Link
-                          href={`/pr/${sc.scan_id}`}
-                          className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          View PR →
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        <p className="text-[9px] text-gray-400 mt-0.5">avg AI%</p>
+                      </div>
+
+                      {/* Trigger source */}
+                      <div className="shrink-0">
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${triggerColor}`}>
+                          {triggerLabel === "GitHub" && <WebhookIcon />}
+                          {triggerLabel}
+                        </span>
+                      </div>
+
+                      {/* Date */}
+                      <div className="shrink-0 ml-auto text-right">
+                        <p className="text-xs font-semibold text-gray-600">{relDate(sc.timestamp)}</p>
+                        <p className="text-[10px] text-gray-400 mt-0.5">{absDate}</p>
+                      </div>
+
+                      {/* View link */}
+                      <Link
+                        href={`/pr/${sc.scan_id}`}
+                        className="shrink-0 inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
+                      >
+                        View →
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

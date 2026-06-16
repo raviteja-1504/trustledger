@@ -26,9 +26,13 @@ export interface ScanResult {
   repo: string;
   pr_number: number;
   commit_sha: string;
+  branch?: string;
   files: FileResult[];
   overall_risk: RiskLevel;
   total_ai_percentage: number;
+  file_count?: number;
+  attested_count?: number;
+  triggered_by?: string;
   timestamp: string;
 }
 
