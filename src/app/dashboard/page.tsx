@@ -304,9 +304,6 @@ function RiskHeatmap({ data }: { data: DashboardData }) {
     if (tp) {
       const tot = tp.critical_count + tp.high_count + tp.medium_count;
       level = tot === 0 ? 0 : tot <= 2 ? 2 : tot <= 5 ? 3 : 4;
-    } else {
-      const seed = (d.getDate() * 31 + d.getMonth() * 7) % 100;
-      level = seed < 60 ? (seed < 20 ? 4 : seed < 40 ? 3 : seed < 50 ? 2 : 1) : 0;
     }
     const mo = d.toLocaleDateString("en-GB", { month:"short", day:"numeric" });
     cells.push({ date: iso, level, label: `${mo} — ${HEATMAP_LABELS[level]} risk` });
@@ -335,7 +332,7 @@ function RiskHeatmap({ data }: { data: DashboardData }) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <p className="font-bold text-gray-900 text-sm">Risk Activity Heatmap</p>
-          <p className="text-xs text-gray-400 mt-0.5">Daily risk level across all repos — last 90 days</p>
+          <p className="text-xs text-gray-400 mt-0.5">Daily risk level across all repos — gray cells have no scan data</p>
         </div>
       </div>
 
