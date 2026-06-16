@@ -298,19 +298,6 @@ export default function RepoDetailPage() {
                         <RiskBadge level={sc.overall_risk as RiskLevel} />
                       </div>
 
-                      {/* Files + attested */}
-                      <div className="shrink-0 min-w-[90px]">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-16 h-1.5 rounded-full overflow-hidden bg-gray-100">
-                            <div className="h-full rounded-full transition-all" style={{ width: `${attPct}%`, background: attColor }} />
-                          </div>
-                          <span className="text-[11px] font-bold tabular-nums" style={{ color: attColor }}>
-                            {attestedCount}/{fileCount}
-                          </span>
-                        </div>
-                        <p className="text-[9px] text-gray-400 mt-0.5">attested</p>
-                      </div>
-
                       {/* AI% */}
                       <div className="shrink-0 min-w-[100px]">
                         <ProgressBar value={sc.total_ai_percentage} mode="ai" />
