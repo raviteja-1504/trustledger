@@ -13,7 +13,6 @@ import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
 import { authedFetch } from "@/lib/useRealData";
-import { SEED_FILE_SAMPLES } from "@/lib/seedFileSamples";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
@@ -671,1167 +670,6 @@ function PolicyGate({ result, policy }: { result: PolicyResult; policy: OrgPolic
   );
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-
-// ── Sample source code for offline review ─────────────────────────────────────
-
-const MOCK_FILE_CONTENT: Record<string, string> = {
-  "src/processors/card_validator.py": `import psycopg2
-import stripe
-
-# Hardcoded Stripe API key — must be rotated immediately
-STRIPE_KEY = "sk_live_51Hx2trustledger_demo"
-
-def validate_card(card_number: str, user_id: str):
-    conn = psycopg2.connect("postgresql://prod_db")
-    cursor = conn.cursor()
-
-    # SQL injection: user_id injected directly into query
-    query = f"SELECT * FROM cards WHERE user_id = '{user_id}'"
-    cursor.execute(query)
-
-    # Arbitrary code execution via eval
-    result = eval("stripe.CreditCard.validate('" + card_number + "')")
-
-    stripe.api_key = STRIPE_KEY
-    return stripe.Charge.create(amount=int(result*100), currency="usd")`,
-
-  "src/gateway/stripe_client.py": `import stripe
-
-# Hardcoded production API key — rotate immediately
-STRIPE_SECRET  = "sk_live_51Hx2trustledger_production_key"
-WEBHOOK_SECRET = "whsec_prod_webhook_2024"
-
-def create_charge(amount: int, currency: str, source: str):
-    stripe.api_key = STRIPE_SECRET
-    return stripe.Charge.create(
-        amount=amount, currency=currency, source=source
-    )
-
-def verify_webhook(payload: bytes, sig: str) -> dict:
-    return stripe.Webhook.construct_event(payload, sig, WEBHOOK_SECRET)`,
-
-  "src/api/refund_handler.py": `# Refund handler
-# This module processes refund requests for completed transactions.
-# It validates the refund amount and calls the payment gateway.
-
-def process_refund(transaction_id: str, amount: float, reason: str) -> dict:
-    # Validate the refund amount
-    if amount <= 0:
-        raise ValueError("Refund amount must be positive")
-
-    # Look up the original transaction
-    transaction = get_transaction(transaction_id)
-
-    # Apply the refund via payment gateway
-    result = payment_gateway.refund(
-        transaction_id=transaction_id,
-        amount=int(amount * 100),
-        reason=reason
-    )
-    return {"status": "refunded", "transaction_id": transaction_id, "amount": amount}`,
-
-  "src/models/transaction.py": `from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
-
-@dataclass
-class Transaction:
-    id: str
-    amount: float
-    currency: str
-    status: str
-    created_at: datetime
-    updated_at: datetime
-    user_id: str
-    description: Optional[str] = None
-    metadata: Optional[dict] = None
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "amount": self.amount,
-            "currency": self.currency,
-            "status": self.status,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-        }`,
-
-  "src/utils/currency_formatter.py": `# Currency formatting utilities
-# Provides human-readable formatting for monetary values.
-
-SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "JPY"]
-
-def format_currency(amount: float, currency: str) -> str:
-    # Format the amount according to the currency
-    if currency == "USD":
-        return f"\${amount:,.2f}"
-    elif currency == "EUR":
-        return f"EUR {amount:,.2f}"
-    elif currency == "GBP":
-        return f"GBP {amount:,.2f}"
-    elif currency == "JPY":
-        return f"JPY {int(amount):,}"
-    return f"{amount:,.2f} {currency}"`,
-
-  "src/middleware/auth_check.ts": `import jwt from "jsonwebtoken";
-
-// Hardcoded secret — should use process.env.JWT_SECRET
-const JWT_SECRET = "jwt_signing_secret_2024";
-
-export function checkAuth(req: Request): { userId: string; role: string } | null {
-  const token = req.headers.get("Authorization")?.replace("Bearer ", "");
-  if (!token) return null;
-
-  // VULNERABLE: accepts "none" algorithm — any token passes verification
-  const payload = jwt.verify(token, JWT_SECRET, {
-    algorithms: ["HS256", "none"],
-  }) as { sub: string; role: string };
-
-  return { userId: payload.sub, role: payload.role };
-}`,
-
-  "src/services/payment_service.ts": `// Payment service — orchestrates charge creation and validation
-
-export class PaymentService {
-  // AI-generated: eval on user-supplied formula
-  async calculateFee(formula: string, amount: number): Promise<number> {
-    const result = eval(formula); // RCE risk
-    return result * amount;
-  }
-
-  async processPayment(data: {
-    amount: number;
-    currency: string;
-    userId: string;
-    description: string;
-  }): Promise<{ id: string; status: string }> {
-    const fee = await this.calculateFee("0.029 + 0.30", data.amount);
-    const charge = await this.createCharge({ ...data, fee });
-    return { id: charge.id, status: charge.status };
-  }
-
-  private async createCharge(data: object): Promise<any> {
-    return fetch("/api/charges", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }).then(r => r.json());
-  }
-}`,
-
-  "src/oauth/token_exchange.ts": `import jwt from "jsonwebtoken";
-
-// JWT secret hardcoded — use process.env.JWT_SECRET
-const JWT_SECRET = "jwt_secret_prod_2024";
-
-export function verifyToken(token: string): object {
-  // Accepts 'none' algorithm — JWT bypass vulnerability
-  const payload = jwt.decode(token, JWT_SECRET, {
-    algorithms: ["HS256", "none"],
-    ignoreExpiration: false,
-  });
-  return payload as object;
-}
-
-export function createToken(userId: string, role: string): string {
-  return jwt.sign({ sub: userId, role }, JWT_SECRET, {
-    expiresIn: "24h",
-    algorithm: "HS256",
-  });
-}`,
-
-  "src/auth/token_service.py": `import jwt
-
-# Hardcoded JWT secret — must use secrets manager
-JWT_SECRET = "jwt_secret_prod_2024"
-
-def verify_token(token: str) -> dict:
-    # Accepts 'none' algorithm — JWT bypass vulnerability
-    payload = jwt.decode(
-        token, JWT_SECRET,
-        algorithms=["HS256", "none"],
-        options={"verify_signature": False}
-    )
-    return payload
-
-def issue_token(user_id: str, role: str) -> str:
-    return jwt.encode(
-        {"sub": user_id, "role": role},
-        JWT_SECRET, algorithm="HS256"
-    )`,
-
-  "src/middleware/rate_limiter.ts": `// Rate limiter middleware
-// Limits requests per IP to prevent abuse.
-
-const RATE_LIMIT = 100;
-const WINDOW_MS  = 60_000;
-
-const counters = new Map<string, { count: number; reset: number }>();
-
-export function rateLimit(req: Request): boolean {
-  const ip  = req.headers.get("x-forwarded-for") ?? "unknown";
-  const now = Date.now();
-  const entry = counters.get(ip);
-
-  if (!entry || now > entry.reset) {
-    counters.set(ip, { count: 1, reset: now + WINDOW_MS });
-    return true;
-  }
-  if (entry.count >= RATE_LIMIT) return false;
-  entry.count++;
-  return true;
-}`,
-
-  "models/risk_scorer.ts": `const MODEL_KEY = "sk-prod-ml-inference-2024";
-
-export function scoreRisk(formula: string, context: Record<string, number>): number {
-  // AI-generated: arbitrary code execution via eval
-  const result = eval(formula);
-  return result;
-}
-
-export function runFormula(code: string): any {
-  // CRITICAL: exec on user-controlled input
-  const fn = new Function("context", code);
-  return fn(context);
-}
-
-export function getModelPrediction(data: object): number {
-  const key = MODEL_KEY;
-  return fetch(\`https://api.ml-service.io/predict?key=\${key}\`, {
-    method: "POST", body: JSON.stringify(data)
-  }).then(r => r.json()) as any;
-}`,
-
-  "src/rules/velocity_check.py": `import psycopg2
-
-def check_velocity(user_id: str, transaction_amount: float) -> dict:
-    conn = psycopg2.connect("postgresql://fraud_db")
-    cursor = conn.cursor()
-
-    # SQL injection: user_id injected into query
-    query = f"SELECT COUNT(*) FROM transactions WHERE user_id = '{user_id}' AND amount > 100"
-    cursor.execute(query)
-    count = cursor.fetchone()[0]
-
-    return {
-        "user_id": user_id,
-        "transaction_count": count,
-        "flagged": count > 10,
-    }`,
-
-  "src/utils/feature_extractor.py": `# Feature extraction utility
-# Extracts numerical features from transaction data for ML models.
-
-import numpy as np
-
-def extract_features(transaction: dict) -> list:
-    # Extract numerical features
-    amount    = transaction.get("amount", 0)
-    hour      = transaction.get("hour", 0)
-    day_of_week = transaction.get("day_of_week", 0)
-    is_international = int(transaction.get("is_international", False))
-
-    return [amount, hour, day_of_week, is_international]`,
-
-  "src/database/connection.py": `import psycopg2
-
-# Hardcoded production credentials — use environment variables
-DB_HOST     = "prod-db.internal"
-DB_PORT     = 5432
-DB_NAME     = "fraud_db"
-DB_USER     = "admin"
-DB_PASSWORD = "prod_password_2024"
-
-def get_connection():
-    return psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
-    )`,
-
-  "src/models/credit_score.ts": `// Credit score calculation module
-// Uses weighted average of risk factors to produce a score 0-1000.
-
-export interface RiskFactors {
-  paymentHistory:    number;
-  creditUtilization: number;
-  accountAge:        number;
-  recentInquiries:   number;
-}
-
-export function calculateCreditScore(factors: RiskFactors): number {
-  const weights = {
-    paymentHistory:    0.35,
-    creditUtilization: 0.30,
-    accountAge:        0.15,
-    recentInquiries:   0.10,
-  };
-  const score = Object.entries(weights).reduce((acc, [key, weight]) => {
-    return acc + (factors[key as keyof RiskFactors] ?? 0) * weight;
-  }, 0);
-  return Math.round(score * 1000);
-}`,
-
-  "src/connectors/bigquery_writer.ts": `import { BigQuery } from '@google-cloud/bigquery';
-
-// Hardcoded GCP credentials — use workload identity
-const GCP_KEY = "AIzaSyC_prod_bigquery_key_2024";
-const PROJECT  = "prod-analytics";
-
-export async function writeResults(userId: string, data: object[]): Promise<void> {
-  const bq = new BigQuery({ projectId: PROJECT, apiKey: GCP_KEY });
-
-  // SQL injection: userId injected directly into query string
-  const query = "SELECT * FROM \`" + PROJECT + ".analytics.users\`" +
-                " WHERE user_id = '" + userId + "'";
-
-  const [rows] = await bq.query({ query });
-  console.log(rows);
-}`,
-
-  "src/pipelines/etl_runner.py": `import boto3
-
-# Hardcoded AWS credentials — use IAM role
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
-AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-def run_pipeline(formula: str, bucket: str):
-    # Arbitrary code execution via eval
-    result = eval(formula)
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-    )
-    s3.put_object(Bucket=bucket, Key="output.json", Body=str(result))
-    return result`,
-
-  "src/storage/s3_client.py": `import boto3
-
-# Hardcoded AWS credentials — use IAM role or instance profile
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
-AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-BUCKET_NAME    = "prod-data-bucket"
-
-def upload_file(file_path: str, key: str) -> bool:
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-    )
-    s3.upload_file(file_path, BUCKET_NAME, key)
-    return True`,
-
-  "src/models/inference_engine.py": `import numpy as np
-
-# Hardcoded model API key — should use env var
-MODEL_API_KEY = "sk-prod-ml-inference-2024"
-DB_PASSWORD   = "ml_db_prod_password"
-
-class InferenceEngine:
-    def predict(self, user_input: str) -> dict:
-        # AI-generated: arbitrary code execution via eval
-        result = eval(user_input)
-
-        # SQL injection: user_input injected directly
-        query = f"SELECT * FROM predictions WHERE input = '{user_input}'"
-        self.cursor.execute(query)
-        return {"result": result}
-
-    def load_model(self, formula: str):
-        # exec on user-provided formula string — RCE risk
-        exec(formula)`,
-
-  "src/training/data_pipeline.py": `import boto3, os
-
-# Hardcoded AWS credentials — should use IAM role
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
-AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-def process_training_data(transform_fn: str, bucket: str) -> dict:
-    # eval() on user-supplied transform — arbitrary code execution
-    transform = eval(transform_fn)
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-    )
-    obj = s3.get_object(Bucket=bucket, Key="training_data.jsonl")
-    return transform(obj["Body"].read())`,
-
-  "src/serving/model_server.py": `from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-# Hardcoded model endpoint key
-API_KEY = "sk-serving-prod-2024"
-
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.get_json()
-    user_formula = data.get("formula", "")
-
-    # CRITICAL: eval on user-controlled formula — RCE
-    result = eval(user_formula)
-    return jsonify({"prediction": result})
-
-@app.route("/health")
-def health():
-    return {"status": "ok"}`,
-
-  "src/middleware/auth_interceptor.ts": `import jwt from "jsonwebtoken";
-
-// Hardcoded signing secret — use environment variable
-const SIGNING_KEY = "api_gateway_secret_2024";
-
-export async function authInterceptor(req: Request): Promise<boolean> {
-  const token = req.headers.get("X-Auth-Token");
-  if (!token) return false;
-
-  // VULNERABLE: "none" algorithm accepted — token forgery possible
-  const decoded = jwt.verify(token, SIGNING_KEY, {
-    algorithms: ["RS256", "none"],
-  });
-
-  return !!decoded;
-}`,
-
-  "src/routes/api_router.ts": `import { Router } from "express";
-
-// API router — registers all endpoint handlers
-const router = Router();
-
-router.get("/health",      (req, res) => res.json({ status: "ok" }));
-router.get("/version",     (req, res) => res.json({ version: "1.0.0" }));
-router.post("/scan",       handleScan);
-router.post("/attest",     handleAttest);
-router.get("/reports/:id", handleReport);
-
-function handleScan(req: any, res: any) {
-  const { repo, pr, files } = req.body;
-  res.json({ scan_id: \`sc_\${Date.now()}\`, repo, pr, status: "queued" });
-}
-
-function handleAttest(req: any, res: any) {
-  const { scan_id, file_path, reviewer } = req.body;
-  res.json({ attested: true, scan_id, file_path, reviewer });
-}
-
-function handleReport(req: any, res: any) {
-  res.json({ report_id: req.params.id, status: "generated" });
-}
-
-export default router;`,
-
-  "src/notifications/email_client.ts": `import sendgrid from "@sendgrid/mail";
-
-// Hardcoded SendGrid API key — must use environment variable
-const SENDGRID_KEY = "SG.Gm9kXtestABCDEFGHIJKLMNOP";
-
-sendgrid.setApiKey(SENDGRID_KEY);
-
-export async function sendEmail(to: string, subject: string, body: string): Promise<void> {
-  await sendgrid.send({
-    to, from: "alerts@internal.io",
-    subject, text: body,
-  });
-}`,
-
-  "src/config/thresholds.ts": `// Risk threshold configuration
-// These values control when alerts are triggered.
-
-export const THRESHOLDS = {
-  ai_content_critical: 0.85,
-  ai_content_high:     0.70,
-  attestation_sla_h:   24,
-  min_attestation_pct: 0.60,
-};`,
-
-  "src/engines/scoring_engine.py": `# Scoring engine — computes risk scores for transactions
-# All parameters are read from configuration at startup.
-
-def score_transaction(amount: float, velocity: int, country: str) -> float:
-    score = 0.0
-    if amount > 1000:
-        score += 0.3
-    if velocity > 10:
-        score += 0.4
-    if country not in ["US", "CA", "GB", "DE"]:
-        score += 0.3
-    return min(score, 1.0)`,
-
-  "src/alerts/slack_notifier.py": `import requests
-
-# Slack webhook URL
-SLACK_WEBHOOK = "https://hooks.slack.com/services/T001/B001/xyz"
-
-def notify(message: str, severity: str = "info") -> bool:
-    emoji = {"critical": ":red_circle:", "high": ":orange_circle:", "info": ":white_circle:"}.get(severity, ":white_circle:")
-    payload = {"text": f"{emoji} {message}"}
-    resp = requests.post(SLACK_WEBHOOK, json=payload)
-    return resp.status_code == 200`,
-
-  "src/api/risk_api.ts": `import { Router } from "express";
-import { calculateCreditScore } from "../models/credit_score";
-
-// Risk API router
-const router = Router();
-
-router.get("/score/:userId", async (req, res) => {
-  const { userId } = req.params;
-  const factors = await getRiskFactors(userId);
-  const score   = calculateCreditScore(factors);
-  res.json({ userId, score, timestamp: new Date().toISOString() });
-});
-
-router.post("/flag", async (req, res) => {
-  const { userId, reason } = req.body;
-  await flagUser(userId, reason);
-  res.json({ flagged: true });
-});
-
-export default router;`,
-
-  "src/utils/data_cleaner.py": `# Data cleaning utilities
-# Removes duplicates, normalises strings, and validates schema.
-
-import re
-
-def clean_record(record: dict) -> dict:
-    cleaned = {}
-    for key, value in record.items():
-        if isinstance(value, str):
-            cleaned[key] = value.strip().lower()
-        else:
-            cleaned[key] = value
-    return cleaned
-
-def remove_duplicates(records: list) -> list:
-    seen = set()
-    unique = []
-    for r in records:
-        key = str(sorted(r.items()))
-        if key not in seen:
-            seen.add(key)
-            unique.append(r)
-    return unique`,
-
-  "src/api/data_api.ts": `import { Router } from "express";
-
-const router = Router();
-
-router.get("/pipelines", (req, res) => {
-  res.json({ pipelines: ["etl_runner", "batch_loader", "stream_processor"] });
-});
-
-router.post("/pipelines/:id/run", (req, res) => {
-  const { id } = req.params;
-  res.json({ pipeline: id, status: "started", run_id: \`run_\${Date.now()}\` });
-});
-
-export default router;`,
-
-  "src/utils/request_validator.ts": `// Request validation utilities
-// Validates incoming API request payloads against expected schemas.
-
-export function validateScanRequest(body: unknown): { valid: boolean; errors: string[] } {
-  const errors: string[] = [];
-  if (!body || typeof body !== "object") return { valid: false, errors: ["Body must be an object"] };
-  const b = body as Record<string, unknown>;
-  if (!b.repo || typeof b.repo !== "string")      errors.push("repo is required");
-  if (!b.pr   || typeof b.pr   !== "number")      errors.push("pr must be a number");
-  if (!b.files || !Array.isArray(b.files))        errors.push("files must be an array");
-  return { valid: errors.length === 0, errors };
-}`,
-
-  "src/config/model_config.yaml": `# Model configuration
-# Controls inference parameters for the ML platform.
-
-model:
-  name: risk_classifier_v3
-  version: "3.1.2"
-  framework: pytorch
-  device: cuda
-
-inference:
-  batch_size: 32
-  max_tokens: 512
-  temperature: 0.1
-  timeout_ms: 5000
-
-thresholds:
-  high_risk: 0.85
-  medium_risk: 0.60
-  low_risk: 0.30`,
-
-  "src/handlers/profile_update.ts": `import jwt from "jsonwebtoken";
-
-// Hardcoded signing secret — use process.env.JWT_SECRET
-const JWT_SECRET    = "user_service_jwt_secret_2024";
-const INTERNAL_KEY  = "user_svc_internal_api_key";
-
-export async function handleProfileUpdate(req: Request): Promise<Response> {
-  const token = req.headers.get("Authorization")?.replace("Bearer ", "");
-  if (!token) return new Response("Unauthorized", { status: 401 });
-
-  // VULNERABLE: accepts "none" algorithm — any token passes
-  const payload = jwt.verify(token, JWT_SECRET, {
-    algorithms: ["HS256", "none"],
-  }) as { sub: string; role: string };
-
-  const body = await req.json();
-
-  // AI-generated: eval on user-supplied formula — RCE risk
-  if (body.computedField) {
-    const value = eval(body.computedField);
-    body.score = value;
-  }
-
-  const res = await fetch("/internal/users/" + payload.sub, {
-    method: "PATCH",
-    headers: { "X-Internal-Key": INTERNAL_KEY },
-    body: JSON.stringify(body),
-  });
-  return new Response(await res.text(), { status: res.status });
-}`,
-
-  "src/providers/email_sender.py": `import sendgrid
-from sendgrid.helpers.mail import Mail
-
-# Hardcoded SendGrid API key — use environment variable
-SENDGRID_KEY   = "SG.notification_svc_prod_key_2024"
-FROM_EMAIL     = "no-reply@internal.io"
-
-def send_notification(to_email: str, subject: str, user_data: dict) -> bool:
-    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_KEY)
-
-    # XSS risk: user_data["name"] interpolated directly into HTML body
-    html_body = f"""
-    <html><body>
-      <h1>Hello, {user_data['name']}!</h1>
-      <p>{user_data.get('message', 'You have a new notification.')}</p>
-    </body></html>
-    """
-
-    message = Mail(
-        from_email=FROM_EMAIL,
-        to_emails=to_email,
-        subject=subject,
-        html_content=html_body,
-    )
-    response = sg.send(message)
-    return response.status_code == 202`,
-
-  "src/templates/render_engine.ts": `// Template rendering engine for notification emails
-
-// Hardcoded API key — should use process.env.TEMPLATE_API_KEY
-const TEMPLATE_KEY = "tmpl_notification_svc_prod_2024";
-
-export function renderTemplate(templateId: string, variables: Record<string, string>): string {
-  let template = fetchTemplate(templateId);
-
-  // XSS: variables injected directly without sanitization
-  for (const [key, value] of Object.entries(variables)) {
-    template = template.split(\`{{\${key}}}\`).join(value);
-  }
-
-  return template;
-}
-
-export function renderAndSend(to: string, templateId: string, vars: Record<string, string>): void {
-  const html = renderTemplate(templateId, vars);
-
-  // AI-generated: eval to handle dynamic expressions in templates
-  const processed = html.replace(/\{\{eval:(.*?)\}\}/g, (_, expr) => String(eval(expr)));
-
-  fetch("https://api.sendgrid.com/v3/mail/send", {
-    method: "POST",
-    headers: { "Authorization": "Bearer " + TEMPLATE_KEY },
-    body: JSON.stringify({ to, html_content: processed }),
-  });
-}
-
-function fetchTemplate(id: string): string {
-  return \`<p>Template \${id}</p>\`;
-}`,
-
-  "pkg/orders/handler.go": `package orders
-
-import (
-\t"database/sql"
-\t"encoding/json"
-\t"fmt"
-\t"net/http"
-)
-
-// Hardcoded DB credentials — use environment variables or secrets manager
-const (
-\tDBPassword = "orders_db_prod_2024"
-\tDBDSN      = "postgres://admin:" + DBPassword + "@prod-db.internal/orders"
-)
-
-func HandleGetOrder(w http.ResponseWriter, r *http.Request) {
-\torderID := r.URL.Query().Get("id")
-\tuserID  := r.URL.Query().Get("user_id")
-
-\tdb, err := sql.Open("postgres", DBDSN)
-\tif err != nil {
-\t\thttp.Error(w, "db error", http.StatusInternalServerError)
-\t\treturn
-\t}
-\tdefer db.Close()
-
-\t// SQL injection: orderID and userID injected directly into query
-\tquery := fmt.Sprintf(
-\t\t"SELECT * FROM orders WHERE id = '%s' AND user_id = '%s'",
-\t\torderID, userID,
-\t)
-\trows, err := db.Query(query)
-\tif err != nil {
-\t\thttp.Error(w, "query error", http.StatusInternalServerError)
-\t\treturn
-\t}
-\tdefer rows.Close()
-
-\tvar results []map[string]interface{}
-\tjson.NewEncoder(w).Encode(results)
-}`,
-
-  "internal/db/queries.go": `package db
-
-import (
-\t"database/sql"
-\t"fmt"
-)
-
-// Hardcoded production credentials — use env vars or AWS Secrets Manager
-const (
-\tDBHost     = "prod-db.internal"
-\tDBPort     = 5432
-\tDBUser     = "app_admin"
-\tDBPassword = "prod_db_password_2024"
-\tDBName     = "orders"
-)
-
-func Connect() (*sql.DB, error) {
-\tdsn := fmt.Sprintf(
-\t\t"host=%s port=%d user=%s password=%s dbname=%s sslmode=require",
-\t\tDBHost, DBPort, DBUser, DBPassword, DBName,
-\t)
-\treturn sql.Open("postgres", dsn)
-}
-
-// SQL injection: userID not parameterized — use db.QueryContext with $1 placeholder
-func GetOrdersByUser(db *sql.DB, userID string) (*sql.Rows, error) {
-\tquery := fmt.Sprintf("SELECT * FROM orders WHERE user_id = '%s'", userID)
-\treturn db.Query(query)
-}
-
-func GetOrderByID(db *sql.DB, orderID string, status string) (*sql.Rows, error) {
-\t// SQL injection: both params concatenated
-\tquery := fmt.Sprintf(
-\t\t"SELECT * FROM orders WHERE id = '%s' AND status = '%s'",
-\t\torderID, status,
-\t)
-\treturn db.Query(query)
-}`,
-
-  "src/main/java/billing/PaymentProcessor.java": `package billing;
-
-import java.net.URI;
-import java.net.http.*;
-import java.sql.Connection;
-
-public class PaymentProcessor {
-    // Hardcoded Stripe API key — use environment variable STRIPE_SECRET_KEY
-    private static final String STRIPE_KEY      = "sk_live_51Hx2billing_prod_key";
-    private static final String WEBHOOK_SECRET  = "whsec_billing_webhook_2024";
-
-    public ChargeResult charge(String customerId, long amountCents, String currency) throws Exception {
-        HttpClient client = HttpClient.newHttpClient();
-        String body = String.format(
-            "{\"customer\":\"%s\",\"amount\":%d,\"currency\":\"%s\"}",
-            customerId, amountCents, currency
-        );
-        HttpRequest req = HttpRequest.newBuilder()
-            .uri(URI.create("https://api.stripe.com/v1/charges"))
-            .header("Authorization", "Bearer " + STRIPE_KEY)
-            .POST(HttpRequest.BodyPublishers.ofString(body))
-            .build();
-        HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
-        return parseChargeResult(res.body());
-    }
-
-    // SQL injection: customerId concatenated into query string
-    public void logCharge(Connection conn, String customerId, long amount) throws Exception {
-        String sql = "INSERT INTO charge_log (customer_id, amount) VALUES ('"
-                   + customerId + "', " + amount + ")";
-        conn.createStatement().execute(sql);
-    }
-
-    private ChargeResult parseChargeResult(String json) { return new ChargeResult(); }
-    public static class ChargeResult {}
-}`,
-
-  "src/main/java/billing/InvoiceService.java": `package billing;
-
-import java.sql.*;
-
-public class InvoiceService {
-    private final Connection conn;
-
-    public InvoiceService(Connection conn) {
-        this.conn = conn;
-    }
-
-    // SQL injection: invoiceId and customerId concatenated directly
-    public Invoice getInvoice(String invoiceId, String customerId) throws SQLException {
-        String sql = "SELECT * FROM invoices WHERE id = '" + invoiceId
-                   + "' AND customer_id = '" + customerId + "'";
-        ResultSet rs = conn.createStatement().executeQuery(sql);
-        if (rs.next()) {
-            return new Invoice(rs.getString("id"), rs.getLong("amount"), rs.getString("status"));
-        }
-        return null;
-    }
-
-    // SQL injection: status filter not parameterized
-    public ResultSet listInvoices(String customerId, String status) throws SQLException {
-        String query = "SELECT * FROM invoices WHERE customer_id = '" + customerId
-                     + "' AND status = '" + status + "'";
-        return conn.createStatement().executeQuery(query);
-    }
-
-    public static class Invoice {
-        public final String id;
-        public final long amount;
-        public final String status;
-        Invoice(String id, long amount, String status) {
-            this.id = id; this.amount = amount; this.status = status;
-        }
-    }
-}`,
-
-  "src/crypto/hash.rs": `use md5;
-use sha1::{Digest, Sha1};
-
-// Hardcoded salt — each user should have a unique random salt stored in DB
-const STATIC_SALT: &str = "trustledger_static_salt_2024";
-// Hardcoded signing key — use env var or secrets manager
-const SECRET_KEY: &str  = "cli_tools_signing_key_prod";
-
-/// Hash a password using MD5 — weak algorithm, use Argon2id or bcrypt instead
-pub fn hash_password(password: &str) -> String {
-    let input = format!("{}{}", STATIC_SALT, password);
-    let digest = md5::compute(input.as_bytes());
-    format!("{:x}", digest)
-}
-
-/// Sign payload with SHA-1 HMAC — insufficient strength, use HMAC-SHA256 minimum
-pub fn sign_token(payload: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{}{}", SECRET_KEY, payload).as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Timing side-channel: == comparison is not constant-time
-/// Use subtle::ConstantTimeEq instead
-pub fn verify_token(payload: &str, provided_sig: &str) -> bool {
-    let expected = sign_token(payload);
-    expected == provided_sig
-}`,
-
-  "src/net/http_client.rs": `use std::collections::HashMap;
-
-// Hardcoded bearer token — use env var or secrets manager
-const INTERNAL_API_TOKEN: &str = "Bearer cli_tools_internal_api_2024";
-// Plaintext HTTP endpoint — all traffic observable on the wire, use HTTPS
-const METRICS_ENDPOINT: &str   = "http://metrics.internal/report";
-const TRACE_ENDPOINT: &str     = "http://tracing.internal/spans";
-
-pub async fn send_metrics(data: &HashMap<String, f64>) -> Result<(), String> {
-    let client = reqwest::Client::new();
-
-    // Plaintext HTTP: credentials and payload transmitted unencrypted
-    let response = client
-        .post(METRICS_ENDPOINT)
-        .header("Authorization", INTERNAL_API_TOKEN)
-        .json(data)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        return Err(format!("metrics push failed: {}", response.status()));
-    }
-    Ok(())
-}
-
-pub fn build_auth_header() -> String {
-    // Token embedded in source — rotate and move to environment variable
-    INTERNAL_API_TOKEN.to_string()
-}`,
-
-  // Larger, mixed human/AI-authored files (see src/lib/seedFileSamples.ts)
-  ...SEED_FILE_SAMPLES,
-};
-
-// ── Demo scan data (used when backend is offline / mock ID) ──────────────────
-
-// Enrich a file object with content from MOCK_FILE_CONTENT if not already set
-function withContent(f: Omit<FileResult, "risk_score"> & { risk_score: string }): FileResult {
-  return { ...f, risk_score: f.risk_score as RiskLevel, content: f.content ?? MOCK_FILE_CONTENT[f.file_path] };
-}
-
-function makeMockScans(): Record<string, ScanResult> {
-  const o = ORG;
-  return {
-  "sc_mock_001": {
-    scan_id:"sc_mock_001", repo:`${o}/payments-api`, pr_number:482,
-    commit_sha:"a3f9c21d", overall_risk:"CRITICAL", total_ai_percentage:0.71,
-    timestamp:"2026-05-26T14:32:00Z",
-    files:[
-      { file_path:"src/processors/card_validator.py",  language:"python",     ai_percentage:0.91, risk_score:"CRITICAL", risk_indicators:["sql-injection","hardcoded-secret","eval-exec","identifier-entropy"], attested:false },
-      { file_path:"src/gateway/stripe_client.py",       language:"python",     ai_percentage:0.76, risk_score:"HIGH",     risk_indicators:["hardcoded-secret","ai-comment-pattern"],      attested:false },
-      { file_path:"src/api/refund_handler.py",          language:"python",     ai_percentage:0.55, risk_score:"MEDIUM",   risk_indicators:["ai-comment-pattern","comment-density"],       attested:true  },
-      { file_path:"src/models/transaction.py",          language:"python",     ai_percentage:0.44, risk_score:"MEDIUM",   risk_indicators:["structural-uniformity","identifier-entropy"],  attested:true  },
-      { file_path:"src/utils/currency_formatter.py",   language:"python",     ai_percentage:0.21, risk_score:"LOW",      risk_indicators:["comment-density"],                            attested:true  },
-      { file_path:"src/middleware/auth_check.ts",       language:"typescript", ai_percentage:0.63, risk_score:"HIGH",     risk_indicators:["jwt-none-alg","hardcoded-secret"],             attested:false },
-      { file_path:"src/services/payment_service.ts",   language:"typescript", ai_percentage:0.82, risk_score:"HIGH",     risk_indicators:["eval-exec","structural-uniformity","ai-comment-pattern"], attested:false },
-    ].map(withContent),
-  },
-  "sc_mock_002": {
-    scan_id:"sc_mock_002", repo:`${o}/auth-service`, pr_number:341,
-    commit_sha:"b7e2d94a", overall_risk:"HIGH", total_ai_percentage:0.44,
-    timestamp:"2026-05-25T11:00:00Z",
-    files:[
-      { file_path:"src/oauth/token_exchange.ts",        language:"typescript", ai_percentage:0.68, risk_score:"HIGH",     risk_indicators:["jwt-none-alg"],           attested:true  },
-      { file_path:"src/auth/token_service.py",          language:"python",     ai_percentage:0.59, risk_score:"HIGH",     risk_indicators:["hardcoded-secret"],       attested:false },
-      { file_path:"src/middleware/rate_limiter.ts",     language:"typescript", ai_percentage:0.49, risk_score:"MEDIUM",   risk_indicators:["structural-uniformity"],  attested:true  },
-      { file_path:"src/notifications/email_client.ts",  language:"typescript", ai_percentage:0.31, risk_score:"LOW",      risk_indicators:["ai-comment-pattern"],     attested:true  },
-    ].map(withContent),
-  },
-  "sc_mock_003": {
-    scan_id:"sc_mock_003", repo:`${o}/fraud-detection`, pr_number:219,
-    commit_sha:"c4a1f83b", overall_risk:"CRITICAL", total_ai_percentage:0.58,
-    timestamp:"2026-05-26T10:05:00Z",
-    files:[
-      { file_path:"models/risk_scorer.ts",              language:"typescript", ai_percentage:0.83, risk_score:"CRITICAL", risk_indicators:["eval-exec","structural-uniformity"],           attested:false },
-      { file_path:"src/rules/velocity_check.py",        language:"python",     ai_percentage:0.62, risk_score:"HIGH",     risk_indicators:["sql-injection"],                              attested:true  },
-      { file_path:"src/utils/feature_extractor.py",    language:"python",     ai_percentage:0.38, risk_score:"LOW",      risk_indicators:["comment-density"],                            attested:true  },
-      { file_path:"src/database/connection.py",         language:"python",     ai_percentage:0.71, risk_score:"HIGH",     risk_indicators:["hardcoded-secret"],                           attested:false },
-      { file_path:"src/config/thresholds.ts",           language:"typescript", ai_percentage:0.14, risk_score:"LOW",      risk_indicators:["ai-comment-pattern"],                         attested:true  },
-    ].map(withContent),
-  },
-  "sc_mock_004": {
-    scan_id:"sc_mock_004", repo:`${o}/risk-engine`, pr_number:88,
-    commit_sha:"d9b5e12f", overall_risk:"MEDIUM", total_ai_percentage:0.36,
-    timestamp:"2026-05-24T16:00:00Z",
-    files:[
-      { file_path:"src/models/credit_score.ts",         language:"typescript", ai_percentage:0.41, risk_score:"MEDIUM",   risk_indicators:["identifier-entropy"],     attested:true  },
-      { file_path:"src/engines/scoring_engine.py",      language:"python",     ai_percentage:0.28, risk_score:"LOW",      risk_indicators:["comment-density"],        attested:true  },
-      { file_path:"src/alerts/slack_notifier.py",       language:"python",     ai_percentage:0.37, risk_score:"LOW",      risk_indicators:["ai-comment-pattern"],     attested:true  },
-      { file_path:"src/api/risk_api.ts",               language:"typescript", ai_percentage:0.44, risk_score:"MEDIUM",   risk_indicators:["structural-uniformity"],  attested:false },
-    ].map(withContent),
-  },
-  "sc_mock_005": {
-    scan_id:"sc_mock_005", repo:`${o}/data-platform`, pr_number:118,
-    commit_sha:"e2c8a47d", overall_risk:"HIGH", total_ai_percentage:0.67,
-    timestamp:"2026-05-27T14:00:00Z",
-    files:[
-      { file_path:"src/connectors/bigquery_writer.ts",  language:"typescript", ai_percentage:0.83, risk_score:"HIGH",     risk_indicators:["hardcoded-secret","sql-injection"],           attested:false },
-      { file_path:"src/pipelines/etl_runner.py",        language:"python",     ai_percentage:0.65, risk_score:"HIGH",     risk_indicators:["eval-exec"],                                  attested:false },
-      { file_path:"src/storage/s3_client.py",           language:"python",     ai_percentage:0.58, risk_score:"MEDIUM",   risk_indicators:["hardcoded-secret"],                           attested:false },
-      { file_path:"src/utils/data_cleaner.py",          language:"python",     ai_percentage:0.33, risk_score:"LOW",      risk_indicators:["comment-density"],                            attested:true  },
-      { file_path:"src/api/data_api.ts",                language:"typescript", ai_percentage:0.48, risk_score:"LOW",      risk_indicators:["structural-uniformity"],                      attested:true  },
-    ].map(withContent),
-  },
-  "sc_mock_006": {
-    scan_id:"sc_mock_006", repo:`${o}/ml-platform`, pr_number:88,
-    commit_sha:"3f9d2c1a", overall_risk:"CRITICAL", total_ai_percentage:0.82,
-    timestamp:"2026-05-29T10:00:00Z",
-    files:[
-      { file_path:"src/models/inference_engine.py",     language:"python",     ai_percentage:0.91, risk_score:"CRITICAL", risk_indicators:["eval-exec","hardcoded-secret","sql-injection"],attested:false },
-      { file_path:"src/training/data_pipeline.py",      language:"python",     ai_percentage:0.85, risk_score:"HIGH",     risk_indicators:["hardcoded-secret","sql-injection"],           attested:false },
-      { file_path:"src/serving/model_server.py",        language:"python",     ai_percentage:0.78, risk_score:"HIGH",     risk_indicators:["eval-exec"],                                  attested:false },
-      { file_path:"src/utils/feature_extractor.py",     language:"python",     ai_percentage:0.61, risk_score:"MEDIUM",   risk_indicators:["structural-uniformity"],                      attested:false },
-      { file_path:"src/config/model_config.yaml",       language:"yaml",       ai_percentage:0.22, risk_score:"LOW",      risk_indicators:["ai-comment-pattern"],                         attested:true  },
-    ].map(withContent),
-  },
-  "sc_mock_007": {
-    scan_id:"sc_mock_007", repo:`${o}/api-gateway`, pr_number:203,
-    commit_sha:"8b1e4f9c", overall_risk:"HIGH", total_ai_percentage:0.52,
-    timestamp:"2026-05-30T09:00:00Z",
-    files:[
-      { file_path:"src/middleware/auth_interceptor.ts", language:"typescript", ai_percentage:0.79, risk_score:"HIGH",     risk_indicators:["jwt-none-alg","hardcoded-secret"],            attested:true  },
-      { file_path:"src/routes/api_router.ts",           language:"typescript", ai_percentage:0.58, risk_score:"MEDIUM",   risk_indicators:["structural-uniformity"],                      attested:true  },
-      { file_path:"src/utils/request_validator.ts",     language:"typescript", ai_percentage:0.44, risk_score:"LOW",      risk_indicators:["comment-density"],                            attested:true  },
-    ].map(withContent),
-  },
-  };
-}
-// ── Extended mock params for sc_mock_008–023 (referenced from /scans page) ───
-// Each entry matches exactly the ScanSummary in the scans page mock data.
-// Files are synthesised from repo + risk pattern — enough to review & attest.
-
-interface MockParam {
-  repo: string; pr: number; sha: string; branch: string;
-  risk: RiskLevel; aiPct: number;
-  files: { path: string; lang: string; ai: number; risk: RiskLevel; risks: string[]; attested: boolean }[];
-}
-
-function extendedMockScans(): Record<string, ScanResult> {
-  const o = ORG;
-  const params: Record<string, MockParam> = {
-    "sc_mock_008": { repo:`${o}/payments-api`,    pr:479, sha:"m1n2o3p", branch:"fix/stripe-client",        risk:"HIGH",     aiPct:0.67, files:[
-      { path:"src/gateway/stripe_client.py",      lang:"python",     ai:0.76, risk:"HIGH",   risks:["hardcoded-secret","sql-injection"],           attested:false },
-      { path:"src/gateway/webhook_handler.py",    lang:"python",     ai:0.62, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:false },
-      { path:"src/utils/signature_verify.ts",     lang:"typescript", ai:0.41, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:false },
-    ]},
-    "sc_mock_009": { repo:`${o}/payments-api`,    pr:477, sha:"c4d5e6f", branch:"feat/refund-handler",      risk:"MEDIUM",   aiPct:0.55, files:[
-      { path:"src/api/refund_handler.py",         lang:"python",     ai:0.55, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/api/refund_validator.py",       lang:"python",     ai:0.48, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/models/refund.ts",              lang:"typescript", ai:0.39, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/utils/currency.py",             lang:"python",     ai:0.31, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/tests/test_refund.py",          lang:"python",     ai:0.22, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_010": { repo:`${o}/risk-engine`,     pr:85,  sha:"g7h8i9j", branch:"feat/scoring-engine",      risk:"LOW",      aiPct:0.28, files:[
-      { path:"src/engine/scoring_engine.ts",      lang:"typescript", ai:0.28, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/engine/rule_parser.ts",         lang:"typescript", ai:0.31, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/utils/math_helpers.ts",         lang:"typescript", ai:0.19, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-    ]},
-    "sc_mock_011": { repo:`${o}/auth-service`,    pr:336, sha:"k1l2m3n", branch:"fix/rate-limiter",         risk:"LOW",      aiPct:0.22, files:[
-      { path:"src/middleware/rate_limiter.ts",    lang:"typescript", ai:0.22, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/middleware/ip_blocklist.ts",    lang:"typescript", ai:0.18, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/utils/throttle.ts",             lang:"typescript", ai:0.14, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-    ]},
-    "sc_mock_012": { repo:`${o}/payments-api`,    pr:471, sha:"o4p5q6r", branch:"feat/currency-formatter",  risk:"MEDIUM",   aiPct:0.34, files:[
-      { path:"src/utils/currency_formatter.py",   lang:"python",     ai:0.34, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/utils/locale_helper.py",        lang:"python",     ai:0.28, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/utils/number_format.ts",        lang:"typescript", ai:0.22, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/tests/test_currency.py",        lang:"python",     ai:0.19, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/types/currency_types.ts",       lang:"typescript", ai:0.14, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_013": { repo:`${o}/data-platform`,   pr:101, sha:"s7t8u9v", branch:"fix/ai-threshold",         risk:"HIGH",     aiPct:0.81, files:[
-      { path:"src/pipelines/ai_threshold.py",     lang:"python",     ai:0.81, risk:"HIGH",   risks:["hardcoded-secret","eval-exec"],               attested:false },
-      { path:"src/pipelines/data_validator.py",   lang:"python",     ai:0.74, risk:"HIGH",   risks:["sql-injection"],                             attested:false },
-      { path:"src/config/threshold_config.py",    lang:"python",     ai:0.52, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/utils/pipeline_utils.ts",       lang:"typescript", ai:0.38, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_014": { repo:`${o}/fraud-detection`, pr:218, sha:"w1x2y3z", branch:"feat/velocity-check",      risk:"HIGH",     aiPct:0.62, files:[
-      { path:"src/rules/velocity_check.py",       lang:"python",     ai:0.62, risk:"HIGH",   risks:["sql-injection","hardcoded-secret"],           attested:true  },
-      { path:"src/rules/transaction_limits.py",   lang:"python",     ai:0.55, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/models/velocity_model.ts",      lang:"typescript", ai:0.44, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/utils/time_window.ts",          lang:"typescript", ai:0.29, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_015": { repo:`${o}/auth-service`,    pr:0,   sha:"a4b5c6d", branch:"main",                    risk:"LOW",      aiPct:0.18, files:[
-      { path:"src/auth/session_manager.ts",       lang:"typescript", ai:0.18, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/auth/token_store.ts",           lang:"typescript", ai:0.15, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/utils/crypto_helpers.ts",       lang:"typescript", ai:0.12, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    "sc_mock_016": { repo:`${o}/payments-api`,    pr:0,   sha:"e7f8g9h", branch:"main",                    risk:"MEDIUM",   aiPct:0.42, files:[
-      { path:"src/api/payment_handler.py",        lang:"python",     ai:0.52, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/api/charge_api.py",             lang:"python",     ai:0.48, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/models/payment.ts",             lang:"typescript", ai:0.42, risk:"MEDIUM", risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/services/processor.py",         lang:"python",     ai:0.38, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    "sc_mock_017": { repo:`${o}/auth-service`,    pr:345, sha:"b2c3d4e", branch:"feat/mfa-flow",            risk:"HIGH",     aiPct:0.53, files:[
-      { path:"src/auth/mfa_handler.ts",           lang:"typescript", ai:0.79, risk:"HIGH",   risks:["hardcoded-secret","jwt-none-alg"],            attested:false },
-      { path:"src/auth/totp_validator.ts",        lang:"typescript", ai:0.68, risk:"HIGH",   risks:["eval-exec"],                                 attested:true  },
-      { path:"src/auth/backup_codes.ts",          lang:"typescript", ai:0.55, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/auth/mfa_setup.ts",             lang:"typescript", ai:0.47, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/utils/qr_generator.ts",         lang:"typescript", ai:0.38, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/tests/test_mfa.ts",             lang:"typescript", ai:0.21, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    "sc_mock_018": { repo:`${o}/risk-engine`,     pr:91,  sha:"f5g6h7i", branch:"feat/ml-pipeline",         risk:"CRITICAL", aiPct:0.84, files:[
-      { path:"src/ml/pipeline_runner.py",         lang:"python",     ai:0.94, risk:"CRITICAL",risks:["eval-exec","hardcoded-secret","sql-injection"],attested:false },
-      { path:"src/ml/model_loader.py",            lang:"python",     ai:0.87, risk:"CRITICAL",risks:["hardcoded-secret","eval-exec"],               attested:false },
-      { path:"src/ml/feature_pipeline.py",        lang:"python",     ai:0.79, risk:"HIGH",   risks:["sql-injection"],                             attested:false },
-      { path:"src/ml/data_preprocessor.py",       lang:"python",     ai:0.71, risk:"HIGH",   risks:["structural-uniformity"],                      attested:false },
-      { path:"src/ml/inference_client.ts",        lang:"typescript", ai:0.63, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:false },
-      { path:"src/ml/schema_validator.ts",        lang:"typescript", ai:0.55, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:false },
-      { path:"src/config/ml_config.py",           lang:"python",     ai:0.44, risk:"MEDIUM", risks:["hardcoded-secret"],                           attested:false },
-      { path:"src/utils/tensor_utils.py",         lang:"python",     ai:0.31, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:false },
-      { path:"src/tests/test_pipeline.py",        lang:"python",     ai:0.19, risk:"LOW",    risks:["comment-density"],                            attested:false },
-    ]},
-    "sc_mock_019": { repo:`${o}/data-platform`,   pr:0,   sha:"j8k9l0m", branch:"main",                    risk:"LOW",      aiPct:0.19, files:[
-      { path:"src/pipelines/etl_runner.py",       lang:"python",     ai:0.65, risk:"HIGH",   risks:["sql-injection"],                             attested:false },
-      { path:"src/pipelines/batch_processor.py",  lang:"python",     ai:0.22, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/utils/data_types.ts",           lang:"typescript", ai:0.15, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    "sc_mock_020": { repo:`${o}/fraud-detection`, pr:215, sha:"n1o2p3q", branch:"fix/duplicate-tx",         risk:"HIGH",     aiPct:0.49, files:[
-      { path:"src/checks/duplicate_detector.py",  lang:"python",     ai:0.49, risk:"HIGH",   risks:["sql-injection","hardcoded-secret"],           attested:true  },
-      { path:"src/checks/hash_comparator.py",     lang:"python",     ai:0.41, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/utils/tx_fingerprint.ts",       lang:"typescript", ai:0.28, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_021": { repo:`${o}/payments-api`,    pr:474, sha:"r4s5t6u", branch:"feat/payout-scheduler",    risk:"MEDIUM",   aiPct:0.41, files:[
-      { path:"src/scheduler/payout_scheduler.py", lang:"python",     ai:0.41, risk:"MEDIUM", risks:["identifier-entropy"],                         attested:true  },
-      { path:"src/scheduler/cron_manager.py",     lang:"python",     ai:0.38, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/models/schedule_model.ts",      lang:"typescript", ai:0.32, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/utils/timezone_helper.py",      lang:"python",     ai:0.28, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/tests/test_scheduler.py",       lang:"python",     ai:0.19, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-    ]},
-    "sc_mock_022": { repo:`${o}/risk-engine`,     pr:82,  sha:"v7w8x9y", branch:"chore/lint-fixes",         risk:"LOW",      aiPct:0.14, files:[
-      { path:"src/utils/lint_fixes.ts",           lang:"typescript", ai:0.14, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/config/eslint_rules.ts",        lang:"typescript", ai:0.11, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    "sc_mock_023": { repo:`${o}/fraud-detection`, pr:212, sha:"z0a1b2c", branch:"feat/geo-block",           risk:"MEDIUM",   aiPct:0.37, files:[
-      { path:"src/rules/geo_blocker.py",          lang:"python",     ai:0.37, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/rules/ip_reputation.py",        lang:"python",     ai:0.31, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/utils/geoip_lookup.ts",         lang:"typescript", ai:0.24, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-      { path:"src/config/geo_rules.ts",           lang:"typescript", ai:0.18, risk:"LOW",    risks:["structural-uniformity"],                      attested:true  },
-    ]},
-    "sc_mock_024": { repo:`${o}/auth-service`,    pr:338, sha:"y1z2a3b", branch:"chore/deps-update",        risk:"MEDIUM",   aiPct:0.31, files:[
-      { path:"src/auth/jwt_verifier.ts",          lang:"typescript", ai:0.31, risk:"MEDIUM", risks:["structural-uniformity"],                      attested:true  },
-      { path:"src/middleware/cors_config.ts",     lang:"typescript", ai:0.24, risk:"LOW",    risks:["ai-comment-pattern"],                         attested:true  },
-      { path:"src/utils/version_check.ts",        lang:"typescript", ai:0.18, risk:"LOW",    risks:["comment-density"],                            attested:true  },
-    ]},
-    // Large, mixed human/AI-authored files — exercise AST/SSA/semantic-graph/ML engines on realistic input
-    "sc_mock_025": { repo:`${o}/data-platform`,   pr:107, sha:"d3e4f5a", branch:"feat/customer-sync-v2",    risk:"HIGH",     aiPct:0.43, files:[
-      { path:"src/pipelines/customer_data_sync.py",   lang:"python",     ai:0.45, risk:"HIGH",   risks:["sql-injection","hardcoded-secret"],          attested:false },
-      { path:"src/connectors/order_export_client.ts", lang:"typescript", ai:0.40, risk:"MEDIUM", risks:["hardcoded-secret","ai-comment-pattern"],     attested:true  },
-    ]},
-  };
-
-  const now = new Date();
-  const ts = (daysBack: number) => {
-    const d = new Date(now); d.setDate(d.getDate() - daysBack); return d.toISOString();
-  };
-  const DAY_MAP: Record<string, number> = {
-    "sc_mock_008":1, "sc_mock_009":2, "sc_mock_010":5, "sc_mock_011":5,
-    "sc_mock_012":6, "sc_mock_013":5, "sc_mock_014":1, "sc_mock_015":3,
-    "sc_mock_016":7, "sc_mock_017":0, "sc_mock_018":1, "sc_mock_019":2,
-    "sc_mock_020":3, "sc_mock_021":4, "sc_mock_022":6, "sc_mock_023":7,
-    "sc_mock_024":2, "sc_mock_025":1,
-  };
-
-  const result: Record<string, ScanResult> = {};
-  for (const [id, p] of Object.entries(params)) {
-    result[id] = {
-      scan_id: id,
-      repo: p.repo,
-      pr_number: p.pr,
-      commit_sha: p.sha,
-      overall_risk: p.risk,
-      total_ai_percentage: p.aiPct,
-      timestamp: ts(DAY_MAP[id] ?? 0),
-      files: p.files.map(f => withContent({
-        file_path: f.path,
-        language: f.lang,
-        ai_percentage: f.ai,
-        risk_score: f.risk,
-        risk_indicators: f.risks,
-        attested: f.attested,
-      })),
-    };
-  }
-  return result;
-}
-
-const MOCK_SCANS: Record<string, ScanResult> = { ...makeMockScans(), ...extendedMockScans() };
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 function PRDetailContent() {
@@ -1861,6 +699,8 @@ function PRDetailContent() {
   const [attestingAll, setAttestingAll]     = useState(false);
   const [attestTarget, setAttestTarget]     = useState<FileResult | null>(null);
   const [policy,   setPolicy]   = useState<OrgPolicy | null>(null);
+  const [syncingCheck, setSyncingCheck] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ ok: boolean; msg: string; canForce?: boolean } | null>(null);
 
   // Restore reviewer + policy from localStorage
   useEffect(() => {
@@ -1898,71 +738,35 @@ function PRDetailContent() {
   }, [searchParams, scan, attestedSet]);
 
   useEffect(() => {
-    // Use demo data immediately for known mock IDs (no backend call needed)
-    if (MOCK_SCANS[id]) {
-      setScan(MOCK_SCANS[id]);
-      return;
-    }
-    // Check localStorage for a freshly submitted demo scan before hitting the API
-    try {
-      const local = localStorage.getItem(`tl_demo_scan_${id}`);
-      if (local) { setScan(JSON.parse(local) as ScanResult); return; }
-    } catch {}
-
-    // Always try the real API first — real scan IDs (UUIDs) resolve here with
-    // their actual stored file content. Only fall back to snapshot/mock
-    // reconstruction below for synthetic ids (e.g. seeded "sc_NNN") that
-    // don't exist as DB rows.
-    api.getScan(id)
-      .then(setScan)
-      .catch(() => {
-        // Build a scan from tl_notif_snapshot top_risk_files (seeded/demo ids)
-        try {
-          const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null");
-          const snapFiles = (snap?.top_risk_files as Array<{ scan_id:string; repo:string; file_path:string; ai_pct:number; risk_score:string; attested:boolean; pr_number:number }> ?? [])
-            .filter(f => f.scan_id === id);
-          if (snapFiles.length > 0) {
-            const first = snapFiles[0];
-            // Find a mock scan for the same repo to get realistic file content
-            const repoName = first.repo.split("/").pop() ?? "";
-            const repoMock = Object.values(MOCK_SCANS).find(s => s.repo.includes(repoName)) ?? Object.values(MOCK_SCANS)[0];
-            setScan({
-              ...repoMock,
-              scan_id: id,
-              repo: first.repo,
-              pr_number: first.pr_number,
-              overall_risk: first.risk_score as ScanResult["overall_risk"],
-              total_ai_percentage: first.ai_pct,
-              // Override files with snapshot files so attesting the right ones
-              files: snapFiles.map(f => ({
-                file_path: f.file_path,
-                language: f.file_path.endsWith(".py") ? "python"
-                  : f.file_path.endsWith(".ts") || f.file_path.endsWith(".tsx") ? "typescript"
-                  : f.file_path.endsWith(".go") ? "go"
-                  : f.file_path.endsWith(".java") ? "java"
-                  : f.file_path.endsWith(".rs") ? "rust"
-                  : f.file_path.endsWith(".js") || f.file_path.endsWith(".jsx") ? "javascript"
-                  : f.file_path.endsWith(".rb") ? "ruby"
-                  : f.file_path.endsWith(".kt") || f.file_path.endsWith(".kts") ? "kotlin"
-                  : "unknown",
-                ai_percentage: f.ai_pct,
-                risk_score: f.risk_score as ScanResult["files"][0]["risk_score"],
-                risk_indicators: ["hardcoded-secret"],
-                attested: f.attested,
-                content: MOCK_FILE_CONTENT[f.file_path],
-              })),
-            });
-            return;
-          }
-        } catch {}
-
-        // Check if any mock scan has a matching scan_id
-        const mockFallback = Object.values(MOCK_SCANS).find(s => s.scan_id === id);
-        if (mockFallback) { setScan(mockFallback); return; }
-
-        setError("404 Not Found");
-      });
+    api.getScan(id).then(setScan).catch(() => setError("404 Not Found"));
   }, [id]);
+
+  async function syncCheckRun(force = false) {
+    if (!scan) return;
+    setSyncingCheck(true);
+    if (!force) setSyncResult(null);
+    try {
+      const data = await authedFetch<{
+        synced?: boolean; reason?: string; message?: string; error?: string;
+      }>("/api/sync-check-run", {
+        method: "POST",
+        body: JSON.stringify({ scan_id: scan.scan_id, force }),
+      });
+      if (data.synced) {
+        setSyncResult({ ok: true, msg: "GitHub check run updated to ✓ success." });
+      } else if (data.reason === "no_check_run") {
+        setSyncResult({ ok: false, msg: "No GitHub check run is linked to this scan." });
+      } else if (data.reason === "files_pending") {
+        setSyncResult({ ok: false, msg: data.message ?? "Some files are still pending.", canForce: true });
+      } else {
+        setSyncResult({ ok: false, msg: data.error ?? "Sync failed." });
+      }
+    } catch {
+      setSyncResult({ ok: false, msg: "Network error — could not reach the server." });
+    } finally {
+      setSyncingCheck(false);
+    }
+  }
 
   function saveReviewer(email: string, github: string) {
     setReviewerEmail(email);
@@ -2008,7 +812,7 @@ function PRDetailContent() {
           .filter(f => f.scan_id === scan.scan_id && f.file_path === path)
           .forEach(f => { updates[`${riskPfx(f.risk_score)}::${scan.scan_id}::${path}`] = "resolved"; });
       }
-      // Fallback: use MOCK_SCANS file risk_score
+      // Fallback: use scan file risk_score
       if (Object.keys(updates).length === 0) {
         const mockFile = scan.files.find(f => f.file_path === path);
         if (mockFile) updates[`${riskPfx(mockFile.risk_score)}::${scan.scan_id}::${path}`] = "resolved";
@@ -2043,7 +847,13 @@ function PRDetailContent() {
       resolveOneFile(path);
       const email = reviewerEmail || "reviewer@trustledger.dev";
       recordActivityEvent(path, email);
-      persistAttestation(path, email, reviewerGithub);
+      persistAttestation(path, email, reviewerGithub).then(() => {
+        const remaining = scan.files.filter(
+          f => (f.risk_score === "HIGH" || f.risk_score === "CRITICAL") &&
+               f.file_path !== path && !f.attested && !attestedSet.has(f.file_path)
+        );
+        if (remaining.length === 0) syncCheckRun(true);
+      });
     }
   }
 
@@ -2057,7 +867,7 @@ function PRDetailContent() {
   );
 
   // Reads tl_notif_snapshot to find EXACTLY which violation keys the dashboard tracks
-  // for this scan, then marks them all resolved. This works regardless of MOCK_SCANS content.
+  // for this scan, then marks them all resolved.
   function resolveViolationsForScan(scanId: string) {
     try {
       const stored  = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
@@ -2076,7 +886,7 @@ function PRDetailContent() {
           });
       }
 
-      // Fallback: write for all MOCK_SCANS files in this scan
+      // Also write for all current scan files to ensure full coverage
       if (scan) {
         scan.files.forEach(f => {
           updates[`${riskPfx(f.risk_score)}::${scanId}::${f.file_path}`] = "resolved";
@@ -2114,6 +924,7 @@ function PRDetailContent() {
     // Mark ALL violations for this scan resolved using snapshot data — handles any path mismatch
     resolveViolationsForScan(scan.scan_id);
     setAttestingAll(false);
+    await syncCheckRun(true);
   }
 
   // When this repo is fully attested, find the next repo with open HIGH/CRIT work.
@@ -2360,27 +1171,50 @@ function PRDetailContent() {
 
         {/* ── All-clear banner ───────────────────────────────────────────── */}
         {allClear && (
-          <div className="animate-fade-up flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
-              <CheckCircleIcon />
+          <div className="animate-fade-up flex flex-col gap-2">
+            <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+              <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
+                <CheckCircleIcon />
+              </div>
+              <p className="text-sm font-semibold text-emerald-800 flex-1">
+                All {highCount} HIGH/CRITICAL file{highCount !== 1 ? "s" : ""} have been attested — this PR is cleared for deployment.
+              </p>
+              <button
+                onClick={(e) => { e.preventDefault(); syncCheckRun(); }}
+                disabled={syncingCheck}
+                className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 disabled:opacity-50 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
+              >
+                {syncingCheck ? "Syncing…" : "↑ Sync GitHub Check"}
+              </button>
+              {nextUnresolved ? (
+                <Link
+                  href={`/pr/${nextUnresolved.scanId}`}
+                  className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
+                >
+                  Review next: {nextUnresolved.repoName} →
+                </Link>
+              ) : (
+                <Link
+                  href="/dashboard"
+                  className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
+                >
+                  Back to dashboard →
+                </Link>
+              )}
             </div>
-            <p className="text-sm font-semibold text-emerald-800 flex-1">
-              All {highCount} HIGH/CRITICAL file{highCount !== 1 ? "s" : ""} have been attested — this PR is cleared for deployment.
-            </p>
-            {nextUnresolved ? (
-              <Link
-                href={`/pr/${nextUnresolved.scanId}`}
-                className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
-              >
-                Review next: {nextUnresolved.repoName} →
-              </Link>
-            ) : (
-              <Link
-                href="/dashboard"
-                className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
-              >
-                Back to dashboard →
-              </Link>
+            {syncResult && (
+              <div className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-medium ${syncResult.ok ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                <span>{syncResult.ok ? "✓" : "✕"} {syncResult.msg}</span>
+                {!syncResult.ok && syncResult.canForce && (
+                  <button
+                    onClick={(e) => { e.preventDefault(); syncCheckRun(true); }}
+                    disabled={syncingCheck}
+                    className="ml-auto shrink-0 px-2 py-0.5 text-xs font-bold text-red-700 bg-red-100 hover:bg-red-200 disabled:opacity-50 rounded border border-red-200 transition-colors"
+                  >
+                    Force Sync
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}

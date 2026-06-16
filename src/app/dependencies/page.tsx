@@ -7,6 +7,8 @@ import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { parsePackageJson, parseRequirementsTxt, parseGoMod } from "@/lib/depAnalysis";
+import { collectManifestPackages } from "@/lib/manifestPackages";
 import type { DashboardData, ScanResult } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -269,6 +271,17 @@ function buildFinding(pkg: string, eco: LangEcosystem, repo: string, filePath: s
   };
 }
 
+// Manifest files (package.json, requirements.txt, go.mod) declare dependencies
+// directly — parse the declared package names instead of scanning for import
+// statements (which a JSON/manifest file won't contain).
+function manifestPackages(filePath: string, content: string): string[] | null {
+  const name = filePath.toLowerCase();
+  if (name.endsWith("package.json"))     return parsePackageJson(content).map(p => p.name);
+  if (name.endsWith("requirements.txt")) return parseRequirementsTxt(content).map(p => p.name);
+  if (name.endsWith("go.mod"))           return parseGoMod(content).map(p => p.name);
+  return null;
+}
+
 function deriveFindings(scans: ScanResult[]): DepFinding[] {
   const findings: DepFinding[] = [];
   const seen = new Set<string>();
@@ -277,7 +290,8 @@ function deriveFindings(scans: ScanResult[]): DepFinding[] {
       if (!file.content) continue;
       const eco = detectEcosystem(file.file_path);
       if (eco === "unknown") continue;
-      const imports = parseImports(file.content, eco);
+      const declared = manifestPackages(file.file_path, file.content);
+      const imports = declared ?? parseImports(file.content, eco);
       for (const pkg of imports) {
         const f = buildFinding(pkg, eco, scan.repo, file.file_path, scan.pr_number, scan.scan_id, file.ai_percentage);
         if (f && !seen.has(f.id)) { seen.add(f.id); findings.push(f); }
@@ -440,6 +454,12 @@ export default function DependenciesPage() {
       const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
       const derived = deriveFindings(scans);
+      // Publish every package declared in a manifest file (package.json,
+      // requirements.txt, go.mod) so /phantom-deps can check each one against
+      // the live npm/PyPI registry, regardless of whether it's in VULN_DB.
+      try {
+        localStorage.setItem("tl_phantom_packages", JSON.stringify(collectManifestPackages(scans)));
+      } catch {}
       // A successful fetch means real data, even if it's an empty list — only
       // fall back to the offline mock list on an actual fetch failure (catch below).
       setFindings(derived);
@@ -511,6 +531,11 @@ export default function DependenciesPage() {
   useEffect(() => {
     try { localStorage.setItem("tl_dep_vuln_count", String(crit + Math.round(vuln * 0.5))); } catch {}
   }, [crit, vuln]);
+
+  // Publish hallucinated/typosquatting count so the dashboard's "Needs attention" strip can read it
+  useEffect(() => {
+    try { localStorage.setItem("tl_dep_risky_count", String(halluc + typosq)); } catch {}
+  }, [halluc, typosq]);
   const refreshAgo = lastRefreshed ? (() => { const s = Math.floor((Date.now()-lastRefreshed.getTime())/1000); return s<10?"just now":s<60?`${s}s ago`:`${Math.floor(s/60)}m ago`; })() : "";
 
   return (

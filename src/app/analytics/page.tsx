@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import AuthGuard from "@/components/AuthGuard";
@@ -54,43 +54,7 @@ function ProgressRing({ value, max = 100, color, size = 64, strokeWidth = 5 }: {
   );
 }
 
-// ── Offline fallback ──────────────────────────────────────────────────────────
-
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-
-function makeOfflineData(): DashboardData {
-  const o = ORG;
-  return {
-    repos: [
-      { repo: `${o}/payments-api`,    ai_pct: 0.71, attestation_rate: 0.80, last_scan: "2026-05-30", scan_count: 34, file_count: 214, latest_scan_id: "sc_mock_001" },
-      { repo: `${o}/auth-service`,    ai_pct: 0.44, attestation_rate: 0.88, last_scan: "2026-05-30", scan_count: 28, file_count: 167, latest_scan_id: "sc_mock_002" },
-      { repo: `${o}/fraud-detection`, ai_pct: 0.63, attestation_rate: 0.67, last_scan: "2026-05-29", scan_count: 21, file_count: 143, latest_scan_id: "sc_mock_003" },
-      { repo: `${o}/risk-engine`,     ai_pct: 0.38, attestation_rate: 0.91, last_scan: "2026-05-28", scan_count: 15, file_count: 98,  latest_scan_id: "sc_mock_004" },
-      { repo: `${o}/data-platform`,   ai_pct: 0.67, attestation_rate: 0.52, last_scan: "2026-05-27", scan_count: 19, file_count: 134, latest_scan_id: "sc_mock_005" },
-      { repo: `${o}/ml-platform`,     ai_pct: 0.79, attestation_rate: 0.45, last_scan: "2026-05-29", scan_count: 11, file_count: 112, latest_scan_id: "sc_mock_006" },
-      { repo: `${o}/api-gateway`,     ai_pct: 0.52, attestation_rate: 0.74, last_scan: "2026-05-30", scan_count: 19, file_count: 124, latest_scan_id: "sc_mock_007" },
-    ],
-    overall_ai_pct: 0.67, attestation_rate: 0.72, unattested_deploy_count: 5,
-    scan_count: 147, file_count: 992,
-    risk_trend: [
-      { date: "2026-03-01", high_count: 22, critical_count: 8,  medium_count: 31 },
-      { date: "2026-03-15", high_count: 19, critical_count: 7,  medium_count: 27 },
-      { date: "2026-04-01", high_count: 17, critical_count: 6,  medium_count: 23 },
-      { date: "2026-04-15", high_count: 14, critical_count: 5,  medium_count: 19 },
-      { date: "2026-05-01", high_count: 11, critical_count: 4,  medium_count: 15 },
-      { date: "2026-05-15", high_count: 8,  critical_count: 3,  medium_count: 11 },
-      { date: "2026-05-30", high_count: 6,  critical_count: 2,  medium_count: 8  },
-    ],
-    top_risk_files: [
-      { repo: `${o}/payments-api`,    file_path: "src/processors/card_validator.py",   ai_pct: 0.94, risk_score: "CRITICAL", attested: false, scan_id: "sc_mock_001", pr_number: 512 },
-      { repo: `${o}/ml-platform`,     file_path: "src/models/inference_engine.py",     ai_pct: 0.91, risk_score: "CRITICAL", attested: false, scan_id: "sc_mock_006", pr_number: 88  },
-      { repo: `${o}/fraud-detection`, file_path: "models/risk_scorer.ts",              ai_pct: 0.88, risk_score: "CRITICAL", attested: false, scan_id: "sc_mock_003", pr_number: 247 },
-      { repo: `${o}/auth-service`,    file_path: "src/auth/token_service.py",          ai_pct: 0.76, risk_score: "HIGH",     attested: false, scan_id: "sc_mock_002", pr_number: 371 },
-      { repo: `${o}/data-platform`,   file_path: "src/connectors/bigquery_writer.ts",  ai_pct: 0.83, risk_score: "HIGH",     attested: false, scan_id: "sc_mock_005", pr_number: 118 },
-    ],
-  };
-}
-const OFFLINE_DATA: DashboardData = makeOfflineData();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -105,7 +69,9 @@ function repoShort(full: string) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnalyticsPage() {
-  const [data,              setData]              = useState<DashboardData>(OFFLINE_DATA);
+  const [data,              setData]              = useState<DashboardData | null>(null);
+  const [loading,           setLoading]           = useState(true);
+  const [loadError,         setLoadError]         = useState<string | null>(null);
   const [period,            setPeriod]            = useState<7 | 30 | 90>(30);
   const [refreshing,        setRefreshing]        = useState(false);
   const [violationStatuses, setViolationStatuses] = useState<Record<string, string>>({});
@@ -113,10 +79,15 @@ export default function AnalyticsPage() {
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
-    if (seed) { setData(seed); if (spinner) setRefreshing(false); return; }
-    try { const d = await api.dashboard(ORG, period); setData(d); }
-    catch { setData(OFFLINE_DATA); }
-    if (spinner) setRefreshing(false);
+    if (seed) { setData(seed); setLoadError(null); setLoading(false); if (spinner) setRefreshing(false); return; }
+    try {
+      const d = await api.dashboard(ORG, period);
+      setData(d); setLoadError(null);
+    } catch (e) {
+      setData(null);
+      setLoadError(e instanceof Error ? e.message : "Failed to load analytics data");
+    }
+    setLoading(false); if (spinner) setRefreshing(false);
   }, [period]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -141,7 +112,43 @@ export default function AnalyticsPage() {
     };
   }, []);
 
-  const effectiveData = useMemo(() => patchDataWithAttestations(data), [data, violationStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
+  const effectiveData = useMemo(() => data ? patchDataWithAttestations(data) : null, [data, violationStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resolvedCount = useMemo(
+    () => Object.values(violationStatuses).filter(v => v === "resolved").length,
+    [violationStatuses],
+  );
+
+  if (!effectiveData) {
+    return (
+      <AuthGuard>
+        <PageSkeleton rows={4} cards={4}>
+        <div className="max-w-7xl mx-auto space-y-6 pb-10">
+          {loading ? (
+            <div className="section-card py-16 text-center">
+              <p className="text-sm font-bold text-gray-700">Loading analytics…</p>
+            </div>
+          ) : (
+            <div className="section-card py-16 text-center space-y-3">
+              <p className="text-sm font-bold text-gray-700">
+                {loadError ? "Couldn't load analytics" : "No analytics data yet"}
+              </p>
+              <p className="text-xs text-gray-400">
+                {loadError ?? "Once scans run for this organization, trends and metrics will appear here."}
+              </p>
+              {loadError && (
+                <button onClick={() => fetchData(true)} disabled={refreshing}
+                  className="px-3 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 disabled:opacity-50 transition-colors">
+                  {refreshing ? "Retrying…" : "Retry"}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        </PageSkeleton>
+      </AuthGuard>
+    );
+  }
 
   // ── Derived metrics ─────────────────────────────────────────────────────────
 
@@ -158,10 +165,6 @@ export default function AnalyticsPage() {
   const unattested = effectiveData.top_risk_files.filter(f => !f.attested).length;
   const attested   = effectiveData.top_risk_files.filter(f => f.attested).length;
 
-  const resolvedCount = useMemo(
-    () => Object.values(violationStatuses).filter(v => v === "resolved").length,
-    [violationStatuses],
-  );
   const effectiveAttested = Math.max(attested, resolvedCount);
   const totalTracked      = Math.max(unattested + effectiveAttested, 1);
   const effectiveAttRate  = effectiveAttested / totalTracked;

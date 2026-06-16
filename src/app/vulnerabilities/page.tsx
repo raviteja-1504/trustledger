@@ -9,7 +9,7 @@ import { useToastHelpers } from "@/lib/toast";
 import CodeViewer from "@/components/CodeViewer";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
-import type { DashboardData, ScanResult, RiskLevel } from "@/types";
+import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { authedFetch } from "@/lib/useRealData";
 import { useViolationsRealtime } from "@/lib/realtime";
@@ -38,190 +38,6 @@ interface Violation {
   sla_deadline?: string;
   policy_rule: string;
 }
-
-// ── Mock file contents for offline code review ────────────────────────────────
-
-const MOCK_FILE_CONTENT: Record<string, string> = {
-  "src/processors/card_validator.py": `import psycopg2
-
-STRIPE_KEY = "sk_live_51Hx2trustledger_demo"
-DB_PASSWORD = "prod_password_2024"
-
-def validate_card(card_number: str, user_id: str):
-    conn = psycopg2.connect(
-        dbname="payments",
-        password=DB_PASSWORD
-    )
-    cursor = conn.cursor()
-    # AI-generated: SQL injection vulnerability
-    query = f"SELECT * FROM cards WHERE user_id = {user_id}"
-    cursor.execute(query)
-    result = cursor.fetchone()
-    return result
-
-def charge_card(amount: float, card_id: str):
-    # Process payment via Stripe
-    import stripe
-    stripe.api_key = STRIPE_KEY
-    return stripe.Charge.create(amount=int(amount*100), currency="usd")`,
-
-  "models/risk_scorer.ts": `const MODEL_KEY = "sk-prod-abc123secretkey";
-
-export function scoreRisk(formula: string, context: Record<string, number>): number {
-  // AI-generated: arbitrary code execution
-  const result = eval(formula);
-  return result;
-}
-
-export function runFormula(code: string): any {
-  // CRITICAL: exec on user-controlled input
-  const fn = new Function("context", code);
-  return fn(context);
-}
-
-export function getModelPrediction(data: object): number {
-  // Hardcoded endpoint key
-  const key = MODEL_KEY;
-  return fetch(\`https://api.ml-service.io/predict?key=\${key}\`, {
-    method: "POST", body: JSON.stringify(data)
-  }).then(r => r.json());
-}`,
-
-  "src/gateway/stripe_client.py": `import stripe
-
-# Hardcoded production API key
-STRIPE_SECRET = "sk_live_51Hx2novapay_production_key"
-WEBHOOK_SECRET = "whsec_novapay_prod_webhook_2024"
-
-def create_charge(amount: int, currency: str, source: str):
-    stripe.api_key = STRIPE_SECRET
-    return stripe.Charge.create(
-        amount=amount,
-        currency=currency,
-        source=source
-    )
-
-def verify_webhook(payload: bytes, sig: str) -> dict:
-    return stripe.Webhook.construct_event(
-        payload, sig, WEBHOOK_SECRET
-    )`,
-
-  "src/oauth/token_exchange.ts": `import jwt from "jsonwebtoken";
-
-// JWT secret hardcoded — should use environment variable
-const JWT_SECRET = "jwt_secret_prod_2024_novapay";
-
-export function verifyToken(token: string): object {
-  // Accepts 'none' algorithm — JWT bypass vulnerability
-  const payload = jwt.decode(token, JWT_SECRET, {
-    algorithms: ["HS256", "none"],
-    ignoreExpiration: false,
-  });
-  return payload as object;
-}
-
-export function createToken(userId: string, role: string): string {
-  return jwt.sign({ sub: userId, role }, JWT_SECRET, {
-    expiresIn: "24h",
-    algorithm: "HS256",
-  });
-}`,
-
-  "src/pipelines/etl_runner.py": `import boto3
-
-# Hardcoded AWS credentials
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
-AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-def run_pipeline(formula: str, bucket: str):
-    # Arbitrary code execution via eval
-    result = eval(formula)
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-    )
-    s3.put_object(Bucket=bucket, Key="output.json", Body=str(result))
-    return result`,
-
-  // ── Seed violation files ─────────────────────────────────────────────────────
-
-  "src/models/inference_engine.py": `import numpy as np
-
-# Hardcoded model API key — should use env var
-MODEL_API_KEY = "sk-prod-ml-inference-2024-novapay"
-DB_PASSWORD   = "ml_db_prod_password"
-
-class InferenceEngine:
-    def predict(self, user_input: str) -> dict:
-        # AI-generated: arbitrary code execution via eval
-        result = eval(user_input)
-
-        # SQL injection: user_input injected directly
-        query = f"SELECT * FROM predictions WHERE input = '{user_input}'"
-        self.cursor.execute(query)
-        return {"result": result}
-
-    def load_model(self, formula: str):
-        # exec on user-provided formula string — RCE risk
-        exec(formula)`,
-
-  "src/auth/token_service.py": `import jwt
-
-# Hardcoded JWT secret — must use secrets manager
-JWT_SECRET = "jwt_secret_prod_2024_novapay_auth"
-
-def verify_token(token: str) -> dict:
-    # Accepts 'none' algorithm — JWT bypass vulnerability
-    payload = jwt.decode(
-        token, JWT_SECRET,
-        algorithms=["HS256", "none"],
-        options={"verify_signature": False}
-    )
-    return payload
-
-def issue_token(user_id: str, role: str) -> str:
-    return jwt.encode(
-        {"sub": user_id, "role": role},
-        JWT_SECRET, algorithm="HS256"
-    )`,
-
-  "src/connectors/bigquery_writer.ts": `import { BigQuery } from '@google-cloud/bigquery';
-
-// Hardcoded GCP credentials — should use workload identity
-const GCP_KEY = "AIzaSyC_novapay_prod_bigquery_key_2024";
-const PROJECT  = "novapay-production";
-
-export async function writeResults(userId: string, data: object[]): Promise<void> {
-  const bq = new BigQuery({ projectId: PROJECT, apiKey: GCP_KEY });
-
-  // SQL injection: userId injected directly into query string
-  const query = "SELECT * FROM \`" + PROJECT + ".analytics.users\`" +
-                " WHERE user_id = '" + userId + "'";
-
-  const [rows] = await bq.query({ query });
-  console.log(rows);
-}`,
-
-  "src/training/data_pipeline.py": `import boto3, os
-
-# Hardcoded AWS credentials — should use IAM role
-AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
-AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-def process_training_data(transform_fn: str, bucket: str) -> dict:
-    # eval() on user-supplied transform — arbitrary code execution
-    transform = eval(transform_fn)
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-    )
-    obj = s3.get_object(Bucket=bucket, Key="training_data.jsonl")
-    return transform(obj["Body"].read())`,
-};
 
 // ── Inline Code Review ─────────────────────────────────────────────────────────
 
@@ -257,82 +73,20 @@ interface InlineCodeReviewProps {
   onReopen: () => void;
 }
 
-// Derive risk indicators from file content — used when backend scan is unavailable
-function detectIndicators(content: string): string[] {
-  const found: string[] = [];
-  const lower = content.toLowerCase();
-
-  // Security vulnerabilities (high confidence — exact pattern matches)
-  if (/['"]\s*\+\s*\w+|f["'].*{.*}\s*(?:where|from|insert|select|delete)/i.test(content) ||
-      /execute\s*\(.*\+|cursor\.execute\s*\(.*%\s*\(/i.test(content))             found.push("sql-injection");
-
-  if (/eval\s*\(|exec\s*\(|new Function\s*\(/i.test(content))                     found.push("eval-exec");
-
-  if (/algorithms.*none|"none"\s*,|'none'\s*,|verify\s*=\s*False/i.test(content)) found.push("jwt-none-alg");
-
-  if (/(sk_live|sk_test|AKIA|ghp_|SG\.|AIza|xoxb-|-----BEGIN.*(PRIVATE|RSA))/i.test(content) ||
-      /(password|secret|api_key|token)\s*=\s*["'][^"']{8,}["']/i.test(content))   found.push("hardcoded-secret");
-
-  if (/subprocess\.(call|run|Popen).*shell\s*=\s*True|os\.system\s*\(.*\+/i.test(content)) found.push("command-injection");
-
-  if (/open\s*\([^)]*\.\.\//i.test(content) ||
-      /path\.join\s*\(.*request|send_file\s*\(.*request/i.test(content))           found.push("path-traversal");
-
-  // AI provenance signals (statistical — less precise, use content analysis)
-  const lines = content.split("\n").filter(l => l.trim().length > 0);
-  if (lines.length > 10) {
-    // Comment density: >30% lines are pure comments
-    const commentLines = lines.filter(l => /^\s*(#|\/\/|\/\*|\*|"""|''')/.test(l)).length;
-    if (commentLines / lines.length > 0.30) found.push("comment-density");
-
-    // Structural uniformity: >80% of indented lines use the SAME indent step
-    const indents = lines.map(l => l.match(/^(\s+)/)?.[1]?.length ?? 0).filter(n => n > 0);
-    const positiveIndents = indents.filter(n => n > 0);
-    if (positiveIndents.length > 5) {
-      const step = Math.min(...positiveIndents);   // safe — array is non-empty
-      const uniform = step > 0 ? positiveIndents.filter(n => n % step === 0).length / positiveIndents.length : 0;
-      if (uniform > 0.90 && step === 4) found.push("structural-uniformity");
-    }
-
-    // AI comment phrases — over-explained, instructional tone
-    const aiPhrases = /(this function|this method|this class|initialize the|here we|note that|step [0-9]+:|# first,|# then,|# finally,|helper function|utility function)/i;
-    const aiCommentCount = lines.filter(l => /^\s*(#|\/\/)/.test(l) && aiPhrases.test(l)).length;
-    if (aiCommentCount >= 2) found.push("ai-comment-pattern");
-
-    // Low identifier entropy — check for generic names
-    const genericNames = /(^|\s)(data|result|response|value|item|element|temp|obj|arr|lst|num|str|val|ret|res)\s*=/gi;
-    const matches = content.match(genericNames);
-    if (matches && matches.length >= 3) found.push("identifier-entropy");
-  }
-
-  return Array.from(new Set(found));
-}
-
 function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeReviewProps) {
   const [scan, setScan]       = useState<ScanResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [copied, setCopied]   = useState(false);
 
   useEffect(() => {
+    let active = true;
+    setLoading(true); setLoadFailed(false);
     api.getScan(scanId)
-      .then(setScan)
-      .catch(() => {
-        // Offline: build a mock ScanResult with the file content we have
-        const content = MOCK_FILE_CONTENT[filePath] ?? `# File: ${filePath}\n# Content not available in offline mode`;
-        const lang    = filePath.endsWith(".ts") || filePath.endsWith(".tsx") ? "typescript" : "python";
-        setScan({
-          scan_id: scanId, repo: `${ORG}/demo`, pr_number: 0,
-          commit_sha: "demo", overall_risk: "CRITICAL",
-          total_ai_percentage: 0.82, timestamp: new Date().toISOString(),
-          files: [{
-            file_path: filePath, language: lang,
-            ai_percentage: 0.82, risk_score: "CRITICAL" as RiskLevel,
-            risk_indicators: content ? detectIndicators(content) : ["hardcoded-secret"],
-            attested: false, content,
-          }],
-        });
-      })
-      .finally(() => setLoading(false));
+      .then(result => { if (active) setScan(result); })
+      .catch(() => { if (active) setLoadFailed(true); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [scanId, filePath]);
 
   const file = scan?.files.find(f => f.file_path === filePath) ?? scan?.files[0];
@@ -344,6 +98,15 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
           <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
         </svg>
         Loading file content…
+      </div>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="px-5 py-4 text-xs text-gray-400">
+        Couldn&apos;t load file content for this scan.{" "}
+        <Link href={`/pr/${scanId}`} className="font-bold text-indigo-600 hover:text-indigo-800">Open PR review →</Link>
       </div>
     );
   }
@@ -456,40 +219,6 @@ function loadAssignees(): Record<string, string> {
 function saveAssignees(a: Record<string, string>) {
   localStorage.setItem(ASSIGNEE_KEY, JSON.stringify(a));
 }
-
-// ── Fallback data (used when backend is offline) ────────────────────────────
-
-function makeOfflineData(): DashboardData {
-  const o  = ORG;
-  const rd = (d: number) => new Date(Date.now() - d * 86400000).toISOString().split("T")[0];
-  return {
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:rd(0), scan_count:34, file_count:214, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.88, last_scan:rd(0), scan_count:28, file_count:167, latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.63, attestation_rate:0.67, last_scan:rd(1), scan_count:21, file_count:143, latest_scan_id:"sc_mock_003" },
-      { repo:`${o}/data-platform`,   ai_pct:0.67, attestation_rate:0.52, last_scan:rd(3), scan_count:19, file_count:134, latest_scan_id:"sc_mock_005" },
-      { repo:`${o}/ml-platform`,     ai_pct:0.79, attestation_rate:0.45, last_scan:rd(1), scan_count:11, file_count:112, latest_scan_id:"sc_mock_006" },
-    ],
-    overall_ai_pct: 0.67, attestation_rate: 0.72, unattested_deploy_count: 5,
-    scan_count: 147, file_count: 992, risk_trend: [],
-    top_risk_files: [
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py",   ai_pct:0.94, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/payments-api`,    file_path:"src/gateway/stripe_client.py",       ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/payments-api`,    file_path:"src/middleware/auth_check.ts",        ai_pct:0.63, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/payments-api`,    file_path:"src/services/payment_service.ts",    ai_pct:0.82, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/auth-service`,    file_path:"src/auth/token_service.py",          ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_002", pr_number:371 },
-      { repo:`${o}/fraud-detection`, file_path:"models/risk_scorer.ts",              ai_pct:0.88, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_003", pr_number:247 },
-      { repo:`${o}/fraud-detection`, file_path:"src/database/connection.py",         ai_pct:0.71, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_003", pr_number:247 },
-      { repo:`${o}/data-platform`,   file_path:"src/connectors/bigquery_writer.ts",  ai_pct:0.83, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_005", pr_number:118 },
-      { repo:`${o}/data-platform`,   file_path:"src/pipelines/etl_runner.py",        ai_pct:0.65, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_005", pr_number:118 },
-      { repo:`${o}/ml-platform`,     file_path:"src/models/inference_engine.py",     ai_pct:0.91, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_006", pr_number:88  },
-      { repo:`${o}/ml-platform`,     file_path:"src/training/data_pipeline.py",      ai_pct:0.85, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_006", pr_number:88  },
-      { repo:`${o}/ml-platform`,     file_path:"src/serving/model_server.py",        ai_pct:0.78, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_006", pr_number:88  },
-      { repo:`${o}/fraud-detection`, file_path:"src/models/anomaly_detector.py",     ai_pct:0.67, risk_score:"MEDIUM",   attested:false, scan_id:"sc_mock_003", pr_number:247 },
-    ],
-  };
-}
-const OFFLINE_DATA: DashboardData = makeOfflineData();
 
 // ── Derive violations from dashboard data ─────────────────────────────────────
 
@@ -747,6 +476,7 @@ export default function ViolationsPage() {
   const [reviewingId,  setReviewingId]  = useState<string | null>(null);
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshed,setLastRefreshed]= useState<Date | null>(null);
+  const [loadError,    setLoadError]    = useState<string | null>(null);
 
   // Load all persisted state
   useEffect(() => {
@@ -762,9 +492,14 @@ export default function ViolationsPage() {
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
-    if (seed) { setData(seed); setLastRefreshed(new Date()); setLoading(false); if (spinner) setRefreshing(false); return; }
-    try { const d = await api.dashboard(ORG, 90); setData(d); setLastRefreshed(new Date()); }
-    catch { setData(OFFLINE_DATA); }
+    if (seed) { setData(seed); setLoadError(null); setLastRefreshed(new Date()); setLoading(false); if (spinner) setRefreshing(false); return; }
+    try {
+      const d = await api.dashboard(ORG, 90);
+      setData(d); setLoadError(null); setLastRefreshed(new Date());
+    } catch (e) {
+      setData(null);
+      setLoadError(e instanceof Error ? e.message : "Failed to load vulnerability data");
+    }
     setLoading(false); if (spinner) setRefreshing(false);
   }, []);
 
@@ -792,7 +527,8 @@ export default function ViolationsPage() {
 
   // Derive violations from live data, apply persisted statuses
   const violations = useMemo<(Violation & { status: VStatus; assignee?: string })[]>(() => {
-    const base = deriveViolations(patchDataWithAttestations(data ?? OFFLINE_DATA));
+    if (!data) return [];
+    const base = deriveViolations(patchDataWithAttestations(data));
     return base.map(v => ({
       ...v,
       status:   statuses[v.id]  ?? "open",
@@ -943,6 +679,20 @@ export default function ViolationsPage() {
           </div>
         </div>
 
+        {/* Error banner */}
+        {loadError && !loading && (
+          <div className="animate-fade-up flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border"
+            style={{ background:"#fef2f2", borderColor:"#fecdd3" }}>
+            <p className="text-sm text-rose-700">
+              <span className="font-bold">Couldn&apos;t load vulnerabilities.</span> {loadError}
+            </p>
+            <button onClick={() => fetchData(true)} disabled={refreshing}
+              className="shrink-0 px-3 py-1.5 text-xs font-bold text-rose-700 bg-white border border-rose-200 rounded-xl hover:bg-rose-50 disabled:opacity-50 transition-colors">
+              {refreshing ? "Retrying…" : "Retry"}
+            </button>
+          </div>
+        )}
+
         {/* Summary cards — click to filter */}
         <div className="animate-fade-up grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
@@ -1052,7 +802,7 @@ export default function ViolationsPage() {
 
         {/* Violations list */}
         <div className="animate-fade-up space-y-3">
-          {violations.length === 0 && !loading ? (
+          {violations.length === 0 && !loading && !loadError ? (
             <div className="section-card py-16 text-center">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-500 mx-auto mb-3">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1061,6 +811,11 @@ export default function ViolationsPage() {
               </div>
               <p className="text-sm font-bold text-gray-700">No violations detected</p>
               <p className="text-xs text-gray-400 mt-1">All files are attested and within policy thresholds</p>
+            </div>
+          ) : violations.length === 0 && !loading && loadError ? (
+            <div className="section-card py-16 text-center">
+              <p className="text-sm font-bold text-gray-700">No violation data available</p>
+              <p className="text-xs text-gray-400 mt-1">Retry the load above once the connection is restored.</p>
             </div>
           ) : filtered.length === 0 ? (
             <div className="section-card py-12 text-center space-y-2">

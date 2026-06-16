@@ -8,6 +8,9 @@ import { useRole, ROLE_LABELS, ROLE_COLORS, type UserRole } from "@/lib/roles";
 import { useSidebar } from "@/lib/sidebar";
 import { useAuth } from "@/lib/auth";
 import { isSeedMode } from "@/lib/useRealData";
+import { countOpenViolations } from "@/lib/violations";
+import { patchDataWithAttestations } from "@/lib/trustScore";
+import type { DashboardData } from "@/types";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -251,13 +254,7 @@ export default function Sidebar() {
   useEffect(() => {
     function refresh() {
       try {
-        type RiskFile = { attested: boolean; risk_score: string; file_path: string; scan_id: string; repo: string };
-        type RepoRow  = { repo: string; ai_pct: number; attestation_rate: number; scan_count: number };
-        const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as {
-          top_risk_files?: RiskFile[];
-          repos?: RepoRow[];
-          unattested_deploy_count?: number;
-        } | null;
+        const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null;
 
         // ── Build resolved-file set from tl_violation_statuses ──────────────
         // Key format: "{pfx}::{scan_id}::{file_path}"
@@ -270,9 +267,6 @@ export default function Sidebar() {
             if (second !== -1) resolvedFiles.add(key.slice(second + 2));
           }
         }
-        // A repo/deploy-level violation is "open" unless explicitly marked
-        // resolved/in_review on the Violations page — mirrors `status === "open"`.
-        const isOpenViolation = (vid: string) => vstats[vid] !== "resolved" && vstats[vid] !== "in_review";
 
         // ── Risk file counts (excluding attested + resolved) ─────────────────
         const riskFiles = snap?.top_risk_files ?? [];
@@ -283,18 +277,17 @@ export default function Sidebar() {
         // Reports: files pending attestation (same set)
         setPendingCount(openCount);
 
-        // Mirror dashboard logic: a repo clears once ALL its CRIT/HIGH files are attested
+        // ── Violations: single source of truth shared with /violations and the
+        // dashboard's "Needs attention" strip (src/lib/violations.ts) ──────────
+        setOpenViolations(snap ? countOpenViolations(patchDataWithAttestations(snap), vstats) : 0);
+
+        // A repo clears once ALL its CRIT/HIGH files are attested — used below
+        // to scope the "deploy blocked" alert count to repos still affected.
         const unresolvedDeployRepos = new Set(
           riskFiles
             .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !resolvedFiles.has(f.file_path))
             .map(f => f.repo)
         );
-
-        // ── Violations: mirror deriveViolations() from src/app/violations/page.tsx ──
-        // unattested CRIT/HIGH files + deploy-blocked (1 entry) + AI-threshold repos (>80%) + low-attestation repos (<60%)
-        const aiThresholdRepos = (snap?.repos ?? []).filter(r => r.ai_pct > 0.8 && isOpenViolation(`ai-thresh::${r.repo}`)).length;
-        const lowAttestViolationRepos = (snap?.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0 && isOpenViolation(`low-attest::${r.repo}`)).length;
-        setOpenViolations(openCount + (unresolvedDeployRepos.size > 0 && isOpenViolation("deploy::blocked") ? 1 : 0) + aiThresholdRepos + lowAttestViolationRepos);
 
         // ── Secrets ──────────────────────────────────────────────────────────
         // tl_secret_total is only set once the /secrets page has loaded (mock or live);

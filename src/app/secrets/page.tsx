@@ -34,67 +34,6 @@ interface SecretFinding {
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
-// ── Mock findings ──────────────────────────────────────────────────────────────
-
-const MOCK_FINDINGS: SecretFinding[] = [
-  {
-    id: "sec_001", severity: "CRITICAL", type: "api_key", label: "Stripe API Key",
-    file_path: "src/processors/card_validator.py", repo: `${ORG}/payments-api`,
-    line_number: 8, masked_value: "sk_live_51Hx2••••••••••••••••",
-    context: 'STRIPE_KEY = "sk_live_51Hx2trustledger_demo"',
-    pr_number: 524, scan_id: "sc_mock_001", detected_at: "2026-05-26T14:32:00Z", status: "open",
-  },
-  {
-    id: "sec_002", severity: "CRITICAL", type: "jwt_secret", label: "JWT Signing Secret",
-    file_path: "src/auth/token_service.py", repo: `${ORG}/auth-service`,
-    line_number: 14, masked_value: "jwt_secret_prod_••••••••",
-    context: 'JWT_SECRET = "jwt_secret_prod_2024"',
-    pr_number: 341, scan_id: "sc_mock_002", detected_at: "2026-05-25T09:20:00Z", status: "open",
-  },
-  {
-    id: "sec_003", severity: "CRITICAL", type: "db_password", label: "Database Password",
-    file_path: "src/database/connection.py", repo: `${ORG}/fraud-detection`,
-    line_number: 23, masked_value: "prod_password_••••",
-    context: 'DB_PASSWORD = "prod_password_2024"',
-    pr_number: 219, scan_id: "sc_mock_003", detected_at: "2026-05-25T11:05:00Z", status: "open",
-  },
-  {
-    id: "sec_004", severity: "HIGH", type: "api_key", label: "SendGrid API Key",
-    file_path: "src/notifications/email_client.ts", repo: `${ORG}/auth-service`,
-    line_number: 5, masked_value: "SG.••••••••••••••••••••••",
-    context: 'const SENDGRID_KEY = "SG.Gm9kXtestABCDEFGHIJKLMNOP"',
-    pr_number: 338, scan_id: "sc_mock_002", detected_at: "2026-05-24T16:00:00Z", status: "open",
-  },
-  {
-    id: "sec_005", severity: "HIGH", type: "private_key", label: "RSA Private Key",
-    file_path: "src/crypto/signing.py", repo: `${ORG}/payments-api`,
-    line_number: 3, masked_value: "-----BEGIN RSA PRIVATE KEY-----••••",
-    context: 'SIGNING_KEY = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEow..."',
-    pr_number: 477, scan_id: "sc_mock_001", detected_at: "2026-05-24T10:10:00Z", status: "open",
-  },
-  {
-    id: "sec_006", severity: "HIGH", type: "oauth_token", label: "GitHub OAuth Token",
-    file_path: "src/integrations/github_client.ts", repo: `${ORG}/data-platform`,
-    line_number: 11, masked_value: "ghp_••••••••••••••••••••",
-    context: 'const GITHUB_TOKEN = "ghp_16C7e42F292c6912E6";',
-    pr_number: 103, scan_id: "sc_mock_005", detected_at: "2026-05-23T14:45:00Z", status: "open",
-  },
-  {
-    id: "sec_007", severity: "MEDIUM", type: "webhook_url", label: "Slack Webhook URL",
-    file_path: "src/alerts/slack_notifier.py", repo: `${ORG}/risk-engine`,
-    line_number: 7, masked_value: "https://hooks.slack.com/services/T00••••/B00••••/••••",
-    context: 'SLACK_WEBHOOK = "https://hooks.slack.com/services/T001/B001/xyz"',
-    pr_number: 88, scan_id: "sc_mock_004", detected_at: "2026-05-22T09:30:00Z", status: "open",
-  },
-  {
-    id: "sec_008", severity: "MEDIUM", type: "api_key", label: "AWS Access Key",
-    file_path: "src/storage/s3_client.py", repo: `${ORG}/data-platform`,
-    line_number: 19, masked_value: "AKIA••••••••••••••••",
-    context: 'AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"',
-    pr_number: 101, scan_id: "sc_mock_005", detected_at: "2026-05-21T12:00:00Z", status: "open",
-  },
-];
-
 const STORAGE_KEY = "tl_secret_status";
 
 // ── Secret detection patterns ──────────────────────────────────────────────────
@@ -225,7 +164,7 @@ export default function SecretsPage() {
   const [filterRepo,   setFilterRepo]   = useState("all");
   const [expanded,     setExpanded]     = useState<string | null>(null);
 
-  // Load seed findings → live scan detections → MOCK_FINDINGS fallback
+  // Load seed findings (opt-in dev mode) → otherwise live scan detections only
   useEffect(() => {
     const isSeed = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id;
 
@@ -239,12 +178,12 @@ export default function SecretsPage() {
     if (isSeed) {
       try {
         const seedRaw = localStorage.getItem("tl_secrets_findings");
-        const seedFindings = seedRaw ? JSON.parse(seedRaw) as SecretFinding[] : MOCK_FINDINGS;
+        const seedFindings = seedRaw ? JSON.parse(seedRaw) as SecretFinding[] : [];
         const merged = applyOverrides(seedFindings);
         setFindings(merged);
         localStorage.setItem("tl_secret_total", String(merged.length));
       } catch {
-        setFindings(applyOverrides(MOCK_FINDINGS));
+        setFindings([]);
       }
       return;
     }

@@ -128,7 +128,7 @@ function addSecurityHeaders(res: NextResponse, pathname: string): void {
     "style-src 'self' 'unsafe-inline' https://unpkg.com",
     "img-src 'self' data: https: blob:",
     "font-src 'self' data:",
-    "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.github.com https://api.sendgrid.com https://api.linear.app https://posthog.com https://eu.posthog.com https://*.sentry.io",
+    "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.github.com https://api.sendgrid.com https://api.linear.app https://posthog.com https://eu.posthog.com https://*.sentry.io https://registry.npmjs.org",
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self' https://github.com https://*.github.com",

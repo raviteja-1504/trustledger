@@ -51,6 +51,9 @@ export const api = {
   getScan: (scanId: string): Promise<ScanResult> =>
     apiFetch<ScanResult>(`/api/scans/${encodeURIComponent(scanId)}`),
 
+  settings: () =>
+    apiFetch<{ members: Array<{ email: string; name?: string; role: string }> }>("/api/settings"),
+
   scan: (body: ScanRequest): Promise<ScanResult> =>
     apiFetch<ScanResult>("/api/scans", { method: "POST", body: JSON.stringify(body) }),
 
@@ -123,7 +126,7 @@ export const api = {
     ),
 
   auditConfig: (org: string) =>
-    apiFetch<{ eventConfig: unknown; eventSoc2: unknown; mockEvents: unknown[] }>(
+    apiFetch<{ eventConfig: unknown; eventSoc2: unknown }>(
       `/api/audit-config?org=${encodeURIComponent(org)}`,
     ),
 

@@ -7,7 +7,7 @@ import Providers from "@/components/Providers";
 
 const inter = Inter({ subsets: ["latin"], display: "swap", variable: "--font-inter" });
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://app.trustledger.dev";
 
 export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),

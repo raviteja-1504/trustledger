@@ -41,19 +41,24 @@ export async function POST(req: NextRequest) {
     body.scan_id, body.file_path, body.reviewer_email, now,
   );
 
-  // Insert immutable attestation record
+  // Upsert attestation record — idempotent so re-attesting the same file
+  // (duplicate click, retry after network error, attest-all re-run) succeeds
+  // rather than failing with a unique constraint violation.
   const { data: attestation, error: attErr } = await db
     .from("attestations")
-    .insert({
-      org_id,
-      scan_id:         body.scan_id,
-      file_path:       body.file_path,
-      risk_score:      file?.risk_score ?? "UNKNOWN",
-      reviewer_id:     user_id ?? null,
-      reviewer_email:  body.reviewer_email,
-      reviewer_github: body.reviewer_github ?? null,
-      payload_hash:    payloadHash,
-    })
+    .upsert(
+      {
+        org_id,
+        scan_id:         body.scan_id,
+        file_path:       body.file_path,
+        risk_score:      file?.risk_score ?? "UNKNOWN",
+        reviewer_id:     user_id ?? null,
+        reviewer_email:  body.reviewer_email,
+        reviewer_github: body.reviewer_github ?? null,
+        payload_hash:    payloadHash,
+      },
+      { onConflict: "scan_id,file_path", ignoreDuplicates: false },
+    )
     .select("id, created_at")
     .single();
 

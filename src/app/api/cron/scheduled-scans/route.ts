@@ -12,15 +12,10 @@ import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
-
-const SCANNABLE_EXTS = new Set(["py","ts","tsx","js","jsx","rb","go","rs","java","kt","cs","php"]);
-
-function isScannable(path: string): boolean {
-  return SCANNABLE_EXTS.has(path.split(".").pop()?.toLowerCase() ?? "");
-}
 
 export async function GET(req: NextRequest) {
   const auth = req.headers.get("authorization");

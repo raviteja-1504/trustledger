@@ -20,18 +20,11 @@ import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import crypto from "crypto";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
-
-const SCANNABLE_EXTS = new Set([
-  "py","ts","tsx","js","jsx","rb","go","rs","java","kt","cs","php","cpp","c","swift",
-]);
-
-function isScannable(path: string): boolean {
-  return SCANNABLE_EXTS.has(path.split(".").pop()?.toLowerCase() ?? "");
-}
 
 async function getGitLabToken(db: ReturnType<typeof createServiceClient>, orgId: string): Promise<string | null> {
   const { data } = await db

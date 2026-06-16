@@ -237,6 +237,39 @@ const SECRET_PATTERNS: SecretPattern[] = [
 // never real secrets — flagging them is a pure false positive.
 const KNOWN_PLACEHOLDER_SECRET_RE = /AKIAIOSFODNN7EXAMPLE|wJalrXUtnFEMI\/K7MDENG\/bPxRfiCYEXAMPLEKEY/;
 
+// Quoted string literals of 4+ chars — used to inspect *values* assigned to
+// secret-shaped variables, rather than the whole line (which would also match
+// the variable name itself, e.g. "...PASSWORD...").
+const QUOTED_VALUE_RE = /["']([^"']{4,})["']/g;
+
+// A quoted value containing one of these markers is a synthetic/demo
+// placeholder, not a real credential: "..." truncation, "xxxx" filler, or
+// words that only appear in sample/demo/test data ("trustledger" referring
+// to this product itself, "password"/"demo"/"sample"/"fake"/"dummy"/
+// "placeholder"/"example"/"exmp").
+const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|password|demo|sample|fake|dummy|placeholder|example|exmp/i;
+
+// A quoted value that is purely a human-readable label (letters/spaces only)
+// is a UI string, not a credential — e.g. private_key: "Private Key".
+const LABEL_VALUE_RE = /^[A-Za-z][A-Za-z ]{2,29}$/;
+
+function isPlaceholderSecretLine(line: string): boolean {
+  if (KNOWN_PLACEHOLDER_SECRET_RE.test(line)) return true;
+  QUOTED_VALUE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = QUOTED_VALUE_RE.exec(line))) {
+    const v = m[1];
+    if (PLACEHOLDER_VALUE_RE.test(v) || LABEL_VALUE_RE.test(v)) return true;
+  }
+  return false;
+}
+
+// Source files whose entire content is fixture/demo data describing
+// *other* (fictional) findings for the demo UI and test suite — not this
+// app's own runtime logic. Secret-shaped strings here are intentional demo
+// content, not exposed credentials.
+const DEMO_DATA_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog)\.ts$/;
+
 // Shannon entropy — detects novel secret formats that match no known pattern
 function shannonEntropy(s: string): number {
   const freq: Record<string, number> = {};
@@ -596,12 +629,13 @@ function runDetector(
   return found;
 }
 
-function findSecrets(lines: string[]): ScanIndicator[] {
+function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
+  if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const found: ScanIndicator[] = [];
   for (const { re, label, severity } of SECRET_PATTERNS) {
     for (let i = 0; i < lines.length; i++) {
       if (isNonExecutableLine(lines[i])) continue;
-      if (KNOWN_PLACEHOLDER_SECRET_RE.test(lines[i])) continue;
+      if (isPlaceholderSecretLine(lines[i])) continue;
       if (re.test(lines[i]))
         found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
     }
@@ -609,7 +643,8 @@ function findSecrets(lines: string[]): ScanIndicator[] {
   return found;
 }
 
-function findHighEntropySecrets(lines: string[]): ScanIndicator[] {
+function findHighEntropySecrets(lines: string[], file_path: string): ScanIndicator[] {
+  if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const found: ScanIndicator[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -3092,8 +3127,8 @@ export function analyzeFile(file_path: string, content: string): FileAnalysis {
 
   // Security scan — all detectors
   const rawIndicators: ScanIndicator[] = [
-    ...findSecrets(lines),
-    ...findHighEntropySecrets(lines),
+    ...findSecrets(lines, file_path),
+    ...findHighEntropySecrets(lines, file_path),
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
     ...findWeakCrypto(lines),

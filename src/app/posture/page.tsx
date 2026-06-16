@@ -45,40 +45,6 @@ interface Recommendation {
   action: string;
 }
 
-// ── Offline fallback ───────────────────────────────────────────────────────────
-
-function makeOffline(): DashboardData {
-  const o = ORG;
-  return {
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:"2026-05-24", scan_count:18, file_count:142, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.92, last_scan:"2026-05-25", scan_count:12, file_count:98,  latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.58, attestation_rate:0.67, last_scan:"2026-05-26", scan_count:9,  file_count:76,  latest_scan_id:"sc_mock_003" },
-      { repo:`${o}/risk-engine`,     ai_pct:0.36, attestation_rate:0.95, last_scan:"2026-05-23", scan_count:7,  file_count:54,  latest_scan_id:"sc_mock_004" },
-      { repo:`${o}/data-platform`,   ai_pct:0.62, attestation_rate:0.55, last_scan:"2026-05-22", scan_count:5,  file_count:61,  latest_scan_id:"sc_mock_005" },
-    ],
-    overall_ai_pct: 0.54,
-    attestation_rate: 0.78,
-    unattested_deploy_count: 3,
-    risk_trend: [
-      { date:"2026-04-01", high_count:12, critical_count:4, medium_count:18 },
-      { date:"2026-04-15", high_count:10, critical_count:3, medium_count:15 },
-      { date:"2026-05-01", high_count:8,  critical_count:2, medium_count:12 },
-      { date:"2026-05-15", high_count:6,  critical_count:2, medium_count:10 },
-      { date:"2026-05-26", high_count:5,  critical_count:1, medium_count:8  },
-    ],
-    scan_count: 51,
-    file_count: 431,
-    top_risk_files: [
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py", ai_pct:0.92, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:482 },
-      { repo:`${o}/fraud-detection`, file_path:"models/risk_scorer.ts",            ai_pct:0.88, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_003", pr_number:219 },
-      { repo:`${o}/auth-service`,    file_path:"src/auth/token_service.py",        ai_pct:0.75, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_002", pr_number:341 },
-      { repo:`${o}/data-platform`,   file_path:"src/connectors/bigquery.ts",       ai_pct:0.81, risk_score:"MEDIUM",   attested:false, scan_id:"sc_mock_005", pr_number:101 },
-    ],
-  };
-}
-const OFFLINE: DashboardData = makeOffline();
-
 // ── Score computation ──────────────────────────────────────────────────────────
 
 function scoreGrade(s: number): ScoreBand {
@@ -455,18 +421,33 @@ const INDUSTRY_BENCHMARKS = [
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function PosturePage() {
-  const [data,              setData]              = useState<DashboardData>(OFFLINE);
+  const [data,              setData]              = useState<DashboardData | null>(null);
   const [loading,           setLoading]           = useState(true);
+  const [loadError,         setLoadError]         = useState<string | null>(null);
   const [lastSync,          setLastSync]          = useState<Date | null>(null);
   const [activeTab,         setActiveTab]         = useState<"overview" | "domains" | "recommendations" | "history">("overview");
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
 
   const fetchData = useCallback(async () => {
     const seed = readSeed();
-    const d = seed ?? await api.dashboard(ORG, 90).catch(() => OFFLINE);
-    setData(d);
-    setLastSync(new Date());
-    setLoading(false);
+    if (seed) {
+      setData(seed);
+      setLoadError(null);
+      setLastSync(new Date());
+      setLoading(false);
+      return;
+    }
+    try {
+      const d = await api.dashboard(ORG, 90);
+      setData(d);
+      setLoadError(null);
+    } catch (e) {
+      setData(null);
+      setLoadError(e instanceof Error ? e.message : "Failed to load posture data");
+    } finally {
+      setLastSync(new Date());
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -496,7 +477,8 @@ export default function PosturePage() {
   }, []);
 
   // Patch top_risk_files with locally-resolved violations so recommendations reflect current state
-  const patchedData = useMemo<DashboardData>(() => {
+  const patchedData = useMemo<DashboardData | null>(() => {
+    if (!data) return null;
     const riskPfx = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
     try {
       const vs = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
@@ -519,15 +501,46 @@ export default function PosturePage() {
     } catch { return data; }
   }, [data, violationStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const domains   = useMemo(() => computeDomains(patchedData),    [patchedData, violationStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
+  const domains   = useMemo(() => patchedData ? computeDomains(patchedData) : [], [patchedData, violationStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
   const overall   = useMemo(() => computeOverall(domains),        [domains]);
   const grade     = useMemo(() => scoreGrade(overall),            [overall]);
   const gradeMeta_ = gradeMeta(grade);
-  const history   = useMemo(() => buildHistory(data),             [data]);
-  const recs      = useMemo(() => buildRecommendations(domains, patchedData), [domains, patchedData]);
+  const history   = useMemo(() => data ? buildHistory(data) : [], [data]);
+  const recs      = useMemo(() => patchedData ? buildRecommendations(domains, patchedData) : [], [domains, patchedData]);
 
   const criticalRecs = recs.filter(r => r.priority === "critical").length;
   const highRecs     = recs.filter(r => r.priority === "high").length;
+
+  if (!data || !patchedData) {
+    return (
+      <AuthGuard>
+        <PageSkeleton rows={4} cards={6}>
+        <div className="max-w-7xl mx-auto space-y-6 pb-10">
+          {loading ? (
+            <div className="section-card py-16 text-center">
+              <p className="text-sm font-bold text-gray-700">Loading security posture…</p>
+            </div>
+          ) : (
+            <div className="section-card py-16 text-center space-y-3">
+              <p className="text-sm font-bold text-gray-700">
+                {loadError ? "Couldn't load security posture" : "No posture data yet"}
+              </p>
+              <p className="text-xs text-gray-400">
+                {loadError ?? "Once scans run for this organization, your security posture score will appear here."}
+              </p>
+              {loadError && (
+                <button onClick={fetchData}
+                  className="px-3 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors">
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        </PageSkeleton>
+      </AuthGuard>
+    );
+  }
 
   // Score chart points
   const histMax = Math.max(...history.map(p => p.score), overall);

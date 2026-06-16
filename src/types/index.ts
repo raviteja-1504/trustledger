@@ -2,12 +2,21 @@ export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "UNKNOWN";
 
 // ── Scan ─────────────────────────────────────────────────────────────────────
 
+export interface FileIndicator {
+  id:       string;
+  label:    string;
+  severity: string;
+  line?:    number;
+  detail?:  string;
+}
+
 export interface FileResult {
   file_path: string;
   language: string;
   ai_percentage: number;
   risk_score: RiskLevel;
   risk_indicators: string[];
+  indicators?: FileIndicator[];
   attested: boolean;
   content?: string;
 }
@@ -88,6 +97,20 @@ export interface DashboardData {
   scan_count: number;
   file_count: number;
   top_risk_files: TopRiskFile[];
+  // Counts of open CRITICAL/HIGH violations whose attestation SLA deadline
+  // has already passed (subset of unattested_deploy_count). Optional so
+  // older cached/seed payloads without these fields still type-check.
+  sla_breach_critical_count?: number;
+  sla_breach_high_count?: number;
+  // Individual CRITICAL/HIGH violations whose SLA deadline has passed —
+  // lets the UI point directly at the breached files instead of just a count.
+  sla_breach_files?: Array<{
+    file_path: string;
+    risk_score: RiskLevel;
+    repo: string;
+    scan_id: string;
+    sla_deadline: string;
+  }>;
 }
 
 // ── Activity ──────────────────────────────────────────────────────────────────

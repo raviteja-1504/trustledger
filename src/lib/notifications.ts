@@ -271,47 +271,8 @@ function diff(prev: DashboardData | null, next: DashboardData): Notification[] {
 }
 
 const BASE_URL = "";
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
-// Fallback data used when the backend is unreachable, so notifications still fire
-function makeOfflineData(): DashboardData {
-  const o = ORG;
-  return {
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:"2026-05-30", scan_count:34, file_count:214, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.88, last_scan:"2026-05-30", scan_count:28, file_count:167, latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.63, attestation_rate:0.67, last_scan:"2026-05-29", scan_count:21, file_count:143, latest_scan_id:"sc_mock_003" },
-      { repo:`${o}/risk-engine`,     ai_pct:0.38, attestation_rate:0.91, last_scan:"2026-05-28", scan_count:15, file_count:98,  latest_scan_id:"sc_mock_004" },
-      { repo:`${o}/data-platform`,   ai_pct:0.67, attestation_rate:0.52, last_scan:"2026-05-27", scan_count:19, file_count:134, latest_scan_id:"sc_mock_005" },
-      { repo:`${o}/ml-platform`,     ai_pct:0.79, attestation_rate:0.45, last_scan:"2026-05-29", scan_count:11, file_count:112, latest_scan_id:"sc_mock_006" },
-      { repo:`${o}/api-gateway`,     ai_pct:0.52, attestation_rate:0.74, last_scan:"2026-05-30", scan_count:19, file_count:124, latest_scan_id:"sc_mock_007" },
-    ],
-    overall_ai_pct: 0.67,
-    attestation_rate: 0.72,
-    unattested_deploy_count: 5,
-    scan_count: 147,
-    file_count: 992,
-    risk_trend: [
-      { date:"2026-03-01", high_count:22, critical_count:8,  medium_count:31 },
-      { date:"2026-03-15", high_count:19, critical_count:7,  medium_count:27 },
-      { date:"2026-04-01", high_count:17, critical_count:6,  medium_count:23 },
-      { date:"2026-04-15", high_count:14, critical_count:5,  medium_count:19 },
-      { date:"2026-05-01", high_count:11, critical_count:4,  medium_count:15 },
-      { date:"2026-05-15", high_count:8,  critical_count:3,  medium_count:11 },
-      { date:"2026-05-30", high_count:6,  critical_count:2,  medium_count:8  },
-    ],
-    top_risk_files: [
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py",   ai_pct:0.94, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/ml-platform`,     file_path:"src/models/inference_engine.py",     ai_pct:0.91, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_006", pr_number:88  },
-      { repo:`${o}/fraud-detection`, file_path:"models/risk_scorer.ts",              ai_pct:0.88, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_003", pr_number:247 },
-      { repo:`${o}/auth-service`,    file_path:"src/auth/token_service.py",          ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_002", pr_number:371 },
-      { repo:`${o}/data-platform`,   file_path:"src/connectors/bigquery_writer.ts",  ai_pct:0.83, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_005", pr_number:118 },
-    ],
-  };
-}
-const OFFLINE_DATA: DashboardData = makeOfflineData();
-
-async function fetchDashboard(): Promise<{ data: DashboardData; hasSession: boolean }> {
+async function fetchDashboard(): Promise<{ data: DashboardData | null; hasSession: boolean }> {
   try {
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token ?? null;
@@ -323,11 +284,11 @@ async function fetchDashboard(): Promise<{ data: DashboardData; hasSession: bool
     const res = await fetch(`${BASE_URL}/api/dashboard`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
-    if (!res.ok) return { data: loadSnap() ?? OFFLINE_DATA, hasSession: !!token };
+    if (!res.ok) return { data: loadSnap(), hasSession: !!token };
     const data = await res.json() as DashboardData;
     return { data, hasSession: !!token };
   } catch {
-    return { data: loadSnap() ?? OFFLINE_DATA, hasSession: false };
+    return { data: loadSnap(), hasSession: false };
   }
 }
 
@@ -360,6 +321,7 @@ export function useNotifications() {
 
   const poll = useCallback(async () => {
     const { data, hasSession } = await fetchDashboard();
+    if (!data) return;
     const snap  = loadSnap();
     // On a fresh session, always regenerate state-based notifications
     const fresh = isNewSession() ? stateNotifications(data) : diff(snap, data);

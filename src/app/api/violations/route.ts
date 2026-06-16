@@ -14,6 +14,14 @@ export async function GET(req: NextRequest) {
   const limit  = parseInt(url.searchParams.get("limit") ?? "100");
 
   const db = createServiceClient();
+
+  // For "currently outstanding" queries (open/in_review), we need to see ALL
+  // of a file's violations across scans — not just ones matching `status` —
+  // so we can tell whether a later scan (and possibly its attestation)
+  // superseded an older still-open violation for that same file. The status
+  // filter is applied after dedup in that case.
+  const dedupe = status === "open" || status === "in_review";
+
   let query = db
     .from("violations")
     .select("*, scans(repo_full_name, pr_number, commit_sha)")
@@ -21,13 +29,29 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: false })
     .limit(limit);
 
-  if (status)            query = query.eq("status", status);
+  if (status && !dedupe) query = query.eq("status", status);
   if (repo)              query = query.eq("scans.repo_full_name", repo);
 
   const { data, error: qErr } = await query;
   if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
 
-  return NextResponse.json({ violations: data ?? [] });
+  let violations = data ?? [];
+
+  // Dedupe by repo+file_path, keeping only the most recent scan's violation
+  // (rows are already ordered created_at desc, so the first one seen per key
+  // is the latest), then keep it only if it still matches the requested status.
+  if (dedupe) {
+    const latestByFile = new Map<string, typeof violations[number]>();
+    violations.forEach(v => {
+      const scans = v.scans as { repo_full_name?: string } | { repo_full_name?: string }[] | null;
+      const scan  = Array.isArray(scans) ? scans[0] : scans;
+      const key   = `${scan?.repo_full_name ?? ""}::${v.file_path}`;
+      if (!latestByFile.has(key)) latestByFile.set(key, v);
+    });
+    violations = Array.from(latestByFile.values()).filter(v => v.status === status);
+  }
+
+  return NextResponse.json({ violations });
 }
 
 export async function PATCH(req: NextRequest) {

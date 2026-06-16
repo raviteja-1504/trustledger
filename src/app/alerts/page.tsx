@@ -50,9 +50,10 @@ interface Alert {
 }
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-function getReviewerEmail(): string {
+function getReviewerEmail(currentUserEmail?: string): string {
+  if (currentUserEmail) return currentUserEmail;
   try { const m = JSON.parse(localStorage.getItem("tl_team_members") ?? "[]"); if (m[0]?.email) return m[0].email; } catch { /* */ }
-  return `reviewer@${ORG}.io`;
+  return "unknown";
 }
 
 // ── SLA per priority ────────────────────────────────────────────────────────────
@@ -219,24 +220,6 @@ function deriveAlerts(data: DashboardData): Alert[] {
   return alerts;
 }
 
-// ── Offline fallback ───────────────────────────────────────────────────────────
-
-function makeOfflineAlerts(): Alert[] {
-  const o = ORG;
-  return [
-  { id:"al_001", group_id:"pr-482", severity:"P1", source:"secret", status:"firing", channel:"slack", repo:`${o}/payments-api`, scan_id:"sc_mock_001", pr_number:482, fired_at:"2026-05-26T14:32:20Z", escalation:[`security-lead@${o}.io`], runbook:`https://wiki.${o}.io/runbooks/leaked-credentials`, notes:[], history:[{action:"Alert created",at:"2026-05-26T14:32:20Z"}], title:"Production Stripe API key committed to source code", body:"card_validator.py in payments-api PR #482 contains sk_live_51Hx2••• — a live Stripe API key. Treat as compromised. Rotate immediately." },
-  { id:"al_002", group_id:"pr-482", severity:"P1", source:"policy", status:"firing", channel:"in-app", repo:`${o}/payments-api`, scan_id:"sc_mock_001", pr_number:482, fired_at:"2026-05-26T14:32:22Z", escalation:[`devops@${o}.io`], notes:[], history:[{action:"Alert created",at:"2026-05-26T14:32:22Z"}], title:"Merge blocked — 2 CRITICAL unattested files in payment path", body:"payments-api PR #482 cannot merge. card_validator.py and stripe_client.py are CRITICAL-risk and require attestation." },
-  { id:"al_003", group_id:"pr-219", severity:"P1", source:"dependency", status:"acknowledged", channel:"slack", repo:`${o}/fraud-detection`, pr_number:219, fired_at:"2026-05-26T10:05:10Z", acknowledged_by:`alice@${o}.io`, escalation:[`security-lead@${o}.io`], runbook:`https://wiki.${o}.io/runbooks/supply-chain`, notes:["Confirmed malicious — removal PR in progress"], history:[{action:"Alert created",at:"2026-05-26T10:05:10Z"},{action:"Acknowledged",by:`alice@${o}.io`,at:"2026-05-26T10:30:00Z",note:"Confirmed malicious — removal PR in progress"}], title:"Typosquatting package — stripe-client (malicious)", body:"fraud-detection introduced stripe-client v1.0.2, a known typosquatting package containing a credential harvester. Remove immediately." },
-  { id:"al_004", group_id:"pr-219", severity:"P1", source:"dependency", status:"firing", channel:"in-app", repo:`${o}/fraud-detection`, pr_number:219, fired_at:"2026-05-26T10:05:15Z", escalation:[`ciso@${o}.io`], notes:[], history:[{action:"Alert created",at:"2026-05-26T10:05:15Z"}], title:"Hallucinated package 'ml-utils-fast' — supply chain risk", body:"risk_scorer.ts imports ml-utils-fast which does not exist on PyPI. Attackers can publish a matching malicious package at any time." },
-  { id:"al_005", group_id:"pr-482", severity:"P2", source:"scan", status:"firing", channel:"email", repo:`${o}/payments-api`, scan_id:"sc_mock_001", pr_number:482, fired_at:"2026-05-26T14:32:18Z", notes:[], history:[{action:"Alert created",at:"2026-05-26T14:32:18Z"}], title:"AI content spike — payments-api PR #482 at 91%", body:"Scan detected 91% average AI content across 8 files in payments-api, exceeding the org threshold of 80%." },
-  { id:"al_006", group_id:"pr-479", severity:"P2", source:"sla", status:"firing", channel:"slack", repo:`${o}/payments-api`, scan_id:"sc_mock_001", pr_number:479, fired_at:"2026-05-24T10:00:00Z", escalation:[`security-lead@${o}.io`], notes:[], history:[{action:"Alert created",at:"2026-05-24T10:00:00Z"}], title:"SLA breach — stripe_client.py unattested 50+ hours", body:"stripe_client.py (HIGH, 76% AI) has exceeded the 48h HIGH-risk attestation SLA. Escalating to security lead." },
-  { id:"al_007", group_id:"pr-341", severity:"P2", source:"secret", status:"acknowledged", channel:"email", repo:`${o}/auth-service`, scan_id:"sc_mock_002", pr_number:341, fired_at:"2026-05-25T09:22:00Z", acknowledged_by:`bob@${o}.io`, notes:["Rotating key — ETA 2h"], history:[{action:"Alert created",at:"2026-05-25T09:22:00Z"},{action:"Acknowledged",by:`bob@${o}.io`,at:"2026-05-25T10:00:00Z",note:"Rotating key — ETA 2h"}], title:"JWT signing secret hardcoded in auth-service", body:"token_service.py contains jwt_secret_prod_2024. JWT signatures can be forged if this key is exposed." },
-  { id:"al_008", group_id:"repo-fraud", severity:"P3", source:"anomaly", status:"snoozed", channel:"in-app", repo:`${o}/fraud-detection`, fired_at:"2026-05-25T09:00:00Z", snooze_until:"2026-05-28T09:00:00Z", notes:["Snoozed — team aware, sprint review scheduled"], history:[{action:"Alert created",at:"2026-05-25T09:00:00Z"},{action:"Snoozed 72h",at:"2026-05-25T09:30:00Z"}], title:"Unusual AI content pattern in fraud-detection", body:"fraud-detection showed a 17pp increase in avg AI content over 7 days. May indicate accelerated AI adoption without governance coverage." },
-  { id:"al_009", group_id:"repo-auth", severity:"P3", source:"policy", status:"resolved", channel:"slack", repo:`${o}/auth-service`, pr_number:341, fired_at:"2026-05-25T11:00:00Z", resolved_at:"2026-05-26T13:18:00Z", notes:[], history:[{action:"Alert created",at:"2026-05-25T11:00:00Z"},{action:"Resolved",by:`alice@${o}.io`,at:"2026-05-26T13:18:00Z",note:"Coverage restored to 92% after attestation batch"}], title:"auth-service attestation coverage dropped below 80%", body:"auth-service attestation rate fell from 92% to 67% after 3 new HIGH files were added in PR #341." },
-  { id:"al_010", severity:"P4", source:"scan", status:"resolved", channel:"in-app", repo:`${o}/risk-engine`, fired_at:"2026-05-22T08:45:00Z", resolved_at:"2026-05-22T08:45:00Z", notes:[], history:[{action:"Alert created",at:"2026-05-22T08:45:00Z"},{action:"Auto-resolved",at:"2026-05-22T08:46:00Z"}], title:"New repository — risk-engine now monitored", body:`${o}/risk-engine connected to TrustLedger. 54 files scanned across 7 PRs. Initial health score: 89.` },
-  ];
-}
-const OFFLINE_ALERTS: Alert[] = makeOfflineAlerts();
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 
@@ -319,7 +302,8 @@ function SLAClock({ firedAt, severity, status }: { firedAt: string; severity: Al
 export default function AlertsPage() {
   const { success, info, warning } = useToastHelpers();
   const { profile } = useAuth();
-  const [baseAlerts,  setBaseAlerts]  = useState<Alert[]>(OFFLINE_ALERTS);
+  const [baseAlerts,  setBaseAlerts]  = useState<Alert[]>([]);
+  const [loadError,   setLoadError]   = useState<string | null>(null);
   const [persisted,   setPersisted]   = useState<PersistedState>({ statuses:{}, ackBy:{}, snoozeUntil:{}, resolvedAt:{}, notes:{}, history:{} });
   const [refreshing,  setRefreshing]  = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
@@ -352,6 +336,7 @@ export default function AlertsPage() {
         const res = await authedFetch<{ alerts: Alert[] }>("/api/alerts?limit=100");
         if (res.alerts.length > 0) {
           setBaseAlerts(res.alerts);
+          setLoadError(null);
           setLastRefreshed(new Date());
           if (spinner) setRefreshing(false);
           return;
@@ -359,15 +344,19 @@ export default function AlertsPage() {
       } catch { /* fall through to derived */ }
     }
 
-    // Derive from dashboard data (seed/offline fallback)
+    // No fired alerts on record — derive informational alerts from the
+    // current risk state (real dashboard data, or a dev-seeded snapshot).
     const seed = readSeed();
     const data = seed ?? await api.dashboard(ORG, 90).catch(() => null);
     if (data) {
       // Apply locally-resolved attestations so attested files don't generate alerts
       const patched = patchDataWithAttestations(data);
-      const derived = deriveAlerts(patched);
-      setBaseAlerts(derived.length > 0 ? derived : OFFLINE_ALERTS);
+      setBaseAlerts(deriveAlerts(patched));
+      setLoadError(null);
       setLastRefreshed(new Date());
+    } else if (profile?.org_id) {
+      setBaseAlerts([]);
+      setLoadError("Unable to load alerts. Check your connection and try again.");
     }
     if (spinner) setRefreshing(false);
   }, [profile?.org_id]);
@@ -426,7 +415,7 @@ export default function AlertsPage() {
   function addHistory(id: string, action: string, note?: string) {
     const a = alerts.find(x => x.id === id);
     const prev = a?.history ?? [];
-    const entry: AlertHistoryEntry = { action, by: getReviewerEmail(), at: new Date().toISOString(), note };
+    const entry: AlertHistoryEntry = { action, by: getReviewerEmail(profile?.email), at: new Date().toISOString(), note };
     updatePersisted(id, { history:{ [id]: [...prev, entry] } });
   }
 
@@ -441,7 +430,7 @@ export default function AlertsPage() {
     const now = new Date().toISOString();
     activeIds.forEach(id => {
       const statuses    = { [id]: status };
-      const ackBy       = status === "acknowledged"                       ? { [id]: getReviewerEmail() } : {};
+      const ackBy       = status === "acknowledged"                       ? { [id]: getReviewerEmail(profile?.email) } : {};
       const snoozeUntil = status === "snoozed" && snoozeMs               ? { [id]: new Date(Date.now() + snoozeMs).toISOString() } : {};
       const resolvedAt  = status === "resolved"                           ? { [id]: now } : {};
       updatePersisted(id, { statuses, ackBy, snoozeUntil, resolvedAt });
@@ -482,7 +471,7 @@ export default function AlertsPage() {
     if (!text) return;
     const a = alerts.find(x => x.id === id);
     const prev = a?.notes ?? [];
-    updatePersisted(id, { notes: { [id]: [...prev, `${getReviewerEmail()}: ${text}`] } });
+    updatePersisted(id, { notes: { [id]: [...prev, `${getReviewerEmail(profile?.email)}: ${text}`] } });
     addHistory(id, "Note added", text);
     success("Note saved", text.slice(0, 50));
     setNoteInput(p => ({ ...p, [id]:"" }));
@@ -954,6 +943,14 @@ export default function AlertsPage() {
 
           <span className="text-xs text-gray-400">{filtered.length} alerts</span>
         </div>
+
+        {/* Load error banner */}
+        {loadError && (
+          <div className="animate-fade-up flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm font-medium">
+            <span><span className="font-bold">Couldn&apos;t load alerts.</span> {loadError}</span>
+            <button onClick={() => fetchAlerts(true)} className="shrink-0 text-rose-600 hover:text-rose-900 font-bold text-xs">Retry</button>
+          </div>
+        )}
 
         {/* Alert list */}
         <div className="animate-fade-up space-y-3">

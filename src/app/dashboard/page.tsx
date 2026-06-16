@@ -17,7 +17,6 @@ const TopRiskFilesPanel  = dynamic(() => import("@/components/TopRiskFilesPanel"
 const ComplianceReadiness= dynamic(() => import("@/components/ComplianceReadiness"),{ ssr:false });
 const ActionItemsPanel   = dynamic(() => import("@/components/ActionItemsPanel"),  { ssr:false });
 import { api } from "@/lib/api";
-import { dashboardWithSeed } from "@/lib/offlineData";
 import { loadPolicy } from "@/lib/policy";
 import { computeTrustScore, scoreColor } from "@/lib/trustScore";
 import { useScansRealtime } from "@/lib/realtime";
@@ -27,65 +26,12 @@ import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/roles";
 import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
 import type { DashboardData, RepoStat, RiskLevel, ActivityEvent } from "@/types";
+import { countOpenViolations } from "@/lib/violations";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
 type DaysOption = (typeof DAYS_OPTIONS)[number];
 type RangeMode = DaysOption | "custom";
 const ORG       = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
-
-// ── Mock data (used when backend is offline) ──────────────────────────────────
-
-function makeMockData(): DashboardData {
-  const o = ORG;
-  const relDate  = (daysBack: number) => new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];
-  const weekDate = (weeksBack: number) => relDate(weeksBack * 7);
-  return {
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:relDate(2), scan_count:18, file_count:142, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.92, last_scan:relDate(1), scan_count:12, file_count:98,  latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.58, attestation_rate:0.67, last_scan:relDate(0), scan_count:9,  file_count:76,  latest_scan_id:"sc_mock_003" },
-      { repo:`${o}/risk-engine`,     ai_pct:0.36, attestation_rate:0.95, last_scan:relDate(3), scan_count:7,  file_count:54,  latest_scan_id:"sc_mock_004" },
-      { repo:`${o}/data-platform`,   ai_pct:0.62, attestation_rate:0.55, last_scan:relDate(4), scan_count:5,  file_count:61,  latest_scan_id:"sc_mock_005" },
-    ],
-    overall_ai_pct:          0.54,
-    attestation_rate:        0.78,
-    unattested_deploy_count: 3,
-    scan_count:              51,
-    file_count:              431,
-    risk_trend: [
-      { date:weekDate(5), high_count:5,  critical_count:3, medium_count:9  },
-      { date:weekDate(4), high_count:4,  critical_count:2, medium_count:7  },
-      { date:weekDate(3), high_count:6,  critical_count:3, medium_count:8  },
-      { date:weekDate(2), high_count:3,  critical_count:1, medium_count:5  },
-      { date:weekDate(1), high_count:2,  critical_count:1, medium_count:4  },
-    ],
-    top_risk_files: [
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py",   ai_pct:0.91, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:482 },
-      { repo:`${o}/fraud-detection`, file_path:"models/risk_scorer.ts",              ai_pct:0.83, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_003", pr_number:219 },
-      { repo:`${o}/payments-api`,    file_path:"src/gateway/stripe_client.py",       ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:479 },
-      { repo:`${o}/auth-service`,    file_path:"src/oauth/token_exchange.ts",        ai_pct:0.68, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_002", pr_number:341 },
-      { repo:`${o}/fraud-detection`, file_path:"src/rules/velocity_check.py",        ai_pct:0.62, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_003", pr_number:218 },
-      { repo:`${o}/payments-api`,    file_path:"src/api/refund_handler.py",          ai_pct:0.55, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_001", pr_number:477 },
-      { repo:`${o}/auth-service`,    file_path:"src/middleware/rate_limiter.ts",     ai_pct:0.49, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_002", pr_number:338 },
-      { repo:`${o}/data-platform`,   file_path:"src/pipelines/etl_runner.py",        ai_pct:0.65, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_005", pr_number:103 },
-      { repo:`${o}/risk-engine`,     file_path:"src/models/credit_score.ts",         ai_pct:0.41, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_004", pr_number:88  },
-      { repo:`${o}/payments-api`,    file_path:"src/utils/currency_formatter.py",    ai_pct:0.22, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_001", pr_number:471 },
-    ],
-  };
-}
-const MOCK_DATA: DashboardData = makeMockData();
-
-function getReviewers(): string[] {
-  try {
-    const stored = typeof window !== "undefined" ? localStorage.getItem("tl_team_members") : null;
-    if (stored) {
-      const members: { email: string }[] = JSON.parse(stored);
-      if (members.length > 0) return members.map(m => m.email);
-    }
-  } catch { /* fall through */ }
-  return [`alice@${ORG}.io`, `bob@${ORG}.io`, `carol@${ORG}.io`, `dave@${ORG}.io`];
-}
 
 function deriveActivity(data: DashboardData): ActivityEvent[] {
   const events: ActivityEvent[] = [];
@@ -126,7 +72,7 @@ function deriveActivity(data: DashboardData): ActivityEvent[] {
       file_count: 0,
       total_ai_pct: f.ai_pct,
       file_path: f.file_path,
-      reviewer_email: f.attested_by ?? getReviewers()[i % getReviewers().length],
+      reviewer_email: f.attested_by ?? "unknown",
     });
   });
 
@@ -154,35 +100,6 @@ function deriveActivity(data: DashboardData): ActivityEvent[] {
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .slice(0, 15);
 }
-
-const MOCK_ACTIVITY: ActivityEvent[] = (function() {
-  const o = ORG;
-  const rd = (daysBack: number) => new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];
-  return deriveActivity({
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:rd(0), scan_count:34, file_count:214, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.88, last_scan:rd(0), scan_count:28, file_count:167, latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.63, attestation_rate:0.67, last_scan:rd(1), scan_count:21, file_count:143, latest_scan_id:"sc_mock_003" },
-      { repo:`${o}/risk-engine`,     ai_pct:0.38, attestation_rate:0.91, last_scan:rd(2), scan_count:15, file_count:98,  latest_scan_id:"sc_mock_004" },
-      { repo:`${o}/data-platform`,   ai_pct:0.67, attestation_rate:0.52, last_scan:rd(3), scan_count:19, file_count:134, latest_scan_id:"sc_mock_005" },
-      { repo:`${o}/ml-platform`,     ai_pct:0.79, attestation_rate:0.45, last_scan:rd(1), scan_count:11, file_count:112, latest_scan_id:"sc_mock_006" },
-      { repo:`${o}/api-gateway`,     ai_pct:0.52, attestation_rate:0.74, last_scan:rd(0), scan_count:19, file_count:124, latest_scan_id:"sc_mock_007" },
-    ],
-    overall_ai_pct:0.67, attestation_rate:0.72, unattested_deploy_count:5, scan_count:147, file_count:992,
-    risk_trend:[
-      { date:rd(35), high_count:11, critical_count:4, medium_count:15 },
-      { date:rd(28), high_count:9,  critical_count:3, medium_count:12 },
-      { date:rd(21), high_count:8,  critical_count:3, medium_count:11 },
-      { date:rd(14), high_count:7,  critical_count:2, medium_count:10 },
-      { date:rd(7),  high_count:6,  critical_count:2, medium_count:8  },
-    ],
-    top_risk_files:[
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py",   ai_pct:0.94, risk_score:"CRITICAL", attested:true,  scan_id:"sc_mock_001", pr_number:512 },
-      { repo:`${o}/auth-service`,    file_path:"src/auth/token_service.py",          ai_pct:0.76, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_002", pr_number:371 },
-      { repo:`${o}/api-gateway`,     file_path:"src/middleware/auth_interceptor.ts", ai_pct:0.79, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_007", pr_number:203 },
-    ],
-  });
-})();
 
 // ── Executive Summary ─────────────────────────────────────────────────────────
 
@@ -308,6 +225,11 @@ function Sparkline({ repo, aiPct }: { repo: string; aiPct: number }) {
 // ── SLA helpers ───────────────────────────────────────────────────────────────
 
 function slaStatus(data: DashboardData) {
+  if (data.sla_breach_critical_count !== undefined || data.sla_breach_high_count !== undefined) {
+    const crit = data.sla_breach_critical_count ?? 0;
+    const high = data.sla_breach_high_count ?? 0;
+    return { crit, high, total: crit + high };
+  }
   const crit = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested).length;
   const high = data.top_risk_files.filter(f => f.risk_score === "HIGH" && !f.attested).length;
   return { crit, high, total: crit + high };
@@ -482,22 +404,35 @@ function SecurityInbox({ data }: { data: DashboardData }) {
   const high    = data.top_risk_files.filter(f => !f.attested && f.risk_score === "HIGH").length;
   const deploys = data.unattested_deploy_count;
 
-  // Read persisted status overrides from localStorage (set by /secrets page)
+  // Open secret findings — total comes from the /secrets page (tl_secret_total,
+  // populated from live scan data), minus anything resolved there.
   const openSecrets = (() => {
     try {
-      const statuses = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
-      const resolved = Object.values(statuses).filter(v => v === "resolved").length;
-      return Math.max(0, 8 - resolved); // 8 total mock findings
-    } catch { return 8; }
+      const total     = parseInt(localStorage.getItem("tl_secret_total") ?? "0", 10);
+      const statuses  = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
+      const resolved  = Object.values(statuses).filter(v => v === "resolved").length;
+      return Math.max(0, (isNaN(total) ? 0 : total) - resolved);
+    } catch { return 0; }
   })();
 
-  // Hallucinated packages (critical deps) — count from mock dep data
-  const hallucinatedCount = 1; // ml-utils-fast (typosquatting adds 1 more → but keep 1 hallucinated)
-  const typosquatCount    = 1; // stripe-client typosquatting
-  const critDepCount      = hallucinatedCount + typosquatCount;
+  // Hallucinated/typosquatting packages — published by the /dependencies page
+  // (tl_dep_risky_count) from live scan data.
+  const critDepCount = (() => {
+    try {
+      const count = parseInt(localStorage.getItem("tl_dep_risky_count") ?? "0", 10);
+      return isNaN(count) ? 0 : count;
+    } catch { return 0; }
+  })();
 
-  // Policy violations: unattested critical + high + deploy blocks
-  const violationsCount = crit + high + (deploys > 0 ? 1 : 0);
+  // Total open policy violations — same list shown on /violations and counted
+  // in the Sidebar nav badge (src/lib/violations.ts), so this stays in sync
+  // with those views instead of re-deriving its own subset/sum.
+  const violationsCount = (() => {
+    try {
+      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
+      return countOpenViolations(data, statuses);
+    } catch { return crit + high + (deploys > 0 ? 1 : 0); }
+  })();
 
   type Chip = { label: string; count: number; href: string; bg: string; text: string; border: string; dot: string };
 
@@ -848,7 +783,6 @@ export default function DashboardPage() {
   const [data,          setData]          = useState<DashboardData | null>(null);
   const [error,         setError]         = useState<string | null>(null);
   const [loading,       setLoading]       = useState(true);
-  const [isDemo,        setIsDemo]        = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [refreshAgo,    setRefreshAgo]    = useState("");
   const [activity,      setActivity]      = useState<ActivityEvent[]>([]);
@@ -861,6 +795,7 @@ export default function DashboardPage() {
   const [watchlist,     setWatchlistState]= useState<Set<string>>(new Set());
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [pulseCount,    setPulseCount]    = useState(0);
+  const [reloadKey,     setReloadKey]     = useState(0);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>(() => {
     if (typeof window === "undefined") return {};
     try { return JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>; }
@@ -877,7 +812,7 @@ export default function DashboardPage() {
     setData(null);
     setLoading(true);
     api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days)
-      .then(d => { setData(d); setIsDemo(false); setLastRefreshed(new Date()); })
+      .then(d => { setData(d); setLastRefreshed(new Date()); })
       .catch(() => {})
       .finally(() => setLoading(false));
   });
@@ -968,7 +903,7 @@ export default function DashboardPage() {
       try {
         const seed = JSON.parse(seedRaw) as DashboardData;
         if (Array.isArray(seed?.repos) && seed.repos.length > 0) {
-          setData(seed); setIsDemo(false); setLastRefreshed(new Date()); setLoading(false);
+          setData(seed); setLastRefreshed(new Date()); setLoading(false);
           setActivity(mergeWithLocal(deriveActivity(seed)));
           return;
         }
@@ -980,16 +915,15 @@ export default function DashboardPage() {
     const ed = rangeMode === "custom" ? endDate   : undefined;
     api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed)
       .then(d => {
-        setData(d); setIsDemo(false); setLastRefreshed(new Date());
+        setData(d); setLastRefreshed(new Date());
         // Activity is derived from real scan/attestation data — empty when the org has none yet.
         setActivity(mergeWithLocal(d.repos.length > 0 ? deriveActivity(d) : []));
       })
-      .catch(() => {
-        setData(MOCK_DATA); setIsDemo(true); setLastRefreshed(new Date());
-        setActivity(mergeWithLocal(MOCK_ACTIVITY));
+      .catch((e: Error) => {
+        setData(null); setError(e?.message || "Failed to load dashboard data");
       })
       .finally(() => setLoading(false));
-  }, [days, rangeMode, startDate, endDate, profile?.org_id]);
+  }, [days, rangeMode, startDate, endDate, profile?.org_id, reloadKey]);
 
   // Refresh-ago ticker
   useEffect(() => {
@@ -1235,10 +1169,13 @@ export default function DashboardPage() {
             </Link>
             {/* SLA breach badge */}
             {sla && sla.total > 0 && (
-              <span className="flex items-center gap-1 text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full ring-1 ring-rose-200">
+              <Link
+                href="/sla"
+                className="flex items-center gap-1 text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full ring-1 ring-rose-200 hover:bg-rose-100 transition-colors"
+              >
                 <SLAIcon />
                 {sla.total} SLA breach{sla.total > 1 ? "es" : ""}
-              </span>
+              </Link>
             )}
             {/* Watchlist active indicator */}
             {repoFilter === "watchlist" && (
@@ -1354,25 +1291,24 @@ export default function DashboardPage() {
         </div>
 
         {/* ── Setup guide for new orgs with no real data ──────────────── */}
-        {isDemo && data && data.repos.length === 0 && (
+        {!loading && !error && data && data.repos.length === 0 && (
           <SetupGuide />
         )}
 
-        {/* API offline banner — only shown when Supabase IS configured but unreachable.
-            Hidden in intentional demo/SKIP_AUTH mode to avoid confusing "API offline" noise. */}
-        {isDemo && !SKIP_AUTH && typeof window !== "undefined" && localStorage.getItem("tl_force_seed") !== "1" && (
-          <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2.5 rounded-xl text-xs font-medium">
+        {/* ── Error state ──────────────────────────────────────────────── */}
+        {error && !loading && (
+          <div className="animate-fade-up flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm font-medium">
             <div className="flex items-center gap-2">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
               </svg>
-              <span>
-                <span className="font-bold">API offline</span> — Supabase not connected.
-                Showing fallback data.
-              </span>
+              <span><span className="font-bold">Failed to load dashboard.</span> {error}</span>
             </div>
-            <button onClick={() => setIsDemo(false)} className="shrink-0 text-amber-600 hover:text-amber-900 font-bold text-xs">
-              Dismiss
+            <button
+              onClick={() => { setError(null); setLoading(true); setReloadKey(k => k + 1); }}
+              className="shrink-0 text-rose-600 hover:text-rose-900 font-bold text-xs"
+            >
+              Retry
             </button>
           </div>
         )}
@@ -1437,29 +1373,46 @@ export default function DashboardPage() {
             {sla && sla.total > 0 && (
               <div className="animate-fade-up flex items-stretch gap-3 bg-amber-50 border border-amber-200 rounded-xl overflow-hidden">
                 <div className="w-1 bg-amber-400 shrink-0" />
-                <div className="flex items-center gap-4 px-4 py-3 flex-1 flex-wrap">
-                  <div className="flex items-center gap-2 shrink-0">
-                    <SLAIcon />
-                    <p className="text-sm font-bold text-amber-800">Attestation SLA breached</p>
-                  </div>
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {sla.crit > 0 && (
-                      <span className="text-[11px] font-bold bg-violet-100 text-violet-800 px-2.5 py-1 rounded-full ring-1 ring-violet-200">
-                        {sla.crit} CRITICAL · 24h SLA
+                <div className="flex-1 px-4 py-3">
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="flex items-center gap-2 shrink-0">
+                      <SLAIcon />
+                      <p className="text-sm font-bold text-amber-800">Attestation SLA breached</p>
+                    </div>
+                    <div className="flex items-center gap-3 flex-wrap flex-1">
+                      {sla.crit > 0 && (
+                        <span className="text-[11px] font-bold bg-violet-100 text-violet-800 px-2.5 py-1 rounded-full ring-1 ring-violet-200">
+                          {sla.crit} CRITICAL · 24h SLA
+                        </span>
+                      )}
+                      {sla.high > 0 && (
+                        <span className="text-[11px] font-bold bg-orange-100 text-orange-800 px-2.5 py-1 rounded-full ring-1 ring-orange-200">
+                          {sla.high} HIGH · 72h SLA
+                        </span>
+                      )}
+                      <span className="text-xs text-amber-700">
+                        {sla.total} file{sla.total !== 1 ? "s" : ""} org-wide {sla.total !== 1 ? "have" : "has"} missed its attestation SLA deadline (separate from any single PR&apos;s pending-attestation count)
                       </span>
-                    )}
-                    {sla.high > 0 && (
-                      <span className="text-[11px] font-bold bg-orange-100 text-orange-800 px-2.5 py-1 rounded-full ring-1 ring-orange-200">
-                        {sla.high} HIGH · 72h SLA
-                      </span>
-                    )}
-                    <span className="text-xs text-amber-700">Files remain unattested past policy deadline</span>
+                    </div>
+                    <Link href="/sla" className="text-xs font-bold text-amber-700 hover:text-amber-900 whitespace-nowrap shrink-0">
+                      View SLA dashboard →
+                    </Link>
                   </div>
-                </div>
-                <div className="flex items-center pr-4">
-                  <Link href="/reports" className="text-xs font-bold text-amber-700 hover:text-amber-900 whitespace-nowrap">
-                    View report →
-                  </Link>
+                  {effectiveData.sla_breach_files && effectiveData.sla_breach_files.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2.5">
+                      {effectiveData.sla_breach_files.map(f => (
+                        <Link
+                          key={`${f.scan_id}::${f.file_path}`}
+                          href={`/pr/${f.scan_id}`}
+                          title={`${f.repo} · ${f.file_path}`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-700 bg-white hover:bg-amber-100 rounded-lg border border-amber-200 transition-colors whitespace-nowrap"
+                        >
+                          <span className={`inline-block w-1.5 h-1.5 rounded-full ${f.risk_score === "CRITICAL" ? "bg-violet-500" : "bg-orange-500"}`} />
+                          {f.file_path.split("/").pop()} →
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

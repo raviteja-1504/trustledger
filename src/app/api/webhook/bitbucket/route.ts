@@ -17,14 +17,11 @@ import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { isScannablePath } from "@/lib/scannableFiles";
 import crypto from "crypto";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
-
-const SCANNABLE_EXTS = new Set([
-  "py","ts","tsx","js","jsx","rb","go","rs","java","kt","cs","php","cpp","c","swift",
-]);
 
 function verifyBitbucketSignature(rawBody: string, signature: string | null, secret: string): boolean {
   if (!signature || !secret) return !secret; // if no secret configured, allow all
@@ -67,7 +64,7 @@ async function fetchBitbucketFiles(
   const diff = await diffRes.json() as { values?: Array<{ new: { path: string }; status: string }> };
 
   const paths = (diff.values ?? [])
-    .filter(f => f.status !== "removed" && SCANNABLE_EXTS.has(f.new?.path?.split(".").pop()?.toLowerCase() ?? ""))
+    .filter(f => f.status !== "removed" && isScannablePath(f.new?.path ?? ""))
     .map(f => f.new.path)
     .slice(0, 50);
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
+import { analyzeFile } from "@/lib/scanner";
 
 export async function GET(
   req: NextRequest,
@@ -41,14 +42,20 @@ export async function GET(
     overall_risk:        scan.overall_risk,
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
-    files: (files ?? []).map(f => ({
-      file_path:       f.file_path,
-      language:        f.language ?? "text",
-      ai_percentage:   f.ai_percentage,
-      risk_score:      f.risk_score,
-      risk_indicators: f.risk_indicators ?? [],
-      attested:        attestedSet.has(f.file_path),
-      content:         f.content ?? undefined,
-    })),
+    files: (files ?? []).map(f => {
+      const analysis = f.content ? analyzeFile(f.file_path, f.content) : null;
+      return {
+        file_path:       f.file_path,
+        language:        f.language ?? "text",
+        ai_percentage:   f.ai_percentage,
+        risk_score:      f.risk_score,
+        risk_indicators: f.risk_indicators ?? [],
+        indicators:      analysis?.indicators?.map(i => ({
+          id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail,
+        })) ?? [],
+        attested:        attestedSet.has(f.file_path),
+        content:         f.content ?? undefined,
+      };
+    }),
   });
 }

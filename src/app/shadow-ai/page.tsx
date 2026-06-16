@@ -68,16 +68,6 @@ function detectionId(d: { repo:string; file:string; date:string }) {
   return `${d.repo}|${d.file}|${d.date}`;
 }
 
-// ── Mock detection events (in production from attribution data in Supabase) ────
-
-// Offline fallback — used only when no seed data and no API available
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-const OFFLINE_DETECTIONS = [
-  { repo:`${ORG}/payments-api`,    file:"src/processors/card_validator.py",  tool:"chatgpt",       confidence:0.84, dev:`alice@${ORG}.io`,   date:"2026-06-08T14:22:00.000Z" },
-  { repo:`${ORG}/auth-service`,    file:"src/oauth/token_exchange.ts",       tool:"github-copilot",confidence:0.82, dev:`bob@${ORG}.io`,     date:"2026-06-07T09:15:00.000Z" },
-  { repo:`${ORG}/fraud-detection`, file:"models/risk_scorer.ts",             tool:"gemini",        confidence:0.71, dev:`charlie@${ORG}.io`, date:"2026-06-06T16:48:00.000Z" },
-];
-
 function buildDetections(
   rawDetections: Array<{ repo: string; file: string; tool: string; confidence: number; dev: string; date: string }>,
   allowed: string[],
@@ -128,7 +118,7 @@ export default function ShadowAIPage() {
     fetch("/api/shadow-ai?days=30")
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(d => setRawDetections(Array.isArray(d) ? d : d.detections ?? []))
-      .catch(() => setRawDetections(OFFLINE_DETECTIONS))
+      .catch(() => setRawDetections([]))
       .finally(() => setLoading(false));
   }, []);
 
@@ -490,6 +480,13 @@ export default function ShadowAIPage() {
             <div className="text-4xl mb-3">✅</div>
             <div className="font-black text-green-800 text-lg mb-2">No Shadow AI Detected</div>
             <div className="text-sm text-green-600">All AI tool usage matches your approved policy. Keep monitoring as team AI tool usage evolves.</div>
+          </div>
+        )}
+
+        {rawDetections.length === 0 && (
+          <div className="animate-fade-up section-card py-14 text-center space-y-1">
+            <p className="text-sm font-bold text-gray-600">No AI tool detections yet</p>
+            <p className="text-xs text-gray-400">Once scans run for this organization, detected AI coding tools will appear here.</p>
           </div>
         )}
 

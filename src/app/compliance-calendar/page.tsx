@@ -33,28 +33,6 @@ const STATUS_META = {
   "in-progress":{ label:"In Progress",color:"#f59e0b" },
 };
 
-// Default events (replaced by real org schedule in production)
-const DEFAULT_EVENTS: AuditEvent[] = [
-  // SOC 2
-  { id:"soc2-prep",    title:"SOC 2 Type II Audit Preparation",     framework:"SOC 2",    type:"review",      date:"2026-07-01", status:"upcoming",     owner:"alice@org.io",  notes:"Gather evidence for all TSCs" },
-  { id:"soc2-audit",   title:"SOC 2 Type II Audit Window Opens",     framework:"SOC 2",    type:"audit",       date:"2026-08-01", status:"upcoming",     owner:"alice@org.io",  link:"/compliance" },
-  { id:"soc2-report",  title:"SOC 2 Report Delivery Deadline",       framework:"SOC 2",    type:"deadline",    date:"2026-08-20", status:"upcoming",     owner:"alice@org.io" },
-  // EU AI Act
-  { id:"euai-review",  title:"EU AI Act High-Risk Assessment Review", framework:"EU AI Act",type:"review",      date:"2026-07-15", status:"upcoming",     owner:"bob@org.io" },
-  { id:"euai-deadline","title":"EU AI Act Compliance Deadline",       framework:"EU AI Act",type:"deadline",    date:"2026-08-01", status:"upcoming",     link:"/compliance" },
-  // PCI-DSS
-  { id:"pci-q2",       title:"PCI-DSS Quarterly Scan Review",        framework:"PCI-DSS",  type:"review",      date:"2026-06-30", status:"upcoming",     owner:"alice@org.io" },
-  { id:"pci-cert",     title:"PCI-DSS Certificate Expiry",           framework:"PCI-DSS",  type:"cert-expiry", date:"2026-08-22", status:"upcoming",     notes:"Renew with SecurityMetrics QSA" },
-  { id:"pci-audit",    title:"PCI-DSS Annual QSA Assessment",        framework:"PCI-DSS",  type:"audit",       date:"2026-09-01", status:"upcoming" },
-  // Internal
-  { id:"int-policy",   title:"Security Policy Annual Review",        framework:"Internal", type:"review",      date:"2026-06-30", status:"in-progress",  owner:"alice@org.io" },
-  { id:"int-training", title:"Security Awareness Training Deadline", framework:"Internal", type:"deadline",    date:"2026-07-15", status:"upcoming" },
-  { id:"int-pentest",  title:"Annual Penetration Test",              framework:"Internal", type:"audit",       date:"2026-10-01", status:"upcoming" },
-  // Already done
-  { id:"done-soc1",    title:"SOC 2 Type I Audit Completed",         framework:"SOC 2",    type:"audit",       date:"2026-02-28", status:"completed",    notes:"Clean opinion received" },
-  { id:"done-pci-q1",  title:"PCI-DSS Q1 Scan Review",              framework:"PCI-DSS",  type:"review",      date:"2026-03-31", status:"completed" },
-];
-
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 function daysUntil(dateStr: string): number {
@@ -71,7 +49,7 @@ export default function ComplianceCalendarPage() {
   const [showAdd,     setShowAdd]     = useState(false);
   const [newEvent,    setNewEvent]    = useState<Partial<AuditEvent>>({ type:"reminder", status:"upcoming", framework:"Internal" });
 
-  // Load: seed key → API → DEFAULT_EVENTS fallback
+  // Load: seed key (opt-in dev seed) → API → localStorage cache
   useEffect(() => {
     // Seed mode (no real org): read from tl_compliance_calendar
     if (isSeedMode() && !profile?.org_id) {
@@ -79,10 +57,10 @@ export default function ComplianceCalendarPage() {
         const raw = localStorage.getItem(CAL_KEY);
         if (raw) { setEvents(JSON.parse(raw) as AuditEvent[]); return; }
       } catch {}
-      setEvents(DEFAULT_EVENTS);
+      setEvents([]);
       return;
     }
-    // Live mode: try API, then localStorage cache, then defaults
+    // Live mode: try API, then localStorage cache
     authedFetch<AuditEvent[]>("/api/compliance-calendar")
       .then(data => { setEvents(data); localStorage.setItem(CAL_KEY, JSON.stringify(data)); })
       .catch(() => {
@@ -90,7 +68,7 @@ export default function ComplianceCalendarPage() {
           const cached = localStorage.getItem(CAL_KEY);
           if (cached) { setEvents(JSON.parse(cached) as AuditEvent[]); return; }
         } catch {}
-        setEvents(DEFAULT_EVENTS);
+        setEvents([]);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
@@ -246,8 +224,16 @@ export default function ComplianceCalendarPage() {
           </div>
         )}
 
+        {/* Empty state */}
+        {events.length === 0 && (
+          <div className="bg-white rounded-2xl border border-gray-200 py-14 text-center space-y-1 shadow-sm">
+            <p className="text-sm font-bold text-gray-600">No compliance events yet</p>
+            <p className="text-xs text-gray-400">Add audit deadlines, cert renewals, and policy reviews to start tracking your compliance calendar.</p>
+          </div>
+        )}
+
         {/* Timeline view */}
-        {view === "timeline" && (
+        {events.length > 0 && view === "timeline" && (
           <div className="space-y-6">
             {byMonth.map(([monthKey, monthEvents]) => {
               const [year, month] = monthKey.split("-");
@@ -265,7 +251,7 @@ export default function ComplianceCalendarPage() {
         )}
 
         {/* List view */}
-        {view === "list" && (
+        {events.length > 0 && view === "list" && (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
             <div className="divide-y divide-gray-50">
               {filtered.map(ev => <EventRow key={ev.id} event={ev} onToggle={toggleComplete} listMode />)}

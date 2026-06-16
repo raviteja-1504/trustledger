@@ -15,6 +15,11 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
+import { api } from "@/lib/api";
+import { collectManifestPackages } from "@/lib/manifestPackages";
+import type { DashboardData, ScanResult } from "@/types";
+
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
 // ── Private package scopes/prefixes for this org ─────────────────────────────
 // Packages matching these are from an internal registry — not public npm.
@@ -27,29 +32,6 @@ function isPrivatePackage(name: string): boolean {
   if (PRIVATE_PACKAGES.includes(name)) return true;
   return PRIVATE_SCOPES.some(s => name.startsWith(s + "/"));
 }
-
-// ── Sample packages from AI-heavy scans (in production pulled from Supabase) ──
-
-const SAMPLE_PACKAGES = [
-  // Public packages — verified on npm
-  { name:"react",               version:"^18.0.0",  source:"payments-api",    aiPr: false },
-  { name:"next",                version:"^13.5.0",  source:"payments-api",    aiPr: false },
-  { name:"@supabase/supabase-js",version:"^2.0.0",  source:"auth-service",    aiPr: false },
-  { name:"zod",                 version:"^3.22.0",  source:"payments-api",    aiPr: true  },
-  { name:"stripe",              version:"^13.0.0",  source:"payments-api",    aiPr: true  },
-  { name:"axios",               version:"^1.6.0",   source:"fraud-detection", aiPr: true  },
-  { name:"express",             version:"^4.18.0",  source:"risk-engine",     aiPr: false },
-  { name:"typescript",          version:"^5.0.0",   source:"auth-service",    aiPr: false },
-
-  // Private/internal packages — exist in internal registry, not public npm
-  { name:"payment-utils-pro",   version:"^2.1.0",   source:"payments-api",    aiPr: true  },
-  { name:"@novapay/card-tools",  version:"^3.0.0",  source:"payments-api",    aiPr: true  },
-  { name:"crypto-payment-flow",  version:"^0.9.1",  source:"risk-engine",     aiPr: false },
-
-  // Hallucinated packages — AI made these up; don't exist anywhere
-  { name:"secure-validator-kit",version:"^1.0.3",   source:"fraud-detection", aiPr: true  },
-  { name:"fraud-score-ai",      version:"^1.2.0",   source:"fraud-detection", aiPr: true  },
-];
 
 type CheckStatus = "pending" | "checking" | "exists" | "phantom" | "private" | "error";
 type RemediationStatus = "open" | "remediating" | "resolved";
@@ -131,18 +113,30 @@ export default function PhantomDepsPage() {
   const [noteInput, setNoteInput] = useState<Record<string,string>>({});
   const [copied, setCopied] = useState<string | null>(null);
 
-  // Load package list: seed → API → SAMPLE_PACKAGES fallback
+  // Load package list — normally published by /dependencies (tl_phantom_packages,
+  // derived from manifest files in scanned PRs). If that hasn't run yet in this
+  // browser session, fetch scans directly so this page works standalone too.
   useEffect(() => {
     setOverrides(loadOverrides());
     setLastScanned(localStorage.getItem(LAST_SCANNED_KEY));
-    try {
-      const raw = localStorage.getItem("tl_phantom_packages");
-      const pkgs = raw ? JSON.parse(raw) as typeof SAMPLE_PACKAGES : SAMPLE_PACKAGES;
-      setResults(pkgs.map(p => ({ ...p, status:"pending" as CheckStatus })));
-    } catch {
-      setResults(SAMPLE_PACKAGES.map(p => ({ ...p, status:"pending" as CheckStatus })));
-    }
-    setLoading(false);
+    (async () => {
+      try {
+        const raw = localStorage.getItem("tl_phantom_packages");
+        let pkgs = raw ? JSON.parse(raw) as Array<{ name:string; version:string; source:string; aiPr:boolean }> : [];
+        if (pkgs.length === 0) {
+          const dash: DashboardData = await api.dashboard(ORG, 90);
+          const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
+          const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
+          pkgs = collectManifestPackages(scans);
+          localStorage.setItem("tl_phantom_packages", JSON.stringify(pkgs));
+        }
+        setResults(pkgs.map(p => ({ ...p, status:"pending" as CheckStatus })));
+      } catch {
+        setResults([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
   function updateOverride(id: string, patch: Partial<PackageOverride>) {
@@ -282,6 +276,13 @@ export default function PhantomDepsPage() {
           </div>
         </div>
 
+        {results.length === 0 ? (
+          <div className="animate-fade-up section-card py-14 text-center space-y-1">
+            <p className="text-sm font-bold text-gray-600">No dependency data yet</p>
+            <p className="text-xs text-gray-400">Once AI-heavy PRs are scanned for this organization, their dependencies will appear here for phantom-package checks.</p>
+          </div>
+        ) : (
+        <>
         {/* ── Stats ── */}
         <div className="animate-fade-up grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
@@ -490,6 +491,8 @@ export default function PhantomDepsPage() {
             <div className="font-black text-green-800 text-lg mb-2">No Phantom Packages Found</div>
             <div className="text-sm text-green-600">All {results.length} packages verified on npm registry. No hallucinated dependencies detected.</div>
           </div>
+        )}
+        </>
         )}
 
       </div>

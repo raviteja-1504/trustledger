@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { EVENT_CONFIG, EVENT_SOC2, makeMockEvents } from "@/lib/auditConfig";
+import { EVENT_CONFIG, EVENT_SOC2 } from "@/lib/auditConfig";
 import type { AuditEventType, AuditEventConfig } from "@/lib/auditConfig";
 
 export async function GET(req: NextRequest) {
-  const org = new URL(req.url).searchParams.get("org") ?? "novapay";
   try {
     const db = createServiceClient();
     const { data, error } = await db.from("audit_event_config").select("*");
@@ -28,12 +27,11 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({ eventConfig, eventSoc2, mockEvents: makeMockEvents(org) });
+    return NextResponse.json({ eventConfig, eventSoc2 });
   } catch {
     return NextResponse.json({
       eventConfig: EVENT_CONFIG,
       eventSoc2:   EVENT_SOC2,
-      mockEvents:  makeMockEvents(org),
     });
   }
 }

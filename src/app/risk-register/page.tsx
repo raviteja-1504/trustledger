@@ -75,9 +75,10 @@ function saveStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.string
 
 // ── Derive risks from scan data ────────────────────────────────────────────────
 
-function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
+function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[]): RiskItem[] {
   const now  = new Date().toISOString().split("T")[0];
   const risks: RiskItem[] = [];
+  const owner = (i: number) => owners.length ? owners[i % owners.length] : "unassigned";
 
   // From top_risk_files
   const critUnatt = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested);
@@ -89,7 +90,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       category:"ai-code", likelihood:5, impact:5,
       title:`${critUnatt.length} CRITICAL file${critUnatt.length>1?"s":""} unattested — merge blocked`,
       description:`${critUnatt.map(f=>f.file_path.split("/").pop()).join(", ")} flagged CRITICAL (avg ${(critUnatt.reduce((s,f)=>s+f.ai_pct,0)/critUnatt.length*100).toFixed(0)}% AI). Policy gate is blocking deploys.`,
-      owner:`alice@${ORG}.io`, due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
+      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
       mitigation:"Assign reviewer to each CRITICAL file. Attest via /pr/{scan_id} before merge deadline.",
       identified_at:now, notes:[],
     });
@@ -101,7 +102,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       category:"ai-code", likelihood:4, impact:4,
       title:`${highUnatt.length} HIGH-risk file${highUnatt.length>1?"s":""} awaiting attestation`,
       description:`${highUnatt.map(f=>f.file_path.split("/").pop()).join(", ")} flagged HIGH. 48h SLA window applies.`,
-      owner:`carol@${ORG}.io`, due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
+      owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
       mitigation:"Schedule security review. Attest via the PR detail page within SLA window.",
       identified_at:now, notes:[],
     });
@@ -116,7 +117,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       residual_likelihood:2, residual_impact:3,
       title:`${secretFiles.length} hardcoded credential${secretFiles.length>1?"s":""} detected`,
       description:`${secretFiles.map(f=>f.file_path.split("/").pop()).join(", ")} contain API keys, passwords, or tokens in source. Treat as compromised.`,
-      owner:`alice@${ORG}.io`, due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
+      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
       mitigation:"Rotate all exposed credentials immediately. Move to AWS Secrets Manager or HashiCorp Vault. Add gitleaks pre-commit hook.",
       related_cve:"CVE-2021-42013", related_link:"/secrets",
       identified_at:now, notes:[],
@@ -132,7 +133,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       residual_likelihood:2, residual_impact:4,
       title:`eval()/exec() RCE pattern in ${evalFiles.length} file${evalFiles.length>1?"s":""}`,
       description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
-      owner:`carol@${ORG}.io`, due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
+      owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
       mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
       related_cve:"CVE-2021-44228", related_link:"/vulnerabilities",
       identified_at:now, notes:[],
@@ -148,7 +149,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       residual_likelihood:1, residual_impact:2,
       title:`SQL Injection pattern in ${sqlFiles.length} file${sqlFiles.length>1?"s":""}`,
       description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
-      owner:`alice@${ORG}.io`, due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
+      owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
       mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
       related_cve:"CVE-2023-20052", related_link:"/vulnerabilities",
       identified_at:now, notes:[],
@@ -164,7 +165,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       residual_likelihood:1, residual_impact:3,
       title:`JWT 'none' algorithm bypass in ${jwtFiles.length} file${jwtFiles.length>1?"s":""}`,
       description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
-      owner:`carol@${ORG}.io`, due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
+      owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
       mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
       related_cve:"CVE-2022-21449", related_link:"/vulnerabilities",
       identified_at:now, notes:[],
@@ -178,7 +179,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       category:"compliance", likelihood:4, impact:4,
       title:`${data.unattested_deploy_count} deploy${data.unattested_deploy_count>1?"s":""} blocked — SLA exposure`,
       description:`${data.unattested_deploy_count} deployment${data.unattested_deploy_count>1?"s":""} currently blocked by policy gate. Prolonged blockage risks SLA breach and SOC 2 CC8.1 findings.`,
-      owner:`alice@${ORG}.io`, due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
+      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
       mitigation:"Prioritise attestation of blocking files. Consider SLA escalation process for high-priority releases.",
       related_link:"/violations",
       identified_at:now, notes:[],
@@ -192,7 +193,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
       category:"compliance", likelihood:3, impact:4,
       title:`Low attestation — ${r.repo.split("/").pop()} at ${Math.round(r.attestation_rate*100)}%`,
       description:`${r.repo.split("/").pop()} attestation coverage (${Math.round(r.attestation_rate*100)}%) is below the 60% compliance threshold. Audit risk for SOC 2 CC8.1.`,
-      owner:`david@${ORG}.io`, due_date:new Date(Date.now()+7*86400000).toISOString().split("T")[0],
+      owner:owner(2), due_date:new Date(Date.now()+7*86400000).toISOString().split("T")[0],
       mitigation:"Assign dedicated security reviewer. Batch-attest LOW and MEDIUM files. Target ≥80% before audit.",
       related_link:"/violations",
       identified_at:now, notes:[],
@@ -201,20 +202,6 @@ function deriveRisks(data: DashboardData, scans: ScanResult[]): RiskItem[] {
 
   return risks;
 }
-
-// ── Offline fallback ───────────────────────────────────────────────────────────
-
-const OFFLINE_RISKS: RiskItem[] = [
-  { id:"RR-001", auto_derived:false, status:"open", treatment:"mitigate", likelihood:5, impact:5, category:"ai-code", owner:`alice@${ORG}.io`, due_date:"2026-06-10", mitigation:"Replace all dynamic SQL with SQLAlchemy ORM. Enforce pre-commit hook.", related_cve:"CVE-2023-20052", related_link:"/vulnerabilities", identified_at:"2026-05-24", notes:[], title:"SQL Injection via AI-generated query construction", description:"AI assistants consistently produce SQL queries using f-string interpolation. Three instances in payments-api.", residual_likelihood:1, residual_impact:2 },
-  { id:"RR-002", auto_derived:false, status:"open", treatment:"mitigate", likelihood:5, impact:5, category:"secrets", owner:`alice@${ORG}.io`, due_date:"2026-05-28", mitigation:"Rotate credentials. Migrate to AWS Secrets Manager. Add gitleaks hook.", related_cve:"CVE-2021-42013", related_link:"/secrets", identified_at:"2026-05-26", notes:[], title:"Hardcoded production credentials in AI-generated code", description:"Stripe API key, JWT secret, and DB password found in source files. Treat as compromised.", residual_likelihood:2, residual_impact:3 },
-  { id:"RR-003", auto_derived:false, status:"open", treatment:"mitigate", likelihood:4, impact:5, category:"supply-chain", owner:`bob@${ORG}.io`, due_date:"2026-06-05", mitigation:"Remove import. Add approved package allowlist to CI. Enable Snyk.", identified_at:"2026-05-26", notes:[], title:"Hallucinated package 'ml-utils-fast' — supply chain risk", description:"AI generated an import for a non-existent PyPI package. Attacker could publish malicious code with that name.", related_link:"/dependencies" },
-  { id:"RR-004", auto_derived:false, status:"mitigating", treatment:"mitigate", likelihood:4, impact:4, category:"ai-code", owner:`carol@${ORG}.io`, due_date:"2026-06-01", mitigation:"Whitelist only HS256. PR #341 attested. Static analysis rule added to CI.", related_cve:"CVE-2022-21449", related_link:"/vulnerabilities", identified_at:"2026-05-25", notes:["PR #341 attested — token_exchange.ts now safe"], title:"JWT 'none' algorithm bypass in auth-service", description:"AI-generated token_exchange.ts accepts algorithms=['HS256','none'], enabling token forgery.", residual_likelihood:1, residual_impact:3 },
-  { id:"RR-005", auto_derived:false, status:"mitigating", treatment:"mitigate", likelihood:4, impact:4, category:"ai-code", owner:`carol@${ORG}.io`, due_date:"2026-06-03", mitigation:"Replace eval with mathjs sandbox. Code review on PR #219.", related_cve:"CVE-2021-44228", related_link:"/vulnerabilities", identified_at:"2026-05-26", notes:[], title:"Arbitrary code execution via eval() in fraud-detection", description:"risk_scorer.ts uses eval() on user-controlled formula strings. Full RCE if exploited.", residual_likelihood:2, residual_impact:4 },
-  { id:"RR-006", auto_derived:false, status:"open", treatment:"mitigate", likelihood:3, impact:5, category:"compliance", owner:`alice@${ORG}.io`, due_date:"2026-05-27", mitigation:"Escalate to security lead. Implement SLA enforcement process.", related_link:"/violations", identified_at:"2026-05-24", notes:[], title:"Attestation SLA breaches — HIGH-risk files unreviewed > 48h", description:"stripe_client.py and etl_runner.py exceeded the 48h SLA. Risk SOC 2 CC8.1 control failure." },
-  { id:"RR-007", auto_derived:false, status:"open", treatment:"mitigate", likelihood:3, impact:4, category:"supply-chain", owner:`bob@${ORG}.io`, due_date:"2026-06-15", mitigation:"Upgrade to requests>=2.31.0. Add pip-audit to CI.", related_cve:"CVE-2023-32681", related_link:"/dependencies", identified_at:"2026-05-23", notes:[], title:"Vulnerable dependency — requests 2.18.0 (CVE-2023-32681)", description:"AI pinned outdated requests library with open redirect vulnerability." },
-  { id:"RR-008", auto_derived:false, status:"accepted", treatment:"accept", likelihood:2, impact:3, category:"ai-code", owner:`david@${ORG}.io`, mitigation:"Accepted with quarterly review. Monitor AI% via dashboard.", identified_at:"2026-05-22", notes:["Formally accepted by CISO 2026-05-22 — low exploitability"], title:"High AI content ratio in data-platform (62%)", description:"data-platform AI content exceeds the 60% warning threshold. Not directly exploitable but indicates insufficient human review." },
-  { id:"RR-009", auto_derived:false, status:"closed", treatment:"mitigate", likelihood:2, impact:4, category:"secrets", owner:`alice@${ORG}.io`, mitigation:"Key rotated within 2h. git-filter-repo used to purge history. Monitoring active.", related_link:"/audit", identified_at:"2026-05-24", notes:["Resolved — key rotated and history purged 2026-05-24"], title:"SendGrid API key committed to auth-service branch", description:"SG.Gm9k* key was committed in PR #338. Key rotated and removed from history." },
-];
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -255,7 +242,7 @@ const CAT_LABELS: Record<RiskCategory, string> = {
   "compliance":"Compliance", "access":"Access Control", "infrastructure":"Infrastructure",
 };
 
-const OWNERS = [`alice@${ORG}.io`,`bob@${ORG}.io`,`carol@${ORG}.io`,`david@${ORG}.io`,`eve@${ORG}.io`];
+function ownerLabel(o: string) { return o === "unassigned" ? "Unassigned" : o.split("@")[0]; }
 
 function fmtDate(iso?: string) {
   if (!iso) return "—";
@@ -331,7 +318,7 @@ interface NewRisk {
 
 const BLANK: NewRisk = {
   title:"", description:"", category:"ai-code", likelihood:3, impact:3,
-  owner:`alice@${ORG}.io`, due_date:"", mitigation:"", treatment:"mitigate",
+  owner:"unassigned", due_date:"", mitigation:"", treatment:"mitigate",
   related_cve:"", related_link:"",
 };
 
@@ -340,7 +327,8 @@ const BLANK: NewRisk = {
 
 export default function RiskRegisterPage() {
   const [store,        setStore]        = useState<PersistStore>({ overrides:{}, manuals:[] });
-  const [derivedRisks, setDerivedRisks] = useState<RiskItem[]>(OFFLINE_RISKS);
+  const [derivedRisks, setDerivedRisks] = useState<RiskItem[]>([]);
+  const [owners,       setOwners]       = useState<string[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
@@ -360,12 +348,17 @@ export default function RiskRegisterPage() {
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
-    const data = seed ?? await api.dashboard(ORG, 90).catch(() => null);
+    const [data, settings] = await Promise.all([
+      seed ?? api.dashboard(ORG, 90).catch(() => null),
+      api.settings().catch(() => null),
+    ]);
+    const memberEmails = (settings?.members ?? []).map(m => m.email).filter(Boolean);
+    setOwners(memberEmails);
     if (data) {
       const scanPromises = data.repos.filter(r=>r.latest_scan_id).map(r=>api.getScan(r.latest_scan_id).catch(()=>null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s!==null);
-      const derived = deriveRisks(patchDataWithAttestations(data), scans);
-      setDerivedRisks(derived.length > 0 ? derived : OFFLINE_RISKS);
+      const derived = deriveRisks(patchDataWithAttestations(data), scans, memberEmails);
+      setDerivedRisks(derived);
       setLastRefreshed(new Date());
     }
     setLoading(false); if (spinner) setRefreshing(false);
@@ -549,7 +542,7 @@ export default function RiskRegisterPage() {
               {[
                 { label:"Category", field:"category", options:Object.entries(CAT_LABELS).map(([k,v])=>({value:k,label:v})) },
                 { label:"Treatment (ISO 31000)", field:"treatment", options:[{value:"mitigate",label:"Mitigate"},{value:"accept",label:"Accept"},{value:"transfer",label:"Transfer"},{value:"avoid",label:"Avoid"}] },
-                { label:"Owner", field:"owner", options:OWNERS.map(o=>({value:o,label:o.split("@")[0]})) },
+                { label:"Owner", field:"owner", options:(owners.length?owners:["unassigned"]).map(o=>({value:o,label:ownerLabel(o)})) },
               ].map(f=>(
                 <div key={f.field}>
                   <label className="block text-[10px] font-semibold text-gray-500 mb-1">{f.label}</label>
@@ -680,7 +673,7 @@ export default function RiskRegisterPage() {
           <select value={filterOwner} onChange={e=>setFilterOwner(e.target.value)}
             className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
             <option value="all">All Owners</option>
-            {OWNERS.map(o=><option key={o} value={o}>{o.split("@")[0]}</option>)}
+            {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
           </select>
           <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-xl">
             {(["score","due"] as const).map(s=>(
@@ -767,7 +760,7 @@ export default function RiskRegisterPage() {
                     <div className="flex items-center gap-3 mt-1.5 flex-wrap text-[10px]">
                       <span className="text-gray-500 flex items-center gap-1">
                         <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                        {r.owner.split("@")[0]}
+                        {ownerLabel(r.owner)}
                       </span>
                       {dl!==null&&r.status!=="closed"&&(
                         <span className={`font-bold ${dl<0?"text-rose-600":dl<=3?"text-orange-600":"text-gray-400"}`}>
@@ -846,7 +839,7 @@ export default function RiskRegisterPage() {
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Owner</p>
                         <select value={r.owner} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none">
-                          {OWNERS.map(o=><option key={o} value={o}>{o.split("@")[0]}</option>)}
+                          {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
                         </select>
                       </div>
                       <div>

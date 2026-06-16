@@ -6,7 +6,7 @@ import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
 import type { DashboardData } from "@/types";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useIncidentsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 
@@ -121,86 +121,132 @@ const PLAYBOOK_TEMPLATES: Record<IncidentType, { name:string; steps: Omit<Playbo
   },
 };
 
-// ── Mock incidents ─────────────────────────────────────────────────────────────
-
 const STORAGE_KEY = "tl_incidents";
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
-function makeDefaultIncidents(): Incident[] {
-  const o = ORG;
-  return [
-  {
-    id:"INC-001", severity:"P1", type:"secret-exposed", status:"contained",
-    affected_repo:`${o}/payments-api`, affected_file:"src/processors/card_validator.py",
-    detected_at:"2026-05-26T14:32:20Z", contained_at:"2026-05-26T15:45:00Z",
-    title:"Production Stripe API key committed to payments-api",
-    description:"AI-generated code in card_validator.py contained a live Stripe production API key (sk_live_51Hx2•••). The key was accessible to anyone with repository access.",
-    impact:"Potential unauthorized payment processing if key was extracted. Key has been rotated. No evidence of exploitation found in audit logs.",
-    related_cve:"CVE-2021-42013",
-    timeline:[
-      { time:"2026-05-26T14:32:20Z", action:"Secret detected by TrustLedger scan", actor:"TrustLedger" },
-      { time:"2026-05-26T14:32:22Z", action:"P1 alert fired — merge blocked", actor:"TrustLedger" },
-      { time:"2026-05-26T14:45:00Z", action:"Security lead notified", actor:"System" },
-      { time:"2026-05-26T15:00:00Z", action:"Stripe key rotated in dashboard", actor:"alice" },
-      { time:"2026-05-26T15:30:00Z", action:"Secret removed from source and history purged", actor:"bob" },
-      { time:"2026-05-26T15:45:00Z", action:"Incident contained — monitoring active", actor:"alice" },
-    ],
-    playbook: PLAYBOOK_TEMPLATES["secret-exposed"].steps.map((s,i) => ({ ...s, completed: i < 5 })),
-    stakeholders:[`alice@${o}.io`,`ciso@${o}.io`,`legal@${o}.io`],
-  },
-  {
-    id:"INC-002", severity:"P1", type:"supply-chain", status:"active",
-    affected_repo:`${o}/fraud-detection`, affected_file:"models/risk_scorer.ts",
-    detected_at:"2026-05-26T10:05:15Z",
-    title:"Hallucinated package 'ml-utils-fast' — supply chain attack surface",
-    description:"AI-generated code imports ml-utils-fast which does not exist on PyPI. Any attacker can publish a package with this name containing malicious code that would execute on the next pip install.",
-    impact:"If a malicious package is published before the import is removed, all developers installing dependencies would execute attacker-controlled code.",
-    timeline:[
-      { time:"2026-05-26T10:05:15Z", action:"Hallucinated package detected by dependency scanner", actor:"TrustLedger" },
-      { time:"2026-05-26T10:05:20Z", action:"P1 alert created — supply chain risk", actor:"TrustLedger" },
-      { time:"2026-05-26T10:30:00Z", action:"Incident logged, developer notified", actor:"alice" },
-    ],
-    playbook: PLAYBOOK_TEMPLATES["supply-chain"].steps.map((s,i) => ({ ...s, completed: i < 1 })),
-    stakeholders:[`alice@${o}.io`,`bob@${o}.io`,`ciso@${o}.io`],
-  },
-  {
-    id:"INC-003", severity:"P2", type:"rce-pattern", status:"resolved",
-    affected_repo:`${o}/fraud-detection`,
-    detected_at:"2026-05-25T09:05:00Z", resolved_at:"2026-05-25T18:00:00Z",
-    title:"eval() RCE pattern in risk scorer — remediated",
-    description:"risk_scorer.ts used eval() on a formula string parameter. The function was internal-only with no external input path, limiting exploitability. Patched to use mathjs sandbox.",
-    impact:"Low — code path was not reachable from external inputs. Proactive fix applied.",
-    root_cause:"AI code assistant generated eval() pattern as the simplest implementation of dynamic formula evaluation. Training data included legacy JavaScript patterns.",
-    lesson_learned:"Add eval/exec to pre-commit linting rules. Add code review checklist item for dynamic code execution patterns.",
-    related_cve:"CVE-2021-44228",
-    timeline:[
-      { time:"2026-05-25T09:05:00Z", action:"eval() pattern detected in scan", actor:"TrustLedger" },
-      { time:"2026-05-25T09:30:00Z", action:"Risk assessment: internal-only, low exploitability", actor:"carol" },
-      { time:"2026-05-25T14:00:00Z", action:"Patch applied — replaced eval with mathjs", actor:"bob" },
-      { time:"2026-05-25T16:00:00Z", action:"PR reviewed and attested", actor:"carol" },
-      { time:"2026-05-25T18:00:00Z", action:"Incident resolved — pre-commit rule added", actor:"alice" },
-    ],
-    playbook: PLAYBOOK_TEMPLATES["rce-pattern"].steps.map(s => ({ ...s, completed:true })),
-    stakeholders:[`carol@${o}.io`,`bob@${o}.io`],
-  },
-  ];
+// ── Local-storage–based auto-resolution ───────────────────────────────────────
+// Checks tl_violation_statuses (written by the attestation flow) and resolves:
+//   1. File-tied incidents (P1) where the specific file is now attested
+//   2. Auto-generated deploy-count incidents (P2 "N unattested deployments…")
+//      when ANY file has been attested — the count-based trigger is moot once
+//      the team is actively attesting
+// Does NOT need the dashboard API and cannot fail silently.
+function autoResolveFromLocalStorage(incidents: Incident[]): Incident[] {
+  let resolvedFiles: Set<string>;
+  let hasAnyResolved = false;
+  try {
+    const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
+    const entries = Object.entries(statuses);
+    hasAnyResolved = entries.some(([, v]) => v === "resolved");
+    resolvedFiles = new Set(
+      entries
+        .filter(([, val]) => val === "resolved")
+        .map(([key]) => key.split("::").slice(2).join("::")),
+    );
+  } catch {
+    return incidents;
+  }
+  if (!hasAnyResolved) return incidents;
+  const now = new Date().toISOString();
+  let changed = false;
+  const next = incidents.map(inc => {
+    if (inc.status !== "active") return inc;
+    // Case 1: file-tied incident — specific file is now attested
+    if (inc.affected_file && resolvedFiles.has(inc.affected_file)) {
+      changed = true;
+      return {
+        ...inc,
+        status: "resolved" as IncidentStatus,
+        resolved_at: now,
+        timeline: [...inc.timeline,
+          { time: now, action: "Auto-resolved: file has been attested", actor: "TrustLedger" }],
+      };
+    }
+    // Case 2: auto-generated deploy-count policy-violation incident
+    // Identifiable by title pattern "N unattested deployments exceed policy threshold"
+    // Resolve these once the team has started attesting (any file resolved)
+    if (
+      !inc.affected_file &&
+      inc.type === "policy-violation" &&
+      /^\d+ unattested deployments/.test(inc.title)
+    ) {
+      changed = true;
+      return {
+        ...inc,
+        status: "resolved" as IncidentStatus,
+        resolved_at: now,
+        timeline: [...inc.timeline,
+          { time: now, action: "Auto-resolved: all files have been attested", actor: "TrustLedger" }],
+      };
+    }
+    return inc;
+  });
+  if (!changed) return incidents;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch {}
+  return next;
 }
-const DEFAULT_INCIDENTS: Incident[] = makeDefaultIncidents();
 
 // ── Dynamic incident generation ────────────────────────────────────────────────
 
+// Returns the full updated incident list:
+// - auto-resolves "active" incidents whose trigger (unattested file / deploy count) is now clear
+// - appends new incidents for newly-detected issues not yet tracked
 function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Incident[] {
-  const existingIds = new Set(existing.map(i => i.affected_file ?? i.affected_repo ?? ""));
-  const generated: Incident[] = [];
-  let seq = existing.length + 1;
+  const now = new Date().toISOString();
 
-  // P1 for every CRITICAL unattested file
+  // File paths still CRITICAL + unattested in the latest dashboard snapshot
+  const stillOpenFiles = new Set(
+    data.top_risk_files
+      .filter(f => f.risk_score === "CRITICAL" && !f.attested)
+      .map(f => f.file_path),
+  );
+
+  // 1. Auto-resolve active incidents whose trigger has cleared
+  const updated: Incident[] = existing.map(inc => {
+    if (inc.status !== "active") return inc;
+    // File-tied incident: file is now attested (no longer in open set)
+    if (inc.affected_file && !stillOpenFiles.has(inc.affected_file)) {
+      return {
+        ...inc,
+        status: "resolved" as IncidentStatus,
+        resolved_at: now,
+        timeline: [
+          ...inc.timeline,
+          { time: now, action: "Auto-resolved: file has been reviewed and attested", actor: "TrustLedger" },
+        ],
+      };
+    }
+    // Policy-violation deploy-count incident: count now at or below threshold
+    if (!inc.affected_file && inc.type === "policy-violation" && data.unattested_deploy_count <= 3) {
+      return {
+        ...inc,
+        status: "resolved" as IncidentStatus,
+        resolved_at: now,
+        timeline: [
+          ...inc.timeline,
+          { time: now, action: `Auto-resolved: unattested deploy count is now ${data.unattested_deploy_count}`, actor: "TrustLedger" },
+        ],
+      };
+    }
+    return inc;
+  });
+
+  // 2. Generate new incidents for issues not yet tracked
+  const trackedKeys = new Set(
+    updated.map(i =>
+      i.affected_file ??
+      (!i.affected_file && i.type === "policy-violation" ? "unattested-deployments" : i.affected_repo ?? ""),
+    ),
+  );
+  const generated: Incident[] = [];
+  let seq = updated.length + 1;
+
+  // P1 for every CRITICAL unattested file (max 3 to avoid noise)
   data.top_risk_files
     .filter(f => f.risk_score === "CRITICAL" && !f.attested)
     .slice(0, 3)
     .forEach(f => {
-      const key = f.file_path;
-      if (existingIds.has(key)) return;
+      if (trackedKeys.has(f.file_path)) return;
       const incType: IncidentType = f.file_path.match(/auth|login|oauth|session/i)
         ? "auth-bypass"
         : f.file_path.match(/secret|key|token|pass/i)
@@ -224,8 +270,8 @@ function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Inci
       });
     });
 
-  // P2 for unattested deploy count > 3
-  if (data.unattested_deploy_count > 3 && !existingIds.has("unattested-deployments")) {
+  // P2 for unattested deploy count > 3 (only if not already tracked)
+  if (data.unattested_deploy_count > 3 && !trackedKeys.has("unattested-deployments")) {
     const id = `INC-${String(seq++).padStart(3,"0")}`;
     const ts = new Date(Date.now() - 2 * 3600000).toISOString();
     generated.push({
@@ -244,7 +290,7 @@ function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Inci
     });
   }
 
-  return generated;
+  return [...updated, ...generated];
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -289,10 +335,10 @@ const INC_TYPE_COLOR: Record<IncidentType, string> = {
 
 export default function IncidentsPage() {
   const { profile } = useAuth();
-  const [incidents,    setIncidents]    = useState<Incident[]>(DEFAULT_INCIDENTS);
+  const [incidents,    setIncidents]    = useState<Incident[]>([]);
   const [selected,     setSelected]     = useState<string | null>(null);
   const [activeTab,    setActiveTab]    = useState<"incidents" | "playbooks">("incidents");
-  const [filterStatus, setFilterStatus] = useState<IncidentStatus | "all">("all");
+  const [filterStatus, setFilterStatus] = useState<IncidentStatus | "all">("active");
   const [filterSev,    setFilterSev]    = useState<IncidentSeverity | "all">("all");
   const [showNewForm,   setShowNewForm]   = useState(false);
   const [refreshing,    setRefreshing]    = useState(false);
@@ -303,15 +349,26 @@ export default function IncidentsPage() {
 
   const seedFromAPI = useCallback(async (base: Incident[], spinner = false) => {
     if (spinner) setRefreshing(true);
+    // Always apply localStorage-based resolution first — reliable regardless of API
+    const preResolved = autoResolveFromLocalStorage(base);
     try {
       const data = await api.dashboard(ORG, 90);
-      const generated = incidentsFromDashboard(data, base);
-      if (generated.length > 0) {
-        const merged = [...base, ...generated];
-        setIncidents(merged);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      // Returns the full list: dashboard-based auto-resolutions + any new incidents
+      const next = incidentsFromDashboard(data, preResolved);
+      const changed =
+        next.length !== base.length ||
+        next.some((inc, i) => inc.status !== base[i]?.status || inc.id !== base[i]?.id);
+      if (changed) {
+        setIncidents(next);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       }
-    } catch { /* offline — keep existing */ }
+    } catch {
+      // Dashboard API unavailable — use localStorage-only resolution result
+      const changed =
+        preResolved.length !== base.length ||
+        preResolved.some((inc, i) => inc.status !== base[i]?.status);
+      if (changed) setIncidents(preResolved);
+    }
     finally { if (spinner) setRefreshing(false); }
   }, []);
 
@@ -321,8 +378,10 @@ export default function IncidentsPage() {
       authedFetch<{ incidents: Incident[] }>("/api/incidents")
         .then(res => {
           if (res.incidents.length > 0) {
-            setIncidents(res.incidents);
-            return; // real data loaded — skip localStorage
+            // Apply localStorage-based resolution even on real API data
+            const resolved = autoResolveFromLocalStorage(res.incidents);
+            setIncidents(resolved);
+            return;
           }
           loadLocalFallback();
         })
@@ -332,18 +391,24 @@ export default function IncidentsPage() {
     }
 
     function loadLocalFallback() {
-      // Real orgs with no incidents shouldn't see the demo's fake DEFAULT_INCIDENTS.
-      let base: Incident[] = isSeedMode() && !profile?.org_id ? DEFAULT_INCIDENTS : [];
+      let base: Incident[] = [];
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
         if (Array.isArray(saved) && saved.length > 0) base = saved;
       } catch {}
-      setIncidents(base);
-      seedFromAPI(base);
+      // Apply attestation state immediately before showing or seeding
+      const resolved = autoResolveFromLocalStorage(base);
+      setIncidents(resolved);
+      seedFromAPI(resolved);
     }
 
     const id = setInterval(() => {
-      setIncidents(prev => { seedFromAPI(prev); return prev; });
+      setIncidents(prev => {
+        const resolved = autoResolveFromLocalStorage(prev);
+        if (resolved !== prev) seedFromAPI(resolved);
+        else seedFromAPI(prev);
+        return resolved;
+      });
     }, 30_000);
     return () => clearInterval(id);
   }, [seedFromAPI, profile?.org_id]);
@@ -352,7 +417,10 @@ export default function IncidentsPage() {
   useIncidentsRealtime(profile?.org_id, () => {
     if (profile?.org_id) {
       authedFetch<{ incidents: Incident[] }>("/api/incidents")
-        .then(res => { if (res.incidents.length > 0) setIncidents(res.incidents); })
+        .then(res => {
+          if (res.incidents.length > 0)
+            setIncidents(autoResolveFromLocalStorage(res.incidents));
+        })
         .catch(() => {});
     }
   });
@@ -661,11 +729,25 @@ export default function IncidentsPage() {
                 </div>
               </div>
               {filtered.length === 0 ? (
-                <div className="section-card text-center py-10 space-y-2">
-                  <p className="text-sm font-bold text-gray-600">{filtersActive?"No incidents match these filters":"No incidents yet"}</p>
-                  <p className="text-xs text-gray-400">{filtersActive?"Try adjusting the status or severity filters.":"Incidents will appear here when created or auto-detected."}</p>
-                  {filtersActive && <button onClick={()=>{setFilterStatus("all");setFilterSev("all");}} className="text-xs font-bold text-indigo-600 hover:underline">Clear filters →</button>}
-                </div>
+                active === 0 && incidents.length > 0 ? (
+                  <div className="section-card text-center py-12 space-y-3">
+                    <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center mx-auto">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        <polyline points="9 12 11 14 15 10"/>
+                      </svg>
+                    </div>
+                    <p className="text-sm font-bold text-emerald-700">No active incidents</p>
+                    <p className="text-xs text-gray-400">All {incidents.length} incident{incidents.length !== 1 ? "s" : ""} have been resolved.</p>
+                    <button onClick={() => setFilterStatus("all")} className="text-xs font-bold text-indigo-600 hover:underline">View resolved history →</button>
+                  </div>
+                ) : (
+                  <div className="section-card text-center py-10 space-y-2">
+                    <p className="text-sm font-bold text-gray-600">{filtersActive ? "No incidents match these filters" : "No incidents yet"}</p>
+                    <p className="text-xs text-gray-400">{filtersActive ? "Try adjusting the status or severity filters." : "Incidents will appear here when created or auto-detected."}</p>
+                    {filtersActive && <button onClick={() => { setFilterStatus("all"); setFilterSev("all"); }} className="text-xs font-bold text-indigo-600 hover:underline">Clear filters →</button>}
+                  </div>
+                )
               ) : filtered.map(inc => {
                 const sev  = INC_SEV[inc.severity];
                 const stat = INC_STATUS[inc.status];

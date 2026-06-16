@@ -148,6 +148,37 @@ export async function getPRFiles(
   return files;
 }
 
+/**
+ * Returns the set of file paths that changed between two commits.
+ * Used for delta scanning: on a `synchronize` event we only need to re-scan
+ * files that appeared in the new push, not the entire PR.
+ */
+export async function getCommitDiff(
+  token: string,
+  owner: string,
+  repo: string,
+  before: string,
+  after: string,
+): Promise<Set<string>> {
+  try {
+    const res = await fetch(
+      `${GITHUB_API}/repos/${owner}/${repo}/compare/${before}...${after}`,
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept:        "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      },
+    );
+    if (!res.ok) return new Set();
+    const data = await res.json() as { files?: PRFile[] };
+    return new Set((data.files ?? []).map(f => f.filename));
+  } catch {
+    return new Set();
+  }
+}
+
 // ── Check runs ────────────────────────────────────────────────────────────────
 
 export type CheckConclusion = "success" | "failure" | "neutral" | "cancelled" | "action_required";

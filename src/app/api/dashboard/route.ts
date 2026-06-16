@@ -46,12 +46,20 @@ async function fetchDashboard(org_id: string, days: number) {
     .eq("org_id", org_id)
     .gte("created_at", since);
 
-  // Open violations
+  // All violations for this org (no status filter) — needed so that, per
+  // file, we can tell whether an older scan's still-open violation has been
+  // superseded by a later scan/attestation of that same file (see dedup below).
   const { data: violations } = await db
     .from("violations")
-    .select("id, scan_id, file_path, risk_score, status")
-    .eq("org_id", org_id)
-    .in("status", ["open", "in_review"]);
+    .select("id, scan_id, file_path, risk_score, status, sla_deadline")
+    .eq("org_id", org_id);
+
+  // All scans for this org (no date filter) — used to find each file's most
+  // recent scan when deduping violations across repeated scans.
+  const { data: allScans } = await db
+    .from("scans")
+    .select("id, repo_full_name, created_at")
+    .eq("org_id", org_id);
 
   // Scan files for top risk. Fetch recent-first so that, once deduped by
   // repo+file_path below, we keep each file's most recent occurrence.
@@ -145,7 +153,6 @@ async function fetchDashboard(org_id: string, days: number) {
       return true;
     })
     .sort((a, b) => b.ai_percentage - a.ai_percentage)
-    .slice(0, 20)
     .map(f => {
       const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
       const key  = `${f.scan_id}::${f.file_path}`;
@@ -166,7 +173,45 @@ async function fetchDashboard(org_id: string, days: number) {
 
   const totalFiles   = scans.reduce((s, sc) => s + sc.file_count, 0);
   const avgAI        = scans.length === 0 ? 0 : scans.reduce((s, sc) => s + sc.total_ai_percentage, 0) / scans.length;
-  const unattested   = (violations ?? []).filter(v => v.risk_score === "CRITICAL" || v.risk_score === "HIGH").length;
+
+  // Dedupe violations by repo+file_path, keeping only the most recent scan's
+  // violation for that file. A still-open violation from an earlier scan is
+  // superseded once a later scan (and possibly its attestation) exists for
+  // the same file — only the latest scan's status should drive SLA breaches.
+  const scanCreatedAtAll = new Map((allScans ?? []).map(s => [s.id, s.created_at]));
+  const scanToRepoAll    = new Map((allScans ?? []).map(s => [s.id, s.repo_full_name]));
+  const latestViolationByFile = new Map<string, NonNullable<typeof violations>[number]>();
+  (violations ?? []).forEach(v => {
+    const repo = scanToRepoAll.get(v.scan_id);
+    if (!repo) return;
+    const key      = `${repo}::${v.file_path}`;
+    const created  = scanCreatedAtAll.get(v.scan_id) ?? "";
+    const existing = latestViolationByFile.get(key);
+    if (!existing || created > (scanCreatedAtAll.get(existing.scan_id) ?? "")) {
+      latestViolationByFile.set(key, v);
+    }
+  });
+  const currentViolations = Array.from(latestViolationByFile.values())
+    .filter(v => v.status === "open" || v.status === "in_review");
+
+  const unattested = currentViolations.filter(v => v.risk_score === "CRITICAL" || v.risk_score === "HIGH").length;
+
+  // SLA breaches: open CRITICAL/HIGH violations whose deadline has passed.
+  const now = Date.now();
+  const breached = currentViolations.filter(
+    v => v.sla_deadline && new Date(v.sla_deadline).getTime() < now,
+  );
+  const sla_breach_critical_count = breached.filter(v => v.risk_score === "CRITICAL").length;
+  const sla_breach_high_count     = breached.filter(v => v.risk_score === "HIGH").length;
+  const sla_breach_files = breached
+    .filter(v => v.risk_score === "CRITICAL" || v.risk_score === "HIGH")
+    .map(v => ({
+      file_path:  v.file_path,
+      risk_score: v.risk_score,
+      repo:       scanToRepoAll.get(v.scan_id) ?? "",
+      scan_id:    v.scan_id,
+      sla_deadline: v.sla_deadline as string,
+    }));
 
   return {
     repos,
@@ -177,5 +222,8 @@ async function fetchDashboard(org_id: string, days: number) {
     scan_count:   scans.length,
     file_count:   totalFiles,
     top_risk_files,
+    sla_breach_critical_count,
+    sla_breach_high_count,
+    sla_breach_files,
   };
 }

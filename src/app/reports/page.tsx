@@ -193,17 +193,6 @@ function pgpLines(fw: Framework, start: string, end: string): string[] {
   ];
 }
 
-function reviewer(idx: number) {
-  const names = ["alice","bob","carol","david","eve","frank"];
-  return `${names[idx % names.length]}@${ORG}.io`;
-}
-
-function attestDate(filePath: string, start: string) {
-  const d = new Date(start);
-  d.setDate(d.getDate() + (hashStr(filePath + start) % 14));
-  return d.toISOString().split("T")[0];
-}
-
 // ─── Data builders ────────────────────────────────────────────────────────────
 
 interface Metric { label: string; value: string; sub: string; status: "good" | "warn" | "bad" | "info" }
@@ -219,9 +208,11 @@ function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
   const trackedAtt   = d.top_risk_files.filter(f => f.attested).length;
   const trackedTotal = d.top_risk_files.length;
 
+  const slaBreached = (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0);
+
   if (fw === "SOC2") return [
     { label:"Attestation Rate",    value:`${att}%`,                      sub:"CC8.1 change control",         status: att>=80?"good":att>=60?"warn":"bad"  },
-    { label:"Unattested Deploys",  value:String(d.unattested_deploy_count), sub:"Blocked from merge",       status: d.unattested_deploy_count===0?"good":"warn" },
+    { label:"Unattested Deploys",  value:String(d.unattested_deploy_count), sub:`Org-wide HIGH/CRITICAL pending review — ${slaBreached} past SLA deadline`, status: d.unattested_deploy_count===0?"good":"warn" },
     { label:"Critical Files",      value:String(crit),                   sub:"Require immediate review",     status: crit===0?"good":crit<=2?"warn":"bad" },
     { label:"Scans Completed",     value:String(d.scan_count),           sub:`${d.file_count} files reviewed`, status:"info" },
   ];
@@ -244,14 +235,14 @@ function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
 function buildRows(fw: Framework, d: DashboardData, start: string): Record<string, string>[] {
   const files = d.top_risk_files;
 
-  if (fw === "SOC2") return files.map((f, i) => ({
+  if (fw === "SOC2") return files.map((f) => ({
     pr:          `#${f.pr_number}`,
     repo:        f.repo.split("/").pop() ?? f.repo,
-    reviewer:    reviewer(i),
+    reviewer:    f.attested_by ?? "—",
     ai_pct:      `${(f.ai_pct * 100).toFixed(1)}%`,
     risk:        f.risk_score,
     status:      f.attested ? "ATTESTED" : "PENDING",
-    attested_at: f.attested ? attestDate(f.file_path, start) : "—",
+    attested_at: f.attested_at ? f.attested_at.split("T")[0] : "—",
   }));
 
   if (fw === "EU AI Act") {
@@ -266,11 +257,11 @@ function buildRows(fw: Framework, d: DashboardData, start: string): Record<strin
     }));
   }
 
-  return files.map((f, i) => ({
+  return files.map((f) => ({
     pr:        `#${f.pr_number}`,
     repo:      f.repo.split("/").pop() ?? f.repo,
-    reviewer1: reviewer(i),
-    reviewer2: f.attested ? reviewer(i + 3) : "—",
+    reviewer1: f.attested_by ?? "—",
+    reviewer2: "—",
     ai_pct:    `${(f.ai_pct * 100).toFixed(1)}%`,
     risk:      f.risk_score,
     cleared:   f.attested ? "YES" : "PENDING",
@@ -533,12 +524,12 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
 
   function FileRow({ f, idx }: { f: (typeof files)[0]; idx: number }) {
     const attested  = isAttested(f);
-    const rev       = reviewer(idx);
+    const rev       = f.attested_by;
     const fileShort = f.file_path.split("/").pop() ?? f.file_path;
     const fileDir   = f.file_path.includes("/") ? f.file_path.split("/").slice(0,-1).join("/")+"/": "";
     const localKey  = `${riskPfx(f.risk_score)}::${f.scan_id}::${f.file_path}`;
     const date      = attested
-      ? (localAttested.has(localKey) ? new Date().toISOString().split("T")[0] : attestDate(f.file_path, start))
+      ? (localAttested.has(localKey) ? new Date().toISOString().split("T")[0] : f.attested_at?.split("T")[0] ?? null)
       : null;
     const lbColor   = attested ? "#10b981"
                     : f.risk_score==="CRITICAL" ? "#ef4444"
@@ -604,8 +595,14 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
 
         {/* Reviewer */}
         <div className="flex items-center gap-1.5 shrink-0 w-28">
-          <ReviewerAvatar email={rev} idx={idx} />
-          <span className="text-[10px] text-gray-500 truncate font-medium">{rev.split("@")[0]}</span>
+          {rev ? (
+            <>
+              <ReviewerAvatar email={rev} idx={idx} />
+              <span className="text-[10px] text-gray-500 truncate font-medium">{rev.split("@")[0]}</span>
+            </>
+          ) : (
+            <span className="text-[10px] text-gray-400">—</span>
+          )}
         </div>
 
         {/* AI% bar */}
@@ -1250,8 +1247,8 @@ function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: stri
       pr_number:  f.pr_number,
       attestation: {
         attested:    f.attested,
-        reviewer:    f.attested ? reviewer(i) : null,
-        attested_at: f.attested ? attestDate(f.file_path, start) : null,
+        reviewer:    f.attested_by ?? null,
+        attested_at: f.attested_at ?? null,
         algorithm:   f.attested ? "SHA-256 with RSA-4096" : null,
       },
     })),

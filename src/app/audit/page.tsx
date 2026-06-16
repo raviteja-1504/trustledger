@@ -4,10 +4,10 @@ import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import { api } from "@/lib/api";
-import { EVENT_CONFIG as DEFAULT_EVENT_CONFIG, EVENT_SOC2 as DEFAULT_EVENT_SOC2, makeMockEvents as makeLibMockEvents } from "@/lib/auditConfig";
+import { EVENT_CONFIG as DEFAULT_EVENT_CONFIG, EVENT_SOC2 as DEFAULT_EVENT_SOC2 } from "@/lib/auditConfig";
 import type { AuditEventConfig } from "@/lib/auditConfig";
 import type { ActivityEvent } from "@/types";
-import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -33,8 +33,6 @@ interface AuditEvent {
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
-// Seeded from lib, pages update via API fetch in component state
-const MOCK_EVENTS: AuditEvent[] = makeLibMockEvents(ORG) as AuditEvent[];
 const EVENT_CONFIG = DEFAULT_EVENT_CONFIG as Record<AuditEventType, AuditEventConfig>;
 const EVENT_SOC2_FALLBACK = DEFAULT_EVENT_SOC2 as Partial<Record<AuditEventType, string[]>>;
 
@@ -437,27 +435,12 @@ export default function AuditPage() {
     return () => clearInterval(id);
   }, [lastRefreshed]);
 
-  // Merge live + mock events, sort newest-first.
-  // Dedup only on concrete scan_id — never drop mock events that have no scan_id,
-  // otherwise historical records are wiped out when live events return empty scan_ids.
+  // Sort live events newest-first. Seed mode populates liveEvents from
+  // tl_local_activity; real orgs get liveEvents from the audit/activity API.
   const allEvents = useMemo<AuditEvent[]>(() => {
-    // In true seed/demo mode (no real org): liveEvents come from
-    // tl_local_activity (seed-populated). Never merge hardcoded MOCK_EVENTS
-    // on top — that would double-count.
-    if (isSeedMode() && !profile?.org_id) {
-      return liveEvents.length > 0
-        ? [...liveEvents].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-        : MOCK_EVENTS;
-    }
-
-    // Non-seed mode: show live events only — MOCK_EVENTS span a fabricated
-    // week of history and would reappear as stale "5 days ago" entries once
-    // real audit data exists.
-    if (liveEvents.length === 0) return MOCK_EVENTS;
-
     return [...liveEvents]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [liveEvents, profile?.org_id]);
+  }, [liveEvents]);
 
   const repos  = useMemo(() => Array.from(new Set(allEvents.filter(e => e.repo).map(e => e.repo!))), [allEvents]);
   const actors = useMemo(() => Array.from(new Set(allEvents.filter(e => e.actor).map(e => e.actor!))), [allEvents]);
@@ -769,8 +752,17 @@ export default function AuditPage() {
               <div className="w-12 h-12 rounded-2xl bg-gray-50 flex items-center justify-center text-gray-400 mx-auto mb-3">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               </div>
-              <p className="text-sm font-bold text-gray-600">No events match your filters</p>
-              <p className="text-xs text-gray-400 mt-1">Try adjusting the search or filter criteria</p>
+              {allEvents.length === 0 ? (
+                <>
+                  <p className="text-sm font-bold text-gray-600">No audit events yet</p>
+                  <p className="text-xs text-gray-400 mt-1">Once scans, attestations, or policy actions occur, they&apos;ll appear here.</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-bold text-gray-600">No events match your filters</p>
+                  <p className="text-xs text-gray-400 mt-1">Try adjusting the search or filter criteria</p>
+                </>
+              )}
             </div>
           ) : grouped.map(group => (
             <div key={group.key}>
