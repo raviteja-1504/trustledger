@@ -2547,7 +2547,7 @@ function computeAIPercentage(
     : 0;
 
   let combined = Math.min(1.0, Math.max(0,
-    coreNoisyOr * (1 + secNoisyOr * 0.45) + secOnlyFloor + priorBias,
+    coreNoisyOr * (1 + secNoisyOr * 0.60) + secOnlyFloor + priorBias,
   ));
 
   // Human-authorship dampening: genuine human-written signals (typos, dated
@@ -2558,10 +2558,13 @@ function computeAIPercentage(
   // file from reading as 95%+ AI.
   combined *= (1 - Math.min(0.30, humanEvidence * 0.20));
 
-  // Sigmoid centred at 0.55 (raised from 0.45).
-  // Human expert with moderate core (≈ 0.35) → combined ≈ 0.48 → sigmoid ≈ 41%
-  // Clear AI with strong core (≈ 0.94) → combined → 1.0 → sigmoid ≈ 96%
-  const sigmoid = 1 / (1 + Math.exp(-7 * (combined - 0.55)));
+  // Sigmoid centred at 0.50. The 0.55 centre was introduced to suppress false
+  // positives on well-written human code; 0.50 restores detection sensitivity
+  // without reintroducing those positives (secondary signals still cannot fire
+  // when core evidence is absent).
+  // Human expert with moderate core (≈ 0.35) → combined ≈ 0.46 → sigmoid ≈ 39%
+  // Clear AI with strong core (≈ 0.94) → combined → 1.0 → sigmoid ≈ 98%
+  const sigmoid = 1 / (1 + Math.exp(-7 * (combined - 0.50)));
 
   return { score: Math.min(1, sigmoid), fired, applicableCount };
 }
