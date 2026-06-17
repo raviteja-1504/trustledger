@@ -134,27 +134,60 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<OrgProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Load org profile after user is known
+  // Load org profile after user is known.
+  // Uses a two-pass approach so a missing onboarding_complete column (Phase 3
+  // migration not yet run) doesn't break the login flow.
   async function loadProfile(userId: string) {
-    const { data } = await supabase
-      .from("org_members")
-      .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name, onboarding_complete)")
-      .eq("user_id", userId)
-      .single();
+    try {
+      // Attempt full query including onboarding_complete
+      const { data, error } = await supabase
+        .from("org_members")
+        .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name, onboarding_complete)")
+        .eq("user_id", userId)
+        .single();
 
-    if (data) {
-      const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string; onboarding_complete: boolean } | null;
-      setProfile({
-        org_id:              data.org_id,
-        org_slug:            org?.slug ?? "",
-        org_name:            org?.name ?? "",
-        role:                data.role,
-        email:               data.email,
-        name:                data.name,
-        github_login:        data.github_login,
-        avatar_url:          data.avatar_url,
-        onboarding_complete: org?.onboarding_complete ?? true,
-      });
+      if (data) {
+        const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string; onboarding_complete?: boolean } | null;
+        setProfile({
+          org_id:              data.org_id,
+          org_slug:            org?.slug ?? "",
+          org_name:            org?.name ?? "",
+          role:                data.role,
+          email:               data.email,
+          name:                data.name,
+          github_login:        data.github_login,
+          avatar_url:          data.avatar_url,
+          onboarding_complete: org?.onboarding_complete ?? true,
+        });
+        return;
+      }
+
+      // Query failed (e.g. onboarding_complete column not yet migrated) — fall
+      // back to query without the new column so login still works.
+      if (error) {
+        const { data: fallback } = await supabase
+          .from("org_members")
+          .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
+          .eq("user_id", userId)
+          .single();
+
+        if (fallback) {
+          const org = (Array.isArray(fallback.organizations) ? fallback.organizations[0] : fallback.organizations) as { slug: string; name: string } | null;
+          setProfile({
+            org_id:              fallback.org_id,
+            org_slug:            org?.slug ?? "",
+            org_name:            org?.name ?? "",
+            role:                fallback.role,
+            email:               fallback.email,
+            name:                fallback.name,
+            github_login:        fallback.github_login,
+            avatar_url:          fallback.avatar_url,
+            onboarding_complete: true, // assume complete until migration runs
+          });
+        }
+      }
+    } catch {
+      // Silent fail — user stays logged in but profile will be null
     }
   }
 
@@ -164,7 +197,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
-      if (session?.user) loadProfile(session.user.id).finally(() => setLoading(false));
+      if (session?.user) loadProfile(session.user.id).catch(() => {}).finally(() => setLoading(false));
       else setLoading(false);
     });
 
@@ -173,7 +206,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
-      if (session?.user) loadProfile(session.user.id);
+      if (session?.user) loadProfile(session.user.id).catch(() => {});
       else setProfile(null);
     });
 
