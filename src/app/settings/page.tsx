@@ -215,6 +215,8 @@ function OrganizationSection() {
     try {
       await authedFetch("/api/settings", { method: "PATCH", body: JSON.stringify({ name: orgName }) });
       toast.success("Organization name updated");
+      // Reload so the sidebar and header pick up the new name from the profile
+      setTimeout(() => window.location.reload(), 800);
     } catch {
       toast.error("Failed to update organization name");
     } finally {

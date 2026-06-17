@@ -49,7 +49,8 @@ export default function CreateOrgPage() {
     } catch (err: unknown) {
       const e = err as { error?: string };
       if (e?.error === "already_in_org") {
-        window.location.href = "/dashboard";
+        setError("You already belong to an organisation. Go to Settings → Delete Organisation to remove it first, or go to your dashboard.");
+        setCreating(false);
         return;
       }
       setError(e?.error === "slug_taken"
@@ -188,9 +189,19 @@ export default function CreateOrgPage() {
           </div>
 
           {error && (
-            <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
-              {error}
-            </p>
+            <div className="text-sm text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 space-y-2">
+              <p>{error}</p>
+              {error.includes("already belong") && (
+                <div className="flex gap-3 pt-1">
+                  <a href="/dashboard" className="text-xs font-bold text-indigo-600 hover:text-indigo-800 underline underline-offset-2">
+                    Go to dashboard →
+                  </a>
+                  <a href="/settings?tab=advanced" className="text-xs font-bold text-rose-600 hover:text-rose-800 underline underline-offset-2">
+                    Delete organisation →
+                  </a>
+                </div>
+              )}
+            </div>
           )}
 
           <button
