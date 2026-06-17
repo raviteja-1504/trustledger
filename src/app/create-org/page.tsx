@@ -55,7 +55,7 @@ export default function CreateOrgPage() {
       }
       setError(e?.error === "slug_taken"
         ? "That URL slug is already taken. Try a different one."
-        : "Failed to create organisation. Please try again.");
+        : `Failed to create organisation (${e?.error ?? "unknown"}). Please try again.`);
       setCreating(false);
     }
   }
