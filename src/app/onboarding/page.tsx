@@ -156,13 +156,18 @@ function GithubStep({ onNext }: { onNext: () => void }) {
       <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 space-y-3">
         <div className="flex items-center gap-2">
           <span className="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-black flex items-center justify-center shrink-0">1</span>
-          <p className="text-sm font-bold text-indigo-900">Install TrustLedger GitHub App</p>
+          <p className="text-sm font-bold text-indigo-900">Install your GitHub App</p>
         </div>
-        <a href="https://github.com/apps/trustledger/installations/new" target="_blank" rel="noopener noreferrer"
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white"
-          style={{ background: "#24292f" }}>
-          <GithubIcon /> Install on GitHub →
-        </a>
+        <p className="text-xs text-indigo-700">
+          Go to <strong>github.com → Settings → Developer settings → GitHub Apps</strong>, find your app and click <strong>Install</strong> on your organisation.
+        </p>
+        <p className="text-xs text-indigo-600">
+          Or if you haven&apos;t created a GitHub App yet, create one at{" "}
+          <a href="https://github.com/settings/apps/new" target="_blank" rel="noopener noreferrer"
+            className="font-bold underline underline-offset-2">
+            github.com/settings/apps/new →
+          </a>
+        </p>
       </div>
 
       {/* 2 — Webhook config */}
