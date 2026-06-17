@@ -78,6 +78,27 @@ export interface AuthResult {
   error?:       string;
 }
 
+export interface JWTResult {
+  user_id:  string;
+  email:    string;
+  error?:   string;
+}
+
+/**
+ * Validates the Bearer JWT and returns the Supabase user — does NOT require
+ * an org_members record. Used by endpoints that run before an org exists
+ * (e.g. POST /api/orgs/create).
+ */
+export async function verifyJWT(req: NextRequest): Promise<JWTResult> {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  if (!authHeader.startsWith("Bearer ")) return { user_id: "", email: "", error: "missing_token" };
+  const token = authHeader.slice(7);
+  const db = createServiceClient();
+  const { data: { user }, error } = await db.auth.getUser(token);
+  if (error || !user) return { user_id: "", email: "", error: "invalid_token" };
+  return { user_id: user.id, email: user.email ?? "" };
+}
+
 const ROLE_RANK: Record<string, number> = { developer: 0, security_reviewer: 1, admin: 2 };
 
 /** Returns an error string if caller's role is below the required minimum, null if allowed. */

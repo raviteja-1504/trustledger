@@ -56,6 +56,21 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
     );
   }
 
+  // Authenticated but no org membership → send to create-org
+  if (!loading && user && !profile && pathname !== "/create-org") {
+    if (typeof window !== "undefined") window.location.replace("/create-org");
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="flex flex-col items-center gap-3">
+          <svg className="animate-spin w-6 h-6 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+          </svg>
+          <p className="text-sm text-gray-400 font-medium">Setting up…</p>
+        </div>
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="flex items-center justify-center h-full px-4">

@@ -29,6 +29,7 @@ function isPublic(pathname: string): boolean {
   if (pathname === "/favicon.ico")             return true;
   if (pathname === "/")                        return true;
   if (pathname === "/onboarding")              return true;
+  if (pathname === "/create-org")              return true;
   return false;
 }
 

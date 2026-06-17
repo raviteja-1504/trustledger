@@ -1873,6 +1873,32 @@ function PrivacyTab() {
         </div>
       </SectionCard>
 
+      <SectionCard title="Reset Organisation" subtitle="Wipe all scans, violations and attestations. Team members stay. Use this to start fresh.">
+        <div className="space-y-4">
+          <div className="bg-rose-50 rounded-xl p-4 border border-rose-200">
+            <p className="text-xs text-rose-700 leading-relaxed">
+              <strong>This deletes:</strong> all scans, scan files, violations, attestations, secret findings, repositories, webhooks and API keys.<br/>
+              <strong>This keeps:</strong> all team members and their roles.<br/>
+              You will be redirected to the onboarding wizard to configure the organisation again.
+            </p>
+          </div>
+          <button
+            onClick={async () => {
+              if (!window.confirm("Reset this organisation? All scan data will be permanently deleted. Team members will remain. This cannot be undone.")) return;
+              try {
+                await authedFetch("/api/orgs/reset", { method: "POST" });
+                window.location.href = "/onboarding";
+              } catch {
+                toastError("Reset failed", "Please try again.");
+              }
+            }}
+            className="px-5 py-2 text-sm font-bold rounded-xl bg-rose-600 text-white hover:bg-rose-700 transition-colors"
+          >
+            Reset organisation data
+          </button>
+        </div>
+      </SectionCard>
+
       <SectionCard title="GDPR Rights" subtitle="Exercise your data rights under GDPR. All requests are logged in the audit trail.">
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-blue-50 rounded-xl p-4 border border-blue-100">
