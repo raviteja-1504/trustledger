@@ -183,12 +183,21 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     });
 
     // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
-      if (session?.user) loadProfile(session.user.id);
-      else setProfile(null);
+      if (session?.user) {
+        loadProfile(session.user.id);
+        // Register session on every sign-in (GitHub OAuth or email) so
+        // active_session_id in org_members always matches the current JWT.
+        // Without this, a GitHub OAuth login after a password login would
+        // produce a new JWT session ID that doesn't match the stored ID,
+        // triggering the "session_revoked" false-positive.
+        if (event === "SIGNED_IN") registerSession();
+      } else {
+        setProfile(null);
+      }
     });
 
     return () => subscription.unsubscribe();
