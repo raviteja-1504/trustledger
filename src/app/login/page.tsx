@@ -305,7 +305,14 @@ function ProductionLoginPage() {
           </p>
         </div>
 
-        <p className="mt-6 text-center text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>
+        <p className="mt-4 text-center text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
+          New to TrustLedger?{" "}
+          <a href="/create-org" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+            Create your organisation →
+          </a>
+        </p>
+
+        <p className="mt-3 text-center text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>
           By signing in you agree to our Terms of Service and Privacy Policy
         </p>
       </div>

@@ -1899,6 +1899,32 @@ function PrivacyTab() {
         </div>
       </SectionCard>
 
+      <SectionCard title="Delete Organisation" subtitle="Permanently delete this organisation and all its data. You will need to create a new one to continue.">
+        <div className="space-y-4">
+          <div className="bg-rose-50 rounded-xl p-4 border border-rose-200">
+            <p className="text-xs text-rose-700 leading-relaxed">
+              <strong>This permanently deletes:</strong> the organisation, all members, all scans, violations, attestations and every other record.<br/>
+              <strong>This cannot be undone.</strong> You will be signed out of the organisation and redirected to create a new one.
+            </p>
+          </div>
+          <button
+            onClick={async () => {
+              if (!window.confirm("PERMANENTLY DELETE this organisation and all its data?\n\nAll members will lose access. This cannot be undone.")) return;
+              if (!window.confirm("Are you sure? Type OK to confirm permanent deletion.")) return;
+              try {
+                await authedFetch("/api/orgs/delete", { method: "POST" });
+                window.location.href = "/create-org";
+              } catch {
+                toastError("Delete failed", "Please try again.");
+              }
+            }}
+            className="px-5 py-2 text-sm font-bold rounded-xl border-2 border-rose-600 text-rose-600 hover:bg-rose-600 hover:text-white transition-colors"
+          >
+            Delete organisation permanently
+          </button>
+        </div>
+      </SectionCard>
+
       <SectionCard title="GDPR Rights" subtitle="Exercise your data rights under GDPR. All requests are logged in the audit trail.">
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-blue-50 rounded-xl p-4 border border-blue-100">
