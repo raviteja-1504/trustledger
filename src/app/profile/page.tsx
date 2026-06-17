@@ -29,6 +29,62 @@ const TIMEZONES = [
   "Asia/Dubai", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney",
 ];
 
+function ClaimAdminCard() {
+  const { profile } = useAuth();
+  const [adminCount, setAdminCount] = useState<number | null>(null);
+  const [claiming,   setClaiming]   = useState(false);
+  const [done,       setDone]       = useState(false);
+
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ members: { role: string }[] }>("/api/team")
+      .then(d => setAdminCount((d.members ?? []).filter(m => m.role === "admin").length))
+      .catch(() => {});
+  }, [profile?.org_id]);
+
+  // Only show when there are no admins in the org
+  if (adminCount === null || adminCount > 0) return null;
+
+  if (done) {
+    return (
+      <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
+        <p className="text-sm font-bold text-emerald-800">✓ You are now the admin.</p>
+        <p className="text-xs text-emerald-600 mt-1">Reload the page to see full access.</p>
+        <button onClick={() => window.location.reload()}
+          className="mt-3 px-4 py-2 text-xs font-bold rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">
+          Reload now
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5">
+      <p className="text-sm font-black text-amber-800 mb-1">⚠️ No admin in this organisation</p>
+      <p className="text-xs text-amber-700 mb-4">
+        Your organisation has no admin. Claim admin rights to access Settings, team management, and full org data.
+      </p>
+      <button
+        onClick={async () => {
+          setClaiming(true);
+          try {
+            await authedFetch("/api/claim-admin", { method: "POST" });
+            setDone(true);
+          } catch {
+            alert("Could not claim admin. The org may already have an admin.");
+          } finally {
+            setClaiming(false);
+          }
+        }}
+        disabled={claiming}
+        className="px-4 py-2 text-sm font-bold rounded-xl bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+      >
+        {claiming ? "Claiming…" : "Claim admin rights"}
+      </button>
+    </div>
+  );
+}
+
 export default function ProfilePage() {
   const { profile: authProfile, user } = useAuth();
   const { success: toastSuccess, error: toastError } = useToastHelpers();
@@ -274,6 +330,9 @@ export default function ProfilePage() {
                 </div>
               )}
             </div>
+
+            {/* Claim Admin — shown only when the org has no admin */}
+            <ClaimAdminCard />
 
             {/* Sessions */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
