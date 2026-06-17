@@ -90,9 +90,9 @@ export function useRole() {
 
   // Production: role comes from org_members via auth profile (real DB value).
   // Demo/SKIP_AUTH: role comes from localStorage switcher.
-  const role: UserRole = SKIP_AUTH
-    ? demoRole
-    : ((profile?.role as UserRole | undefined) ?? "developer");
+  const rawRole = SKIP_AUTH ? demoRole : ((profile?.role as UserRole | undefined) ?? "developer");
+  // Guard against unexpected DB values (null, empty string, unknown role name)
+  const role: UserRole = (rawRole in PERMISSIONS) ? (rawRole as UserRole) : "developer";
 
   return { role, permissions: PERMISSIONS[role], setRole, isDemo: SKIP_AUTH };
 }

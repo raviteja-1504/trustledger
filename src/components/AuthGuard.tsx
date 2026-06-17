@@ -1,7 +1,7 @@
 "use client";
 
 import { ReactNode, useEffect } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
@@ -25,18 +25,16 @@ function GitHubIcon() {
 
 export default function AuthGuard({ children }: { children: ReactNode }) {
   const { user, profile, loading, signInWithGitHub } = useAuth();
-  const router   = useRouter();
   const pathname = usePathname() ?? "";
 
   // Redirect new (incomplete) orgs to the onboarding wizard.
-  // Only admins trigger this — developers/reviewers see the dashboard immediately
-  // (they were invited after the admin completed setup).
+  // Only admins trigger this — developers/reviewers see the dashboard immediately.
   useEffect(() => {
     if (SKIP_AUTH || loading || !user || !profile) return;
     if (profile.onboarding_complete) return;
-    if (pathname === "/onboarding" || pathname.startsWith("/api/")) return;
-    if (profile.role === "admin") router.replace("/onboarding");
-  }, [loading, user, profile, pathname, router]);
+    if (pathname === "/onboarding") return;
+    if (profile.role === "admin") window.location.replace("/onboarding");
+  }, [loading, user, profile, pathname]);
 
   if (SKIP_AUTH) return <>{children}</>;
 
