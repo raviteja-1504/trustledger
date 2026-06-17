@@ -105,11 +105,24 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
     const { data: { user }, error } = await db.auth.getUser(token);
     if (error || !user) return { org_id: "", error: "invalid_token" };
 
-    const { data: member } = await db
+    let { data: member } = await db
       .from("org_members")
       .select("org_id, role, email, active_session_id")
       .eq("user_id", user.id)
       .single();
+
+    // Invited users sign up after being added — their org_members row has
+    // user_id = null until first login. Link it now.
+    if (!member && user.email) {
+      const { data: linked } = await db
+        .from("org_members")
+        .update({ user_id: user.id })
+        .eq("email", user.email)
+        .is("user_id", null)
+        .select("org_id, role, email, active_session_id")
+        .single();
+      member = linked;
+    }
 
     if (!member) return { org_id: "", error: "no_org_membership" };
 

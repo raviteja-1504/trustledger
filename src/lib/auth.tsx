@@ -135,11 +135,27 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
   // Load org profile after user is known.
   async function loadProfile(userId: string) {
-    const { data } = await supabase
+    // Look up by user_id first (returning members)
+    let { data } = await supabase
       .from("org_members")
       .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
       .eq("user_id", userId)
       .single();
+
+    // Invited users have user_id = null until first login — link by email
+    if (!data) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user?.email) {
+        const { data: linked } = await supabase
+          .from("org_members")
+          .update({ user_id: userId })
+          .eq("email", user.email)
+          .is("user_id", null)
+          .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
+          .single();
+        data = linked;
+      }
+    }
 
     if (data) {
       const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string } | null;
