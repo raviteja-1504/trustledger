@@ -61,12 +61,12 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   if (prAuthorFilter) scansQuery = scansQuery.eq("pr_author", prAuthorFilter);
   const { data: scans } = await scansQuery;
 
-  // Attestations in period
+  // Attestations — no date filter: we need ALL attestations to correctly
+  // suppress SLA breaches on files attested before the current period window.
   const { data: attests } = await db
     .from("attestations")
     .select("scan_id, file_path, reviewer_email, created_at")
-    .eq("org_id", org_id)
-    .gte("created_at", since);
+    .eq("org_id", org_id);
 
   // All violations for this org (no status filter) — needed so that, per
   // file, we can tell whether an older scan's still-open violation has been
@@ -218,8 +218,10 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   // false SLA breaches for files that are attested in any scan for the same
   // repo (violation.status may lag behind if attestation happened via an
   // older flow that only resolved the specific scan's violation).
+  // Use scanToRepoAll (no date filter) so attestations on older scans outside
+  // the current period window still suppress false SLA breaches.
   const attestedRepoFiles = new Set(
-    (attests ?? []).map(a => `${scanToRepo.get(a.scan_id) ?? ""}::${a.file_path}`)
+    (attests ?? []).map(a => `${scanToRepoAll.get(a.scan_id) ?? scanToRepo.get(a.scan_id) ?? ""}::${a.file_path}`)
   );
 
   const currentViolations = Array.from(latestViolationByFile.values())
