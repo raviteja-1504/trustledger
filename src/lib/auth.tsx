@@ -10,14 +10,15 @@ import { authedFetch } from "./useRealData";
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface OrgProfile {
-  org_id:   string;
-  org_slug: string;
-  org_name: string;
-  role:     string;
-  email:    string;
-  name:     string | null;
-  github_login: string | null;
-  avatar_url:   string | null;
+  org_id:              string;
+  org_slug:            string;
+  org_name:            string;
+  role:                string;
+  email:               string;
+  name:                string | null;
+  github_login:        string | null;
+  avatar_url:          string | null;
+  onboarding_complete: boolean;
 }
 
 interface AuthContextValue {
@@ -93,8 +94,9 @@ function getDemoProfile(role: string): OrgProfile {
     role,
     email:        EMAILS[role] ?? "demo@trustledger.dev",
     name:         NAMES[role]  ?? "Demo User",
-    github_login: null,
-    avatar_url:   null,
+    github_login:        null,
+    avatar_url:          null,
+    onboarding_complete: true,
   };
 }
 
@@ -136,21 +138,22 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   async function loadProfile(userId: string) {
     const { data } = await supabase
       .from("org_members")
-      .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
+      .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name, onboarding_complete)")
       .eq("user_id", userId)
       .single();
 
     if (data) {
-      const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string } | null;
+      const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string; onboarding_complete: boolean } | null;
       setProfile({
-        org_id:   data.org_id,
-        org_slug: org?.slug ?? "",
-        org_name: org?.name ?? "",
-        role:     data.role,
-        email:    data.email,
-        name:     data.name,
-        github_login: data.github_login,
-        avatar_url:   data.avatar_url,
+        org_id:              data.org_id,
+        org_slug:            org?.slug ?? "",
+        org_name:            org?.name ?? "",
+        role:                data.role,
+        email:               data.email,
+        name:                data.name,
+        github_login:        data.github_login,
+        avatar_url:          data.avatar_url,
+        onboarding_complete: org?.onboarding_complete ?? true,
       });
     }
   }
