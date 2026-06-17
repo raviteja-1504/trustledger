@@ -175,13 +175,6 @@ function AnalyticsIcon() {
     </svg>
   );
 }
-function ChangelogIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-    </svg>
-  );
-}
 function NotifPageIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -208,31 +201,23 @@ const ALL_LINKS = [
   { href: "/dependencies",    label: "Dependencies",    icon: DepsIcon,        permission: null                         },
   { href: "/vulnerabilities", label: "Vulnerabilities", icon: VulnIcon,        permission: null                         },
   // Compliance
-  { href: "/compliance",           label: "Compliance",          icon: ComplianceIcon,  permission: null },
-  { href: "/compliance-calendar",  label: "Compliance Calendar", icon: ComplianceIcon,  permission: null },
-  { href: "/sla",                  label: "SLA Dashboard",       icon: PostureIcon,     permission: null },
+  { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null                         },
+  { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null                         },
   { href: "/risk-register",   label: "Risk Register",   icon: RiskRegIcon,     permission: null                         },
   { href: "/evidence",        label: "Evidence",        icon: EvidenceIcon2,   permission: null                         },
   // Audit
   { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null                         },
   { href: "/aibom",           label: "AIBOM",           icon: ReportsIcon,     permission: null                         },
-  { href: "/orgs",            label: "Organisations",   icon: OverviewIcon,    permission: "canManageSettings" as const  },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
-  // AI Intelligence (new features)
-  { href: "/trust-score",     label: "TrustScore™",      icon: PostureIcon,     permission: null                         },
-  { href: "/shadow-ai",       label: "Shadow AI",        icon: VulnIcon,        permission: "canManageSettings" as const },
-  { href: "/phantom-deps",    label: "Phantom Deps",     icon: DepsIcon,        permission: null                         },
-  { href: "/ai-debt",         label: "AI Debt Clock",    icon: AnalyticsIcon,   permission: null                         },
+  // AI Intel
+  { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null                         },
+  { href: "/shadow-ai",       label: "Shadow AI",       icon: VulnIcon,        permission: "canManageSettings" as const },
   // Config
+  { href: "/orgs",            label: "Organisations",   icon: OverviewIcon,    permission: "canManageSettings" as const },
   { href: "/profile",         label: "My Profile",      icon: OverviewIcon,    permission: null                         },
-  { href: "/roi",             label: "ROI Dashboard",   icon: AnalyticsIcon,   permission: "canManageSettings" as const },
+  { href: "/notifications",   label: "Notifications",   icon: NotifPageIcon,   permission: null                         },
   { href: "/settings",        label: "Settings",        icon: SettingsIcon,    permission: "canManageSettings" as const },
   { href: "/billing",         label: "Billing & Usage", icon: AnalyticsIcon,   permission: "canManageSettings" as const },
-  { href: "/status",          label: "System Status",   icon: PostureIcon,     permission: null                         },
-  { href: "/docs",            label: "API Docs",         icon: ReportsIcon,     permission: null                         },
-  { href: "/admin/go-live",   label: "Go-Live Checklist",icon: PostureIcon,     permission: "canManageSettings" as const },
-  { href: "/notifications",  label: "Notifications",    icon: NotifPageIcon,   permission: null                         },
-  { href: "/changelog",      label: "Changelog",        icon: ChangelogIcon,   permission: null                         },
 ];
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -437,13 +422,13 @@ export default function Sidebar() {
       <nav className={clsx("flex-1 py-3 overflow-y-auto overflow-x-hidden min-h-0", collapsed ? "px-1.5" : "px-3")}
         style={{ scrollbarWidth:"thin", scrollbarColor:"rgba(99,102,241,0.3) transparent" }}>
         {[
-          { label:"Overview",       hrefs:["/dashboard","/analytics","/posture"] },
-          { label:"Threats",        hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
-          { label:"Code Risk",      hrefs:["/scans","/secrets","/dependencies","/vulnerabilities"] },
-          { label:"AI Intel",       hrefs:["/trust-score","/shadow-ai","/phantom-deps","/ai-debt"] },
-          { label:"Compliance",     hrefs:["/compliance","/compliance-calendar","/sla","/risk-register","/evidence"] },
-          { label:"Audit",          hrefs:["/audit","/aibom","/reports"] },
-          { label:"Config",         hrefs:["/profile","/settings","/billing","/roi","/orgs","/status","/docs","/admin/go-live","/notifications","/changelog"] },
+          { label:"Overview",    hrefs:["/dashboard","/analytics","/posture"] },
+          { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
+          { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/vulnerabilities"] },
+          { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register","/evidence"] },
+          { label:"Audit",       hrefs:["/audit","/aibom","/reports"] },
+          { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
+          { label:"Config",      hrefs:["/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {
           const groupLinks = visibleLinks.filter(l => group.hrefs.includes(l.href));
           if (groupLinks.length === 0) return null;
