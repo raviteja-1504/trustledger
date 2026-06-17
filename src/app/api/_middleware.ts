@@ -71,10 +71,23 @@ async function checkIPAllowlist(
 }
 
 export interface AuthResult {
-  org_id:      string;
-  user_id?:    string;
+  org_id:       string;
+  user_id?:     string;
   actor_email?: string;
-  error?:      string;
+  role?:        string;   // "admin" | "security_reviewer" | "developer"
+  error?:       string;
+}
+
+const ROLE_RANK: Record<string, number> = { developer: 0, security_reviewer: 1, admin: 2 };
+
+/** Returns an error string if caller's role is below the required minimum, null if allowed. */
+export function requireRole(
+  result: AuthResult,
+  min: "developer" | "security_reviewer" | "admin",
+): string | null {
+  const rank = ROLE_RANK[result.role ?? "developer"] ?? 0;
+  if (rank < (ROLE_RANK[min] ?? 0)) return "insufficient_permissions";
+  return null;
 }
 
 export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
@@ -94,22 +107,19 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
 
     const { data: member } = await db
       .from("org_members")
-      .select("org_id, email, active_session_id")
+      .select("org_id, role, email, active_session_id")
       .eq("user_id", user.id)
       .single();
 
     if (!member) return { org_id: "", error: "no_org_membership" };
 
     // ── Single active session enforcement ─────────────────────────────────
-    // A newer login (via /api/auth/bootstrap) overwrites active_session_id.
-    // If this token's session_id no longer matches, this session has been
-    // superseded by a login elsewhere — reject it.
     const tokenSessionId = getJwtSessionId(token);
     if (member.active_session_id && tokenSessionId && member.active_session_id !== tokenSessionId) {
       return { org_id: "", error: "session_revoked" };
     }
 
-    return { org_id: member.org_id, user_id: user.id, actor_email: member.email };
+    return { org_id: member.org_id, user_id: user.id, actor_email: member.email, role: member.role };
   }
 
   // ── TrustLedger API key (format: tl_live_<random64>) ──────────────────────

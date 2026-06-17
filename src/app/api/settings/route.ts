@@ -1,10 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
 
-// ── GET org settings ───────────────────────────────────────────────────────────
+// â”€â”€ GET org settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -47,11 +47,14 @@ export async function GET(req: NextRequest) {
   });
 }
 
-// ── PATCH org settings ─────────────────────────────────────────────────────────
+// â”€â”€ PATCH org settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function PATCH(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+  const { org_id, user_id, actor_email } = auth;
 
   const body = await req.json() as {
     name?:                   string;
@@ -96,7 +99,7 @@ export async function PATCH(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-// ── POST — invite team member ──────────────────────────────────────────────────
+// â”€â”€ POST â€” invite team member â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -179,3 +182,4 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({ error: "unknown_action" }, { status: 400 });
 }
+

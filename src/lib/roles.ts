@@ -63,35 +63,38 @@ export const PERMISSIONS: Record<UserRole, RolePermissions> = {
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
-function storageKey(uid?: string | null): string {
-  return SKIP_AUTH ? "tl_role_dev" : `tl_role_${uid ?? "anon"}`;
-}
-
 export function useRole() {
-  const { user } = useAuth();
-  // SKIP_AUTH defaults to admin so local dev sees everything immediately
-  const [role, setRoleState] = useState<UserRole>(SKIP_AUTH ? "admin" : "developer");
+  const { user, profile } = useAuth();
+
+  // In demo/dev mode keep the localStorage switcher working so devs can
+  // preview different role views without a real DB.
+  const [demoRole, setDemoRoleState] = useState<UserRole>("admin");
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const stored = localStorage.getItem(storageKey(user?.id));
-    if (stored && stored in PERMISSIONS) setRoleState(stored as UserRole);
+    if (!SKIP_AUTH || typeof window === "undefined") return;
+    const stored = localStorage.getItem("tl_role_dev");
+    if (stored && stored in PERMISSIONS) setDemoRoleState(stored as UserRole);
   }, [user]);
 
   const setRole = useCallback(
     (newRole: UserRole) => {
+      if (!SKIP_AUTH) return; // role is immutable in production — set by admin
       if (typeof window !== "undefined") {
-        localStorage.setItem(storageKey(user?.id), newRole);
-        // In demo/SKIP_AUTH mode, also update the demo role key so the
-        // auth profile name/email reflects the new role on next reload.
-        if (SKIP_AUTH) localStorage.setItem("tl_demo_role", newRole);
+        localStorage.setItem("tl_role_dev", newRole);
+        localStorage.setItem("tl_demo_role", newRole);
       }
-      setRoleState(newRole);
+      setDemoRoleState(newRole);
     },
-    [user],
+    [],
   );
 
-  return { role, permissions: PERMISSIONS[role], setRole };
+  // Production: role comes from org_members via auth profile (real DB value).
+  // Demo/SKIP_AUTH: role comes from localStorage switcher.
+  const role: UserRole = SKIP_AUTH
+    ? demoRole
+    : ((profile?.role as UserRole | undefined) ?? "developer");
+
+  return { role, permissions: PERMISSIONS[role], setRole, isDemo: SKIP_AUTH };
 }
 
 // ── Team roster (localStorage-backed for demo; swap for API call in production) ─

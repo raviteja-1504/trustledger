@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requireRole } from "../_middleware";
 
 type ExportType = "violations" | "audit" | "scans" | "attestations" | "secrets" | "aibom";
 type ExportFormat = "csv" | "json";
@@ -28,8 +28,11 @@ function toCSV(rows: Record<string, unknown>[], columns: string[]): string {
 }
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "security_reviewer");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+  const { org_id } = auth;
 
   const url    = new URL(req.url);
   const type   = (url.searchParams.get("type") ?? "violations") as ExportType;

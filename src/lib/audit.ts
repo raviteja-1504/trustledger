@@ -16,7 +16,8 @@ export type AuditEventType =
   | "incident_created" | "incident_resolved"
   | "api_key_created" | "api_key_revoked"
   | "violation_resolved" | "violation_escalated"
-  | "report_generated" | "org_settings_changed";
+  | "report_generated" | "org_settings_changed"
+  | "member_invited" | "member_role_changed" | "member_removed";
 
 interface AuditEntry {
   org_id:        string;

@@ -213,6 +213,7 @@ const ALL_LINKS = [
   { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null                         },
   { href: "/shadow-ai",       label: "Shadow AI",       icon: VulnIcon,        permission: "canManageSettings" as const },
   // Config
+  { href: "/settings/team",   label: "Team",            icon: OverviewIcon,    permission: null                         },
   { href: "/orgs",            label: "Organisations",   icon: OverviewIcon,    permission: "canManageSettings" as const },
   { href: "/profile",         label: "My Profile",      icon: OverviewIcon,    permission: null                         },
   { href: "/notifications",   label: "Notifications",   icon: NotifPageIcon,   permission: null                         },
@@ -225,7 +226,7 @@ const ALL_LINKS = [
 export default function Sidebar() {
   const pathname   = usePathname() ?? "/";
   const router     = useRouter();
-  const { role, setRole, permissions } = useRole();
+  const { role, setRole, permissions, isDemo } = useRole();
   const roleColor  = ROLE_COLORS[role];
   const { collapsed, toggle } = useSidebar();
   const { signOut, profile } = useAuth();
@@ -428,7 +429,7 @@ export default function Sidebar() {
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register","/evidence"] },
           { label:"Audit",       hrefs:["/audit","/aibom","/reports"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
-          { label:"Config",      hrefs:["/orgs","/profile","/notifications","/settings","/billing"] },
+          { label:"Config",      hrefs:["/settings/team","/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {
           const groupLinks = visibleLinks.filter(l => group.hrefs.includes(l.href));
           if (groupLinks.length === 0) return null;
@@ -520,30 +521,45 @@ export default function Sidebar() {
               </svg>
             </button>
           </div>
+        ) : isDemo ? (
+            /* Demo mode — keep the role switcher so devs can preview views */
+            <div className="relative rounded-xl overflow-hidden"
+              style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.08)" }}>
+              <div className="flex items-center gap-2 px-2.5 py-1.5 pointer-events-none">
+                <span className={clsx("w-1.5 h-1.5 rounded-full shrink-0", roleColor.dot)} />
+                <span className="text-[11px] font-semibold truncate" style={{ color:"rgba(255,255,255,0.58)" }}>
+                  {ROLE_LABELS[role]}
+                </span>
+                <span className="ml-auto text-[9px] font-bold tracking-wide px-1 rounded" style={{ color:"rgba(255,200,50,0.7)", background:"rgba(255,200,50,0.1)" }}>DEMO</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  className="shrink-0" style={{ color:"rgba(255,255,255,0.25)" }}>
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </div>
+              <select value={role} onChange={e => setRole(e.target.value as UserRole)} title="Switch role (demo)"
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+                <option value="developer">Developer</option>
+                <option value="security_reviewer">Security Reviewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
         ) : (
-          <div className="relative rounded-xl overflow-hidden"
-            style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.08)" }}>
-            <div className="flex items-center gap-2 px-2.5 py-1.5 pointer-events-none">
+            /* Production — role is set by admin, read-only */
+            <div className="flex items-center gap-2 px-2.5 py-2 rounded-xl"
+              style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.08)" }}>
               <span className={clsx("w-1.5 h-1.5 rounded-full shrink-0", roleColor.dot)} />
               <span className="text-[11px] font-semibold truncate" style={{ color:"rgba(255,255,255,0.58)" }}>
                 {ROLE_LABELS[role]}
               </span>
               {!permissions.canAttest && (
-                <span className="ml-auto text-[9px] font-semibold tracking-wide" style={{ color:"rgba(255,255,255,0.22)" }}>view only</span>
+                <span className="ml-auto text-[9px] font-semibold" style={{ color:"rgba(255,255,255,0.22)" }}>view only</span>
               )}
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                className={clsx("shrink-0", !permissions.canAttest ? "" : "ml-auto")}
-                style={{ color:"rgba(255,255,255,0.25)" }}>
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
+              {profile?.email && (
+                <span className="ml-auto text-[9px] truncate max-w-[80px]" style={{ color:"rgba(255,255,255,0.28)" }} title={profile.email}>
+                  {profile.email.split("@")[0]}
+                </span>
+              )}
             </div>
-            <select value={role} onChange={e => setRole(e.target.value as UserRole)} title="Switch role"
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
-              <option value="developer">Developer</option>
-              <option value="security_reviewer">Security Reviewer</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
         )}
         {!collapsed && (
           <button

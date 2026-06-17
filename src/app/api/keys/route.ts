@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+  const { org_id } = auth;
 
   const db = createServiceClient();
   const { data } = await db
@@ -19,8 +22,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+  const { org_id, user_id, actor_email } = auth;
 
   const body = await req.json() as { name: string; expires_days?: number };
   if (!body.name) return NextResponse.json({ error: "missing_name" }, { status: 400 });
