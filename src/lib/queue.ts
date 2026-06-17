@@ -7,6 +7,7 @@ export interface ScanJob {
   pr_number:        number;
   head_sha:         string;
   branch:           string;
+  pr_author:        string | null;
   before_sha:       string | null;
   action:           string;
   check_run_id:     number | null;

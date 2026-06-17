@@ -4,40 +4,62 @@ import { verifyApiKey } from "../_middleware";
 import { cached, cacheDel, cacheKeys, TTL } from "@/lib/cache";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
 
-  const url   = new URL(req.url);
-  const days  = parseInt(url.searchParams.get("days") ?? "90");
-  const noCache = url.searchParams.get("nocache") === "1";
+  const url      = new URL(req.url);
+  const days     = parseInt(url.searchParams.get("days") ?? "90");
+  const noCache  = url.searchParams.get("nocache") === "1";
+  const { org_id, role, user_id } = auth;
 
-  // Cache key includes org + period
+  // Developers get a personal view scoped to their own PRs — never cached
+  // because it is user-specific (cache key would need user_id).
+  if (role === "developer") {
+    const db = createServiceClient();
+    let githubLogin: string | null = null;
+    if (user_id) {
+      const { data: member } = await db
+        .from("org_members")
+        .select("github_login")
+        .eq("user_id", user_id)
+        .single();
+      githubLogin = member?.github_login ?? null;
+    }
+    const result = await fetchDashboard(org_id, days, githubLogin);
+    return NextResponse.json({ ...result, _scope: "developer" });
+  }
+
+  // Admin / security_reviewer — org-wide, cacheable
   const cacheKey = cacheKeys.dashboard(org_id, days);
   if (!noCache) {
-    const hit = await cached(cacheKey, TTL.DASHBOARD, () => fetchDashboard(org_id, days));
+    const hit = await cached(cacheKey, TTL.DASHBOARD, () => fetchDashboard(org_id, days, null));
     return NextResponse.json(hit, {
       headers: { "X-Cache": "HIT", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
     });
   }
-  const result = await fetchDashboard(org_id, days);
+  const result = await fetchDashboard(org_id, days, null);
   return NextResponse.json(result, {
     headers: { "X-Cache": "MISS", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
   });
 }
 
-// ── Core dashboard query (separated so it can be cached) ──────────────────
+// ── Core dashboard query ───────────────────────────────────────────────────
+// prAuthorFilter: when set, restricts to scans opened by this GitHub login.
 
-async function fetchDashboard(org_id: string, days: number) {
+async function fetchDashboard(org_id: string, days: number, prAuthorFilter: string | null) {
   const db    = createServiceClient();
   const since = new Date(Date.now() - days * 86400_000).toISOString();
 
   // Aggregate per-repo stats from scans
-  const { data: scans } = await db
+  // When prAuthorFilter is set (developer role), restrict to that author's PRs.
+  let scansQuery = db
     .from("scans")
     .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
     .eq("org_id", org_id)
     .gte("created_at", since)
     .order("created_at", { ascending: false });
+  if (prAuthorFilter) scansQuery = scansQuery.eq("pr_author", prAuthorFilter);
+  const { data: scans } = await scansQuery;
 
   // Attestations in period
   const { data: attests } = await db
@@ -54,12 +76,13 @@ async function fetchDashboard(org_id: string, days: number) {
     .select("id, scan_id, file_path, risk_score, status, sla_deadline")
     .eq("org_id", org_id);
 
-  // All scans for this org (no date filter) — used to find each file's most
-  // recent scan when deduping violations across repeated scans.
-  const { data: allScans } = await db
+  // All scans for this org (no date filter) — used for violation dedup.
+  let allScansQuery = db
     .from("scans")
     .select("id, repo_full_name, created_at")
     .eq("org_id", org_id);
+  if (prAuthorFilter) allScansQuery = allScansQuery.eq("pr_author", prAuthorFilter);
+  const { data: allScans } = await allScansQuery;
 
   // Scan files for top risk. Fetch recent-first so that, once deduped by
   // repo+file_path below, we keep each file's most recent occurrence.

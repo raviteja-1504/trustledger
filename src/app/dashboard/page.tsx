@@ -802,6 +802,7 @@ export default function DashboardPage() {
   const { role, permissions } = useRole();
   const roleColor = ROLE_COLORS[role];
   const { profile } = useAuth();
+  const isDeveloperView = role === "developer";
 
   // Supabase Realtime — refresh dashboard when a new scan lands
   useScansRealtime(profile?.org_id, () => {
@@ -1334,6 +1335,25 @@ export default function DashboardPage() {
 
         {effectiveData && (
           <>
+            {/* ── Developer scope banner ───────────────────────────────── */}
+            {isDeveloperView && (
+              <div className="animate-fade-up flex items-center gap-3 bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3">
+                <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-indigo-800">My PRs</p>
+                  <p className="text-xs text-indigo-600 mt-0.5">
+                    Showing only repositories and files from pull requests opened by{" "}
+                    <span className="font-semibold">@{profile?.github_login ?? profile?.email?.split("@")[0] ?? "you"}</span>.
+                    Contact your admin to see org-wide data.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* ── Urgent action banner ─────────────────────────────────── */}
             {effectiveData.unattested_deploy_count > 0 && (
               <div className="animate-fade-up bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
@@ -1414,8 +1434,8 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* ── Executive Summary ───────────────────────────────────── */}
-            <ExecSummary data={effectiveData} />
+            {/* ── Executive Summary — admin/security_reviewer only ─────── */}
+            {!isDeveloperView && <ExecSummary data={effectiveData} />}
 
             {/* ── Stats grid ───────────────────────────────────────────── */}
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7 gap-4 animate-fade-up">
@@ -1479,8 +1499,8 @@ export default function DashboardPage() {
               />
             </div>
 
-            {/* ── Security Inbox strip ─────────────────────────────────── */}
-            <SecurityInbox data={effectiveData} />
+            {/* ── Security Inbox strip — admin/security_reviewer only ──── */}
+            {!isDeveloperView && <SecurityInbox data={effectiveData} />}
 
 
             {/* ── Empty state ──────────────────────────────────────────── */}
@@ -1605,17 +1625,19 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                {/* ── Compliance Readiness ─────────────────────────────── */}
-                <ComplianceReadiness data={effectiveData} />
+                {/* ── Compliance Readiness — admin/security_reviewer only ── */}
+                {!isDeveloperView && <ComplianceReadiness data={effectiveData} />}
 
                 {/* ── My Actions / Repos at a Glance / Risk Matrix ─────── */}
                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 animate-fade-up delay-300">
                   <div className="lg:col-span-2">
                     <ActionItemsPanel data={effectiveData} violationStatuses={violationStatuses} />
                   </div>
-                  <div className="lg:col-span-3">
-                    <RepoRiskMatrix data={effectiveData} />
-                  </div>
+                  {!isDeveloperView && (
+                    <div className="lg:col-span-3">
+                      <RepoRiskMatrix data={effectiveData} />
+                    </div>
+                  )}
                 </div>
 
                 {/* ── Top Risk Files ────────────────────────────────────── */}
@@ -1915,7 +1937,7 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Risk Heatmap ─────────────────────────────────────────────── */}
-      {effectiveData && (
+      {effectiveData && !isDeveloperView && (
         <div className="max-w-7xl mx-auto">
           <RiskHeatmap data={effectiveData} />
         </div>

@@ -12,14 +12,26 @@ import { cacheDel, cacheKeys } from "@/lib/cache";
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const { org_id, role, user_id } = auth;
 
   const url   = new URL(req.url);
   const repo  = url.searchParams.get("repo") ?? undefined;
   const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "100"), 200);
 
   const db = createServiceClient();
+
+  // Developers can only see their own PR scans
+  let prAuthorFilter: string | null = null;
+  if (role === "developer" && user_id) {
+    const { data: member } = await db
+      .from("org_members")
+      .select("github_login")
+      .eq("user_id", user_id)
+      .single();
+    prAuthorFilter = member?.github_login ?? null;
+  }
 
   let query = db
     .from("scans")
@@ -28,7 +40,8 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: false })
     .limit(limit);
 
-  if (repo) query = query.eq("repo_full_name", repo);
+  if (repo)            query = query.eq("repo_full_name", repo);
+  if (prAuthorFilter)  query = query.eq("pr_author", prAuthorFilter);
 
   const { data: scans, error: dbErr } = await query;
   if (dbErr) return NextResponse.json({ error: "db_error" }, { status: 500 });

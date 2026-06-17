@@ -185,32 +185,37 @@ function NotifPageIcon() {
   );
 }
 
-const ALL_LINKS = [
+// roles: which roles can see this link (undefined = all roles)
+const ALL_LINKS: Array<{
+  href: string; label: string; icon: () => JSX.Element;
+  permission: "canManageSettings" | null;
+  roles?: UserRole[];
+}> = [
   // Overview
   { href: "/dashboard",       label: "Overview",        icon: OverviewIcon,    permission: null                         },
-  { href: "/analytics",       label: "Analytics",       icon: AnalyticsIcon,   permission: null                         },
-  { href: "/posture",         label: "Security Posture",icon: PostureIcon,     permission: null                         },
+  { href: "/analytics",       label: "Analytics",       icon: AnalyticsIcon,   permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/posture",         label: "Security Posture",icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   // Threats
   { href: "/violations",      label: "Violations",      icon: ViolationsIcon,  permission: null                         },
-  { href: "/alerts",          label: "Alerts",          icon: BellAlertIcon,   permission: null                         },
-  { href: "/incidents",       label: "Incidents",       icon: IncidentIcon,    permission: null                         },
-  { href: "/threat-intel",    label: "Threat Intel",    icon: ThreatIcon,      permission: null                         },
+  { href: "/alerts",          label: "Alerts",          icon: BellAlertIcon,   permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/incidents",       label: "Incidents",       icon: IncidentIcon,    permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/threat-intel",    label: "Threat Intel",    icon: ThreatIcon,      permission: null,  roles: ["admin","security_reviewer"] },
   // Code Risk
   { href: "/scans",           label: "Scan History",    icon: ScansNavIcon,    permission: null                         },
-  { href: "/secrets",         label: "Secrets",         icon: SecretsIcon,     permission: null                         },
-  { href: "/dependencies",    label: "Dependencies",    icon: DepsIcon,        permission: null                         },
-  { href: "/vulnerabilities", label: "Vulnerabilities", icon: VulnIcon,        permission: null                         },
+  { href: "/secrets",         label: "Secrets",         icon: SecretsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/dependencies",    label: "Dependencies",    icon: DepsIcon,        permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/vulnerabilities", label: "Vulnerabilities", icon: VulnIcon,        permission: null,  roles: ["admin","security_reviewer"] },
   // Compliance
-  { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null                         },
-  { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null                         },
-  { href: "/risk-register",   label: "Risk Register",   icon: RiskRegIcon,     permission: null                         },
-  { href: "/evidence",        label: "Evidence",        icon: EvidenceIcon2,   permission: null                         },
+  { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/risk-register",   label: "Risk Register",   icon: RiskRegIcon,     permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/evidence",        label: "Evidence",        icon: EvidenceIcon2,   permission: null,  roles: ["admin","security_reviewer"] },
   // Audit
-  { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null                         },
-  { href: "/aibom",           label: "AIBOM",           icon: ReportsIcon,     permission: null                         },
+  { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/aibom",           label: "AIBOM",           icon: ReportsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
   // AI Intel
-  { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null                         },
+  { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/shadow-ai",       label: "Shadow AI",       icon: VulnIcon,        permission: "canManageSettings" as const },
   // Config
   { href: "/settings/team",   label: "Team",            icon: OverviewIcon,    permission: null                         },
@@ -354,7 +359,10 @@ export default function Sidebar() {
     };
   }, []);
 
-  const visibleLinks = ALL_LINKS.filter(l => l.permission === null || permissions[l.permission]);
+  const visibleLinks = ALL_LINKS.filter(l =>
+    (l.permission === null || permissions[l.permission]) &&
+    (!l.roles || l.roles.includes(role))
+  );
 
   async function handleSignOut() {
     await signOut();

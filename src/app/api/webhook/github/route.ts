@@ -50,6 +50,7 @@ export async function POST(req: NextRequest) {
     const prNumber     = pr.number     as number;
     const headSha      = (pr.head as Record<string, string>).sha;
     const branch       = (pr.head as Record<string, string>).ref;
+    const prAuthor     = (pr.user as Record<string, string> | null)?.login ?? null;
     const beforeSha    = (payload.before as string | undefined) ?? null;
     const [owner, repoName] = repoFullName.split("/");
 
@@ -103,6 +104,7 @@ export async function POST(req: NextRequest) {
       pr_number:       prNumber,
       head_sha:        headSha,
       branch,
+      pr_author:       prAuthor,
       before_sha:      beforeSha,
       action,
       check_run_id:    checkRunId,

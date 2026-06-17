@@ -5,32 +5,41 @@ import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationUpdateSchema } from "@/lib/validation";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const { org_id, role, user_id } = auth;
 
   const url    = new URL(req.url);
-  const status = url.searchParams.get("status");        // open|in_review|resolved
+  const status = url.searchParams.get("status");
   const repo   = url.searchParams.get("repo");
   const limit  = parseInt(url.searchParams.get("limit") ?? "100");
 
   const db = createServiceClient();
 
-  // For "currently outstanding" queries (open/in_review), we need to see ALL
-  // of a file's violations across scans — not just ones matching `status` —
-  // so we can tell whether a later scan (and possibly its attestation)
-  // superseded an older still-open violation for that same file. The status
-  // filter is applied after dedup in that case.
+  // Developers see only violations from their own PR scans
+  let prAuthorFilter: string | null = null;
+  if (role === "developer" && user_id) {
+    const { data: member } = await db
+      .from("org_members")
+      .select("github_login")
+      .eq("user_id", user_id)
+      .single();
+    prAuthorFilter = member?.github_login ?? null;
+  }
+
   const dedupe = status === "open" || status === "in_review";
 
+  // Filter violations through their parent scan's pr_author when scoped
   let query = db
     .from("violations")
-    .select("*, scans(repo_full_name, pr_number, commit_sha)")
+    .select("*, scans!inner(repo_full_name, pr_number, commit_sha, pr_author)")
     .eq("org_id", org_id)
     .order("created_at", { ascending: false })
     .limit(limit);
 
   if (status && !dedupe) query = query.eq("status", status);
   if (repo)              query = query.eq("scans.repo_full_name", repo);
+  if (prAuthorFilter)    query = query.eq("scans.pr_author", prAuthorFilter);
 
   const { data, error: qErr } = await query;
   if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
