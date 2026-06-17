@@ -214,8 +214,22 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
       latestViolationByFile.set(key, v);
     }
   });
+  // Build a set of attested repo+file_path combinations so we can suppress
+  // false SLA breaches for files that are attested in any scan for the same
+  // repo (violation.status may lag behind if attestation happened via an
+  // older flow that only resolved the specific scan's violation).
+  const attestedRepoFiles = new Set(
+    (attests ?? []).map(a => `${scanToRepo.get(a.scan_id) ?? ""}::${a.file_path}`)
+  );
+
   const currentViolations = Array.from(latestViolationByFile.values())
-    .filter(v => v.status === "open" || v.status === "in_review");
+    .filter(v => {
+      if (v.status !== "open" && v.status !== "in_review") return false;
+      // Suppress if the file already has an attestation in this repo
+      const repo = scanToRepoAll.get(v.scan_id) ?? "";
+      if (attestedRepoFiles.has(`${repo}::${v.file_path}`)) return false;
+      return true;
+    });
 
   const unattested = currentViolations.filter(v => v.risk_score === "CRITICAL" || v.risk_score === "HIGH").length;
 

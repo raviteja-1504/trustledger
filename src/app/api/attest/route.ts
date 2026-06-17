@@ -66,12 +66,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "attestation_failed", detail: attErr?.message }, { status: 500 });
   }
 
-  // Update violation status to resolved
-  await db
-    .from("violations")
-    .update({ status: "resolved", resolved_at: now, resolved_by: user_id ?? null })
-    .eq("scan_id", body.scan_id)
-    .eq("file_path", body.file_path);
+  // Resolve violations for this file across ALL scans in this repo, not just
+  // the current scan — the SLA dashboard deduplicates by repo+file_path and
+  // keeps the latest scan's violation, so a stale open violation from an
+  // earlier scan would still trigger a false SLA breach.
+  const { data: repoScans } = await db
+    .from("scans")
+    .select("id")
+    .eq("org_id", org_id)
+    .eq("repo_full_name", scan.repo_full_name);
+
+  const scanIds = (repoScans ?? []).map(s => s.id);
+  if (scanIds.length > 0) {
+    await db
+      .from("violations")
+      .update({ status: "resolved", resolved_at: now, resolved_by: user_id ?? null })
+      .eq("org_id", org_id)
+      .eq("file_path", body.file_path)
+      .in("scan_id", scanIds);
+  }
 
   // If this scan came from a GitHub PR and all CRITICAL/HIGH files are now
   // attested, flip the Check Run from "action_required" to "success" so the
