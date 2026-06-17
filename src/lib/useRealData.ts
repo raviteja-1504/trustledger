@@ -42,14 +42,16 @@ export async function authedFetch<T>(
     headers: { "Content-Type": "application/json", ...headers, ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string };
+    const body = await res.json().catch(() => ({})) as { error?: string; detail?: string };
     if (body.error === "session_revoked") {
       await supabase.auth.signOut();
       if (typeof window !== "undefined") {
         window.location.href = "/login?error=session_revoked";
       }
     }
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    // Include detail so callers can see the underlying DB/API error
+    const msg = [body.error, body.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`;
+    throw new Error(msg);
   }
   return res.json() as Promise<T>;
 }

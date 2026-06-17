@@ -47,15 +47,16 @@ export default function CreateOrgPage() {
       });
       window.location.href = "/onboarding";
     } catch (err: unknown) {
-      const e = err as { error?: string };
-      if (e?.error === "already_in_org") {
+      // authedFetch throws new Error(body.error) so the code is in .message
+      const code = (err instanceof Error ? err.message : (err as { error?: string })?.error) ?? "unknown";
+      if (code === "already_in_org") {
         setError("You already belong to an organisation. Go to Settings → Delete Organisation to remove it first, or go to your dashboard.");
         setCreating(false);
         return;
       }
-      setError(e?.error === "slug_taken"
+      setError(code === "slug_taken"
         ? "That URL slug is already taken. Try a different one."
-        : `Failed to create organisation (${e?.error ?? "unknown"}). Please try again.`);
+        : `Failed to create organisation (${code}). Please try again.`);
       setCreating(false);
     }
   }
