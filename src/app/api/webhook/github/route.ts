@@ -23,12 +23,10 @@ export async function POST(req: NextRequest) {
   const secret  = process.env.GITHUB_WEBHOOK_SECRET ?? "";
 
   // ── 1. Verify signature ────────────────────────────────────────────────────
-  // Temporary: skip signature check so we can confirm the rest of the pipeline
-  // works. Re-enable once we confirm scans are created.
-  // if (!verifyWebhookSignature(rawBody, sig, secret)) {
-  //   return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
-  // }
-  console.log("[webhook] sig bypass active, secret len:", secret.length);
+  console.log("[webhook] secret len:", secret.length); // should be 32
+  if (!verifyWebhookSignature(rawBody, sig, secret)) {
+    return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
+  }
 
   const payload = JSON.parse(rawBody) as Record<string, unknown>;
 
