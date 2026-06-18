@@ -17,10 +17,8 @@ let _client: Client | null = null;
 
 function client(): Client {
   if (!_client) {
-    _client = new Client({
-      token:   process.env.QSTASH_TOKEN!,
-      ...(process.env.QSTASH_URL ? { baseUrl: process.env.QSTASH_URL } : {}),
-    });
+    // baseUrl is NOT a valid option in @upstash/qstash — token alone is sufficient
+    _client = new Client({ token: process.env.QSTASH_TOKEN! });
   }
   return _client;
 }
@@ -30,27 +28,30 @@ function client(): Client {
  * Falls back to a direct POST to the worker when QSTASH_TOKEN is not set
  * (local dev / environments without QStash configured).
  */
-function directFetch(workerUrl: string, job: ScanJob): void {
-  fetch(workerUrl, {
+async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
+  const res = await fetch(workerUrl, {
     method:  "POST",
     headers: { "Content-Type": "application/json", "x-internal-secret": process.env.INTERNAL_SECRET ?? "dev" },
     body:    JSON.stringify(job),
-  }).catch(err => console.error("[queue] direct fetch failed:", err));
+  });
+  if (!res.ok) console.error("[queue] direct fetch returned", res.status);
 }
 
 export async function enqueueScan(job: ScanJob): Promise<void> {
   const workerUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/scan-worker`;
 
   if (!process.env.QSTASH_TOKEN) {
-    directFetch(workerUrl, job);
+    // No QStash — run scan synchronously so it completes before the caller returns
+    await directFetch(workerUrl, job);
     return;
   }
 
   try {
     await client().publishJSON({ url: workerUrl, body: job, retries: 3 });
+    console.log("[queue] job enqueued to QStash");
   } catch (err) {
-    // QStash unavailable — fall back to direct fetch so scans still run
-    console.error("[queue] QStash failed, falling back to direct fetch:", err);
-    directFetch(workerUrl, job);
+    // QStash unavailable — run scan synchronously as fallback
+    console.error("[queue] QStash failed, running scan directly:", err);
+    await directFetch(workerUrl, job);
   }
 }
