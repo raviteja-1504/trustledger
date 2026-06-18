@@ -58,8 +58,12 @@ export async function getInstallationToken(
 
 /** Build a short-lived JWT for the GitHub App. */
 function buildAppJWT(): string {
-  const appId      = process.env.GITHUB_APP_ID!;
-  const privateKey = process.env.GITHUB_APP_PRIVATE_KEY!.replace(/\\n/g, "\n");
+  // Trim \r from App ID (Windows CLI piping adds carriage returns to env vars)
+  const appId      = (process.env.GITHUB_APP_ID ?? "").replace(/\r/g, "").trim();
+  // Strip \r and convert escaped \n back to real newlines for the RSA key
+  const privateKey = (process.env.GITHUB_APP_PRIVATE_KEY ?? "")
+    .replace(/\r/g, "")
+    .replace(/\\n/g, "\n");
 
   const now  = Math.floor(Date.now() / 1000);
   const exp  = now + 540;           // 9 minutes
