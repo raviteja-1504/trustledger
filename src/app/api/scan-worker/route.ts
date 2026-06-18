@@ -30,6 +30,10 @@ import type { ScanJob } from "@/lib/queue";
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean> {
+  // Internal secret always accepted (webhook fallback when QStash isn't used)
+  if (req.headers.get("x-internal-secret") === (process.env.INTERNAL_SECRET ?? "dev")) {
+    return true;
+  }
   // QStash signature verification
   if (process.env.QSTASH_CURRENT_SIGNING_KEY && process.env.QSTASH_NEXT_SIGNING_KEY) {
     try {
@@ -45,8 +49,7 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
       return false;
     }
   }
-  // Local dev fallback: shared internal secret
-  return req.headers.get("x-internal-secret") === (process.env.INTERNAL_SECRET ?? "dev");
+  return false;
 }
 
 export async function POST(req: NextRequest) {

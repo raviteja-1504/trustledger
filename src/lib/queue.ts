@@ -16,7 +16,12 @@ export interface ScanJob {
 let _client: Client | null = null;
 
 function client(): Client {
-  if (!_client) _client = new Client({ token: process.env.QSTASH_TOKEN! });
+  if (!_client) {
+    _client = new Client({
+      token:   process.env.QSTASH_TOKEN!,
+      ...(process.env.QSTASH_URL ? { baseUrl: process.env.QSTASH_URL } : {}),
+    });
+  }
   return _client;
 }
 
