@@ -29,16 +29,11 @@ export async function POST(req: NextRequest) {
 
   if (deleteErr) {
     // rpc not available — fall back to sequential JS deletes
-    const { data: scans } = await db.from("scans").select("id").eq("org_id", org_id);
-    const scanIds = (scans ?? []).map((s: { id: string }) => s.id);
-
-    if (scanIds.length > 0) {
-      await db.from("violations")      .delete().in("scan_id", scanIds);
-      await db.from("attestations")    .delete().in("scan_id", scanIds);
-      await db.from("secret_findings") .delete().in("scan_id", scanIds);
-      await db.from("scan_files")      .delete().in("scan_id", scanIds);
-    }
-
+    // Delete by org_id directly — avoids FK subquery mismatches
+    await db.from("attestations")      .delete().eq("org_id", org_id);
+    await db.from("violations")        .delete().eq("org_id", org_id);
+    await db.from("secret_findings")   .delete().eq("org_id", org_id);
+    await db.from("scan_files")        .delete().eq("org_id", org_id);
     await db.from("scans")             .delete().eq("org_id", org_id);
     await db.from("repositories")      .delete().eq("org_id", org_id);
     await db.from("webhook_deliveries").delete().eq("org_id", org_id);
