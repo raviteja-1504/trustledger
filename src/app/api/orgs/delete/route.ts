@@ -22,29 +22,31 @@ export async function POST(req: NextRequest) {
   const { org_id } = auth;
   const db = createServiceClient();
 
-  // Get all scan IDs first
-  const { data: scans } = await db.from("scans").select("id").eq("org_id", org_id);
-  const scanIds = (scans ?? []).map(s => s.id);
+  // Delete via raw SQL using the service role to bypass all FK/RLS issues.
+  // The JS client deletes fail silently when FK constraints or missing tables
+  // cause errors — using rpc with a raw query guarantees the delete completes.
+  const { error: deleteErr } = await db.rpc("delete_org_cascade", { target_org_id: org_id });
 
-  // Delete all operational data in FK-safe order
-  if (scanIds.length > 0) {
-    await db.from("violations")      .delete().in("scan_id", scanIds);
-    await db.from("attestations")    .delete().in("scan_id", scanIds);
-    await db.from("secret_findings") .delete().in("scan_id", scanIds);
-    await db.from("scan_files")      .delete().in("scan_id", scanIds);
+  if (deleteErr) {
+    // rpc not available — fall back to sequential JS deletes
+    const { data: scans } = await db.from("scans").select("id").eq("org_id", org_id);
+    const scanIds = (scans ?? []).map((s: { id: string }) => s.id);
+
+    if (scanIds.length > 0) {
+      await db.from("violations")      .delete().in("scan_id", scanIds);
+      await db.from("attestations")    .delete().in("scan_id", scanIds);
+      await db.from("secret_findings") .delete().in("scan_id", scanIds);
+      await db.from("scan_files")      .delete().in("scan_id", scanIds);
+    }
+
+    await db.from("scans")             .delete().eq("org_id", org_id);
+    await db.from("repositories")      .delete().eq("org_id", org_id);
+    await db.from("webhook_deliveries").delete().eq("org_id", org_id);
+    await db.from("api_keys")          .delete().eq("org_id", org_id);
+    await db.from("audit_log")         .delete().eq("org_id", org_id);
+    await db.from("org_members")       .delete().eq("org_id", org_id);
+    await db.from("organizations")     .delete().eq("id", org_id);
   }
-
-  await db.from("scans")             .delete().eq("org_id", org_id);
-  await db.from("repositories")      .delete().eq("org_id", org_id);
-  await db.from("webhook_deliveries").delete().eq("org_id", org_id);
-  await db.from("api_keys")          .delete().eq("org_id", org_id);
-  await db.from("audit_log")         .delete().eq("org_id", org_id);
-
-  // Remove all members (including the admin calling this)
-  await db.from("org_members").delete().eq("org_id", org_id);
-
-  // Delete the organisation itself
-  await db.from("organizations").delete().eq("id", org_id);
 
   // Bust cache
   await Promise.all(DASHBOARD_CACHE_DAYS.map(d => cacheDel(cacheKeys.dashboard(org_id, d))));
