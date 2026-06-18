@@ -104,18 +104,22 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
-    await enqueueScan({
-      org_id:          orgId,
-      installation_id: installationId!,
-      repo_full_name:  repoFullName,
-      pr_number:       prNumber,
-      head_sha:        headSha,
-      branch,
-      pr_author:       prAuthor,
-      before_sha:      beforeSha,
-      action,
-      check_run_id:    checkRunId,
-    });
+    try {
+      await enqueueScan({
+        org_id:          orgId,
+        installation_id: installationId!,
+        repo_full_name:  repoFullName,
+        pr_number:       prNumber,
+        head_sha:        headSha,
+        branch,
+        pr_author:       prAuthor,
+        before_sha:      beforeSha,
+        action,
+        check_run_id:    checkRunId,
+      });
+    } catch (err) {
+      console.error("[webhook] enqueueScan failed:", err);
+    }
 
     return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });
   }
