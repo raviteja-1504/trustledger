@@ -58,17 +58,11 @@ export async function POST(req: NextRequest) {
     const db = createServiceClient();
 
     // Look up org
-    const { data: orgRecord, error: orgErr } = await db
+    const { data: orgRecord } = await db
       .from("organizations")
-      .select("id, name, github_org")
+      .select("id")
       .eq("github_org", owner)
       .maybeSingle();
-
-    console.log("[webhook] org lookup:", { owner, orgId: orgRecord?.id, orgName: orgRecord?.name, error: orgErr?.message ?? null });
-
-    // Also log all orgs to diagnose mismatch
-    const { data: allOrgs } = await db.from("organizations").select("id, name, github_org");
-    console.log("[webhook] all orgs:", allOrgs?.map(o => ({ name: o.name, github_org: o.github_org })));
 
     const orgId = orgRecord?.id ?? null;
 
