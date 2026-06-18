@@ -13,46 +13,45 @@ export interface ScanJob {
   check_run_id:     number | null;
 }
 
+/** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */
+function cleanEnv(val: string | undefined, fallback = ""): string {
+  return (val ?? fallback).replace(/^﻿/, "").trim();
+}
+
 let _client: Client | null = null;
 
 function client(): Client {
-  if (!_client) {
-    // baseUrl is NOT a valid option in @upstash/qstash — token alone is sufficient
-    _client = new Client({ token: process.env.QSTASH_TOKEN! });
-  }
+  if (!_client) _client = new Client({ token: cleanEnv(process.env.QSTASH_TOKEN) });
   return _client;
 }
 
-/**
- * Enqueue a scan job via Upstash QStash.
- * Falls back to a direct POST to the worker when QSTASH_TOKEN is not set
- * (local dev / environments without QStash configured).
- */
 async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
+  const secret = cleanEnv(process.env.INTERNAL_SECRET, "dev");
+  console.log("[queue] calling scan-worker at", workerUrl, "secret len:", secret.length);
   const res = await fetch(workerUrl, {
     method:  "POST",
-    headers: { "Content-Type": "application/json", "x-internal-secret": process.env.INTERNAL_SECRET ?? "dev" },
+    headers: { "Content-Type": "application/json", "x-internal-secret": secret },
     body:    JSON.stringify(job),
   });
   const body = await res.json().catch(() => ({}));
-  console.log("[queue] scan-worker response:", res.status, JSON.stringify(body).slice(0, 200));
+  console.log("[queue] scan-worker response:", res.status, JSON.stringify(body).slice(0, 300));
 }
 
 export async function enqueueScan(job: ScanJob): Promise<void> {
-  const workerUrl = `${process.env.NEXT_PUBLIC_APP_URL}/api/scan-worker`;
+  const appUrl   = cleanEnv(process.env.NEXT_PUBLIC_APP_URL);
+  const workerUrl = `${appUrl}/api/scan-worker`;
+  console.log("[queue] workerUrl:", workerUrl, "qstash token set:", !!process.env.QSTASH_TOKEN);
 
-  if (!process.env.QSTASH_TOKEN) {
-    // No QStash — run scan synchronously so it completes before the caller returns
+  if (!cleanEnv(process.env.QSTASH_TOKEN)) {
     await directFetch(workerUrl, job);
     return;
   }
 
   try {
     await client().publishJSON({ url: workerUrl, body: job, retries: 3 });
-    console.log("[queue] job enqueued to QStash");
+    console.log("[queue] job enqueued to QStash successfully");
   } catch (err) {
-    // QStash unavailable — run scan synchronously as fallback
-    console.error("[queue] QStash failed, running scan directly:", err);
+    console.error("[queue] QStash failed, running scan directly:", String(err).slice(0, 200));
     await directFetch(workerUrl, job);
   }
 }

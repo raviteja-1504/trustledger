@@ -31,7 +31,9 @@ const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean> {
   // Internal secret always accepted (webhook fallback when QStash isn't used)
-  if (req.headers.get("x-internal-secret") === (process.env.INTERNAL_SECRET ?? "dev")) {
+  // Strip BOM (﻿) that Windows CLI piping adds to env vars in Vercel
+  const expectedSecret = (process.env.INTERNAL_SECRET ?? "dev").replace(/^﻿/, "").trim();
+  if (req.headers.get("x-internal-secret") === expectedSecret) {
     return true;
   }
   // QStash signature verification
