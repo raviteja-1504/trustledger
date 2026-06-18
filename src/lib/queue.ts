@@ -34,7 +34,8 @@ async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
     headers: { "Content-Type": "application/json", "x-internal-secret": process.env.INTERNAL_SECRET ?? "dev" },
     body:    JSON.stringify(job),
   });
-  if (!res.ok) console.error("[queue] direct fetch returned", res.status);
+  const body = await res.json().catch(() => ({}));
+  console.log("[queue] scan-worker response:", res.status, JSON.stringify(body).slice(0, 200));
 }
 
 export async function enqueueScan(job: ScanJob): Promise<void> {
