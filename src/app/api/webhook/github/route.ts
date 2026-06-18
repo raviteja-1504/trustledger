@@ -20,10 +20,10 @@ export async function POST(req: NextRequest) {
   const rawBody = await req.text();
   const sig     = req.headers.get("x-hub-signature-256");
   const event   = req.headers.get("x-github-event");
-  const secret  = process.env.GITHUB_WEBHOOK_SECRET ?? "";
+  // Trim any stray \r characters added by Windows CLI piping into Vercel env vars
+  const secret  = (process.env.GITHUB_WEBHOOK_SECRET ?? "").trim();
 
   // ── 1. Verify signature ────────────────────────────────────────────────────
-  console.log("[webhook] secret len:", secret.length); // should be 32
   if (!verifyWebhookSignature(rawBody, sig, secret)) {
     return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
   }
