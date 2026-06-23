@@ -48,18 +48,25 @@ export async function GET(
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
-      const analysis = !storedIndicators && f.content ? analyzeFile(f.file_path, f.content) : null;
+      let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] = [];
+      if (!storedIndicators && f.content) {
+        try {
+          const analysis = analyzeFile(f.file_path, f.content);
+          freshIndicators = analysis.indicators
+            .filter(i => i.line != null)
+            .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }));
+          console.log(`[scan-api] ${f.file_path}: fresh indicators =`, freshIndicators.length, freshIndicators.map(i => `${i.id}:${i.line}`));
+        } catch (e) {
+          console.error(`[scan-api] analyzeFile failed for ${f.file_path}:`, e);
+        }
+      }
       return {
         file_path:       f.file_path,
         language:        f.language ?? "text",
         ai_percentage:   f.ai_percentage,
         risk_score:      f.risk_score,
         risk_indicators: f.risk_indicators ?? [],
-        indicators:      storedIndicators
-          ?? analysis?.indicators?.map(i => ({
-            id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail,
-          }))
-          ?? [],
+        indicators:      storedIndicators ?? freshIndicators,
         attested:        attestedSet.has(f.file_path),
         content:         f.content ?? undefined,
       };
