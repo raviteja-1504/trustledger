@@ -209,6 +209,13 @@ export async function POST(req: NextRequest) {
             ai_percentage: f.ai_percentage, risk_score: f.risk_score,
             risk_indicators: f.risk_indicators, content_hash: f.content_hash, line_count: f.line_count,
             content: contentByPath.get(f.file_path) ?? null,
+            // Store detailed indicators (with line numbers) so the PR page
+            // can show exact locations without re-running the scanner.
+            indicators: f.indicators
+              ? f.indicators
+                  .filter(i => i.line)
+                  .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }))
+              : [],
           })));
         }
 

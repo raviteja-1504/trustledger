@@ -23,7 +23,7 @@ export async function GET(
 
   const { data: files } = await db
     .from("scan_files")
-    .select("*")
+    .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators")
     .eq("scan_id", params.id)
     .order("ai_percentage", { ascending: false });
 
@@ -43,16 +43,23 @@ export async function GET(
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
     files: (files ?? []).map(f => {
-      const analysis = f.content ? analyzeFile(f.file_path, f.content) : null;
+      // Use stored indicators (with line numbers) if available; fall back to
+      // re-analysing from content for older scans that predate the indicators column.
+      const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
+        ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
+        : null;
+      const analysis = !storedIndicators && f.content ? analyzeFile(f.file_path, f.content) : null;
       return {
         file_path:       f.file_path,
         language:        f.language ?? "text",
         ai_percentage:   f.ai_percentage,
         risk_score:      f.risk_score,
         risk_indicators: f.risk_indicators ?? [],
-        indicators:      analysis?.indicators?.map(i => ({
-          id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail,
-        })) ?? [],
+        indicators:      storedIndicators
+          ?? analysis?.indicators?.map(i => ({
+            id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail,
+          }))
+          ?? [],
         attested:        attestedSet.has(f.file_path),
         content:         f.content ?? undefined,
       };
