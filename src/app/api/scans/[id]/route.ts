@@ -48,6 +48,8 @@ export async function GET(
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
+      // Fallback: re-run analyzeFile on stored content for older scans
+      // that predate the indicators column (new scans have indicators stored directly).
       let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] = [];
       if (!storedIndicators && f.content) {
         try {
@@ -55,10 +57,7 @@ export async function GET(
           freshIndicators = analysis.indicators
             .filter(i => i.line != null)
             .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }));
-          console.log(`[scan-api] ${f.file_path}: fresh indicators =`, freshIndicators.length, freshIndicators.map(i => `${i.id}:${i.line}`));
-        } catch (e) {
-          console.error(`[scan-api] analyzeFile failed for ${f.file_path}:`, e);
-        }
+        } catch { /* silent — indicators just won't have line numbers */ }
       }
       return {
         file_path:       f.file_path,
