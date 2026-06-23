@@ -283,25 +283,39 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
             )}
           </div>
 
-          {/* Signals */}
+          {/* Signals — enriched with line numbers and detail from indicators */}
           {file.risk_indicators.length > 0 && (
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
-                Risk Signals ({file.risk_indicators.length})
+                Detected Signals ({file.risk_indicators.length})
               </p>
               <div className="space-y-2">
                 {file.risk_indicators.map(sig => {
                   const meta = SIGNAL_META[sig] ?? { label: sig, desc: "Custom detection signal", sev: "medium" as SignalSev };
                   const { badge, dot } = SEV_COLORS[meta.sev];
+                  // Find all indicator instances for this signal (may have multiple occurrences with different lines)
+                  const instances = (file.indicators ?? []).filter(i => i.id === sig);
+                  const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
+                  const detail = instances[0]?.detail;
                   return (
-                    <div key={sig} className="flex items-start gap-3 bg-gray-50 rounded-xl border border-gray-100 p-3">
+                    <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 ${meta.sev === "critical" ? "bg-rose-50 border-rose-200" : meta.sev === "high" ? "bg-orange-50 border-orange-200" : "bg-gray-50 border-gray-100"}`}>
                       <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dot}`} />
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                           <p className="text-xs font-bold text-gray-900">{meta.label}</p>
                           <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                          {lines.length > 0 && (
+                            <span className="ml-auto text-[10px] font-bold text-gray-500 bg-white border border-gray-200 px-2 py-px rounded-md font-mono">
+                              {lines.length === 1 ? `Line ${lines[0]}` : `Lines ${lines.slice(0, 3).join(", ")}${lines.length > 3 ? ` +${lines.length - 3}` : ""}`}
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] text-gray-500 leading-relaxed">{meta.desc}</p>
+                        {detail && (
+                          <p className="text-[10px] font-mono text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2 py-1 mt-1.5 truncate">
+                            {detail}
+                          </p>
+                        )}
                       </div>
                     </div>
                   );
