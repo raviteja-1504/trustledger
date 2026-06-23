@@ -21,15 +21,84 @@ import AIAttributionBadge from "@/components/AIAttributionBadge";
 
 type SignalSev = "critical" | "high" | "medium" | "low";
 
-const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev }> = {
-  "sql-injection":         { label: "SQL Injection",          desc: "Dynamic SQL construction without parameterization — high injection risk when AI-generated code handles user input",          sev: "critical" },
-  "hardcoded-secret":      { label: "Hardcoded Secret",       desc: "API keys, passwords, or tokens may be embedded directly in source — a common AI model hallucination pattern",              sev: "critical" },
-  "eval-exec":             { label: "Eval / Exec Usage",      desc: "Dynamic code execution via eval() or exec() — AI models frequently produce this anti-pattern without security consideration", sev: "critical" },
-  "jwt-none-alg":          { label: "JWT None Algorithm",     desc: "JWT token verification may accept the 'none' algorithm, bypassing signature checks — a well-known AI security mistake",    sev: "high"     },
-  "ai-comment-pattern":    { label: "AI Comment Pattern",     desc: "Comment verbosity and style strongly match AI generation signatures (over-explained, instructional tone)",                  sev: "low"      },
-  "structural-uniformity": { label: "Structural Uniformity",  desc: "Code blocks show unusually uniform structure and indentation — indicates AI copy-paste without human variation",            sev: "medium"   },
-  "comment-density":       { label: "High Comment Density",   desc: "Comment-to-code ratio far exceeds human baseline — typical of AI output that over-documents obvious logic",                sev: "low"      },
-  "identifier-entropy":    { label: "Low Identifier Entropy", desc: "Variable and function names show low lexical entropy — AI models tend to use generic, predictable naming patterns",         sev: "medium"   },
+const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev; security?: boolean }> = {
+  // ── Security vulnerabilities (shown with line numbers) ─────────────────────
+  "sql-injection":           { label: "SQL Injection",             desc: "Query built with string interpolation — use parameterised queries",                          sev: "critical", security: true },
+  "nosql-injection":         { label: "NoSQL Injection",           desc: "User input in MongoDB operator/query without schema validation",                             sev: "critical", security: true },
+  "hardcoded-secret":        { label: "Hardcoded Secret",          desc: "API key, password, or token embedded directly in source code",                               sev: "critical", security: true },
+  "eval-exec":               { label: "Eval / Exec",               desc: "Dynamic code execution via eval() or exec() — arbitrary code execution risk",                sev: "critical", security: true },
+  "command-injection":       { label: "Command Injection",         desc: "User input flows into shell command — allows arbitrary OS command execution",                 sev: "critical", security: true },
+  "path-traversal":          { label: "Path Traversal",            desc: "User-controlled path could escape sandbox and read/write arbitrary files",                    sev: "critical", security: true },
+  "ssrf":                    { label: "SSRF",                      desc: "Server-side request forgery — user controls the URL of an outgoing request",                  sev: "critical", security: true },
+  "jwt-none-alg":            { label: "JWT None Algorithm",        desc: "JWT verification may accept 'none' algorithm, bypassing signature checks",                    sev: "critical", security: true },
+  "prototype-pollution":     { label: "Prototype Pollution",       desc: "Object property assignment from user input can pollute global prototype",                    sev: "high",     security: true },
+  "xss":                     { label: "XSS",                       desc: "User-controlled value inserted into DOM without sanitisation",                                sev: "high",     security: true },
+  "mass-assignment":         { label: "Mass Assignment",           desc: "Request body fields assigned to model without allowlist — may expose sensitive fields",        sev: "high",     security: true },
+  "insecure-deserialisation":{ label: "Insecure Deserialisation",  desc: "Untrusted data deserialised without type validation",                                         sev: "high",     security: true },
+  "weak-crypto":             { label: "Weak Cryptography",         desc: "Deprecated or weak algorithm (MD5, SHA1, DES) used for security-critical operation",          sev: "high",     security: true },
+  "open-redirect":           { label: "Open Redirect",             desc: "User-controlled redirect target can send users to malicious sites",                           sev: "high",     security: true },
+  "pii-in-logs":             { label: "PII in Logs",               desc: "Personally identifiable information may be written to logs",                                  sev: "high",     security: true },
+  "idor":                    { label: "IDOR",                      desc: "Object referenced by user-supplied ID without ownership check",                               sev: "high",     security: true },
+  "insecure-randomness":     { label: "Insecure Randomness",       desc: "Math.random() or weak RNG used for security tokens",                                         sev: "high",     security: true },
+  "cookie-insecurity":       { label: "Insecure Cookie",          desc: "Cookie missing Secure, HttpOnly, or SameSite attribute",                                      sev: "medium",   security: true },
+  "verbose-errors":          { label: "Verbose Error Exposure",    desc: "Stack traces or internal details exposed to clients",                                         sev: "medium",   security: true },
+  "sensitive-data-in-url":   { label: "Sensitive Data in URL",     desc: "Credentials or tokens passed in URL query parameters (logged by proxies)",                   sev: "medium",   security: true },
+  "timing-attack":           { label: "Timing Attack",             desc: "Non-constant-time comparison of secrets enables timing oracle attacks",                       sev: "medium",   security: true },
+  "watermark-detection":     { label: "AI Watermark",              desc: "Invisible Unicode characters detected — AI tool may have embedded a watermark",               sev: "high",     security: true },
+  "backdoor-detection":      { label: "Backdoor / Logic Bomb",     desc: "Date-gated condition, hardcoded bypass, or exfiltration pattern detected",                    sev: "critical", security: true },
+  "prompt-leakage":          { label: "Prompt Leakage",            desc: "AI system prompt or instruction text may be embedded in this file",                          sev: "high",     security: true },
+  "behavioral-risk":         { label: "Behavioral Risk",           desc: "Suspicious behavioral pattern (logic bomb, exfiltration, hidden channel)",                    sev: "high",     security: true },
+  "supply-chain-risk":       { label: "Supply Chain Risk",         desc: "Risky or typosquatted package imports detected",                                              sev: "medium",   security: true },
+  "cross-file-taint-exposure":{ label: "Cross-file Taint",        desc: "Tainted data from an imported module may reach a sensitive sink in this file",                sev: "high",     security: true },
+  // ── AI detection signals (file-level, no line numbers) ───────────────────────
+  "comment-phrasing":        { label: "AI Comment Phrasing",       desc: "Formulaic, instructional comment style matches AI generation signatures",                    sev: "low"  },
+  "language-specific":       { label: "Language-specific Pattern", desc: "Stereotyped per-language patterns frequently produced by AI code generators",                sev: "low"  },
+  "ngram-fingerprint":       { label: "Token N-gram Fingerprint",  desc: "Characteristic token sequences (e.g. 'return {success:' 'const result=await') match AI output", sev: "low" },
+  "test-structure":          { label: "Uniform Test Structure",    desc: "Robotically uniform test suite layout — AI models generate repetitive test boilerplate",      sev: "low"  },
+  "structural-clones":       { label: "Structural Clones",         desc: "3+ near-identical function bodies — indicates AI-generated CRUD scaffold",                   sev: "low"  },
+  "lexical-diversity":       { label: "Low Lexical Diversity",     desc: "Low type-token ratio — AI reuses a small vocabulary of ~200 identifiers consistently",        sev: "low"  },
+  "variable-vocabulary":     { label: "Generic Variable Names",    desc: "Generic names (result, handler, payload, data) are an AI hallmark",                          sev: "low"  },
+  "sentence-identifiers":    { label: "Long Identifier Names",     desc: "4-word function names (processUserAuthentication) are a characteristic AI pattern",           sev: "low"  },
+  "error-uniformity":        { label: "Uniform Error Handling",    desc: "Robotically consistent error handling across all functions",                                  sev: "low"  },
+  "cyclomatic-uniformity":   { label: "Uniform Complexity",        desc: "All functions have near-identical cyclomatic complexity — AI generates identically structured code", sev: "low" },
+  "doc-coverage":            { label: "Full Doc Coverage",         desc: "Every function documented — AI documents all; humans skip obvious ones",                      sev: "low"  },
+  "structural-repetition":   { label: "Structural Repetition",     desc: "Try/catch boilerplate repeated in every function",                                           sev: "low"  },
+  "function-size":           { label: "Uniform Function Size",     desc: "Suspiciously same-sized functions — AI generates to a target line count",                    sev: "low"  },
+  "comment-density":         { label: "High Comment Density",      desc: "AI comments every block; senior developers comment sparingly",                               sev: "low"  },
+  "method-chain-density":    { label: "Method Chain Density",      desc: "AI prefers fluent method chains; humans use intermediate variables",                         sev: "low"  },
+  "structured-logging":      { label: "Structured Logging",        desc: "AI uses structured context objects in every log call",                                       sev: "low"  },
+  "guard-clause-density":    { label: "Guard Clause Density",      desc: "AI applies early-return guards mechanically to every function",                              sev: "low"  },
+  "exhaustive-switches":     { label: "Exhaustive Switches",       desc: "AI adds default cases to all switch statements",                                            sev: "low"  },
+  "exception-specificity":   { label: "Specific Exceptions",       desc: "Specific exception types in every catch block — AI pattern",                                sev: "low"  },
+  "magic-number-absence":    { label: "No Magic Numbers",          desc: "AI names all constants; human developers sometimes inline them",                            sev: "low"  },
+  "boilerplate":             { label: "Boilerplate Density",       desc: "Repetitive template patterns characteristic of AI scaffolding",                             sev: "low"  },
+  "error-message-phrasing":  { label: "AI Error Messages",         desc: "'Invalid X', 'X is required', 'Failed to X' — formulaic AI error templates",               sev: "low"  },
+  "identifier-length":       { label: "Uniform Identifier Length", desc: "No short loop variables (i, j) — AI avoids brevity",                                       sev: "low"  },
+  "token-frequency":         { label: "Token Frequency Profile",   desc: "await/const/interface surplus vs var/this/prototype matches AI output distribution",        sev: "low"  },
+  "hallucinated-api":        { label: "Hallucinated API",          desc: "Non-existent method calls (validateAndSave, Array.isEmpty) — AI hallucination",             sev: "medium" },
+  "copy-paste-pattern":      { label: "Copy-paste Pattern",        desc: "Verbatim StackOverflow or tutorial implementation",                                         sev: "low"  },
+  "style-drift":             { label: "Style Drift",               desc: "AI-signal density jumps sharply mid-file — partial AI insertion",                          sev: "low"  },
+  "async-consistency":       { label: "Async Consistency",         desc: "Modern async/await used throughout — consistent with AI output",                            sev: "low"  },
+  "functional-preference":   { label: "Functional Style",          desc: "Consistent use of map/filter/reduce over loops — AI preference",                           sev: "low"  },
+  "template-literals":       { label: "Template Literals",         desc: "Exclusive template literal usage — modern style AI consistently applies",                   sev: "low"  },
+  "naming-consistency":      { label: "Naming Consistency",        desc: "Perfectly consistent camelCase/snake_case — AI enforces style rules uniformly",             sev: "low"  },
+  "import-organization":     { label: "Organised Imports",         desc: "Imports grouped and ordered — AI applies this consistently, humans vary",                   sev: "low"  },
+  "dead-code-absence":       { label: "No Dead Code",              desc: "No unused variables or imports — AI avoids them; humans accumulate them",                   sev: "low"  },
+  "async-try-catch":         { label: "Async Try-catch",           desc: "Every async function wrapped in try/catch — AI best-practice adherence",                   sev: "low"  },
+  "immutable-preference":    { label: "Immutable Preference",      desc: "Consistent const usage — AI prefers immutability",                                         sev: "low"  },
+  "type-guards":             { label: "Type Guards",               desc: "TypeScript type guards applied systematically — AI follows strict-mode patterns",           sev: "low"  },
+  "return-types":            { label: "Return Type Annotations",   desc: "Every function has explicit return type — AI strict-mode output",                          sev: "low"  },
+  "verb-prefix":             { label: "Verb Prefix Naming",        desc: "All functions prefixed with verb (get, set, handle) — AI naming convention",               sev: "low"  },
+  "destructuring-density":   { label: "Object Destructuring",      desc: "Consistent destructuring — modern JS pattern AI applies everywhere",                       sev: "low"  },
+  "line-length":             { label: "Line Length Uniformity",    desc: "Very uniform line lengths — Prettier-formatted AI output",                                 sev: "low"  },
+  "default-params":          { label: "Default Parameters",        desc: "Default parameter values used consistently — AI best practice",                            sev: "low"  },
+  "arrow-consistency":       { label: "Arrow Functions",           desc: "Consistent arrow function style throughout — AI modern JS preference",                     sev: "low"  },
+  "blank-line-regularity":   { label: "Blank Line Regularity",     desc: "Max 1 blank line between blocks, perfect regularity — AI formatting signature",            sev: "low"  },
+  "nesting-depth":           { label: "Shallow Nesting",           desc: "Shallow nesting depth throughout — AI applies early-exit patterns",                        sev: "low"  },
+  "ai-model-attribution":    { label: "AI Model Attribution",      desc: "Specific AI tool detected from style fingerprints",                                        sev: "low"  },
+  "ai-comment-pattern":      { label: "AI Comment Pattern",        desc: "Comment verbosity and style strongly match AI generation signatures",                      sev: "low"  },
+  "structural-uniformity":   { label: "Structural Uniformity",     desc: "Code blocks show unusually uniform structure — AI copy-paste without human variation",     sev: "low"  },
+  "identifier-entropy":      { label: "Low Identifier Entropy",    desc: "Generic, predictable naming — AI tends toward low-entropy identifiers",                    sev: "low"  },
 };
 
 const SEV_COLORS: Record<SignalSev, { badge: string; dot: string }> = {
@@ -283,46 +352,69 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
             )}
           </div>
 
-          {/* Signals — enriched with line numbers and detail from indicators */}
-          {file.risk_indicators.length > 0 && (
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
-                Detected Signals ({file.risk_indicators.length})
-              </p>
-              <div className="space-y-2">
-                {file.risk_indicators.map(sig => {
-                  const meta = SIGNAL_META[sig] ?? { label: sig, desc: "Custom detection signal", sev: "medium" as SignalSev };
-                  const { badge, dot } = SEV_COLORS[meta.sev];
-                  // Find all indicator instances for this signal (may have multiple occurrences with different lines)
-                  const instances = (file.indicators ?? []).filter(i => i.id === sig);
-                  const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
-                  const detail = instances[0]?.detail;
-                  return (
-                    <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 ${meta.sev === "critical" ? "bg-rose-50 border-rose-200" : meta.sev === "high" ? "bg-orange-50 border-orange-200" : "bg-gray-50 border-gray-100"}`}>
-                      <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dot}`} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                          <p className="text-xs font-bold text-gray-900">{meta.label}</p>
-                          <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
-                          {lines.length > 0 && (
-                            <span className="ml-auto text-[10px] font-bold text-gray-500 bg-white border border-gray-200 px-2 py-px rounded-md font-mono">
-                              {lines.length === 1 ? `Line ${lines[0]}` : `Lines ${lines.slice(0, 3).join(", ")}${lines.length > 3 ? ` +${lines.length - 3}` : ""}`}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-gray-500 leading-relaxed">{meta.desc}</p>
-                        {detail && (
-                          <p className="text-[10px] font-mono text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2 py-1 mt-1.5 truncate">
-                            {detail}
-                          </p>
-                        )}
-                      </div>
+          {/* Signals — split into security vulnerabilities and AI detection */}
+          {file.risk_indicators.length > 0 && (() => {
+            const securitySigs = file.risk_indicators.filter(s => SIGNAL_META[s]?.security);
+            const aiSigs       = file.risk_indicators.filter(s => !SIGNAL_META[s]?.security);
+
+            const renderSignal = (sig: string) => {
+              const meta = SIGNAL_META[sig] ?? { label: sig, desc: "Detection signal", sev: "low" as SignalSev };
+              const { badge, dot } = SEV_COLORS[meta.sev];
+              const instances = (file.indicators ?? []).filter(i => i.id === sig);
+              const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
+              const detail = instances[0]?.detail;
+              const isSec = !!meta.security;
+              return (
+                <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 ${
+                  isSec && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
+                  : isSec && meta.sev === "high"   ? "bg-orange-50 border-orange-200"
+                  : isSec && meta.sev === "medium"  ? "bg-amber-50 border-amber-200"
+                  : "bg-gray-50 border-gray-100"}`}>
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dot}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                      <p className="text-xs font-bold text-gray-900">{meta.label}</p>
+                      <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                      {lines.length > 0 && (
+                        <span className="ml-auto text-[10px] font-bold text-gray-600 bg-white border border-gray-200 px-2 py-px rounded-md font-mono">
+                          {lines.length === 1 ? `Line ${lines[0]}` : `Lines ${lines.slice(0, 3).join(", ")}${lines.length > 3 ? ` +${lines.length - 3}` : ""}`}
+                        </span>
+                      )}
                     </div>
-                  );
-                })}
+                    <p className="text-[11px] text-gray-500 leading-relaxed">{meta.desc}</p>
+                    {detail && (
+                      <p className="text-[10px] font-mono text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2 py-1 mt-1.5 truncate" title={detail}>
+                        {detail}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            };
+
+            return (
+              <div className="space-y-4">
+                {/* Security vulnerabilities */}
+                {securitySigs.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-rose-500 mb-2">
+                      Security Vulnerabilities ({securitySigs.length})
+                    </p>
+                    <div className="space-y-2">{securitySigs.map(renderSignal)}</div>
+                  </div>
+                )}
+                {/* AI detection signals */}
+                {aiSigs.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
+                      AI Detection Signals ({aiSigs.length})
+                    </p>
+                    <div className="space-y-1.5">{aiSigs.map(renderSignal)}</div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Footer */}
