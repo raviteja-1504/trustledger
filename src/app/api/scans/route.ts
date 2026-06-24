@@ -171,6 +171,10 @@ export async function POST(req: NextRequest) {
       semantic_graph: null,
       git_provenance: null,
       ai_tooling: [],
+      evidence_breakdown: {
+        code_evidence: avgAI, pr_evidence: 0, git_evidence: 0, tool_evidence: 0,
+        combined: avgAI, likelihood: "Mixed Authorship" as const, boosts: [],
+      },
     };
   } else {
     // Run the real scanner on provided content
