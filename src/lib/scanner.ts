@@ -3717,9 +3717,15 @@ export function runScan(input: ScanInput): ScanOutput {
     allBoosts.push(`AI tooling detected: ${ai_tooling.map(t => t.tool).join(", ")}`);
   }
 
-  // Git evidence: from provenance analysis (drift score + temporal risk)
+  // Git evidence: from provenance analysis
+  // ProvenanceSummary.overallRiskScore: 0=trusted, 1=critical
+  // aiAuthoredCommits: commits explicitly referencing AI tools
   if (git_provenance) {
-    gitEvidence = Math.min(1, git_provenance.drift_score * 0.6 + git_provenance.temporal_risk * 0.4);
+    const aiCommitSignal = Math.min(1, git_provenance.aiAuthoredCommits / Math.max(1, git_provenance.totalCommits));
+    gitEvidence = Math.min(1, git_provenance.overallRiskScore * 0.5 + aiCommitSignal * 0.5);
+    if (git_provenance.aiAuthoredCommits > 0) {
+      allBoosts.push(`${git_provenance.aiAuthoredCommits} commit(s) mention AI tool in message`);
+    }
   }
 
   // Exemption: lower PR evidence if many generated/vendor files detected
