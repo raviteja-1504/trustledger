@@ -63,16 +63,21 @@ export async function POST(req: NextRequest) {
 
   const job = JSON.parse(rawBody) as ScanJob;
   const {
-    org_id:          orgId,
-    installation_id: installationId,
-    repo_full_name:  repoFullName,
-    pr_number:       prNumber,
-    head_sha:        headSha,
+    org_id:           orgId,
+    installation_id:  installationId,
+    repo_full_name:   repoFullName,
+    pr_number:        prNumber,
+    head_sha:         headSha,
     branch,
-    pr_author:       prAuthor,
-    before_sha:      beforeSha,
+    pr_author:        prAuthor,
+    before_sha:       beforeSha,
     action,
-    check_run_id:    checkRunId,
+    check_run_id:     checkRunId,
+    pr_additions,
+    pr_deletions,
+    pr_commits,
+    pr_changed_files,
+    pr_created_at,
   } = job;
 
   const [owner, repoName] = repoFullName.split("/");
@@ -157,6 +162,13 @@ export async function POST(req: NextRequest) {
     // ── Run scanner ───────────────────────────────────────────────────────────
     const result = runScan({
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
+      pr_metadata: pr_additions != null ? {
+        additions:     pr_additions,
+        deletions:     pr_deletions ?? 0,
+        commits:       pr_commits ?? 1,
+        changed_files: pr_changed_files ?? 0,
+        created_at:    pr_created_at,
+      } : undefined,
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
 

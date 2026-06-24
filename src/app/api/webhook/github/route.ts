@@ -47,12 +47,18 @@ export async function POST(req: NextRequest) {
     const pr    = payload.pull_request as Record<string, unknown>;
     const repo  = payload.repository   as Record<string, unknown>;
 
-    const repoFullName = repo.full_name as string;
-    const prNumber     = pr.number     as number;
-    const headSha      = (pr.head as Record<string, string>).sha;
-    const branch       = (pr.head as Record<string, string>).ref;
-    const prAuthor     = (pr.user as Record<string, string> | null)?.login ?? null;
-    const beforeSha    = (payload.before as string | undefined) ?? null;
+    const repoFullName  = repo.full_name as string;
+    const prNumber      = pr.number     as number;
+    const headSha       = (pr.head as Record<string, string>).sha;
+    const branch        = (pr.head as Record<string, string>).ref;
+    const prAuthor      = (pr.user as Record<string, string> | null)?.login ?? null;
+    const beforeSha     = (payload.before as string | undefined) ?? null;
+    // PR behavior metadata for multi-signal AI evidence scoring
+    const prAdditions   = pr.additions   as number | undefined;
+    const prDeletions   = pr.deletions   as number | undefined;
+    const prCommits     = pr.commits     as number | undefined;
+    const prChangedFiles = pr.changed_files as number | undefined;
+    const prCreatedAt   = pr.created_at  as string | undefined;
     const [owner, repoName] = repoFullName.split("/");
 
     const db = createServiceClient();
@@ -100,16 +106,21 @@ export async function POST(req: NextRequest) {
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
     try {
       await enqueueScan({
-        org_id:          orgId,
-        installation_id: installationId!,
-        repo_full_name:  repoFullName,
-        pr_number:       prNumber,
-        head_sha:        headSha,
+        org_id:           orgId,
+        installation_id:  installationId!,
+        repo_full_name:   repoFullName,
+        pr_number:        prNumber,
+        head_sha:         headSha,
         branch,
-        pr_author:       prAuthor,
-        before_sha:      beforeSha,
+        pr_author:        prAuthor,
+        before_sha:       beforeSha,
         action,
-        check_run_id:    checkRunId,
+        check_run_id:     checkRunId,
+        pr_additions:     prAdditions,
+        pr_deletions:     prDeletions,
+        pr_commits:       prCommits,
+        pr_changed_files: prChangedFiles,
+        pr_created_at:    prCreatedAt,
       });
     } catch (err) {
       console.error("[webhook] enqueueScan failed:", err);

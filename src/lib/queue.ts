@@ -11,6 +11,12 @@ export interface ScanJob {
   before_sha:       string | null;
   action:           string;
   check_run_id:     number | null;
+  // PR behavior metadata for multi-signal evidence scoring
+  pr_additions?:    number;
+  pr_deletions?:    number;
+  pr_commits?:      number;
+  pr_changed_files?: number;
+  pr_created_at?:   string;
 }
 
 /** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */

@@ -3327,6 +3327,16 @@ export interface ScanSummary {
   requires_immediate_action: boolean; // any critical or high findings
 }
 
+export interface PRMetadata {
+  additions:     number;   // total lines added in this PR
+  deletions:     number;   // total lines deleted
+  commits:       number;   // number of commits in the PR
+  changed_files: number;   // number of files changed
+  created_at?:   string;   // ISO timestamp when PR was created
+  head_pushed_at?: string; // ISO timestamp of most recent push to head branch
+  pr_author?:    string;   // GitHub login of PR author
+}
+
 export interface ScanInput {
   repo:          string;
   pr_number:     number;
@@ -3335,6 +3345,104 @@ export interface ScanInput {
   files:         Array<{ path: string; content: string }>;
   prev_hashes?:  Record<string, string>;  // incremental: path → previous content_hash; skip if unchanged
   git_log?:      string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
+  pr_metadata?:  PRMetadata;              // PR behavior signals (LOC, commits, timing)
+}
+
+// ── AI Likelihood Classification ────────────────────────────────────────────
+
+export type AILikelihoodBand =
+  | "Likely Human"
+  | "Human with Tool Assistance"
+  | "Mixed Authorship"
+  | "Likely AI-Assisted"
+  | "Strong AI Evidence";
+
+export function classifyAILikelihood(score: number): AILikelihoodBand {
+  if (score <= 0.20) return "Likely Human";
+  if (score <= 0.40) return "Human with Tool Assistance";
+  if (score <= 0.60) return "Mixed Authorship";
+  if (score <= 0.80) return "Likely AI-Assisted";
+  return "Strong AI Evidence";
+}
+
+// ── Evidence Breakdown ───────────────────────────────────────────────────────
+
+export interface EvidenceBreakdown {
+  code_evidence:  number;  // 0–1: style/structure/AI-pattern signals
+  pr_evidence:    number;  // 0–1: PR behavior (LOC, commits, timing)
+  git_evidence:   number;  // 0–1: git provenance (commit velocity, history)
+  tool_evidence:  number;  // 0–1: explicit tool artifacts (Cursor, Copilot, etc.)
+  combined:       number;  // 0–1: weighted combination
+  likelihood:     AILikelihoodBand;
+  boosts:         string[]; // human-readable reasons for score boosts
+}
+
+// ── PR Behavior Scoring ──────────────────────────────────────────────────────
+// Weights: PR Behavior 25%, Git Provenance 30%, Code Structure 25%,
+//          Tool Evidence 15%, Attestation/Baseline 5%
+
+const GENERATED_PATH_RE = /(?:^|\/)(?:dist|vendor|generated|proto|protobuf|openapi|\.next|node_modules|__generated__|migrations)\//;
+
+function scorePRBehavior(meta: PRMetadata, totalFileLines: number): {
+  score:  number;
+  boosts: string[];
+} {
+  const boosts: string[] = [];
+  let score = 0;
+
+  const linesAdded  = meta.additions;
+  const commitCount = Math.max(1, meta.commits);
+  const fileCount   = Math.max(1, meta.changed_files);
+  const locPerCommit = linesAdded / commitCount;
+
+  // Signal 1: LOC vs commit count (very high weight)
+  // >500 LOC in a single commit is a strong AI indicator
+  if (locPerCommit > 1000) {
+    score += 0.30;
+    boosts.push(`${linesAdded} lines added in ${commitCount} commit(s) — ${Math.round(locPerCommit)} LOC/commit`);
+  } else if (locPerCommit > 500) {
+    score += 0.20;
+    boosts.push(`High LOC/commit ratio: ${Math.round(locPerCommit)} lines per commit`);
+  } else if (locPerCommit > 200) {
+    score += 0.10;
+  }
+
+  // Signal 2: Single commit for entire feature
+  if (commitCount === 1 && linesAdded > 300) {
+    score += 0.15;
+    boosts.push(`Entire feature in 1 commit (${linesAdded} lines)`);
+  } else if (commitCount <= 2 && linesAdded > 500) {
+    score += 0.10;
+    boosts.push(`${linesAdded} lines in only ${commitCount} commits`);
+  }
+
+  // Signal 3: Files changed vs commits ratio
+  const filesPerCommit = fileCount / commitCount;
+  if (filesPerCommit > 8 && commitCount <= 2) {
+    score += 0.10;
+    boosts.push(`${fileCount} files changed in ${commitCount} commit(s)`);
+  } else if (filesPerCommit > 5) {
+    score += 0.05;
+  }
+
+  // Signal 4: Branch-to-PR timing (if available)
+  if (meta.created_at && meta.head_pushed_at) {
+    const prCreated   = new Date(meta.created_at).getTime();
+    const branchPush  = new Date(meta.head_pushed_at).getTime();
+    const minutesDiff = Math.abs(prCreated - branchPush) / 60000;
+    if (minutesDiff < 10 && linesAdded > 200) {
+      score += 0.20;
+      boosts.push(`PR opened ${Math.round(minutesDiff)} min after push with ${linesAdded} lines`);
+    } else if (minutesDiff < 30 && linesAdded > 500) {
+      score += 0.10;
+      boosts.push(`${linesAdded} lines pushed and PR opened within ${Math.round(minutesDiff)} min`);
+    }
+  }
+
+  // Exemption: reduce score if many files look generated
+  // (this would need file paths — applied in runScan)
+
+  return { score: Math.min(1, score), boosts };
 }
 
 export interface CrossFileConsistency {
@@ -3382,6 +3490,7 @@ export interface ScanOutput {
   semantic_graph:       SemanticGraph | null;
   git_provenance:       GitProvenanceSummary | null;
   ai_tooling:           AIToolingArtifact[];
+  evidence_breakdown:   EvidenceBreakdown;  // multi-signal evidence buckets
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -3502,6 +3611,39 @@ export function runScan(input: ScanInput): ScanOutput {
 
   const boostedAI = crossFileBoost ? Math.min(1, avgAI + 0.05) : avgAI;
 
+  // ── Multi-signal evidence breakdown ─────────────────────────────────────────
+  // Weights: Code 25%, PR Behavior 25%, Git 30%, Tool Evidence 15%, other 5%
+
+  // 1. Code evidence (existing AI % from style/structure signals)
+  const codeEvidence = boostedAI;
+
+  // 2. PR behavior evidence
+  const totalLinesInScan = files.reduce((s, f) => s + f.line_count, 0);
+  const prMeta = input.pr_metadata;
+  const prBehavior = prMeta
+    ? scorePRBehavior(prMeta, totalLinesInScan)
+    : { score: 0, boosts: [] as string[] };
+  const prEvidence = prBehavior.score;
+
+  // 3. Tool evidence (Cursor/Copilot/Claude artifacts found)
+  // Will be populated after ai_tooling is computed below; placeholder for now
+  let toolEvidence = 0;
+
+  // 4. Git provenance evidence (from existing git_provenance analysis)
+  // Mapped from ProvenanceSummary.drift_score and temporal_risk
+  let gitEvidence = 0;
+  // Applied after git_provenance is computed below
+
+  // Combined score — weighted per the proposed architecture
+  // Applied after tool evidence and git evidence are computed
+
+  const allBoosts: string[] = [...prBehavior.boosts];
+
+  // Hard boost: >1000 LOC in single commit and <15 min timing
+  if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) {
+    allBoosts.push(`High-confidence signal: ${prMeta.additions} lines in a single commit`);
+  }
+
   const riskOrder: Record<string, number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3 };
   const overallRisk = files.reduce<RiskLevel>((max, f) =>
     riskOrder[f.risk_score] > riskOrder[max] ? f.risk_score : max, "LOW");
@@ -3568,6 +3710,52 @@ export function runScan(input: ScanInput): ScanOutput {
   // ── AI tooling artifact detection (LLM-era governance visibility) ─────────
   const ai_tooling = detectAIToolingArtifacts(input.files.map(f => f.path));
 
+  // ── Finalise evidence breakdown ───────────────────────────────────────────
+  // Tool evidence: explicit AI tool artifacts found (Cursor, Copilot, etc.)
+  toolEvidence = ai_tooling.length > 0 ? Math.min(1, ai_tooling.length * 0.35) : 0;
+  if (ai_tooling.length > 0) {
+    allBoosts.push(`AI tooling detected: ${ai_tooling.map(t => t.tool).join(", ")}`);
+  }
+
+  // Git evidence: from provenance analysis (drift score + temporal risk)
+  if (git_provenance) {
+    gitEvidence = Math.min(1, git_provenance.drift_score * 0.6 + git_provenance.temporal_risk * 0.4);
+  }
+
+  // Exemption: lower PR evidence if many generated/vendor files detected
+  const generatedFileRatio = input.files.filter(f => GENERATED_PATH_RE.test(f.path)).length / Math.max(1, input.files.length);
+  const prEvidenceAdjusted = prEvidence * (1 - generatedFileRatio * 0.5);
+
+  // Combined score:
+  //   Code Structure   25%
+  //   PR Behavior      25%
+  //   Git Provenance   30%
+  //   Tool Evidence    15%
+  //   (baseline 5% handled via codeEvidence floor)
+  const combinedRaw = (
+    codeEvidence  * 0.25 +
+    prEvidenceAdjusted * 0.25 +
+    gitEvidence   * 0.30 +
+    toolEvidence  * 0.15
+  );
+
+  // Hard boosts that override normal weighting
+  let hardBoost = 0;
+  if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) hardBoost = Math.max(hardBoost, 0.20);
+  if (ai_tooling.length > 0 && codeEvidence > 0.40)              hardBoost = Math.max(hardBoost, 0.15);
+
+  const combined = Math.min(1, combinedRaw + hardBoost);
+
+  const evidence_breakdown: EvidenceBreakdown = {
+    code_evidence:  codeEvidence,
+    pr_evidence:    prEvidenceAdjusted,
+    git_evidence:   gitEvidence,
+    tool_evidence:  toolEvidence,
+    combined,
+    likelihood:     classifyAILikelihood(combined),
+    boosts:         allBoosts,
+  };
+
   // ── Repository trust score ────────────────────────────────────────────────
   const totalLines2 = files.reduce((s, f) => s + f.line_count, 0) || 1;
   const secDensity  = (criticalCount + highCount) / (totalLines2 / 100);
@@ -3626,6 +3814,7 @@ export function runScan(input: ScanInput): ScanOutput {
     semantic_graph,
     git_provenance,
     ai_tooling,
+    evidence_breakdown,
   };
 }
 
