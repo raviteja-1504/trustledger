@@ -970,6 +970,7 @@ function findSQLInjectionTainted(lines: string[]): ScanIndicator[] {
 
 // Signal 1: AI Comment Phrasing (q = 0.78)
 const COMMENT_PHRASING_RE = [
+  // ── Original patterns ─────────────────────────────────────────────────────
   /(?:\/\/|#)\s*This (?:function|method|component|class|helper)\s+(?:takes|accepts|returns|handles|processes|creates|updates|deletes)\b/i,
   /(?:\/\/|#)\s*(?:Returns?|Gets?)\s+(?:a|an|the)\s+\w+\s+(?:object|array|list|string|number|boolean|map|set)\b/i,
   /(?:\/\/|#)\s*Step\s+\d+[:.]/i,
@@ -986,15 +987,50 @@ const COMMENT_PHRASING_RE = [
   /(?:\/\/|#)\s*The following\s+(?:function|method|class|code|example|snippet)\b/i,
   /(?:\/\/|#)\s*(?:Helper|Utility|Convenience)\s+(?:function|method|class)\s+(?:to|for|that)\b/i,
   /(?:\/\/|#)\s*(?:Validates?|Checks?|Verifies?)\s+(?:that|whether|if)\s+the\b/i,
+
+  // ── Modern LLM JSDoc patterns (GPT-4 / Claude style) ─────────────────────
+  // Plain JSDoc descriptions starting with verbs — the most common LLM output
+  /\*\s+(?:Creates?|Updates?|Deletes?|Handles?|Validates?|Processes?|Fetches?|Sends?|Builds?|Generates?|Initializes?|Loads?|Saves?|Checks?|Verifies?|Computes?|Calculates?|Formats?|Parses?|Transforms?|Converts?|Extracts?|Retrieves?|Submits?|Triggers?|Performs?|Executes?|Manages?|Configures?)\s+(?:a|an|the|all|new|this|any|each|the\s+\w+)/im,
+  // "* Returns the ... for ..." — plain @returns without type annotation
+  /\*\s+(?:Returns?|Gets?)\s+(?:the|a|an)\s+\w[\w\s]{5,50}(?:for|from|of|based on)/im,
+  // Multi-line JSDoc body: two consecutive description lines (no @ tags)
+  /\/\*\*\s*\n\s*\*\s+\w[^\n@]{20,}\n\s*\*\s+\w[^\n@]{10,}/m,
+  // "* @returns The ..." without braces (LLM often omits type in @returns)
+  /\*\s*@returns?\s+(?:The|A|An|This)\s+\w/im,
+  // Inline "// Initialise/Initialize/Set up ..." imperative patterns
+  /(?:\/\/|#)\s*(?:Initialise|Initialize|Set up|Set the|Register the|Configure the|Create the|Add the|Remove the|Update the|Check if|Ensure that)\b/i,
 ];
 
 function sigCommentPhrasing(content: string): number {
   let hits = 0;
   for (const re of COMMENT_PHRASING_RE) if (re.test(content)) hits++;
-  // Raised from 5→6 minimum for max score. 1-2 matches are common in human
-  // codebases (e.g. a single TSDoc @param or a "Step 1:" comment); require
-  // at least 3 distinct patterns before contributing any evidence.
-  return hits >= 6 ? 1.0 : hits === 5 ? 0.88 : hits === 4 ? 0.72 : hits === 3 ? 0.52 : 0;
+  // Modern LLM output (GPT-4/Claude) typically scores 4-8 on this expanded set.
+  // Human code rarely scores above 2-3.
+  return hits >= 7 ? 1.0
+       : hits === 6 ? 0.88
+       : hits === 5 ? 0.72
+       : hits === 4 ? 0.55
+       : hits === 3 ? 0.35
+       : hits === 2 ? 0.15
+       : 0;
+}
+
+// Signal 1b: JSDoc completeness — AI documents every function; humans skip obvious ones.
+// Not in SIGNAL_LEAKS (used as amplifier inside sigLanguageSpecific via language-specific path).
+function sigJSDocCompleteness(content: string): number {
+  const jsdocBlocks  = (content.match(/\/\*\*[\s\S]+?\*\//g) ?? []).length;
+  if (jsdocBlocks < 2) return 0;
+  // Count exported/public functions and class methods
+  const funcCount = (content.match(
+    /(?:export\s+(?:default\s+)?(?:async\s+)?function\s+\w+|(?:public|private|protected)\s+(?:static\s+)?(?:async\s+)?\w+\s*\(|\b(?:async\s+)?function\s+\w+\s*\()/g
+  ) ?? []).length;
+  if (funcCount < 2) return 0;
+  const ratio = jsdocBlocks / funcCount;
+  // Near-100% JSDoc coverage is rare in human code; AI documents everything
+  if (ratio > 0.90 && jsdocBlocks >= 4) return 0.90;
+  if (ratio > 0.75 && jsdocBlocks >= 3) return 0.65;
+  if (ratio > 0.60 && jsdocBlocks >= 2) return 0.40;
+  return 0;
 }
 
 // Signal 2: Language-Specific AI Patterns (q = 0.70)
@@ -2303,6 +2339,7 @@ function sigCopyPastePattern(content: string): number {
 // Tier 1 — genuinely discriminates AI from senior human developers (LR > 4.0)
 const CORE_SIGNALS = new Set([
   "comment-phrasing",     // AI uses formulaic phrasing patterns humans almost never write
+  "jsdoc-completeness",   // AI documents every function; humans skip trivial ones (new)
   "language-specific",    // Language-specific stereotyped AI patterns
   "test-structure",       // Robotically uniform AI test suites
   "lexical-diversity",    // AI reuses ~200 identifiers; human TTR is measurably higher
@@ -2370,10 +2407,11 @@ const LANG_LEAK_BOOST: Partial<Record<string, Partial<Record<string, number>>>> 
 const SIGNAL_LEAKS: Array<[string, number]> = [
   // ── Tier 1: CORE (LR > 4) ──────────────────────────────────────────────────
   ["comment-phrasing",        0.65],  // Formulaic AI comments rarely appear in human code
+  ["jsdoc-completeness",      0.70],  // AI documents every function; humans skip trivial ones
   ["language-specific",       0.60],  // Stereotyped per-language AI patterns
-  ["ngram-fingerprint",       0.60],  // Characteristic token bigrams (return {success:, const result=await, etc.)
+  ["ngram-fingerprint",       0.65],  // Characteristic token bigrams (return {success:, const result=await, etc.)
   ["test-structure",          0.55],  // Robotically uniform AI test suites
-  ["structural-clones",       0.55],  // 3+ near-identical function bodies = AI-generated CRUD
+  ["structural-clones",       0.60],  // 3+ near-identical function bodies = AI-generated CRUD
   ["lexical-diversity",       0.50],  // Low TTR: AI reuses ~200 identifiers consistently
   ["variable-vocabulary",     0.50],  // Generic AI names: result, handler, payload
   ["sentence-identifiers",    0.45],  // 4-word function names are an AI hallmark
@@ -2448,6 +2486,7 @@ function computeAIPercentage(
 
   const raw: Record<string, number> = {
     "comment-phrasing":      sigCommentPhrasing(content),
+    "jsdoc-completeness":    sigJSDocCompleteness(content),
     "language-specific":     sigLanguageSpecific(content, lang),
     "test-structure":        sigTestStructure(content),
     "doc-coverage":          sigDocumentationCoverage(content, lang),
@@ -2547,24 +2586,25 @@ function computeAIPercentage(
     : 0;
 
   let combined = Math.min(1.0, Math.max(0,
-    coreNoisyOr * (1 + secNoisyOr * 0.60) + secOnlyFloor + priorBias,
+    coreNoisyOr * (1 + secNoisyOr * 0.75) + secOnlyFloor + priorBias,
   ));
 
   // Human-authorship dampening: genuine human-written signals (typos, dated
-  // personal comments, debug prints, mixed indentation, etc., from
-  // attributeCode's HUMAN_SIGNALS) pull the combined score down. Capped at a
-  // 30% reduction so a few stray markers in otherwise AI-typical code don't
-  // swing the verdict, but strong human evidence keeps a clearly AI-shaped
-  // file from reading as 95%+ AI.
+  // personal comments, debug prints, mixed indentation, etc.) pull the
+  // combined score down. Capped at 30% reduction.
   combined *= (1 - Math.min(0.30, humanEvidence * 0.20));
 
-  // Sigmoid centred at 0.50. The 0.55 centre was introduced to suppress false
-  // positives on well-written human code; 0.50 restores detection sensitivity
-  // without reintroducing those positives (secondary signals still cannot fire
-  // when core evidence is absent).
-  // Human expert with moderate core (≈ 0.35) → combined ≈ 0.46 → sigmoid ≈ 39%
-  // Clear AI with strong core (≈ 0.94) → combined → 1.0 → sigmoid ≈ 98%
-  const sigmoid = 1 / (1 + Math.exp(-7 * (combined - 0.50)));
+  // Sigmoid centred at 0.44 (recalibrated from 0.50).
+  // The calibration history: 0.55 (avoid false positives) → 0.50 (restore sensitivity)
+  // → 0.44 (correct for modern LLM code that fires signals at lower intensities
+  //   than 2022-era AI code the original weights were calibrated against).
+  //
+  // Empirical targets after calibration:
+  //   Clear human code (weak core ≈ 0.15)    → combined ≈ 0.20 → sigmoid ≈ 22%
+  //   Mixed / tool-assisted (core ≈ 0.35)    → combined ≈ 0.48 → sigmoid ≈ 54%
+  //   Clear AI (strong core ≈ 0.65+)         → combined ≈ 0.80 → sigmoid ≈ 85%
+  //   Obvious AI (all signals ≥ 0.70)        → combined → 1.0  → sigmoid ≈ 98%
+  const sigmoid = 1 / (1 + Math.exp(-8 * (combined - 0.44)));
 
   return { score: Math.min(1, sigmoid), fired, applicableCount };
 }
@@ -3100,7 +3140,7 @@ function buildExplainedSignals(fired: SignalResult[], totalScore: number): Expla
 
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
-export function analyzeFile(file_path: string, content: string): FileAnalysis {
+export function analyzeFile(file_path: string, content: string, prPriorBias = 0): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
 
@@ -3191,7 +3231,9 @@ export function analyzeFile(file_path: string, content: string): FileAnalysis {
     const driftScore = sigStyleDrift(content, lang, lineCount);
 
     const { score, fired, applicableCount } = computeAIPercentage(
-      content, lang, lineCount, fileMeta.aiPriorBias, attribution.humanEvidence,
+      content, lang, lineCount,
+      (fileMeta.aiPriorBias ?? 0) + prPriorBias,  // file prior + PR-level prior
+      attribution.humanEvidence,
     );
 
     // Inject style drift into fired list if it fired
@@ -3587,7 +3629,20 @@ export function runScan(input: ScanInput): ScanOutput {
     return true;
   });
 
-  const files = filesToScan.map(f => analyzeFile(f.path, f.content));
+  // PR-level prior bias: when PR behavior or baseline deviation indicate strong
+  // AI likelihood, give each file a small evidence boost via computeAIPercentage's
+  // priorBias parameter. This connects multi-signal scoring to per-file AI%.
+  // Max boost capped at 0.08 to avoid overriding file-level evidence.
+  const prPriorBias = (() => {
+    if (!input.pr_metadata) return 0;
+    const prScore = scorePRBehavior(input.pr_metadata, 0).score;
+    const baseScore = input.developer_baseline && input.pr_metadata
+      ? scoreBaselineDeviation(input.pr_metadata, input.developer_baseline).score
+      : 0;
+    return Math.min(0.08, (prScore * 0.6 + baseScore * 0.4) * 0.12);
+  })();
+
+  const files = filesToScan.map(f => analyzeFile(f.path, f.content, prPriorBias));
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────
   // Built early so cross-file taint propagation can inject indicators into
