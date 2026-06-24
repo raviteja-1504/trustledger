@@ -159,6 +159,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
+    // ── Git provenance: fetch PR commit history ───────────────────────────────
+    // Build a git log string from the GitHub commits API so analyzeGitProvenance()
+    // can score commit velocity, AI commit messages, and signing rate.
+    let gitLog: string | undefined;
+    try {
+      const commitsRes = await fetch(
+        `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}/commits?per_page=50`,
+        { headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } },
+      );
+      if (commitsRes.ok) {
+        const commits = await commitsRes.json() as Array<{
+          sha: string;
+          commit: { author: { name: string; email: string; date: string }; message: string };
+        }>;
+        // Format: "%H|%an|%ae|%at|%G?|%s"  (G? = GPG status, use N = no sig)
+        gitLog = commits.map(c => {
+          const ts = Math.floor(new Date(c.commit.author.date).getTime() / 1000);
+          const subject = c.commit.message.split("\n")[0].replace(/\|/g, " ");
+          return `${c.sha}|${c.commit.author.name}|${c.commit.author.email}|${ts}|N|${subject}`;
+        }).join("\n");
+      }
+    } catch { /* non-fatal — git provenance just won't be scored */ }
+
     // ── Developer baseline (Phase 3) ─────────────────────────────────────────
     // Fetch the PR author's historical patterns to detect deviation
     let developerBaseline = null;
@@ -185,6 +208,7 @@ export async function POST(req: NextRequest) {
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
       pr_metadata:         prMeta,
       developer_baseline:  developerBaseline ?? undefined,
+      git_log:             gitLog,
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
 
