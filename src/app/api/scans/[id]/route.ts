@@ -14,7 +14,7 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("*")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
@@ -42,6 +42,7 @@ export async function GET(
     overall_risk:        scan.overall_risk,
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
+    evidence_breakdown:  scan.evidence_breakdown ?? null,
     files: (files ?? []).map(f => {
       // Use stored indicators (with line numbers) if available; fall back to
       // re-analysing from content for older scans that predate the indicators column.

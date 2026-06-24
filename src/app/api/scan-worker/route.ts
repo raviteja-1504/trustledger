@@ -208,6 +208,7 @@ export async function POST(req: NextRequest) {
         duration_ms:         result.duration_ms,
         check_run_id:        checkRunId,
         installation_id:     installationId,
+        evidence_breakdown:  result.evidence_breakdown,
       }).select("id").single();
 
       if (scan) {

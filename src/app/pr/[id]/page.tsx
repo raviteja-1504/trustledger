@@ -1275,6 +1275,72 @@ function PRDetailContent() {
           </div>
         )}
 
+        {/* ── Evidence breakdown panel ────────────────────────────────────── */}
+        {scan?.evidence_breakdown && (
+          <div className="animate-fade-up section-card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="font-bold text-gray-900 text-sm">AI Likelihood</p>
+                <p className="text-xs text-gray-400 mt-0.5">Multi-signal evidence across code, PR behavior, git history and tooling</p>
+              </div>
+              <div className="text-right">
+                <p className="text-lg font-black" style={{
+                  color: scan.evidence_breakdown.likelihood === "Strong AI Evidence" ? "#ef4444"
+                       : scan.evidence_breakdown.likelihood === "Likely AI-Assisted"   ? "#f97316"
+                       : scan.evidence_breakdown.likelihood === "Mixed Authorship"     ? "#f59e0b"
+                       : scan.evidence_breakdown.likelihood === "Human with Tool Assistance" ? "#6366f1"
+                       : "#10b981"
+                }}>
+                  {Math.round(scan.evidence_breakdown.combined * 100)}%
+                </p>
+                <p className="text-[10px] font-semibold text-gray-500">{scan.evidence_breakdown.likelihood}</p>
+              </div>
+            </div>
+
+            {/* Evidence bars */}
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              {([
+                { key: "code_evidence",  label: "Code Signals",    weight: "25%", color: "#6366f1" },
+                { key: "pr_evidence",    label: "PR Behavior",     weight: "25%", color: "#f97316" },
+                { key: "git_evidence",   label: "Git Provenance",  weight: "30%", color: "#8b5cf6" },
+                { key: "tool_evidence",  label: "Tool Artifacts",  weight: "15%", color: "#06b6d4" },
+              ] as const).map(({ key, label, weight, color }) => {
+                const val = scan.evidence_breakdown![key] as number;
+                return (
+                  <div key={key}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-semibold text-gray-600">{label}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-gray-400">{weight}</span>
+                        <span className="text-[11px] font-bold tabular-nums" style={{ color }}>{Math.round(val * 100)}%</span>
+                      </div>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden bg-gray-100">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${val * 100}%`, background: color }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Boosts */}
+            {scan.evidence_breakdown.boosts.length > 0 && (
+              <div className="border-t border-gray-100 pt-3">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">Signal Boosts</p>
+                <div className="space-y-1">
+                  {scan.evidence_breakdown.boosts.map((b, i) => (
+                    <div key={i} className="flex items-start gap-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-1.5">
+                      <span className="shrink-0 mt-0.5">⚡</span>
+                      <span>{b}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Reviewer identity bar ───────────────────────────────────────── */}
         {scan && (
           <div className="animate-fade-up delay-50">

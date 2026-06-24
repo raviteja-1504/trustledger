@@ -21,6 +21,16 @@ export interface FileResult {
   content?: string;
 }
 
+export interface EvidenceBreakdown {
+  code_evidence:  number;
+  pr_evidence:    number;
+  git_evidence:   number;
+  tool_evidence:  number;
+  combined:       number;
+  likelihood:     "Likely Human" | "Human with Tool Assistance" | "Mixed Authorship" | "Likely AI-Assisted" | "Strong AI Evidence";
+  boosts:         string[];
+}
+
 export interface ScanResult {
   scan_id: string;
   repo: string;
@@ -34,6 +44,7 @@ export interface ScanResult {
   attested_count?: number;
   triggered_by?: string;
   timestamp: string;
+  evidence_breakdown?: EvidenceBreakdown;
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────
