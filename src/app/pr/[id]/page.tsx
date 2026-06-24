@@ -1300,12 +1300,13 @@ function PRDetailContent() {
             {/* Evidence bars */}
             <div className="grid grid-cols-2 gap-3 mb-4">
               {([
-                { key: "code_evidence",  label: "Code Signals",    weight: "25%", color: "#6366f1" },
-                { key: "pr_evidence",    label: "PR Behavior",     weight: "25%", color: "#f97316" },
-                { key: "git_evidence",   label: "Git Provenance",  weight: "30%", color: "#8b5cf6" },
-                { key: "tool_evidence",  label: "Tool Artifacts",  weight: "15%", color: "#06b6d4" },
+                { key: "code_evidence",     label: "Code Signals",       weight: "25%", color: "#6366f1" },
+                { key: "pr_evidence",       label: "PR Behavior",        weight: "25%", color: "#f97316" },
+                { key: "git_evidence",      label: "Git Provenance",     weight: "25%", color: "#8b5cf6" },
+                { key: "baseline_evidence", label: "Author Baseline",    weight: "15%", color: "#ec4899" },
+                { key: "tool_evidence",     label: "Tool Artifacts",     weight: "10%", color: "#06b6d4" },
               ] as const).map(({ key, label, weight, color }) => {
-                const val = scan.evidence_breakdown![key] as number;
+                const val = (scan.evidence_breakdown as unknown as Record<string, number>)[key] ?? 0;
                 return (
                   <div key={key}>
                     <div className="flex items-center justify-between mb-1">

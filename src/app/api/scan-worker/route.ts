@@ -159,16 +159,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
+    // ── Developer baseline (Phase 3) ─────────────────────────────────────────
+    // Fetch the PR author's historical patterns to detect deviation
+    let developerBaseline = null;
+    if (orgId && prAuthor) {
+      const { data: baselineRow } = await db
+        .from("developer_baselines")
+        .select("pr_count, avg_loc_per_pr, avg_commits_per_pr, avg_files_per_pr, avg_ai_percentage")
+        .eq("org_id", orgId)
+        .eq("github_login", prAuthor)
+        .maybeSingle();
+      developerBaseline = baselineRow ?? null;
+    }
+
     // ── Run scanner ───────────────────────────────────────────────────────────
+    const prMeta = pr_additions != null ? {
+      additions:     pr_additions,
+      deletions:     pr_deletions ?? 0,
+      commits:       pr_commits ?? 1,
+      changed_files: pr_changed_files ?? 0,
+      created_at:    pr_created_at,
+    } : undefined;
+
     const result = runScan({
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
-      pr_metadata: pr_additions != null ? {
-        additions:     pr_additions,
-        deletions:     pr_deletions ?? 0,
-        commits:       pr_commits ?? 1,
-        changed_files: pr_changed_files ?? 0,
-        created_at:    pr_created_at,
-      } : undefined,
+      pr_metadata:         prMeta,
+      developer_baseline:  developerBaseline ?? undefined,
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
 
@@ -335,6 +351,28 @@ export async function POST(req: NextRequest) {
             delta: isDelta, files_rescanned: result.files.length, files_inherited: inheritedFiles.length,
           },
         });
+
+        // ── Update developer baseline (rolling average) ───────────────────
+        // After each scan, update the author's historical metrics so future
+        // scans can detect deviation. Uses exponential moving average to
+        // give more weight to recent PRs and handle new developers gracefully.
+        if (prAuthor && prMeta) {
+          const prev = developerBaseline;
+          const n    = (prev?.pr_count ?? 0) + 1;
+          const alpha = Math.min(0.3, 1 / n); // decaying weight; caps at 30%
+          const newBaseline = {
+            org_id:              orgId,
+            github_login:        prAuthor,
+            pr_count:            n,
+            avg_loc_per_pr:      prev ? prev.avg_loc_per_pr    * (1 - alpha) + prMeta.additions   * alpha : prMeta.additions,
+            avg_commits_per_pr:  prev ? prev.avg_commits_per_pr * (1 - alpha) + prMeta.commits    * alpha : prMeta.commits,
+            avg_files_per_pr:    prev ? prev.avg_files_per_pr   * (1 - alpha) + prMeta.changed_files * alpha : prMeta.changed_files,
+            avg_ai_percentage:   prev ? prev.avg_ai_percentage  * (1 - alpha) + result.total_ai_percentage * alpha : result.total_ai_percentage,
+            last_updated:        new Date().toISOString(),
+          };
+          await db.from("developer_baselines")
+            .upsert(newBaseline, { onConflict: "org_id,github_login" });
+        }
       }
     }
 

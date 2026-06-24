@@ -3338,14 +3338,15 @@ export interface PRMetadata {
 }
 
 export interface ScanInput {
-  repo:          string;
-  pr_number:     number;
-  commit_sha:    string;
-  branch?:       string;
-  files:         Array<{ path: string; content: string }>;
-  prev_hashes?:  Record<string, string>;  // incremental: path → previous content_hash; skip if unchanged
-  git_log?:      string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
-  pr_metadata?:  PRMetadata;              // PR behavior signals (LOC, commits, timing)
+  repo:               string;
+  pr_number:          number;
+  commit_sha:         string;
+  branch?:            string;
+  files:              Array<{ path: string; content: string }>;
+  prev_hashes?:       Record<string, string>;  // incremental: path → previous content_hash; skip if unchanged
+  git_log?:           string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
+  pr_metadata?:       PRMetadata;              // PR behavior signals (LOC, commits, timing)
+  developer_baseline?: DeveloperBaseline;      // author's historical PR patterns (Phase 3)
 }
 
 // ── AI Likelihood Classification ────────────────────────────────────────────
@@ -3367,14 +3368,86 @@ export function classifyAILikelihood(score: number): AILikelihoodBand {
 
 // ── Evidence Breakdown ───────────────────────────────────────────────────────
 
+export interface DeveloperBaseline {
+  pr_count:          number;
+  avg_loc_per_pr:    number;
+  avg_commits_per_pr: number;
+  avg_files_per_pr:  number;
+  avg_ai_percentage: number;
+}
+
+export interface BaselineDeviation {
+  score:            number;   // 0–1: how far this PR deviates from author's norm
+  loc_deviation:    number;   // multiplier: 3x = 3× their usual LOC
+  commit_deviation: number;   // multiplier: 0.2x = far fewer commits than usual
+  reasons:          string[];
+}
+
+export function scoreBaselineDeviation(
+  meta: PRMetadata,
+  baseline: DeveloperBaseline,
+): BaselineDeviation {
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (baseline.pr_count < 3) {
+    // Not enough history to establish a reliable baseline
+    return { score: 0, loc_deviation: 1, commit_deviation: 1, reasons: [] };
+  }
+
+  // LOC deviation
+  const locDev = baseline.avg_loc_per_pr > 0
+    ? meta.additions / baseline.avg_loc_per_pr
+    : 1;
+  if (locDev > 5) {
+    score += 0.35;
+    reasons.push(`${Math.round(locDev)}× more LOC than their usual PRs (avg: ${Math.round(baseline.avg_loc_per_pr)} lines)`);
+  } else if (locDev > 3) {
+    score += 0.20;
+    reasons.push(`${Math.round(locDev)}× more LOC than their usual PRs`);
+  } else if (locDev > 2) {
+    score += 0.10;
+  }
+
+  // Commit count deviation (far fewer commits than usual = AI generated in one go)
+  const commitDev = baseline.avg_commits_per_pr > 0
+    ? meta.commits / baseline.avg_commits_per_pr
+    : 1;
+  if (commitDev < 0.3 && meta.additions > 100) {
+    score += 0.30;
+    reasons.push(`Only ${meta.commits} commit(s) vs their usual ${Math.round(baseline.avg_commits_per_pr)} — unusually low for this author`);
+  } else if (commitDev < 0.5) {
+    score += 0.15;
+    reasons.push(`Fewer commits than this author's typical pattern`);
+  }
+
+  // Files changed deviation
+  const filesDev = baseline.avg_files_per_pr > 0
+    ? meta.changed_files / baseline.avg_files_per_pr
+    : 1;
+  if (filesDev > 4 && meta.commits <= 2) {
+    score += 0.20;
+    reasons.push(`${meta.changed_files} files in ${meta.commits} commit(s) — this author usually touches ${Math.round(baseline.avg_files_per_pr)} files`);
+  }
+
+  return {
+    score:            Math.min(1, score),
+    loc_deviation:    locDev,
+    commit_deviation: commitDev,
+    reasons,
+  };
+}
+
 export interface EvidenceBreakdown {
-  code_evidence:  number;  // 0–1: style/structure/AI-pattern signals
-  pr_evidence:    number;  // 0–1: PR behavior (LOC, commits, timing)
-  git_evidence:   number;  // 0–1: git provenance (commit velocity, history)
-  tool_evidence:  number;  // 0–1: explicit tool artifacts (Cursor, Copilot, etc.)
-  combined:       number;  // 0–1: weighted combination
-  likelihood:     AILikelihoodBand;
-  boosts:         string[]; // human-readable reasons for score boosts
+  code_evidence:      number;  // 0–1: style/structure/AI-pattern signals
+  pr_evidence:        number;  // 0–1: PR behavior (LOC, commits, timing)
+  git_evidence:       number;  // 0–1: git provenance (commit velocity, history)
+  tool_evidence:      number;  // 0–1: explicit tool artifacts (Cursor, Copilot, etc.)
+  baseline_evidence:  number;  // 0–1: deviation from developer's historical patterns
+  combined:           number;  // 0–1: weighted combination
+  likelihood:         AILikelihoodBand;
+  boosts:             string[]; // human-readable reasons for score boosts
+  baseline_deviation?: BaselineDeviation; // developer baseline comparison detail
 }
 
 // ── PR Behavior Scoring ──────────────────────────────────────────────────────
@@ -3630,14 +3703,17 @@ export function runScan(input: ScanInput): ScanOutput {
   let toolEvidence = 0;
 
   // 4. Git provenance evidence (from existing git_provenance analysis)
-  // Mapped from ProvenanceSummary.drift_score and temporal_risk
   let gitEvidence = 0;
   // Applied after git_provenance is computed below
 
-  // Combined score — weighted per the proposed architecture
-  // Applied after tool evidence and git evidence are computed
+  // 5. Developer baseline deviation
+  const baselineData = input.developer_baseline;
+  const baselineDev  = prMeta && baselineData
+    ? scoreBaselineDeviation(prMeta, baselineData)
+    : null;
+  const baselineEvidence = baselineDev?.score ?? 0;
 
-  const allBoosts: string[] = [...prBehavior.boosts];
+  const allBoosts: string[] = [...prBehavior.boosts, ...(baselineDev?.reasons ?? [])];
 
   // Hard boost: >1000 LOC in single commit and <15 min timing
   if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) {
@@ -3732,17 +3808,18 @@ export function runScan(input: ScanInput): ScanOutput {
   const generatedFileRatio = input.files.filter(f => GENERATED_PATH_RE.test(f.path)).length / Math.max(1, input.files.length);
   const prEvidenceAdjusted = prEvidence * (1 - generatedFileRatio * 0.5);
 
-  // Combined score:
-  //   Code Structure   25%
-  //   PR Behavior      25%
-  //   Git Provenance   30%
-  //   Tool Evidence    15%
-  //   (baseline 5% handled via codeEvidence floor)
+  // Combined score (weights from architecture doc):
+  //   Code Structure       25%
+  //   PR Behavior          25%
+  //   Git Provenance       25%  (reduced from 30% to make room for baseline)
+  //   Developer Baseline   15%
+  //   Tool Evidence        10%
   const combinedRaw = (
-    codeEvidence  * 0.25 +
+    codeEvidence       * 0.25 +
     prEvidenceAdjusted * 0.25 +
-    gitEvidence   * 0.30 +
-    toolEvidence  * 0.15
+    gitEvidence        * 0.25 +
+    baselineEvidence   * 0.15 +
+    toolEvidence       * 0.10
   );
 
   // Hard boosts that override normal weighting
@@ -3753,13 +3830,15 @@ export function runScan(input: ScanInput): ScanOutput {
   const combined = Math.min(1, combinedRaw + hardBoost);
 
   const evidence_breakdown: EvidenceBreakdown = {
-    code_evidence:  codeEvidence,
-    pr_evidence:    prEvidenceAdjusted,
-    git_evidence:   gitEvidence,
-    tool_evidence:  toolEvidence,
+    code_evidence:      codeEvidence,
+    pr_evidence:        prEvidenceAdjusted,
+    git_evidence:       gitEvidence,
+    tool_evidence:      toolEvidence,
+    baseline_evidence:  baselineEvidence,
     combined,
-    likelihood:     classifyAILikelihood(combined),
-    boosts:         allBoosts,
+    likelihood:         classifyAILikelihood(combined),
+    boosts:             allBoosts,
+    baseline_deviation: baselineDev ?? undefined,
   };
 
   // ── Repository trust score ────────────────────────────────────────────────

@@ -22,13 +22,20 @@ export interface FileResult {
 }
 
 export interface EvidenceBreakdown {
-  code_evidence:  number;
-  pr_evidence:    number;
-  git_evidence:   number;
-  tool_evidence:  number;
-  combined:       number;
-  likelihood:     "Likely Human" | "Human with Tool Assistance" | "Mixed Authorship" | "Likely AI-Assisted" | "Strong AI Evidence";
-  boosts:         string[];
+  code_evidence:      number;
+  pr_evidence:        number;
+  git_evidence:       number;
+  tool_evidence:      number;
+  baseline_evidence:  number;
+  combined:           number;
+  likelihood:         "Likely Human" | "Human with Tool Assistance" | "Mixed Authorship" | "Likely AI-Assisted" | "Strong AI Evidence";
+  boosts:             string[];
+  baseline_deviation?: {
+    score:            number;
+    loc_deviation:    number;
+    commit_deviation: number;
+    reasons:          string[];
+  };
 }
 
 export interface ScanResult {
