@@ -443,6 +443,7 @@ export async function POST(req: NextRequest) {
           scan_id: result.scan_id, repo: repoFullName, pr_number: prNumber,
           overall_risk: mergedResult.overall_risk,
           total_ai_percentage: result.total_ai_percentage,
+          evidence_breakdown: result.evidence_breakdown,
           files: mergedResult.files.map(f => ({
             file_path: f.file_path, risk_score: f.risk_score,
             ai_percentage: f.ai_percentage, risk_indicators: f.risk_indicators,
