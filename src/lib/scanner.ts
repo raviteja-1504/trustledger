@@ -2334,12 +2334,81 @@ function sigCopyPastePattern(content: string): number {
 // developer's clean TypeScript accumulates noisyOr ≈ 0.99 (98% AI).
 // Fix: three-phase scoring. Only CORE signals drive the primary probability.
 // SECONDARY amplify it. STYLE provides a small cap-bounded corroboration boost.
+// ── Zero-debug-artifact signal (LR ≈ 8, very high) ──────────────────────────
+// AI never leaves console.log("debug"), // TODO, // FIXME, commented-out code blocks,
+// or placeholder `pass` statements. Human developers always do.
+// Absence of all debug artifacts in a file with >30 lines is a strong AI signal.
+function sigZeroDebugArtifacts(content: string, lineCount: number): number {
+  if (lineCount < 20) return 0;
+  const lines = content.split("\n");
+
+  // Count debug/human artifacts
+  const todoFixes  = lines.filter(l => /\/\/\s*(?:TODO|FIXME|HACK|XXX|BUG|NOTE|TEMP)\b/i.test(l) || /#\s*(?:TODO|FIXME|HACK|XXX|BUG)\b/i.test(l)).length;
+  const consoleLogs = lines.filter(l => /\bconsole\s*\.\s*(?:log|warn|error|debug|info)\s*\(/.test(l)).length;
+  const printDebugs = lines.filter(l => /\bprint\s*\(["'](?:debug|test|here|check|ok|yes)\b/i.test(l) || /\bpprint\s*\(/.test(l)).length;
+  const commentedCode = (() => {
+    let runs = 0; let inRun = false;
+    for (const l of lines) {
+      const isCommentedCode = /^\s*(?:\/\/|#)\s*(?:const|let|var|function|return|if|for|import|def|class|public|private)\b/.test(l);
+      if (isCommentedCode) { if (!inRun) { runs++; inRun = true; } } else { inRun = false; }
+    }
+    return runs;
+  })();
+  const placeholders = lines.filter(l => /\bpass\s*(?:#.*)?$/.test(l.trim()) || /\bthrow\s+new\s+Error\s*\(\s*["'](?:Not implemented|TODO|not implemented)\b/i.test(l)).length;
+
+  const totalArtifacts = todoFixes + consoleLogs + printDebugs + commentedCode + placeholders;
+
+  // Key insight: if a file has ZERO of all these artifacts AND is substantial, that's AI
+  if (totalArtifacts === 0 && lineCount > 50) {
+    // Scale with file size — larger files with zero artifacts = stronger signal
+    const sizeFactor = Math.min(1, (lineCount - 50) / 200);
+    return 0.55 + sizeFactor * 0.35;
+  }
+  if (totalArtifacts === 0 && lineCount > 20) return 0.40;
+  if (totalArtifacts === 1) return 0.15; // One stray TODO doesn't negate the signal
+  return 0; // Multiple artifacts = human
+}
+
+// ── Import exhaustiveness signal ──────────────────────────────────────────────
+// AI imports exactly what it uses, with perfect organisation.
+// Human code has unused imports, missing imports, messy ordering.
+function sigImportExhaustiveness(content: string, lang: string): number {
+  if (lang !== "typescript" && lang !== "javascript") return 0;
+  const lines = content.split("\n");
+  const importLines = lines.filter(l => /^\s*import\s+/.test(l));
+  if (importLines.length < 3) return 0;
+
+  // Check for unused import patterns (human code always has these eventually)
+  // AI code rarely has //eslint-disable-next-line or @ts-ignore on imports
+  const eslintDisables = lines.filter(l => /eslint-disable|@ts-ignore|@ts-expect-error/.test(l)).length;
+  if (eslintDisables > 0) return 0; // Human workaround = human code
+
+  // Check import organisation: all from same module grouped together
+  let prevModule = "";
+  let outOfOrder = 0;
+  for (const l of importLines) {
+    const m = /from\s+["']([^"']+)["']/.exec(l);
+    if (!m) continue;
+    const mod = m[1].startsWith(".") ? "local" : m[1].split("/")[0];
+    if (mod < prevModule && prevModule !== "local" && mod !== "local") outOfOrder++;
+    prevModule = mod;
+  }
+
+  // Perfectly ordered imports with no eslint-disables = AI signal
+  if (outOfOrder === 0 && importLines.length >= 4 && eslintDisables === 0) {
+    return Math.min(0.75, 0.30 + importLines.length * 0.05);
+  }
+  return 0;
+}
+
 // Tiers are derived from estimated LR = P(signal|AI) / P(signal|human code).
 
 // Tier 1 — genuinely discriminates AI from senior human developers (LR > 4.0)
 const CORE_SIGNALS = new Set([
   "comment-phrasing",     // AI uses formulaic phrasing patterns humans almost never write
-  "jsdoc-completeness",   // AI documents every function; humans skip trivial ones (new)
+  "jsdoc-completeness",   // AI documents every function; humans skip trivial ones
+  "zero-debug-artifacts", // AI leaves no TODO/console.log/commented code; humans always do
+  "import-exhaustiveness",// AI imports exactly what it uses with perfect ordering
   "language-specific",    // Language-specific stereotyped AI patterns
   "test-structure",       // Robotically uniform AI test suites
   "lexical-diversity",    // AI reuses ~200 identifiers; human TTR is measurably higher
@@ -2408,6 +2477,8 @@ const SIGNAL_LEAKS: Array<[string, number]> = [
   // ── Tier 1: CORE (LR > 4) ──────────────────────────────────────────────────
   ["comment-phrasing",        0.65],  // Formulaic AI comments rarely appear in human code
   ["jsdoc-completeness",      0.70],  // AI documents every function; humans skip trivial ones
+  ["zero-debug-artifacts",    0.75],  // AI never leaves TODO/console.log/commented code
+  ["import-exhaustiveness",   0.60],  // AI imports exactly what it uses; humans have messy imports
   ["language-specific",       0.60],  // Stereotyped per-language AI patterns
   ["ngram-fingerprint",       0.65],  // Characteristic token bigrams (return {success:, const result=await, etc.)
   ["test-structure",          0.55],  // Robotically uniform AI test suites
@@ -2487,6 +2558,8 @@ function computeAIPercentage(
   const raw: Record<string, number> = {
     "comment-phrasing":      sigCommentPhrasing(content),
     "jsdoc-completeness":    sigJSDocCompleteness(content),
+    "zero-debug-artifacts":  sigZeroDebugArtifacts(content, lineCount),
+    "import-exhaustiveness": sigImportExhaustiveness(content, lang),
     "language-specific":     sigLanguageSpecific(content, lang),
     "test-structure":        sigTestStructure(content),
     "doc-coverage":          sigDocumentationCoverage(content, lang),
@@ -3936,7 +4009,12 @@ export function runScan(input: ScanInput): ScanOutput {
     pr_number:            input.pr_number,
     commit_sha:           input.commit_sha,
     overall_risk:         overallRisk,
-    total_ai_percentage:  boostedAI,
+    // Use multi-signal combined score as the primary AI likelihood metric
+    // when PR-level evidence is available; fall back to code-only average
+    // for API-submitted scans without PR metadata.
+    total_ai_percentage:  evidence_breakdown.combined > boostedAI
+      ? evidence_breakdown.combined   // blended: code + PR behavior + git + baseline + tools
+      : boostedAI,                    // code-only fallback
     cross_file_ai_boost:  crossFileBoost,
     mixed_authorship:     mixedAuthorship,
     scan_quality,
