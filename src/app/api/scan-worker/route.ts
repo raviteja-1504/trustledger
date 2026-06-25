@@ -209,6 +209,8 @@ export async function POST(req: NextRequest) {
       pr_metadata:         prMeta,
       developer_baseline:  developerBaseline ?? undefined,
       git_log:             gitLog,
+      // Pass ALL PR file paths (not just scannable) so .claude/, .cursorrules etc. are detected
+      all_file_paths:      prFiles.map(f => f.filename),
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
 

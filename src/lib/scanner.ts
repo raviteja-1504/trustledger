@@ -3458,6 +3458,7 @@ export interface ScanInput {
   commit_sha:         string;
   branch?:            string;
   files:              Array<{ path: string; content: string }>;
+  all_file_paths?:    string[];                // ALL paths in the PR (not just scannable ones) — for tooling detection
   prev_hashes?:       Record<string, string>;  // incremental: path → previous content_hash; skip if unchanged
   git_log?:           string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
   pr_metadata?:       PRMetadata;              // PR behavior signals (LOC, commits, timing)
@@ -3912,7 +3913,11 @@ export function runScan(input: ScanInput): ScanOutput {
     : null;
 
   // ── AI tooling artifact detection (LLM-era governance visibility) ─────────
-  const ai_tooling = detectAIToolingArtifacts(input.files.map(f => f.path));
+  // Use allFilePaths when provided so config/json files like .claude/settings.json
+  // are checked even though they aren't scannable source files.
+  const ai_tooling = detectAIToolingArtifacts(
+    (input.all_file_paths ?? input.files.map(f => f.path))
+  );
 
   // ── Finalise evidence breakdown ───────────────────────────────────────────
   // Tool evidence: explicit AI tool artifacts found (Cursor, Copilot, etc.)
