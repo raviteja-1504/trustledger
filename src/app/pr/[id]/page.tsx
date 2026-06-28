@@ -185,68 +185,118 @@ function isValidEmail(email: string): boolean {
   return EMAIL_RE.test(email);
 }
 
+interface TeamMember { email: string; name: string | null; github_login: string | null; role: string; }
+
 function ReviewerBar({ email, github, onSave }: {
   email: string; github: string; onSave: (e: string, g: string) => void;
 }) {
-  const [editing, setEditing]   = useState(!email);
-  const [draftEmail,  setDE]    = useState(email);
-  const [draftGithub, setDG]    = useState(github);
+  const [editing, setEditing]     = useState(!email);
+  const [draftEmail,  setDE]      = useState(email);
+  const [draftGithub, setDG]      = useState(github);
+  const [members, setMembers]     = useState<TeamMember[]>([]);
 
   useEffect(() => { setDE(email); setDG(github); }, [email, github]);
 
+  // Load team members for the dropdown
+  useEffect(() => {
+    authedFetch<{ members: TeamMember[] }>("/api/team")
+      .then(r => setMembers((r.members ?? []).filter(m => m.email)))
+      .catch(() => {});
+  }, []);
+
+  // When a team member is selected from dropdown, also fill GitHub handle
+  function selectMember(selectedEmail: string) {
+    setDE(selectedEmail);
+    const m = members.find(m => m.email === selectedEmail);
+    if (m?.github_login) setDG(m.github_login);
+  }
+
   if (!editing) {
+    const member = members.find(m => m.email === email);
+    const displayName = member?.name || email.split("@")[0];
     return (
       <div className="flex items-center gap-3 px-4 py-2.5 bg-indigo-50/70 border border-indigo-100 rounded-xl">
-        <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
-          <UserIcon />
+        <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center text-xs font-bold text-indigo-600 shrink-0">
+          {displayName.slice(0, 2).toUpperCase()}
         </div>
         <div className="flex-1 min-w-0">
-          <span className="text-xs font-semibold text-indigo-800">{email}</span>
-          <span className="text-xs text-indigo-400 ml-2">· @{github}</span>
+          <span className="text-xs font-semibold text-indigo-800">{displayName}</span>
+          <span className="text-xs text-indigo-400 ml-2 truncate">{email}</span>
+          {github && <span className="text-xs text-indigo-300 ml-2">· @{github}</span>}
         </div>
-        <span className="text-[10px] text-indigo-400 hidden sm:block">Reviewer identity for attestations</span>
+        <span className="text-[10px] text-indigo-400 hidden sm:block">Attesting as</span>
         <button
           onClick={() => setEditing(true)}
           className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-500 hover:text-indigo-700 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors shrink-0"
         >
-          <PencilIcon /> Edit
+          <PencilIcon /> Change
         </button>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2.5 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl">
-      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-800 shrink-0">
+    <div className="flex flex-col gap-3 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+      <div className="flex items-center gap-2">
         <UserIcon />
-        Set reviewer to attest:
+        <span className="text-xs font-bold text-indigo-800">Who is attesting?</span>
+        <span className="text-[10px] text-indigo-400">Select yourself or a delegated reviewer</span>
       </div>
-      <div className="flex flex-1 items-center gap-2 flex-wrap">
-        <input
-          type="email"
-          placeholder="reviewer@company.com"
-          value={draftEmail}
-          onChange={e => setDE(e.target.value)}
-          className="flex-1 min-w-[160px] text-xs border border-amber-200 bg-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-amber-400"
-        />
+      <div className="flex flex-col sm:flex-row gap-2">
+        {/* Email — dropdown if team members loaded, free-text fallback */}
+        {members.length > 0 ? (
+          <select
+            value={draftEmail}
+            onChange={e => selectMember(e.target.value)}
+            className="flex-1 text-xs border border-indigo-200 bg-white rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          >
+            <option value="">— select reviewer —</option>
+            {members.map(m => (
+              <option key={m.email} value={m.email}>
+                {m.name ? `${m.name} (${m.email})` : m.email}
+                {m.role === "admin" ? " · Admin" : m.role === "security_reviewer" ? " · Reviewer" : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="email"
+            placeholder="your@email.com"
+            value={draftEmail}
+            onChange={e => setDE(e.target.value)}
+            className="flex-1 text-xs border border-indigo-200 bg-white rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          />
+        )}
+        {/* GitHub handle */}
         <input
           type="text"
           placeholder="github-username"
           value={draftGithub}
           onChange={e => setDG(e.target.value)}
-          className="w-36 text-xs border border-amber-200 bg-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-amber-400"
+          className="w-40 text-xs border border-indigo-200 bg-white rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400"
         />
         <button
-          disabled={!isValidEmail(draftEmail) || !draftGithub}
+          disabled={!isValidEmail(draftEmail)}
           onClick={() => { onSave(draftEmail, draftGithub); setEditing(false); }}
-          className="px-3.5 py-1.5 text-xs font-bold bg-amber-500 text-white rounded-lg disabled:opacity-40 hover:bg-amber-600 transition-colors"
+          className="px-4 py-2 text-xs font-bold bg-indigo-600 text-white rounded-lg disabled:opacity-40 hover:bg-indigo-700 transition-colors whitespace-nowrap"
         >
-          Save
+          Confirm
         </button>
-        {draftEmail && !isValidEmail(draftEmail) && (
-          <span className="text-[11px] text-rose-600 w-full">Enter a valid email address (e.g. you@company.com)</span>
+        {email && (
+          <button
+            onClick={() => { setDE(email); setDG(github); setEditing(false); }}
+            className="px-3 py-2 text-xs font-semibold text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
+          >
+            Cancel
+          </button>
         )}
       </div>
+      {draftEmail && !isValidEmail(draftEmail) && (
+        <p className="text-[11px] text-rose-600">Enter a valid email address</p>
+      )}
+      {!draftGithub && isValidEmail(draftEmail) && (
+        <p className="text-[11px] text-indigo-400">GitHub username is optional but improves attestation records</p>
+      )}
     </div>
   );
 }
@@ -839,18 +889,20 @@ function PRDetailContent() {
   const [syncingCheck, setSyncingCheck] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; msg: string; canForce?: boolean } | null>(null);
 
-  // Restore reviewer + policy from localStorage
+  // Restore reviewer + policy from localStorage, falling back to profile identity
   useEffect(() => {
-    const storedEmail = localStorage.getItem("tl_reviewer_email") ?? "";
-    if (storedEmail && !isValidEmail(storedEmail)) {
-      // Previously-saved value isn't a valid email (e.g. a GitHub username was
-      // entered by mistake) — clear it so attest calls don't fail validation
-      // and the reviewer bar prompts for a correct value.
-      localStorage.removeItem("tl_reviewer_email");
-    } else {
-      setReviewerEmail(storedEmail);
-    }
-    setReviewerGithub(localStorage.getItem("tl_reviewer_github") ?? "");
+    const storedEmail  = localStorage.getItem("tl_reviewer_email") ?? "";
+    const storedGithub = localStorage.getItem("tl_reviewer_github") ?? "";
+    // Auto-fill from logged-in profile when nothing valid is stored
+    const resolvedEmail  = (storedEmail && isValidEmail(storedEmail))
+      ? storedEmail
+      : (profile?.email ?? "");
+    const resolvedGithub = storedGithub || profile?.github_login || "";
+    setReviewerEmail(resolvedEmail);
+    setReviewerGithub(resolvedGithub);
+    // Persist auto-filled values so they survive page reload
+    if (resolvedEmail)  localStorage.setItem("tl_reviewer_email",  resolvedEmail);
+    if (resolvedGithub) localStorage.setItem("tl_reviewer_github", resolvedGithub);
     setPolicy(loadPolicy());
     // Re-sync attestedSet in case localStorage was updated while away
     try {
@@ -860,7 +912,8 @@ function PRDetailContent() {
         .map(([key]) => key.split("::").slice(2).join("::"));
       if (paths.length > 0) setAttestedSet(prev => new Set([...Array.from(prev), ...paths]));
     } catch {}
-  }, [id]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, profile?.email, profile?.github_login]);
 
   // Deep link from Reports/Dashboard: ?attest=<file_path> opens the
   // Review & Attest modal for that file once the scan has loaded, so
