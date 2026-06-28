@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
@@ -99,6 +100,7 @@ async function checkNpm(pkgName: string): Promise<{ exists: boolean; description
 }
 
 export default function PhantomDepsPage() {
+    const tz = useTimezone();
   const [results, setResults]   = useState<PackageResult[]>([]);
   const [loading, setLoading]   = useState(true);
   const [scanning, setScanning] = useState(false);

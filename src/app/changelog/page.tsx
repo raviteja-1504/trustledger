@@ -1,3 +1,5 @@
+"use client";
+import { formatDateOnly, useTimezone, getSavedTimezone } from "@/lib/timezone";
 /**
  * Public API Changelog — documents breaking changes, new features, deprecations.
  * Accessible at /changelog — no auth required.
@@ -88,6 +90,7 @@ const TYPE_STYLE: Record<string, { bg: string; text: string; border: string }> =
 };
 
 export default function ChangelogPage() {
+  const tz = useTimezone();
   return (
     <div className="min-h-screen" style={{ background:"#f8fafc" }}>
       <div className="max-w-2xl mx-auto py-16 px-4">
@@ -125,7 +128,7 @@ export default function ChangelogPage() {
                     style={{ background: ts.bg, color: ts.text, border: `1px solid ${ts.border}` }}>
                     v{entry.version}
                   </span>
-                  <span className="text-sm text-gray-400">{new Date(entry.date).toLocaleDateString("en-GB", { day:"numeric", month:"long", year:"numeric" })}</span>
+                  <span className="text-sm text-gray-400">{formatDateOnly(new Date(entry.date), getSavedTimezone())}</span>
                   <div className="flex-1 h-px bg-gray-200" />
                 </div>
 

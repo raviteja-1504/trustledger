@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
@@ -93,6 +94,7 @@ function MetricCard({ label, value, sub, color = "#6366f1", icon }: {
 }
 
 export default function ROIDashboard() {
+    const tz = useTimezone();
   const { profile } = useAuth();
   const [metrics,    setMetrics]    = useState<ROIMetrics | null>(null);
   const [loading,    setLoading]    = useState(true);

@@ -7,6 +7,7 @@ import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useToastHelpers } from "@/lib/toast";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import {
   type OrgPolicy,
   DEFAULT_POLICY,
@@ -1130,6 +1131,7 @@ interface APIKey { id: string; name: string; prefix: string; created: string; la
 
 function APIAccessTab() {
   const { profile } = useAuth();
+  const tz = useTimezone();
   const orgName = useOrgName();
   const [keys,      setKeys]      = useState<APIKey[]>(() => {
     try { return JSON.parse(localStorage.getItem(API_KEY_STORE) ?? "[]"); } catch { return []; }
@@ -1215,7 +1217,7 @@ function APIAccessTab() {
   const toggleScope = (s: string) =>
     setNewScopes(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
-  const fmtDate = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" });
+  const fmtDate = (iso: string) => formatDateOnly(new Date(iso), tz);
 
   return (
     <div className="space-y-5">
@@ -1859,6 +1861,7 @@ function cronDescription(expr: string): string {
 }
 
 function SchedulesTab() {
+  const tz = useTimezone();
   const { profile } = useAuth();
   type Schedule = { id: string; repo_id: string; repo_full_name?: string; branch: string; cron_expression: string; enabled: boolean; last_run_at: string | null };
   const [schedules,  setSchedules]  = useState<Schedule[]>([]);
@@ -1968,7 +1971,7 @@ function SchedulesTab() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-gray-800 truncate">{s.repo_full_name}</p>
-                  <p className="text-[10px] text-gray-400">{s.branch} · {cronDescription(s.cron_expression)} · {s.last_run_at ? `Last run ${new Date(s.last_run_at).toLocaleDateString()}` : "Never run"}</p>
+                  <p className="text-[10px] text-gray-400">{s.branch} · {cronDescription(s.cron_expression)} · {s.last_run_at ? `Last run ${formatDateOnly(new Date(s.last_run_at), tz)}` : "Never run"}</p>
                 </div>
               </div>
             ))}
@@ -2246,6 +2249,7 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 export default function SettingsPage() {
+    const tz = useTimezone();
   const [tab,    setTab]    = useState<Tab>("policies");
   const [policy, setPolicy] = useState<OrgPolicy>(DEFAULT_POLICY);
   const [saved,  setSaved]  = useState(false);

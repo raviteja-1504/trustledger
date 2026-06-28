@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import ProgressBar from "@/components/ProgressBar";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
@@ -124,6 +125,7 @@ const DEMO_ENTRIES: AIBOMEntry[] = [
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function AIBOMPage() {
+    const tz = useTimezone();
   const { profile }   = useAuth();
   const [entries,     setEntries]     = useState<AIBOMEntry[]>([]);
   const [loading,     setLoading]     = useState(true);
@@ -433,7 +435,7 @@ export default function AIBOMPage() {
                   {isOpen && (
                     <div className="px-5 pb-3 pl-10 -mt-1 flex flex-wrap items-center gap-3 text-[10px] text-gray-500">
                       <span>Scan <span className="font-mono text-gray-700">{e.scan_id}</span></span>
-                      <span>Scanned {new Date(e.scanned_at).toLocaleDateString()}</span>
+                      <span>Scanned {formatDateOnly(new Date(e.scanned_at), tz)}</span>
                       <div className="flex flex-wrap gap-1">
                         {(e.risk_indicators ?? []).length === 0 ? (
                           <span className="text-gray-400">No risk indicators</span>

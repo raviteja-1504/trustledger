@@ -1,7 +1,8 @@
-﻿"use client";
+"use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
@@ -59,7 +60,7 @@ const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function shortDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  return formatDateOnly(new Date(iso), getSavedTimezone());
 }
 
 function repoShort(full: string) {
@@ -69,6 +70,7 @@ function repoShort(full: string) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnalyticsPage() {
+    const tz = useTimezone();
   const [data,              setData]              = useState<DashboardData | null>(null);
   const [loading,           setLoading]           = useState(true);
   const [loadError,         setLoadError]         = useState<string | null>(null);

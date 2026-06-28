@@ -5,6 +5,7 @@ import Link from "next/link";
 import InfoTooltip from "@/components/InfoTooltip";
 import { useToastHelpers } from "@/lib/toast";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
@@ -300,6 +301,7 @@ function SLAClock({ firedAt, severity, status }: { firedAt: string; severity: Al
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function AlertsPage() {
+    const tz = useTimezone();
   const { success, info, warning } = useToastHelpers();
   const { profile } = useAuth();
   const [baseAlerts,  setBaseAlerts]  = useState<Alert[]>([]);
@@ -781,7 +783,7 @@ export default function AlertsPage() {
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                 </svg>
-                Snoozed until {new Date(alert.snooze_until).toLocaleString("en-GB", { dateStyle:"medium", timeStyle:"short" })}
+                Snoozed until {formatDateTime(new Date(alert.snooze_until), tz)}
               </div>
             )}
           </div>

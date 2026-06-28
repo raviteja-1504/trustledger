@@ -1,8 +1,9 @@
-﻿"use client";
+"use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
@@ -175,6 +176,7 @@ type PageTab = "overview" | "controls" | "mapping" | "exceptions";
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function CompliancePage() {
+    const tz = useTimezone();
   const [frameworks,  setFrameworks]  = useState<FrameworkDef[]>(() => makeDefaultFrameworks(ORG, {}) as FrameworkDef[]);
   const [crossThemes, setCrossThemes] = useState<CrossFrameworkTheme[]>(DEFAULT_THEMES);
   const [data,        setData]        = useState<DashboardData | null>(null);

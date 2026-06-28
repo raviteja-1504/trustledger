@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import InfoTooltip from "@/components/InfoTooltip";
 import StatsCard from "@/components/StatsCard";
 import RiskDonut from "@/components/RiskDonut";
@@ -771,6 +772,7 @@ function saveWatchlist(s: Set<string>) {
 }
 
 export default function DashboardPage() {
+    const tz = useTimezone();
   const [rangeMode,     setRangeMode]     = useState<RangeMode>(90);
   const [days,          setDays]          = useState<DaysOption>(90);
   const [startDate,     setStartDate]     = useState("");

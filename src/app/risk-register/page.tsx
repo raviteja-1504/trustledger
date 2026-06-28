@@ -4,6 +4,7 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import InfoTooltip from "@/components/InfoTooltip";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
@@ -326,6 +327,7 @@ const BLANK: NewRisk = {
 
 
 export default function RiskRegisterPage() {
+    const tz = useTimezone();
   const [store,        setStore]        = useState<PersistStore>({ overrides:{}, manuals:[] });
   const [derivedRisks, setDerivedRisks] = useState<RiskItem[]>([]);
   const [owners,       setOwners]       = useState<string[]>([]);

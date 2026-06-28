@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import { authedFetch } from "@/lib/useRealData";
 import { useRole } from "@/lib/roles";
 import { useAuth } from "@/lib/auth";
@@ -28,12 +29,13 @@ function relDate(iso: string) {
   if (d === 0) return "Today";
   if (d === 1) return "Yesterday";
   if (d < 30) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  return formatDateOnly(new Date(iso), getSavedTimezone());
 }
 
 const ROLE_ORDER: UserRole[] = ["admin", "security_reviewer", "developer"];
 
 export default function TeamPage() {
+    const tz = useTimezone();
   const { permissions } = useRole();
   const { profile } = useAuth();
   const isAdmin = permissions.canManageUsers;

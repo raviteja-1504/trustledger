@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import { patchDataWithAttestations } from "@/lib/trustScore";
@@ -112,6 +113,7 @@ function DebtClock({ value, hourlyRate }: { value: number; hourlyRate: number })
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function AIDebtPage() {
+    const tz = useTimezone();
   const [data,              setData]              = useState<DashboardData | null>(null);
   const [elapsed,           setElapsed]           = useState(0);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});

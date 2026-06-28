@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
@@ -421,6 +422,7 @@ const INDUSTRY_BENCHMARKS = [
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function PosturePage() {
+    const tz = useTimezone();
   const [data,              setData]              = useState<DashboardData | null>(null);
   const [loading,           setLoading]           = useState(true);
   const [loadError,         setLoadError]         = useState<string | null>(null);

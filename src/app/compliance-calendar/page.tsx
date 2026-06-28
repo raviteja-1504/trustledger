@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 
@@ -42,6 +43,7 @@ function daysUntil(dateStr: string): number {
 const CAL_KEY = "tl_compliance_calendar";
 
 export default function ComplianceCalendarPage() {
+    const tz = useTimezone();
   const { profile }   = useAuth();
   const [view,        setView]        = useState<"timeline" | "list">("timeline");
   const [filter,      setFilter]      = useState<string>("all");
@@ -319,7 +321,7 @@ function EventRow({ event: ev, onToggle, listMode = false }: {
       {/* Date + status */}
       <div className="shrink-0 text-right">
         <p className={`text-sm font-black tabular-nums ${isOverdue ? "text-rose-600" : urgency ? "text-amber-600" : "text-gray-700"}`}>
-          {new Date(ev.date).toLocaleDateString("en-GB", { day:"numeric", month:"short" })}
+          {formatDateOnly(new Date(ev.date), getSavedTimezone())}
         </p>
         <p className="text-[10px] mt-0.5" style={{ color: statusMeta.color }}>
           {ev.status === "completed" ? "Done" : days === 0 ? "Today" : days > 0 ? `${days}d away` : `${Math.abs(days)}d ago`}

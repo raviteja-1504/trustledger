@@ -11,6 +11,7 @@
 
 import { useState, useEffect, useMemo, useCallback } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 
@@ -90,6 +91,7 @@ function timeAgo(iso: string) {
 // ── Stats ──────────────────────────────────────────────────────────────────────
 
 export default function ShadowAIPage() {
+    const tz = useTimezone();
   const [rawDetections, setRawDetections] = useState<Array<{ repo:string; file:string; tool:string; confidence:number; dev:string; date:string }>>([]);
   const [allowed, setAllowed] = useState<string[]>(["github-copilot"]);
   const [editing, setEditing] = useState(false);

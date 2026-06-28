@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import type { ReactNode, CSSProperties } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import type { DashboardData } from "@/types";
 import { api } from "@/lib/api";
 
@@ -151,7 +152,7 @@ function offsetDate(months: number) {
 const todayStr = () => new Date().toISOString().split("T")[0];
 
 function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" });
+  return formatDateOnly(new Date(iso), getSavedTimezone());
 }
 
 function hashStr(s: string): number {
@@ -1594,6 +1595,7 @@ function ReportsContent() {
 }
 
 export default function ReportsPage() {
+  const tz = useTimezone();
   return (
     <Suspense fallback={
       <div className="flex items-center justify-center h-64">

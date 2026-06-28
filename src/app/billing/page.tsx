@@ -3,6 +3,7 @@
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
@@ -102,8 +103,8 @@ function BillingContent() {
   const planColor = PLAN_COLOR[plan] ?? PLAN_COLOR.trial;
   const features  = PLAN_FEATURES[plan] ?? [];
   const nextPlans = ["trial","starter","growth"].filter(p => p !== plan);
-  const since     = new Date(data.org.member_since).toLocaleDateString("en-GB", { month:"long", year:"numeric" });
-  const period    = new Date(data.period.start).toLocaleDateString("en-GB", { month:"long", year:"numeric" });
+  const since     = formatDateOnly(new Date(data.org.member_since), getSavedTimezone());
+  const period    = formatDateOnly(new Date(data.period.start), getSavedTimezone());
 
   async function startCheckout(planKey: string) {
     if (isSeedMode() && !profile?.org_id) { warning("Demo mode", "Connect Stripe in production: set STRIPE_SECRET_KEY and STRIPE_PRICE_* env vars."); return; }
@@ -197,11 +198,11 @@ function BillingContent() {
             </div>
             <div className="grid grid-cols-2 gap-3 text-center">
               <div>
-                <p className="text-lg font-black text-indigo-600">{data.usage.scans_all_time.toLocaleString()}</p>
+                <p className="text-lg font-black text-indigo-600">{data.usage.scans_all_time}</p>
                 <p className="text-[9px] text-gray-400 uppercase tracking-wider">Total scans</p>
               </div>
               <div>
-                <p className="text-lg font-black text-emerald-600">{data.usage.attestations_all_time.toLocaleString()}</p>
+                <p className="text-lg font-black text-emerald-600">{data.usage.attestations_all_time}</p>
                 <p className="text-[9px] text-gray-400 uppercase tracking-wider">Total attestations</p>
               </div>
             </div>
@@ -284,6 +285,7 @@ function BillingContent() {
 }
 
 export default function BillingPage() {
+  const tz = useTimezone();
   return (
     <Suspense fallback={<PageSkeleton><div /></PageSkeleton>}>
       <BillingContent />

@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime as tzRelativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import RiskBadge from "@/components/RiskBadge";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
@@ -77,7 +78,7 @@ function relativeTime(iso: string): string {
   const days = Math.floor(hrs / 24);
   if (days === 1) return "yesterday";
   if (days < 7)  return `${days}d ago`;
-  return new Date(iso).toLocaleDateString("en-GB", { day:"numeric", month:"short" });
+  return formatDateOnly(new Date(iso), getSavedTimezone());
 }
 
 function shortSha(sha: string): string { return sha.slice(0, 7); }
@@ -254,6 +255,7 @@ function effectiveAttestedCount(s: ScanSummary, statuses: Record<string, string>
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ScansPage() {
+    const tz = useTimezone();
   const { profile } = useAuth();
   const [scans,            setScans]            = useState<ScanSummary[]>([]);
   const [loading,          setLoading]          = useState(true);

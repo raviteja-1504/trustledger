@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
@@ -34,6 +35,7 @@ const PLAN_BADGE: Record<string, { bg: string; text: string }> = {
 };
 
 export default function OrgsPage() {
+    const tz = useTimezone();
   const { profile } = useAuth();
   const [orgs,    setOrgs]    = useState<OrgSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -177,7 +179,7 @@ export default function OrgsPage() {
             const plan    = PLAN_BADGE[org.plan] ?? PLAN_BADGE.starter;
             const riskCol = RISK_COLOR[org.latest_risk] ?? "#94a3b8";
             const lastScan = org.last_scan
-              ? new Date(org.last_scan).toLocaleDateString("en-GB", { day:"numeric", month:"short" })
+              ? formatDateOnly(new Date(org.last_scan), tz)
               : "Never";
 
             return (

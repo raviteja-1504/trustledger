@@ -10,6 +10,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import { readSeed } from "@/lib/offlineData";
 import { api } from "@/lib/api";
 import { computeTrustScore, scoreColor, patchDataWithAttestations } from "@/lib/trustScore";
@@ -151,6 +152,7 @@ function downloadCertificate(score: number, org: string, label: string) {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function TrustScorePage() {
+    const tz = useTimezone();
   const [data,      setData]      = useState<DashboardData>(FALLBACK);
   const [statuses,  setStatuses]  = useState<Record<string,string>>({});
 
