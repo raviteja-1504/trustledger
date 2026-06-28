@@ -239,7 +239,7 @@ export default function AIBOMPage() {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
   }, [filtered]);
 
-  const orgName = profile?.org_slug ?? "org";
+  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
 
   if (loading) return <AuthGuard><PageSkeleton><div /></PageSkeleton></AuthGuard>;
 

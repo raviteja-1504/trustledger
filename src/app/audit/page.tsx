@@ -31,8 +31,6 @@ interface AuditEvent {
   severity: "info" | "warning" | "critical";
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-
 const EVENT_CONFIG = DEFAULT_EVENT_CONFIG as Record<AuditEventType, AuditEventConfig>;
 const EVENT_SOC2_FALLBACK = DEFAULT_EVENT_SOC2 as Partial<Record<AuditEventType, string[]>>;
 
@@ -67,12 +65,18 @@ async function buildHashChain(orderedOldestFirst: AuditEvent[]): Promise<{ hashe
   return { hashes, prevHashes, head: prev };
 }
 
-const ACTOR_PALETTE: Record<string, { bg:string; text:string }> = {
-  [`alice@${ORG}.io`]: { bg:"#ede9fe", text:"#6d28d9" },
-  [`bob@${ORG}.io`]:   { bg:"#dbeafe", text:"#1d4ed8" },
-  [`carol@${ORG}.io`]: { bg:"#d1fae5", text:"#065f46" },
-  [`admin@${ORG}.io`]: { bg:"#fef3c7", text:"#92400e" },
-};
+const ACTOR_COLORS = [
+  { bg:"#ede9fe", text:"#6d28d9" },
+  { bg:"#dbeafe", text:"#1d4ed8" },
+  { bg:"#d1fae5", text:"#065f46" },
+  { bg:"#fef3c7", text:"#92400e" },
+  { bg:"#fce7f3", text:"#9d174d" },
+  { bg:"#ecfdf5", text:"#065f46" },
+];
+function actorColor(actor: string) {
+  const idx = actor.split("").reduce((h, c) => (h * 31 + c.charCodeAt(0)) & 0xffff, 0) % ACTOR_COLORS.length;
+  return ACTOR_COLORS[idx];
+}
 
 // ── Small components ────────────────────────────────────────────────────────────
 
@@ -100,7 +104,7 @@ function EventIcon({ type }: { type: AuditEventType }) {
 
 function ActorAvatar({ email }: { email: string }) {
   const initials = email.split("@")[0].slice(0,2).toUpperCase();
-  const pal = ACTOR_PALETTE[email] ?? { bg:"#f1f5f9", text:"#475569" };
+  const pal = actorColor(email);
   return (
     <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-black shrink-0"
       style={{ background:pal.bg, color:pal.text }}>
@@ -369,7 +373,7 @@ export default function AuditPage() {
 
   // Fetch audit config from API — updates SOC 2 mappings and mock events dynamically
   useEffect(() => {
-    api.auditConfig(ORG)
+    api.auditConfig(profile?.org_slug ?? "")
       .then(res => {
         if (res?.eventSoc2) setEventSoc2(res.eventSoc2 as Partial<Record<AuditEventType, string[]>>);
       })
@@ -400,7 +404,7 @@ export default function AuditPage() {
     }
 
     try {
-      const r = await api.activity(ORG, 100);
+      const r = await api.activity(profile?.org_slug ?? "", 100);
       const apiEvents = r.events.map(activityToAuditEvent);
       const seen: Record<string, boolean> = {};
       const merged = [...localEvents, ...apiEvents].filter(e => {

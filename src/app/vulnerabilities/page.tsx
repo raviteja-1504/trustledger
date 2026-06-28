@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Link from "next/link";
@@ -15,7 +15,6 @@ import { authedFetch } from "@/lib/useRealData";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -409,7 +408,7 @@ function getTeamReviewers(): string[] {
     const stored = typeof window !== "undefined" ? localStorage.getItem("tl_team_members") : null;
     if (stored) { const m: {email:string}[] = JSON.parse(stored); if (m.length > 0) return m.map(x => x.email); }
   } catch { /* */ }
-  return [`alice@${ORG}.io`,`bob@${ORG}.io`,`carol@${ORG}.io`,`dave@${ORG}.io`,`security@${ORG}.io`];
+  return [];
 }
 
 // Per-type remediation checklist
@@ -494,7 +493,7 @@ export default function ViolationsPage() {
     const seed = readSeed();
     if (seed) { setData(seed); setLoadError(null); setLastRefreshed(new Date()); setLoading(false); if (spinner) setRefreshing(false); return; }
     try {
-      const d = await api.dashboard(ORG, 90);
+      const d = await api.dashboard(profile?.org_slug ?? "", 90);
       setData(d); setLoadError(null); setLastRefreshed(new Date());
     } catch (e) {
       setData(null);
@@ -958,32 +957,6 @@ export default function ViolationsPage() {
                         <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                       </svg>
                       {isEscalated ? "Escalated" : "Escalate"}
-                    </button>
-                    {/* Create Ticket — JIRA / Linear */}
-                    <button
-                      onClick={() => {
-                        const prov = localStorage.getItem("tl_ticket_provider") ?? "jira";
-                        authedFetch("/api/integrations/ticket", {
-                          method: "POST",
-                          body: JSON.stringify({
-                            provider:     prov,
-                            title:        `[TrustLedger] ${v.severity} violation — ${v.file?.split("/").pop() ?? v.id}`,
-                            description:  `${v.type.replace(/_/g," ")} detected in \`${v.file}\` (${v.severity} risk). Repo: ${v.repo ?? "unknown"}. Scan ID: ${v.scan_id ?? "n/a"}.`,
-                            priority:     v.severity === "CRITICAL" ? "highest" : v.severity === "HIGH" ? "high" : "medium",
-                            labels:       ["security", "ai-governance"],
-                            violation_id: v.id,
-                            scan_id:      v.scan_id,
-                            file_path:    v.file,
-                            repo:         v.repo,
-                            risk_score:   v.severity,
-                          }),
-                        })
-                          .then(() => success("Ticket created", `${prov.toUpperCase()} ticket created for this violation.`))
-                          .catch(() => info("Ticket integration", "Configure JIRA or Linear in Settings → Integrations."));
-                      }}
-                      className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition-colors whitespace-nowrap flex items-center gap-1">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-                      Create Ticket
                     </button>
                     {v.status === "open" && (
                       <>

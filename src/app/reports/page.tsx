@@ -8,10 +8,10 @@ import AuthGuard from "@/components/AuthGuard";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import type { DashboardData } from "@/types";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ORG      = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 const BASE_URL = "";
 
 const FRAMEWORKS = ["SOC2", "EU AI Act", "PCI-DSS"] as const;
@@ -180,7 +180,7 @@ function sha256hex(fw: Framework, org: string, start: string, end: string) {
     .join("");
 }
 
-function pgpLines(fw: Framework, start: string, end: string): string[] {
+function pgpLines(fw: Framework, start: string, end: string, org = ""): string[] {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   const line = (seed: string, len = 64) => {
     let s = "";
@@ -189,7 +189,7 @@ function pgpLines(fw: Framework, start: string, end: string): string[] {
   };
   return [
     line(fw + start, 64),
-    line(ORG + end, 64),
+    line(org + end, 64),
     line(fw + end + start, 48) + "==",
   ];
 }
@@ -888,11 +888,11 @@ function ComplianceMapping({ criteria, data, color, accentBg }: {
   );
 }
 
-function SignatureBlock({ fw, start, end }: { fw: Framework; start: string; end: string }) {
+function SignatureBlock({ fw, start, end, org }: { fw: Framework; start: string; end: string; org: string }) {
   const id  = reportId(fw, start);
-  const fp  = fingerprint(fw, ORG, start);
-  const sha = sha256hex(fw, ORG, start, end);
-  const sig = pgpLines(fw, start, end);
+  const fp  = fingerprint(fw, org, start);
+  const sha = sha256hex(fw, org, start, end);
+  const sig = pgpLines(fw, start, end, org);
   const ts  = new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
 
   const row = (label: string, value: ReactNode, mono = false) => (
@@ -929,7 +929,7 @@ function SignatureBlock({ fw, start, end }: { fw: Framework; start: string; end:
       <div className="divide-y divide-white/5">
         {row("Report ID",    <span className="text-emerald-400 font-bold font-mono">{id}</span>)}
         {row("Framework",   fw)}
-        {row("Organisation",ORG)}
+        {row("Organisation",org)}
         {row("Period",       `${start}  →  ${end}`,  true)}
         {row("Algorithm",   "SHA-256 with RSA-4096")}
         {row("Generated",    ts,                      true)}
@@ -972,9 +972,10 @@ function SignatureBlock({ fw, start, end }: { fw: Framework; start: string; end:
 
 // ─── Full report document ─────────────────────────────────────────────────────
 
-function ReportDocument({ data, fw, start, end, violationStatuses }: {
+function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
   data: DashboardData; fw: Framework; start: string; end: string;
   violationStatuses: Record<string, string>;
+  org: string;
 }) {
   const def     = FW[fw];
   const metrics = buildMetrics(fw, data);
@@ -1016,7 +1017,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
           <div className="shrink-0 text-right space-y-3">
             <div>
               <p className="text-[9px] font-bold uppercase tracking-widest text-white/30 mb-0.5">Organisation</p>
-              <p className="text-sm font-bold text-white">{ORG}</p>
+              <p className="text-sm font-bold text-white">{org}</p>
             </div>
             <div>
               <p className="text-[9px] font-bold uppercase tracking-widest text-white/30 mb-0.5">Report Period</p>
@@ -1077,7 +1078,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
         {/* 5. Cryptographic Attestation */}
         <section>
           <SectionHead num={5} title="Cryptographic Attestation" color={def.color} />
-          <SignatureBlock fw={fw} start={start} end={end} />
+          <SignatureBlock fw={fw} start={start} end={end} org={org} />
         </section>
 
         {/* 6. Management Assertion */}
@@ -1092,7 +1093,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
             </div>
             <div className="px-6 py-5 space-y-4 bg-white">
               <p className="text-xs text-gray-700 leading-relaxed">
-                Management of <strong>{ORG}</strong> asserts that, to the best of its knowledge and belief,
+                Management of <strong>{org}</strong> asserts that, to the best of its knowledge and belief,
                 the controls described in this report were suitably designed and operating effectively throughout
                 the period <strong>{start}</strong> to <strong>{end}</strong> with respect to the {def.shortName} criteria.
               </p>
@@ -1105,7 +1106,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
                 <div>
                   <p className="text-[9px] text-gray-400 font-semibold uppercase tracking-wider mb-3">Prepared by</p>
                   <div className="border-b border-gray-300 h-8 mb-1" />
-                  <p className="text-[10px] text-gray-600">Security Lead, {ORG}</p>
+                  <p className="text-[10px] text-gray-600">Security Lead, {org}</p>
                   <p className="text-[9px] text-gray-400">Date: _______________</p>
                 </div>
                 <div>
@@ -1162,7 +1163,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
         {/* Footer */}
         <div className="flex items-center justify-between pt-4 border-t border-gray-100">
           <p suppressHydrationWarning className="text-[10px] text-gray-400">
-            Generated by TrustLedger · {new Date().toLocaleDateString("en-GB", { day:"2-digit", month:"long", year:"numeric" })} · {def.shortName} · {ORG}
+            Generated by TrustLedger · {new Date().toLocaleDateString("en-GB", { day:"2-digit", month:"long", year:"numeric" })} · {def.shortName} · {org}
           </p>
           <p className="text-[10px] text-gray-400 font-mono">{reportId(fw, start)}</p>
         </div>
@@ -1173,8 +1174,8 @@ function ReportDocument({ data, fw, start, end, violationStatuses }: {
 
 // ─── Fallback demo data (used when backend is not reachable) ─────────────────
 
-function makeFallbackData(): DashboardData {
-  const o = ORG;
+function makeFallbackData(org: string): DashboardData {
+  const o = org;
   return {
     repos: [
       { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:"2026-05-20", scan_count:18, file_count:142, latest_scan_id:"sc_mock_001" },
@@ -1208,18 +1209,18 @@ function makeFallbackData(): DashboardData {
     ],
   };
 }
-const FALLBACK_DATA: DashboardData = makeFallbackData();
+const FALLBACK_DATA: DashboardData = makeFallbackData("your organisation");
 
 // ─── AIBOM generator ─────────────────────────────────────────────────────────
 
-function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: string) {
+function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: string, org: string) {
   const now = new Date().toISOString();
   const aibom = {
     aibom_version: "1.0.0",
     schema: "https://trustledger.dev/schemas/aibom/1.0",
     metadata: {
       generated_at: now,
-      org: ORG,
+      org: org,
       framework: fw,
       period_start: start,
       period_end: end,
@@ -1265,7 +1266,7 @@ function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: stri
   const blob = new Blob([JSON.stringify(aibom, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `trustledger-aibom-${ORG}-${start}.json`;
+  a.download = `trustledger-aibom-${org.replace(/\s+/g,"-").toLowerCase()}-${start}.json`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -1280,6 +1281,8 @@ const Check   = () => <svg width="11" height="11" viewBox="0 0 24 24" fill="none
 
 function ReportsContent() {
   const params = useSearchParams();
+  const { profile } = useAuth();
+  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
   const initialFw = (() => {
     const p = params?.get("fw");
     return (FRAMEWORKS as readonly string[]).includes(p ?? "") ? (p as Framework) : "SOC2";
@@ -1344,7 +1347,7 @@ function ReportsContent() {
       } catch {}
     }
     try {
-      const d = await api.dashboard(ORG, 90);
+      const d = await api.dashboard(orgName, 90);
       setData(d);
     } catch { /* fall through — page uses FALLBACK_DATA via effectiveData ?? FALLBACK_DATA */ }
     setLoading(false);
@@ -1560,7 +1563,7 @@ function ReportsContent() {
                 Machine-readable inventory of all AI-authored files with risk levels, attestations, and reviewer chains — compatible with SLSA and supply-chain tooling.
               </p>
               <button
-                onClick={() => downloadAIBOM(effectiveData ?? FALLBACK_DATA, fw, start, end)}
+                onClick={() => downloadAIBOM(effectiveData ?? FALLBACK_DATA, fw, start, end, orgName)}
                 className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold text-indigo-700 border border-indigo-200 hover:bg-indigo-50 transition-colors"
                 style={{ background:"rgba(99,102,241,0.05)" }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1585,7 +1588,7 @@ function ReportsContent() {
                 <p className="text-sm font-medium text-gray-400">Loading report data…</p>
               </div>
             ) : (
-              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} />
+              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} />
             )}
           </div>
         </div>
