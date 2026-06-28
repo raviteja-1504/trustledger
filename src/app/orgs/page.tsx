@@ -223,7 +223,7 @@ export default function OrgsPage() {
                       <p className="text-[10px] text-gray-400">Members</p>
                     </div>
                     <div className="text-center">
-                      <p className="text-sm font-bold text-gray-600">{(org.latest_ai_pct * 100).toFixed(0)}%</p>
+                      <p className="text-sm font-bold text-gray-600">{Number.isFinite(org.latest_ai_pct) ? (org.latest_ai_pct * 100).toFixed(0) : "—"}%</p>
                       <p className="text-[10px] text-gray-400">Avg AI</p>
                     </div>
                     <div className="text-center hidden sm:block">

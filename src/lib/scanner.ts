@@ -3713,7 +3713,8 @@ export function runScan(input: ScanInput): ScanOutput {
     const baseScore = input.developer_baseline && input.pr_metadata
       ? scoreBaselineDeviation(input.pr_metadata, input.developer_baseline).score
       : 0;
-    return Math.min(0.08, (prScore * 0.6 + baseScore * 0.4) * 0.12);
+    const val = (prScore * 0.6 + baseScore * 0.4) * 0.12;
+    return Number.isFinite(val) ? Math.min(0.08, val) : 0;
   })();
 
   const files = filesToScan.map(f => analyzeFile(f.path, f.content, prPriorBias));
@@ -3960,7 +3961,8 @@ export function runScan(input: ScanInput): ScanOutput {
   if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) hardBoost = Math.max(hardBoost, 0.20);
   if (ai_tooling.length > 0 && codeEvidence > 0.40)              hardBoost = Math.max(hardBoost, 0.15);
 
-  const combined = Math.min(1, combinedRaw + hardBoost);
+  const combinedUnclamped = combinedRaw + hardBoost;
+  const combined = Number.isFinite(combinedUnclamped) ? Math.min(1, combinedUnclamped) : codeEvidence;
 
   const evidence_breakdown: EvidenceBreakdown = {
     code_evidence:      codeEvidence,
@@ -4014,12 +4016,14 @@ export function runScan(input: ScanInput): ScanOutput {
     pr_number:            input.pr_number,
     commit_sha:           input.commit_sha,
     overall_risk:         overallRisk,
-    // Use multi-signal combined score as the primary AI likelihood metric
-    // when PR-level evidence is available; fall back to code-only average
-    // for API-submitted scans without PR metadata.
-    total_ai_percentage:  evidence_breakdown.combined > boostedAI
-      ? evidence_breakdown.combined   // blended: code + PR behavior + git + baseline + tools
-      : boostedAI,                    // code-only fallback
+    // Use multi-signal combined score as the primary AI likelihood metric.
+    // Guarded against NaN: any NaN in sub-calculations falls back to code-only.
+    total_ai_percentage: (() => {
+      const blended = evidence_breakdown.combined;
+      const fallback = Number.isFinite(boostedAI) ? boostedAI : avgAI;
+      if (!Number.isFinite(blended)) return Number.isFinite(fallback) ? fallback : 0;
+      return blended > fallback ? blended : fallback;
+    })(),
     cross_file_ai_boost:  crossFileBoost,
     mixed_authorship:     mixedAuthorship,
     scan_quality,
