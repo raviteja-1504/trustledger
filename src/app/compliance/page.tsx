@@ -8,8 +8,10 @@ import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
-import { makeFrameworks as makeDefaultFrameworks, CROSS_FRAMEWORK_THEMES as DEFAULT_THEMES } from "@/lib/complianceConfig";
+import { makeDefaultFrameworks, CROSS_FRAMEWORK_THEMES as DEFAULT_THEMES } from "@/lib/complianceConfig";
 import type { FrameworkDef as FrameworkDefLib, CrossFrameworkTheme } from "@/lib/complianceConfig";
+import { authedFetch } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
 import type { DashboardData } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -59,14 +61,12 @@ interface Exception {
   status: "open" | "in-progress" | "resolved";
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-
 // ── Framework catalog — delegates to lib; localStorage overrides audit dates ──
 
-function makeFrameworks(): FrameworkDef[] {
+function makeFrameworks(org = "org"): FrameworkDef[] {
   let policy: Record<string, string> = {};
   try { policy = JSON.parse(typeof window !== "undefined" ? (localStorage.getItem("tl_compliance_schedule") ?? "{}") : "{}"); } catch { /* */ }
-  return makeDefaultFrameworks(ORG, policy) as FrameworkDef[];
+  return makeDefaultFrameworks(org, policy) as FrameworkDef[];
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────────
@@ -176,32 +176,69 @@ type PageTab = "overview" | "controls" | "mapping" | "exceptions";
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function CompliancePage() {
-    const tz = useTimezone();
-  const [frameworks,  setFrameworks]  = useState<FrameworkDef[]>(() => makeDefaultFrameworks(ORG, {}) as FrameworkDef[]);
+  const tz = useTimezone();
+  const { profile } = useAuth();
+  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
+  const orgSlug = profile?.org_slug || "";
+
+  const [frameworks,  setFrameworks]  = useState<FrameworkDef[]>(() => makeFrameworks());
   const [crossThemes, setCrossThemes] = useState<CrossFrameworkTheme[]>(DEFAULT_THEMES);
   const [data,        setData]        = useState<DashboardData | null>(null);
   const [activeFw,    setActiveFw]    = useState<string>("soc2");
   const [tab,         setTab]         = useState<PageTab>("overview");
   const [exceptions,  setExceptions]  = useState<Exception[]>([]);
   const [showExcForm, setShowExcForm] = useState(false);
-  const [excForm,     setExcForm]     = useState({ title:"", description:"", control_id:"", owner:`alice@${ORG}.io`, due_date:"", remediation:"", risk_accepted:false });
+  const [excForm,     setExcForm]     = useState({ title:"", description:"", control_id:"", owner: profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
   const [refreshing,  setRefreshing]  = useState(false);
+  const [teamMembers, setTeamMembers] = useState<{ email: string; role: string; name: string | null }[]>([]);
 
   useEffect(() => { setExceptions(loadExceptions()); }, []);
 
+  // Load real team members and map role-label owners to real emails
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ members: { email: string; role: string; name: string | null }[] }>("/api/team")
+      .then(res => {
+        const members = res.members ?? [];
+        setTeamMembers(members);
+        // Default exception owner to current user
+        if (profile?.email) setExcForm(f => ({ ...f, owner: f.owner || profile.email! }));
+        // Reassign placeholder owners to real team emails
+        if (members.length === 0) return;
+        const byRole = (r: string) => members.filter(m => m.role === r);
+        const admins     = byRole("admin");
+        const reviewers  = byRole("security_reviewer");
+        const all        = members;
+        const pick = (pool: typeof members, i: number) =>
+          (pool.length ? pool : all)[i % (pool.length || all.length)]?.email ?? "";
+        setFrameworks(prev => prev.map(fw => ({
+          ...fw,
+          controls: fw.controls.map((ctrl, i) => ({
+            ...ctrl,
+            owner: ctrl.owner === "Security Lead"       ? pick(admins.length    ? admins    : all, 0)
+                 : ctrl.owner === "DevOps Lead"         ? pick(reviewers.length ? reviewers : all, Math.floor(i / 2))
+                 : ctrl.owner === "Compliance Officer"  ? pick(admins.length    ? admins    : all, admins.length > 1 ? 1 : 0)
+                 : ctrl.owner,
+          })),
+        })));
+      })
+      .catch(() => {});
+  }, [profile?.org_id, profile?.email]);
+
   // Re-derive frameworks when tl_compliance_schedule changes in another tab or on focus
   useEffect(() => {
-    function refresh() { setFrameworks(makeFrameworks()); }
+    function refresh() { setFrameworks(makeFrameworks(orgSlug)); }
     function onStorage(e: StorageEvent) { if (e.key === "tl_compliance_schedule") refresh(); }
     function onFocus() { refresh(); }
     window.addEventListener("storage", onStorage);
     window.addEventListener("focus", onFocus);
     return () => { window.removeEventListener("storage", onStorage); window.removeEventListener("focus", onFocus); };
-  }, []);
+  }, [orgSlug]);
 
   // Fetch framework config from API — falls back to lib defaults
   useEffect(() => {
-    api.complianceConfig(ORG)
+    if (!orgSlug) return;
+    api.complianceConfig(orgSlug)
       .then(res => {
         if (Array.isArray(res?.frameworks) && res.frameworks.length > 0)
           setFrameworks(res.frameworks as FrameworkDef[]);
@@ -209,15 +246,15 @@ export default function CompliancePage() {
           setCrossThemes(res.crossFrameworkThemes as CrossFrameworkTheme[]);
       })
       .catch(() => { /* keep defaults */ });
-  }, []);
+  }, [orgSlug]);
 
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
-    const d = seed ?? await api.dashboard(ORG, 90).catch(() => null);
+    const d = seed ?? await api.dashboard(orgSlug, 90).catch(() => null);
     if (d) setData(d);
     if (spinner) setRefreshing(false);
-  }, []);
+  }, [orgSlug]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -264,7 +301,7 @@ export default function CompliancePage() {
     setExceptions(next);
     saveExceptions(next);
     setShowExcForm(false);
-    setExcForm({ title:"", description:"", control_id:"", owner:`alice@${ORG}.io`, due_date:"", remediation:"", risk_accepted:false });
+    setExcForm({ title:"", description:"", control_id:"", owner:profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
   }
 
   function closeException(id: string) {
@@ -280,7 +317,7 @@ export default function CompliancePage() {
     const pkg = {
       type: "TrustLedger Auditor Package",
       generated_at: new Date().toISOString(),
-      org: ORG,
+      org: orgName,
       framework: fw.fullName,
       standard: fw.standard,
       compliance_score: fwScore,
@@ -796,7 +833,7 @@ export default function CompliancePage() {
                     <label className="block text-[10px] font-semibold text-gray-500 mb-1">Owner</label>
                     <select value={excForm.owner} onChange={e=>setExcForm(p=>({...p,owner:e.target.value}))}
                       className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none">
-                      {(()=>{try{const m=JSON.parse(localStorage.getItem("tl_team_members")??"[]");if(m.length)return m.map((x:{email:string})=>x.email);}catch{/**/}return [`alice@${ORG}.io`,`bob@${ORG}.io`,`carol@${ORG}.io`,`david@${ORG}.io`];})().map((em:string)=>(
+                      {(teamMembers.length ? teamMembers.map(m => m.email) : [""]).map((em:string)=>(
                         <option key={em} value={em}>{em.split("@")[0]}</option>
                       ))}
                     </select>

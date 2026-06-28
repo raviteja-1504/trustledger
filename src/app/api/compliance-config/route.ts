@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { makeFrameworks, CROSS_FRAMEWORK_THEMES } from "@/lib/complianceConfig";
+import { makeDefaultFrameworks as makeFrameworks, CROSS_FRAMEWORK_THEMES } from "@/lib/complianceConfig";
 import type { FrameworkDef, CrossFrameworkTheme } from "@/lib/complianceConfig";
 
 export async function GET(req: NextRequest) {
