@@ -141,46 +141,52 @@ export async function PATCH(req: NextRequest) {
   return NextResponse.json({ member });
 }
 
-// ── DELETE — remove member ────────────────────────────────────────────────────
+// ── DELETE — remove member (by user_id for active members, member_id for pending) ──
 export async function DELETE(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   const roleErr = requireRole(auth, "admin");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
-  const userId = new URL(req.url).searchParams.get("user_id");
-  if (!userId) return NextResponse.json({ error: "user_id_required" }, { status: 400 });
-  if (userId === auth.user_id) return NextResponse.json({ error: "cannot_remove_self" }, { status: 400 });
+  const params   = new URL(req.url).searchParams;
+  const userId   = params.get("user_id");
+  const memberId = params.get("member_id");
+
+  if (!userId && !memberId) {
+    return NextResponse.json({ error: "user_id_or_member_id_required" }, { status: 400 });
+  }
+  if (userId && userId === auth.user_id) {
+    return NextResponse.json({ error: "cannot_remove_self" }, { status: 400 });
+  }
 
   const db = createServiceClient();
-  const { data: member } = await db
+
+  // Look up the row — works for both active (user_id) and pending (member_id) members
+  const query = db
     .from("org_members")
-    .select("id, email")
-    .eq("org_id", auth.org_id)
-    .eq("user_id", userId)
-    .single();
+    .select("id, email, role, user_id")
+    .eq("org_id", auth.org_id);
+
+  const { data: member } = await (
+    userId ? query.eq("user_id", userId).single()
+           : query.eq("id", memberId!).single()
+  );
 
   if (!member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
 
-  // Ensure at least one admin remains
-  const { count: adminCount } = await db
-    .from("org_members")
-    .select("id", { count: "exact", head: true })
-    .eq("org_id", auth.org_id)
-    .eq("role", "admin");
-
-  const { data: targetMember } = await db
-    .from("org_members")
-    .select("role")
-    .eq("org_id", auth.org_id)
-    .eq("user_id", userId)
-    .single();
-
-  if (targetMember?.role === "admin" && (adminCount ?? 0) <= 1) {
-    return NextResponse.json({ error: "last_admin" }, { status: 400 });
+  // Prevent removing the last admin
+  if (member.role === "admin") {
+    const { count: adminCount } = await db
+      .from("org_members")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", auth.org_id)
+      .eq("role", "admin");
+    if ((adminCount ?? 0) <= 1) {
+      return NextResponse.json({ error: "last_admin" }, { status: 400 });
+    }
   }
 
-  await db.from("org_members").delete().eq("org_id", auth.org_id).eq("user_id", userId);
+  await db.from("org_members").delete().eq("org_id", auth.org_id).eq("id", member.id);
 
   await writeAuditLog(db, {
     org_id:        auth.org_id,

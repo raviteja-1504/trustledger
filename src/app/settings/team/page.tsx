@@ -102,12 +102,14 @@ export default function TeamPage() {
     finally { setChangingRole(null); }
   }
 
-  async function removeMember(userId: string, email: string) {
-    if (!confirm(`Remove ${email} from the organisation?`)) return;
-    setRemoving(userId);
+  async function removeMember(m: Member) {
+    if (!confirm(`Remove ${m.email} from the organisation?`)) return;
+    const key = m.user_id ?? m.id;
+    setRemoving(key);
     try {
-      await authedFetch(`/api/team?user_id=${userId}`, { method: "DELETE" });
-      setMembers(prev => prev.filter(m => m.user_id !== userId));
+      const qs = m.user_id ? `user_id=${m.user_id}` : `member_id=${m.id}`;
+      await authedFetch(`/api/team?${qs}`, { method: "DELETE" });
+      setMembers(prev => prev.filter(x => x.id !== m.id));
     } catch { /* ignore */ }
     finally { setRemoving(null); }
   }
@@ -256,14 +258,14 @@ export default function TeamPage() {
                             </select>
                           )}
 
-                          {/* Remove button — admin only, not self */}
-                          {isAdmin && !isCurrentUser && m.user_id && (
+                          {/* Remove button — admin only, not self; works for pending (no user_id) too */}
+                          {isAdmin && !isCurrentUser && (
                             <button
-                              onClick={() => removeMember(m.user_id!, m.email)}
-                              disabled={removing === m.user_id}
+                              onClick={() => removeMember(m)}
+                              disabled={removing === (m.user_id ?? m.id)}
                               className="shrink-0 text-xs font-semibold text-rose-500 hover:text-rose-700 disabled:opacity-40 transition-colors px-2 py-1 rounded-lg hover:bg-rose-50"
                             >
-                              {removing === m.user_id ? "…" : "Remove"}
+                              {removing === (m.user_id ?? m.id) ? "…" : "Remove"}
                             </button>
                           )}
                         </div>
