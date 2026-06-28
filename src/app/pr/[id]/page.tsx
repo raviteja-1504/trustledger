@@ -13,6 +13,7 @@ import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
 import { authedFetch } from "@/lib/useRealData";
+import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
@@ -811,6 +812,7 @@ function PRDetailContent() {
   const id = (useParams<{ id: string }>() ?? { id: "" }).id;
   const searchParams = useSearchParams();
   const { profile } = useAuth();
+  const tz = useTimezone();
 
   const [scan,    setScan]    = useState<ScanResult | null>(null);
   const [error,   setError]   = useState<string | null>(null);
@@ -1233,7 +1235,7 @@ function PRDetailContent() {
                   <div className="flex items-center gap-2.5 mt-2 flex-wrap">
                     <span className="font-mono text-xs text-slate-400 bg-slate-800/70 px-2.5 py-1 rounded-lg">{scan.commit_sha.slice(0, 8)}</span>
                     <RiskBadge level={scan.overall_risk} />
-                    <span className="text-xs text-slate-400">{new Date(scan.timestamp).toLocaleString()}</span>
+                    <span className="text-xs text-slate-400">{formatDateTime(scan.timestamp, tz)}</span>
                   </div>
                 </div>
 

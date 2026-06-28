@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { saveTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
@@ -88,7 +89,7 @@ function ClaimAdminCard() {
 export default function ProfilePage() {
   const { profile: authProfile, user } = useAuth();
   const { success: toastSuccess, error: toastError } = useToastHelpers();
-  const [prof,         setProf]        = useState<Profile>({ display_name:"", bio:"", avatar_url:"", github_login:"", timezone:"UTC", theme:"system", notification_digest_day:"monday" });
+  const [prof,         setProf]        = useState<Profile>({ display_name:"", bio:"", avatar_url:"", github_login:"", timezone: (typeof window !== "undefined" ? localStorage.getItem("tl_user_timezone") || "UTC" : "UTC"), theme:"system", notification_digest_day:"monday" });
   const [twoFA,        setTwoFA]       = useState<TwoFAStatus>({ enabled:false, setup_pending:false });
   const [otpData,      setOtpData]     = useState<{ secret:string; otp_uri:string } | null>(null);
   const [backups,      setBackups]     = useState<string[] | null>(null);
@@ -129,6 +130,11 @@ export default function ProfilePage() {
   async function saveProfile() {
     if (!user) return;
     await supabase.from("user_profiles").upsert({ user_id: user.id, ...prof, updated_at: new Date().toISOString() });
+    // Persist timezone to localStorage so all pages pick it up immediately
+    if (prof.timezone) {
+      saveTimezone(prof.timezone);
+      window.dispatchEvent(new CustomEvent("tl:timezone", { detail: prof.timezone }));
+    }
     setSaved(true); setTimeout(() => setSaved(false), 2500);
   }
 

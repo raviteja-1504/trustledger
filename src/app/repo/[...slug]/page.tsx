@@ -8,6 +8,7 @@ import RiskBadge from "@/components/RiskBadge";
 import ProgressBar from "@/components/ProgressBar";
 import { api } from "@/lib/api";
 import { isSeedMode } from "@/lib/useRealData";
+import { relativeTime, formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import type { ScanResult, FileResult, RiskLevel, DashboardData } from "@/types";
 
@@ -77,6 +78,7 @@ function buildScansFromSeed(repo: string): ScanResult[] {
   }
 }
 
+// relDate kept for backward compat — timezone-aware version uses relativeTime() from lib/timezone
 function relDate(iso: string) {
   if (!iso) return "—";
   const d = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
@@ -114,6 +116,7 @@ function WebhookIcon() {
 
 export default function RepoDetailPage() {
   const { profile } = useAuth();
+  const tz = useTimezone();
   const { slug } = (useParams<{ slug: string[] }>() ?? { slug: [] });
   const repo = Array.isArray(slug) ? slug.join("/") : slug;
   const [scans, setScans] = useState<ScanResult[]>([]);
@@ -257,7 +260,7 @@ export default function RepoDetailPage() {
                   : sc.overall_risk === "HIGH"     ? "#f97316"
                   : sc.overall_risk === "MEDIUM"   ? "#f59e0b" : "#10b981";
                 const isLatest     = idx === 0;
-                const absDate      = sc.timestamp ? new Date(sc.timestamp).toLocaleString("en-GB", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" }) : "—";
+                const absDate      = formatDateTime(sc.timestamp, tz);
                 const triggerLabel = sc.triggered_by === "webhook" || sc.triggered_by === "github-app" ? "GitHub" : sc.triggered_by === "scheduled" ? "Scheduled" : "API";
                 const triggerColor = triggerLabel === "GitHub" ? "text-violet-600 bg-violet-50 border-violet-200"
                   : triggerLabel === "Scheduled" ? "text-sky-600 bg-sky-50 border-sky-200"
