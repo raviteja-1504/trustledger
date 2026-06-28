@@ -429,12 +429,18 @@ function PoliciesTab({ policy, setPolicy }: {
 // ── Tab: Integrations ──────────────────────────────────────────────────────────
 
 const GITHUB_APP_URL = "https://github.com/apps/trustledger";
-const ORG_SETTINGS = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+
+// useOrgName() — reads org name from auth profile instead of the hardcoded env var
+function useOrgName(): string {
+  const { profile } = useAuth();
+  return profile?.org_name || profile?.org_slug || "your organisation";
+}
 
 function IntegrationsTab({ policy, setPolicy }: {
   policy: OrgPolicy;
   setPolicy: React.Dispatch<React.SetStateAction<OrgPolicy>>;
 }) {
+  const orgName = useOrgName();
   const [slackTesting, setSlackTesting]   = useState(false);
   const [slackResult,  setSlackResult]    = useState<"ok" | "error" | null>(null);
   const [repoCount,    setRepoCount]      = useState<number | null>(null);
@@ -444,7 +450,7 @@ function IntegrationsTab({ policy, setPolicy }: {
   // Load live GitHub stats from dashboard API, fall back to sensible mock values
   const loadGitHubStats = useCallback(async () => {
     try {
-      const data = await api.dashboard(ORG_SETTINGS, 30);
+      const data = await api.dashboard(orgName, 30);
       setRepoCount(data.repos.length);
       setScanCount(data.scan_count);
       setBlockedCount(data.unattested_deploy_count);
@@ -880,6 +886,7 @@ function NotificationsTab({ policy, setPolicy }: {
   policy: OrgPolicy;
   setPolicy: React.Dispatch<React.SetStateAction<OrgPolicy>>;
 }) {
+  const orgName = useOrgName();
   const set = <K extends keyof OrgPolicy>(k: K, v: OrgPolicy[K]) =>
     setPolicy(p => ({ ...p, [k]: v }));
 
@@ -949,7 +956,7 @@ function NotificationsTab({ policy, setPolicy }: {
                 <ShieldIcon size={12} />
               </div>
               <div>
-                <p className="text-xs font-bold text-white">TrustLedger Weekly — {ORG_SETTINGS}</p>
+                <p className="text-xs font-bold text-white">TrustLedger Weekly — {orgName}</p>
                 <p className="text-[10px] text-gray-400">Week of May 26, 2026</p>
               </div>
             </div>
@@ -1073,253 +1080,44 @@ const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
   { value: "admin",             label: ROLE_LABELS.admin },
 ];
 
+
 function TeamTab() {
-  const { role, setRole, permissions } = useRole();
-  const { members, setMemberRole, addMember, removeMember } = useTeamMembers();
-  const { profile } = useAuth();
-  const [newName,    setNewName]    = useState("");
-  const [newEmail,   setNewEmail]   = useState("");
-  const [newRole,    setNewRole]    = useState<UserRole>("developer");
-  const [addError,   setAddError]   = useState("");
-  const [inviteSent, setInviteSent] = useState(false);
-  const [inviting,   setInviting]   = useState(false);
-
-  const isAdmin = permissions.canManageUsers;
-
-  const PERM_LABELS: [keyof typeof permissions, string][] = [
-    ["canAttest",         "Attest files"],
-    ["canScan",           "Trigger scans"],
-    ["canViewReports",    "View reports"],
-    ["canManageSettings", "Manage settings"],
-    ["canManageUsers",    "Manage team"],
-    ["canExportData",     "Export data"],
-  ];
-
-  async function handleAdd(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newEmail.trim()) { setAddError("Email is required."); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) { setAddError("Enter a valid email."); return; }
-    if (members.some(m => m.email === newEmail.trim())) { setAddError("A member with this email already exists."); return; }
-    setAddError(""); setInviting(true);
-
-    // Real API invite (sends magic link email)
-    if (profile?.org_id) {
-      try {
-        await authedFetch("/api/settings", {
-          method: "POST",
-          body:   JSON.stringify({ action: "invite_member", email: newEmail.trim(), role: newRole }),
-        });
-        setInviteSent(true);
-        setTimeout(() => setInviteSent(false), 4000);
-        setNewName(""); setNewEmail(""); setNewRole("developer"); setInviting(false);
-        return;
-      } catch (err) {
-        setAddError(err instanceof Error ? err.message : "Invite failed");
-        setInviting(false);
-        return;
-      }
-    }
-
-    // localStorage fallback (demo/seed mode)
-    const initials = (newName || newEmail).trim().split(/[\s@]/).map(p => p[0]).join("").slice(0, 2).toUpperCase();
-    addMember({ name: newName.trim() || newEmail.split("@")[0], email: newEmail.trim(), role: newRole, avatarInitials: initials });
-    setNewName(""); setNewEmail(""); setNewRole("developer"); setInviting(false);
-  }
-
-  async function handleRemove(userId: string, email: string) {
-    if (profile?.org_id) {
-      try {
-        await authedFetch("/api/settings", {
-          method: "POST",
-          body:   JSON.stringify({ action: "remove_member", user_id: userId }),
-        });
-      } catch { /* non-fatal */ }
-    }
-    removeMember(email);
-  }
-
-  async function handleRoleChange(userId: string, email: string, newR: UserRole) {
-    if (profile?.org_id) {
-      try {
-        await authedFetch("/api/settings", {
-          method: "POST",
-          body:   JSON.stringify({ action: "update_member_role", user_id: userId, role: newR }),
-        });
-      } catch { /* non-fatal */ }
-    }
-    setMemberRole(email, newR);
-  }
-
+  // Delegates to /settings/team which has full real-data implementation
+  const orgName = useOrgName();
   return (
-    <div className="space-y-5">
-      {/* Your role */}
-      <SectionCard
-        title="Your Role"
-        subtitle="Your current access level. Switch roles to preview different permission sets (demo only)."
-      >
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-3">
-            <span className={clsx("w-2.5 h-2.5 rounded-full shrink-0", ROLE_COLORS[role].dot)} />
-            <div>
-              <p className="text-sm font-bold text-gray-900">{ROLE_LABELS[role]}</p>
-              <p className="text-xs text-gray-400 mt-0.5 max-w-xs">{ROLE_DESCRIPTIONS[role]}</p>
-            </div>
-          </div>
-          <select
-            value={role}
-            onChange={e => setRole(e.target.value as UserRole)}
-            className="text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white text-gray-800 font-medium"
-          >
-            {ROLE_OPTIONS.map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="border-t border-gray-50 pt-3.5 grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {PERM_LABELS.map(([k, label]) => (
-            <div key={k} className={clsx(
-              "flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium",
-              permissions[k] ? "bg-emerald-50 text-emerald-700" : "bg-gray-50 text-gray-400",
-            )}>
-              <span className="text-[11px] leading-none font-bold">{permissions[k] ? "✓" : "✗"}</span>
-              {label}
-            </div>
-          ))}
-        </div>
-      </SectionCard>
-
-      {/* Team members list */}
-      <div className="section-card animate-fade-up overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between gap-3">
+    <div className="space-y-4">
+      <div className="section-card p-5">
+        <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-bold text-gray-900 flex items-center gap-2">
-              <UsersIcon size={15} />
-              Team Members
-            </p>
-            <p className="text-xs text-gray-400 mt-0.5">{members.length} members in {ORG_SETTINGS}</p>
+            <p className="font-bold text-gray-900 text-sm">Team — {orgName}</p>
+            <p className="text-xs text-gray-400 mt-0.5">Manage members and roles for your organisation</p>
           </div>
-          {!isAdmin && (
-            <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg ring-1 ring-amber-200">
-              Admin required to edit
-            </span>
-          )}
+          <a href="/settings/team"
+            className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors">
+            Open Team Manager →
+          </a>
         </div>
-        <ul className="divide-y divide-gray-50">
-          {members.map(m => {
-            const mc = ROLE_COLORS[m.role];
-            return (
-              <li key={m.id} className="flex items-center gap-3 px-6 py-3.5 hover:bg-gray-50/50 transition-colors">
-                <div className={clsx(
-                  "w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 border-2",
-                  mc.bg, mc.text, mc.ring,
-                )}>
-                  {m.avatarInitials}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-800 truncate">{m.name}</p>
-                  <p className="text-xs text-gray-400 truncate">{m.email}</p>
-                </div>
-                {isAdmin ? (
-                  <select
-                    value={m.role}
-                    onChange={e => handleRoleChange(m.id, m.email, e.target.value as UserRole)}
-                    className={clsx(
-                      "text-xs font-semibold border rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer",
-                      mc.bg, mc.text,
-                    )}
-                  >
-                    {ROLE_OPTIONS.map(o => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className={clsx(
-                    "text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1",
-                    mc.bg, mc.text, mc.ring,
-                  )}>
-                    {ROLE_LABELS[m.role]}
-                  </span>
-                )}
-                {isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => handleRemove(m.id, m.email)}
-                    className="ml-1 text-gray-300 hover:text-rose-500 transition-colors shrink-0"
-                    title="Remove member"
-                  >
-                    <TrashIcon />
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
       </div>
-
-      {/* Add member — admin only */}
-      {isAdmin && (
-        <SectionCard
-          title="Add Team Member"
-          subtitle={`Invite a new member to the ${ORG_SETTINGS} organisation`}
-        >
-          <form onSubmit={handleAdd} className="space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="block">
-                <span className="text-xs font-semibold text-gray-600 mb-1.5 block">Full name</span>
-                <input
-                  type="text"
-                  placeholder="Jane Doe"
-                  value={newName}
-                  onChange={e => { setNewName(e.target.value); setAddError(""); }}
-                  className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-semibold text-gray-600 mb-1.5 block">Email address</span>
-                <input
-                  type="email"
-                  placeholder={`jane@${ORG_SETTINGS}.io`}
-                  value={newEmail}
-                  onChange={e => { setNewEmail(e.target.value); setAddError(""); }}
-                  className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                />
-              </label>
-            </div>
-            <div className="flex items-end gap-3 flex-wrap">
-              <label className="block flex-1 min-w-[180px]">
-                <span className="text-xs font-semibold text-gray-600 mb-1.5 block">Role</span>
-                <select
-                  value={newRole}
-                  onChange={e => setNewRole(e.target.value as UserRole)}
-                  className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white"
-                >
-                  {ROLE_OPTIONS.map(o => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                disabled={inviting}
-                className="px-5 py-2.5 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 transition-all shadow-sm shrink-0 disabled:opacity-60"
-              >
-                {inviting ? "Sending…" : profile?.org_id ? "Send invite" : "Add member"}
-              </button>
-            </div>
-            {addError && (
-              <p className="text-xs text-rose-600 font-medium">{addError}</p>
-            )}
-            {inviteSent && (
-              <p className="text-xs text-emerald-700 font-semibold bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-200">
-                ✓ Invite email sent — they'll receive a magic link to join {ORG_SETTINGS}.
-              </p>
-            )}
-            {profile?.org_id && (
-              <p className="text-xs text-gray-400">A magic link will be emailed to the invitee via Supabase Auth.</p>
-            )}
-          </form>
-        </SectionCard>
-      )}
+      <div className="section-card overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-100">
+          <p className="text-xs text-gray-500">
+            The full team management experience (invite, assign roles, remove members) lives at{" "}
+            <a href="/settings/team" className="text-indigo-600 font-semibold hover:underline">/settings/team</a>.
+          </p>
+        </div>
+        <div className="px-5 py-4">
+          <a href="/settings/team" className="flex items-center gap-3 text-sm text-gray-700 hover:text-indigo-600 transition-colors">
+            <span className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600 shrink-0">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+            </span>
+            <span>Go to Team Management page</span>
+            <span className="ml-auto text-indigo-500">→</span>
+          </a>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1332,6 +1130,7 @@ interface APIKey { id: string; name: string; prefix: string; created: string; la
 
 function APIAccessTab() {
   const { profile } = useAuth();
+  const orgName = useOrgName();
   const [keys,      setKeys]      = useState<APIKey[]>(() => {
     try { return JSON.parse(localStorage.getItem(API_KEY_STORE) ?? "[]"); } catch { return []; }
   });
@@ -1554,7 +1353,7 @@ trustledger auth --token YOUR_API_KEY
 
 # Submit a scan
 trustledger scan \\
-  --repo ${ORG_SETTINGS}/payments-api \\
+  --repo ${orgName}/payments-api \\
   --pr 482 \\
   --commit abc1234`
         }</pre>
@@ -2451,6 +2250,7 @@ export default function SettingsPage() {
   const [policy, setPolicy] = useState<OrgPolicy>(DEFAULT_POLICY);
   const [saved,  setSaved]  = useState(false);
   const { profile } = useAuth();
+  const orgName = useOrgName();
 
   useEffect(() => {
     setPolicy(loadPolicy());
@@ -2496,43 +2296,43 @@ export default function SettingsPage() {
 
   return (
     <AuthGuard>
-      <div className="max-w-3xl mx-auto space-y-5 pb-10">
+      <div className="max-w-3xl mx-auto space-y-6 pb-12">
 
         {/* Header */}
-        <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-center justify-between gap-4 flex-wrap pb-1">
           <div>
-            <h1 className="text-xl font-extrabold text-gray-900 tracking-tight">Settings</h1>
-            <p className="text-sm text-gray-400 mt-0.5">
-              Configure policies, integrations, and notifications for <span className="font-semibold text-gray-600">{ORG_SETTINGS}</span>
+            <div className="flex items-center gap-2 mb-0.5">
+              <h1 className="text-xl font-extrabold text-gray-900 tracking-tight">Settings</h1>
+              <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
+                {orgName}
+              </span>
+            </div>
+            <p className="text-sm text-gray-400">
+              Policies · Integrations · Team · Notifications · API keys
             </p>
           </div>
-          <div className="flex items-center gap-2.5">
-            <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-3 py-1.5 rounded-lg">
-              Policy: <span className="text-gray-900">{policy.name}</span>
-            </span>
-            <button
-              onClick={handleSave}
-              className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-sm ${
-                saved
-                  ? "bg-emerald-500 text-white"
-                  : "bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95"
-              }`}
-            >
-              {saved ? <><CheckIcon size={13} /> Saved</> : "Save changes"}
-            </button>
-          </div>
+          <button
+            onClick={handleSave}
+            className={`inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-bold rounded-xl transition-all ${
+              saved
+                ? "bg-emerald-500 text-white shadow-lg shadow-emerald-100"
+                : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100 active:scale-[0.98]"
+            }`}
+          >
+            {saved ? <><CheckIcon size={13} /> Saved</> : "Save changes"}
+          </button>
         </div>
 
-        {/* Tab bar */}
-        <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-xl self-start w-fit">
+        {/* Tab bar — horizontal scroll on mobile */}
+        <div className="flex items-center gap-1 overflow-x-auto pb-0.5 -mx-1 px-1">
           {TABS.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all ${
+              className={`shrink-0 px-3.5 py-2 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
                 tab === t.key
-                  ? "bg-white text-gray-900 shadow-sm"
-                  : "text-gray-500 hover:text-gray-700"
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
               }`}
             >
               {t.label}
