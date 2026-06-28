@@ -793,6 +793,7 @@ export default function DashboardPage() {
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
   const [watchlist,     setWatchlistState]= useState<Set<string>>(new Set());
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [slaExpanded,   setSlaExpanded]   = useState(false);
   const [pulseCount,    setPulseCount]    = useState(0);
   const [reloadKey,     setReloadKey]     = useState(0);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>(() => {
@@ -1131,84 +1132,48 @@ export default function DashboardPage() {
 
         {/* ── Page header ──────────────────────────────────────────────── */}
         <div className="animate-fade-up space-y-2.5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 flex-wrap">
-            {/* Live monitoring pulse */}
-            <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200">
+        {/* Row 1: identity + actions */}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          {/* Left: org identity */}
+          <div className="flex items-center gap-2 min-w-0">
+            {/* Live pulse */}
+            <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200 shrink-0">
               <span className="relative flex w-2 h-2">
                 <span key={pulseCount} className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex rounded-full w-2 h-2 bg-emerald-500" />
               </span>
               Live
             </span>
-            <span className="text-xs font-semibold uppercase tracking-widest text-indigo-500 bg-indigo-50 px-2.5 py-1 rounded-full">
+            <span className="text-sm font-bold text-gray-900 truncate">
               {profile?.org_id ? (profile.org_name || profile.org_slug || ORG) : ORG}
             </span>
-            <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ring-1 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
+            <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ring-1 shrink-0 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${roleColor.dot}`} />
               {ROLE_LABELS[role]}
             </span>
-            <span className="flex items-center gap-1 text-xs text-gray-400">
-              <ClockIcon />
-              {rangeMode === "custom"
-                ? (startDate && endDate ? `${startDate} → ${endDate}` : "Custom range")
-                : `Last ${rangeMode}d`}
-            </span>
-            {/* Last refreshed */}
-            {refreshAgo && (
-              <span className="text-[10px] text-gray-400 font-medium">
-                Updated {refreshAgo}
-              </span>
-            )}
-            <Link
-              href="/settings"
-              className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200 hover:bg-emerald-100 transition-colors"
-            >
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-              {policyName} Policy
-            </Link>
-            {/* SLA breach badge */}
-            {sla && sla.total > 0 && (
-              <Link
-                href="/sla"
-                className="flex items-center gap-1 text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-full ring-1 ring-rose-200 hover:bg-rose-100 transition-colors"
-              >
-                <SLAIcon />
-                {sla.total} SLA breach{sla.total > 1 ? "es" : ""}
-              </Link>
-            )}
-            {/* Watchlist active indicator */}
-            {repoFilter === "watchlist" && (
-              <span className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full ring-1 ring-amber-200">
-                <StarIcon filled /> Watchlist
-                <button onClick={() => setRepoFilter("all")} className="ml-0.5 hover:text-amber-900">×</button>
-              </span>
-            )}
           </div>
+          {/* Right: actions */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Keyboard shortcut hint */}
             <button
               onClick={() => setShowShortcuts(true)}
               className="flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-xl transition-colors"
               title="Keyboard shortcuts (?)"
             >
               <KeyboardIcon />
-              <kbd className="text-[10px] bg-gray-100 px-1 rounded">?</kbd>
+              <kbd className="text-[10px] bg-gray-100 px-1 rounded hidden sm:inline">?</kbd>
             </button>
-            {/* Export CSV */}
             {permissions.canExportData && data && (
               <button
                 onClick={exportCSV}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 active:scale-[0.98] transition-all shadow-sm"
+                className="hidden sm:flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 active:scale-[0.98] transition-all shadow-sm"
                 title="Export CSV (E)"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                 </svg>
-                Export CSV
+                Export
               </button>
             )}
-            {/* New Scan */}
             <RoleGate requires="canScan">
               <button
                 onClick={() => setScanPanelOpen(true)}
@@ -1218,16 +1183,17 @@ export default function DashboardPage() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                 </svg>
-                New Scan
+                <span className="hidden sm:inline">New Scan</span>
+                <span className="sm:hidden">Scan</span>
               </button>
             </RoleGate>
             {/* Date range */}
-            <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
+            <div className="flex items-center gap-0.5 bg-gray-100 p-1 rounded-xl">
               {DAYS_OPTIONS.map(d => (
                 <button
                   key={d}
                   onClick={() => { setDays(d); setRangeMode(d); }}
-                  className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all duration-150 ${
+                  className={`px-2.5 sm:px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-all duration-150 ${
                     rangeMode === d ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
                   }`}
                 >
@@ -1236,7 +1202,7 @@ export default function DashboardPage() {
               ))}
               <button
                 onClick={() => { setRangeMode("custom"); setPendingStart(""); setPendingEnd(""); }}
-                className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all duration-150 ${
+                className={`px-2.5 sm:px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-all duration-150 ${
                   rangeMode === "custom" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
                 }`}
               >
@@ -1244,6 +1210,40 @@ export default function DashboardPage() {
               </button>
             </div>
           </div>
+        </div>
+        {/* Row 2: metadata strip */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="flex items-center gap-1 text-xs text-gray-400">
+            <ClockIcon />
+            {rangeMode === "custom"
+              ? (startDate && endDate ? `${startDate} → ${endDate}` : "Custom range")
+              : `Last ${rangeMode}d`}
+          </span>
+          {refreshAgo && (
+            <span className="text-[10px] text-gray-400">· Updated {refreshAgo}</span>
+          )}
+          <Link
+            href="/settings"
+            className="flex items-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200 hover:bg-emerald-100 transition-colors"
+          >
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            {policyName} Policy
+          </Link>
+          {sla && sla.total > 0 && (
+            <Link
+              href="/sla"
+              className="flex items-center gap-1 text-xs font-semibold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full ring-1 ring-rose-200 hover:bg-rose-100 transition-colors"
+            >
+              <SLAIcon />
+              {sla.total} SLA breach{sla.total > 1 ? "es" : ""}
+            </Link>
+          )}
+          {repoFilter === "watchlist" && (
+            <span className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full ring-1 ring-amber-200">
+              <StarIcon filled /> Watchlist
+              <button onClick={() => setRepoFilter("all")} className="ml-0.5 hover:text-amber-900">×</button>
+            </span>
+          )}
         </div>
 
         {/* ── Custom date range bar ─────────────────────────────────────── */}
@@ -1389,52 +1389,92 @@ export default function DashboardPage() {
             )}
 
             {/* ── SLA Breach tracker ─────────────────────────────────── */}
-            {sla && sla.total > 0 && (
-              <div className="animate-fade-up flex items-stretch gap-3 bg-amber-50 border border-amber-200 rounded-xl overflow-hidden">
-                <div className="w-1 bg-amber-400 shrink-0" />
-                <div className="flex-1 px-4 py-3">
-                  <div className="flex items-center gap-4 flex-wrap">
+            {sla && sla.total > 0 && (() => {
+              const breachFiles = effectiveData.sla_breach_files ?? [];
+              const SHOW_INIT = 3;
+              const visible = slaExpanded ? breachFiles : breachFiles.slice(0, SHOW_INIT);
+              const hidden  = breachFiles.length - SHOW_INIT;
+              return (
+                <div className="animate-fade-up bg-amber-50 border border-amber-200 rounded-xl overflow-hidden">
+                  {/* Header row */}
+                  <div className="flex items-center gap-3 px-4 py-3 border-b border-amber-200/60 flex-wrap">
                     <div className="flex items-center gap-2 shrink-0">
                       <SLAIcon />
                       <p className="text-sm font-bold text-amber-800">Attestation SLA breached</p>
                     </div>
-                    <div className="flex items-center gap-3 flex-wrap flex-1">
+                    <div className="flex items-center gap-2 flex-wrap flex-1">
                       {sla.crit > 0 && (
-                        <span className="text-[11px] font-bold bg-violet-100 text-violet-800 px-2.5 py-1 rounded-full ring-1 ring-violet-200">
-                          {sla.crit} CRITICAL · 24h SLA
+                        <span className="text-[11px] font-bold bg-violet-100 text-violet-800 px-2 py-0.5 rounded-full ring-1 ring-violet-200">
+                          {sla.crit} CRITICAL · 24 h
                         </span>
                       )}
                       {sla.high > 0 && (
-                        <span className="text-[11px] font-bold bg-orange-100 text-orange-800 px-2.5 py-1 rounded-full ring-1 ring-orange-200">
-                          {sla.high} HIGH · 72h SLA
+                        <span className="text-[11px] font-bold bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full ring-1 ring-orange-200">
+                          {sla.high} HIGH · 72 h
                         </span>
                       )}
-                      <span className="text-xs text-amber-700">
-                        {sla.total} file{sla.total !== 1 ? "s" : ""} org-wide {sla.total !== 1 ? "have" : "has"} missed its attestation SLA deadline (separate from any single PR&apos;s pending-attestation count)
+                      <span className="text-[11px] text-amber-700">
+                        {sla.total} file{sla.total !== 1 ? "s" : ""} missed attestation deadline
                       </span>
                     </div>
                     <Link href="/sla" className="text-xs font-bold text-amber-700 hover:text-amber-900 whitespace-nowrap shrink-0">
-                      View SLA dashboard →
+                      Full SLA dashboard →
                     </Link>
                   </div>
-                  {effectiveData.sla_breach_files && effectiveData.sla_breach_files.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-2.5">
-                      {effectiveData.sla_breach_files.map(f => (
-                        <Link
-                          key={`${f.scan_id}::${f.file_path}`}
-                          href={`/pr/${f.scan_id}`}
-                          title={`${f.repo} · ${f.file_path}`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-700 bg-white hover:bg-amber-100 rounded-lg border border-amber-200 transition-colors whitespace-nowrap"
+                  {/* File rows */}
+                  {breachFiles.length > 0 && (
+                    <div className="divide-y divide-amber-100">
+                      {visible.map(f => {
+                        const hoursOverdue = f.sla_deadline
+                          ? Math.max(0, Math.round((Date.now() - new Date(f.sla_deadline).getTime()) / 3600000))
+                          : null;
+                        const isCrit = f.risk_score === "CRITICAL";
+                        return (
+                          <Link
+                            key={`${f.scan_id}::${f.file_path}`}
+                            href={`/pr/${f.scan_id}`}
+                            className="flex items-center gap-3 px-4 py-2.5 hover:bg-amber-100/60 transition-colors group"
+                          >
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${isCrit ? "bg-violet-500" : "bg-orange-400"}`} />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-gray-800 truncate">
+                                {f.file_path.split("/").pop()}
+                              </p>
+                              <p className="text-[10px] text-gray-400 truncate">{f.repo} · {f.file_path}</p>
+                            </div>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${isCrit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>
+                              {isCrit ? "CRITICAL" : "HIGH"}
+                            </span>
+                            {hoursOverdue !== null && (
+                              <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full shrink-0 whitespace-nowrap">
+                                {hoursOverdue}h overdue
+                              </span>
+                            )}
+                            <svg className="w-3.5 h-3.5 text-amber-400 group-hover:text-amber-600 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 18l6-6-6-6"/></svg>
+                          </Link>
+                        );
+                      })}
+                      {!slaExpanded && hidden > 0 && (
+                        <button
+                          onClick={() => setSlaExpanded(true)}
+                          className="w-full px-4 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100/60 transition-colors text-left"
                         >
-                          <span className={`inline-block w-1.5 h-1.5 rounded-full ${f.risk_score === "CRITICAL" ? "bg-violet-500" : "bg-orange-500"}`} />
-                          {f.file_path.split("/").pop()} →
-                        </Link>
-                      ))}
+                          Show {hidden} more file{hidden !== 1 ? "s" : ""} →
+                        </button>
+                      )}
+                      {slaExpanded && hidden > 0 && (
+                        <button
+                          onClick={() => setSlaExpanded(false)}
+                          className="w-full px-4 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100/60 transition-colors text-left"
+                        >
+                          Show less ↑
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* ── Executive Summary — admin/security_reviewer only ─────── */}
             {!isDeveloperView && <ExecSummary data={effectiveData} />}
