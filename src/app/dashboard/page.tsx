@@ -789,6 +789,10 @@ export default function DashboardPage() {
   const [repoSort,      setRepoSort]      = useState<"risk" | "ai" | "attest" | "scans">("risk");
   const [repoFilter,    setRepoFilter]    = useState<"all" | "critical" | "needs_action" | "watchlist">("all");
   const [repoSearch,    setRepoSearch]    = useState("");
+  const [repoView,      setRepoView]      = useState<"table" | "grid">("table");
+  const [repoGroupOrg,  setRepoGroupOrg]  = useState(false);
+  const [repoPage,      setRepoPage]      = useState(0);
+  const REPO_PAGE_SIZE = 15;
   const [policyName,    setPolicyName]    = useState<string>("Standard");
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
   const [watchlist,     setWatchlistState]= useState<Set<string>>(new Set());
@@ -1125,6 +1129,28 @@ export default function DashboardPage() {
       return 0;
     }),
   [effectiveData, repoSearch, repoFilter, repoSort, watchlist]);
+
+  // Reset to page 0 whenever filter/search/sort changes
+  useEffect(() => { setRepoPage(0); }, [repoSearch, repoFilter, repoSort]);
+
+  // Paginated slice
+  const pagedRepos = sortedRepos.slice(0, (repoPage + 1) * REPO_PAGE_SIZE);
+  const hasMore    = pagedRepos.length < sortedRepos.length;
+
+  // Group by GitHub org (the owner part of "owner/repo")
+  const repoGroups: { org: string; repos: typeof sortedRepos }[] = repoGroupOrg
+    ? (() => {
+        const map: Record<string, typeof sortedRepos> = {};
+        pagedRepos.forEach(r => {
+          const org = r.repo.includes("/") ? r.repo.split("/")[0] : "—";
+          if (!map[org]) map[org] = [];
+          map[org].push(r);
+        });
+        return Object.entries(map)
+          .sort((a, b) => b[1].length - a[1].length)
+          .map(([org, repos]) => ({ org, repos }));
+      })()
+    : [{ org: "", repos: pagedRepos }];
 
   return (
     <AuthGuard>
@@ -1701,174 +1727,303 @@ export default function DashboardPage() {
                   <TopRiskFilesPanel files={effectiveData.top_risk_files} />
                 </div>
 
-                {/* ── Repos table ──────────────────────────────────────── */}
+                {/* ── Repos section ─────────────────────────────────── */}
                 <div className="section-card animate-fade-up delay-350">
+
+                  {/* ── Toolbar ── */}
                   <div className="flex flex-col gap-3 px-5 py-4 border-b border-gray-100">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    {/* Row 1: title + view toggle */}
+                    <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="font-bold text-gray-900 text-sm">Repositories</p>
                         <p className="text-xs text-gray-400 mt-0.5">
-                          {sortedRepos.length} of {effectiveData.repos.length} repos
+                          {sortedRepos.length} of {effectiveData.repos.length} repo{effectiveData.repos.length !== 1 ? "s" : ""}
                           {repoSearch && <span className="ml-1 text-indigo-500">· filtered</span>}
-                          {watchlist.size > 0 && (
-                            <span className="ml-2 text-amber-600 font-medium">
-                              {watchlist.size} starred
-                            </span>
-                          )}
+                          {watchlist.size > 0 && <span className="ml-2 text-amber-600 font-medium">{watchlist.size} starred</span>}
                         </p>
                       </div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {/* Search */}
-                        <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 focus-within:ring-1 focus-within:ring-indigo-300 transition-all">
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400 shrink-0">
-                            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                          </svg>
-                          <input
-                            type="text" placeholder="Search repos…" value={repoSearch}
-                            onChange={e => setRepoSearch(e.target.value)}
-                            className="text-xs text-gray-700 border-0 outline-none bg-transparent w-32 placeholder:text-gray-400"
-                          />
-                          {repoSearch && (
-                            <button onClick={() => setRepoSearch("")} className="text-gray-300 hover:text-gray-500 transition-colors">
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                            </button>
-                          )}
-                        </div>
-                        {/* Filter */}
-                        <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-lg">
-                          {([
-                            ["all", "All"],
-                            ["critical", "At Risk"],
-                            ["needs_action", "Needs Action"],
-                            ["watchlist", "★ Starred"],
-                          ] as const).map(([v, l]) => (
-                            <button
-                              key={v}
-                              onClick={() => setRepoFilter(v)}
-                              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
-                                repoFilter === v ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-                              }`}
-                            >
-                              {l}
-                            </button>
-                          ))}
-                        </div>
-                        {/* Sort */}
-                        <select
-                          value={repoSort}
-                          onChange={e => setRepoSort(e.target.value as typeof repoSort)}
-                          className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-600 font-medium bg-white focus:outline-none focus:ring-1 focus:ring-indigo-300"
+                      <div className="flex items-center gap-1.5">
+                        {/* Group by org toggle */}
+                        <button
+                          onClick={() => setRepoGroupOrg(v => !v)}
+                          title="Group by GitHub organisation"
+                          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                            repoGroupOrg ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                          }`}
                         >
-                          <option value="risk">Sort: Risk</option>
-                          <option value="ai">Sort: AI%</option>
-                          <option value="attest">Sort: Attestation</option>
-                          <option value="scans">Sort: Scans</option>
-                        </select>
-                        <span className="text-xs text-gray-400 bg-gray-50 border border-gray-100 px-2.5 py-1.5 rounded-lg font-medium">
-                          {rangeMode === "custom" ? "custom range" : `${rangeMode}d window`}
-                        </span>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="2" y="3" width="6" height="4" rx="1"/><rect x="9" y="3" width="6" height="4" rx="1"/><rect x="16" y="3" width="6" height="4" rx="1"/>
+                            <line x1="5" y1="7" x2="5" y2="21"/><line x1="12" y1="7" x2="12" y2="21"/><line x1="5" y1="21" x2="19" y2="21"/><line x1="19" y1="7" x2="19" y2="21"/>
+                          </svg>
+                          <span className="hidden sm:inline">Group</span>
+                        </button>
+                        {/* View toggle: table | grid */}
+                        <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
+                          <button
+                            onClick={() => setRepoView("table")}
+                            title="Table view"
+                            className={`p-1.5 rounded-md transition-all ${repoView === "table" ? "bg-white shadow-sm text-gray-900" : "text-gray-400 hover:text-gray-600"}`}
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 3h18v4H3z"/><path d="M3 9h18v4H3z"/><path d="M3 15h18v6H3z"/></svg>
+                          </button>
+                          <button
+                            onClick={() => setRepoView("grid")}
+                            title="Card grid view"
+                            className={`p-1.5 rounded-md transition-all ${repoView === "grid" ? "bg-white shadow-sm text-gray-900" : "text-gray-400 hover:text-gray-600"}`}
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                          </button>
+                        </div>
                       </div>
+                    </div>
+                    {/* Row 2: search + filter + sort */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 focus-within:ring-1 focus-within:ring-indigo-300 transition-all">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400 shrink-0">
+                          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                        <input
+                          type="text" placeholder="Search repos…" value={repoSearch}
+                          onChange={e => setRepoSearch(e.target.value)}
+                          className="text-xs text-gray-700 border-0 outline-none bg-transparent w-36 placeholder:text-gray-400"
+                        />
+                        {repoSearch && (
+                          <button onClick={() => setRepoSearch("")} className="text-gray-300 hover:text-gray-500 transition-colors">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
+                        {([["all","All"],["critical","At Risk"],["needs_action","Action"],["watchlist","★"]] as const).map(([v,l]) => (
+                          <button key={v} onClick={() => setRepoFilter(v)}
+                            className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${repoFilter === v ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                      <select value={repoSort} onChange={e => setRepoSort(e.target.value as typeof repoSort)}
+                        className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-600 font-medium bg-white focus:outline-none focus:ring-1 focus:ring-indigo-300">
+                        <option value="risk">Sort: Risk</option>
+                        <option value="ai">Sort: AI%</option>
+                        <option value="attest">Sort: Attestation</option>
+                        <option value="scans">Sort: Scans</option>
+                      </select>
                     </div>
                   </div>
 
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b border-gray-100">
-                        {["", "Repository", "Score", "AI Trend", "AI Content", "Attestation", "Risk", "Scans", "Files", "Status", "Last Scan", ""].map((h, i) => (
-                          <th key={i} className="px-3 py-3 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-4 last:pr-4">
-                            {h === "Score" ? (
-                              <span className="flex items-center gap-1">
-                                Score
-                                <InfoTooltip position="bottom" size="sm"
-                                  title="Security Score"
-                                  description="Composite security grade (A–F) for each repository based on four weighted factors."
-                                  formula={"Attestation rate × 40pts\n+ (1 − AI%) × 30pts\n+ Scan freshness × 15pts\n+ Risk level × 15pts\n= Total / 100"} />
-                              </span>
-                            ) : h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {sortedRepos.map(r => {
-                        const level = repoRiskLevel(r);
-                        const isWatched = watchlist.has(r.repo);
-                        const statusLabel = r.attestation_rate >= 0.8 ? "Compliant" : r.attestation_rate < 0.5 ? "Needs Action" : "In Review";
-                        const statusCls   = r.attestation_rate >= 0.8
-                          ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-                          : r.attestation_rate < 0.5
-                            ? "bg-rose-50 text-rose-700 ring-rose-200"
-                            : "bg-amber-50 text-amber-700 ring-amber-200";
-                        return (
-                          <tr key={r.repo} className="hover:bg-gray-50/70 transition-colors group">
-                            {/* Star */}
-                            <td className="pl-4 pr-1 py-3.5">
-                              <button
-                                onClick={() => toggleWatch(r.repo)}
-                                className={`transition-opacity ${isWatched ? "opacity-100" : "opacity-0 group-hover:opacity-60 hover:!opacity-100"}`}
-                                title={isWatched ? "Remove from watchlist" : "Add to watchlist"}
-                              >
-                                <StarIcon filled={isWatched} />
-                              </button>
-                            </td>
-                            {/* Repo name */}
-                            <td className="px-3 py-3.5">
-                              <div className="flex items-center gap-2">
-                                <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
-                                  <svg className="text-indigo-400 w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path d="M3 3h18v18H3z"/><path d="M9 3v18"/>
-                                  </svg>
-                                </div>
-                                <Link href={`/repo/${r.repo}`} className="font-mono text-xs font-semibold text-gray-800 group-hover:text-indigo-600 transition-colors hover:underline" onClick={e => e.stopPropagation()}>
-                                  {r.repo}
+                  {/* ── Grid view ── */}
+                  {repoView === "grid" && (
+                    <div className="p-4 space-y-4">
+                      {repoGroups.map(({ org, repos: groupRepos }) => (
+                        <div key={org || "all"}>
+                          {repoGroupOrg && org && (
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{org}</span>
+                              <span className="text-[10px] text-gray-300">{groupRepos.length} repo{groupRepos.length !== 1 ? "s" : ""}</span>
+                              <div className="flex-1 h-px bg-gray-100" />
+                            </div>
+                          )}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                            {groupRepos.map(r => {
+                              const level    = repoRiskLevel(r);
+                              const isWatched = watchlist.has(r.repo);
+                              const repoName  = r.repo.includes("/") ? r.repo.split("/")[1] : r.repo;
+                              const orgName   = r.repo.includes("/") ? r.repo.split("/")[0] : "";
+                              const grade     = securityScore(r);
+                              const gradeLetter = grade >= 90 ? "A" : grade >= 75 ? "B" : grade >= 60 ? "C" : grade >= 45 ? "D" : "F";
+                              const gradeColor  = grade >= 90 ? "text-emerald-600 bg-emerald-50" : grade >= 75 ? "text-blue-600 bg-blue-50" : grade >= 60 ? "text-amber-600 bg-amber-50" : "text-rose-600 bg-rose-50";
+                              const RISK_DOT: Record<string,string> = { CRITICAL:"bg-rose-500", HIGH:"bg-orange-400", MEDIUM:"bg-amber-400", LOW:"bg-emerald-400", UNKNOWN:"bg-gray-300" };
+                              return (
+                                <Link key={r.repo} href={`/repo/${r.repo}`}
+                                  className="group relative flex flex-col gap-3 p-4 bg-white border border-gray-200 rounded-xl hover:border-indigo-300 hover:shadow-md transition-all">
+                                  {/* Header */}
+                                  <div className="flex items-start gap-2">
+                                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm font-black shrink-0 ${gradeColor}`}>
+                                      {gradeLetter}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-bold text-gray-900 truncate">{repoName}</p>
+                                      {orgName && <p className="text-[10px] text-gray-400 truncate">{orgName}</p>}
+                                    </div>
+                                    <button
+                                      onClick={e => { e.preventDefault(); toggleWatch(r.repo); }}
+                                      className={`shrink-0 transition-opacity ${isWatched ? "opacity-100" : "opacity-0 group-hover:opacity-50 hover:!opacity-100"}`}
+                                    >
+                                      <StarIcon filled={isWatched} />
+                                    </button>
+                                  </div>
+                                  {/* Risk dot + level */}
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`w-2 h-2 rounded-full shrink-0 ${RISK_DOT[level] ?? RISK_DOT.UNKNOWN}`} />
+                                    <span className="text-[10px] font-bold text-gray-500">{level}</span>
+                                    <span className="ml-auto text-[10px] text-gray-400">{relativeDate(r.last_scan)}</span>
+                                  </div>
+                                  {/* Bars */}
+                                  <div className="space-y-1.5">
+                                    <div>
+                                      <div className="flex justify-between text-[10px] text-gray-400 mb-0.5">
+                                        <span>AI Content</span><span className="font-semibold text-gray-600">{Math.round(r.ai_pct * 100)}%</span>
+                                      </div>
+                                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                        <div className="h-full rounded-full bg-indigo-500" style={{ width: `${r.ai_pct * 100}%` }} />
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <div className="flex justify-between text-[10px] text-gray-400 mb-0.5">
+                                        <span>Attested</span><span className="font-semibold text-gray-600">{Math.round(r.attestation_rate * 100)}%</span>
+                                      </div>
+                                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${r.attestation_rate * 100}%` }} />
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {/* Footer */}
+                                  <div className="flex items-center gap-3 text-[10px] text-gray-400 border-t border-gray-50 pt-2">
+                                    <span>{r.scan_count} scans</span>
+                                    <span>{r.file_count} files</span>
+                                    {r.latest_scan_id && (
+                                      <span
+                                        onClick={e => { e.preventDefault(); window.location.href = `/pr/${r.latest_scan_id}`; }}
+                                        className="ml-auto text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity"
+                                      >
+                                        Latest PR →
+                                      </span>
+                                    )}
+                                  </div>
                                 </Link>
-                              </div>
-                            </td>
-                            {/* Security score */}
-                            <td className="px-3 py-3.5">
-                              <SecurityGrade score={securityScore(r)} />
-                            </td>
-                            {/* Sparkline */}
-                            <td className="px-3 py-3.5">
-                              <Sparkline repo={r.repo} aiPct={r.ai_pct} />
-                            </td>
-                            {/* AI bar */}
-                            <td className="px-3 py-3.5 min-w-[120px]">
-                              <ProgressBar value={r.ai_pct} mode="ai" />
-                            </td>
-                            {/* Attest bar */}
-                            <td className="px-3 py-3.5 min-w-[120px]">
-                              <ProgressBar value={r.attestation_rate} mode="attest" />
-                            </td>
-                            <td className="px-3 py-3.5"><RiskBadge level={level} /></td>
-                            <td className="px-3 py-3.5">
-                              <span className="text-xs font-semibold text-gray-700 bg-gray-100 px-2 py-0.5 rounded-md tabular-nums">{r.scan_count}</span>
-                            </td>
-                            <td className="px-3 py-3.5">
-                              <span className="text-xs text-gray-500 tabular-nums">{r.file_count}</span>
-                            </td>
-                            <td className="px-3 py-3.5">
-                              <span className={`badge ring-1 ${statusCls}`}>{statusLabel}</span>
-                            </td>
-                            <td className="px-3 py-3.5">
-                              <span className="text-xs text-gray-400 tabular-nums">{relativeDate(r.last_scan)}</span>
-                            </td>
-                            <td className="px-3 py-3.5 pr-4">
-                              {r.latest_scan_id && (
-                                <Link
-                                  href={`/pr/${r.latest_scan_id}`}
-                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap"
-                                >
-                                  View PR <ExternalLinkIcon />
-                                </Link>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
+                  {/* ── Table view ── */}
+                  {repoView === "table" && (
+                    <div className="overflow-x-auto">
+                      {repoGroups.map(({ org, repos: groupRepos }) => (
+                        <div key={org || "all"}>
+                          {repoGroupOrg && org && (
+                            <div className="flex items-center gap-2 px-5 py-2 bg-gray-50 border-b border-gray-100">
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-gray-400"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">{org}</span>
+                              <span className="text-[10px] text-gray-300">{groupRepos.length} repo{groupRepos.length !== 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          <table className="w-full">
+                            {!repoGroupOrg && (
+                              <thead>
+                                <tr className="border-b border-gray-100">
+                                  {["", "Repository", "Score", "AI Trend", "AI Content", "Attestation", "Risk", "Scans", "Files", "Status", "Last Scan", ""].map((h, i) => (
+                                    <th key={i} className="px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-4 last:pr-4">
+                                      {h === "Score" ? (
+                                        <span className="flex items-center gap-1">Score
+                                          <InfoTooltip position="bottom" size="sm" title="Security Score"
+                                            description="Composite security grade (A–F) for each repository."
+                                            formula={"Attestation rate × 40pts\n+ (1 − AI%) × 30pts\n+ Scan freshness × 15pts\n+ Risk level × 15pts\n= Total / 100"} />
+                                        </span>
+                                      ) : h}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            )}
+                            {repoGroupOrg && (
+                              <thead>
+                                <tr className="border-b border-gray-100">
+                                  {["", "Repository", "Score", "AI%", "Attested", "Risk", "Scans", "Last Scan", ""].map((h, i) => (
+                                    <th key={i} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-5 last:pr-4">{h}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            )}
+                            <tbody className="divide-y divide-gray-50">
+                              {groupRepos.map(r => {
+                                const level = repoRiskLevel(r);
+                                const isWatched = watchlist.has(r.repo);
+                                const statusLabel = r.attestation_rate >= 0.8 ? "Compliant" : r.attestation_rate < 0.5 ? "Needs Action" : "In Review";
+                                const statusCls   = r.attestation_rate >= 0.8
+                                  ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                                  : r.attestation_rate < 0.5
+                                    ? "bg-rose-50 text-rose-700 ring-rose-200"
+                                    : "bg-amber-50 text-amber-700 ring-amber-200";
+                                const repoName = r.repo.includes("/") ? r.repo.split("/")[1] : r.repo;
+                                const orgPart  = r.repo.includes("/") ? r.repo.split("/")[0] : "";
+                                return (
+                                  <tr key={r.repo} className="hover:bg-gray-50/70 transition-colors group">
+                                    <td className="pl-4 pr-1 py-3">
+                                      <button onClick={() => toggleWatch(r.repo)}
+                                        className={`transition-opacity ${isWatched ? "opacity-100" : "opacity-0 group-hover:opacity-60 hover:!opacity-100"}`}
+                                        title={isWatched ? "Remove from watchlist" : "Add to watchlist"}>
+                                        <StarIcon filled={isWatched} />
+                                      </button>
+                                    </td>
+                                    <td className="px-3 py-3">
+                                      <div className="flex items-center gap-2">
+                                        <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
+                                          <svg className="text-indigo-400 w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3h18v18H3z"/><path d="M9 3v18"/></svg>
+                                        </div>
+                                        <div className="min-w-0">
+                                          <Link href={`/repo/${r.repo}`}
+                                            className="block font-semibold text-xs text-gray-800 group-hover:text-indigo-600 transition-colors hover:underline truncate max-w-[160px]"
+                                            onClick={e => e.stopPropagation()}>
+                                            {repoName}
+                                          </Link>
+                                          {!repoGroupOrg && orgPart && (
+                                            <span className="text-[10px] text-gray-400">{orgPart}</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td className="px-3 py-3"><SecurityGrade score={securityScore(r)} /></td>
+                                    {!repoGroupOrg && <td className="px-3 py-3 hidden lg:table-cell"><Sparkline repo={r.repo} aiPct={r.ai_pct} /></td>}
+                                    <td className="px-3 py-3 min-w-[100px]">
+                                      {repoGroupOrg
+                                        ? <span className="text-xs font-semibold text-gray-700">{Math.round(r.ai_pct * 100)}%</span>
+                                        : <ProgressBar value={r.ai_pct} mode="ai" />}
+                                    </td>
+                                    <td className="px-3 py-3 min-w-[100px]">
+                                      {repoGroupOrg
+                                        ? <span className="text-xs font-semibold text-gray-700">{Math.round(r.attestation_rate * 100)}%</span>
+                                        : <ProgressBar value={r.attestation_rate} mode="attest" />}
+                                    </td>
+                                    <td className="px-3 py-3"><RiskBadge level={level} /></td>
+                                    <td className="px-3 py-3">
+                                      <span className="text-xs font-semibold text-gray-700 bg-gray-100 px-2 py-0.5 rounded-md tabular-nums">{r.scan_count}</span>
+                                    </td>
+                                    {!repoGroupOrg && (
+                                      <>
+                                        <td className="px-3 py-3 hidden xl:table-cell">
+                                          <span className="text-xs text-gray-500 tabular-nums">{r.file_count}</span>
+                                        </td>
+                                        <td className="px-3 py-3 hidden md:table-cell">
+                                          <span className={`badge ring-1 ${statusCls}`}>{statusLabel}</span>
+                                        </td>
+                                      </>
+                                    )}
+                                    <td className="px-3 py-3">
+                                      <span className="text-xs text-gray-400 tabular-nums whitespace-nowrap">{relativeDate(r.last_scan)}</span>
+                                    </td>
+                                    <td className="px-3 py-3 pr-4">
+                                      {r.latest_scan_id && (
+                                        <Link href={`/pr/${r.latest_scan_id}`}
+                                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                                          PR <ExternalLinkIcon />
+                                        </Link>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Empty state */}
                   {sortedRepos.length === 0 && (
                     <div className="py-10 text-center">
                       <p className="text-sm text-gray-400">
@@ -1876,6 +2031,41 @@ export default function DashboardPage() {
                           ? "No starred repos yet — click ★ on any repo row to add it."
                           : "No repositories match the current filter."}
                       </p>
+                    </div>
+                  )}
+
+                  {/* Pagination footer */}
+                  {sortedRepos.length > 0 && (
+                    <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100">
+                      <span className="text-xs text-gray-400">
+                        Showing {Math.min(pagedRepos.length, sortedRepos.length)} of {sortedRepos.length}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {hasMore && (
+                          <button
+                            onClick={() => setRepoPage(p => p + 1)}
+                            className="px-3.5 py-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors"
+                          >
+                            Show {Math.min(REPO_PAGE_SIZE, sortedRepos.length - pagedRepos.length)} more
+                          </button>
+                        )}
+                        {repoPage > 0 && !hasMore && (
+                          <button
+                            onClick={() => setRepoPage(0)}
+                            className="px-3.5 py-1.5 text-xs font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
+                          >
+                            Show less
+                          </button>
+                        )}
+                        {hasMore && (
+                          <button
+                            onClick={() => setRepoPage(Math.ceil(sortedRepos.length / REPO_PAGE_SIZE) - 1)}
+                            className="px-3.5 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700 transition-colors"
+                          >
+                            Show all {sortedRepos.length}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
