@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import Link from "next/link";
@@ -16,7 +16,7 @@ import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+
 
 // ── Inline Code Review ─────────────────────────────────────────────────────────
 
@@ -271,13 +271,6 @@ function timeAgo(iso: string) {
 
 const NOTES_KEY     = "tl_violation_notes";
 const ESCALATE_KEY  = "tl_violation_escalations";
-function getTeamReviewers(): string[] {
-  try {
-    const stored = typeof window !== "undefined" ? localStorage.getItem("tl_team_members") : null;
-    if (stored) { const m: {email:string}[] = JSON.parse(stored); if (m.length > 0) return m.map(x => x.email); }
-  } catch { /* */ }
-  return [`alice@${ORG}.io`,`bob@${ORG}.io`,`carol@${ORG}.io`,`dave@${ORG}.io`,`security@${ORG}.io`];
-}
 
 // Per-type remediation checklist
 const REMEDIATION: Record<VType, string[]> = {
@@ -345,6 +338,7 @@ export default function ViolationsPage() {
   const [notes,        setNotes]        = useState<Record<string, string>>({});
   const [escalated,    setEscalated]    = useState<Set<string>>(new Set());
   const [selected,     setSelected]     = useState<Set<string>>(new Set());
+  const [teamMembers,  setTeamMembers]  = useState<{ email: string; name: string | null }[]>([]);
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [filterSev,    setFilterSev]    = useState<VSeverity | "all">("all");
   const [filterStat,   setFilterStat]   = useState<VStatus | "all">("open");
@@ -366,13 +360,21 @@ export default function ViolationsPage() {
     } catch {}
   }, []);
 
+  // Fetch real team members for the reviewer dropdown
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ members: { email: string; name: string | null }[] }>("/api/team")
+      .then(r => setTeamMembers((r.members ?? []).filter(m => m.email)))
+      .catch(() => {});
+  }, [profile?.org_id]);
+
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
     if (seed) { setData(seed); setLoadError(null); setLastRefreshed(new Date()); setLoading(false); if (spinner) setRefreshing(false); return; }
     try {
       const [d, scansResp] = await Promise.all([
-        api.dashboard(ORG, 90),
+        api.dashboard(profile?.org_slug ?? "org", 90),
         profile?.org_id
           ? authedFetch<{ scans: RecentScan[] }>("/api/scans?limit=5").catch(() => ({ scans: [] }))
           : Promise.resolve({ scans: [] }),
@@ -888,7 +890,11 @@ export default function ViolationsPage() {
                           onClick={e => e.stopPropagation()}
                           className="text-[10px] text-gray-500 bg-transparent border-none outline-none cursor-pointer hover:text-indigo-600 max-w-[120px] truncate">
                           <option value="">Assign reviewer…</option>
-                          {getTeamReviewers().map(r => <option key={r} value={r}>{r.split("@")[0]}</option>)}
+                          {teamMembers.map(m => (
+                            <option key={m.email} value={m.email}>
+                              {m.name || m.email.split("@")[0]}
+                            </option>
+                          ))}
                         </select>
                       </div>
                       {violationNote && (
