@@ -206,11 +206,17 @@ export default function SecretsPage() {
       return;
     }
 
-    // 2. Not seed mode — start empty, populate from live scan data only
-    setFindings([]);
-    localStorage.setItem("tl_secret_total", "0");
+    // 2. Not seed mode — show cached findings immediately, then refresh from live scans
+    // Load cached findings from localStorage so the page is useful instantly
+    try {
+      const cached = JSON.parse(localStorage.getItem("tl_secrets_cache") ?? "[]") as SecretFinding[];
+      if (cached.length > 0) {
+        setFindings(applyOverrides(cached));
+      }
+    } catch { /* ignore */ }
 
     (async () => {
+      if (!profile?.org_id) return; // wait until profile is loaded
       try {
         const data = await api.dashboard(profile?.org_slug || "org", 90);
         const scanIds = data.repos.filter(r => r.latest_scan_id).slice(0, 5).map(r => r.latest_scan_id);
@@ -248,12 +254,14 @@ export default function SecretsPage() {
           });
         });
 
-        if (liveFindings.length > 0) {
-          const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] } : f);
-          setFindings(merged);
-          localStorage.setItem("tl_secret_total", String(merged.length));
-        }
-      } catch { /* offline — keep empty */ }
+        const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
+        setFindings(merged);
+        // Cache for next visit so the page loads instantly
+        localStorage.setItem("tl_secrets_cache", JSON.stringify(liveFindings));
+        localStorage.setItem("tl_secret_total", String(merged.length));
+        // Notify sidebar to update badge immediately
+        window.dispatchEvent(new Event("tl:badge"));
+      } catch { /* offline — keep cached */ }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);

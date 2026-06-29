@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import { useAuth } from "@/lib/auth";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
@@ -20,7 +21,6 @@ import { api } from "@/lib/api";
 import { collectManifestPackages } from "@/lib/manifestPackages";
 import type { DashboardData, ScanResult } from "@/types";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
 
 // ── Private package scopes/prefixes for this org ─────────────────────────────
 // Packages matching these are from an internal registry — not public npm.
@@ -100,7 +100,8 @@ async function checkNpm(pkgName: string): Promise<{ exists: boolean; description
 }
 
 export default function PhantomDepsPage() {
-    const tz = useTimezone();
+  const tz = useTimezone();
+  const { profile } = useAuth();
   const [results, setResults]   = useState<PackageResult[]>([]);
   const [loading, setLoading]   = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -121,25 +122,33 @@ export default function PhantomDepsPage() {
   useEffect(() => {
     setOverrides(loadOverrides());
     setLastScanned(localStorage.getItem(LAST_SCANNED_KEY));
+    // Show cached packages immediately so page isn't blank while fetching
+    const raw = localStorage.getItem("tl_phantom_packages");
+    const cached = raw ? JSON.parse(raw) as Array<{ name:string; version:string; source:string; aiPr:boolean }> : [];
+    if (cached.length > 0) {
+      setResults(cached.map(p => ({ ...p, status:"pending" as CheckStatus })));
+      setLoading(false);
+    }
+
+    if (!profile?.org_id) return; // wait for profile before hitting API
     (async () => {
       try {
-        const raw = localStorage.getItem("tl_phantom_packages");
-        let pkgs = raw ? JSON.parse(raw) as Array<{ name:string; version:string; source:string; aiPr:boolean }> : [];
-        if (pkgs.length === 0) {
-          const dash: DashboardData = await api.dashboard(ORG, 90);
+        if (cached.length === 0) {
+          const dash: DashboardData = await api.dashboard(profile.org_slug || "org", 90);
           const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
           const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
-          pkgs = collectManifestPackages(scans);
+          const pkgs = collectManifestPackages(scans);
           localStorage.setItem("tl_phantom_packages", JSON.stringify(pkgs));
+          setResults(pkgs.map(p => ({ ...p, status:"pending" as CheckStatus })));
         }
-        setResults(pkgs.map(p => ({ ...p, status:"pending" as CheckStatus })));
       } catch {
-        setResults([]);
+        if (cached.length === 0) setResults([]);
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   function updateOverride(id: string, patch: Partial<PackageOverride>) {
     setOverrides(prev => {
