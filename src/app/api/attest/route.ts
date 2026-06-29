@@ -66,6 +66,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "attestation_failed", detail: attErr?.message }, { status: 500 });
   }
 
+  // Mark the file as attested in scan_files so the PR page shows the correct
+  // state on reload without relying on localStorage.
+  await db
+    .from("scan_files")
+    .update({ attested: true })
+    .eq("scan_id", body.scan_id)
+    .eq("file_path", body.file_path);
+
   // Resolve violations for this file across ALL scans in this repo, not just
   // the current scan — the SLA dashboard deduplicates by repo+file_path and
   // keeps the latest scan's violation, so a stale open violation from an

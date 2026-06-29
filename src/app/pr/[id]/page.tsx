@@ -1016,9 +1016,21 @@ function PRDetailContent() {
 
   // Persist an attestation to the real API so it's recorded in Supabase and,
   // for GitHub-sourced scans, can flip the PR's Check Run to "success".
-  function persistAttestation(path: string, email: string, github: string) {
-    if (scan && profile?.org_id) {
-      return authedFetch("/api/attest", {
+  // Falls back to a retry queue in localStorage if the API is unreachable.
+  async function persistAttestation(path: string, email: string, github: string): Promise<boolean> {
+    if (!scan) return false;
+    // Guard: org_id required for the API — if profile isn't loaded yet, queue it
+    if (!profile?.org_id) {
+      // Save to retry queue so next page load can re-submit
+      try {
+        const queue = JSON.parse(localStorage.getItem("tl_attest_retry_queue") ?? "[]");
+        queue.push({ scan_id: scan.scan_id, file_path: path, reviewer_email: email, reviewer_github: github, ts: Date.now() });
+        localStorage.setItem("tl_attest_retry_queue", JSON.stringify(queue));
+      } catch {}
+      return false;
+    }
+    try {
+      await authedFetch("/api/attest", {
         method: "POST",
         body:   JSON.stringify({
           scan_id:         scan.scan_id,
@@ -1026,10 +1038,42 @@ function PRDetailContent() {
           reviewer_email:  email,
           reviewer_github: github || undefined,
         }),
-      }).catch(() => {});
+      });
+      return true;
+    } catch {
+      // Save to retry queue — will be flushed on next load
+      try {
+        const queue = JSON.parse(localStorage.getItem("tl_attest_retry_queue") ?? "[]");
+        queue.push({ scan_id: scan.scan_id, file_path: path, reviewer_email: email, reviewer_github: github, ts: Date.now() });
+        localStorage.setItem("tl_attest_retry_queue", JSON.stringify(queue));
+      } catch {}
+      return false;
     }
-    return Promise.resolve();
   }
+
+  // Flush any attestations that failed to persist on a previous visit
+  useEffect(() => {
+    if (!profile?.org_id || !scan) return;
+    try {
+      const queue: { scan_id: string; file_path: string; reviewer_email: string; reviewer_github: string; ts: number }[] =
+        JSON.parse(localStorage.getItem("tl_attest_retry_queue") ?? "[]");
+      if (queue.length === 0) return;
+      // Only retry entries for this scan
+      const mine = queue.filter(q => q.scan_id === scan.scan_id);
+      const rest = queue.filter(q => q.scan_id !== scan.scan_id);
+      if (mine.length === 0) return;
+      localStorage.setItem("tl_attest_retry_queue", JSON.stringify(rest));
+      mine.forEach(q =>
+        authedFetch("/api/attest", {
+          method: "POST",
+          body: JSON.stringify({ scan_id: q.scan_id, file_path: q.file_path, reviewer_email: q.reviewer_email, reviewer_github: q.reviewer_github }),
+        }).then(() => {
+          setAttestedSet(s => { const n = new Set(s); n.add(q.file_path); return n; });
+        }).catch(() => {})
+      );
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id, scan?.scan_id]);
 
   function markAttested(path: string) {
     setAttestedSet(s => { const n = new Set(s); n.add(path); return n; });
@@ -1429,13 +1473,23 @@ function PRDetailContent() {
         {/* ── All-clear banner ───────────────────────────────────────────── */}
         {allClear && (
           <div className="animate-fade-up flex flex-col gap-2">
-            <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+            <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex-wrap">
               <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
                 <CheckCircleIcon />
               </div>
-              <p className="text-sm font-semibold text-emerald-800 flex-1">
-                All {highCount} HIGH/CRITICAL file{highCount !== 1 ? "s" : ""} have been attested — this PR is cleared for deployment.
-              </p>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-bold text-emerald-800">
+                  All {highCount} HIGH/CRITICAL file{highCount !== 1 ? "s" : ""} attested — cleared for deployment
+                </p>
+                {scan?.repo && (
+                  <Link
+                    href={`/repo/${scan.repo}`}
+                    className="text-xs text-emerald-600 hover:text-emerald-800 hover:underline font-medium"
+                  >
+                    View repo: {scan.repo} →
+                  </Link>
+                )}
+              </div>
               <button
                 onClick={(e) => { e.preventDefault(); syncCheckRun(); }}
                 disabled={syncingCheck}
@@ -1455,7 +1509,7 @@ function PRDetailContent() {
                   href="/dashboard"
                   className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 rounded-lg border border-emerald-200 transition-colors whitespace-nowrap"
                 >
-                  Back to dashboard →
+                  Dashboard →
                 </Link>
               )}
             </div>
