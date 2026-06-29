@@ -7,6 +7,7 @@ import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
 import type { DashboardData } from "@/types";
 import { authedFetch } from "@/lib/useRealData";
+import { patchDataWithAttestations } from "@/lib/trustScore";
 import { useIncidentsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 
@@ -277,15 +278,20 @@ function incidentsFromDashboard(data: DashboardData, existing: Incident[], membe
   if (data.unattested_deploy_count > 3 && !trackedKeys.has("unattested-deployments")) {
     const id = `INC-${String(seq++).padStart(3,"0")}`;
     const ts = new Date(Date.now() - 2 * 3600000).toISOString();
+    // Use the repo with the lowest attestation rate as the most-affected repo
+    const worstRepo = data.repos.length > 0
+      ? data.repos.slice().sort((a, b) => a.attestation_rate - b.attestation_rate)[0].repo
+      : "unknown";
+    const attPct = Math.round(data.attestation_rate * 100);
     generated.push({
-      id, title:`${data.unattested_deploy_count} unattested deployments exceed policy threshold`,
+      id, title:`${data.unattested_deploy_count} file${data.unattested_deploy_count !== 1 ? "s" : ""} unattested across ${data.repos.length} repo${data.repos.length !== 1 ? "s" : ""}`,
       type:"policy-violation", severity:"P2", status:"active",
-      affected_repo: data.repos[0]?.repo ?? "unknown",
+      affected_repo: worstRepo,
       detected_at: ts,
-      description:`${data.unattested_deploy_count} deploys have occurred without full attestation coverage. Policy requires 100% attestation before production deployment. Current attestation rate: ${(data.attestation_rate * 100).toFixed(0)}%.`,
-      impact:`Policy violation — ${data.unattested_deploy_count} deployments lack required security review. Compliance posture degraded.`,
+      description:`${data.unattested_deploy_count} CRITICAL/HIGH files require attestation. Organisation-wide attestation rate: ${attPct}%. Policy requires all CRITICAL and HIGH files to be reviewed before merge.`,
+      impact:`${data.unattested_deploy_count} file${data.unattested_deploy_count !== 1 ? "s" : ""} unreviewed across ${data.repos.length} repo${data.repos.length !== 1 ? "s" : ""}. Compliance posture: ${attPct < 50 ? "critical" : attPct < 80 ? "degraded" : "at risk"}.`,
       timeline:[
-        { time: ts, action:`${data.unattested_deploy_count} unattested deploys detected`, actor:"TrustLedger" },
+        { time: ts, action:`${data.unattested_deploy_count} unattested CRITICAL/HIGH files detected`, actor:"TrustLedger" },
         { time: new Date(new Date(ts).getTime() + 120000).toISOString(), action:"P2 policy-violation incident created", actor:"TrustLedger" },
       ],
       playbook: PLAYBOOK_TEMPLATES["policy-violation"].steps.map(s => ({ ...s, completed:false })),
@@ -367,7 +373,9 @@ export default function IncidentsPage() {
     // Always apply localStorage-based resolution first — reliable regardless of API
     const preResolved = autoResolveFromLocalStorage(base);
     try {
-      const data = await api.dashboard(orgSlug || "org", 90);
+      const rawData = await api.dashboard(orgSlug || "org", 90);
+      // Apply local attestations so already-attested files don't trigger new incidents
+      const data = patchDataWithAttestations(rawData);
       // Returns the full list: dashboard-based auto-resolutions + any new incidents
       const next = incidentsFromDashboard(data, preResolved, teamMembers);
       const changed =
