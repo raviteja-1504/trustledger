@@ -122,7 +122,7 @@ const PLAYBOOK_TEMPLATES: Record<IncidentType, { name:string; steps: Omit<Playbo
 };
 
 const STORAGE_KEY = "tl_incidents";
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+
 
 // ── Local-storage–based auto-resolution ───────────────────────────────────────
 // Checks tl_violation_statuses (written by the attestation flow) and resolves:
@@ -191,7 +191,10 @@ function autoResolveFromLocalStorage(incidents: Incident[]): Incident[] {
 // Returns the full updated incident list:
 // - auto-resolves "active" incidents whose trigger (unattested file / deploy count) is now clear
 // - appends new incidents for newly-detected issues not yet tracked
-function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Incident[] {
+function incidentsFromDashboard(data: DashboardData, existing: Incident[], members: { email: string; role: string }[] = []): Incident[] {
+  const adminEmails    = members.filter(m => m.role === "admin" || m.role === "security_reviewer").map(m => m.email);
+  const secStakeholders = adminEmails.slice(0, 3).length > 0 ? adminEmails.slice(0, 3) : [];
+  const devStakeholders = adminEmails.slice(0, 2).length > 0 ? adminEmails.slice(0, 2) : [];
   const now = new Date().toISOString();
 
   // File paths still CRITICAL + unattested in the latest dashboard snapshot
@@ -266,7 +269,7 @@ function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Inci
           { time: new Date(new Date(ts).getTime() + 60000).toISOString(), action:"P1 incident auto-created", actor:"TrustLedger" },
         ],
         playbook: PLAYBOOK_TEMPLATES[incType].steps.map(s => ({ ...s, completed:false })),
-        stakeholders:[`security@${ORG}.io`,`ciso@${ORG}.io`],
+        stakeholders:secStakeholders,
       });
     });
 
@@ -286,7 +289,7 @@ function incidentsFromDashboard(data: DashboardData, existing: Incident[]): Inci
         { time: new Date(new Date(ts).getTime() + 120000).toISOString(), action:"P2 policy-violation incident created", actor:"TrustLedger" },
       ],
       playbook: PLAYBOOK_TEMPLATES["policy-violation"].steps.map(s => ({ ...s, completed:false })),
-      stakeholders:[`security@${ORG}.io`,`devops@${ORG}.io`],
+      stakeholders:devStakeholders,
     });
   }
 
@@ -335,6 +338,9 @@ const INC_TYPE_COLOR: Record<IncidentType, string> = {
 
 export default function IncidentsPage() {
   const { profile } = useAuth();
+  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
+  const orgSlug = profile?.org_slug || "";
+
   const [incidents,    setIncidents]    = useState<Incident[]>([]);
   const [selected,     setSelected]     = useState<string | null>(null);
   const [activeTab,    setActiveTab]    = useState<"incidents" | "playbooks">("incidents");
@@ -345,16 +351,25 @@ export default function IncidentsPage() {
   const [newEntry,      setNewEntry]      = useState("");
   const [showEntryForm, setShowEntryForm] = useState(false);
   const [newInc, setNewInc] = useState({ title:"", type:"secret-exposed" as IncidentType, severity:"P2" as IncidentSeverity, affected_repo:"", description:"" });
+  const [teamMembers,  setTeamMembers]  = useState<{ email: string; name: string | null; role: string }[]>([]);
   const filtersActive = filterStatus !== "all" || filterSev !== "all";
+
+  // Fetch real team members for stakeholder display and new incident defaults
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ members: { email: string; name: string | null; role: string }[] }>("/api/team")
+      .then(r => setTeamMembers((r.members ?? []).filter(m => m.email)))
+      .catch(() => {});
+  }, [profile?.org_id]);
 
   const seedFromAPI = useCallback(async (base: Incident[], spinner = false) => {
     if (spinner) setRefreshing(true);
     // Always apply localStorage-based resolution first — reliable regardless of API
     const preResolved = autoResolveFromLocalStorage(base);
     try {
-      const data = await api.dashboard(ORG, 90);
+      const data = await api.dashboard(orgSlug || "org", 90);
       // Returns the full list: dashboard-based auto-resolutions + any new incidents
-      const next = incidentsFromDashboard(data, preResolved);
+      const next = incidentsFromDashboard(data, preResolved, teamMembers);
       const changed =
         next.length !== base.length ||
         next.some((inc, i) => inc.status !== base[i]?.status || inc.id !== base[i]?.id);
@@ -370,7 +385,8 @@ export default function IncidentsPage() {
       if (changed) setIncidents(preResolved);
     }
     finally { if (spinner) setRefreshing(false); }
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgSlug, teamMembers]);
 
   useEffect(() => {
     // Try real API first, fall back to localStorage, then defaults
@@ -476,7 +492,7 @@ export default function IncidentsPage() {
       impact:"Under investigation",
       timeline:[{time:now,action:"Incident created",actor:"you"}],
       playbook: PLAYBOOK_TEMPLATES[newInc.type].steps.map(s=>({...s,completed:false})),
-      stakeholders:[`alice@${ORG}.io`,`ciso@${ORG}.io`],
+      stakeholders:teamMembers.map(m => m.email).slice(0, 2),
     };
     save([inc, ...incidents]);
     // Also persist to real API
@@ -615,7 +631,7 @@ export default function IncidentsPage() {
               <div>
                 <label className="block text-[10px] font-semibold text-gray-500 mb-1">Affected Repository</label>
                 <input value={newInc.affected_repo} onChange={e=>setNewInc(p=>({...p,affected_repo:e.target.value}))}
-                  placeholder={`${ORG}/repo-name`}
+                  placeholder={`${orgSlug}/repo-name`}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none" />
               </div>
               <div className="col-span-2">
