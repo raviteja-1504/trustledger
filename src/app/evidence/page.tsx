@@ -404,36 +404,36 @@ function matchesFilter(item: { title: string; description: string; resolvedStatu
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
-
-function getOwners(): string[] {
-  try {
-    const stored = typeof window !== "undefined" ? localStorage.getItem("tl_team_members") : null;
-    if (stored) { const m: {email:string}[] = JSON.parse(stored); if (m.length > 0) return m.map(x => x.email); }
-  } catch { /* */ }
-  return [`alice@${ORG}.io`,`bob@${ORG}.io`,`carol@${ORG}.io`,`security@${ORG}.io`,`legal@${ORG}.io`];
-}
+interface TeamMember { email: string; name: string | null; role: string; github_login: string | null; }
 
 export default function EvidencePage() {
   const { profile } = useAuth();
+  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
+  const orgSlug = profile?.org_slug || "";
+
   const [data,          setData]          = useState<DashboardData | null>(null);
-  const [auditStart,    setAuditStart]    = useState("2026-02-01");
-  const [auditEnd,      setAuditEnd]      = useState("2026-05-31");
+  const [teamMembers,   setTeamMembers]   = useState<TeamMember[]>([]);
+  const [auditStart,    setAuditStart]    = useState(() => {
+    const d = new Date(); d.setMonth(d.getMonth() - 3);
+    return d.toISOString().split("T")[0];
+  });
+  const [auditEnd,      setAuditEnd]      = useState(() => new Date().toISOString().split("T")[0]);
   const [activeFw,      setActiveFw]      = useState("soc2");
   const [overrides,     setOverrides]     = useState<Record<string, EvidenceOverride>>({});
-  const [owners,        setOwners]        = useState<Record<string, string>>({});       // item_id → owner
-  const [dueDates,      setDueDates]      = useState<Record<string, string>>({});       // item_id → ISO date
+  const [owners,        setOwners]        = useState<Record<string, string>>({});
+  const [dueDates,      setDueDates]      = useState<Record<string, string>>({});
   const [uploadId,      setUploadId]      = useState<string | null>(null);
   const [uploadNote,    setUploadNote]    = useState("");
   const [uploadUrl,     setUploadUrl]     = useState("");
   const [uploadFile,    setUploadFile]    = useState<File | null>(null);
   const [uploading,     setUploading]     = useState(false);
   const [uploadOwner,   setUploadOwner]   = useState("");
-  const [showGuide,     setShowGuide]     = useState<string | null>(null);    // item_id
+  const [showGuide,     setShowGuide]     = useState<string | null>(null);
   const [search,        setSearch]        = useState("");
   const [filterStatus,  setFilterStatus]  = useState<EvidenceStatus | "all">("all");
   const [refreshing,    setRefreshing]    = useState(false);
   const [view,          setView]          = useState<"controls" | "gaps" | "owners">("controls");
+  const [dragOver,      setDragOver]      = useState(false);
 
   useEffect(() => {
     setOverrides(loadOverrides());
@@ -441,13 +441,31 @@ export default function EvidencePage() {
     try { setDueDates(JSON.parse(localStorage.getItem("tl_evidence_dues") ?? "{}")); } catch {}
   }, []);
 
+  // Fetch real team members for owner dropdowns
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ members: TeamMember[] }>("/api/team")
+      .then(r => setTeamMembers((r.members ?? []).filter(m => m.email)))
+      .catch(() => {});
+  }, [profile?.org_id]);
+
+  const getOwners = useCallback((): string[] =>
+    teamMembers.length > 0 ? teamMembers.map(m => m.email) : [],
+  [teamMembers]);
+
+  const getMemberName = useCallback((email: string): string => {
+    const m = teamMembers.find(t => t.email === email);
+    return m?.name || email.split("@")[0];
+  }, [teamMembers]);
+
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
     const seed = readSeed();
-    const d = seed ?? await api.dashboard(ORG, 90).catch(() => null);
+    const d = seed ?? await api.dashboard(orgSlug || "orgSlug", 90).catch(() => null);
     if (d) setData(d);
     if (spinner) setRefreshing(false);
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgSlug]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -561,7 +579,7 @@ export default function EvidencePage() {
   function exportPackage() {
     const pkg = {
       generated_at: new Date().toISOString(),
-      org: ORG,
+      orgSlug: orgName,
       audit_period: { start: auditStart, end: auditEnd },
       frameworks: frameworks.map(f => ({
         id: f.id,
@@ -584,7 +602,7 @@ export default function EvidencePage() {
     const blob = new Blob([JSON.stringify(pkg, null, 2)], { type:"application/json" });
     Object.assign(document.createElement("a"), {
       href: URL.createObjectURL(blob),
-      download: `evidence-package-${ORG}-${auditStart}.json`,
+      download: `evidence-package-${orgSlug}-${auditStart}.json`,
     }).click();
   }
 
@@ -626,11 +644,16 @@ export default function EvidencePage() {
             {/* Owner + due date row */}
             <div className="flex items-center gap-3 mt-1.5 flex-wrap">
               <select value={owners[ev.id] ?? ""} onChange={e => setOwner(ev.id, e.target.value)}
-                className="text-[9px] bg-transparent border-none outline-none text-gray-400 hover:text-indigo-600 cursor-pointer">
+                className="text-[9px] bg-transparent border-none outline-none text-gray-400 hover:text-indigo-600 cursor-pointer max-w-[160px]">
                 <option value="">Assign owner…</option>
-                {getOwners().map(o => <option key={o} value={o}>{o.split("@")[0]}</option>)}
+                {getOwners().map(o => <option key={o} value={o}>{getMemberName(o)}</option>)}
               </select>
-              {owners[ev.id] && <span className="text-[9px] text-indigo-500 font-medium">👤 {owners[ev.id].split("@")[0]}</span>}
+              {owners[ev.id] && (
+                <span className="inline-flex items-center gap-1 text-[9px] text-indigo-600 font-medium bg-indigo-50 px-1.5 py-0.5 rounded-full">
+                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  {getMemberName(owners[ev.id])}
+                </span>
+              )}
               {ev.resolvedStatus === "pending" && (
                 <input type="date" value={dueDates[ev.id] ?? ""} onChange={e => setDueDate(ev.id, e.target.value)}
                   className="text-[9px] border-none outline-none bg-transparent text-gray-400 hover:text-rose-500 cursor-pointer" />
@@ -704,23 +727,44 @@ export default function EvidencePage() {
             <input value={uploadUrl} onChange={e => setUploadUrl(e.target.value)}
               placeholder="URL (optional): SharePoint link, Jira ticket, S3 path…"
               className="w-full text-xs border border-emerald-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white" />
-            {/* File upload — stores to Supabase Storage when authenticated */}
-            <label className="flex items-center gap-2 cursor-pointer group">
-              <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-200 bg-white text-xs text-gray-500 hover:border-emerald-400 transition-colors">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-emerald-500 shrink-0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                {uploadFile ? <span className="text-emerald-700 font-medium truncate">{uploadFile.name} ({(uploadFile.size/1024).toFixed(0)} KB)</span> : "Attach file (PDF, screenshot, CSV)…"}
-              </div>
+            {/* Drag-drop file upload zone */}
+            <label
+              className={`flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed cursor-pointer transition-all py-5 ${
+                dragOver ? "border-emerald-400 bg-emerald-50" : "border-emerald-200 bg-white hover:border-emerald-300"
+              }`}
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={e => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files[0]; if (f) setUploadFile(f); }}
+            >
+              {uploadFile ? (
+                <>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  <span className="text-xs font-semibold text-emerald-700">{uploadFile.name}</span>
+                  <span className="text-[10px] text-emerald-500">{(uploadFile.size / 1024).toFixed(0)} KB · click to change</span>
+                </>
+              ) : (
+                <>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  <span className="text-xs text-gray-500">Drag & drop or <span className="text-emerald-600 font-semibold">browse</span></span>
+                  <span className="text-[10px] text-gray-400">PDF · PNG · JPG · CSV · DOCX · TXT</span>
+                </>
+              )}
               <input type="file" className="sr-only" accept=".pdf,.png,.jpg,.csv,.xlsx,.docx,.txt"
                 onChange={e => setUploadFile(e.target.files?.[0] ?? null)} />
             </label>
-            {uploadFile && profile?.org_id && (
-              <p className="text-[9px] text-emerald-600">File will be uploaded to Supabase Storage (evidence vault) on confirm.</p>
+            {uploadFile && (
+              <div className="flex items-center gap-2">
+                <p className="text-[9px] text-emerald-600 flex-1">
+                  {profile?.org_id ? "File will be uploaded to Supabase Storage (evidence vault)." : "File will be recorded locally."}
+                </p>
+                <button type="button" onClick={() => setUploadFile(null)} className="text-[9px] text-gray-400 hover:text-gray-600">✕ Remove</button>
+              </div>
             )}
             <div className="flex gap-2">
               <select value={uploadOwner} onChange={e => setUploadOwner(e.target.value)}
                 className="flex-1 text-xs border border-emerald-200 rounded-lg px-3 py-2 focus:outline-none bg-white">
                 <option value="">Collected by (optional)…</option>
-                {getOwners().map(o => <option key={o} value={o}>{o}</option>)}
+                {getOwners().map(o => <option key={o} value={o}>{getMemberName(o)} ({o})</option>)}
               </select>
               <button onClick={() => markCollected(ev.id)} disabled={uploading}
                 className="text-xs font-bold text-white px-4 py-2 rounded-lg transition-colors shrink-0 disabled:opacity-60"
@@ -751,7 +795,7 @@ export default function EvidencePage() {
         {/* Header */}
         <div className="animate-fade-up flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <div className="flex items-center gap-2.5 mb-1">
+            <div className="flex items-center gap-2.5 mb-0.5">
               <div className="w-8 h-8 rounded-xl flex items-center justify-center"
                 style={{ background:"rgba(16,185,129,0.1)", border:"1px solid rgba(16,185,129,0.2)" }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -760,13 +804,32 @@ export default function EvidencePage() {
                 </svg>
               </div>
               <h1 className="text-xl font-black text-gray-900 tracking-tight">Evidence Locker</h1>
+              <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">{orgName}</span>
               {gaps.length > 0 && (
-                <span className="text-xs font-black text-white bg-amber-500 px-2 py-0.5 rounded-full">{gaps.length} gaps</span>
+                <span className="text-xs font-black text-white bg-amber-500 px-2 py-0.5 rounded-full">{gaps.length} gap{gaps.length !== 1 ? "s" : ""}</span>
               )}
             </div>
             <p className="text-sm text-gray-400">
-              Compliance evidence organized by framework and control — auto-collected from live scan data.
+              Compliance evidence for {orgName} — auto-collected from live scans, manually verified by your team.
             </p>
+            {/* Live stats bar */}
+            {data && (
+              <div className="flex items-center gap-4 mt-2 flex-wrap">
+                {[
+                  { label: "Scans",       value: data.scan_count,                               color: "text-indigo-600" },
+                  { label: "Files",        value: data.file_count,                               color: "text-gray-600"   },
+                  { label: "Attested",     value: `${Math.round(data.attestation_rate * 100)}%`, color: "text-emerald-600" },
+                  { label: "Repos",        value: data.repos.length,                             color: "text-violet-600" },
+                  { label: "Unblocked",    value: data.unattested_deploy_count === 0 ? "All" : `${data.unattested_deploy_count} blocked`, color: data.unattested_deploy_count === 0 ? "text-emerald-600" : "text-rose-600" },
+                ].map(s => (
+                  <div key={s.label} className="flex items-center gap-1">
+                    <span className={`text-xs font-black tabular-nums ${s.color}`}>{s.value}</span>
+                    <span className="text-[10px] text-gray-400">{s.label}</span>
+                  </div>
+                ))}
+                <span className="text-[10px] text-gray-300">· live</span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => fetchData(true)} disabled={refreshing}
@@ -956,7 +1019,7 @@ export default function EvidencePage() {
                   }}
                   className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white shrink-0 w-40">
                   <option value="">Unassigned</option>
-                  {getOwners().map(o => <option key={o} value={o}>{o}</option>)}
+                  {getOwners().map(o => <option key={o} value={o}>{getMemberName(o)} ({o})</option>)}
                 </select>
               </div>
             ))}
