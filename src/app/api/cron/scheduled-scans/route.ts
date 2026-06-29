@@ -169,6 +169,68 @@ export async function GET(req: NextRequest) {
             sla_deadline: new Date(Date.now() + (f.risk_score === "CRITICAL" ? 24 : 48) * 3600_000).toISOString(),
           })));
         }
+
+        // ── Attestation carry-over ──────────────────────────────────────────
+        // If a file with the same content_hash was previously attested in any
+        // scan in this org, auto-inherit that attestation. This prevents a
+        // scheduled re-scan from wiping attestations on unchanged files.
+        if (result.files.length > 0) {
+          const hashes = result.files.map(f => f.content_hash).filter(Boolean);
+          if (hashes.length > 0) {
+            const { data: prevMatches } = await db
+              .from("scan_files")
+              .select("file_path, content_hash, scan_id")
+              .eq("org_id", orgId)
+              .neq("scan_id", scanRow.id)
+              .in("content_hash", hashes);
+
+            if (prevMatches && prevMatches.length > 0) {
+              const prevScanIds = [...new Set(prevMatches.map(p => p.scan_id as string))];
+              const { data: prevAtts } = await db
+                .from("attestations")
+                .select("scan_id, file_path, risk_score, reviewer_email, reviewer_github")
+                .eq("org_id", orgId)
+                .in("scan_id", prevScanIds);
+
+              const autoAttest = new Map<string, { risk_score: string; reviewer_email: string; reviewer_github: string | null }>();
+              for (const att of (prevAtts ?? [])) {
+                const match = prevMatches.find(p => p.scan_id === att.scan_id && p.file_path === att.file_path);
+                if (!match) continue;
+                const ourFile = result.files.find(f => f.file_path === att.file_path && f.content_hash === match.content_hash);
+                if (ourFile && !autoAttest.has(att.file_path)) {
+                  autoAttest.set(att.file_path, {
+                    risk_score:      att.risk_score as string,
+                    reviewer_email:  att.reviewer_email as string,
+                    reviewer_github: att.reviewer_github as string | null,
+                  });
+                }
+              }
+
+              if (autoAttest.size > 0) {
+                const ts = new Date().toISOString();
+                await db.from("attestations").upsert(
+                  [...autoAttest.entries()].map(([fp, att]) => ({
+                    org_id: orgId, scan_id: scanRow.id, file_path: fp,
+                    risk_score: att.risk_score, reviewer_email: att.reviewer_email,
+                    reviewer_github: att.reviewer_github,
+                    payload_hash: `inherited-scheduled:${scanRow.id}:${fp}`,
+                  })),
+                  { onConflict: "scan_id,file_path", ignoreDuplicates: true },
+                );
+                // Auto-resolve violations for inherited files
+                await db.from("violations")
+                  .update({ status: "resolved", resolved_at: ts })
+                  .eq("scan_id", scanRow.id)
+                  .in("file_path", [...autoAttest.keys()]);
+                await db.from("scan_files")
+                  .update({ attested: true })
+                  .eq("scan_id", scanRow.id)
+                  .in("file_path", [...autoAttest.keys()]);
+              }
+            }
+          }
+        }
+        // ─────────────────────────────────────────────────────────────────
       }
 
       // Update last_run_at

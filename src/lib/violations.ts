@@ -17,6 +17,8 @@ export interface Violation {
   file?: string;
   pr_number?: number;
   scan_id?: string;
+  scan_triggered_by?: string;  // "webhook" | "scheduled" | "api"
+  scan_created_at?: string;    // ISO timestamp of the scan that created this
   detected_at: string;
   sla_deadline?: string;
   policy_rule: string;

@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
   // Filter violations through their parent scan's pr_author when scoped
   let query = db
     .from("violations")
-    .select("*, scans!inner(repo_full_name, pr_number, commit_sha, pr_author)")
+    .select("*, scans!inner(repo_full_name, pr_number, commit_sha, pr_author, triggered_by, created_at)")
     .eq("org_id", org_id)
     .order("created_at", { ascending: false })
     .limit(limit);

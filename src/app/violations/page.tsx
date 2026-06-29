@@ -325,6 +325,16 @@ const REMEDIATION: Record<VType, string[]> = {
   ],
 };
 
+interface RecentScan {
+  id: string;
+  repo_full_name: string;
+  pr_number: number | null;
+  overall_risk: string;
+  file_count: number;
+  created_at: string;
+  triggered_by: string | null;
+}
+
 export default function ViolationsPage() {
   const { success, info, error: toastError } = useToastHelpers();
   const { profile } = useAuth();
@@ -343,6 +353,7 @@ export default function ViolationsPage() {
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshed,setLastRefreshed]= useState<Date | null>(null);
   const [loadError,    setLoadError]    = useState<string | null>(null);
+  const [recentScans,  setRecentScans]  = useState<RecentScan[]>([]);
 
   // Load all persisted state
   useEffect(() => {
@@ -360,14 +371,22 @@ export default function ViolationsPage() {
     const seed = readSeed();
     if (seed) { setData(seed); setLoadError(null); setLastRefreshed(new Date()); setLoading(false); if (spinner) setRefreshing(false); return; }
     try {
-      const d = await api.dashboard(ORG, 90);
-      setData(d); setLoadError(null); setLastRefreshed(new Date());
+      const [d, scansResp] = await Promise.all([
+        api.dashboard(ORG, 90),
+        profile?.org_id
+          ? authedFetch<{ scans: RecentScan[] }>("/api/scans?limit=5").catch(() => ({ scans: [] }))
+          : Promise.resolve({ scans: [] }),
+      ]);
+      setData(d);
+      setRecentScans(scansResp.scans ?? []);
+      setLoadError(null); setLastRefreshed(new Date());
     } catch (e) {
       setData(null);
       setLoadError(e instanceof Error ? e.message : "Failed to load violations data");
     }
     setLoading(false); if (spinner) setRefreshing(false);
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   // Initial fetch + 30s auto-poll
   useEffect(() => {
@@ -568,6 +587,49 @@ export default function ViolationsPage() {
             {refreshAgo && <span className="text-[9px] text-gray-400">Updated {refreshAgo}</span>}
           </div>
         </div>
+
+        {/* Recent scan origin banner — explains why violations re-appeared */}
+        {recentScans.length > 0 && (() => {
+          const latest = recentScans[0];
+          const triggeredByLabel =
+            latest.triggered_by === "scheduled" ? "Scheduled scan"
+            : latest.triggered_by === "webhook"  ? `PR #${latest.pr_number ?? "webhook"}`
+            : latest.triggered_by ?? "Manual scan";
+          const isScheduled = latest.triggered_by === "scheduled";
+          const ago = (() => {
+            const m = Math.floor((Date.now() - new Date(latest.created_at).getTime()) / 60000);
+            if (m < 1) return "just now";
+            if (m < 60) return `${m}m ago`;
+            const h = Math.floor(m / 60);
+            if (h < 24) return `${h}h ago`;
+            return `${Math.floor(h / 24)}d ago`;
+          })();
+          return (
+            <div className={`animate-fade-up flex items-start gap-3 px-4 py-3 rounded-xl border text-xs ${isScheduled ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-200"}`}>
+              <svg width="14" height="14" className={`shrink-0 mt-0.5 ${isScheduled ? "text-blue-500" : "text-gray-400"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+              <div className="flex-1 min-w-0">
+                <span className={`font-bold ${isScheduled ? "text-blue-800" : "text-gray-700"}`}>
+                  Latest scan: {triggeredByLabel}
+                </span>
+                <span className={`ml-1 ${isScheduled ? "text-blue-600" : "text-gray-500"}`}>
+                  · {latest.repo_full_name} · {latest.file_count} files · {ago}
+                </span>
+                {isScheduled && (
+                  <p className="mt-0.5 text-blue-600">
+                    A scheduled scan ran automatically and may have created new violations.
+                    Files with unchanged content are now auto-attested from previous attestations.
+                    Only files that actually changed since your last attestation need review.
+                  </p>
+                )}
+              </div>
+              <Link href="/scans" className={`shrink-0 font-semibold hover:underline ${isScheduled ? "text-blue-600" : "text-gray-500"}`}>
+                All scans →
+              </Link>
+            </div>
+          );
+        })()}
 
         {/* Error banner */}
         {loadError && !loading && (
