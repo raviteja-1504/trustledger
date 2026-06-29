@@ -412,8 +412,13 @@ export default function IncidentsPage() {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
         if (Array.isArray(saved) && saved.length > 0) base = saved;
       } catch {}
-      // Apply attestation state immediately before showing or seeding
       const resolved = autoResolveFromLocalStorage(base);
+      // Write back immediately when auto-resolution changes any status so that
+      // the sidebar badge reads the correct count from localStorage.
+      if (resolved !== base) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
+        window.dispatchEvent(new Event("tl:badge"));
+      }
       setIncidents(resolved);
       seedFromAPI(resolved);
     }
@@ -421,8 +426,13 @@ export default function IncidentsPage() {
     const id = setInterval(() => {
       setIncidents(prev => {
         const resolved = autoResolveFromLocalStorage(prev);
-        if (resolved !== prev) seedFromAPI(resolved);
-        else seedFromAPI(prev);
+        if (resolved !== prev) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
+          window.dispatchEvent(new Event("tl:badge"));
+          seedFromAPI(resolved);
+        } else {
+          seedFromAPI(prev);
+        }
         return resolved;
       });
     }, 30_000);
@@ -430,6 +440,10 @@ export default function IncidentsPage() {
     const onAttestComplete = () => {
       setIncidents(prev => {
         const resolved = autoResolveFromLocalStorage(prev);
+        if (resolved !== prev) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
+          window.dispatchEvent(new Event("tl:badge"));
+        }
         seedFromAPI(resolved);
         return resolved;
       });
