@@ -1,5 +1,15 @@
 import type { DashboardData } from "@/types";
 
+// Returns "parent/filename" for generic names (route.ts, page.tsx, index.ts) so
+// violations from different API routes don't all display as just "route.ts".
+function shortPath(filePath: string): string {
+  const parts = filePath.split("/");
+  const name = parts[parts.length - 1] ?? filePath;
+  const parent = parts[parts.length - 2] ?? "";
+  const isGeneric = /^(route|page|index|layout|middleware|types|utils|helpers)\.(ts|tsx|js|jsx|py)$/.test(name);
+  return isGeneric && parent ? `${parent}/${name}` : name;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export type VSeverity = "CRITICAL" | "HIGH" | "MEDIUM";
@@ -75,7 +85,7 @@ export function deriveViolations(data: DashboardData): Violation[] {
         type:        "unattested_critical",
         severity:    "CRITICAL",
         title:       "CRITICAL file unattested — merge blocked",
-        description: `${f.file_path.split("/").pop()} in ${f.repo.split("/").pop()} is ${(f.ai_pct * 100).toFixed(0)}% AI content, flagged CRITICAL. Policy gate blocks merge until a designated reviewer attests.`,
+        description: `${shortPath(f.file_path)} in ${f.repo.split("/").pop()} is ${(f.ai_pct * 100).toFixed(0)}% AI content, flagged CRITICAL. Policy gate blocks merge until a designated reviewer attests.`,
         repo:        f.repo,
         file:        f.file_path,
         pr_number:   f.pr_number,
@@ -96,7 +106,7 @@ export function deriveViolations(data: DashboardData): Violation[] {
         type:        "unattested_high",
         severity:    "HIGH",
         title:       "HIGH-risk file awaiting attestation",
-        description: `${f.file_path.split("/").pop()} (${(f.ai_pct * 100).toFixed(0)}% AI, HIGH risk) has not been attested. 48 h SLA applies — assign a reviewer now.`,
+        description: `${shortPath(f.file_path)} (${(f.ai_pct * 100).toFixed(0)}% AI, HIGH risk) has not been attested. 48 h SLA applies — assign a reviewer now.`,
         repo:        f.repo,
         file:        f.file_path,
         pr_number:   f.pr_number,
@@ -117,7 +127,7 @@ export function deriveViolations(data: DashboardData): Violation[] {
         type:        "unattested_medium",
         severity:    "MEDIUM",
         title:       "MEDIUM-risk file pending attestation",
-        description: `${f.file_path.split("/").pop()} (${(f.ai_pct * 100).toFixed(0)}% AI, MEDIUM risk) requires attestation before the next quarterly review.`,
+        description: `${shortPath(f.file_path)} (${(f.ai_pct * 100).toFixed(0)}% AI, MEDIUM risk) requires attestation before the next quarterly review.`,
         repo:        f.repo,
         file:        f.file_path,
         pr_number:   f.pr_number,

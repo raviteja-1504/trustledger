@@ -851,9 +851,17 @@ export default function ViolationsPage() {
                           {v.repo.split("/").pop()}
                         </span>
                       )}
-                      {v.file && (
-                        <span className="text-[10px] font-mono text-gray-500">{v.file.split("/").pop()}</span>
-                      )}
+                      {v.file && (() => {
+                        const parts = v.file.split("/");
+                        const name = parts.pop() ?? "";
+                        const parent = parts.pop() ?? "";
+                        // Show parent/filename when the filename alone is generic (route.ts, page.tsx, index.ts etc.)
+                        const isGeneric = /^(route|page|index|layout|middleware|types|utils|helpers)\.(ts|tsx|js|jsx|py)$/.test(name);
+                        const display = isGeneric && parent ? `${parent}/${name}` : name;
+                        return (
+                          <span className="text-[10px] font-mono text-gray-500" title={v.file}>{display}</span>
+                        );
+                      })()}
                       {v.pr_number && v.scan_id && (
                         <Link href={`/pr/${v.scan_id}`}
                           className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5">
