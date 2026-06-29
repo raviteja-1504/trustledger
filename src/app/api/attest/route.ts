@@ -94,18 +94,21 @@ export async function POST(req: NextRequest) {
       .in("scan_id", scanIds);
   }
 
-  // If all violations for this scan are now resolved, also resolve the
-  // corresponding alert so the sidebar badge clears immediately.
-  const { count: openViolations } = await db
+  // Resolve alerts when there are no remaining open violations for the whole repo.
+  // We check the REPO (not just this scan) because multiple scans of the same PR
+  // each create their own alert. Checking by scan_id only resolves one alert;
+  // the others stay firing. Checking by repo resolves all of them together.
+  const { count: openRepoViolations } = await db
     .from("violations")
     .select("id", { count: "exact", head: true })
-    .eq("scan_id", body.scan_id)
-    .neq("status", "resolved");
-  if ((openViolations ?? 1) === 0) {
+    .eq("org_id", org_id)
+    .neq("status", "resolved")
+    .in("scan_id", scanIds); // scanIds = all scans for this repo
+  if ((openRepoViolations ?? 1) === 0) {
     await db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
       .eq("org_id", org_id)
-      .eq("scan_id", body.scan_id)
+      .eq("repo", scan.repo_full_name)
       .eq("alert_type", "policy")
       .in("status", ["firing", "acknowledged", "snoozed"]);
   }

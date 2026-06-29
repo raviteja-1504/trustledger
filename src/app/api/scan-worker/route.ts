@@ -399,20 +399,29 @@ export async function POST(req: NextRequest) {
                 .eq("scan_id", scan.id)
                 .in("file_path", [...autoAttest.keys()]);
 
-              // Check if all violations for this scan are now resolved —
-              // if so, also resolve the scan's alert so the badge clears.
-              const { count: openViolations } = await db
+              // Resolve ALL policy alerts for this repo if no open violations remain
+              // (check repo-wide, not just this scan, because multiple scans of the
+              // same PR each create their own alert).
+              const allScanIdsForRepo = (await db
+                .from("scans")
+                .select("id")
+                .eq("org_id", orgId)
+                .eq("repo_full_name", repoFullName)
+              ).data?.map(s => s.id) ?? [scan.id];
+
+              const { count: openRepoViolations } = await db
                 .from("violations")
                 .select("id", { count: "exact", head: true })
-                .eq("scan_id", scan.id)
-                .neq("status", "resolved");
-              if ((openViolations ?? 1) === 0) {
+                .eq("org_id", orgId)
+                .neq("status", "resolved")
+                .in("scan_id", allScanIdsForRepo);
+              if ((openRepoViolations ?? 1) === 0) {
                 await db.from("alerts")
                   .update({ status: "resolved", resolved_at: now })
                   .eq("org_id", orgId)
-                  .eq("scan_id", scan.id)
+                  .eq("repo", repoFullName)
                   .eq("alert_type", "policy")
-                  .in("status", ["firing", "acknowledged"]);
+                  .in("status", ["firing", "acknowledged", "snoozed"]);
               }
             }
           }
