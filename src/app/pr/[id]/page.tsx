@@ -1082,6 +1082,10 @@ function PRDetailContent() {
       const email = reviewerEmail || "reviewer@trustledger.dev";
       recordActivityEvent(path, email);
       persistAttestation(path, email, reviewerGithub).then(() => {
+        // Notify all open pages to update badges immediately
+        window.dispatchEvent(new CustomEvent("tl:attest-complete", { detail: { scan_id: scan.scan_id, file_path: path } }));
+        window.dispatchEvent(new Event("tl:attestation"));
+        window.dispatchEvent(new Event("tl:badge"));
         const remaining = scan.files.filter(
           f => (f.risk_score === "HIGH" || f.risk_score === "CRITICAL") &&
                f.file_path !== path && !f.attested && !attestedSet.has(f.file_path)
