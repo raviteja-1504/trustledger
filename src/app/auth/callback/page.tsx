@@ -34,7 +34,14 @@ export default function AuthCallbackPage() {
     (async () => {
       const { data, error: exchErr } = await supabase.auth.exchangeCodeForSession(code);
       if (exchErr || !data.session) {
-        router.replace("/login?error=auth_failed");
+        // Encode the actual Supabase error message so the login page can show it
+        const reason = exchErr?.message ?? "no_session";
+        // pkce_verifier_mismatch / bad_code_verifier → browser lost the PKCE state
+        const isPKCE = reason.toLowerCase().includes("code_verifier") ||
+                       reason.toLowerCase().includes("pkce") ||
+                       reason.toLowerCase().includes("verifier");
+        const errParam = isPKCE ? "pkce_lost" : encodeURIComponent(reason);
+        router.replace(`/login?error=${errParam}`);
         return;
       }
 

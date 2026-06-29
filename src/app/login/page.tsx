@@ -184,6 +184,7 @@ function ProductionLoginPage() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const errorParam   = searchParams?.get("error");
+  const [githubBusy, setGithubBusy] = useState(false);
 
   const [showEmail, setShowEmail] = useState(false);
   const [email,     setEmail]     = useState("");
@@ -232,13 +233,25 @@ function ProductionLoginPage() {
           <p className="text-base font-bold text-white text-center">Sign in to your organisation</p>
 
           {/* Errors */}
-          {errorParam && (
-            <div className="px-3 py-2.5 rounded-xl text-sm text-rose-300 bg-rose-900/30 border border-rose-700/40">
-              {errorParam === "session_timeout"
-                ? "You were signed out due to inactivity."
-                : "Sign-in failed — please try again."}
-            </div>
-          )}
+          {errorParam && (() => {
+            const msg =
+              errorParam === "session_timeout"    ? "You were signed out due to inactivity."
+            : errorParam === "pkce_lost"          ? "Sign-in session expired — your browser lost the login state. Please try again."
+            : errorParam === "missing_code"       ? "GitHub did not return an authorisation code. Please try again."
+            : errorParam === "access_denied"      ? "GitHub access was denied. Please authorise TrustLedger to continue."
+            : errorParam === "auth_failed"        ? "Sign-in failed. Please try again or contact support."
+            : `Sign-in error: ${decodeURIComponent(errorParam)}`;
+            return (
+              <div className="px-3 py-2.5 rounded-xl text-xs text-rose-300 bg-rose-900/30 border border-rose-700/40 space-y-2">
+                <p>{msg}</p>
+                {(errorParam === "pkce_lost" || errorParam === "auth_failed") && (
+                  <p className="text-rose-400 text-[11px]">
+                    Tip: make sure you are not in a private/incognito window with storage blocked, or try a different browser.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
           {formErr && (
             <div className="px-3 py-2.5 rounded-xl text-sm text-rose-300 bg-rose-900/30 border border-rose-700/40">
               {formErr}
@@ -247,14 +260,19 @@ function ProductionLoginPage() {
 
           {/* Primary: GitHub */}
           <button
-            onClick={signInWithGitHub}
-            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl font-semibold text-sm text-white transition-all"
+            onClick={async () => { setGithubBusy(true); await signInWithGitHub(); }}
+            disabled={githubBusy}
+            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl font-semibold text-sm text-white transition-all disabled:opacity-70 disabled:cursor-not-allowed"
             style={{ background: "#24292f", border: "1px solid rgba(255,255,255,0.12)" }}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = "#1a1f24"; }}
+            onMouseEnter={e => { if (!githubBusy) (e.currentTarget as HTMLElement).style.background = "#1a1f24"; }}
             onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "#24292f"; }}
           >
-            <GitHubIcon />
-            Continue with GitHub
+            {githubBusy ? (
+              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+              </svg>
+            ) : <GitHubIcon />}
+            {githubBusy ? "Redirecting to GitHub…" : "Continue with GitHub"}
           </button>
 
           {/* Secondary: email (collapsed by default) */}
