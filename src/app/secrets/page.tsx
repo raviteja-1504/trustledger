@@ -32,7 +32,7 @@ interface SecretFinding {
   resolved_at?: string;
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+
 
 const STORAGE_KEY = "tl_secret_status";
 
@@ -86,14 +86,31 @@ const SECRET_PATTERNS: PatternRule[] = [
   { re:/(?:api[_-]?key|apikey)\s*=\s*["'`][a-zA-Z0-9_\-]{16,}["'`]/i, label:"Generic API Key",      type:"api_key",     severity:"MEDIUM"   },
 ];
 
+// Files that intentionally contain fake/demo credential strings — scanning
+// these produces false positives. Mirrors scanner.ts DEMO_DATA_FILE_RE.
+const DEMO_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog|NewScanPanel)\.(ts|tsx)$/i;
+
+// Known placeholder values that look like secrets but aren't — mirrors
+// scanner.ts isPlaceholderSecretLine logic.
+const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|DEMO|FAKE|SAMPLE|EXAMPLE|placeholder|xxxx|test_|_test|_demo|_sample/i;
+
 function detectSecretsInContent(content: string, file_path: string, repo: string, scan_id: string, pr_number: number, ts: string): SecretFinding[] {
+  // Skip demo/seed files — they contain intentional fake credentials
+  if (DEMO_FILE_RE.test(file_path)) return [];
+
   const findings: SecretFinding[] = [];
   const lines = content.split("\n");
   lines.forEach((line, idx) => {
+    // Skip comment lines and known placeholder patterns
+    if (/^\s*(\/\/|#|\*)/.test(line)) return;
+    if (PLACEHOLDER_VALUE_RE.test(line)) return;
+
     for (const p of SECRET_PATTERNS) {
       const m = line.match(p.re);
       if (!m) continue;
       const raw = m[0];
+      // Skip if the matched value itself looks like a placeholder
+      if (PLACEHOLDER_VALUE_RE.test(raw)) continue;
       const masked = raw.slice(0, Math.min(8, raw.length)) + "•".repeat(Math.max(4, raw.length - 8));
       findings.push({
         id: `sec_live_${scan_id}_${idx}`,
@@ -194,7 +211,7 @@ export default function SecretsPage() {
 
     (async () => {
       try {
-        const data = await api.dashboard(ORG, 90);
+        const data = await api.dashboard(profile?.org_slug || "org", 90);
         const scanIds = data.repos.filter(r => r.latest_scan_id).slice(0, 5).map(r => r.latest_scan_id);
         const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
         const existingKeys = new Set<string>();
@@ -244,7 +261,7 @@ export default function SecretsPage() {
     setFindings(prev => {
       const next = prev.map(f => f.id === id ? {
         ...f, status,
-        resolved_by: status === "resolved" ? (() => { try { const m = JSON.parse(localStorage.getItem("tl_team_members") ?? "[]"); return m[0]?.email ?? `reviewer@${ORG}.io`; } catch { return `reviewer@${ORG}.io`; } })() : undefined,
+        resolved_by: status === "resolved" ? (() => { try { const m = JSON.parse(localStorage.getItem("tl_team_members") ?? "[]"); return m[0]?.email ?? `reviewer@trustledger.local`; } catch { return `reviewer@trustledger.local`; } })() : undefined,
         resolved_at: status === "resolved" ? new Date().toISOString() : undefined,
       } : f);
       // Only persist non-default (resolved) overrides — saves "open" as default avoids
