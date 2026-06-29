@@ -7,7 +7,7 @@ import clsx from "clsx";
 import { useRole, ROLE_LABELS, ROLE_COLORS, type UserRole } from "@/lib/roles";
 import { useSidebar } from "@/lib/sidebar";
 import { useAuth } from "@/lib/auth";
-import { isSeedMode } from "@/lib/useRealData";
+import { isSeedMode, authedFetch } from "@/lib/useRealData";
 import { countOpenViolations } from "@/lib/violations";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import type { DashboardData } from "@/types";
@@ -293,34 +293,44 @@ export default function Sidebar() {
         const secretTotal = isNaN(rawSecretTotal) ? 0 : rawSecretTotal;
         setOpenSecrets(Math.max(0, secretTotal - resolvedSecrets));
 
-        // ── Alerts: derive firing count from snapshot ─────────────────────
-        // "firing" is default — tl_alerts_state only stores explicit overrides
-        if (snap) {
-          const deployBlocked = unresolvedDeployRepos.size === 0
-            ? 0
-            : Math.min(snap.unattested_deploy_count ?? 0, unresolvedDeployRepos.size);
-          // Mirror deriveAlerts() from src/app/alerts/page.tsx exactly so this
-          // badge count matches what the /alerts page actually shows.
-          const aiCritRepos   = (snap.repos ?? []).filter(r => r.ai_pct > 0.85).length;
-          const aiSpikeRepos  = (snap.repos ?? []).filter(r => r.ai_pct > 0.7 && r.ai_pct <= 0.85).length;
+        // ── Alerts: read from DB (same source as /alerts page) ───────────
+        // Previously derived from the snapshot, which diverged from the DB when
+        // alerts were resolved or deduplicated. Now uses the real API so the badge
+        // always matches what the /alerts page shows.
+        if (profile?.org_id && !isSeedMode()) {
+          authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>(
+            "/api/alerts?status=firing&limit=200"
+          ).then(res => {
+            // Deduplicate same as the alerts page: keep latest per scan_id+source
+            const deduped = new Map<string, string>();
+            for (const a of (res.alerts ?? [])) {
+              const key = a.scan_id ? `${a.scan_id}::${a.source ?? "policy"}` : a.id;
+              if (!deduped.has(key)) deduped.set(key, a.id);
+            }
+            // Subtract any that are locally actioned in tl_alerts_state
+            const alertState = JSON.parse(localStorage.getItem("tl_alerts_state") ?? "null") as {
+              statuses?: Record<string, string>;
+            } | null;
+            const actioned = alertState?.statuses
+              ? [...deduped.values()].filter(id => {
+                  const s = alertState.statuses![id];
+                  return s && s !== "firing";
+                }).length
+              : 0;
+            setFiringAlerts(Math.max(0, deduped.size - actioned));
+          }).catch(() => {
+            // API unavailable — fall back to 0 rather than showing a stale count
+            setFiringAlerts(0);
+          });
+        } else if (snap && isSeedMode()) {
+          // Seed/demo mode: derive as before
+          const aiCritRepos  = (snap.repos ?? []).filter(r => r.ai_pct > 0.85).length;
+          const aiSpikeRepos = (snap.repos ?? []).filter(r => r.ai_pct > 0.7 && r.ai_pct <= 0.85).length;
           const lowAttestRepos = (snap.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
-          let baseFiring = Math.min(critUnatt.length, 3)   // P1 secret (slice 0,3)
-            + (deployBlocked > 0 ? 1 : 0)                   // P1 deploy-blocked
-            + aiCritRepos                                   // P1 ai-critical
-            + Math.min(highUnatt.length, 3)                 // P2 HIGH (slice 0,3)
-            + Math.min(critUnatt.length, 2)                 // P2 SLA breach (slice 0,2)
-            + aiSpikeRepos                                  // P2 AI spike
-            + lowAttestRepos;                               // P3 low attestation
-
-          // Subtract alerts already actioned (non-firing overrides in tl_alerts_state)
-          const alertState = JSON.parse(localStorage.getItem("tl_alerts_state") ?? "null") as {
-            statuses?: Record<string, string>;
-          } | null;
-          const actioned = alertState?.statuses
-            ? Object.values(alertState.statuses).filter(s => s !== "firing").length
-            : 0;
-
-          setFiringAlerts(Math.max(0, baseFiring - actioned));
+          const baseFiring = Math.min(critUnatt.length, 3) + (unresolvedDeployRepos.size > 0 ? 1 : 0)
+            + aiCritRepos + Math.min(highUnatt.length, 3) + Math.min(critUnatt.length, 2)
+            + aiSpikeRepos + lowAttestRepos;
+          setFiringAlerts(Math.max(0, baseFiring));
         } else {
           setFiringAlerts(0);
         }
@@ -357,7 +367,9 @@ export default function Sidebar() {
       window.removeEventListener("tl:badge",         refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, []);
+  // Re-run when org_id becomes available so the API call fires after login
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   const visibleLinks = ALL_LINKS.filter(l =>
     (l.permission === null || permissions[l.permission]) &&
