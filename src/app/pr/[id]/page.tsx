@@ -1150,12 +1150,21 @@ function PRDetailContent() {
       f => (f.risk_score === "HIGH" || f.risk_score === "CRITICAL") &&
            !f.attested && !attestedSet.has(f.file_path)
     );
-    for (const f of toAttest) {
-      await persistAttestation(f.file_path, email, github);
-      setAttestedSet(s => { const n = new Set(s); n.add(f.file_path); return n; });
-      recordActivityEvent(f.file_path, email);
-    }
-    // Mark ALL violations for this scan resolved using snapshot data — handles any path mismatch
+    // Run all attestations in parallel so the whole batch completes in ~1s
+    // instead of N × ~750ms sequentially. This means navigation away mid-attest
+    // is unlikely, but even if it happens, each file writes its own violation
+    // status to localStorage immediately so progress survives navigation.
+    await Promise.allSettled(
+      toAttest.map(async f => {
+        await persistAttestation(f.file_path, email, github);
+        // Write to localStorage immediately so progress survives navigation
+        resolveOneFile(f.file_path);
+        setAttestedSet(s => { const n = new Set(s); n.add(f.file_path); return n; });
+        recordActivityEvent(f.file_path, email);
+      })
+    );
+    // Belt-and-suspenders: mark all scan violations resolved in case any
+    // individual resolveOneFile() call missed a key variant
     resolveViolationsForScan(scan.scan_id);
     setAttestingAll(false);
     await syncCheckRun(true);
