@@ -50,7 +50,7 @@ interface Alert {
   history: AlertHistoryEntry[];
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+
 function getReviewerEmail(currentUserEmail?: string): string {
   if (currentUserEmail) return currentUserEmail;
   try { const m = JSON.parse(localStorage.getItem("tl_team_members") ?? "[]"); if (m[0]?.email) return m[0].email; } catch { /* */ }
@@ -117,8 +117,8 @@ function deriveAlerts(data: DashboardData): Alert[] {
       fired_at: h(f.file_path, 2),
       title:`CRITICAL file unattested — ${f.file_path.split("/").pop()}`,
       body:`${f.file_path} in ${f.repo.split("/").pop()} is ${(f.ai_pct*100).toFixed(0)}% AI and flagged CRITICAL. Merge is blocked until attested.`,
-      escalation:[`security-lead@${ORG}.io`],
-      runbook:`https://wiki.${ORG}.io/runbooks/unattested-critical`,
+      escalation:["security@trustledger.local"],
+      runbook:"/audit",
       notes:[], history:[{ action:"Alert created", at: h(f.file_path, 2) }],
     });
   });
@@ -131,7 +131,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
       fired_at: h("deploy", 3),
       title:`${data.unattested_deploy_count} deploy${data.unattested_deploy_count>1?"s":""} blocked by policy gate`,
       body:`${data.unattested_deploy_count} deployment${data.unattested_deploy_count>1?"s":""} are blocked. Attest all CRITICAL and HIGH files to unblock merges.`,
-      escalation:[`devops@${ORG}.io`],
+      escalation:["devops@trustledger.local"],
       notes:[], history:[{ action:"Alert created", at: h("deploy", 3) }],
     });
   }
@@ -144,7 +144,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
       repo:r.repo, fired_at: h(r.repo, 6),
       title:`Critical AI threshold — ${r.repo.split("/").pop()} at ${(r.ai_pct*100).toFixed(0)}%`,
       body:`${r.repo.split("/").pop()} average AI content (${(r.ai_pct*100).toFixed(0)}%) exceeds the critical 85% threshold. Immediate governance review required.`,
-      escalation:[`ciso@${ORG}.io`, `security-lead@${ORG}.io`],
+      escalation:["ciso@trustledger.local","security@trustledger.local"],
       notes:[], history:[{ action:"Alert created", at: h(r.repo, 6) }],
     });
   });
@@ -158,7 +158,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
       fired_at: h(f.file_path+"high", 12),
       title:`HIGH-risk file awaiting attestation — ${f.file_path.split("/").pop()}`,
       body:`${f.file_path.split("/").pop()} (HIGH, ${(f.ai_pct*100).toFixed(0)}% AI) has not been attested. 48h SLA window.`,
-      escalation:[`team-lead@${ORG}.io`],
+      escalation:["team-lead@trustledger.local"],
       notes:[], history:[{ action:"Alert created", at: h(f.file_path+"high", 12) }],
     });
   });
@@ -173,7 +173,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
       fired_at: new Date(firedMs).toISOString(),
       title:`SLA breach — ${f.file_path.split("/").pop()} unattested 50+ hours`,
       body:`${f.file_path.split("/").pop()} (CRITICAL) has exceeded the 24h attestation SLA. Escalating to security lead.`,
-      escalation:[`security-lead@${ORG}.io`, `ciso@${ORG}.io`],
+      escalation:["security@trustledger.local","ciso@trustledger.local"],
       notes:[], history:[{ action:"Alert created", at: new Date(firedMs).toISOString() }],
     });
   });
@@ -331,6 +331,7 @@ export default function AlertsPage() {
 
   const fetchAlerts = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
+    const orgSlug = profile?.org_slug || "";
 
     // Try real API first when authenticated
     if (profile?.org_id) {
@@ -346,14 +347,47 @@ export default function AlertsPage() {
       } catch { /* fall through to derived */ }
     }
 
-    // No fired alerts on record — derive informational alerts from the
-    // current risk state (real dashboard data, or a dev-seeded snapshot).
+    // No fired alerts on record — derive from risk state.
     const seed = readSeed();
-    const data = seed ?? await api.dashboard(ORG, 90).catch(() => null);
+    const data = seed ?? await api.dashboard(orgSlug || "org", 90).catch(() => null);
     if (data) {
-      // Apply locally-resolved attestations so attested files don't generate alerts
-      const patched = patchDataWithAttestations(data);
-      setBaseAlerts(deriveAlerts(patched));
+      // If we're authenticated, fetch the REAL open violation count from the DB.
+      // This is authoritative — if the DB says 0 open violations, patch the
+      // dashboard data so no false-positive alerts fire (catches cases where
+      // localStorage was cleared but attestations are persisted in Supabase).
+      let patchedData = patchDataWithAttestations(data);
+
+      if (profile?.org_id) {
+        try {
+          const { violations: openViolations } = await authedFetch<{ violations: { file_path: string; risk_score: string; scan_id: string }[] }>(
+            "/api/violations?status=open&limit=200"
+          );
+          const openSet = new Set(
+            (openViolations ?? []).map(v => `${v.scan_id}::${v.file_path}`)
+          );
+          // If DB says 0 open violations, mark all top_risk_files as attested
+          // so deriveAlerts produces no firing alerts for unattested files.
+          if (openSet.size === 0) {
+            patchedData = {
+              ...patchedData,
+              unattested_deploy_count: 0,
+              top_risk_files: patchedData.top_risk_files.map(f => ({ ...f, attested: true })),
+            };
+          } else {
+            // Partial patch: only mark files NOT in the open set as attested
+            patchedData = {
+              ...patchedData,
+              unattested_deploy_count: openSet.size > 0 ? data.unattested_deploy_count : 0,
+              top_risk_files: patchedData.top_risk_files.map(f => {
+                const key = `${f.scan_id}::${f.file_path}`;
+                return openSet.has(key) ? f : { ...f, attested: true };
+              }),
+            };
+          }
+        } catch { /* if violations API fails, use patched data as-is */ }
+      }
+
+      setBaseAlerts(deriveAlerts(patchedData));
       setLoadError(null);
       setLastRefreshed(new Date());
     } else if (profile?.org_id) {
@@ -361,7 +395,7 @@ export default function AlertsPage() {
       setLoadError("Unable to load alerts. Check your connection and try again.");
     }
     if (spinner) setRefreshing(false);
-  }, [profile?.org_id]);
+  }, [profile?.org_id, profile?.org_slug]);
 
   useEffect(() => {
     fetchAlerts();
