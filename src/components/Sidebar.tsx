@@ -341,10 +341,8 @@ export default function Sidebar() {
           setActiveIncidents(rawIncidents.filter((i: { status: string }) =>
             i.status === "active" || i.status === "contained"
           ).length);
-        } else if (!rawIncidents && seed) {
-          // No incidents persisted yet — use DEFAULT_INCIDENTS baseline (2 active in seed)
-          setActiveIncidents(2);
         } else {
+          // No incidents in localStorage means no active incidents
           setActiveIncidents(0);
         }
 
