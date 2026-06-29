@@ -358,14 +358,16 @@ export default function Sidebar() {
     refresh();
     // Interval as safety net; tl:badge event gives instant updates
     const id = setInterval(refresh, 5_000);
-    window.addEventListener("focus",            refresh);
-    window.addEventListener("tl:badge",         refresh);
-    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus",                refresh);
+    window.addEventListener("tl:badge",             refresh);
+    window.addEventListener("tl:attest-complete",   refresh);
+    document.addEventListener("visibilitychange",   refresh);
     return () => {
       clearInterval(id);
-      window.removeEventListener("focus",            refresh);
-      window.removeEventListener("tl:badge",         refresh);
-      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus",                refresh);
+      window.removeEventListener("tl:badge",             refresh);
+      window.removeEventListener("tl:attest-complete",   refresh);
+      document.removeEventListener("visibilitychange",   refresh);
     };
   // Re-run when org_id becomes available so the API call fires after login
   // eslint-disable-next-line react-hooks/exhaustive-deps

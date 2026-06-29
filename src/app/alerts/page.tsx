@@ -418,11 +418,15 @@ export default function AlertsPage() {
     };
     window.addEventListener("storage", onStorage);
     window.addEventListener("tl:attestation", onStorage);
+    // Immediate refresh when PR page attestAll() completes
+    const onAttestComplete = () => fetchAlerts(false);
+    window.addEventListener("tl:attest-complete", onAttestComplete);
 
     return () => {
       clearInterval(id);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("tl:attestation", onStorage);
+      window.removeEventListener("tl:attest-complete", onAttestComplete);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);

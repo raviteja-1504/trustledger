@@ -1167,6 +1167,12 @@ function PRDetailContent() {
     // individual resolveOneFile() call missed a key variant
     resolveViolationsForScan(scan.scan_id);
     setAttestingAll(false);
+    // Notify all open pages (violations, alerts, incidents, sidebar) to
+    // re-fetch immediately instead of waiting for their 30s poll. Also
+    // dispatch tl:attestation which the alerts page specifically listens for.
+    window.dispatchEvent(new CustomEvent("tl:attest-complete", { detail: { scan_id: scan.scan_id } }));
+    window.dispatchEvent(new Event("tl:attestation"));
+    window.dispatchEvent(new Event("tl:badge"));
     await syncCheckRun(true);
   }
 

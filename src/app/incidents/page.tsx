@@ -426,7 +426,20 @@ export default function IncidentsPage() {
         return resolved;
       });
     }, 30_000);
-    return () => clearInterval(id);
+    // Immediate refresh when PR page attestAll() completes
+    const onAttestComplete = () => {
+      setIncidents(prev => {
+        const resolved = autoResolveFromLocalStorage(prev);
+        seedFromAPI(resolved);
+        return resolved;
+      });
+    };
+    window.addEventListener("tl:attest-complete", onAttestComplete);
+
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("tl:attest-complete", onAttestComplete);
+    };
   }, [seedFromAPI, profile?.org_id]);
 
   // Realtime — refresh when incidents change in DB

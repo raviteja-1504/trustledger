@@ -398,6 +398,14 @@ export default function ViolationsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Immediate refresh when PR page attestAll() completes
+  useEffect(() => {
+    const onDone = () => fetchData(false);
+    window.addEventListener("tl:attest-complete", onDone);
+    return () => window.removeEventListener("tl:attest-complete", onDone);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Realtime: refresh when violations table changes in DB
   useViolationsRealtime(profile?.org_id, () => fetchData(false));
 
