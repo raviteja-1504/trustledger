@@ -86,9 +86,10 @@ const SECRET_PATTERNS: PatternRule[] = [
   { re:/(?:api[_-]?key|apikey)\s*=\s*["'`][a-zA-Z0-9_\-]{16,}["'`]/i, label:"Generic API Key",      type:"api_key",     severity:"MEDIUM"   },
 ];
 
-// Files that intentionally contain fake/demo credential strings — scanning
-// these produces false positives. Mirrors scanner.ts DEMO_DATA_FILE_RE.
-const DEMO_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog|NewScanPanel)\.(ts|tsx)$/i;
+// Files that intentionally contain fake/demo credential strings, or that
+// define secret-detection patterns (whose regex source looks like a secret).
+// Mirrors scanner.ts DEMO_DATA_FILE_RE.
+const DEMO_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog|NewScanPanel|secrets\/page)\.(ts|tsx)$/i;
 
 // Known placeholder values that look like secrets but aren't — mirrors
 // scanner.ts isPlaceholderSecretLine logic.

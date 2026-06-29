@@ -268,7 +268,7 @@ function isPlaceholderSecretLine(line: string): boolean {
 // *other* (fictional) findings for the demo UI and test suite — not this
 // app's own runtime logic. Secret-shaped strings here are intentional demo
 // content, not exposed credentials.
-const DEMO_DATA_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog)\.ts$/;
+const DEMO_DATA_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog)\.ts$|\/secrets\/page\.tsx$/;
 
 // Shannon entropy — detects novel secret formats that match no known pattern
 function shannonEntropy(s: string): number {
