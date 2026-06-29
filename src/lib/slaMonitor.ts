@@ -64,17 +64,19 @@ export async function checkSLABreaches(
       const repo      = scanViolations[0]?.scans?.repo_full_name ?? "unknown";
       const pr        = scanViolations[0]?.scans?.pr_number;
 
-      // Check if we already fired an SLA alert for this scan recently (avoid spam)
+      // Skip if there is already an OPEN (firing / acknowledged) SLA alert for this scan.
+      // Using open status instead of a time window prevents duplicate rows piling up
+      // every time the cron runs while the breach is still unresolved.
       const { data: existing } = await db
         .from("alerts")
         .select("id")
         .eq("org_id", org_id)
         .eq("scan_id", scan_id)
         .eq("alert_type", "sla_breach")
-        .gte("fired_at", new Date(Date.now() - 3600_000).toISOString()) // 1h dedup window
+        .in("status", ["firing", "acknowledged", "snoozed"])
         .limit(1) as { data: { id: string }[] | null };
 
-      if (existing && existing.length > 0) continue; // Already alerted
+      if (existing && existing.length > 0) continue; // Open alert already exists, skip
 
       const title = `SLA breach — ${critCount + highCount} file${critCount + highCount > 1 ? "s" : ""} unattested in ${repo.split("/").pop()}`;
       const body  = [

@@ -336,9 +336,19 @@ export default function AlertsPage() {
     // Try real API first when authenticated
     if (profile?.org_id) {
       try {
-        const res = await authedFetch<{ alerts: Alert[] }>("/api/alerts?limit=100");
+        const res = await authedFetch<{ alerts: Alert[] }>("/api/alerts?limit=200");
         if (res.alerts.length > 0) {
-          setBaseAlerts(res.alerts);
+          // Deduplicate: for the same scan + alert_type, keep only the most recent.
+          // This collapses the N duplicate SLA breach alerts (one per cron run) into one.
+          const deduped = new Map<string, Alert>();
+          for (const a of res.alerts) {
+            const key = a.scan_id ? `${a.scan_id}::${a.source}` : a.id;
+            const prev = deduped.get(key);
+            if (!prev || new Date(a.fired_at) > new Date(prev.fired_at)) {
+              deduped.set(key, a);
+            }
+          }
+          setBaseAlerts(Array.from(deduped.values()));
           setLoadError(null);
           setLastRefreshed(new Date());
           if (spinner) setRefreshing(false);
@@ -475,6 +485,19 @@ export default function AlertsPage() {
         : status.charAt(0).toUpperCase() + status.slice(1);
       addHistory(id, label, note);
     });
+
+    // For real DB alerts (UUID format), call PATCH /api/alerts so the
+    // resolved status persists in Supabase and doesn't come back on refresh.
+    if (profile?.org_id) {
+      const isUUID = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+      activeIds.filter(isUUID).forEach(id => {
+        const snoozeHours = snoozeMs ? Math.round(snoozeMs / 3600_000) : undefined;
+        authedFetch("/api/alerts", {
+          method: "PATCH",
+          body: JSON.stringify({ id, status, ...(snoozeHours ? { snooze_hours: snoozeHours } : {}), note }),
+        }).catch(() => { /* non-fatal — localStorage state is source of truth for UI */ });
+      });
+    }
     setSelected(new Set());
     setSnoozeMenu(null);
 
