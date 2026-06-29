@@ -310,6 +310,39 @@ export async function POST(req: NextRequest) {
             org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
             sla_deadline: new Date(Date.now() + slaH * 3600_000).toISOString(),
           })));
+
+          // ── Create a single alert per scan for the sidebar badge ──────────
+          // One P1/P2 alert per scan (not per file) so the alerts page shows
+          // a meaningful entry and the sidebar badge reflects the real state.
+          // Skip if an open alert already exists for this scan (idempotent).
+          const { data: existingAlert } = await db
+            .from("alerts")
+            .select("id")
+            .eq("org_id", orgId)
+            .eq("scan_id", scan.id)
+            .in("status", ["firing", "acknowledged", "snoozed"])
+            .limit(1);
+
+          if (!existingAlert || existingAlert.length === 0) {
+            const critCount = violationFiles.filter(f => f.risk_score === "CRITICAL").length;
+            const highCount = violationFiles.filter(f => f.risk_score === "HIGH").length;
+            const severity  = critCount > 0 ? "P1" : "P2";
+            const repoShort = repoFullName.split("/").pop() ?? repoFullName;
+            await db.from("alerts").insert({
+              org_id:     orgId,
+              alert_type: "policy",
+              severity,
+              status:     "firing",
+              title:      `${critCount + highCount} unattested file${critCount + highCount > 1 ? "s" : ""} in ${repoShort} PR #${prNumber}`,
+              body:       [
+                critCount > 0 ? `${critCount} CRITICAL` : "",
+                highCount > 0 ? `${highCount} HIGH` : "",
+              ].filter(Boolean).join(" and ") + ` file${critCount + highCount > 1 ? "s" : ""} require attestation before merge.`,
+              repo:       repoFullName,
+              scan_id:    scan.id,
+              fired_at:   new Date().toISOString(),
+            });
+          }
         }
 
         // ── Cross-PR attestation inheritance ──────────────────────────────────
@@ -365,6 +398,22 @@ export async function POST(req: NextRequest) {
                 .update({ status: "resolved", resolved_at: now })
                 .eq("scan_id", scan.id)
                 .in("file_path", [...autoAttest.keys()]);
+
+              // Check if all violations for this scan are now resolved —
+              // if so, also resolve the scan's alert so the badge clears.
+              const { count: openViolations } = await db
+                .from("violations")
+                .select("id", { count: "exact", head: true })
+                .eq("scan_id", scan.id)
+                .neq("status", "resolved");
+              if ((openViolations ?? 1) === 0) {
+                await db.from("alerts")
+                  .update({ status: "resolved", resolved_at: now })
+                  .eq("org_id", orgId)
+                  .eq("scan_id", scan.id)
+                  .eq("alert_type", "policy")
+                  .in("status", ["firing", "acknowledged"]);
+              }
             }
           }
         }

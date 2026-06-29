@@ -94,6 +94,22 @@ export async function POST(req: NextRequest) {
       .in("scan_id", scanIds);
   }
 
+  // If all violations for this scan are now resolved, also resolve the
+  // corresponding alert so the sidebar badge clears immediately.
+  const { count: openViolations } = await db
+    .from("violations")
+    .select("id", { count: "exact", head: true })
+    .eq("scan_id", body.scan_id)
+    .neq("status", "resolved");
+  if ((openViolations ?? 1) === 0) {
+    await db.from("alerts")
+      .update({ status: "resolved", resolved_at: now })
+      .eq("org_id", org_id)
+      .eq("scan_id", body.scan_id)
+      .eq("alert_type", "policy")
+      .in("status", ["firing", "acknowledged", "snoozed"]);
+  }
+
   // If this scan came from a GitHub PR and all CRITICAL/HIGH files are now
   // attested, flip the Check Run from "action_required" to "success" so the
   // PR is unblocked.
