@@ -27,6 +27,6 @@
     { "path": "/api/cron/sla",                  "schedule": "0 6 * * *" },
     { "path": "/api/cron/weekly-report",        "schedule": "0 8 * * 1" },
     { "path": "/api/cron/compliance-reminders", "schedule": "0 9 * * *" },
-    { "path": "/api/cron/webhook-retry",        "schedule": "0 12 * * *" },
+    { "path": "/api/cron/webhook-retry",        "schedule": "0 12 * * *" }
   ]
 }
