@@ -1053,7 +1053,19 @@ function PRDetailContent() {
     }
   }
 
-  // Flush any attestations that failed to persist on a previous visit
+  // Flush any attestations that failed to persist on a previous visit.
+  //
+  // Entries are only removed from tl_attest_retry_queue once their retry
+  // actually succeeds. Previously the whole "mine" batch was removed from
+  // the queue up front, before any retry fetch had even started -- if a
+  // retry failed again, the entry vanished from the queue forever (silently
+  // swallowed by .catch(() => {})) with no further attempt ever made, while
+  // the UI had already shown it as attested since the very first (failed)
+  // attempt. resolveOneFile() is also now called on a successful retry,
+  // which the old code never did here -- it only updated attestedSet
+  // (this page's own state), not the tl_violation_statuses override that
+  // the dashboard/SLA/scans pages read for cross-page badge sync, so even a
+  // successful retry never corrected the gap visible on other pages/devices.
   useEffect(() => {
     if (!profile?.org_id || !scan) return;
     try {
@@ -1062,16 +1074,28 @@ function PRDetailContent() {
       if (queue.length === 0) return;
       // Only retry entries for this scan
       const mine = queue.filter(q => q.scan_id === scan.scan_id);
-      const rest = queue.filter(q => q.scan_id !== scan.scan_id);
       if (mine.length === 0) return;
-      localStorage.setItem("tl_attest_retry_queue", JSON.stringify(rest));
       mine.forEach(q =>
         authedFetch("/api/attest", {
           method: "POST",
           body: JSON.stringify({ scan_id: q.scan_id, file_path: q.file_path, reviewer_email: q.reviewer_email, reviewer_github: q.reviewer_github }),
         }).then(() => {
+          // Success — remove just this entry from the queue now, and mark it
+          // resolved both in this page's own state and in the cross-page
+          // localStorage override.
+          try {
+            const current: typeof queue = JSON.parse(localStorage.getItem("tl_attest_retry_queue") ?? "[]");
+            localStorage.setItem("tl_attest_retry_queue", JSON.stringify(
+              current.filter(c => !(c.scan_id === q.scan_id && c.file_path === q.file_path)),
+            ));
+          } catch {}
           setAttestedSet(s => { const n = new Set(s); n.add(q.file_path); return n; });
-        }).catch(() => {})
+          resolveOneFile(q.file_path);
+          window.dispatchEvent(new Event("tl:badge"));
+        }).catch(() => {
+          // Still failing — leave it in the queue so the next visit to this
+          // scan retries again, instead of silently dropping it.
+        })
       );
     } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1080,10 +1104,19 @@ function PRDetailContent() {
   function markAttested(path: string) {
     setAttestedSet(s => { const n = new Set(s); n.add(path); return n; });
     if (scan) {
-      resolveOneFile(path);
       const email = reviewerEmail || "reviewer@trustledger.dev";
       recordActivityEvent(path, email);
-      persistAttestation(path, email, reviewerGithub).then(() => {
+      // resolveOneFile() (the cross-page localStorage "resolved" marker read
+      // by the dashboard/SLA/scans pages) must only fire once the server
+      // call actually succeeds. Calling it unconditionally here used to mark
+      // a file as resolved locally even when persistAttestation() failed and
+      // fell back to the retry queue -- on the originating device the file
+      // looked permanently attested, while the server (and every other
+      // device/browser, which has no copy of this localStorage override)
+      // never actually received the attestation.
+      persistAttestation(path, email, reviewerGithub).then(ok => {
+        if (!ok) return;
+        resolveOneFile(path);
         // Notify all open pages to update badges immediately
         window.dispatchEvent(new CustomEvent("tl:attest-complete", { detail: { scan_id: scan.scan_id, file_path: path } }));
         window.dispatchEvent(new Event("tl:attestation"));
@@ -1173,18 +1206,34 @@ function PRDetailContent() {
     // instead of N × ~750ms sequentially. This means navigation away mid-attest
     // is unlikely, but even if it happens, each file writes its own violation
     // status to localStorage immediately so progress survives navigation.
-    await Promise.allSettled(
+    //
+    // resolveOneFile()/setAttestedSet() only fire for files whose server call
+    // actually succeeded (persistAttestation() returned true). Previously
+    // these ran unconditionally after the await, regardless of success -- a
+    // failed/queued-for-retry attestation still got marked "resolved" in the
+    // localStorage override that the dashboard/SLA/scans pages read for
+    // cross-page badge sync. That made the file look permanently attested on
+    // the originating device even when the server never received it -- a gap
+    // only visible on a different device/browser, which has no copy of that
+    // localStorage override and shows the true (unattested) server state.
+    const results = await Promise.allSettled(
       toAttest.map(async f => {
-        await persistAttestation(f.file_path, email, github);
-        // Write to localStorage immediately so progress survives navigation
-        resolveOneFile(f.file_path);
-        setAttestedSet(s => { const n = new Set(s); n.add(f.file_path); return n; });
-        recordActivityEvent(f.file_path, email);
+        const ok = await persistAttestation(f.file_path, email, github);
+        if (ok) {
+          resolveOneFile(f.file_path);
+          setAttestedSet(s => { const n = new Set(s); n.add(f.file_path); return n; });
+          recordActivityEvent(f.file_path, email);
+        }
+        return ok;
       })
     );
+    const allSucceeded = results.every(r => r.status === "fulfilled" && r.value === true);
     // Belt-and-suspenders: mark all scan violations resolved in case any
-    // individual resolveOneFile() call missed a key variant
-    resolveViolationsForScan(scan.scan_id);
+    // individual resolveOneFile() call missed a key variant -- but only when
+    // every file in this batch genuinely persisted; otherwise this would
+    // re-introduce the same "looks resolved, isn't" gap for files that failed
+    // and are sitting in the retry queue.
+    if (allSucceeded) resolveViolationsForScan(scan.scan_id);
     setAttestingAll(false);
 
     // Final alert-resolution recheck. Each parallel /api/attest call above
