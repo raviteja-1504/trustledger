@@ -226,7 +226,12 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // ANY property access on an object name ending in "s" followed by a long
   // property name (values.someVeryLongPropertyName, options.anotherFieldHere,
   // settings.xyz) — extremely common JS/TS syntax, not a Vault token shape.
-  { re: /(?<![\w.])s\.[A-Za-z0-9]{24,}(?![.\w])/,                              label: "HashiCorp Vault token",       severity: "critical" },
+  // Also excludes a following "(" — Go's idiomatic single-letter receiver `s`
+  // (s *Server, s *Service) makes s.SomeLongMethodName(...) syntactically
+  // identical to a real Vault token by shape alone; a real token value is
+  // never itself a function call, and every Go method/function call requires
+  // "(" even with zero arguments, so this exclusion is safe.
+  { re: /(?<![\w.])s\.[A-Za-z0-9]{24,}(?![.\w(])/,                             label: "HashiCorp Vault token",       severity: "critical" },
   { re: /(?:DD_API_KEY|DATADOG_API_KEY)[^=\n]*=\s*["'][A-Za-z0-9]{32,}["']/i, label: "Datadog API key",             severity: "high"     },
   { re: /xkeysib-[a-f0-9]{64}-[A-Za-z0-9_-]+/,                                label: "Brevo API key",               severity: "critical" },
   { re: /key-[a-f0-9]{32}/,                                                     label: "Mailgun API key",             severity: "critical" },
