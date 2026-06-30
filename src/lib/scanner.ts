@@ -222,7 +222,11 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /AC[a-z0-9]{32}/,                                                       label: "Twilio Account SID",          severity: "critical" },
   { re: /SK[a-z0-9]{32}/,                                                       label: "Twilio Auth Token",           severity: "critical" },
   { re: /npm_[A-Za-z0-9]{36}/,                                                  label: "NPM access token",            severity: "critical" },
-  { re: /s\.[A-Za-z0-9]{24,}/,                                                  label: "HashiCorp Vault token",       severity: "critical" },
+  // Word-boundary guards required: without them, "s." + 24 alnum chars matches
+  // ANY property access on an object name ending in "s" followed by a long
+  // property name (values.someVeryLongPropertyName, options.anotherFieldHere,
+  // settings.xyz) — extremely common JS/TS syntax, not a Vault token shape.
+  { re: /(?<![\w.])s\.[A-Za-z0-9]{24,}(?![.\w])/,                              label: "HashiCorp Vault token",       severity: "critical" },
   { re: /(?:DD_API_KEY|DATADOG_API_KEY)[^=\n]*=\s*["'][A-Za-z0-9]{32,}["']/i, label: "Datadog API key",             severity: "high"     },
   { re: /xkeysib-[a-f0-9]{64}-[A-Za-z0-9_-]+/,                                label: "Brevo API key",               severity: "critical" },
   { re: /key-[a-f0-9]{32}/,                                                     label: "Mailgun API key",             severity: "critical" },
