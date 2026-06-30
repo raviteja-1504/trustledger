@@ -312,6 +312,7 @@ export default function AlertsPage() {
   const [filterSev,   setFilterSev]   = useState<AlertSeverity | "all">("all");
   const [filterStat,  setFilterStat]  = useState<AlertStatus | "all">("all");
   const [filterSrc,   setFilterSrc]   = useState<AlertSource | "all">("all");
+  const [filterRepo,  setFilterRepo]  = useState("all");
   const [search,      setSearch]      = useState("");
   const [expanded,    setExpanded]    = useState<string | null>(null);
   const [selected,    setSelected]    = useState<Set<string>>(new Set());
@@ -540,13 +541,16 @@ export default function AlertsPage() {
     setNoteInput(p => ({ ...p, [id]:"" }));
   }
 
+  const repos = useMemo(() => Array.from(new Set(alerts.filter(a => a.repo).map(a => a.repo as string))), [alerts]);
+
   const filtered = useMemo(() => alerts.filter(a => {
     if (filterSev  !== "all" && a.severity !== filterSev)  return false;
     if (filterStat !== "all" && a.status   !== filterStat) return false;
     if (filterSrc  !== "all" && a.source   !== filterSrc)  return false;
+    if (filterRepo !== "all" && a.repo     !== filterRepo) return false;
     if (search) { const q = search.toLowerCase(); if (![a.title, a.body, a.repo ?? ""].join(" ").toLowerCase().includes(q)) return false; }
     return true;
-  }), [alerts, filterSev, filterStat, filterSrc, search]);
+  }), [alerts, filterSev, filterStat, filterSrc, filterRepo, search]);
 
   // Group related alerts
   const grouped = useMemo(() => {
@@ -996,6 +1000,15 @@ export default function AlertsPage() {
               <option key={s} value={s}>{s.charAt(0).toUpperCase()+s.slice(1)}</option>
             ))}
           </select>
+
+          {/* Repo */}
+          {repos.length > 1 && (
+            <select value={filterRepo} onChange={e => setFilterRepo(e.target.value)}
+              className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
+              <option value="all">All Repos</option>
+              {repos.map(r => <option key={r} value={r}>{r.split("/").pop()}</option>)}
+            </select>
+          )}
 
           {/* Select all */}
           <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer ml-auto">

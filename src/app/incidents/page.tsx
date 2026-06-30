@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
@@ -352,13 +352,14 @@ export default function IncidentsPage() {
   const [activeTab,    setActiveTab]    = useState<"incidents" | "playbooks">("incidents");
   const [filterStatus, setFilterStatus] = useState<IncidentStatus | "all">("active");
   const [filterSev,    setFilterSev]    = useState<IncidentSeverity | "all">("all");
+  const [filterRepo,   setFilterRepo]   = useState("all");
   const [showNewForm,   setShowNewForm]   = useState(false);
   const [refreshing,    setRefreshing]    = useState(false);
   const [newEntry,      setNewEntry]      = useState("");
   const [showEntryForm, setShowEntryForm] = useState(false);
   const [newInc, setNewInc] = useState({ title:"", type:"secret-exposed" as IncidentType, severity:"P2" as IncidentSeverity, affected_repo:"", description:"" });
   const [teamMembers,  setTeamMembers]  = useState<{ email: string; name: string | null; role: string }[]>([]);
-  const filtersActive = filterStatus !== "all" || filterSev !== "all";
+  const filtersActive = filterStatus !== "all" || filterSev !== "all" || filterRepo !== "all";
 
   // Fetch real team members for stakeholder display and new incident defaults
   useEffect(() => {
@@ -546,9 +547,12 @@ export default function IncidentsPage() {
     setNewInc({ title:"", type:"secret-exposed", severity:"P2", affected_repo:"", description:"" });
   }
 
+  const repos = useMemo(() => Array.from(new Set(incidents.filter(i => i.affected_repo).map(i => i.affected_repo as string))), [incidents]);
+
   const filtered = incidents.filter(i => {
     if (filterStatus !== "all" && i.status   !== filterStatus) return false;
     if (filterSev    !== "all" && i.severity !== filterSev)    return false;
+    if (filterRepo   !== "all" && i.affected_repo !== filterRepo) return false;
     return true;
   });
 
@@ -756,7 +760,7 @@ export default function IncidentsPage() {
                     {filtered.length} of {incidents.length} incident{incidents.length!==1?"s":""}
                   </span>
                   {filtersActive && (
-                    <button onClick={()=>{setFilterStatus("all");setFilterSev("all");}}
+                    <button onClick={()=>{setFilterStatus("all");setFilterSev("all");setFilterRepo("all");}}
                       className="text-[10px] font-bold text-rose-500 hover:text-rose-700 transition-colors">
                       Clear filters ×
                     </button>
@@ -778,6 +782,13 @@ export default function IncidentsPage() {
                     </button>
                   ))}
                 </div>
+                {repos.length > 1 && (
+                  <select value={filterRepo} onChange={e=>setFilterRepo(e.target.value)}
+                    className="w-full text-[11px] font-semibold text-gray-600 bg-gray-100 border-0 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                    <option value="all">All Repos</option>
+                    {repos.map(r => <option key={r} value={r}>{r.split("/").pop()}</option>)}
+                  </select>
+                )}
               </div>
               {filtered.length === 0 ? (
                 active === 0 && incidents.length > 0 ? (

@@ -38,6 +38,7 @@ interface RiskItem {
   identified_at: string;
   auto_derived: boolean;     // derived from scan data vs manually entered
   notes: string[];
+  repo?: string;
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────────
@@ -76,104 +77,121 @@ function saveStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.string
 
 // ── Derive risks from scan data ────────────────────────────────────────────────
 
+function groupByRepo<T>(items: T[], repoOf: (t: T) => string): Map<string, T[]> {
+  const m = new Map<string, T[]>();
+  for (const item of items) {
+    const repo = repoOf(item);
+    const arr = m.get(repo) ?? [];
+    arr.push(item);
+    m.set(repo, arr);
+  }
+  return m;
+}
+
 function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[]): RiskItem[] {
   const now  = new Date().toISOString().split("T")[0];
   const risks: RiskItem[] = [];
   const owner = (i: number) => owners.length ? owners[i % owners.length] : "unassigned";
+  const repoSlug = (r: string) => r.replace(/[^a-zA-Z0-9]/g, "-");
 
-  // From top_risk_files
+  // From top_risk_files — split per repo so each risk maps to exactly one
+  // repo and the Risk Register can be filtered by repo like every other
+  // findings page in the app.
   const critUnatt = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested);
   const highUnatt = data.top_risk_files.filter(f => f.risk_score === "HIGH"     && !f.attested);
 
-  if (critUnatt.length > 0) {
+  groupByRepo(critUnatt, f => f.repo).forEach((files, repo) => {
     risks.push({
-      id:"DR-CRIT-UNATT", auto_derived:true, status:"open", treatment:"mitigate",
-      category:"ai-code", likelihood:5, impact:5,
-      title:`${critUnatt.length} CRITICAL file${critUnatt.length>1?"s":""} unattested — merge blocked`,
-      description:`${critUnatt.map(f=>f.file_path.split("/").pop()).join(", ")} flagged CRITICAL (avg ${(critUnatt.reduce((s,f)=>s+f.ai_pct,0)/critUnatt.length*100).toFixed(0)}% AI). Policy gate is blocking deploys.`,
+      id:`DR-CRIT-UNATT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
+      category:"ai-code", likelihood:5, impact:5, repo,
+      title:`${files.length} CRITICAL file${files.length>1?"s":""} unattested in ${repo.split("/").pop()} — merge blocked`,
+      description:`${files.map(f=>f.file_path.split("/").pop()).join(", ")} flagged CRITICAL (avg ${(files.reduce((s,f)=>s+f.ai_pct,0)/files.length*100).toFixed(0)}% AI). Policy gate is blocking deploys.`,
       owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
       mitigation:"Assign reviewer to each CRITICAL file. Attest via /pr/{scan_id} before merge deadline.",
       identified_at:now, notes:[],
     });
-  }
+  });
 
-  if (highUnatt.length > 0) {
+  groupByRepo(highUnatt, f => f.repo).forEach((files, repo) => {
     risks.push({
-      id:"DR-HIGH-UNATT", auto_derived:true, status:"open", treatment:"mitigate",
-      category:"ai-code", likelihood:4, impact:4,
-      title:`${highUnatt.length} HIGH-risk file${highUnatt.length>1?"s":""} awaiting attestation`,
-      description:`${highUnatt.map(f=>f.file_path.split("/").pop()).join(", ")} flagged HIGH. 48h SLA window applies.`,
+      id:`DR-HIGH-UNATT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
+      category:"ai-code", likelihood:4, impact:4, repo,
+      title:`${files.length} HIGH-risk file${files.length>1?"s":""} awaiting attestation in ${repo.split("/").pop()}`,
+      description:`${files.map(f=>f.file_path.split("/").pop()).join(", ")} flagged HIGH. 48h SLA window applies.`,
       owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
       mitigation:"Schedule security review. Attest via the PR detail page within SLA window.",
       identified_at:now, notes:[],
     });
-  }
+  });
 
-  // Hardcoded secrets from risk_indicators
-  const secretFiles = scans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("hardcoded-secret")));
-  if (secretFiles.length > 0) {
-    risks.push({
-      id:"DR-SECRETS", auto_derived:true, status:"open", treatment:"mitigate",
-      category:"secrets", likelihood:5, impact:5,
-      residual_likelihood:2, residual_impact:3,
-      title:`${secretFiles.length} hardcoded credential${secretFiles.length>1?"s":""} detected`,
-      description:`${secretFiles.map(f=>f.file_path.split("/").pop()).join(", ")} contain API keys, passwords, or tokens in source. Treat as compromised.`,
-      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
-      mitigation:"Rotate all exposed credentials immediately. Move to AWS Secrets Manager or HashiCorp Vault. Add gitleaks pre-commit hook.",
-      related_cve:"CVE-2021-42013", related_link:"/secrets",
-      identified_at:now, notes:[],
-    });
-  }
+  // Hardcoded secrets from risk_indicators — scans already carry a repo each
+  groupByRepo(scans, s => s.repo).forEach((repoScans, repo) => {
+    const secretFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("hardcoded-secret")));
+    if (secretFiles.length > 0) {
+      risks.push({
+        id:`DR-SECRETS-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
+        category:"secrets", likelihood:5, impact:5, repo,
+        residual_likelihood:2, residual_impact:3,
+        title:`${secretFiles.length} hardcoded credential${secretFiles.length>1?"s":""} detected in ${repo.split("/").pop()}`,
+        description:`${secretFiles.map(f=>f.file_path.split("/").pop()).join(", ")} contain API keys, passwords, or tokens in source. Treat as compromised.`,
+        owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
+        mitigation:"Rotate all exposed credentials immediately. Move to AWS Secrets Manager or HashiCorp Vault. Add gitleaks pre-commit hook.",
+        related_cve:"CVE-2021-42013", related_link:"/secrets",
+        identified_at:now, notes:[],
+      });
+    }
 
-  // Eval/exec
-  const evalFiles = scans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("eval-exec")));
-  if (evalFiles.length > 0) {
-    risks.push({
-      id:"DR-EVAL-EXEC", auto_derived:true, status:"mitigating", treatment:"mitigate",
-      category:"ai-code", likelihood:4, impact:5,
-      residual_likelihood:2, residual_impact:4,
-      title:`eval()/exec() RCE pattern in ${evalFiles.length} file${evalFiles.length>1?"s":""}`,
-      description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
-      owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
-      mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
-      related_cve:"CVE-2021-44228", related_link:"/vulnerabilities",
-      identified_at:now, notes:[],
-    });
-  }
+    // Eval/exec
+    const evalFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("eval-exec")));
+    if (evalFiles.length > 0) {
+      risks.push({
+        id:`DR-EVAL-EXEC-${repoSlug(repo)}`, auto_derived:true, status:"mitigating", treatment:"mitigate",
+        category:"ai-code", likelihood:4, impact:5, repo,
+        residual_likelihood:2, residual_impact:4,
+        title:`eval()/exec() RCE pattern in ${evalFiles.length} file${evalFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
+        description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
+        owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
+        mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
+        related_cve:"CVE-2021-44228", related_link:"/vulnerabilities",
+        identified_at:now, notes:[],
+      });
+    }
 
-  // SQL injection
-  const sqlFiles = scans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("sql-injection")));
-  if (sqlFiles.length > 0) {
-    risks.push({
-      id:"DR-SQL-INJECT", auto_derived:true, status:"open", treatment:"mitigate",
-      category:"ai-code", likelihood:5, impact:5,
-      residual_likelihood:1, residual_impact:2,
-      title:`SQL Injection pattern in ${sqlFiles.length} file${sqlFiles.length>1?"s":""}`,
-      description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
-      owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
-      mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
-      related_cve:"CVE-2023-20052", related_link:"/vulnerabilities",
-      identified_at:now, notes:[],
-    });
-  }
+    // SQL injection
+    const sqlFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("sql-injection")));
+    if (sqlFiles.length > 0) {
+      risks.push({
+        id:`DR-SQL-INJECT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
+        category:"ai-code", likelihood:5, impact:5, repo,
+        residual_likelihood:1, residual_impact:2,
+        title:`SQL Injection pattern in ${sqlFiles.length} file${sqlFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
+        description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
+        owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
+        mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
+        related_cve:"CVE-2023-20052", related_link:"/vulnerabilities",
+        identified_at:now, notes:[],
+      });
+    }
 
-  // JWT bypass
-  const jwtFiles = scans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("jwt-none-alg")));
-  if (jwtFiles.length > 0) {
-    risks.push({
-      id:"DR-JWT-BYPASS", auto_derived:true, status:"mitigating", treatment:"mitigate",
-      category:"ai-code", likelihood:4, impact:5,
-      residual_likelihood:1, residual_impact:3,
-      title:`JWT 'none' algorithm bypass in ${jwtFiles.length} file${jwtFiles.length>1?"s":""}`,
-      description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
-      owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
-      mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
-      related_cve:"CVE-2022-21449", related_link:"/vulnerabilities",
-      identified_at:now, notes:[],
-    });
-  }
+    // JWT bypass
+    const jwtFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("jwt-none-alg")));
+    if (jwtFiles.length > 0) {
+      risks.push({
+        id:`DR-JWT-BYPASS-${repoSlug(repo)}`, auto_derived:true, status:"mitigating", treatment:"mitigate",
+        category:"ai-code", likelihood:4, impact:5, repo,
+        residual_likelihood:1, residual_impact:3,
+        title:`JWT 'none' algorithm bypass in ${jwtFiles.length} file${jwtFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
+        description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
+        owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
+        mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
+        related_cve:"CVE-2022-21449", related_link:"/vulnerabilities",
+        identified_at:now, notes:[],
+      });
+    }
+  });
 
-  // Deploy blocked
+  // Deploy blocked — genuinely org-wide (aggregated across all repos), no
+  // single repo to attribute it to, so left without a repo field.
   if (data.unattested_deploy_count > 0) {
     risks.push({
       id:"DR-DEPLOY-BLOCK", auto_derived:true, status:"open", treatment:"mitigate",
@@ -190,8 +208,8 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
   // Low attestation repos
   data.repos.filter(r => r.attestation_rate < 0.6).forEach(r => {
     risks.push({
-      id:`DR-LOW-ATT-${r.repo.replace("/","-")}`, auto_derived:true, status:"open", treatment:"mitigate",
-      category:"compliance", likelihood:3, impact:4,
+      id:`DR-LOW-ATT-${repoSlug(r.repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
+      category:"compliance", likelihood:3, impact:4, repo:r.repo,
       title:`Low attestation — ${r.repo.split("/").pop()} at ${Math.round(r.attestation_rate*100)}%`,
       description:`${r.repo.split("/").pop()} attestation coverage (${Math.round(r.attestation_rate*100)}%) is below the 60% compliance threshold. Audit risk for SOC 2 CC8.1.`,
       owner:owner(2), due_date:new Date(Date.now()+7*86400000).toISOString().split("T")[0],
@@ -337,6 +355,7 @@ export default function RiskRegisterPage() {
   const [filterStatus, setFilterStatus] = useState<RiskStatus | "all">("all");
   const [filterCat,    setFilterCat]    = useState<RiskCategory | "all">("all");
   const [filterOwner,  setFilterOwner]  = useState("all");
+  const [filterRepo,   setFilterRepo]   = useState("all");
   const [heatFilter,   setHeatFilter]   = useState<[number,number]|null>(null);
   const [search,       setSearch]       = useState("");
   const [sortBy,       setSortBy]       = useState<"score" | "due">("score");
@@ -438,11 +457,14 @@ export default function RiskRegisterPage() {
     });
   }
 
+  const repos = useMemo(() => Array.from(new Set(allRisks.filter(r => r.repo).map(r => r.repo as string))), [allRisks]);
+
   const filtered = useMemo(() => {
     const list = allRisks.filter(r => {
       if (filterStatus !== "all" && r.status   !== filterStatus) return false;
       if (filterCat    !== "all" && r.category !== filterCat)    return false;
       if (filterOwner  !== "all" && r.owner    !== filterOwner)  return false;
+      if (filterRepo   !== "all" && r.repo     !== filterRepo)   return false;
       if (heatFilter   !== null  && !(r.likelihood===heatFilter[0] && r.impact===heatFilter[1])) return false;
       if (search) { const q=search.toLowerCase(); if (![r.title,r.description,r.id,r.related_cve??""].join(" ").toLowerCase().includes(q)) return false; }
       return true;
@@ -455,7 +477,7 @@ export default function RiskRegisterPage() {
       if (db===null) return -1;
       return da - db;
     });
-  }, [allRisks, filterStatus, filterCat, filterOwner, heatFilter, search, sortBy]);
+  }, [allRisks, filterStatus, filterCat, filterOwner, filterRepo, heatFilter, search, sortBy]);
 
   const openRisks  = allRisks.filter(r=>r.status==="open").length;
   const overdueRisks = allRisks.filter(r=>r.status!=="closed" && (daysLeft(r.due_date)??Infinity)<0).length;
@@ -677,6 +699,13 @@ export default function RiskRegisterPage() {
             <option value="all">All Owners</option>
             {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
           </select>
+          {repos.length > 1 && (
+            <select value={filterRepo} onChange={e=>setFilterRepo(e.target.value)}
+              className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
+              <option value="all">All Repos</option>
+              {repos.map(r=><option key={r} value={r}>{r.split("/").pop()}</option>)}
+            </select>
+          )}
           <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-xl">
             {(["score","due"] as const).map(s=>(
               <button key={s} onClick={()=>setSortBy(s)}
@@ -685,8 +714,8 @@ export default function RiskRegisterPage() {
               </button>
             ))}
           </div>
-          {(search||filterStatus!=="all"||filterCat!=="all"||filterOwner!=="all"||heatFilter)&&(
-            <button onClick={()=>{setSearch("");setFilterStatus("all");setFilterCat("all");setFilterOwner("all");setHeatFilter(null);}}
+          {(search||filterStatus!=="all"||filterCat!=="all"||filterOwner!=="all"||filterRepo!=="all"||heatFilter)&&(
+            <button onClick={()=>{setSearch("");setFilterStatus("all");setFilterCat("all");setFilterOwner("all");setFilterRepo("all");setHeatFilter(null);}}
               className="text-xs font-bold text-rose-600 hover:text-rose-800 px-2 py-1 rounded-lg hover:bg-rose-50 transition-colors">
               Clear all
             </button>
