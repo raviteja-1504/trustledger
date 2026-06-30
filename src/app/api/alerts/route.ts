@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
+import { hasOpenRepoViolations } from "@/lib/repoViolations";
 
 // ── GET — list alerts ──────────────────────────────────────────────────────────
 
@@ -74,7 +75,46 @@ export async function GET(req: NextRequest) {
   const { data, error: qErr } = await query;
   if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
 
-  return NextResponse.json({ alerts: (data ?? []).map(row => toUiAlert(row as AlertRow)) });
+  const rows = (data ?? []) as AlertRow[];
+
+  // Self-healing: attestation is supposed to auto-resolve policy alerts (see
+  // /api/attest and /api/alerts/recheck), but that depends on a client-side
+  // call completing — e.g. a fire-and-forget request cancelled by navigation,
+  // or two reviewers attesting concurrently outside any single request's
+  // view. Rather than rely on a cron (removed per org policy) to catch
+  // stragglers, opportunistically re-verify any still-active policy alerts
+  // whenever the list is read, and resolve the ones whose repo genuinely has
+  // no open violations left. Capped to a handful of distinct repos per
+  // request so this stays cheap on the common case (0-1 active alerts).
+  const activePolicyRepos = [...new Set(
+    rows
+      .filter(r => r.alert_type === "policy" && r.repo && ["firing", "acknowledged", "snoozed"].includes(r.status))
+      .map(r => r.repo as string),
+  )].slice(0, 10);
+
+  if (activePolicyRepos.length > 0) {
+    const now = new Date().toISOString();
+    const staleRepos: string[] = [];
+    for (const repo of activePolicyRepos) {
+      if (!(await hasOpenRepoViolations(db, org_id, repo))) staleRepos.push(repo);
+    }
+    if (staleRepos.length > 0) {
+      await db.from("alerts")
+        .update({ status: "resolved", resolved_at: now })
+        .eq("org_id", org_id)
+        .eq("alert_type", "policy")
+        .in("repo", staleRepos)
+        .in("status", ["firing", "acknowledged", "snoozed"]);
+      for (const r of rows) {
+        if (r.alert_type === "policy" && r.repo && staleRepos.includes(r.repo) && r.status !== "resolved") {
+          r.status = "resolved";
+          r.resolved_at = now;
+        }
+      }
+    }
+  }
+
+  return NextResponse.json({ alerts: rows.map(row => toUiAlert(row)) });
 }
 
 // ── POST — fire a new alert + deliver it ──────────────────────────────────────

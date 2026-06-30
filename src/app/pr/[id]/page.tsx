@@ -1102,6 +1102,7 @@ function PRDetailContent() {
             authedFetch("/api/alerts/recheck", {
               method: "POST",
               body: JSON.stringify({ scan_id: scan.scan_id }),
+              keepalive: true,
             }).catch(() => {});
           }
         }
@@ -1195,10 +1196,19 @@ function PRDetailContent() {
     // This recheck runs once, after Promise.allSettled has confirmed every
     // individual attest call has fully completed, so it sees the true final
     // state instead of a mid-flight race.
+    //
+    // Awaited (not fire-and-forget) with keepalive: true — by this point all
+    // attestation progress is already persisted (localStorage + DB), so there
+    // is nothing left to lose by waiting. A fire-and-forget fetch here was
+    // found to be silently cancelled when the user navigated away right after
+    // seeing files marked attested, since this call fires last in the
+    // sequence; keepalive ensures the browser completes the request even if
+    // the page unloads mid-flight.
     if (profile?.org_id) {
-      authedFetch("/api/alerts/recheck", {
+      await authedFetch("/api/alerts/recheck", {
         method: "POST",
         body: JSON.stringify({ scan_id: scan.scan_id }),
+        keepalive: true,
       }).catch(() => {});
     }
 
