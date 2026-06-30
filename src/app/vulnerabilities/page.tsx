@@ -170,6 +170,7 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
           code={file.content ?? `# Content not available\n# File: ${file.file_path}`}
           language={lang}
           filename={file.file_path}
+          indicators={file.indicators}
           riskIndicators={file.risk_indicators}
           maxHeight="320px"
         />

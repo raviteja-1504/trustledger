@@ -184,6 +184,7 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
           code={content}
           language={lang}
           filename={filePath}
+          indicators={file?.indicators}
           riskIndicators={indicators}
           maxHeight="320px"
         />

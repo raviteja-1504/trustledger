@@ -360,6 +360,7 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
                 code={file.content}
                 language={file.language}
                 filename={file.file_path}
+                indicators={file.indicators}
                 riskIndicators={file.risk_indicators}
               />
             ) : (
@@ -743,6 +744,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                     code={file.content}
                     language={file.language}
                     filename={file.file_path}
+                    indicators={file.indicators}
                     riskIndicators={file.risk_indicators}
                   />
                 </div>

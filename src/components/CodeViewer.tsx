@@ -1,9 +1,21 @@
 "use client";
 
+interface LineIndicator {
+  line?:    number;
+  label:    string;
+  severity: string;
+  detail?:  string;
+}
+
 interface Props {
   code: string;
   language?: string;
   filename?: string;
+  // Real per-line findings from the scanner (file.indicators from /api/scans/[id]),
+  // each with a .line number — used to highlight the exact risky line. Falls back
+  // to file-level risk_indicators (string IDs, no line info) only when per-line
+  // data isn't available, in which case no line-level highlighting is shown.
+  indicators?: LineIndicator[];
   riskIndicators?: string[];
   maxHeight?: string;
 }
@@ -60,23 +72,22 @@ const TOKEN_CLS: Record<TokType, string> = {
   plain:    "text-slate-300",
 };
 
-// Lines containing these patterns get a risk highlight
-const RISKY: RegExp[] = [
-  /\beval\s*\(/,
-  /\bexec\s*\(/,
-  /password\s*=\s*["'][^"']{4,}/i,
-  /secret\s*=\s*["'][^"']{4,}/i,
-  /api_key\s*=\s*["'][^"']{4,}/i,
-  /sk_live_/i,
-  /whsec_/i,
-  /verify_signature.*False/i,
-  /\.execute\(\s*[^?][^,)]{10,}\)/,
-  /["']\s*\+\s*str\(/,
-  /f["'][^"']*\{[a-zA-Z_]/,
-];
-
-export default function CodeViewer({ code, language = "python", filename, riskIndicators = [], maxHeight = "380px" }: Props) {
+export default function CodeViewer({ code, language = "python", filename, indicators = [], maxHeight = "380px" }: Props) {
   const lines = code.split("\n");
+
+  // Map line number -> indicators on that line, from the real scanner output
+  // (the same data driving the PR page's red-line highlights). Replaces a
+  // previous hardcoded RISKY regex list that, among other overly-broad
+  // patterns, flagged ANY Python f-string containing a variable
+  // (/f["'][^"']*\{[a-zA-Z_]/) as risky — matching nearly every f-string
+  // print() statement in a typical file, regardless of actual risk.
+  const byLine = new Map<number, LineIndicator[]>();
+  for (const ind of indicators) {
+    if (ind.line == null) continue;
+    const arr = byLine.get(ind.line) ?? [];
+    arr.push(ind);
+    byLine.set(ind.line, arr);
+  }
 
   return (
     <div className="rounded-xl overflow-hidden border border-slate-700/60 text-xs font-mono">
@@ -90,7 +101,11 @@ export default function CodeViewer({ code, language = "python", filename, riskIn
         <table className="w-full border-collapse">
           <tbody>
             {lines.map((line, idx) => {
-              const isRisky = RISKY.some(re => re.test(line));
+              const lineIndicators = byLine.get(idx + 1) ?? [];
+              const isRisky = lineIndicators.length > 0;
+              const title = isRisky
+                ? lineIndicators.map(i => i.label).join(", ")
+                : undefined;
               return (
                 <tr
                   key={idx}
@@ -101,7 +116,7 @@ export default function CodeViewer({ code, language = "python", filename, riskIn
                   </td>
                   <td className="pl-4 py-px whitespace-pre leading-relaxed">
                     {isRisky && (
-                      <span className="text-rose-500 mr-2 text-[10px]" title="Risk pattern detected">⚠</span>
+                      <span className="text-rose-500 mr-2 text-[10px]" title={title}>⚠</span>
                     )}
                     {tokenizeLine(line, language).map((tok, ti) => (
                       <span key={ti} className={TOKEN_CLS[tok.type]}>{tok.text}</span>
