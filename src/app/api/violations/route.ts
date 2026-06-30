@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationUpdateSchema } from "@/lib/validation";
+import { cacheDel, cacheKeys } from "@/lib/cache";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -27,7 +28,11 @@ export async function GET(req: NextRequest) {
     prAuthorFilter = member?.github_login ?? null;
   }
 
-  const dedupe = status === "open" || status === "in_review";
+  // "unresolved" = open OR in_review — used by the SLA page, which cares about
+  // breach deadlines regardless of review status. Dashboard's own breach count
+  // also includes both, so this keeps the two screens in agreement.
+  const isUnresolved = status === "unresolved";
+  const dedupe = status === "open" || status === "in_review" || isUnresolved;
 
   // Filter violations through their parent scan's pr_author when scoped
   let query = db
@@ -37,7 +42,8 @@ export async function GET(req: NextRequest) {
     .order("created_at", { ascending: false })
     .limit(limit);
 
-  if (status && !dedupe) query = query.eq("status", status);
+  if (isUnresolved)         query = query.neq("status", "resolved");
+  else if (status && !dedupe) query = query.eq("status", status);
   if (repo)              query = query.eq("scans.repo_full_name", repo);
   if (prAuthorFilter)    query = query.eq("scans.pr_author", prAuthorFilter);
 
@@ -57,7 +63,9 @@ export async function GET(req: NextRequest) {
       const key   = `${scan?.repo_full_name ?? ""}::${v.file_path}`;
       if (!latestByFile.has(key)) latestByFile.set(key, v);
     });
-    violations = Array.from(latestByFile.values()).filter(v => v.status === status);
+    violations = Array.from(latestByFile.values()).filter(v =>
+      isUnresolved ? v.status !== "resolved" : v.status === status
+    );
   }
 
   return NextResponse.json({ violations });
@@ -113,6 +121,10 @@ export async function PATCH(req: NextRequest) {
     resource_id:   body.id,
     payload: { status: body.status, file_path: data.file_path, risk_score: data.risk_score },
   });
+
+  // Invalidate dashboard cache so resolving a violation here is reflected
+  // immediately in unattested_deploy_count / SLA breach counts.
+  await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
 
   return NextResponse.json({ ok: true, violation: data });
 }

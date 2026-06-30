@@ -160,9 +160,11 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  // Invalidate dashboard cache so new attestation is reflected immediately
-  await cacheDel(cacheKeys.dashboard(org_id, 90));
-  await cacheDel(cacheKeys.dashboard(org_id, 30));
+  // Invalidate dashboard cache so new attestation is reflected immediately.
+  // Must cover every day-window the dashboard UI can request (7/30/90) —
+  // previously only 90 and 30 were cleared, so viewing the 7-day range right
+  // after attesting served a stale unattested_deploy_count for up to TTL.DASHBOARD.
+  await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
 
   return NextResponse.json({
     attestation_id: attestation.id,

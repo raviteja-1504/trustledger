@@ -75,7 +75,9 @@ export default function SLAPage() {
     }
     if (!profile?.org_id) { setLoading(false); setRefreshing(false); return; }
     try {
-      const res = await authedFetch<{ violations: Array<Record<string, unknown>> }>("/api/violations?status=open&limit=200");
+      // "unresolved" = open + in_review — matches the dashboard's SLA breach
+      // count, which includes in_review violations whose deadline has passed.
+      const res = await authedFetch<{ violations: Array<Record<string, unknown>> }>("/api/violations?status=unresolved&limit=500");
       const now = Date.now();
       const mapped = (res.violations ?? [])
         .filter(v => v.sla_deadline)
