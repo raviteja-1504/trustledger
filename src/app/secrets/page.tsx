@@ -7,6 +7,7 @@ import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import type { FileIndicator } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -36,96 +37,54 @@ interface SecretFinding {
 
 const STORAGE_KEY = "tl_secret_status";
 
-// ── Secret detection patterns ──────────────────────────────────────────────────
+// ── Secret detection ─────────────────────────────────────────────────────────
+//
+// Findings come from the real scanner (analyzeFile() in lib/scanner.ts, via
+// /api/scans/[id]'s freshly-computed `indicators`) rather than a separate
+// client-side regex pass. This page previously ran its own independent
+// SECRET_PATTERNS engine with none of scanner.ts's false-positive guards
+// (TEST_FILE_RE, looksLikeRealSecret entropy/dummy-value checks) — it flagged
+// things like `jwt_secret = "test-secret-for-unit-tests"` in *_test.go files
+// that the real scanner correctly ignores. Consuming the same indicators the
+// rest of the app uses (violations, vulnerabilities, PR code viewer) keeps
+// detection consistent everywhere and inherits every future scanner fix
+// automatically.
 
-interface PatternRule { re: RegExp; label: string; type: SecretType; severity: SecretSeverity }
+const SECRET_INDICATOR_IDS = new Set(["hardcoded-secret", "high-entropy-secret"]);
 
-const SECRET_PATTERNS: PatternRule[] = [
-  // Payment / billing
-  { re:/sk_live_[a-zA-Z0-9_]{24,}/,                                    label:"Stripe Live Key",       type:"api_key",     severity:"CRITICAL" },
-  { re:/sk_test_[a-zA-Z0-9_]{24,}/,                                    label:"Stripe Test Key",       type:"api_key",     severity:"HIGH"     },
-  { re:/rk_live_[a-zA-Z0-9_]{24,}/,                                    label:"Stripe Restricted Key", type:"api_key",     severity:"CRITICAL" },
+function severityFromIndicator(sev: string): SecretSeverity {
+  const s = sev.toLowerCase();
+  if (s === "critical") return "CRITICAL";
+  if (s === "high")     return "HIGH";
+  return "MEDIUM";
+}
 
-  // AWS
-  { re:/AKIA[A-Z0-9]{16}/,                                             label:"AWS Access Key ID",     type:"api_key",     severity:"CRITICAL" },
-  { re:/(?<![A-Za-z0-9/+])[A-Za-z0-9/+=]{40}(?![A-Za-z0-9/+=])/,    label:"AWS Secret Key",        type:"api_key",     severity:"CRITICAL" },
+// Coarse category for the Type column/filter — derived from the indicator's
+// label text (e.g. "Hardcoded Stripe API key", "Hardcoded JWT").
+function inferSecretType(label: string): SecretType {
+  const l = label.toLowerCase();
+  if (l.includes("jwt"))                                          return "jwt_secret";
+  if (/postgres|mongodb|db connection|password/.test(l))          return "db_password";
+  if (/private key|service account key|certificate/.test(l))      return "private_key";
+  if (/webhook/.test(l))                                          return "webhook_url";
+  if (/bearer|basic auth| token/.test(l))                         return "oauth_token";
+  return "api_key";
+}
 
-  // GitHub / GitLab
-  { re:/ghp_[a-zA-Z0-9]{36}/,                                         label:"GitHub Personal Token", type:"oauth_token", severity:"HIGH"     },
-  { re:/ghs_[a-zA-Z0-9]{36}/,                                         label:"GitHub Actions Token",  type:"oauth_token", severity:"HIGH"     },
-  { re:/github_pat_[a-zA-Z0-9_]{82}/,                                 label:"GitHub Fine-grained PAT",type:"oauth_token", severity:"HIGH"    },
-  { re:/glpat-[a-zA-Z0-9_-]{20}/,                                     label:"GitLab Personal Token", type:"oauth_token", severity:"HIGH"     },
+// Masks any 8+ char run of credential-shaped characters in a line, keeping
+// the first 4 chars visible — used to show real source context without
+// exposing the full secret value in the UI.
+function maskSecretsInLine(line: string): string {
+  return line.replace(/[A-Za-z0-9_\-./+=]{8,}/g, m => m.slice(0, 4) + "•".repeat(Math.max(4, m.length - 4)));
+}
 
-  // Email services
-  { re:/SG\.[a-zA-Z0-9_-]{22,}\.[a-zA-Z0-9_-]{43,}/,                label:"SendGrid API Key",       type:"api_key",     severity:"HIGH"     },
-  { re:/key-[a-zA-Z0-9]{32}/,                                         label:"Mailgun API Key",        type:"api_key",     severity:"HIGH"     },
-
-  // Private keys
-  { re:/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/,             label:"Private Key",            type:"private_key", severity:"CRITICAL" },
-  { re:/-----BEGIN CERTIFICATE-----/,                                  label:"TLS Certificate",        type:"private_key", severity:"MEDIUM"   },
-
-  // Auth / JWT
-  { re:/jwt[_-]?secret[\s"'`=:]+["'`]?[a-zA-Z0-9_!@#$%^&*]{12,}/i,  label:"JWT Signing Secret",    type:"jwt_secret",  severity:"CRITICAL" },
-  { re:/secret[_-]?key[\s"'`=:]+["'`]?[a-zA-Z0-9_!@#$%^&*]{12,}/i,  label:"Application Secret",    type:"jwt_secret",  severity:"CRITICAL" },
-
-  // Database
-  { re:/(?:db|database)[_-]?pass(?:word)?[\s"'`=:]+["'`]?[^\s"'`]{6,}/i, label:"DB Password",       type:"db_password", severity:"CRITICAL" },
-  { re:/(?:mysql|postgres|mongodb):\/\/[^:]+:([^@/\s]+)@/i,           label:"DB Connection String",  type:"db_password", severity:"CRITICAL" },
-
-  // Communication
-  { re:/https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]{8,}\/B[A-Z0-9]{8,}\/[a-zA-Z0-9]{24,}/, label:"Slack Webhook", type:"webhook_url", severity:"MEDIUM" },
-  { re:/xox[baprs]-[0-9]{12}-[0-9A-Za-z-]{24,}/,                     label:"Slack Token",            type:"oauth_token", severity:"HIGH"     },
-  { re:/T[a-zA-Z0-9]{8}[./][a-zA-Z0-9]{8}[./][a-zA-Z0-9_-]{27}/,    label:"Twilio Auth Token",     type:"oauth_token", severity:"HIGH"     },
-
-  // Cloud / Google
-  { re:/AIza[0-9A-Za-z_-]{35}/,                                       label:"Google API Key",         type:"api_key",     severity:"HIGH"     },
-  { re:/"type":\s*"service_account"/,                                  label:"Google Service Account", type:"api_key",     severity:"CRITICAL" },
-
-  // Generic high-value patterns (must come last to avoid false positives)
-  { re:/(?:password|passwd|pwd)\s*=\s*["'`][^"'`\s]{8,}["'`]/i,      label:"Hardcoded Password",     type:"db_password", severity:"HIGH"     },
-  { re:/(?:api[_-]?key|apikey)\s*=\s*["'`][a-zA-Z0-9_\-]{16,}["'`]/i, label:"Generic API Key",      type:"api_key",     severity:"MEDIUM"   },
-];
-
-// Files that intentionally contain fake/demo credential strings, or that
-// define secret-detection patterns (whose regex source looks like a secret).
-// Mirrors scanner.ts DEMO_DATA_FILE_RE.
-const DEMO_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog|NewScanPanel|secrets\/page)\.(ts|tsx)$/i;
-
-// Known placeholder values that look like secrets but aren't — mirrors
-// scanner.ts isPlaceholderSecretLine logic.
-const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|DEMO|FAKE|SAMPLE|EXAMPLE|placeholder|xxxx|test_|_test|_demo|_sample/i;
-
-function detectSecretsInContent(content: string, file_path: string, repo: string, scan_id: string, pr_number: number, ts: string): SecretFinding[] {
-  // Skip demo/seed files — they contain intentional fake credentials
-  if (DEMO_FILE_RE.test(file_path)) return [];
-
-  const findings: SecretFinding[] = [];
-  const lines = content.split("\n");
-  lines.forEach((line, idx) => {
-    // Skip comment lines and known placeholder patterns
-    if (/^\s*(\/\/|#|\*)/.test(line)) return;
-    if (PLACEHOLDER_VALUE_RE.test(line)) return;
-
-    for (const p of SECRET_PATTERNS) {
-      const m = line.match(p.re);
-      if (!m) continue;
-      const raw = m[0];
-      // Skip if the matched value itself looks like a placeholder
-      if (PLACEHOLDER_VALUE_RE.test(raw)) continue;
-      const masked = raw.slice(0, Math.min(8, raw.length)) + "•".repeat(Math.max(4, raw.length - 8));
-      findings.push({
-        id: `sec_live_${scan_id}_${idx}`,
-        severity: p.severity, type: p.type, label: p.label,
-        file_path, repo, line_number: idx + 1,
-        masked_value: masked,
-        context: line.trim().slice(0, 120).replace(raw, masked),
-        pr_number, scan_id,
-        detected_at: ts, status: "open",
-      });
-      break; // one match per line
-    }
-  });
-  return findings;
+function buildContext(rawLine: string): { context: string; masked: string } {
+  const trimmed = rawLine.trim().slice(0, 160);
+  const masked  = maskSecretsInLine(trimmed);
+  const eqIdx   = masked.search(/[:=]/);
+  if (eqIdx === -1) return { context: masked, masked: "••••••••" };
+  const value = masked.slice(eqIdx + 1).trim().replace(/^["'`]|["'`;,]+$/g, "") || "••••••••";
+  return { context: masked, masked: value };
 }
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
@@ -219,7 +178,13 @@ export default function SecretsPage() {
       if (!profile?.org_id) return; // wait until profile is loaded
       try {
         const data = await api.dashboard(profile?.org_slug || "org", 90);
-        const scanIds = data.repos.filter(r => r.latest_scan_id).slice(0, 5).map(r => r.latest_scan_id);
+        // Dedupe to one scan per repo (the latest) — fetching more than one
+        // scan per repo would re-surface the same still-present secret once
+        // per scan it appeared in, the same "multiple scans of one PR"
+        // duplication bug already fixed for violations/alerts.
+        const repoToScanId = new Map<string, string>();
+        data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
+        const scanIds = [...repoToScanId.values()].slice(0, 5);
         const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
         const existingKeys = new Set<string>();
         const liveFindings: SecretFinding[] = [];
@@ -228,29 +193,28 @@ export default function SecretsPage() {
           if (r.status !== "fulfilled" || !r.value) return;
           const scan = r.value;
           scan.files.forEach(file => {
-            const hasSecretIndicator = file.risk_indicators.some(ri =>
-              ri.toLowerCase().includes("secret") || ri.toLowerCase().includes("credential") || ri.toLowerCase().includes("hardcoded")
-            );
-            if (!hasSecretIndicator && !file.content) return;
-            const key = `${scan.scan_id}::${file.file_path}`;
-            if (existingKeys.has(key)) return;
-            existingKeys.add(key);
+            const secretIndicators = (file.indicators ?? []).filter((i: FileIndicator) => SECRET_INDICATOR_IDS.has(i.id) && i.line != null);
+            secretIndicators.forEach((ind: FileIndicator) => {
+              const key = `${scan.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
+              if (existingKeys.has(key)) return;
+              existingKeys.add(key);
 
-            if (file.content) {
-              const detected = detectSecretsInContent(file.content, file.file_path, scan.repo, scan.scan_id, scan.pr_number, scan.timestamp);
-              liveFindings.push(...detected);
-            } else if (hasSecretIndicator) {
+              const rawLine = file.content?.split("\n")[(ind.line as number) - 1] ?? ind.detail ?? ind.label;
+              const { context, masked } = buildContext(rawLine);
+
               liveFindings.push({
-                id: `sec_ri_${scan.scan_id}_${file.file_path.replace(/\W/g,"_")}`,
-                severity: file.risk_score === "CRITICAL" ? "CRITICAL" : "HIGH",
-                type: "api_key", label: "Hardcoded Secret (risk indicator)",
+                id: `sec_${scan.scan_id}_${file.file_path.replace(/\W/g, "_")}_${ind.line}_${ind.id}`,
+                severity: severityFromIndicator(ind.severity),
+                type: inferSecretType(ind.label),
+                label: ind.label,
                 file_path: file.file_path, repo: scan.repo,
-                line_number: 0, masked_value: "•••••••••••••••",
-                context: `[Detected via risk_indicator in ${file.file_path} — content not available]`,
+                line_number: ind.line as number,
+                masked_value: masked,
+                context,
                 pr_number: scan.pr_number, scan_id: scan.scan_id,
                 detected_at: scan.timestamp, status: "open",
               });
-            }
+            });
           });
         });
 
