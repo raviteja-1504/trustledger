@@ -334,12 +334,19 @@ function extractTaintedVars(lines: string[]): Set<string> {
 
 // Individual detector patterns — module-level compilation
 const SQL_INJECTION_RE = [
-  /f["'].*\{.*\}.*(?:where|from|select|insert|delete|update)/i,
-  /["']\s*\+\s*\w+\s*\+\s*["'].*(?:where|from|select)/i,
+  // f-string / template-literal SQL queries — require a real SQL clause
+  // PAIR (SELECT...FROM, DELETE FROM, UPDATE...SET, INSERT INTO), not just
+  // an isolated keyword. A single word like "from"/"where"/"update" is
+  // common in plain English (e.g. "valid from {date}", "please update your
+  // profile") and must not trigger this on its own.
+  /f["'][^"']*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\{/i,
+  // String concatenation + SQL clause pair, in either order
+  // ("SELECT ... FROM " + var or var + " WHERE id = " + var + "...").
+  /(?=[\s\S]*["']\s*\+\s*\w+)(?=[\s\S]*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b))/i,
   /cursor\.execute\s*\(\s*(?:f["']|["'][^?])/i,
   /db\.query\s*\(\s*(?:`[^`]*\$\{|['"][^?][^'"]*\+)/i,
   /(?:execute|query)\s*\(\s*["'].*\+\s*\w/i,
-  /\$\{[^}]+\}.*(?:WHERE|SELECT|INSERT|UPDATE|DELETE)/i,
+  /(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{/i,
   /knex\.raw\s*\(`[^`]*\$\{/i,
   /sequelize\.query\s*\(\s*`[^`]*\$\{/i,
 ];
