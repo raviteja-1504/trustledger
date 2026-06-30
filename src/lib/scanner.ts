@@ -403,8 +403,11 @@ const EVAL_EXEC_RE = [
   /\bexecSync\s*\(/,
 ];
 
+// "ignoreExpiration" must be set to true to be a bypass — the bare keyword
+// also appears when explicitly disabled (ignoreExpiration: false), which is
+// the secure default and must NOT be flagged.
 const JWT_BYPASS_RE =
-  /(?:algorithms?\s*=\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration|{"alg"\s*:\s*"none"})/i;
+  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"})/i;
 
 const CMD_INJECTION_RE = [
   /subprocess\.(?:call|run)\s*\([^)]*f["']/,
@@ -458,9 +461,20 @@ const OPEN_REDIRECT_RE = [
   /window\.location(?:\.href)?\s*=\s*(?:params|query|search|url)\b/i,
 ];
 
+// Require one side of the comparison to be clearly request-derived
+// (req./body./params./query./request./headers.) — without this, the old
+// unconstrained `\w+` fallback matched ANY equality comparison where either
+// side merely contained "key"/"hash"/"token" as a substring, e.g.
+// `cacheKey === expectedKey` or `hashCode === obj.hashCode()`, which have
+// nothing to do with timing-safe credential comparison. "key" alone was
+// dropped — it's too generic a name even when paired with taint (e.g. a
+// non-secret object/map key looked up from a query param).
+// Keyword allows a \w* prefix/suffix so compound names (storedPassword,
+// expectedToken) still match — only the bare "key" alone was dropped from
+// the keyword list since it's too generic even with the taint requirement.
 const TIMING_ATTACK_RE = [
-  /(?:token|secret|password|hash|hmac|signature|key)\s*(?:===|==)\s*(?:req\.|body\.|params\.|query\.|\w+)/i,
-  /(?:req\.|body\.|params\.)[\w.]+\s*(?:===|==)\s*(?:token|secret|password|hash|hmac|signature)/i,
+  /(?:token|secret|password|hash|hmac|signature)\s*(?:===|==)\s*(?:req\.|body\.|params\.|query\.|request\.|headers\.)\w+/i,
+  /(?:req\.|body\.|params\.|request\.|headers\.)[\w.]+\s*(?:===|==)\s*\w*(?:token|secret|password|hash|hmac|signature)\w*/i,
 ];
 
 // SSTI — server-side template injection
@@ -609,14 +623,20 @@ const WEAK_CRYPTO_RE = [
   /bcrypt\.(?:hash|hashSync)\s*\([^,]+,\s*[1-9]\s*[,)]/,  // rounds < 10
 ];
 
-// PII in logs
+// PII in logs — requires the keyword to appear as a property/variable access
+// (e.g. user.email, req.body.password) or inside template interpolation
+// (${email}), not just anywhere in the call's arguments. The old patterns
+// matched purely descriptive log messages that merely mention the word, e.g.
+// console.log("sending email notification") or console.log("checking auth
+// status"), with no actual PII value being logged at all.
 const PII_LOG_RE = [
-  /(?:console|logger|log)\.\w+\s*\([^)]*\b(?:email|mail)\b[^)]*\)/i,
-  /(?:console|logger|log)\.\w+\s*\([^)]*\b(?:password|passwd|pwd|token|secret|auth)\b[^)]*\)/i,
-  /(?:console|logger|log)\.\w+\s*\([^)]*\bssn\b[^)]*\)/i,
-  /(?:console|logger|log)\.\w+\s*\([^)]*\b(?:credit.?card|ccnum|cvv|card.?number)\b[^)]*\)/i,
-  /(?:console|logger|log)\.\w+\s*\([^)]*\bphone\b[^)]*\)/i,
-  /logging\.(?:info|debug|warning|error)\s*\([^)]*(?:password|email|token|ssn)\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.(?:email|mail)\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.(?:password|passwd|pwd|token|secret|authToken|accessToken|apiKey)\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.ssn\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.(?:creditCard|ccNum|cvv|cardNumber)\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.phone(?:Number)?\b[^)]*\)/i,
+  /(?:console|logger|log)\.\w+\s*\([^)]*\$\{[^}]*\b(?:email|password|token|secret|ssn|phone|creditCard|cvv)\b[^}]*\}[^)]*\)/i,
+  /logging\.(?:info|debug|warning|error)\s*\([^)]*[\w\])]\.(?:password|email|token|ssn)\b[^)]*\)/i,
 ];
 
 // Mass assignment
