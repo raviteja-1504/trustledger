@@ -199,7 +199,17 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
 // All patterns compiled once at module level for throughput.
 // ══════════════════════════════════════════════════════════════════════════════
 
-interface SecretPattern { re: RegExp; label: string; severity: ScanIndicator["severity"] }
+interface SecretPattern {
+  re: RegExp;
+  label: string;
+  severity: ScanIndicator["severity"];
+  // Generic word-keyed patterns (password=, secret=, token=) have no fixed
+  // structure unlike branded prefixes (sk_live_, AKIA, ghp_) — they need an
+  // extra randomness check on the captured value to avoid flagging English
+  // phrases, validation messages, and readable test fixtures. The regex must
+  // capture the value in group 1 when this is set.
+  genericValue?: boolean;
+}
 
 const SECRET_PATTERNS: SecretPattern[] = [
   { re: /(?:sk_live|sk_test)_[A-Za-z0-9]{20,}/,                               label: "Stripe API key",              severity: "critical" },
@@ -226,11 +236,46 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /postgresql:\/\/[^@\s]+:[^@\s]+@/,                                     label: "Postgres credentials",        severity: "critical" },
   { re: /mongodb(?:\+srv)?:\/\/[^@\s]+:[^@\s]+@/,                              label: "MongoDB credentials",         severity: "critical" },
   { re: /jdbc:[a-z]+:\/\/[^\s"']+password=[^\s&"']+/i,                         label: "DB connection string",        severity: "critical" },
-  { re: /(?:password|passwd|pwd)\s*=\s*["'][^"']{8,}["']/i,                   label: "Hardcoded password",          severity: "critical" },
-  { re: /(?:api_key|apikey|api_secret)\s*=\s*["'][^"']{8,}["']/i,             label: "Hardcoded API key",           severity: "critical" },
-  { re: /(?:secret|token)\s*=\s*["'][^"']{12,}["']/i,                         label: "Hardcoded secret",            severity: "high"     },
-  { re: /(?:access_token|ACCESS_TOKEN)\s*=\s*["'][A-Za-z0-9_\-]{20,}["']/i,  label: "Hardcoded access token",      severity: "high"     },
+  // Generic word-keyed patterns — value captured in group 1, checked by
+  // looksLikeRealSecret() in findSecrets() before being reported. Variable
+  // name allows a _KEY/_TOKEN/_VALUE suffix to catch real-world names like
+  // SECRET_KEY (Django/Flask/Rails) and AUTH_TOKEN without using a greedy
+  // \w* that would also match unrelated names like "secretary_name".
+  { re: /(?:password|passwd|pwd)\s*=\s*["']([^"']{8,})["']/i,                  label: "Hardcoded password",          severity: "critical", genericValue: true },
+  { re: /(?:api_key|apikey|api_secret)\s*=\s*["']([^"']{8,})["']/i,            label: "Hardcoded API key",           severity: "critical", genericValue: true },
+  { re: /(?:secret|token)(?:_?key|_?token|_?value)?\s*=\s*["']([^"']{12,})["']/i, label: "Hardcoded secret",          severity: "high",     genericValue: true },
+  { re: /(?:access_token|ACCESS_TOKEN)\s*=\s*["']([A-Za-z0-9_\-]{20,})["']/i, label: "Hardcoded access token",      severity: "high",     genericValue: true },
 ];
+
+// Well-known dummy/placeholder values used throughout test suites and demos —
+// never real secrets even though they pass the length check.
+const DUMMY_SECRET_VALUES_RE = /^(?:12345678|01234567890?|0{6,}|1{6,}|abcdefgh\w*|qwerty\w*|password\d*|letmein\d*|changeme\d*|changeit\d*|admin123\w*|test1234\w*|secret123\w*|foobar\w*|your[-_]?(?:key|token|secret|password)\w*)$/i;
+
+// Real secrets are high-entropy, randomly-generated strings that typically mix
+// character classes (upper+lower+digit, or +symbol). English words, validation
+// messages, and readable test fixtures are low-entropy and usually a single
+// character class. This check is applied only to the 4 generic word-keyed
+// patterns above — branded formats (sk_live_, AKIA, ghp_) are already
+// unambiguous from their structure and don't need it.
+function looksLikeRealSecret(value: string): boolean {
+  if (/\s/.test(value)) return false;                       // secrets don't contain spaces
+  if (DUMMY_SECRET_VALUES_RE.test(value)) return false;      // known placeholder values
+  if (/^(.)\1{5,}$/.test(value)) return false;               // repeated-char filler (aaaaaa, xxxxxx)
+  const hasUpper  = /[A-Z]/.test(value);
+  const hasLower  = /[a-z]/.test(value);
+  const hasDigit  = /[0-9]/.test(value);
+  const hasSymbol = /[^A-Za-z0-9]/.test(value);
+  const classCount = [hasUpper, hasLower, hasDigit, hasSymbol].filter(Boolean).length;
+  if (classCount < 2) return false;                          // single-class strings read as English/numeric, not secrets
+  return shannonEntropy(value) > 2.8;
+}
+
+// Files whose content is test/fixture/mock data — generic word-keyed secret
+// patterns (password=, secret=, token=) are extremely noisy here since test
+// suites routinely hardcode fake credentials for mocking. Branded/structural
+// patterns (Stripe keys, AWS keys, private keys, DB URLs) still fire since a
+// real leaked key checked into a test file is still a real exposed credential.
+const TEST_FILE_RE = /(?:^|\/)(?:__tests__|__mocks__|tests?|fixtures?|mocks?|specs?)\/|\.(?:test|spec)\.[jt]sx?$|(?:^|\/)test_\w+\.py$|_test\.(?:py|go)$/i;
 
 // Well-known placeholder/example credentials used throughout official docs,
 // SDKs, and tutorials (e.g. AWS's canonical "EXAMPLE" key pair). These are
@@ -244,10 +289,8 @@ const QUOTED_VALUE_RE = /["']([^"']{4,})["']/g;
 
 // A quoted value containing one of these markers is a synthetic/demo
 // placeholder, not a real credential: "..." truncation, "xxxx" filler, or
-// words that only appear in sample/demo/test data ("trustledger" referring
-// to this product itself, "password"/"demo"/"sample"/"fake"/"dummy"/
-// "placeholder"/"example"/"exmp").
-const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|password|demo|sample|fake|dummy|placeholder|example|exmp/i;
+// words that only appear in sample/demo/test data.
+const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|password|demo|sample|fake|dummy|placeholder|example|exmp|\btest\w*|\bmock\w*|\bstub\b|\bfixture\b|changeme|change[-_]me|changeit|\btbd\b|\bn\/?a\b|\bfoo\b|\bbar\b|\bbaz\b|\byour[-_]?\w*(?:key|token|secret|password)\w*|insert[-_]?your|<[^<>]+>|\{\{[^{}]+\}\}|redacted|masked|undefined|^null$|_here$|^enter[-_]/i;
 
 // A quoted value that is purely a human-readable label (letters/spaces only)
 // is a UI string, not a credential — e.g. private_key: "Private Key".
@@ -638,13 +681,20 @@ function runDetector(
 
 function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   if (DEMO_DATA_FILE_RE.test(file_path)) return [];
+  const isTestFile = TEST_FILE_RE.test(file_path);
   const found: ScanIndicator[] = [];
-  for (const { re, label, severity } of SECRET_PATTERNS) {
+  for (const { re, label, severity, genericValue } of SECRET_PATTERNS) {
+    // Generic word-keyed patterns are suppressed in test/fixture/mock files —
+    // branded/structural patterns still run there since a real leaked key is
+    // real regardless of which file it's in.
+    if (genericValue && isTestFile) continue;
     for (let i = 0; i < lines.length; i++) {
       if (isNonExecutableLine(lines[i])) continue;
       if (isPlaceholderSecretLine(lines[i])) continue;
-      if (re.test(lines[i]))
-        found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
+      const m = re.exec(lines[i]);
+      if (!m) continue;
+      if (genericValue && !looksLikeRealSecret(m[1] ?? "")) continue;
+      found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
     }
   }
   return found;
