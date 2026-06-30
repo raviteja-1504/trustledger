@@ -1004,9 +1004,16 @@ export default function DashboardPage() {
       scanId,
     }));
 
-    const adjusted = unresolvedRepos.size === 0
-      ? 0
-      : Math.min(data.unattested_deploy_count, unresolvedRepos.size);
+    // Use the client-side count directly — it's derived from top_risk_files
+    // (a direct scan_files query) which is more reliable than the server's
+    // unattested_deploy_count (derived from the separate violations table).
+    // Previously this was capped via Math.min(data.unattested_deploy_count, ...),
+    // which could suppress the banner entirely right after a new PR is raised:
+    // if the scan-worker's violations insert lags behind its scan_files insert
+    // (async QStash timing), the server count could read 0 while top_risk_files
+    // already shows the new unattested CRITICAL/HIGH file — Math.min(0, N) = 0
+    // hid both the banner and its repo-name chips even though real data existed.
+    const adjusted = unresolvedRepos.size;
 
     // Patch top_risk_files: mark any file as effectively attested when its violation status is handled
     const patchedTopRisk = data.top_risk_files.map(f => {
