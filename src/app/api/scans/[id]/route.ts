@@ -44,21 +44,25 @@ export async function GET(
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
     files: (files ?? []).map(f => {
-      // Use stored indicators (with line numbers) if available; fall back to
-      // re-analysing from content for older scans that predate the indicators column.
+      // Always re-run analyzeFile() on stored content when available, rather
+      // than trusting scan_files.indicators as-is. Indicators are written once
+      // at scan time — if the scanner's detection patterns are improved later
+      // (false-positive fixes, new signals), files scanned before that change
+      // would otherwise keep showing stale/incorrect highlighted lines forever
+      // until a brand-new PR scan happens to run. Re-analysing on every page
+      // load is cheap (in-memory regex, no network calls) and guarantees the
+      // PR page always reflects the current scanner logic immediately.
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
-      // Fallback: re-run analyzeFile on stored content for older scans
-      // that predate the indicators column (new scans have indicators stored directly).
-      let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] = [];
-      if (!storedIndicators && f.content) {
+      let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] | null = null;
+      if (f.content) {
         try {
           const analysis = analyzeFile(f.file_path, f.content);
           freshIndicators = analysis.indicators
             .filter(i => i.line != null)
             .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }));
-        } catch { /* silent — indicators just won't have line numbers */ }
+        } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
       }
       return {
         file_path:       f.file_path,
@@ -66,7 +70,12 @@ export async function GET(
         ai_percentage:   f.ai_percentage,
         risk_score:      f.risk_score,
         risk_indicators: f.risk_indicators ?? [],
-        indicators:      storedIndicators ?? freshIndicators,
+        // Prefer freshly-computed indicators (current scanner logic, possibly
+        // an empty array if a false positive was since fixed — that's a valid
+        // result, not a failure). Only fall back to the stored snapshot if
+        // content was unavailable or re-analysis threw (freshIndicators is
+        // null in both cases, distinct from a legitimate empty array).
+        indicators:      freshIndicators ?? storedIndicators ?? [],
         attested:        attestedSet.has(f.file_path),
         content:         f.content ?? undefined,
       };
