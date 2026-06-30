@@ -1092,7 +1092,19 @@ function PRDetailContent() {
           f => (f.risk_score === "HIGH" || f.risk_score === "CRITICAL") &&
                f.file_path !== path && !f.attested && !attestedSet.has(f.file_path)
         );
-        if (remaining.length === 0) syncCheckRun(true);
+        if (remaining.length === 0) {
+          syncCheckRun(true);
+          // Safety net: if another reviewer is attesting different files in
+          // this repo at the same time, /api/attest's inline alert check
+          // could have raced and missed resolving the alert. This recheck
+          // catches that once our own files are all clear.
+          if (profile?.org_id) {
+            authedFetch("/api/alerts/recheck", {
+              method: "POST",
+              body: JSON.stringify({ scan_id: scan.scan_id }),
+            }).catch(() => {});
+          }
+        }
       });
     }
   }
@@ -1173,6 +1185,23 @@ function PRDetailContent() {
     // individual resolveOneFile() call missed a key variant
     resolveViolationsForScan(scan.scan_id);
     setAttestingAll(false);
+
+    // Final alert-resolution recheck. Each parallel /api/attest call above
+    // independently checks "are all repo violations resolved?" and resolves
+    // the alert if so — but under N concurrent requests, every single one
+    // can observe "N-1 others still open" at the moment it checks, since the
+    // other requests' writes haven't landed yet. None of them ever sees zero,
+    // so the alert can be left firing even though every file is now attested.
+    // This recheck runs once, after Promise.allSettled has confirmed every
+    // individual attest call has fully completed, so it sees the true final
+    // state instead of a mid-flight race.
+    if (profile?.org_id) {
+      authedFetch("/api/alerts/recheck", {
+        method: "POST",
+        body: JSON.stringify({ scan_id: scan.scan_id }),
+      }).catch(() => {});
+    }
+
     // Notify all open pages (violations, alerts, incidents, sidebar) to
     // re-fetch immediately instead of waiting for their 30s poll. Also
     // dispatch tl:attestation which the alerts page specifically listens for.
