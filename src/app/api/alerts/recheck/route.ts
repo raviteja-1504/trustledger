@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
+import { hasOpenRepoViolations } from "@/lib/repoViolations";
 
 /**
  * POST /api/alerts/recheck
@@ -39,24 +40,14 @@ export async function POST(req: NextRequest) {
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-  const { data: repoScans } = await db
-    .from("scans")
-    .select("id")
-    .eq("org_id", org_id)
-    .eq("repo_full_name", scan.repo_full_name);
-
-  const scanIds = (repoScans ?? []).map(s => s.id);
-  if (scanIds.length === 0) return NextResponse.json({ resolved: false });
-
-  const { count: openRepoViolations } = await db
-    .from("violations")
-    .select("id", { count: "exact", head: true })
-    .eq("org_id", org_id)
-    .neq("status", "resolved")
-    .in("scan_id", scanIds);
-
-  if ((openRepoViolations ?? 0) > 0) {
-    return NextResponse.json({ resolved: false, open_violations: openRepoViolations });
+  // Dedup-aware check: a naive "any violation row != resolved across all
+  // scan_ids" count is wrong for a repo scanned repeatedly (one scan per PR
+  // commit) — a dangling open row from an EARLIER scan, for a file_path that
+  // a LATER scan no longer flags (renamed/removed/fixed), is never touched
+  // since the user only ever attests files visible in the current scan's
+  // file list. That stale row kept the count above zero forever.
+  if (await hasOpenRepoViolations(db, org_id, scan.repo_full_name)) {
+    return NextResponse.json({ resolved: false });
   }
 
   const { data: resolvedAlerts } = await db

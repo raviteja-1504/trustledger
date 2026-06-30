@@ -25,6 +25,7 @@ import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
+import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import type { ScanJob } from "@/lib/queue";
 
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -401,21 +402,9 @@ export async function POST(req: NextRequest) {
 
               // Resolve ALL policy alerts for this repo if no open violations remain
               // (check repo-wide, not just this scan, because multiple scans of the
-              // same PR each create their own alert).
-              const allScanIdsForRepo = (await db
-                .from("scans")
-                .select("id")
-                .eq("org_id", orgId)
-                .eq("repo_full_name", repoFullName)
-              ).data?.map(s => s.id) ?? [scan.id];
-
-              const { count: openRepoViolations } = await db
-                .from("violations")
-                .select("id", { count: "exact", head: true })
-                .eq("org_id", orgId)
-                .neq("status", "resolved")
-                .in("scan_id", allScanIdsForRepo);
-              if ((openRepoViolations ?? 1) === 0) {
+              // same PR each create their own alert). Dedup-aware: see
+              // lib/repoViolations.ts for why a naive row count is wrong here.
+              if (!(await hasOpenRepoViolations(db, orgId, repoFullName))) {
                 await db.from("alerts")
                   .update({ status: "resolved", resolved_at: now })
                   .eq("org_id", orgId)

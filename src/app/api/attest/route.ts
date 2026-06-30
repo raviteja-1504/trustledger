@@ -6,6 +6,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { validateBody, AttestSchema } from "@/lib/validation";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
+import { hasOpenRepoViolations } from "@/lib/repoViolations";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -98,13 +99,16 @@ export async function POST(req: NextRequest) {
   // We check the REPO (not just this scan) because multiple scans of the same PR
   // each create their own alert. Checking by scan_id only resolves one alert;
   // the others stay firing. Checking by repo resolves all of them together.
-  const { count: openRepoViolations } = await db
-    .from("violations")
-    .select("id", { count: "exact", head: true })
-    .eq("org_id", org_id)
-    .neq("status", "resolved")
-    .in("scan_id", scanIds); // scanIds = all scans for this repo
-  if ((openRepoViolations ?? 1) === 0) {
+  //
+  // Must use dedup-by-latest-scan-per-file (hasOpenRepoViolations), not a naive
+  // "any row != resolved" count: a repo scanned repeatedly (one scan per PR
+  // commit) accumulates violation rows from EVERY scan. A file that was
+  // CRITICAL in an early scan but renamed/removed/no-longer-risky by a later
+  // scan leaves a dangling open row that's never touched (the user only ever
+  // attests files visible in the CURRENT scan's file list) — that stale row
+  // kept the naive count above zero forever, so the alert never resolved even
+  // when every file in the latest scan was genuinely attested.
+  if (!(await hasOpenRepoViolations(db, org_id, scan.repo_full_name))) {
     await db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
       .eq("org_id", org_id)
