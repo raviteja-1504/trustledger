@@ -30,14 +30,29 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
   const checked   = useRef(false);
 
   // Check onboarding status once after the user + profile loads.
-  // Admins who haven't completed setup are redirected to /onboarding.
+  // Only redirect to /onboarding if the org itself is incomplete — skip
+  // entirely if the org already has repos/scans (i.e. a team member joining
+  // an existing org should never see the onboarding flow).
   useEffect(() => {
     if (SKIP_AUTH || loading || !user || !profile || checked.current) return;
     if (pathname === "/onboarding") return;
     if (profile.role !== "admin") return;
     checked.current = true;
-    authedFetch<{ complete: boolean }>("/api/onboarding")
-      .then(data => { if (!data.complete) window.location.replace("/onboarding"); })
+    authedFetch<{ complete: boolean; org_name: string }>("/api/onboarding")
+      .then(data => {
+        // Already marked complete — nothing to do
+        if (data.complete) return;
+        // If org has a name it's an existing org — auto-complete and skip
+        // onboarding so admins joining via invite don't hit the setup flow
+        if (data.org_name) {
+          authedFetch("/api/onboarding", {
+            method: "POST",
+            body: JSON.stringify({ action: "complete" }),
+          }).catch(() => {});
+          return;
+        }
+        window.location.replace("/onboarding");
+      })
       .catch(() => {}); // if check fails, allow access
   }, [loading, user, profile, pathname]);
 
