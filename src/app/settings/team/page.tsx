@@ -83,8 +83,11 @@ export default function TeamPage() {
       setInviteEmail(""); setInviteName(""); setInviteRole("developer");
       await load();
     } catch (err: unknown) {
-      const msg = (err as { error?: string })?.error ?? "Invite failed.";
-      setInviteMsg({ ok: false, text: msg === "already_member" ? `${inviteEmail} is already a member.` : msg });
+      const raw = (err instanceof Error ? err.message : String(err)) ?? "Invite failed.";
+      const text = raw === "already_member" ? `${inviteEmail} is already a member.`
+        : raw.startsWith("invite_failed") ? `Insert error: ${raw}`
+        : raw;
+      setInviteMsg({ ok: false, text });
     } finally {
       setInviting(false);
     }
