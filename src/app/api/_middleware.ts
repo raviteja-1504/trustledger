@@ -133,16 +133,29 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
       .single();
 
     // Invited users sign up after being added — their org_members row has
-    // user_id = null until first login. Link it now.
+    // user_id = null until first login, OR may be a stale UID from a
+    // previous invite flow where inviteUserByEmail stored a different auth
+    // UID than the one the user actually logged in with. Fix both cases by
+    // matching on email and updating to the current auth user's ID.
     if (!member && user.email) {
       const { data: linked } = await db
         .from("org_members")
         .update({ user_id: user.id })
         .eq("email", user.email)
-        .is("user_id", null)
+        .neq("user_id", user.id)   // covers both null and wrong-UID cases
         .select("org_id, role, email, active_session_id")
-        .single();
-      member = linked;
+        .maybeSingle();
+      // maybeSingle returns null (not error) when 0 rows matched
+      if (linked) member = linked;
+      // If still not found, try once more by user_id (update may have raced)
+      if (!member) {
+        const { data: refetch } = await db
+          .from("org_members")
+          .select("org_id, role, email, active_session_id")
+          .eq("user_id", user.id)
+          .single();
+        if (refetch) member = refetch;
+      }
     }
 
     if (!member) return { org_id: "", error: "no_org_membership" };
