@@ -284,20 +284,46 @@ export async function POST(req: NextRequest) {
             content: f.content,
           })));
 
+          // For inherited (unchanged) files, copy attestations from any prior
+          // scan of this same PR — not just the immediately previous scan.
+          // Checking only prevScan.id meant that if the prior scan had zero
+          // attestation rows (e.g. due to the now-fixed ON CONFLICT insert bug),
+          // no attestations were inherited even though the files are guaranteed
+          // unchanged and were attested in some earlier scan of the same PR.
           if (prevScan) {
-            const { data: prevAtts } = await db
-              .from("attestations")
-              .select("file_path, risk_score, reviewer_id, reviewer_email, reviewer_github, payload_hash")
-              .eq("scan_id", prevScan.id)
-              .in("file_path", inheritedFiles.map(f => f.file_path));
+            const inheritedPaths = new Set(inheritedFiles.map(f => f.file_path));
+            const unInherited = new Set(inheritedPaths);
 
-            if (prevAtts && prevAtts.length > 0) {
-              await db.from("attestations").insert(prevAtts.map(a => ({
-                org_id: orgId, scan_id: scan.id,
-                file_path: a.file_path, risk_score: a.risk_score,
-                reviewer_id: a.reviewer_id, reviewer_email: a.reviewer_email,
-                reviewer_github: a.reviewer_github, payload_hash: a.payload_hash,
-              })));
+            const { data: prScans } = await db
+              .from("scans")
+              .select("id, created_at")
+              .eq("org_id", orgId)
+              .eq("repo_full_name", repoFullName)
+              .eq("pr_number", prNumber)
+              .neq("id", scan.id)
+              .order("created_at", { ascending: false });
+
+            for (const priorScan of (prScans ?? [])) {
+              if (unInherited.size === 0) break;
+              const { data: priorAtts } = await db
+                .from("attestations")
+                .select("file_path, risk_score, reviewer_id, reviewer_email, reviewer_github, payload_hash")
+                .eq("scan_id", priorScan.id)
+                .in("file_path", [...unInherited]);
+              if (!priorAtts || priorAtts.length === 0) continue;
+              for (const a of priorAtts) {
+                const existingAtt = await db.from("attestations").select("id")
+                  .eq("scan_id", scan.id).eq("file_path", a.file_path).maybeSingle();
+                if (!existingAtt.data) {
+                  await db.from("attestations").insert({
+                    org_id: orgId, scan_id: scan.id,
+                    file_path: a.file_path, risk_score: a.risk_score,
+                    reviewer_id: a.reviewer_id, reviewer_email: a.reviewer_email,
+                    reviewer_github: a.reviewer_github, payload_hash: a.payload_hash,
+                  });
+                }
+                unInherited.delete(a.file_path);
+              }
             }
           }
         }
