@@ -37,7 +37,11 @@ export async function GET(req: NextRequest) {
       headers: { "X-Cache": "HIT", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
     });
   }
+  // Fetch fresh data, then DELETE the stale cache entry so all subsequent
+  // regular calls (violations page 30s poll, other pages) also get fresh
+  // data instead of the old truncated result.
   const result = await fetchDashboard(org_id, days, null);
+  await Promise.all([7, 30, 90].map(d => cacheDel(cacheKeys.dashboard(org_id, d))));
   return NextResponse.json(result, {
     headers: { "X-Cache": "MISS", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
   });
