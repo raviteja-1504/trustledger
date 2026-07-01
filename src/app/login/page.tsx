@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -186,7 +187,9 @@ function ProductionLoginPage() {
   const errorParam   = searchParams?.get("error");
   const [githubBusy, setGithubBusy] = useState(false);
 
-  const [mode,      setMode]      = useState<"signin" | "signup" | "forgot">("signin");
+  const [mode,      setMode]      = useState<"signin" | "signup" | "forgot" | "set-password">("signin");
+  const [newPass,   setNewPass]   = useState("");
+  const [newPassOk, setNewPassOk] = useState<string | null>(null);
   const [showEmail, setShowEmail] = useState(false);
   const [email,     setEmail]     = useState("");
   const [password,  setPassword]  = useState("");
@@ -196,9 +199,20 @@ function ProductionLoginPage() {
   const [formOk,    setFormOk]    = useState<string | null>(null);
   const [busy,      setBusy]      = useState(false);
 
+  // Detect PASSWORD_RECOVERY event from Supabase when user clicks the reset link.
+  // The link embeds tokens in the URL hash; Supabase JS picks them up and fires
+  // PASSWORD_RECOVERY instead of SIGNED_IN, giving us a chance to show the
+  // "set new password" form before navigating away.
   useEffect(() => {
-    if (user) router.replace("/dashboard");
-  }, [user, router]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") setMode("set-password");
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (user && mode !== "set-password") router.replace("/dashboard");
+  }, [user, router, mode]);
 
   function switchMode(m: "signin" | "signup" | "forgot") {
     setMode(m); setFormErr(null); setFormOk(null);
@@ -231,7 +245,52 @@ function ProductionLoginPage() {
     }
   }
 
+  async function handleSetPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setFormErr(null);
+    const { error } = await supabase.auth.updateUser({ password: newPass });
+    setBusy(false);
+    if (error) { setFormErr(error.message); return; }
+    setNewPassOk("Password set! Taking you to the dashboard…");
+    setTimeout(() => router.replace("/dashboard"), 1500);
+  }
+
   if (loading) return null;
+
+  // Password recovery mode — show set-password form fullscreen, no tabs
+  if (mode === "set-password") {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-4"
+        style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e1040 50%,#0f172a 100%)" }}>
+        <div className="w-full max-w-sm">
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-4"
+              style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
+              <ShieldIcon />
+            </div>
+            <h1 className="text-2xl font-black text-white tracking-tight">Set your password</h1>
+            <p className="text-sm mt-1" style={{ color: "rgba(165,180,252,0.6)" }}>Choose a password to secure your account</p>
+          </div>
+          <div className="rounded-2xl p-7 space-y-4" style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
+            {formErr && <div className="px-3 py-2.5 rounded-xl text-sm text-rose-300 bg-rose-900/30 border border-rose-700/40">{formErr}</div>}
+            {newPassOk && <div className="px-3 py-2.5 rounded-xl text-sm text-emerald-300 bg-emerald-900/30 border border-emerald-700/40">{newPassOk}</div>}
+            {!newPassOk && (
+              <form onSubmit={handleSetPassword} className="space-y-3">
+                <input type="password" placeholder="New password (min 8 chars)" value={newPass}
+                  onChange={e => setNewPass(e.target.value)} required minLength={8} autoFocus
+                  className="w-full px-4 py-2.5 rounded-xl text-sm bg-white/5 border border-white/10 text-white placeholder-white/30 focus:outline-none focus:border-indigo-500" />
+                <button type="submit" disabled={busy}
+                  className="w-full py-2.5 rounded-xl font-semibold text-sm text-white"
+                  style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", opacity: busy ? 0.7 : 1 }}>
+                  {busy ? "Saving…" : "Set password & sign in"}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const inputCls = "w-full px-4 py-2.5 rounded-xl text-sm bg-white/5 border border-white/10 text-white placeholder-white/30 focus:outline-none focus:border-indigo-500";
 
