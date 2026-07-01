@@ -63,18 +63,14 @@ export async function POST(req: NextRequest) {
 
   if (existing) return NextResponse.json({ error: "already_member" }, { status: 409 });
 
-  // Insert with user_id = null — /api/me auto-links the user_id on their
-  // first sign-in via the service-role middleware, so pre-fetching all auth
-  // users here is unnecessary and was causing invite failures.
   const { data: member, error: insertErr } = await db
     .from("org_members")
     .insert({
-      org_id:       auth.org_id,
-      user_id:      null,
+      org_id:  auth.org_id,
+      user_id: null,
       email,
       name,
       role,
-      invited_by:   auth.user_id ?? null,
     })
     .select("id, email, name, role, created_at")
     .single();
