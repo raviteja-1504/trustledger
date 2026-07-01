@@ -97,9 +97,15 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   // the current state of each repo with no stale older-scan entries polluting
   // the list. The dedup loop below (seenFiles by repo::file_path) is kept for
   // safety but becomes a no-op since each file now appears exactly once.
+  // Use the date-filtered `scans` (not allScans) to compute latest scan per repo.
+  // allScans has no date filter, so using it here would pull in repos scanned
+  // months ago whose old scan_ids produce ghost "deploy pending" banners and
+  // empty PR pages when clicked (old scans may have stale or incomplete data).
+  // scans is already filtered to the requested window (gte since), so only
+  // repos with recent activity appear in top_risk_files.
   const latestScanIdPerRepo = (() => {
     const m = new Map<string, { id: string; created_at: string }>();
-    for (const s of allScans ?? []) {
+    for (const s of scans ?? []) {
       const existing = m.get(s.repo_full_name);
       if (!existing || s.created_at > existing.created_at) {
         m.set(s.repo_full_name, { id: s.id, created_at: s.created_at });

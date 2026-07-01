@@ -46,28 +46,30 @@ export async function GET(req: NextRequest) {
   const { data: scans, error: dbErr } = await query;
   if (dbErr) return NextResponse.json({ error: "db_error" }, { status: 500 });
 
-  // Count HIGH/CRITICAL attestations and HIGH/CRITICAL file totals per scan.
-  // Using HIGH/CRIT only (not total file count) matches what the PR detail page
-  // shows ("72/72 attested") and correctly reflects policy-gated files.
+  // Count attestations per scan (all risk levels — no filter avoids silent query
+  // failures from chained .in() on risk_score) and HIGH/CRIT file counts per
+  // scan separately. The chip uses Math.min(attested, high_crit_count) so the
+  // display correctly shows "X/72" or "All attested" based on policy-gated files
+  // rather than total files, without needing a risk_score filter on attestations.
   const scanIds = (scans ?? []).map(s => s.id);
-  const attestCounts   = new Map<string, number>(); // HIGH/CRIT attested per scan
-  const highCritCounts = new Map<string, number>(); // HIGH/CRIT files per scan
+  const attestCounts   = new Map<string, number>();
+  const highCritCounts = new Map<string, number>();
 
   if (scanIds.length > 0) {
-    const [attestRes, highCritRes] = await Promise.all([
-      db.from("attestations")
-        .select("scan_id")
-        .in("scan_id", scanIds)
-        .in("risk_score", ["CRITICAL", "HIGH"]),
-      db.from("scan_files")
-        .select("scan_id")
-        .in("scan_id", scanIds)
-        .in("risk_score", ["CRITICAL", "HIGH"]),
-    ]);
-    (attestRes.data ?? []).forEach(a => {
+    const { data: attests } = await db
+      .from("attestations")
+      .select("scan_id")
+      .in("scan_id", scanIds);
+    (attests ?? []).forEach(a => {
       attestCounts.set(a.scan_id, (attestCounts.get(a.scan_id) ?? 0) + 1);
     });
-    (highCritRes.data ?? []).forEach(f => {
+
+    const { data: highCritFiles } = await db
+      .from("scan_files")
+      .select("scan_id")
+      .in("scan_id", scanIds)
+      .in("risk_score", ["CRITICAL", "HIGH"]);
+    (highCritFiles ?? []).forEach(f => {
       highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
     });
   }
