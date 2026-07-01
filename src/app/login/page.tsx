@@ -338,7 +338,7 @@ function ProductionLoginPage() {
               errorParam === "session_timeout" ? "You were signed out due to inactivity."
             : errorParam === "pkce_lost"       ? "Sign-in session expired — please try again."
             : errorParam === "missing_code"    ? "GitHub did not return an authorisation code. Please try again."
-            : errorParam === "access_denied"   ? "GitHub access was denied. Please authorise TrustLedger to continue."
+            : errorParam === "access_denied"   ? "Link expired or redirect URL not whitelisted. Go to Forgot Password and request a new link."
             : errorParam === "auth_failed"     ? "Sign-in failed. Please try again or contact support."
             : `Sign-in error: ${decodeURIComponent(errorParam)}`;
             return (

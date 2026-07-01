@@ -243,9 +243,9 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function resetPassword(email: string) {
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
+    const appUrl = (process.env.NEXT_PUBLIC_APP_URL ?? "").replace(/\/$/, "");
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${appUrl}/login?reset=1`,
+      redirectTo: `${appUrl}/login`,
     });
     return { error: error?.message ?? null };
   }
