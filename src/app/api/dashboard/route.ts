@@ -63,18 +63,26 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
 
   // Attestations — no date filter: we need ALL attestations to correctly
   // suppress SLA breaches on files attested before the current period window.
+  // Explicit .limit(10000) is required: Supabase silently caps unqualified
+  // queries at 1000 rows. Once an org accumulates >1000 attestation rows
+  // (from backfills or many scans), the truncated result leaves some scan_ids
+  // out of attestedFileSet — those files show attested:false in top_risk_files
+  // causing a permanent false "deploy pending" banner and ghost violations.
   const { data: attests } = await db
     .from("attestations")
     .select("scan_id, file_path, reviewer_email, created_at")
-    .eq("org_id", org_id);
+    .eq("org_id", org_id)
+    .limit(10000);
 
   // All violations for this org (no status filter) — needed so that, per
   // file, we can tell whether an older scan's still-open violation has been
   // superseded by a later scan/attestation of that same file (see dedup below).
+  // Explicit .limit(10000) — same Supabase 1000-row default-cap issue as attests.
   const { data: violations } = await db
     .from("violations")
     .select("id, scan_id, file_path, risk_score, status, sla_deadline")
-    .eq("org_id", org_id);
+    .eq("org_id", org_id)
+    .limit(10000);
 
   // All scans for this org (no date filter) — used for violation dedup and
   // to derive the latest scan per repo for top_risk_files (see below).

@@ -393,7 +393,8 @@ export async function POST(req: NextRequest) {
               .from("attestations")
               .select("scan_id, file_path, risk_score, reviewer_email, reviewer_github")
               .eq("org_id", orgId)
-              .in("scan_id", prevScanIds);
+              .in("scan_id", prevScanIds)
+              .limit(10000);
 
             const autoAttest = new Map<string, { risk_score: string; reviewer_email: string; reviewer_github: string | null }>();
             for (const att of (prevAtts ?? [])) {
