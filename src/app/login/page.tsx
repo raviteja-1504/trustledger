@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "@/lib/supabase"; // used in handleSetPassword
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -181,7 +181,7 @@ function GitHubIcon() {
 }
 
 function ProductionLoginPage() {
-  const { user, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, loading } = useAuth();
+  const { user, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, passwordRecovery, clearPasswordRecovery, loading } = useAuth();
   const router       = useRouter();
   const searchParams = useSearchParams();
   const errorParam   = searchParams?.get("error");
@@ -199,16 +199,12 @@ function ProductionLoginPage() {
   const [formOk,    setFormOk]    = useState<string | null>(null);
   const [busy,      setBusy]      = useState(false);
 
-  // Detect PASSWORD_RECOVERY event from Supabase when user clicks the reset link.
-  // The link embeds tokens in the URL hash; Supabase JS picks them up and fires
-  // PASSWORD_RECOVERY instead of SIGNED_IN, giving us a chance to show the
-  // "set new password" form before navigating away.
+  // Switch to set-password mode when auth context detects PASSWORD_RECOVERY.
+  // The flag is persisted in localStorage by the auth context so it survives
+  // the full-page reload caused by Supabase redirecting to the Site URL.
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY") setMode("set-password");
-    });
-    return () => subscription.unsubscribe();
-  }, []);
+    if (passwordRecovery) setMode("set-password");
+  }, [passwordRecovery]);
 
   useEffect(() => {
     if (user && mode !== "set-password") router.replace("/dashboard");
@@ -251,6 +247,7 @@ function ProductionLoginPage() {
     const { error } = await supabase.auth.updateUser({ password: newPass });
     setBusy(false);
     if (error) { setFormErr(error.message); return; }
+    clearPasswordRecovery();
     setNewPassOk("Password set! Taking you to the dashboard…");
     setTimeout(() => router.replace("/dashboard"), 1500);
   }

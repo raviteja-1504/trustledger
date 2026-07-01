@@ -22,10 +22,12 @@ export interface OrgProfile {
 }
 
 interface AuthContextValue {
-  user:       User | null;
-  session:    Session | null;
-  profile:    OrgProfile | null;
-  loading:    boolean;
+  user:             User | null;
+  session:          Session | null;
+  profile:          OrgProfile | null;
+  loading:          boolean;
+  passwordRecovery: boolean;
+  clearPasswordRecovery: () => void;
   signInWithGitHub:   () => Promise<void>;
   signInWithEmail:    (email: string, password: string) => Promise<{ error: string | null }>;
   signUpWithEmail:    (email: string, password: string, name: string) => Promise<{ error: string | null }>;
@@ -107,11 +109,13 @@ function makeDemoAuth(): AuthContextValue {
     session: null,
     profile: getDemoProfile(role),
     loading: false,
-    signInWithGitHub: async () => {},
-    signInWithEmail:  async () => ({ error: null }),
-    signUpWithEmail:  async () => ({ error: null }),
-    resetPassword:    async () => ({ error: null }),
-    signOut:          async () => {
+    passwordRecovery:      false,
+    clearPasswordRecovery: () => {},
+    signInWithGitHub:      async () => {},
+    signInWithEmail:       async () => ({ error: null }),
+    signUpWithEmail:       async () => ({ error: null }),
+    resetPassword:         async () => ({ error: null }),
+    signOut:               async () => {
       if (typeof window !== "undefined") localStorage.removeItem("tl_demo_role");
       window.location.href = "/login";
     },
@@ -130,10 +134,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 
 function SupabaseAuthProvider({ children }: { children: ReactNode }) {
-  const [user,    setUser]    = useState<User | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
-  const [profile, setProfile] = useState<OrgProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user,             setUser]             = useState<User | null>(null);
+  const [session,          setSession]          = useState<Session | null>(null);
+  const [profile,          setProfile]          = useState<OrgProfile | null>(null);
+  const [loading,          setLoading]          = useState(true);
+  const [passwordRecovery, setPasswordRecovery] = useState(() =>
+    typeof window !== "undefined" && localStorage.getItem("tl_password_recovery") === "1"
+  );
+
+  function clearPasswordRecovery() {
+    localStorage.removeItem("tl_password_recovery");
+    setPasswordRecovery(false);
+  }
 
   // Load org profile after user is known.
   async function loadProfile(userId: string) {
@@ -192,14 +204,18 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      // PASSWORD_RECOVERY fires when the user clicks a reset/invite link.
-      // Navigate to /login so the set-password form is shown regardless of
-      // which page the Supabase link lands on (Site URL root, /dashboard, etc).
+      // PASSWORD_RECOVERY fires when the user clicks a reset link.
+      // Persist in localStorage so the flag survives the page navigation
+      // (window.location.replace causes a full reload which resets React state).
       if (event === "PASSWORD_RECOVERY") {
-        if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-          window.location.replace("/login");
-          return;
+        if (typeof window !== "undefined") {
+          localStorage.setItem("tl_password_recovery", "1");
+          setPasswordRecovery(true);
+          if (!window.location.pathname.startsWith("/login")) {
+            window.location.replace("/login");
+          }
         }
+        return;
       }
       syncSessionCookie(session);
       setSession(session);
@@ -296,7 +312,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, signOut }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, clearPasswordRecovery, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -306,10 +322,12 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
 const _noopAuth: AuthContextValue = {
   user: null, session: null, profile: null, loading: false,
-  signInWithGitHub:  async () => {},
-  signInWithEmail:   async () => ({ error: null }),
-  signUpWithEmail:   async () => ({ error: null }),
-  resetPassword:     async () => ({ error: null }),
+  passwordRecovery:      false,
+  clearPasswordRecovery: () => {},
+  signInWithGitHub:      async () => {},
+  signInWithEmail:       async () => ({ error: null }),
+  signUpWithEmail:       async () => ({ error: null }),
+  resetPassword:         async () => ({ error: null }),
   signOut: async () => {},
 };
 
