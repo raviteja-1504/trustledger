@@ -147,49 +147,22 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     setPasswordRecovery(false);
   }
 
-  // Load org profile after user is known.
-  async function loadProfile(userId: string) {
-    // Look up by user_id first (returning members)
-    let { data } = await supabase
-      .from("org_members")
-      .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
-      .eq("user_id", userId)
-      .single();
-
-    // Invited users have user_id = null until first login. The direct
-    // Supabase client UPDATE (anon key) is blocked by RLS for new users
-    // who don't own the row yet. Fall back to /api/me which uses the
-    // service role client in the middleware — it handles the linking
-    // automatically and returns the profile once linked.
-    if (!data) {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.access_token) {
-          const res = await fetch("/api/me", {
-            headers: { Authorization: `Bearer ${session.access_token}` },
-          });
-          if (res.ok) {
-            const me = await res.json();
-            setProfile(me);
-            return;
-          }
-        }
-      } catch {}
-    }
-
-    if (data) {
-      const org = (Array.isArray(data.organizations) ? data.organizations[0] : data.organizations) as { slug: string; name: string } | null;
-      setProfile({
-        org_id:   data.org_id,
-        org_slug: org?.slug ?? "",
-        org_name: org?.name ?? "",
-        role:     data.role,
-        email:    data.email,
-        name:     data.name,
-        github_login: data.github_login,
-        avatar_url:   data.avatar_url,
+  // Load org profile via the service-role API — bypasses RLS completely.
+  // Previously tried the anon Supabase client first, but RLS policies on
+  // org_members block invited/external members from reading their own row,
+  // causing profile = null and redirect to create-org.
+  async function loadProfile(_userId: string) {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch("/api/me", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
       });
-    }
+      if (res.ok) {
+        const me = await res.json();
+        setProfile(me);
+      }
+    } catch {}
   }
 
   useEffect(() => {
