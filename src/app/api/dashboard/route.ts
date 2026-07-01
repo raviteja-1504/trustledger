@@ -65,31 +65,7 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   if (prAuthorFilter) scansQuery = scansQuery.eq("pr_author", prAuthorFilter);
   const { data: scans } = await scansQuery;
 
-  // Attestations — no date filter: we need ALL attestations to correctly
-  // suppress SLA breaches on files attested before the current period window.
-  // Explicit .limit(10000) is required: Supabase silently caps unqualified
-  // queries at 1000 rows. Once an org accumulates >1000 attestation rows
-  // (from backfills or many scans), the truncated result leaves some scan_ids
-  // out of attestedFileSet — those files show attested:false in top_risk_files
-  // causing a permanent false "deploy pending" banner and ghost violations.
-  const { data: attests } = await db
-    .from("attestations")
-    .select("scan_id, file_path, reviewer_email, created_at")
-    .eq("org_id", org_id)
-    .limit(10000);
-
-  // All violations for this org (no status filter) — needed so that, per
-  // file, we can tell whether an older scan's still-open violation has been
-  // superseded by a later scan/attestation of that same file (see dedup below).
-  // Explicit .limit(10000) — same Supabase 1000-row default-cap issue as attests.
-  const { data: violations } = await db
-    .from("violations")
-    .select("id, scan_id, file_path, risk_score, status, sla_deadline")
-    .eq("org_id", org_id)
-    .limit(10000);
-
-  // All scans for this org (no date filter) — used for violation dedup and
-  // to derive the latest scan per repo for top_risk_files (see below).
+  // All scans for this org (no date filter) — used for violation dedup.
   let allScansQuery = db
     .from("scans")
     .select("id, repo_full_name, created_at")
@@ -97,24 +73,14 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   if (prAuthorFilter) allScansQuery = allScansQuery.eq("pr_author", prAuthorFilter);
   const { data: allScans } = await allScansQuery;
 
-  // Scan files for top risk — scoped to the LATEST scan per repo rather than
-  // a date-range + limit. The previous approach (.gte(since).limit(200))
-  // broke when a single repo had many scans: efs-services with 8+ scans ×
-  // 72 CRITICAL/HIGH files = 576 rows, which alone exceeds the 200 limit.
-  // Rows beyond the limit that came from older scans (no attestation rows)
-  // would appear as "unattested" even when the latest scan's files were fully
-  // attested — causing a permanent false "1 deploy pending" banner.
-  //
-  // By scoping to the latest scan per repo, we get exactly the right data:
-  // the current state of each repo with no stale older-scan entries polluting
-  // the list. The dedup loop below (seenFiles by repo::file_path) is kept for
-  // safety but becomes a no-op since each file now appears exactly once.
-  // Use the date-filtered `scans` (not allScans) to compute latest scan per repo.
-  // allScans has no date filter, so using it here would pull in repos scanned
-  // months ago whose old scan_ids produce ghost "deploy pending" banners and
-  // empty PR pages when clicked (old scans may have stale or incomplete data).
-  // scans is already filtered to the requested window (gte since), so only
-  // repos with recent activity appear in top_risk_files.
+  // Compute the latest scan per repo (from date-filtered scans, not allScans
+  // which would pull in repos scanned months ago and cause ghost banners).
+  // Done BEFORE attestations/violations queries so we can scope them to only
+  // these scan_ids — avoiding Supabase's server-side row limit (which can be
+  // as low as 1000 and cannot be overridden by .limit() from the client when
+  // the project has a max_rows setting). Scoping to ~4 repos × ~100 files
+  // = ~400 rows eliminates the limit problem permanently regardless of how
+  // many historical scans or backfilled attestation rows the org accumulates.
   const latestScanIdPerRepo = (() => {
     const m = new Map<string, { id: string; created_at: string }>();
     for (const s of scans ?? []) {
@@ -125,6 +91,24 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     }
     return [...m.values()].map(v => v.id);
   })();
+
+  // Attestations scoped to latest scan per repo only. The only consumer that
+  // needs cross-scan attestation history (attestedRepoFiles for SLA dedup)
+  // is satisfied by checking the latest scan's attestations — any file
+  // attested in the latest scan is by definition not in SLA breach for that
+  // repo's current state.
+  const { data: attests } = latestScanIdPerRepo.length === 0 ? { data: [] } : await db
+    .from("attestations")
+    .select("scan_id, file_path, reviewer_email, created_at")
+    .in("scan_id", latestScanIdPerRepo);
+
+  // Violations scoped to latest scan per repo for the same reason: the dedup
+  // logic keeps only the latest scan's violation per file anyway, so fetching
+  // older scans' violations is wasted work and adds unnecessary rows.
+  const { data: violations } = latestScanIdPerRepo.length === 0 ? { data: [] } : await db
+    .from("violations")
+    .select("id, scan_id, file_path, risk_score, status, sla_deadline")
+    .in("scan_id", latestScanIdPerRepo);
 
   const { data: riskFiles } = latestScanIdPerRepo.length === 0 ? { data: null } : await db
     .from("scan_files")
