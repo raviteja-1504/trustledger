@@ -323,18 +323,23 @@ export async function POST(req: NextRequest) {
                 .eq("scan_id", priorScan.id)
                 .in("file_path", [...unInherited]);
               if (!priorAtts || priorAtts.length === 0) continue;
-              for (const a of priorAtts) {
-                if (!alreadyInherited.has(a.file_path as string)) {
-                  await db.from("attestations").insert({
+              // Batch insert all new attestations in one query instead of one
+              // per file. The table rule blocks ON CONFLICT (upsert) but plain
+              // INSERT is fine — .insert([array]) generates a single multi-row
+              // INSERT with no ON CONFLICT clause.
+              const toInsert = priorAtts.filter(a => !alreadyInherited.has(a.file_path as string));
+              if (toInsert.length > 0) {
+                await db.from("attestations").insert(
+                  toInsert.map(a => ({
                     org_id: orgId, scan_id: scan.id,
                     file_path: a.file_path, risk_score: a.risk_score,
                     reviewer_id: a.reviewer_id, reviewer_email: a.reviewer_email,
                     reviewer_github: a.reviewer_github, payload_hash: a.payload_hash,
-                  });
-                  alreadyInherited.add(a.file_path as string);
-                }
-                unInherited.delete(a.file_path as string);
+                  }))
+                );
+                toInsert.forEach(a => alreadyInherited.add(a.file_path as string));
               }
+              priorAtts.forEach(a => unInherited.delete(a.file_path as string));
             }
           }
         }
@@ -424,26 +429,24 @@ export async function POST(req: NextRequest) {
             if (autoAttest.size > 0) {
               const now = new Date().toISOString();
               autoAttest.forEach((_, fp) => autoAttestedPaths.add(fp));
-              // The attestations table has a PostgreSQL rule that blocks INSERT
-              // with ON CONFLICT (which .upsert() uses internally). Insert only
-              // rows that don't already exist — one INSERT per file to stay
-              // compatible with the rule. Failures are silently ignored so a
-              // single bad row doesn't abort the whole inheritance batch.
-              for (const [fp, att] of autoAttest.entries()) {
-                const { data: existingAtt } = await db
-                  .from("attestations")
-                  .select("id")
-                  .eq("scan_id", scan.id)
-                  .eq("file_path", fp)
-                  .maybeSingle();
-                if (!existingAtt) {
-                  await db.from("attestations").insert({
+              // Batch insert all inherited attestations in one query.
+              // The table rule blocks ON CONFLICT (upsert) but plain INSERT
+              // works fine. Pre-filter against existing rows (loaded once
+              // above in the within-PR inheritance block via existingForScan).
+              const { data: existingCrossPR } = await db
+                .from("attestations").select("file_path").eq("scan_id", scan.id);
+              const existingCrossPRSet = new Set((existingCrossPR ?? []).map(a => a.file_path as string));
+              const crossPRToInsert = [...autoAttest.entries()]
+                .filter(([fp]) => !existingCrossPRSet.has(fp));
+              if (crossPRToInsert.length > 0) {
+                await db.from("attestations").insert(
+                  crossPRToInsert.map(([fp, att]) => ({
                     org_id: orgId, scan_id: scan.id, file_path: fp,
                     risk_score: att.risk_score, reviewer_email: att.reviewer_email,
                     reviewer_github: att.reviewer_github,
                     payload_hash: `inherited:${scan.id}:${fp}`,
-                  });
-                }
+                  }))
+                );
               }
               await db.from("violations")
                 .update({ status: "resolved", resolved_at: now })
