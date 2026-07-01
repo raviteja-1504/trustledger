@@ -23,6 +23,7 @@ interface ScanSummary {
   overall_risk:        RiskLevel;
   total_ai_percentage: number;
   file_count:          number;
+  high_crit_count?:    number;
   attested_count:      number;
   created_at:          string;
   triggered_by:        string;
@@ -39,25 +40,25 @@ function makeMockScans(): ScanSummary[] {
     return d.toISOString();
   };
   return [
-    { scan_id:"sc_mock_001", repo:`${o}/payments-api`,    pr_number:482, commit_sha:"a1b2c3d", branch:"feature/card-validator",   overall_risk:"CRITICAL", total_ai_percentage:0.71, file_count:7,  attested_count:3,  created_at:ts(0,14,32), triggered_by:"webhook" },
-    { scan_id:"sc_mock_003", repo:`${o}/fraud-detection`, pr_number:219, commit_sha:"e4f5g6h", branch:"feat/risk-scorer",         overall_risk:"CRITICAL", total_ai_percentage:0.58, file_count:5,  attested_count:3,  created_at:ts(0,10, 5), triggered_by:"webhook" },
+    { scan_id:"sc_mock_001", repo:`${o}/payments-api`,    pr_number:482, commit_sha:"a1b2c3d", branch:"feature/card-validator",   overall_risk:"CRITICAL", total_ai_percentage:0.71, file_count:7,  attested_count:3,  high_crit_count:3,  created_at:ts(0,14,32), triggered_by:"webhook" },
+    { scan_id:"sc_mock_003", repo:`${o}/fraud-detection`, pr_number:219, commit_sha:"e4f5g6h", branch:"feat/risk-scorer",         overall_risk:"CRITICAL", total_ai_percentage:0.58, file_count:5,  attested_count:3,  high_crit_count:3,  created_at:ts(0,10, 5), triggered_by:"webhook" },
     { scan_id:"sc_mock_017", repo:`${o}/auth-service`,    pr_number:345, commit_sha:"b2c3d4e", branch:"feat/mfa-flow",            overall_risk:"HIGH",     total_ai_percentage:0.53, file_count:6,  attested_count:5,  created_at:ts(0, 9,15), triggered_by:"webhook" },
-    { scan_id:"sc_mock_002", repo:`${o}/auth-service`,    pr_number:341, commit_sha:"i7j8k9l", branch:"fix/token-exchange",       overall_risk:"HIGH",     total_ai_percentage:0.44, file_count:4,  attested_count:3,  created_at:ts(1,11, 0), triggered_by:"webhook" },
+    { scan_id:"sc_mock_002", repo:`${o}/auth-service`,    pr_number:341, commit_sha:"i7j8k9l", branch:"fix/token-exchange",       overall_risk:"HIGH",     total_ai_percentage:0.44, file_count:4,  attested_count:3,  high_crit_count:3,  created_at:ts(1,11, 0), triggered_by:"webhook" },
     { scan_id:"sc_mock_008", repo:`${o}/payments-api`,    pr_number:479, commit_sha:"m1n2o3p", branch:"fix/stripe-client",        overall_risk:"HIGH",     total_ai_percentage:0.67, file_count:3,  attested_count:0,  created_at:ts(1, 9,22), triggered_by:"webhook" },
     { scan_id:"sc_mock_014", repo:`${o}/fraud-detection`, pr_number:218, commit_sha:"w1x2y3z", branch:"feat/velocity-check",      overall_risk:"HIGH",     total_ai_percentage:0.62, file_count:4,  attested_count:4,  created_at:ts(1,16,30), triggered_by:"webhook" },
     { scan_id:"sc_mock_018", repo:`${o}/risk-engine`,     pr_number:91,  commit_sha:"f5g6h7i", branch:"feat/ml-pipeline",         overall_risk:"CRITICAL", total_ai_percentage:0.84, file_count:9,  attested_count:0,  created_at:ts(1, 8, 0), triggered_by:"webhook" },
     { scan_id:"sc_mock_025", repo:`${o}/data-platform`,   pr_number:107, commit_sha:"d3e4f5a", branch:"feat/customer-sync-v2",    overall_risk:"HIGH",     total_ai_percentage:0.43, file_count:2,  attested_count:1,  created_at:ts(1,13, 0), triggered_by:"webhook" },
-    { scan_id:"sc_mock_004", repo:`${o}/risk-engine`,     pr_number:88,  commit_sha:"u7v8w9x", branch:"refactor/scoring",         overall_risk:"MEDIUM",   total_ai_percentage:0.36, file_count:4,  attested_count:3,  created_at:ts(2,16,20), triggered_by:"webhook" },
-    { scan_id:"sc_mock_024", repo:`${o}/auth-service`,    pr_number:338, commit_sha:"y1z2a3b", branch:"chore/deps-update",        overall_risk:"MEDIUM",   total_ai_percentage:0.31, file_count:3,  attested_count:3,  created_at:ts(2,10,30), triggered_by:"webhook" },
+    { scan_id:"sc_mock_004", repo:`${o}/risk-engine`,     pr_number:88,  commit_sha:"u7v8w9x", branch:"refactor/scoring",         overall_risk:"MEDIUM",   total_ai_percentage:0.36, file_count:4,  attested_count:3,  high_crit_count:3,  created_at:ts(2,16,20), triggered_by:"webhook" },
+    { scan_id:"sc_mock_024", repo:`${o}/auth-service`,    pr_number:338, commit_sha:"y1z2a3b", branch:"chore/deps-update",        overall_risk:"MEDIUM",   total_ai_percentage:0.31, file_count:3,  attested_count:3,  high_crit_count:3,  created_at:ts(2,10,30), triggered_by:"webhook" },
     { scan_id:"sc_mock_009", repo:`${o}/payments-api`,    pr_number:477, commit_sha:"c4d5e6f", branch:"feat/refund-handler",      overall_risk:"MEDIUM",   total_ai_percentage:0.55, file_count:5,  attested_count:5,  created_at:ts(2,17,30), triggered_by:"webhook" },
     { scan_id:"sc_mock_019", repo:`${o}/data-platform`,   pr_number:0,   commit_sha:"j8k9l0m", branch:"main",                    overall_risk:"LOW",      total_ai_percentage:0.19, file_count:14, attested_count:12, created_at:ts(2,12, 0), triggered_by:"push"    },
     { scan_id:"sc_mock_015", repo:`${o}/auth-service`,    pr_number:0,   commit_sha:"a4b5c6d", branch:"main",                    overall_risk:"LOW",      total_ai_percentage:0.18, file_count:12, attested_count:12, created_at:ts(3,10, 0), triggered_by:"push"    },
-    { scan_id:"sc_mock_020", repo:`${o}/fraud-detection`, pr_number:215, commit_sha:"n1o2p3q", branch:"fix/duplicate-tx",         overall_risk:"HIGH",     total_ai_percentage:0.49, file_count:3,  attested_count:3,  created_at:ts(3,15,45), triggered_by:"webhook" },
+    { scan_id:"sc_mock_020", repo:`${o}/fraud-detection`, pr_number:215, commit_sha:"n1o2p3q", branch:"fix/duplicate-tx",         overall_risk:"HIGH",     total_ai_percentage:0.49, file_count:3,  attested_count:3,  high_crit_count:3,  created_at:ts(3,15,45), triggered_by:"webhook" },
     { scan_id:"sc_mock_005", repo:`${o}/data-platform`,   pr_number:103, commit_sha:"q4r5s6t", branch:"feat/etl-runner",          overall_risk:"HIGH",     total_ai_percentage:0.62, file_count:6,  attested_count:4,  created_at:ts(4,14, 0), triggered_by:"webhook" },
     { scan_id:"sc_mock_006", repo:`${o}/ml-platform`,    pr_number:57,  commit_sha:"h2i3j4k", branch:"feat/inference-engine",     overall_risk:"CRITICAL", total_ai_percentage:0.88, file_count:5,  attested_count:1,  created_at:ts(4, 8,45), triggered_by:"webhook" },
     { scan_id:"sc_mock_021", repo:`${o}/payments-api`,    pr_number:474, commit_sha:"r4s5t6u", branch:"feat/payout-scheduler",    overall_risk:"MEDIUM",   total_ai_percentage:0.41, file_count:5,  attested_count:5,  created_at:ts(4,11,30), triggered_by:"webhook" },
-    { scan_id:"sc_mock_010", repo:`${o}/risk-engine`,     pr_number:85,  commit_sha:"g7h8i9j", branch:"feat/scoring-engine",      overall_risk:"LOW",      total_ai_percentage:0.28, file_count:3,  attested_count:3,  created_at:ts(5,15,45), triggered_by:"webhook" },
-    { scan_id:"sc_mock_011", repo:`${o}/auth-service`,    pr_number:336, commit_sha:"k1l2m3n", branch:"fix/rate-limiter",         overall_risk:"LOW",      total_ai_percentage:0.22, file_count:3,  attested_count:3,  created_at:ts(5,11,20), triggered_by:"webhook" },
+    { scan_id:"sc_mock_010", repo:`${o}/risk-engine`,     pr_number:85,  commit_sha:"g7h8i9j", branch:"feat/scoring-engine",      overall_risk:"LOW",      total_ai_percentage:0.28, file_count:3,  attested_count:3,  high_crit_count:3,  created_at:ts(5,15,45), triggered_by:"webhook" },
+    { scan_id:"sc_mock_011", repo:`${o}/auth-service`,    pr_number:336, commit_sha:"k1l2m3n", branch:"fix/rate-limiter",         overall_risk:"LOW",      total_ai_percentage:0.22, file_count:3,  attested_count:3,  high_crit_count:3,  created_at:ts(5,11,20), triggered_by:"webhook" },
     { scan_id:"sc_mock_013", repo:`${o}/data-platform`,   pr_number:101, commit_sha:"s7t8u9v", branch:"fix/ai-threshold",         overall_risk:"HIGH",     total_ai_percentage:0.81, file_count:4,  attested_count:2,  created_at:ts(5, 9,10), triggered_by:"webhook" },
     { scan_id:"sc_mock_012", repo:`${o}/payments-api`,    pr_number:471, commit_sha:"o4p5q6r", branch:"feat/currency-formatter",  overall_risk:"MEDIUM",   total_ai_percentage:0.34, file_count:5,  attested_count:5,  created_at:ts(6,16, 0), triggered_by:"webhook" },
     { scan_id:"sc_mock_022", repo:`${o}/risk-engine`,     pr_number:82,  commit_sha:"v7w8x9y", branch:"chore/lint-fixes",         overall_risk:"LOW",      total_ai_percentage:0.14, file_count:2,  attested_count:2,  created_at:ts(6,14, 0), triggered_by:"webhook" },
@@ -381,7 +382,8 @@ export default function ScansPage() {
     const filesTotal = scans.reduce((s, x) => s + x.file_count, 0);
     const fullyAttested = scans.filter(s => {
       const eff = effectiveAttestedCount(s, violationStatuses);
-      return s.file_count > 0 && eff >= s.file_count;
+      const riskTotal = s.high_crit_count ?? s.file_count;
+      return riskTotal > 0 && eff >= riskTotal;
     }).length;
     return {
       total:         scans.length,
@@ -405,9 +407,10 @@ export default function ScansPage() {
     const repoShort   = s.repo.includes("/") ? s.repo.split("/").slice(1).join("/") : s.repo;
     const isPR        = s.pr_number > 0;
     const attested    = effectiveAttestedCount(s, violationStatuses);
+    const riskTotal   = s.high_crit_count ?? s.file_count;
     const chip        = superseded
       ? { label:"Superseded", textColor:"#6b7280", bg:"#f3f4f6", border:"#e5e7eb" }
-      : attestChip(attested, s.file_count);
+      : attestChip(Math.min(attested, riskTotal), riskTotal);
     const aiPct     = Math.round(s.total_ai_percentage * 100);
     const aiColor   = s.total_ai_percentage >= 0.7 ? "#be123c" : s.total_ai_percentage >= 0.4 ? "#b45309" : "#059669";
     const aiBg      = s.total_ai_percentage >= 0.7 ? "#fff1f2" : s.total_ai_percentage >= 0.4 ? "#fffbeb" : "#f0fdf4";

@@ -46,16 +46,29 @@ export async function GET(req: NextRequest) {
   const { data: scans, error: dbErr } = await query;
   if (dbErr) return NextResponse.json({ error: "db_error" }, { status: 500 });
 
-  // Count attestations per scan in one query
+  // Count HIGH/CRITICAL attestations and HIGH/CRITICAL file totals per scan.
+  // Using HIGH/CRIT only (not total file count) matches what the PR detail page
+  // shows ("72/72 attested") and correctly reflects policy-gated files.
   const scanIds = (scans ?? []).map(s => s.id);
-  const attestCounts = new Map<string, number>();
+  const attestCounts   = new Map<string, number>(); // HIGH/CRIT attested per scan
+  const highCritCounts = new Map<string, number>(); // HIGH/CRIT files per scan
+
   if (scanIds.length > 0) {
-    const { data: attests } = await db
-      .from("attestations")
-      .select("scan_id")
-      .in("scan_id", scanIds);
-    (attests ?? []).forEach(a => {
+    const [attestRes, highCritRes] = await Promise.all([
+      db.from("attestations")
+        .select("scan_id")
+        .in("scan_id", scanIds)
+        .in("risk_score", ["CRITICAL", "HIGH"]),
+      db.from("scan_files")
+        .select("scan_id")
+        .in("scan_id", scanIds)
+        .in("risk_score", ["CRITICAL", "HIGH"]),
+    ]);
+    (attestRes.data ?? []).forEach(a => {
       attestCounts.set(a.scan_id, (attestCounts.get(a.scan_id) ?? 0) + 1);
+    });
+    (highCritRes.data ?? []).forEach(f => {
+      highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
     });
   }
 
@@ -69,6 +82,7 @@ export async function GET(req: NextRequest) {
       overall_risk:        s.overall_risk,
       total_ai_percentage: s.total_ai_percentage,
       file_count:          s.file_count,
+      high_crit_count:     highCritCounts.get(s.id) ?? 0,
       attested_count:      attestCounts.get(s.id) ?? 0,
       created_at:          s.created_at,
       triggered_by:        s.triggered_by ?? "api",
