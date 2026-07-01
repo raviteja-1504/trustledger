@@ -180,30 +180,50 @@ function GitHubIcon() {
 }
 
 function ProductionLoginPage() {
-  const { user, signInWithGitHub, signInWithEmail, loading } = useAuth();
+  const { user, signInWithGitHub, signInWithEmail, signUpWithEmail, loading } = useAuth();
   const router       = useRouter();
   const searchParams = useSearchParams();
   const errorParam   = searchParams?.get("error");
   const [githubBusy, setGithubBusy] = useState(false);
 
+  const [mode,      setMode]      = useState<"signin" | "signup">("signin");
   const [showEmail, setShowEmail] = useState(false);
   const [email,     setEmail]     = useState("");
   const [password,  setPassword]  = useState("");
+  const [confirm,   setConfirm]   = useState("");
+  const [name,      setName]      = useState("");
   const [formErr,   setFormErr]   = useState<string | null>(null);
+  const [formOk,    setFormOk]    = useState<string | null>(null);
   const [busy,      setBusy]      = useState(false);
 
   useEffect(() => {
     if (user) router.replace("/dashboard");
   }, [user, router]);
 
+  function switchMode(m: "signin" | "signup") {
+    setMode(m); setFormErr(null); setFormOk(null);
+    setEmail(""); setPassword(""); setConfirm(""); setName("");
+    setShowEmail(m === "signup");
+  }
+
   async function handleEmail(e: React.FormEvent) {
     e.preventDefault();
+    setFormErr(null); setFormOk(null);
+    if (mode === "signup" && password !== confirm) {
+      setFormErr("Passwords do not match."); return;
+    }
     setBusy(true);
-    setFormErr(null);
-    const { error } = await signInWithEmail(email, password);
-    setBusy(false);
-    if (error) setFormErr(error);
-    else router.replace("/dashboard");
+    if (mode === "signin") {
+      const { error } = await signInWithEmail(email, password);
+      setBusy(false);
+      if (error) setFormErr(error);
+      else router.replace("/dashboard");
+    } else {
+      const { error } = await signUpWithEmail(email, password, name);
+      setBusy(false);
+      if (error) setFormErr(error);
+      else setFormOk("Account created! Check your email to confirm your address, then sign in.");
+    }
   }
 
   if (loading) return null;
@@ -216,7 +236,7 @@ function ProductionLoginPage() {
       <div className="w-full max-w-sm">
 
         {/* Branding */}
-        <div className="flex flex-col items-center mb-10">
+        <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-4"
             style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
             <ShieldIcon />
@@ -225,30 +245,41 @@ function ProductionLoginPage() {
           <p className="text-sm mt-1" style={{ color: "rgba(165,180,252,0.6)" }}>AI Code Governance</p>
         </div>
 
+        {/* Sign in / Sign up toggle */}
+        <div className="flex rounded-xl p-1 mb-5" style={{ background: "rgba(255,255,255,0.05)" }}>
+          {(["signin","signup"] as const).map(m => (
+            <button key={m} onClick={() => switchMode(m)}
+              className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all"
+              style={{
+                background: mode === m ? "rgba(99,102,241,0.8)" : "transparent",
+                color:      mode === m ? "white" : "rgba(255,255,255,0.4)",
+              }}>
+              {m === "signin" ? "Sign In" : "Sign Up"}
+            </button>
+          ))}
+        </div>
+
         {/* Card */}
         <div className="rounded-2xl p-7 space-y-4" style={{
           background: "rgba(255,255,255,0.04)",
           border: "1px solid rgba(255,255,255,0.08)",
         }}>
-          <p className="text-base font-bold text-white text-center">Sign in to your organisation</p>
+          <p className="text-base font-bold text-white text-center">
+            {mode === "signin" ? "Sign in to your organisation" : "Create your account"}
+          </p>
 
-          {/* Errors */}
-          {errorParam && (() => {
+          {/* Errors / success */}
+          {errorParam && mode === "signin" && (() => {
             const msg =
-              errorParam === "session_timeout"    ? "You were signed out due to inactivity."
-            : errorParam === "pkce_lost"          ? "Sign-in session expired — your browser lost the login state. Please try again."
-            : errorParam === "missing_code"       ? "GitHub did not return an authorisation code. Please try again."
-            : errorParam === "access_denied"      ? "GitHub access was denied. Please authorise TrustLedger to continue."
-            : errorParam === "auth_failed"        ? "Sign-in failed. Please try again or contact support."
+              errorParam === "session_timeout" ? "You were signed out due to inactivity."
+            : errorParam === "pkce_lost"       ? "Sign-in session expired — please try again."
+            : errorParam === "missing_code"    ? "GitHub did not return an authorisation code. Please try again."
+            : errorParam === "access_denied"   ? "GitHub access was denied. Please authorise TrustLedger to continue."
+            : errorParam === "auth_failed"     ? "Sign-in failed. Please try again or contact support."
             : `Sign-in error: ${decodeURIComponent(errorParam)}`;
             return (
-              <div className="px-3 py-2.5 rounded-xl text-xs text-rose-300 bg-rose-900/30 border border-rose-700/40 space-y-2">
+              <div className="px-3 py-2.5 rounded-xl text-xs text-rose-300 bg-rose-900/30 border border-rose-700/40">
                 <p>{msg}</p>
-                {(errorParam === "pkce_lost" || errorParam === "auth_failed") && (
-                  <p className="text-rose-400 text-[11px]">
-                    Tip: make sure you are not in a private/incognito window with storage blocked, or try a different browser.
-                  </p>
-                )}
               </div>
             );
           })()}
@@ -257,26 +288,58 @@ function ProductionLoginPage() {
               {formErr}
             </div>
           )}
+          {formOk && (
+            <div className="px-3 py-2.5 rounded-xl text-sm text-emerald-300 bg-emerald-900/30 border border-emerald-700/40">
+              {formOk}
+            </div>
+          )}
 
-          {/* Primary: GitHub */}
-          <button
-            onClick={async () => { setGithubBusy(true); await signInWithGitHub(); }}
-            disabled={githubBusy}
-            className="w-full flex items-center justify-center gap-3 py-3 rounded-xl font-semibold text-sm text-white transition-all disabled:opacity-70 disabled:cursor-not-allowed"
-            style={{ background: "#24292f", border: "1px solid rgba(255,255,255,0.12)" }}
-            onMouseEnter={e => { if (!githubBusy) (e.currentTarget as HTMLElement).style.background = "#1a1f24"; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "#24292f"; }}
-          >
-            {githubBusy ? (
-              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-              </svg>
-            ) : <GitHubIcon />}
-            {githubBusy ? "Redirecting to GitHub…" : "Continue with GitHub"}
-          </button>
+          {/* GitHub — only for sign in */}
+          {mode === "signin" && (
+            <button
+              onClick={async () => { setGithubBusy(true); await signInWithGitHub(); }}
+              disabled={githubBusy}
+              className="w-full flex items-center justify-center gap-3 py-3 rounded-xl font-semibold text-sm text-white transition-all disabled:opacity-70"
+              style={{ background: "#24292f", border: "1px solid rgba(255,255,255,0.12)" }}
+              onMouseEnter={e => { if (!githubBusy) (e.currentTarget as HTMLElement).style.background = "#1a1f24"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "#24292f"; }}
+            >
+              {githubBusy ? (
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                </svg>
+              ) : <GitHubIcon />}
+              {githubBusy ? "Redirecting to GitHub…" : "Continue with GitHub"}
+            </button>
+          )}
 
-          {/* Secondary: email (collapsed by default) */}
-          {!showEmail ? (
+          {/* Email form */}
+          {mode === "signup" || showEmail ? (
+            <form onSubmit={handleEmail} className="space-y-2.5">
+              {mode === "signup" && (
+                <input type="text" placeholder="Full name" value={name}
+                  onChange={e => setName(e.target.value)} required autoFocus
+                  className={inputCls} />
+              )}
+              <input type="email" placeholder="Work email" value={email}
+                onChange={e => setEmail(e.target.value)} required
+                autoFocus={mode === "signin"}
+                className={inputCls} />
+              <input type="password" placeholder="Password" value={password}
+                onChange={e => setPassword(e.target.value)} required minLength={8}
+                className={inputCls} />
+              {mode === "signup" && (
+                <input type="password" placeholder="Confirm password" value={confirm}
+                  onChange={e => setConfirm(e.target.value)} required minLength={8}
+                  className={inputCls} />
+              )}
+              <button type="submit" disabled={busy}
+                className="w-full py-2.5 rounded-xl font-semibold text-sm text-white transition-all"
+                style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", opacity: busy ? 0.7 : 1 }}>
+                {busy ? (mode === "signin" ? "Signing in…" : "Creating account…") : (mode === "signin" ? "Sign in" : "Create account")}
+              </button>
+            </form>
+          ) : (
             <button
               onClick={() => setShowEmail(true)}
               className="w-full py-2.5 rounded-xl text-sm font-medium transition-colors"
@@ -286,35 +349,7 @@ function ProductionLoginPage() {
             >
               Sign in with email instead
             </button>
-          ) : (
-            <form onSubmit={handleEmail} className="space-y-2.5">
-              <input type="email" placeholder="Work email" value={email}
-                onChange={e => setEmail(e.target.value)} required autoFocus
-                className={inputCls} />
-              <input type="password" placeholder="Password" value={password}
-                onChange={e => setPassword(e.target.value)} required minLength={8}
-                className={inputCls} />
-              <button type="submit" disabled={busy}
-                className="w-full py-2.5 rounded-xl font-semibold text-sm text-white transition-all"
-                style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", opacity: busy ? 0.7 : 1 }}>
-                {busy ? "Signing in…" : "Sign in"}
-              </button>
-            </form>
           )}
-        </div>
-
-        {/* Create org — prominent secondary CTA */}
-        <div className="mt-4 rounded-2xl px-6 py-4 text-center" style={{
-          background: "rgba(99,102,241,0.08)",
-          border: "1px solid rgba(99,102,241,0.2)",
-        }}>
-          <p className="text-xs font-medium mb-1.5" style={{ color: "rgba(165,180,252,0.6)" }}>
-            Setting up TrustLedger for your team?
-          </p>
-          <a href="/create-org"
-            className="text-sm font-bold text-indigo-400 hover:text-indigo-300 transition-colors">
-            Create your organisation →
-          </a>
         </div>
 
         <p className="mt-5 text-center text-xs" style={{ color: "rgba(255,255,255,0.18)" }}>
