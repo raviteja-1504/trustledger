@@ -92,15 +92,19 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     return [...m.values()].map(v => v.id);
   })();
 
-  // Attestations scoped to latest scan per repo only. The only consumer that
-  // needs cross-scan attestation history (attestedRepoFiles for SLA dedup)
-  // is satisfied by checking the latest scan's attestations — any file
-  // attested in the latest scan is by definition not in SLA breach for that
-  // repo's current state.
+  // Attestations scoped to latest scan per repo AND filtered to CRITICAL/HIGH.
+  // attestedFileSet is only checked against top_risk_files which is already
+  // CRITICAL/HIGH only. attestedRepoFiles (SLA dedup) only needs to suppress
+  // breaches on CRITICAL/HIGH violations (now also filtered to that risk level).
+  // This brings attestation rows from ~83/repo (all risk levels) to ~72/repo
+  // (CRITICAL/HIGH only), matching violations and riskFiles — all three queries
+  // now scale at the same rate and the bottleneck is ~13 repos before any hits
+  // the server-side row cap.
   const { data: attests } = latestScanIdPerRepo.length === 0 ? { data: [] } : await db
     .from("attestations")
     .select("scan_id, file_path, reviewer_email, created_at")
-    .in("scan_id", latestScanIdPerRepo);
+    .in("scan_id", latestScanIdPerRepo)
+    .in("risk_score", ["CRITICAL", "HIGH"]);
 
   // Violations scoped to latest scan per repo AND filtered to CRITICAL/HIGH
   // only — the dashboard only uses violations for unattested_deploy_count and
