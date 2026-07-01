@@ -76,7 +76,8 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .select("id, scan_id, file_path, risk_score, status, sla_deadline")
     .eq("org_id", org_id);
 
-  // All scans for this org (no date filter) — used for violation dedup.
+  // All scans for this org (no date filter) — used for violation dedup and
+  // to derive the latest scan per repo for top_risk_files (see below).
   let allScansQuery = db
     .from("scans")
     .select("id, repo_full_name, created_at")
@@ -84,16 +85,37 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   if (prAuthorFilter) allScansQuery = allScansQuery.eq("pr_author", prAuthorFilter);
   const { data: allScans } = await allScansQuery;
 
-  // Scan files for top risk. Fetch recent-first so that, once deduped by
-  // repo+file_path below, we keep each file's most recent occurrence.
-  const { data: riskFiles } = await db
+  // Scan files for top risk — scoped to the LATEST scan per repo rather than
+  // a date-range + limit. The previous approach (.gte(since).limit(200))
+  // broke when a single repo had many scans: efs-services with 8+ scans ×
+  // 72 CRITICAL/HIGH files = 576 rows, which alone exceeds the 200 limit.
+  // Rows beyond the limit that came from older scans (no attestation rows)
+  // would appear as "unattested" even when the latest scan's files were fully
+  // attested — causing a permanent false "1 deploy pending" banner.
+  //
+  // By scoping to the latest scan per repo, we get exactly the right data:
+  // the current state of each repo with no stale older-scan entries polluting
+  // the list. The dedup loop below (seenFiles by repo::file_path) is kept for
+  // safety but becomes a no-op since each file now appears exactly once.
+  const latestScanIdPerRepo = (() => {
+    const m = new Map<string, { id: string; created_at: string }>();
+    for (const s of allScans ?? []) {
+      const existing = m.get(s.repo_full_name);
+      if (!existing || s.created_at > existing.created_at) {
+        m.set(s.repo_full_name, { id: s.id, created_at: s.created_at });
+      }
+    }
+    return [...m.values()].map(v => v.id);
+  })();
+
+  const { data: riskFiles } = latestScanIdPerRepo.length === 0 ? { data: null } : await db
     .from("scan_files")
     .select("scan_id, file_path, ai_percentage, risk_score, risk_indicators, created_at, scans(repo_full_name, pr_number)")
     .eq("org_id", org_id)
     .in("risk_score", ["CRITICAL", "HIGH"])
-    .gte("created_at", since)
-    .order("created_at", { ascending: false })
-    .limit(200) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
+    .in("scan_id", latestScanIdPerRepo)
+    .order("ai_percentage", { ascending: false })
+    .limit(1000) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
 
   if (!scans) return { repos:[], overall_ai_pct:0, attestation_rate:0, unattested_deploy_count:0, risk_trend:[], scan_count:0, file_count:0, top_risk_files:[] };
 
