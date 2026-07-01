@@ -26,9 +26,10 @@ interface AuthContextValue {
   session:    Session | null;
   profile:    OrgProfile | null;
   loading:    boolean;
-  signInWithGitHub: () => Promise<void>;
-  signInWithEmail:  (email: string, password: string) => Promise<{ error: string | null }>;
-  signUpWithEmail:  (email: string, password: string, name: string) => Promise<{ error: string | null }>;
+  signInWithGitHub:   () => Promise<void>;
+  signInWithEmail:    (email: string, password: string) => Promise<{ error: string | null }>;
+  signUpWithEmail:    (email: string, password: string, name: string) => Promise<{ error: string | null }>;
+  resetPassword:      (email: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
 }
 
@@ -109,6 +110,7 @@ function makeDemoAuth(): AuthContextValue {
     signInWithGitHub: async () => {},
     signInWithEmail:  async () => ({ error: null }),
     signUpWithEmail:  async () => ({ error: null }),
+    resetPassword:    async () => ({ error: null }),
     signOut:          async () => {
       if (typeof window !== "undefined") localStorage.removeItem("tl_demo_role");
       window.location.href = "/login";
@@ -240,6 +242,14 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     return { error: error?.message ?? null };
   }
 
+  async function resetPassword(email: string) {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${appUrl}/login?reset=1`,
+    });
+    return { error: error?.message ?? null };
+  }
+
   // Record this session as the user's sole active session (kicks out any
   // previously issued token — see verifyApiKey's session_revoked check).
   async function registerSession() {
@@ -277,7 +287,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, signInWithGitHub, signInWithEmail, signUpWithEmail, signOut }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -287,9 +297,10 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
 const _noopAuth: AuthContextValue = {
   user: null, session: null, profile: null, loading: false,
-  signInWithGitHub: async () => {},
-  signInWithEmail:  async () => ({ error: null }),
-  signUpWithEmail:  async () => ({ error: null }),
+  signInWithGitHub:  async () => {},
+  signInWithEmail:   async () => ({ error: null }),
+  signUpWithEmail:   async () => ({ error: null }),
+  resetPassword:     async () => ({ error: null }),
   signOut: async () => {},
 };
 

@@ -180,13 +180,13 @@ function GitHubIcon() {
 }
 
 function ProductionLoginPage() {
-  const { user, signInWithGitHub, signInWithEmail, signUpWithEmail, loading } = useAuth();
+  const { user, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, loading } = useAuth();
   const router       = useRouter();
   const searchParams = useSearchParams();
   const errorParam   = searchParams?.get("error");
   const [githubBusy, setGithubBusy] = useState(false);
 
-  const [mode,      setMode]      = useState<"signin" | "signup">("signin");
+  const [mode,      setMode]      = useState<"signin" | "signup" | "forgot">("signin");
   const [showEmail, setShowEmail] = useState(false);
   const [email,     setEmail]     = useState("");
   const [password,  setPassword]  = useState("");
@@ -200,10 +200,10 @@ function ProductionLoginPage() {
     if (user) router.replace("/dashboard");
   }, [user, router]);
 
-  function switchMode(m: "signin" | "signup") {
+  function switchMode(m: "signin" | "signup" | "forgot") {
     setMode(m); setFormErr(null); setFormOk(null);
     setEmail(""); setPassword(""); setConfirm(""); setName("");
-    setShowEmail(m === "signup");
+    setShowEmail(m === "signup" || m === "forgot");
   }
 
   async function handleEmail(e: React.FormEvent) {
@@ -218,11 +218,16 @@ function ProductionLoginPage() {
       setBusy(false);
       if (error) setFormErr(error);
       else router.replace("/dashboard");
-    } else {
+    } else if (mode === "signup") {
       const { error } = await signUpWithEmail(email, password, name);
       setBusy(false);
       if (error) setFormErr(error);
       else setFormOk("Account created! Check your email to confirm your address, then sign in.");
+    } else {
+      const { error } = await resetPassword(email);
+      setBusy(false);
+      if (error) setFormErr(error);
+      else setFormOk("Password reset email sent — check your inbox and follow the link to set a new password.");
     }
   }
 
@@ -247,14 +252,14 @@ function ProductionLoginPage() {
 
         {/* Sign in / Sign up toggle */}
         <div className="flex rounded-xl p-1 mb-5" style={{ background: "rgba(255,255,255,0.05)" }}>
-          {(["signin","signup"] as const).map(m => (
+          {(["signin","signup","forgot"] as const).map(m => (
             <button key={m} onClick={() => switchMode(m)}
-              className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all"
+              className="flex-1 py-2 rounded-lg text-xs font-semibold transition-all"
               style={{
                 background: mode === m ? "rgba(99,102,241,0.8)" : "transparent",
                 color:      mode === m ? "white" : "rgba(255,255,255,0.4)",
               }}>
-              {m === "signin" ? "Sign In" : "Sign Up"}
+              {m === "signin" ? "Sign In" : m === "signup" ? "Sign Up" : "Forgot Password"}
             </button>
           ))}
         </div>
@@ -265,7 +270,7 @@ function ProductionLoginPage() {
           border: "1px solid rgba(255,255,255,0.08)",
         }}>
           <p className="text-base font-bold text-white text-center">
-            {mode === "signin" ? "Sign in to your organisation" : "Create your account"}
+            {mode === "signin" ? "Sign in to your organisation" : mode === "signup" ? "Create your account" : "Reset your password"}
           </p>
 
           {/* Errors / success */}
@@ -314,7 +319,7 @@ function ProductionLoginPage() {
           )}
 
           {/* Email form */}
-          {mode === "signup" || showEmail ? (
+          {mode === "signup" || mode === "forgot" || showEmail ? (
             <form onSubmit={handleEmail} className="space-y-2.5">
               {mode === "signup" && (
                 <input type="text" placeholder="Full name" value={name}
@@ -323,11 +328,13 @@ function ProductionLoginPage() {
               )}
               <input type="email" placeholder="Work email" value={email}
                 onChange={e => setEmail(e.target.value)} required
-                autoFocus={mode === "signin"}
+                autoFocus={mode === "signin" || mode === "forgot"}
                 className={inputCls} />
-              <input type="password" placeholder="Password" value={password}
-                onChange={e => setPassword(e.target.value)} required minLength={8}
-                className={inputCls} />
+              {mode !== "forgot" && (
+                <input type="password" placeholder="Password" value={password}
+                  onChange={e => setPassword(e.target.value)} required minLength={8}
+                  className={inputCls} />
+              )}
               {mode === "signup" && (
                 <input type="password" placeholder="Confirm password" value={confirm}
                   onChange={e => setConfirm(e.target.value)} required minLength={8}
@@ -336,7 +343,9 @@ function ProductionLoginPage() {
               <button type="submit" disabled={busy}
                 className="w-full py-2.5 rounded-xl font-semibold text-sm text-white transition-all"
                 style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", opacity: busy ? 0.7 : 1 }}>
-                {busy ? (mode === "signin" ? "Signing in…" : "Creating account…") : (mode === "signin" ? "Sign in" : "Create account")}
+                {busy
+                  ? (mode === "signin" ? "Signing in…" : mode === "signup" ? "Creating account…" : "Sending…")
+                  : (mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Send reset link")}
               </button>
             </form>
           ) : (
