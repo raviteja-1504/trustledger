@@ -291,8 +291,7 @@ export async function POST(req: NextRequest) {
           // no attestations were inherited even though the files are guaranteed
           // unchanged and were attested in some earlier scan of the same PR.
           if (prevScan) {
-            const inheritedPaths = new Set(inheritedFiles.map(f => f.file_path));
-            const unInherited = new Set(inheritedPaths);
+            const unInherited = new Set(inheritedFiles.map(f => f.file_path));
 
             const { data: prScans } = await db
               .from("scans")
@@ -303,6 +302,19 @@ export async function POST(req: NextRequest) {
               .neq("id", scan.id)
               .order("created_at", { ascending: false });
 
+            // Pre-load which file_paths already have attestation rows for this
+            // new scan (single query) instead of checking per-file inside the
+            // loop. Previously each file did a separate SELECT+INSERT which
+            // produced O(prior_scans × inherited_files) sequential DB roundtrips
+            // — ~2600 queries for a PR with 8 prior scans and 166 files, making
+            // the scan-worker extremely slow. One upfront query reduces this to
+            // O(prior_scans + inherited_files).
+            const { data: existingForScan } = await db
+              .from("attestations")
+              .select("file_path")
+              .eq("scan_id", scan.id);
+            const alreadyInherited = new Set((existingForScan ?? []).map(a => a.file_path as string));
+
             for (const priorScan of (prScans ?? [])) {
               if (unInherited.size === 0) break;
               const { data: priorAtts } = await db
@@ -312,17 +324,16 @@ export async function POST(req: NextRequest) {
                 .in("file_path", [...unInherited]);
               if (!priorAtts || priorAtts.length === 0) continue;
               for (const a of priorAtts) {
-                const existingAtt = await db.from("attestations").select("id")
-                  .eq("scan_id", scan.id).eq("file_path", a.file_path).maybeSingle();
-                if (!existingAtt.data) {
+                if (!alreadyInherited.has(a.file_path as string)) {
                   await db.from("attestations").insert({
                     org_id: orgId, scan_id: scan.id,
                     file_path: a.file_path, risk_score: a.risk_score,
                     reviewer_id: a.reviewer_id, reviewer_email: a.reviewer_email,
                     reviewer_github: a.reviewer_github, payload_hash: a.payload_hash,
                   });
+                  alreadyInherited.add(a.file_path as string);
                 }
-                unInherited.delete(a.file_path);
+                unInherited.delete(a.file_path as string);
               }
             }
           }
