@@ -217,3 +217,45 @@ export async function DELETE(req: NextRequest) {
 
   return NextResponse.json({ ok: true });
 }
+
+// ── PUT — resend invite email ──────────────────────────────────────────────────
+export async function PUT(req: NextRequest) {
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+
+  let body: { email?: string };
+  try { body = await req.json(); } catch { return NextResponse.json({ error: "invalid_json" }, { status: 400 }); }
+
+  const email = body.email?.toLowerCase().trim();
+  if (!email) return NextResponse.json({ error: "email_required" }, { status: 400 });
+
+  const db = createServiceClient();
+
+  // Verify they are a member of this org
+  const { data: member } = await db
+    .from("org_members")
+    .select("id, user_id")
+    .eq("org_id", auth.org_id)
+    .eq("email", email)
+    .maybeSingle();
+
+  if (!member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
+
+  // Generate a fresh magic link (password recovery type so they can set a password)
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
+  const { data: linkData, error: linkErr } = await db.auth.admin.generateLink({
+    type: "recovery",
+    email,
+    options: { redirectTo: `${appUrl}/dashboard` },
+  });
+
+  if (linkErr || !linkData?.properties?.action_link) {
+    return NextResponse.json({ error: "link_generation_failed", detail: linkErr?.message }, { status: 500 });
+  }
+
+  // Supabase doesn't expose a "send email" API directly — return the link
+  // so the admin can share it, or configure Supabase SMTP to auto-send.
+  return NextResponse.json({ ok: true, action_link: linkData.properties.action_link });
+}

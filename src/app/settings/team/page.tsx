@@ -54,6 +54,8 @@ export default function TeamPage() {
   // Per-member action state
   const [changingRole, setChangingRole] = useState<string | null>(null);
   const [removing,     setRemoving]     = useState<string | null>(null);
+  const [resending,    setResending]    = useState<string | null>(null);
+  const [resendLink,   setResendLink]   = useState<{ email: string; link: string } | null>(null);
 
   async function load() {
     setLoading(true);
@@ -115,6 +117,19 @@ export default function TeamPage() {
       setMembers(prev => prev.filter(x => x.id !== m.id));
     } catch { /* ignore */ }
     finally { setRemoving(null); }
+  }
+
+  async function resendInvite(email: string) {
+    setResending(email);
+    setResendLink(null);
+    try {
+      const data = await authedFetch<{ ok: boolean; action_link?: string }>("/api/team", {
+        method: "PUT",
+        body: JSON.stringify({ email }),
+      });
+      if (data.action_link) setResendLink({ email, link: data.action_link });
+    } catch { /* ignore */ }
+    finally { setResending(null); }
   }
 
   const byRole = ROLE_ORDER.map(role => ({
@@ -261,6 +276,17 @@ export default function TeamPage() {
                             </select>
                           )}
 
+                          {/* Resend invite — admin only, not self */}
+                          {isAdmin && !isCurrentUser && (
+                            <button
+                              onClick={() => resendInvite(m.email)}
+                              disabled={resending === m.email}
+                              className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1 rounded-lg transition-colors shrink-0 disabled:opacity-50"
+                            >
+                              {resending === m.email ? "…" : "↺ Resend"}
+                            </button>
+                          )}
+
                           {/* Remove button — admin only, not self; works for pending (no user_id) too */}
                           {isAdmin && !isCurrentUser && (
                             <button
@@ -315,6 +341,28 @@ export default function TeamPage() {
         </div>
 
       </div>
+
+      {/* Resend link modal — shown when SMTP not configured */}
+      {resendLink && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={() => setResendLink(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-lg w-full space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <p className="font-bold text-gray-900">Login link for {resendLink.email}</p>
+              <button onClick={() => setResendLink(null)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+            </div>
+            <p className="text-xs text-gray-500">Share this link with the team member. It grants them access to set their password and sign in. Valid for 24 hours.</p>
+            <div className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-xs font-mono text-gray-700 break-all select-all">
+              {resendLink.link}
+            </div>
+            <button
+              onClick={() => { navigator.clipboard.writeText(resendLink.link); }}
+              className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors"
+            >
+              Copy link
+            </button>
+          </div>
+        </div>
+      )}
     </AuthGuard>
   );
 }
