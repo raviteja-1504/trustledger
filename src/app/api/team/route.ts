@@ -63,15 +63,14 @@ export async function POST(req: NextRequest) {
 
   if (existing) return NextResponse.json({ error: "already_member" }, { status: 409 });
 
-  // Try to find an existing Supabase user by email
-  const { data: { users } } = await db.auth.admin.listUsers();
-  const existingUser = users.find(u => u.email === email);
-
+  // Insert with user_id = null — /api/me auto-links the user_id on their
+  // first sign-in via the service-role middleware, so pre-fetching all auth
+  // users here is unnecessary and was causing invite failures.
   const { data: member, error: insertErr } = await db
     .from("org_members")
     .insert({
       org_id:       auth.org_id,
-      user_id:      existingUser?.id ?? null,
+      user_id:      null,
       email,
       name,
       role,
