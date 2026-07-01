@@ -59,7 +59,8 @@ export async function GET(req: NextRequest) {
     const { data: attests } = await db
       .from("attestations")
       .select("scan_id")
-      .in("scan_id", scanIds);
+      .in("scan_id", scanIds)
+      .limit(10000);
     (attests ?? []).forEach(a => {
       attestCounts.set(a.scan_id, (attestCounts.get(a.scan_id) ?? 0) + 1);
     });
@@ -68,7 +69,8 @@ export async function GET(req: NextRequest) {
       .from("scan_files")
       .select("scan_id")
       .in("scan_id", scanIds)
-      .in("risk_score", ["CRITICAL", "HIGH"]);
+      .in("risk_score", ["CRITICAL", "HIGH"])
+      .limit(10000);
     (highCritFiles ?? []).forEach(f => {
       highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
     });
