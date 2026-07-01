@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
   let authUserId: string | null = null;
   try {
     const { data: invited, error: inviteErr } = await db.auth.admin.inviteUserByEmail(email, {
-      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login`,
+      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/dashboard`,
     });
     if (inviteErr) {
       // User may already exist in auth — look them up by email
