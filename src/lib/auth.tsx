@@ -148,21 +148,26 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   // Load org profile via the service-role API — bypasses RLS completely.
-  // Previously tried the anon Supabase client first, but RLS policies on
-  // org_members block invited/external members from reading their own row,
-  // causing profile = null and redirect to create-org.
   async function loadProfile(_userId: string) {
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) return;
+      if (!session?.access_token) {
+        console.warn("[loadProfile] no access_token in session");
+        return;
+      }
       const res = await fetch("/api/me", {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (res.ok) {
         const me = await res.json();
         setProfile(me);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        console.warn("[loadProfile] /api/me failed", res.status, body);
       }
-    } catch {}
+    } catch (e) {
+      console.warn("[loadProfile] error", e);
+    }
   }
 
   useEffect(() => {

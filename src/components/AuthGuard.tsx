@@ -71,16 +71,42 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
     );
   }
 
-  // Authenticated but no org membership → send to create-org
+  // Authenticated but no org membership — try /api/me once more before
+  // giving up. This handles the case where loadProfile() finished before
+  // the session token was fully available (rare race) or /api/me transiently
+  // failed. Only redirect to create-org if /api/me explicitly returns 404.
   if (!loading && user && !profile && pathname !== "/create-org") {
-    if (typeof window !== "undefined") window.location.replace("/create-org");
+    if (typeof window !== "undefined") {
+      import("@/lib/supabase").then(({ supabase }) =>
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          if (!session?.access_token) { window.location.replace("/create-org"); return; }
+          fetch("/api/me", { headers: { Authorization: `Bearer ${session.access_token}` } })
+            .then(async res => {
+              if (res.ok) {
+                // Profile found — reload so auth context can pick it up
+                window.location.reload();
+              } else {
+                const body = await res.json().catch(() => ({}));
+                // Only redirect to create-org if truly no membership
+                if (res.status === 404 && body.error === "no_org_membership") {
+                  window.location.replace("/create-org");
+                } else {
+                  // Auth/server error — retry in 2s
+                  setTimeout(() => window.location.reload(), 2000);
+                }
+              }
+            })
+            .catch(() => window.location.replace("/create-org"));
+        })
+      );
+    }
     return (
       <div className="flex items-center justify-center h-full">
         <div className="flex flex-col items-center gap-3">
           <svg className="animate-spin w-6 h-6 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
           </svg>
-          <p className="text-sm text-gray-400 font-medium">Setting up…</p>
+          <p className="text-sm text-gray-400 font-medium">Loading your profile…</p>
         </div>
       </div>
     );
