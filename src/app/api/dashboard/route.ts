@@ -102,13 +102,18 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .select("scan_id, file_path, reviewer_email, created_at")
     .in("scan_id", latestScanIdPerRepo);
 
-  // Violations scoped to latest scan per repo for the same reason: the dedup
-  // logic keeps only the latest scan's violation per file anyway, so fetching
-  // older scans' violations is wasted work and adds unnecessary rows.
+  // Violations scoped to latest scan per repo AND filtered to CRITICAL/HIGH
+  // only — the dashboard only uses violations for unattested_deploy_count and
+  // SLA breach detection, both of which already filter to CRITICAL/HIGH. MEDIUM
+  // violations are never shown in either banner or SLA section. Filtering here
+  // halves the row count (MEDIUM files make up ~half of violations), giving 2x
+  // more headroom before hitting the server-side max_rows limit as more repos
+  // are connected.
   const { data: violations } = latestScanIdPerRepo.length === 0 ? { data: [] } : await db
     .from("violations")
     .select("id, scan_id, file_path, risk_score, status, sla_deadline")
-    .in("scan_id", latestScanIdPerRepo);
+    .in("scan_id", latestScanIdPerRepo)
+    .in("risk_score", ["CRITICAL", "HIGH"]);
 
   const { data: riskFiles } = latestScanIdPerRepo.length === 0 ? { data: null } : await db
     .from("scan_files")
