@@ -63,11 +63,33 @@ export async function POST(req: NextRequest) {
 
   if (existing) return NextResponse.json({ error: "already_member" }, { status: 409 });
 
+  // Ensure the Supabase auth user exists. inviteUserByEmail creates a new
+  // user (or returns the existing one) and sends them a magic-link email so
+  // they can set their password and log in without a separate sign-up step.
+  let authUserId: string | null = null;
+  try {
+    const { data: invited, error: inviteErr } = await db.auth.admin.inviteUserByEmail(email, {
+      redirectTo: `${process.env.NEXT_PUBLIC_APP_URL ?? ""}/login`,
+    });
+    if (inviteErr) {
+      // User may already exist in auth — look them up by email
+      const { data: { users } } = await db.auth.admin.listUsers({ perPage: 1000 });
+      const existing = users.find(u => u.email?.toLowerCase() === email);
+      authUserId = existing?.id ?? null;
+    } else {
+      authUserId = invited.user?.id ?? null;
+    }
+  } catch { /* will fail at insert if still null */ }
+
+  if (!authUserId) {
+    return NextResponse.json({ error: "auth_user_creation_failed" }, { status: 500 });
+  }
+
   const { data: member, error: insertErr } = await db
     .from("org_members")
     .insert({
       org_id:  auth.org_id,
-      user_id: null,
+      user_id: authUserId,
       email,
       name,
       role,
