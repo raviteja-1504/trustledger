@@ -1740,23 +1740,42 @@ export default function DashboardPage() {
                 </div>
 
                 {/* ── Top Risk Files ────────────────────────────────────── */}
-                <div className="section-card animate-fade-up delay-350">
-                  <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                    <div>
-                      <p className="font-bold text-gray-900 text-sm">Top Risk Files</p>
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        {effectiveData.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")).length} blocking &nbsp;·&nbsp;
-                        {effectiveData.top_risk_files.length} total shown
-                      </p>
+                {(() => {
+                  const needsAction = effectiveData.top_risk_files.filter(
+                    f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")
+                  );
+                  const shown = needsAction.slice(0, 10);
+                  const remaining = needsAction.length - shown.length;
+                  return (
+                    <div className="section-card animate-fade-up delay-350">
+                      <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                        <div>
+                          <p className="font-bold text-gray-900 text-sm">Files Needing Attestation</p>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            {needsAction.length === 0
+                              ? "All high-risk files reviewed — nothing to action"
+                              : `${needsAction.length} CRITICAL/HIGH file${needsAction.length !== 1 ? "s" : ""} pending reviewer sign-off`}
+                          </p>
+                        </div>
+                        {needsAction.length > 0 && (
+                          <Link href="/violations"
+                            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap">
+                            View all →
+                          </Link>
+                        )}
+                      </div>
+                      <TopRiskFilesPanel files={shown} />
+                      {remaining > 0 && (
+                        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
+                          <span className="text-xs text-gray-400">{remaining} more file{remaining !== 1 ? "s" : ""} not shown</span>
+                          <Link href="/violations" className="text-xs font-semibold text-indigo-600 hover:underline">
+                            View all {needsAction.length} in Violations →
+                          </Link>
+                        </div>
+                      )}
                     </div>
-                    {effectiveData.top_risk_files.length > 0 && (
-                      <span className="text-xs text-gray-400 bg-gray-50 border border-gray-100 px-2.5 py-1 rounded-lg font-medium">
-                        Top 10 by severity
-                      </span>
-                    )}
-                  </div>
-                  <TopRiskFilesPanel files={effectiveData.top_risk_files} />
-                </div>
+                  );
+                })()}
 
                 {/* ── Repos section ─────────────────────────────────── */}
                 <div className="section-card animate-fade-up delay-350">
