@@ -386,15 +386,27 @@ export async function POST(req: NextRequest) {
             if (autoAttest.size > 0) {
               const now = new Date().toISOString();
               autoAttest.forEach((_, fp) => autoAttestedPaths.add(fp));
-              await db.from("attestations").upsert(
-                [...autoAttest.entries()].map(([fp, att]) => ({
-                  org_id: orgId, scan_id: scan.id, file_path: fp,
-                  risk_score: att.risk_score, reviewer_email: att.reviewer_email,
-                  reviewer_github: att.reviewer_github,
-                  payload_hash: `inherited:${scan.id}:${fp}`,
-                })),
-                { onConflict: "scan_id,file_path", ignoreDuplicates: true },
-              );
+              // The attestations table has a PostgreSQL rule that blocks INSERT
+              // with ON CONFLICT (which .upsert() uses internally). Insert only
+              // rows that don't already exist — one INSERT per file to stay
+              // compatible with the rule. Failures are silently ignored so a
+              // single bad row doesn't abort the whole inheritance batch.
+              for (const [fp, att] of autoAttest.entries()) {
+                const { data: existingAtt } = await db
+                  .from("attestations")
+                  .select("id")
+                  .eq("scan_id", scan.id)
+                  .eq("file_path", fp)
+                  .maybeSingle();
+                if (!existingAtt) {
+                  await db.from("attestations").insert({
+                    org_id: orgId, scan_id: scan.id, file_path: fp,
+                    risk_score: att.risk_score, reviewer_email: att.reviewer_email,
+                    reviewer_github: att.reviewer_github,
+                    payload_hash: `inherited:${scan.id}:${fp}`,
+                  });
+                }
+              }
               await db.from("violations")
                 .update({ status: "resolved", resolved_at: now })
                 .eq("scan_id", scan.id)

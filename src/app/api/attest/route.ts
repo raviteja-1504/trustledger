@@ -42,13 +42,25 @@ export async function POST(req: NextRequest) {
     body.scan_id, body.file_path, body.reviewer_email, now,
   );
 
-  // Upsert attestation record — idempotent so re-attesting the same file
-  // (duplicate click, retry after network error, attest-all re-run) succeeds
-  // rather than failing with a unique constraint violation.
-  const { data: attestation, error: attErr } = await db
+  // The attestations table has a PostgreSQL rule that blocks any INSERT with
+  // an ON CONFLICT clause (Supabase's .upsert() uses this internally). Use a
+  // SELECT-then-INSERT pattern instead: if the record already exists (duplicate
+  // click, retry after network error, attest-all re-run) just return the
+  // existing row; otherwise insert a fresh one.
+  const { data: existing } = await db
     .from("attestations")
-    .upsert(
-      {
+    .select("id, created_at")
+    .eq("scan_id", body.scan_id)
+    .eq("file_path", body.file_path)
+    .maybeSingle();
+
+  let attestation: { id: string; created_at: string };
+  if (existing) {
+    attestation = existing as { id: string; created_at: string };
+  } else {
+    const { data: inserted, error: insErr } = await db
+      .from("attestations")
+      .insert({
         org_id,
         scan_id:         body.scan_id,
         file_path:       body.file_path,
@@ -57,14 +69,14 @@ export async function POST(req: NextRequest) {
         reviewer_email:  body.reviewer_email,
         reviewer_github: body.reviewer_github ?? null,
         payload_hash:    payloadHash,
-      },
-      { onConflict: "scan_id,file_path", ignoreDuplicates: false },
-    )
-    .select("id, created_at")
-    .single();
+      })
+      .select("id, created_at")
+      .single();
 
-  if (attErr || !attestation) {
-    return NextResponse.json({ error: "attestation_failed", detail: attErr?.message }, { status: 500 });
+    if (insErr || !inserted) {
+      return NextResponse.json({ error: "attestation_failed", detail: insErr?.message }, { status: 500 });
+    }
+    attestation = inserted as { id: string; created_at: string };
   }
 
   // Mark the file as attested in scan_files so the PR page shows the correct

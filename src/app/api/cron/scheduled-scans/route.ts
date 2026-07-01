@@ -208,15 +208,20 @@ export async function GET(req: NextRequest) {
 
               if (autoAttest.size > 0) {
                 const ts = new Date().toISOString();
-                await db.from("attestations").upsert(
-                  [...autoAttest.entries()].map(([fp, att]) => ({
-                    org_id: orgId, scan_id: scanRow.id, file_path: fp,
-                    risk_score: att.risk_score, reviewer_email: att.reviewer_email,
-                    reviewer_github: att.reviewer_github,
-                    payload_hash: `inherited-scheduled:${scanRow.id}:${fp}`,
-                  })),
-                  { onConflict: "scan_id,file_path", ignoreDuplicates: true },
-                );
+                // Table has a rule blocking ON CONFLICT; check existence first.
+                for (const [fp, att] of autoAttest.entries()) {
+                  const { data: existingAtt } = await db
+                    .from("attestations").select("id")
+                    .eq("scan_id", scanRow.id).eq("file_path", fp).maybeSingle();
+                  if (!existingAtt) {
+                    await db.from("attestations").insert({
+                      org_id: orgId, scan_id: scanRow.id, file_path: fp,
+                      risk_score: att.risk_score, reviewer_email: att.reviewer_email,
+                      reviewer_github: att.reviewer_github,
+                      payload_hash: `inherited-scheduled:${scanRow.id}:${fp}`,
+                    });
+                  }
+                }
                 // Auto-resolve violations for inherited files
                 await db.from("violations")
                   .update({ status: "resolved", resolved_at: ts })
