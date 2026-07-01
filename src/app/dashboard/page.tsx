@@ -784,6 +784,7 @@ export default function DashboardPage() {
   const [loading,       setLoading]       = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [refreshAgo,    setRefreshAgo]    = useState("");
+  const [clearingCache, setClearingCache] = useState(false);
   const [activity,      setActivity]      = useState<ActivityEvent[]>([]);
   const [localActivity, setLocalActivity] = useState<ActivityEvent[]>([]); // attestations from PR page
   const [repoSort,      setRepoSort]      = useState<"risk" | "ai" | "attest" | "scans">("risk");
@@ -927,6 +928,7 @@ export default function DashboardPage() {
       .catch((e: Error) => {
         setData(null); setError(e?.message || "Failed to load dashboard data");
       })
+
       .finally(() => setLoading(false));
   }, [days, rangeMode, startDate, endDate, profile?.org_id, reloadKey]);
 
@@ -963,6 +965,17 @@ export default function DashboardPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [permissions, data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function clearCache() {
+    setClearingCache(true);
+    try {
+      const sd = rangeMode === "custom" ? startDate : undefined;
+      const ed = rangeMode === "custom" ? endDate   : undefined;
+      const d = await api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed, true);
+      setData(d); setLastRefreshed(new Date());
+    } catch {}
+    setClearingCache(false);
+  }
 
   // Recompute unattested_deploy_count from which scan IDs still have unresolved files.
   // This way attesting ALL visible files always drives the counter to 0.
@@ -1255,6 +1268,17 @@ export default function DashboardPage() {
           {refreshAgo && (
             <span className="text-[10px] text-gray-400">· Updated {refreshAgo}</span>
           )}
+          <button
+            onClick={clearCache}
+            disabled={clearingCache}
+            title="Bypass server cache and fetch fresh data"
+            className="flex items-center gap-1 text-[10px] font-semibold text-gray-500 hover:text-indigo-600 bg-gray-100 hover:bg-indigo-50 px-2 py-0.5 rounded-full transition-colors disabled:opacity-50"
+          >
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            {clearingCache ? "Refreshing…" : "Clear Cache"}
+          </button>
           <Link
             href="/settings"
             className="flex items-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200 hover:bg-emerald-100 transition-colors"

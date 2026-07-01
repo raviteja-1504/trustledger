@@ -41,10 +41,11 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ── API surface ────────────────────────────────────────────────────────────────
 
 export const api = {
-  dashboard: (org: string, days = 90, startDate?: string, endDate?: string): Promise<DashboardData> => {
+  dashboard: (org: string, days = 90, startDate?: string, endDate?: string, nocache?: boolean): Promise<DashboardData> => {
     const p = new URLSearchParams({ org });
     if (startDate && endDate) { p.set("start_date", startDate); p.set("end_date", endDate); }
     else p.set("days", String(days));
+    if (nocache) p.set("nocache", "1");
     return apiFetch<DashboardData>(`/api/dashboard?${p.toString()}`);
   },
 
