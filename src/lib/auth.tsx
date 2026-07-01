@@ -142,19 +142,25 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
       .eq("user_id", userId)
       .single();
 
-    // Invited users have user_id = null until first login — link by email
+    // Invited users have user_id = null until first login. The direct
+    // Supabase client UPDATE (anon key) is blocked by RLS for new users
+    // who don't own the row yet. Fall back to /api/me which uses the
+    // service role client in the middleware — it handles the linking
+    // automatically and returns the profile once linked.
     if (!data) {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user?.email) {
-        const { data: linked } = await supabase
-          .from("org_members")
-          .update({ user_id: userId })
-          .eq("email", user.email)
-          .is("user_id", null)
-          .select("org_id, role, email, name, github_login, avatar_url, organizations(slug, name)")
-          .single();
-        data = linked;
-      }
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          const res = await fetch("/api/me", {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          if (res.ok) {
+            const me = await res.json();
+            setProfile(me);
+            return;
+          }
+        }
+      } catch {}
     }
 
     if (data) {
