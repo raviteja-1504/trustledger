@@ -192,6 +192,15 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // PASSWORD_RECOVERY fires when the user clicks a reset/invite link.
+      // Navigate to /login so the set-password form is shown regardless of
+      // which page the Supabase link lands on (Site URL root, /dashboard, etc).
+      if (event === "PASSWORD_RECOVERY") {
+        if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+          window.location.replace("/login");
+          return;
+        }
+      }
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
@@ -243,10 +252,10 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function resetPassword(email: string) {
-    const base = (process.env.NEXT_PUBLIC_APP_URL || (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/$/, "");
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${base}/login`,
-    });
+    // No custom redirectTo — use Supabase's configured Site URL to avoid
+    // "redirect URL not whitelisted" errors from strict URL matching.
+    // The PASSWORD_RECOVERY event is handled globally in onAuthStateChange below.
+    const { error } = await supabase.auth.resetPasswordForEmail(email);
     return { error: error?.message ?? null };
   }
 

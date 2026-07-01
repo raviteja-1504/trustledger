@@ -68,10 +68,7 @@ export async function POST(req: NextRequest) {
   // they can set their password and log in without a separate sign-up step.
   let authUserId: string | null = null;
   try {
-    const appUrl = (process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://dashboard-tan-six-48.vercel.app")).replace(/\/$/, "");
-    const { data: invited, error: inviteErr } = await db.auth.admin.inviteUserByEmail(email, {
-      redirectTo: `${appUrl}/dashboard`,
-    });
+    const { data: invited, error: inviteErr } = await db.auth.admin.inviteUserByEmail(email);
     if (inviteErr) {
       // User may already exist in auth — look them up by email
       const { data: { users } } = await db.auth.admin.listUsers({ perPage: 1000 });
@@ -245,7 +242,7 @@ export async function PUT(req: NextRequest) {
   if (!member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
 
   // Generate a fresh magic link (password recovery type so they can set a password)
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://dashboard-tan-six-48.vercel.app")).replace(/\/$/, "");
+  const appUrl = "https://dashboard-tan-six-48.vercel.app";
   const { data: linkData, error: linkErr } = await db.auth.admin.generateLink({
     type: "recovery",
     email,
