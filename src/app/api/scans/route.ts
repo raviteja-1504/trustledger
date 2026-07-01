@@ -46,32 +46,34 @@ export async function GET(req: NextRequest) {
   const { data: scans, error: dbErr } = await query;
   if (dbErr) return NextResponse.json({ error: "db_error" }, { status: 500 });
 
-  // Count attestations per scan (all risk levels — no filter avoids silent query
-  // failures from chained .in() on risk_score) and HIGH/CRIT file counts per
-  // scan separately. The chip uses Math.min(attested, high_crit_count) so the
-  // display correctly shows "X/72" or "All attested" based on policy-gated files
-  // rather than total files, without needing a risk_score filter on attestations.
+  // Only query attestations and HIGH/CRIT counts for the LATEST scan per
+  // repo+PR. Older scans for the same PR are "superseded" and shown with a
+  // "Superseded" badge client-side — their counts don't matter. Scoping to
+  // latest-per-PR keeps the result set tiny (4 repos × ~100 files ≈ 400 rows)
+  // which permanently defeats Supabase's server-side max_rows cap that silently
+  // truncates org-wide queries regardless of the client's .limit() value.
   const scanIds = (scans ?? []).map(s => s.id);
   const attestCounts   = new Map<string, number>();
   const highCritCounts = new Map<string, number>();
 
   if (scanIds.length > 0) {
-    const { data: attests } = await db
-      .from("attestations")
-      .select("scan_id")
-      .in("scan_id", scanIds)
-      .limit(10000);
-    (attests ?? []).forEach(a => {
+    // Compute latest scan per (repo, pr_number) from the already-fetched scans
+    // list (ordered created_at DESC, so first occurrence per key is latest).
+    const latestPerPR = new Map<string, string>();
+    for (const s of scans ?? []) {
+      const key = `${s.repo_full_name}::${s.pr_number ?? 0}`;
+      if (!latestPerPR.has(key)) latestPerPR.set(key, s.id);
+    }
+    const latestIds = [...new Set(latestPerPR.values())];
+
+    const [attestRes, highCritRes] = await Promise.all([
+      db.from("attestations").select("scan_id").in("scan_id", latestIds),
+      db.from("scan_files").select("scan_id").in("scan_id", latestIds).in("risk_score", ["CRITICAL", "HIGH"]),
+    ]);
+    (attestRes.data ?? []).forEach(a => {
       attestCounts.set(a.scan_id, (attestCounts.get(a.scan_id) ?? 0) + 1);
     });
-
-    const { data: highCritFiles } = await db
-      .from("scan_files")
-      .select("scan_id")
-      .in("scan_id", scanIds)
-      .in("risk_score", ["CRITICAL", "HIGH"])
-      .limit(10000);
-    (highCritFiles ?? []).forEach(f => {
+    (highCritRes.data ?? []).forEach(f => {
       highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
     });
   }
