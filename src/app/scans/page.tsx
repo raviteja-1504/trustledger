@@ -344,6 +344,23 @@ export default function ScansPage() {
       });
   }, [scans, repoFilter, riskFilter, trigFilter, dateFilter, search, sortKey]);
 
+  // For each repo+PR combo, find the latest scan. Any older scan for the same
+  // repo+PR is "superseded" — its individual attestation count is misleading
+  // because attestation inheritance only creates rows on the latest scan. Show
+  // a "Superseded" badge instead of a partial count so reviewers don't think
+  // they need to take action on an old commit's scan.
+  const latestScanPerPR = useMemo(() => {
+    const latest = new Map<string, { scan_id: string; created_at: string }>();
+    for (const s of scans) {
+      const key = `${s.repo}::${s.pr_number}`;
+      const existing = latest.get(key);
+      if (!existing || s.created_at > existing.created_at) {
+        latest.set(key, { scan_id: s.scan_id, created_at: s.created_at });
+      }
+    }
+    return new Set([...latest.values()].map(v => v.scan_id));
+  }, [scans]);
+
   // Build date-grouped list (only when sorted by date)
   const groupedRows = useMemo(() => {
     if (sortKey !== "date") return null;
@@ -384,11 +401,13 @@ export default function ScansPage() {
     { key:"files", label:"Files"     },
   ] as const;
 
-  function ScanRow({ s }: { s: ScanSummary }) {
+  function ScanRow({ s, superseded }: { s: ScanSummary; superseded?: boolean }) {
     const repoShort   = s.repo.includes("/") ? s.repo.split("/").slice(1).join("/") : s.repo;
     const isPR        = s.pr_number > 0;
     const attested    = effectiveAttestedCount(s, violationStatuses);
-    const chip        = attestChip(attested, s.file_count);
+    const chip        = superseded
+      ? { label:"Superseded", textColor:"#6b7280", bg:"#f3f4f6", border:"#e5e7eb" }
+      : attestChip(attested, s.file_count);
     const aiPct     = Math.round(s.total_ai_percentage * 100);
     const aiColor   = s.total_ai_percentage >= 0.7 ? "#be123c" : s.total_ai_percentage >= 0.4 ? "#b45309" : "#059669";
     const aiBg      = s.total_ai_percentage >= 0.7 ? "#fff1f2" : s.total_ai_percentage >= 0.4 ? "#fffbeb" : "#f0fdf4";
@@ -584,12 +603,12 @@ export default function ScansPage() {
                   <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">{group.label}</span>
                   <span className="ml-2 text-[10px] text-gray-400">{group.items.length} scan{group.items.length !== 1 ? "s" : ""}</span>
                 </div>
-                {group.items.map(s => <ScanRow key={s.scan_id} s={s} />)}
+                {group.items.map(s => <ScanRow key={s.scan_id} s={s} superseded={!latestScanPerPR.has(s.scan_id)} />)}
               </div>
             ))
           ) : (
             // Flat sorted view
-            filtered.map(s => <ScanRow key={s.scan_id} s={s} />)
+            filtered.map(s => <ScanRow key={s.scan_id} s={s} superseded={!latestScanPerPR.has(s.scan_id)} />)
           )}
         </div>
 
