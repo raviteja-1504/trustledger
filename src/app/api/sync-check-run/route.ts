@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   const db = createServiceClient();
 
   // ── Resolve the scan row ──────────────────────────────────────────────────
-  let scan: { id: string; repo_full_name: string; check_run_id: string | null; installation_id: string | null } | null = null;
+  let scan: { id: string; repo_full_name: string; check_run_id: number | null; installation_id: number | null } | null = null;
 
   if (body.scan_id) {
     const { data } = await db
@@ -83,8 +83,9 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     const deliveryPayload = delivery?.payload as Record<string, unknown> | null;
-    const recoveredRunId  = deliveryPayload?.tl_check_run_id as number | null;
-    const recoveredInstId = (deliveryPayload?.installation as Record<string, unknown> | null)?.id as number | null;
+    const recoveredRunId  = deliveryPayload?.tl_check_run_id ? Number(deliveryPayload.tl_check_run_id) : null;
+    const recoveredInstId = (deliveryPayload?.installation as Record<string, unknown> | null)?.id
+      ? Number((deliveryPayload!.installation as Record<string, unknown>).id) : null;
 
     if (recoveredRunId && recoveredInstId) {
       try {
