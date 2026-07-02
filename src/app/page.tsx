@@ -212,39 +212,6 @@ const PRICING = [
   },
 ];
 
-const STATS = [
-  { value: "2.4M+", label: "Files scanned",       color: "#6366f1" },
-  { value: "98%",   label: "Detection accuracy",   color: "#10b981" },
-  { value: "50+",   label: "Engineering teams",    color: "#f59e0b" },
-  { value: "<90ms", label: "Scan latency",         color: "#3b82f6" },
-];
-
-const TESTIMONIALS = [
-  {
-    quote: "TrustLedger caught a hardcoded API key in AI-generated code before it hit production. That alone justified the entire year's subscription.",
-    name: "Sarah Chen",
-    role: "Staff Security Engineer",
-    company: "FinanceOS",
-    initials: "SC",
-    accentColor: "#6366f1",
-  },
-  {
-    quote: "Our SOC 2 auditors asked for evidence of AI code review processes. We generated a signed PDF report from TrustLedger in 30 seconds. Done.",
-    name: "Marcus T.",
-    role: "VP Engineering",
-    company: "Nexus Capital",
-    initials: "MT",
-    accentColor: "#10b981",
-  },
-  {
-    quote: "We use Copilot on every PR. TrustLedger tells us exactly what AI wrote. The attestation workflow fits seamlessly into our existing GitHub review process.",
-    name: "Priya M.",
-    role: "Head of Platform Security",
-    company: "Cloudbridge",
-    initials: "PM",
-    accentColor: "#f59e0b",
-  },
-];
 
 // ── NavBar ─────────────────────────────────────────────────────────────────────
 
@@ -417,22 +384,6 @@ function HeroSection() {
   );
 }
 
-// ── StatsBar ───────────────────────────────────────────────────────────────────
-
-function StatsBar() {
-  return (
-    <section style={{ background: "linear-gradient(90deg, #0d1320 0%, #111827 50%, #0d1320 100%)", borderTop: "1px solid rgba(255,255,255,0.06)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-      <div className="max-w-4xl mx-auto px-5 py-10 grid grid-cols-2 sm:grid-cols-4 gap-8 text-center">
-        {STATS.map(s => (
-          <div key={s.label}>
-            <p className="text-3xl font-black" style={{ color: s.color }}>{s.value}</p>
-            <p className="text-sm text-white/35 font-medium mt-1">{s.label}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 // ── FeaturesSection ────────────────────────────────────────────────────────────
 
@@ -548,66 +499,6 @@ function HowItWorksSection() {
   );
 }
 
-// ── TestimonialsSection ────────────────────────────────────────────────────────
-
-function TestimonialsSection() {
-  return (
-    <section className="py-24 px-5"
-      style={{ background: "linear-gradient(180deg, #0a0f1e 0%, #0d1320 100%)" }}>
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="text-xs font-bold uppercase tracking-widest text-emerald-400 px-3 py-1 rounded-full border"
-            style={{ background: "rgba(16,185,129,0.1)", borderColor: "rgba(16,185,129,0.25)" }}>
-            Trusted by teams
-          </span>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
-            Security-first teams rely on TrustLedger
-          </h2>
-          <p className="text-white/40 mt-3 text-lg max-w-xl mx-auto">
-            Engineering leaders across fintech, healthcare, and infrastructure share their experience.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          {TESTIMONIALS.map(t => (
-            <div key={t.name} className="flex flex-col gap-5 p-6 rounded-2xl border border-white/[0.07] transition-all duration-200 hover:border-white/[0.13]"
-              style={{ background: "rgba(255,255,255,0.03)" }}>
-              {/* Stars */}
-              <div className="flex gap-0.5">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <svg key={i} width="12" height="12" viewBox="0 0 24 24" fill="#f59e0b">
-                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                  </svg>
-                ))}
-              </div>
-              <p className="text-white/65 text-sm leading-relaxed flex-1">"{t.quote}"</p>
-              <div className="flex items-center gap-3 pt-2 border-t border-white/[0.06]">
-                <div className="w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-black shrink-0"
-                  style={{ background: `${t.accentColor}20`, border: `1.5px solid ${t.accentColor}40`, color: t.accentColor }}>
-                  {t.initials}
-                </div>
-                <div>
-                  <p className="text-white text-xs font-bold leading-snug">{t.name}</p>
-                  <p className="text-white/35 text-[10px] mt-0.5">{t.role} · {t.company}</p>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Trusted logos strip */}
-        <div className="mt-14 flex flex-col items-center gap-5">
-          <p className="text-xs text-white/25 font-medium uppercase tracking-widest">Used by teams at</p>
-          <div className="flex flex-wrap justify-center items-center gap-x-10 gap-y-3">
-            {["FinanceOS", "Nexus Capital", "Cloudbridge", "Veritas Bank", "Streamline AI", "OpenCore"].map(name => (
-              <span key={name} className="text-sm font-bold text-white/20 tracking-tight">{name}</span>
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
 
 // ── PricingSection ─────────────────────────────────────────────────────────────
 
@@ -819,10 +710,8 @@ export default function LandingPage() {
     <div style={{ background: "#020617" }}>
       <NavBar />
       <HeroSection />
-      <StatsBar />
       <FeaturesSection />
       <HowItWorksSection />
-      <TestimonialsSection />
       <PricingSection />
       <CTASection />
       <Footer />
