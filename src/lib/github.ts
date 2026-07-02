@@ -223,10 +223,10 @@ export async function updateCheckRun(
   token: string,
   owner: string,
   repo: string,
-  checkRunId: number,
+  checkRunId: number | string,
   payload: Omit<CheckRunPayload, "head_sha">,
 ): Promise<void> {
-  await fetch(`${GITHUB_API}/repos/${owner}/${repo}/check-runs/${checkRunId}`, {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/check-runs/${checkRunId}`, {
     method: "PATCH",
     headers: {
       Authorization: `token ${token}`,
@@ -236,6 +236,10 @@ export async function updateCheckRun(
     },
     body: JSON.stringify(payload),
   });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`GitHub updateCheckRun failed: ${res.status} — ${detail.slice(0, 200)}`);
+  }
 }
 
 /** Build a human-readable check-run summary from scan results. */

@@ -94,6 +94,28 @@ export async function POST(req: NextRequest) {
     .maybeSingle();
 
   if (existing) {
+    // Scan already persisted — this is a QStash retry after the first
+    // invocation timed out. The check run may still show "in_progress" if
+    // the previous invocation timed out after persisting the scan but before
+    // calling updateCheckRun. Recover it here so the PR isn't left stuck.
+    if (checkRunId) {
+      try {
+        const { token: retryToken } = await getInstallationToken(installationId);
+        const { count: openViolations } = await db
+          .from("violations")
+          .select("id", { count: "exact", head: true })
+          .eq("scan_id", existing.id)
+          .neq("status", "resolved")
+          .in("risk_score", ["CRITICAL", "HIGH"]);
+        const retryConcl: "success" | "action_required" =
+          (openViolations ?? 0) > 0 ? "action_required" : "success";
+        await updateCheckRun(retryToken, owner, repoName, checkRunId, {
+          name: "TrustLedger AI Governance", status: "completed",
+          conclusion: retryConcl,
+          output: { title: "Scan complete", summary: "TrustLedger has finished analysing this pull request." },
+        });
+      } catch { /* best-effort — don't block the 200 response */ }
+    }
     return NextResponse.json({ ok: true, skipped: true, reason: "already_scanned" });
   }
 
@@ -584,7 +606,22 @@ export async function POST(req: NextRequest) {
 
   } catch (err) {
     console.error("[scan-worker] error:", err);
-    // Return 500 so QStash retries the job
+    // Best-effort: mark the check run as failed so the PR isn't left stuck
+    // in "Scanning…" indefinitely. Do this before returning 500 (which
+    // causes QStash to retry) — on retry the idempotency block above
+    // handles updating the check run if the scan was already persisted.
+    if (checkRunId) {
+      try {
+        const { token: errToken } = await getInstallationToken(installationId);
+        await updateCheckRun(errToken, owner, repoName, checkRunId, {
+          name: "TrustLedger AI Governance", status: "completed", conclusion: "neutral",
+          output: {
+            title: "Scan error",
+            summary: "TrustLedger encountered an error while analysing this PR. Push a new commit to trigger a fresh scan.",
+          },
+        });
+      } catch { /* don't mask the original error */ }
+    }
     return NextResponse.json({ error: "scan_failed", detail: String(err) }, { status: 500 });
   }
 }

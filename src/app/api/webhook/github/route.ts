@@ -72,16 +72,6 @@ export async function POST(req: NextRequest) {
 
     const orgId = orgRecord?.id ?? null;
 
-    // Log delivery receipt
-    await db.from("webhook_deliveries").insert({
-      org_id:       orgId,
-      source:       "github",
-      event_type:   `pull_request.${action}`,
-      payload,
-      signature_ok: true,
-      processed:    false,
-    });
-
     let checkRunId: number | null = null;
 
     // Create "in_progress" check run immediately so GitHub shows a spinner
@@ -102,6 +92,17 @@ export async function POST(req: NextRequest) {
         console.error("[webhook] check run creation failed:", err);
       }
     }
+
+    // Log delivery receipt — include check_run_id so recovery is possible
+    // even if the scan-worker crashes before persisting the scan row.
+    await db.from("webhook_deliveries").insert({
+      org_id:       orgId,
+      source:       "github",
+      event_type:   `pull_request.${action}`,
+      payload:      { ...payload, tl_check_run_id: checkRunId },
+      signature_ok: true,
+      processed:    false,
+    });
 
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
     try {
