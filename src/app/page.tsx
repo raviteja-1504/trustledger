@@ -448,6 +448,171 @@ function FeaturesSection() {
   );
 }
 
+// ── WhySection ────────────────────────────────────────────────────────────────
+
+const WHY_ROWS = [
+  {
+    vs: "GitHub Advanced Security / Snyk",
+    them: "Finds known CVEs and dependency vulnerabilities in human-written code.",
+    us: "Detects AI-generated code patterns — structural, semantic, and behavioral — and enforces human sign-off before it ships. Complements GHAS; doesn't replace it.",
+    accent: "#6366f1",
+  },
+  {
+    vs: "SonarQube / Semgrep",
+    them: "Static analysis rules run on the final diff. No concept of who or what wrote the code.",
+    us: "47-signal scanner attributes code to AI tooling (Cursor, Copilot, Claude Code, ChatGPT) and tracks deviation from each developer's historical baseline — catching AI spikes even when the code is syntactically clean.",
+    accent: "#10b981",
+  },
+  {
+    vs: "Manual PR review",
+    them: "Reviewers eyeball the diff. AI-generated code looks like human code. Reviewers miss it.",
+    us: "Every PR gets a per-file AI% score, a risk level, and a named attestation requirement. Reviewers sign off with cryptographic proof. The audit trail answers 'who reviewed this AI code and when' — forever.",
+    accent: "#f59e0b",
+  },
+];
+
+const ARCH_SIGNALS = [
+  { label: "AST structural analysis",        desc: "Parses source into an abstract syntax tree and scores structural patterns that correlate with LLM output — long function bodies, uniform naming, missing edge-case handling." },
+  { label: "SSA-form taint tracking",         desc: "Converts code to static single-assignment form and follows tainted data across function boundaries. Catches injection paths and credential leaks that single-file scanners miss." },
+  { label: "Cross-file semantic graph",       desc: "Builds a call graph across the entire PR. Detects AI-generated glue code that wires together real modules in unsafe ways — a class of bug invisible to per-file tools." },
+  { label: "Git provenance scoring",          desc: "Scores commit velocity, message entropy, signing rate, and LOC/commit ratio against norms. A 1,300 LOC/commit average from a single author is a signal, not a fact — weighted accordingly." },
+  { label: "Developer baseline deviation",    desc: "Tracks each GitHub login's historical AI%, file count, and commit cadence. A sudden 3× spike in AI content on a PR flags as anomalous even if the absolute score is moderate." },
+  { label: "AI tool attribution",             desc: "Detects .cursor/, .claude/, .copilot-instructions, Windsurf config, and inline marker comments to attribute code to specific AI assistants — not just 'AI wrote this' but 'Cursor wrote this'." },
+];
+
+function WhySection() {
+  return (
+    <section className="py-24 px-5"
+      style={{ background: "linear-gradient(180deg, #020617 0%, #080c1a 100%)" }}>
+      <div className="max-w-5xl mx-auto">
+        <div className="text-center mb-14">
+          <span className="text-xs font-bold uppercase tracking-widest text-indigo-400 px-3 py-1 rounded-full border"
+            style={{ background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.25)" }}>
+            Why TrustLedger
+          </span>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
+            Different problem. Different tool.
+          </h2>
+          <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">
+            Existing security scanners were built for human-written code. TrustLedger is built specifically for the AI coding era — where the risk is not just what the code does, but who (or what) wrote it.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          {WHY_ROWS.map(row => (
+            <div key={row.vs} className="rounded-2xl border border-white/[0.07] overflow-hidden"
+              style={{ background: "rgba(255,255,255,0.025)" }}>
+              <div className="px-6 py-3 border-b border-white/[0.06]"
+                style={{ background: "rgba(255,255,255,0.02)" }}>
+                <span className="text-[11px] font-bold uppercase tracking-widest"
+                  style={{ color: "rgba(255,255,255,0.25)" }}>vs  </span>
+                <span className="text-xs font-bold text-white/40">{row.vs}</span>
+              </div>
+              <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.06]">
+                <div className="px-6 py-5">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/20 mb-2">They do</p>
+                  <p className="text-sm text-white/40 leading-relaxed">{row.them}</p>
+                </div>
+                <div className="px-6 py-5">
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}99` }}>TrustLedger does</p>
+                  <p className="text-sm text-white/70 leading-relaxed">{row.us}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── ArchSection ────────────────────────────────────────────────────────────────
+
+function ArchSection() {
+  return (
+    <section className="py-24 px-5"
+      style={{ background: "linear-gradient(180deg, #080c1a 0%, #020617 100%)" }}>
+      <div className="max-w-5xl mx-auto">
+        <div className="text-center mb-14">
+          <span className="text-xs font-bold uppercase tracking-widest text-violet-400 px-3 py-1 rounded-full border"
+            style={{ background: "rgba(139,92,246,0.1)", borderColor: "rgba(139,92,246,0.25)" }}>
+            Under the hood
+          </span>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
+            A real detection engine, not regex.
+          </h2>
+          <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">
+            47 signals across six analysis layers. Every scan combines static, semantic, behavioral, and provenance evidence — then weights them against your team's own baseline.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {ARCH_SIGNALS.map((s, i) => (
+            <div key={s.label} className="p-5 rounded-2xl border border-white/[0.07] transition-all duration-200 hover:border-white/[0.14]"
+              style={{ background: "rgba(255,255,255,0.025)" }}>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-[10px] font-black tabular-nums w-5 h-5 rounded-md flex items-center justify-center shrink-0"
+                  style={{ background: "rgba(139,92,246,0.15)", color: "#a78bfa", border: "1px solid rgba(139,92,246,0.25)" }}>
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <p className="text-xs font-bold text-white/80">{s.label}</p>
+              </div>
+              <p className="text-xs text-white/40 leading-relaxed">{s.desc}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Architecture flow diagram */}
+        <div className="mt-12 rounded-2xl border border-white/[0.08] overflow-hidden"
+          style={{ background: "rgba(255,255,255,0.02)" }}>
+          <div className="px-6 py-4 border-b border-white/[0.06]">
+            <p className="text-[10px] font-black uppercase tracking-widest text-white/25">Scan pipeline — per PR</p>
+          </div>
+          <div className="px-6 py-6 flex flex-wrap items-center gap-2">
+            {[
+              { label: "GitHub webhook", color: "#374151" },
+              { label: "QStash queue", color: "#1e3a5f" },
+              { label: "File fetch", color: "#1e3a5f" },
+              { label: "AST + SSA", color: "#2d1f5e" },
+              { label: "Semantic graph", color: "#2d1f5e" },
+              { label: "Git provenance", color: "#1a3a2a" },
+              { label: "ML classifier", color: "#1a3a2a" },
+              { label: "Risk score", color: "#3b1f1f" },
+              { label: "Attestation gate", color: "#3b1f1f" },
+              { label: "Check run ✓", color: "#1a3a2a" },
+            ].map((step, i, arr) => (
+              <div key={step.label} className="flex items-center gap-2">
+                <div className="px-3 py-1.5 rounded-lg text-[11px] font-bold text-white/60"
+                  style={{ background: step.color, border: "1px solid rgba(255,255,255,0.08)" }}>
+                  {step.label}
+                </div>
+                {i < arr.length - 1 && (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.2)" strokeWidth="2.5">
+                    <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+                  </svg>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="px-6 pb-5 grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-white/[0.05] pt-5">
+            {[
+              { stat: "<500ms", label: "Webhook response", sub: "Scan runs async via QStash" },
+              { stat: "47",     label: "Detection signals", sub: "AST · SSA · semantic · git · ML" },
+              { stat: "∞",      label: "Cross-PR memory",   sub: "Identical file → auto-attested" },
+            ].map(s => (
+              <div key={s.label} className="text-center">
+                <p className="text-2xl font-black text-violet-400 tabular-nums">{s.stat}</p>
+                <p className="text-xs font-bold text-white/50 mt-1">{s.label}</p>
+                <p className="text-[10px] text-white/25 mt-0.5">{s.sub}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ── HowItWorksSection ──────────────────────────────────────────────────────────
 
 function HowItWorksSection() {
@@ -711,6 +876,8 @@ export default function LandingPage() {
       <NavBar />
       <HeroSection />
       <FeaturesSection />
+      <WhySection />
+      <ArchSection />
       <HowItWorksSection />
       <PricingSection />
       <CTASection />
