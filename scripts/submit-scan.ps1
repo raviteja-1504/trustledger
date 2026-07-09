@@ -4,7 +4,7 @@
 param(
   [Parameter(Mandatory = $true)]
   [string]$ApiKey,
-  [string]$BaseUrl = "https://dashboard-tan-six-48.vercel.app",
+  [string]$BaseUrl = "https://dashboard-psi-smoky-96.vercel.app",
   [string]$Repo = "novapay/payments-api"
 )
 

@@ -45,8 +45,7 @@ async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
 
 export async function enqueueScan(job: ScanJob): Promise<void> {
   const appUrl = cleanEnv(process.env.NEXT_PUBLIC_APP_URL)
-    || cleanEnv(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "")
-    || "https://dashboard-tan-six-48.vercel.app";
+    || cleanEnv(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
   const workerUrl = `${appUrl}/api/scan-worker`;
   console.log("[queue] workerUrl:", workerUrl, "qstash token set:", !!process.env.QSTASH_TOKEN);
 

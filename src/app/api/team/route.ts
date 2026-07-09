@@ -242,7 +242,7 @@ export async function PUT(req: NextRequest) {
   if (!member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
 
   // Generate a fresh magic link (password recovery type so they can set a password)
-  const appUrl = "https://dashboard-tan-six-48.vercel.app";
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
   const { data: linkData, error: linkErr } = await db.auth.admin.generateLink({
     type: "recovery",
     email,
