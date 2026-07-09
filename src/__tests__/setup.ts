@@ -17,17 +17,20 @@ jest.mock("next/link", () => {
   return { __esModule: true, default: MockLink };
 });
 
-// Mock localStorage
-const localStorageMock = (() => {
-  let store: Record<string, string> = {};
-  return {
-    getItem:    (k: string) => store[k] ?? null,
-    setItem:    (k: string, v: string) => { store[k] = v; },
-    removeItem: (k: string) => { delete store[k]; },
-    clear:      () => { store = {}; },
-  };
-})();
-Object.defineProperty(window, "localStorage", { value: localStorageMock });
+// Mock localStorage — only relevant under jsdom (component tests). API/lib
+// tests run under `@jest-environment node` (no DOM), where `window` doesn't exist.
+if (typeof window !== "undefined") {
+  const localStorageMock = (() => {
+    let store: Record<string, string> = {};
+    return {
+      getItem:    (k: string) => store[k] ?? null,
+      setItem:    (k: string, v: string) => { store[k] = v; },
+      removeItem: (k: string) => { delete store[k]; },
+      clear:      () => { store = {}; },
+    };
+  })();
+  Object.defineProperty(window, "localStorage", { value: localStorageMock });
+}
 
 // Suppress console.error noise from React in tests
 const originalError = console.error;

@@ -56,3 +56,5 @@ Thumbs.db
 .sentryclirc
 
 .deploy-tmp
+
+.vercel
