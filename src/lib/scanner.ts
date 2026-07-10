@@ -50,6 +50,13 @@ export interface ScanIndicator {
   detail?:  string;
 }
 
+export interface FunctionAIScore {
+  name:          string;
+  line:          number;
+  endLine:       number;
+  ai_percentage: number;
+}
+
 export interface FixSuggestion {
   vuln_id:      string;
   title:        string;
@@ -134,6 +141,7 @@ export interface FileAnalysis {
   ast_risks:          AstRisk[];
   ssa_taint_paths:    TaintPath[];
   ml_score:           MLScoreResult | null;
+  function_scores:    FunctionAIScore[];
 }
 
 // ── Language detection ─────────────────────────────────────────────────────────
@@ -3330,6 +3338,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     line_attribution: [], explained_signals: [],
     exploitability: null, compliance: null,
     ast_metrics: null, ast_risks: [], ssa_taint_paths: [], ml_score: null,
+    function_scores: [],
   });
 
   if (!content || content.trim().length < 50) return emptyResult();
@@ -3499,6 +3508,25 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     }
   }
 
+  // Per-function AI attribution -- same signal set as the file-level score,
+  // just re-run against each function's own body instead of the whole file.
+  // Skips trivial functions (< 5 lines, e.g. one-line getters) where the
+  // signal set has too little content to say anything meaningful, and caps
+  // at 40 functions/file as a bound against pathological generated files
+  // with hundreds of tiny functions.
+  const function_scores: FunctionAIScore[] = [];
+  if (!fileMeta.skipAI) {
+    for (const fn of astResult.functions.slice(0, 40)) {
+      const bodyLen = fn.endLine - fn.line;
+      if (bodyLen < 5) continue;
+      const bodyLines = extractFunctionBody(content, fn.line, fn.endLine);
+      const bodyContent = bodyLines.join("\n");
+      if (bodyContent.trim().length < 50) continue;
+      const { score } = computeAIPercentage(bodyContent, lang, bodyLines.length, 0, attribution.humanEvidence);
+      function_scores.push({ name: fn.name || "(anonymous)", line: fn.line, endLine: fn.endLine, ai_percentage: score });
+    }
+  }
+
   // ML classifier — independent probability estimate
   const ml_score = !fileMeta.skipAI
     ? classifyCode(content, ast_metrics, ai_percentage)
@@ -3509,7 +3537,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     content_hash: hash, line_count: lineCount, attribution, scan_quality,
     fix_suggestions, watermarks, supply_chain, behavioral_risk, provenance,
     line_attribution, explained_signals, exploitability, compliance,
-    ast_metrics, ast_risks, ssa_taint_paths, ml_score,
+    ast_metrics, ast_risks, ssa_taint_paths, ml_score, function_scores,
   };
 }
 

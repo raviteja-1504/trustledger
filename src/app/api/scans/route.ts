@@ -153,6 +153,7 @@ export async function POST(req: NextRequest) {
         ast_risks:         [],
         ssa_taint_paths:   [],
         ml_score:          null,
+        function_scores:   [],
       };
     });
     const riskOrder: Record<string, number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3, UNKNOWN:-1 };
