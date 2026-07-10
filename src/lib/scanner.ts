@@ -2492,9 +2492,6 @@ function sigImportExhaustiveness(content: string, lang: string): number {
 // Tier 1 — genuinely discriminates AI from senior human developers (LR > 4.0)
 const CORE_SIGNALS = new Set([
   "comment-phrasing",     // AI uses formulaic phrasing patterns humans almost never write
-  "jsdoc-completeness",   // AI documents every function; humans skip trivial ones
-  "zero-debug-artifacts", // AI leaves no TODO/console.log/commented code; humans always do
-  "import-exhaustiveness",// AI imports exactly what it uses with perfect ordering
   "language-specific",    // Language-specific stereotyped AI patterns
   "test-structure",       // Robotically uniform AI test suites
   "lexical-diversity",    // AI reuses ~200 identifiers; human TTR is measurably higher
@@ -2508,6 +2505,18 @@ const CORE_SIGNALS = new Set([
   "backdoor-detection",   // Logic bombs, exfiltration, hardcoded bypasses
 ]);
 
+// jsdoc-completeness, zero-debug-artifacts, and import-exhaustiveness were
+// moved out of CORE and into SECONDARY below. All three measure "is this
+// code polished/complete" rather than anything AI-specific — a mature,
+// well-reviewed human codebase (the benchmark's zod/dompurify/entities
+// samples) has thorough docs, no leftover debug artifacts, and clean
+// imports precisely *because* it went through review, not because AI wrote
+// it. As CORE signals they could independently drive coreNoisyOr high on
+// their own; as SECONDARY they can only amplify existing core evidence
+// (see the "Multiplicative combination" comment below), which is the same
+// treatment already applied to doc-coverage/language-specific for the same
+// reason (see the LANG_LEAK_BOOST comment).
+
 // Tier 2 — moderately discriminating, compound with Tier 1 evidence (LR 1.8–4.0)
 const SECONDARY_SIGNALS = new Set([
   "doc-coverage", "error-uniformity", "structural-repetition",
@@ -2520,6 +2529,7 @@ const SECONDARY_SIGNALS = new Set([
   "token-frequency",          // AI-surplus tokens: await/const/interface/Readonly at high density
   "hallucinated-api",         // Calls to non-existent APIs (validateAndSave, Array.isEmpty, etc.)
   "copy-paste-pattern",       // Verbatim StackOverflow algorithm implementations
+  "jsdoc-completeness",   "zero-debug-artifacts", "import-exhaustiveness",
 ]);
 
 // Tier 3 — "good practice" that any senior developer exhibits (LR < 1.8)
