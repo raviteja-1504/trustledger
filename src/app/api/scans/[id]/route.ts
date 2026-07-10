@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { analyzeFile } from "@/lib/scanner";
+import { analyzeFile, type FunctionAIScore } from "@/lib/scanner";
 
 export async function GET(
   req: NextRequest,
@@ -56,12 +56,17 @@ export async function GET(
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
       let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] | null = null;
+      // function_scores was never persisted at scan time (added after this
+      // re-analysis-on-read pattern already existed), so it's always
+      // recomputed here rather than having a stored-snapshot fallback.
+      let functionScores: FunctionAIScore[] = [];
       if (f.content) {
         try {
           const analysis = analyzeFile(f.file_path, f.content);
           freshIndicators = analysis.indicators
             .filter(i => i.line != null)
             .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }));
+          functionScores = analysis.function_scores;
         } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
       }
       return {
@@ -76,6 +81,7 @@ export async function GET(
         // content was unavailable or re-analysis threw (freshIndicators is
         // null in both cases, distinct from a legitimate empty array).
         indicators:      freshIndicators ?? storedIndicators ?? [],
+        function_scores: functionScores,
         attested:        attestedSet.has(f.file_path),
         content:         f.content ?? undefined,
       };

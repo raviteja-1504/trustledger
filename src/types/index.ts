@@ -10,6 +10,13 @@ export interface FileIndicator {
   detail?:  string;
 }
 
+export interface FunctionScore {
+  name:          string;
+  line:          number;
+  endLine:       number;
+  ai_percentage: number;
+}
+
 export interface FileResult {
   file_path: string;
   language: string;
@@ -17,6 +24,7 @@ export interface FileResult {
   risk_score: RiskLevel;
   risk_indicators: string[];
   indicators?: FileIndicator[];
+  function_scores?: FunctionScore[];
   attested: boolean;
   content?: string;
 }

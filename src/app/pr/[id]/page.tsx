@@ -715,6 +715,29 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                 <p className="text-xs text-gray-400 italic">No risk signals detected — file meets AI provenance requirements</p>
               )}
 
+              {/* Per-function AI breakdown */}
+              {(file.function_scores?.length ?? 0) > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
+                    Per-Function AI Content ({file.function_scores!.length})
+                  </p>
+                  <div className="space-y-1.5">
+                    {[...file.function_scores!]
+                      .sort((a, b) => b.ai_percentage - a.ai_percentage)
+                      .map(fn => (
+                        <div key={`${fn.name}-${fn.line}`} className="flex items-center gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2">
+                          <code className="text-xs font-mono font-semibold text-gray-700 truncate min-w-0 flex-1">{fn.name}()</code>
+                          <span className="text-[10px] font-mono text-gray-400 shrink-0">L{fn.line}–{fn.endLine}</span>
+                          <div className="w-24 shrink-0"><ProgressBar value={fn.ai_percentage} mode="ai" height="h-1.5" /></div>
+                          <span className="text-xs font-black text-gray-800 tabular-nums w-12 text-right shrink-0">
+                            {(fn.ai_percentage * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
               {/* Attest CTA inside expanded row */}
               {needsAttest && (
                 <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
