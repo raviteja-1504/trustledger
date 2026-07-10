@@ -27,7 +27,15 @@ function cleanEnv(val: string | undefined, fallback = ""): string {
 let _client: Client | null = null;
 
 function client(): Client {
-  if (!_client) _client = new Client({ token: cleanEnv(process.env.QSTASH_TOKEN) });
+  if (!_client) {
+    // Without an explicit baseUrl, the SDK defaults to the global
+    // qstash.upstash.io endpoint, which 404s for region-pinned accounts
+    // (e.g. us-east-1) — QSTASH_URL must be passed explicitly.
+    _client = new Client({
+      token:   cleanEnv(process.env.QSTASH_TOKEN),
+      baseUrl: cleanEnv(process.env.QSTASH_URL) || undefined,
+    });
+  }
   return _client;
 }
 
