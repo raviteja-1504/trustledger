@@ -44,11 +44,16 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
         currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
         nextSigningKey:    process.env.QSTASH_NEXT_SIGNING_KEY,
       });
+      // The signature JWT embeds the destination URL as a claim — verify()
+      // needs it to check that claim against the actual request, otherwise
+      // it fails closed (every delivery gets rejected with 401).
       return await receiver.verify({
         signature: req.headers.get("upstash-signature") ?? "",
         body:      rawBody,
+        url:       req.url,
       });
-    } catch {
+    } catch (err) {
+      console.error("[scan-worker] QStash signature verification failed:", err);
       return false;
     }
   }
