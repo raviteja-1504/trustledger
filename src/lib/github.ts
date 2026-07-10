@@ -56,6 +56,21 @@ export async function getInstallationToken(
   return res.json() as Promise<InstallationToken>;
 }
 
+/** Fetch the GitHub org/user login an installation belongs to. */
+export async function getInstallationAccount(installationId: number): Promise<string> {
+  const jwt = buildAppJWT();
+  const res = await fetch(`${GITHUB_API}/app/installations/${installationId}`, {
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept:        "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub installation lookup failed: ${res.status}`);
+  const data = await res.json() as { account: { login: string } };
+  return data.account.login;
+}
+
 /** Build a short-lived JWT for the GitHub App. */
 function buildAppJWT(): string {
   // Trim \r from App ID (Windows CLI piping adds carriage returns to env vars)
