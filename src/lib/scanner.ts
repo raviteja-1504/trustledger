@@ -38,6 +38,7 @@ import { analyzeGitProvenance }  from "./gitProvenance";
 import type { ProvenanceSummary as GitProvenanceSummary } from "./gitProvenance";
 import { classifyCode }          from "./mlClassifier";
 import type { MLScoreResult }    from "./mlClassifier";
+import { detectorRegistry }      from "./detectorRegistry";
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
@@ -3374,6 +3375,10 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findInsecureFileUpload(lines),
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
+    // Pluggable detectors registered via detectorRegistry.register() -- see
+    // detectorRegistry.ts. Empty by default; this is the on-ramp for new
+    // detectors that don't require editing this function.
+    ...detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"),
   ];
 
   // Dedup by id+line
