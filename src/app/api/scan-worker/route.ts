@@ -38,11 +38,18 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
     return true;
   }
   // QStash signature verification
-  if (process.env.QSTASH_CURRENT_SIGNING_KEY && process.env.QSTASH_NEXT_SIGNING_KEY) {
+  // Strip BOM/\r that Windows CLI piping adds to env vars in Vercel (same
+  // issue documented for INTERNAL_SECRET/GITHUB_APP_PRIVATE_KEY) -- these
+  // keys are hashed byte-for-byte, so a single stray character breaks
+  // verification for every request, not just some.
+  const currentSigningKey = (process.env.QSTASH_CURRENT_SIGNING_KEY ?? "").replace(/^﻿/, "").replace(/\r/g, "").trim();
+  const nextSigningKey    = (process.env.QSTASH_NEXT_SIGNING_KEY ?? "").replace(/^﻿/, "").replace(/\r/g, "").trim();
+  if (currentSigningKey && nextSigningKey) {
+    console.log("[scan-worker] signing key fingerprint:", currentSigningKey.length, currentSigningKey.slice(0, 6), currentSigningKey.slice(-4));
     try {
       const receiver = new Receiver({
-        currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
-        nextSigningKey:    process.env.QSTASH_NEXT_SIGNING_KEY,
+        currentSigningKey,
+        nextSigningKey,
       });
       // The signature JWT embeds the destination URL as a claim — verify()
       // needs it to check that claim against the actual request, otherwise
