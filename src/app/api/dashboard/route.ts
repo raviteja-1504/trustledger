@@ -63,7 +63,7 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .gte("created_at", since)
     .order("created_at", { ascending: false });
   if (prAuthorFilter) scansQuery = scansQuery.eq("pr_author", prAuthorFilter);
-  const { data: scans } = await scansQuery;
+  const { data: scansRaw } = await scansQuery;
 
   // All scans for this org (no date filter) — used for violation dedup.
   let allScansQuery = db
@@ -71,7 +71,23 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .select("id, repo_full_name, created_at")
     .eq("org_id", org_id);
   if (prAuthorFilter) allScansQuery = allScansQuery.eq("pr_author", prAuthorFilter);
-  const { data: allScans } = await allScansQuery;
+  const { data: allScansRaw } = await allScansQuery;
+
+  // Exclude repos with no corresponding active `repositories` row. Under
+  // normal operation every scan's repo has one (the webhook handler upserts
+  // it alongside every scan), so this only ever filters out repos that were
+  // explicitly deactivated or removed -- without it, a removed repo's old
+  // scan headers (which can outlive the repo record; attestations referencing
+  // them are permanently undeletable, which transitively blocks deleting the
+  // scans too) would resurface here forever with stale zeroed-out stats.
+  const { data: activeRepoRows } = await db
+    .from("repositories")
+    .select("repo_full_name")
+    .eq("org_id", org_id)
+    .eq("is_active", true);
+  const activeRepoNames = new Set((activeRepoRows ?? []).map(r => r.repo_full_name));
+  const scans    = (scansRaw ?? []).filter(s => activeRepoNames.has(s.repo_full_name));
+  const allScans = (allScansRaw ?? []).filter(s => activeRepoNames.has(s.repo_full_name));
 
   // Compute the latest scan per repo (from date-filtered scans, not allScans
   // which would pull in repos scanned months ago and cause ghost banners).
@@ -128,7 +144,6 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .order("ai_percentage", { ascending: false })
     .limit(1000) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
 
-  if (!scans) return { repos:[], overall_ai_pct:0, attestation_rate:0, unattested_deploy_count:0, risk_trend:[], scan_count:0, file_count:0, top_risk_files:[] };
 
   // Build repo stats
   const repoMap = new Map<string, {
