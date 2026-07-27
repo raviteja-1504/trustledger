@@ -33,10 +33,22 @@ export async function GET(req: NextRequest) {
     prAuthorFilter = member?.github_login ?? null;
   }
 
+  // Exclude repos with no corresponding active `repositories` row -- see
+  // the identical filter in api/dashboard/route.ts for why this is needed
+  // (a removed repo's scan headers can outlive the repositories row, since
+  // attestations referencing them are permanently undeletable by design).
+  const { data: activeRepoRows } = await db
+    .from("repositories")
+    .select("repo_full_name")
+    .eq("org_id", org_id)
+    .eq("is_active", true);
+  const activeRepoNames = (activeRepoRows ?? []).map(r => r.repo_full_name);
+
   let query = db
     .from("scans")
     .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, file_count, created_at, triggered_by")
     .eq("org_id", org_id)
+    .in("repo_full_name", activeRepoNames)
     .order("created_at", { ascending: false })
     .limit(limit);
 
