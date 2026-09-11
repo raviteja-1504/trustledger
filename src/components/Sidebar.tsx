@@ -10,6 +10,8 @@ import { useAuth } from "@/lib/auth";
 import { isSeedMode, authedFetch } from "@/lib/useRealData";
 import { countOpenViolations } from "@/lib/violations";
 import { patchDataWithAttestations } from "@/lib/trustScore";
+import { api } from "@/lib/api";
+import { SECRET_INDICATOR_IDS } from "@/lib/secretIndicators";
 import type { DashboardData } from "@/types";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -353,19 +355,73 @@ export default function Sidebar() {
       } catch { /* no-op */ }
     }
 
+    // Violations, Reports and Secrets badges previously only reflected
+    // reality after the user had actually visited /dashboard or /secrets at
+    // least once -- those pages were the only thing that ever wrote
+    // tl_notif_snapshot / tl_secret_total, so a badge stayed at whatever was
+    // last cached (often 0, i.e. invisible) until a page visit populated it.
+    // This fetches the same data those pages fetch, directly, so the sidebar
+    // is correct on its own instead of depending on which pages happen to
+    // have been opened this session. Deliberately not on the 5s interval
+    // below -- this does a dashboard fetch plus up to 5 scan fetches, which
+    // is meaningfully heavier than the alerts poll; event-driven (mount,
+    // focus, tab visible again, tl:badge) is enough to fix the staleness
+    // without polling that cost every 5 seconds.
+    async function refreshLive() {
+      if (!profile?.org_id || isSeedMode()) return;
+      try {
+        const data = await api.dashboard(profile.org_slug || "org", 90);
+        localStorage.setItem("tl_notif_snapshot", JSON.stringify(data));
+
+        // Secrets: same "latest scan per repo, up to 5" approach as the
+        // /secrets page itself -- there's no lightweight count-only endpoint,
+        // so this reuses the same scan fetches to derive both.
+        const repoToScanId = new Map<string, string>();
+        data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
+        const scanIds = [...repoToScanId.values()].slice(0, 5);
+        const scanResults = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
+        const seenSecretKeys = new Set<string>();
+        let secretCount = 0;
+        scanResults.forEach(r => {
+          if (r.status !== "fulfilled" || !r.value) return;
+          r.value.files.forEach(file => {
+            (file.indicators ?? []).forEach(ind => {
+              if (!SECRET_INDICATOR_IDS.has(ind.id) || ind.line == null) return;
+              const key = `${r.value.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
+              if (seenSecretKeys.has(key)) return;
+              seenSecretKeys.add(key);
+              secretCount++;
+            });
+          });
+        });
+        localStorage.setItem("tl_secret_total", String(secretCount));
+
+        // Incidents: fetch directly rather than waiting for /incidents to
+        // have been visited and written tl_incidents itself.
+        try {
+          const inc = await authedFetch<{ incidents: { status: string }[] }>("/api/incidents");
+          localStorage.setItem("tl_incidents", JSON.stringify(inc.incidents ?? []));
+        } catch { /* leave tl_incidents as-is */ }
+
+        refresh(); // recompute badge state now that the underlying data is fresh
+      } catch { /* offline — leave existing counts as-is */ }
+    }
+
     refresh();
+    refreshLive();
     // Interval as safety net; tl:badge event gives instant updates
     const id = setInterval(refresh, 5_000);
-    window.addEventListener("focus",                refresh);
-    window.addEventListener("tl:badge",             refresh);
-    window.addEventListener("tl:attest-complete",   refresh);
-    document.addEventListener("visibilitychange",   refresh);
+    const refreshBoth = () => { refresh(); refreshLive(); };
+    window.addEventListener("focus",                refreshBoth);
+    window.addEventListener("tl:badge",             refreshBoth);
+    window.addEventListener("tl:attest-complete",   refreshBoth);
+    document.addEventListener("visibilitychange",   refreshBoth);
     return () => {
       clearInterval(id);
-      window.removeEventListener("focus",                refresh);
-      window.removeEventListener("tl:badge",             refresh);
-      window.removeEventListener("tl:attest-complete",   refresh);
-      document.removeEventListener("visibilitychange",   refresh);
+      window.removeEventListener("focus",                refreshBoth);
+      window.removeEventListener("tl:badge",             refreshBoth);
+      window.removeEventListener("tl:attest-complete",   refreshBoth);
+      document.removeEventListener("visibilitychange",   refreshBoth);
     };
   // Re-run when org_id becomes available so the API call fires after login
   // eslint-disable-next-line react-hooks/exhaustive-deps

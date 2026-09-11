@@ -7,6 +7,7 @@ import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { SECRET_INDICATOR_IDS } from "@/lib/secretIndicators";
 import type { FileIndicator } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -49,8 +50,6 @@ const STORAGE_KEY = "tl_secret_status";
 // rest of the app uses (violations, vulnerabilities, PR code viewer) keeps
 // detection consistent everywhere and inherits every future scanner fix
 // automatically.
-
-const SECRET_INDICATOR_IDS = new Set(["hardcoded-secret", "high-entropy-secret"]);
 
 function severityFromIndicator(sev: string): SecretSeverity {
   const s = sev.toLowerCase();
