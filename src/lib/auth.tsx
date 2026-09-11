@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  createContext, useContext, useEffect, useState, type ReactNode,
+  createContext, useContext, useEffect, useRef, useState, type ReactNode,
 } from "react";
 import type { User, Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
@@ -141,6 +141,11 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   const [passwordRecovery, setPasswordRecovery] = useState(() =>
     typeof window !== "undefined" && localStorage.getItem("tl_password_recovery") === "1"
   );
+  // Persisted across the idle-timeout effect's re-runs (see below) -- a
+  // plain variable inside that effect would get silently reset every time
+  // Supabase's background token auto-refresh fires a new `user` object,
+  // which has nothing to do with real user activity.
+  const lastActivityRef = useRef(Date.now());
 
   function clearPasswordRecovery() {
     localStorage.removeItem("tl_password_recovery");
@@ -268,16 +273,22 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   // Auto sign-out after IDLE_TIMEOUT_MS with no user activity.
+  // lastActivityRef (declared above, outside this effect) is the source of
+  // truth for "when did the user last actually do something" -- it must
+  // NOT be reset just because this effect re-runs. This effect itself does
+  // re-run on every `user` object change, including Supabase's automatic
+  // background token refresh (onAuthStateChange fires with a new user
+  // object on every refresh, unrelated to real activity); only the ref
+  // survives that, which is exactly why it isn't a plain local variable.
   useEffect(() => {
     if (!user) return;
 
-    let lastActivity = Date.now();
-    const onActivity = () => { lastActivity = Date.now(); };
+    const onActivity = () => { lastActivityRef.current = Date.now(); };
     const events: (keyof WindowEventMap)[] = ["mousemove", "keydown", "click", "scroll", "touchstart"];
     events.forEach(e => window.addEventListener(e, onActivity, { passive: true }));
 
     const interval = setInterval(() => {
-      if (Date.now() - lastActivity >= IDLE_TIMEOUT_MS) {
+      if (Date.now() - lastActivityRef.current >= IDLE_TIMEOUT_MS) {
         clearInterval(interval);
         signOut().then(() => { window.location.href = "/login?error=session_timeout"; });
       }
