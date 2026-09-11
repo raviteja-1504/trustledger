@@ -269,6 +269,12 @@ export async function POST(req: NextRequest) {
       file_count:          result.files.length,
       triggered_by:        user_id ? "api" : "webhook",
       duration_ms:         result.duration_ms,
+      // Was being computed by runScan() and then silently discarded here --
+      // the PR detail page's Multi-Signal Evidence panel read this column
+      // directly, so any scan created through this endpoint (the manual
+      // "New Scan" panel, direct API submissions) persisted no evidence
+      // breakdown at all.
+      evidence_breakdown:  result.evidence_breakdown,
     })
     .select("id")
     .single();
