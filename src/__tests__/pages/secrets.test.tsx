@@ -38,4 +38,12 @@ describe("SecretsPage", () => {
     const findings = screen.getAllByText(/detected|hardcoded|secret|key/i);
     expect(findings.length).toBeGreaterThan(0);
   });
+
+  it("shows a Refresh button that can be clicked without crashing", () => {
+    render(<SecretsPage />);
+    const button = screen.getByRole("button", { name: /refresh/i });
+    expect(button).toBeInTheDocument();
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+  });
 });

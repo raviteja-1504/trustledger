@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import InfoTooltip from "@/components/InfoTooltip";
 import AuthGuard from "@/components/AuthGuard";
@@ -140,14 +140,91 @@ export default function SecretsPage() {
   const [filterStatus, setFilterStatus] = useState<SecretStatus | "all">("all");
   const [filterRepo,   setFilterRepo]   = useState("all");
   const [expanded,     setExpanded]     = useState<string | null>(null);
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+
+  // Re-reads status overrides fresh each call (rather than capturing them
+  // once) so a manual refresh also picks up resolve/re-open actions made in
+  // another tab, not just new/changed findings from the server.
+  function readStatusOverrides(): Record<string, SecretStatus> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Record<string, SecretStatus>;
+      return Object.fromEntries(Object.entries(raw).filter(([, v]) => v === "resolved")) as Record<string, SecretStatus>;
+    } catch { return {}; }
+  }
+
+  // Fetches current findings from the live scans (bypassing any client-side
+  // cache) and replaces `findings` with the result. Previously this only ran
+  // once on mount -- if the tab stayed open, a new scan landed, a secret got
+  // rotated/resolved elsewhere, or the initial fetch silently failed
+  // (offline at the time), there was no way to see current data short of a
+  // full page reload. Exposed as a standalone function so both the initial
+  // load and the Refresh button use the exact same live-fetch logic.
+  const fetchLive = useCallback(async () => {
+    if (!profile?.org_id) return;
+    const saved = readStatusOverrides();
+    try {
+      const data = await api.dashboard(profile?.org_slug || "org", 90);
+      // Dedupe to one scan per repo (the latest) — fetching more than one
+      // scan per repo would re-surface the same still-present secret once
+      // per scan it appeared in, the same "multiple scans of one PR"
+      // duplication bug already fixed for violations/alerts.
+      const repoToScanId = new Map<string, string>();
+      data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
+      const scanIds = [...repoToScanId.values()].slice(0, 5);
+      const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
+      const existingKeys = new Set<string>();
+      const liveFindings: SecretFinding[] = [];
+
+      results.forEach(r => {
+        if (r.status !== "fulfilled" || !r.value) return;
+        const scan = r.value;
+        scan.files.forEach(file => {
+          const secretIndicators = (file.indicators ?? []).filter((i: FileIndicator) => SECRET_INDICATOR_IDS.has(i.id) && i.line != null);
+          secretIndicators.forEach((ind: FileIndicator) => {
+            const key = `${scan.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
+            if (existingKeys.has(key)) return;
+            existingKeys.add(key);
+
+            const rawLine = file.content?.split("\n")[(ind.line as number) - 1] ?? ind.detail ?? ind.label;
+            const { context, masked } = buildContext(rawLine);
+
+            liveFindings.push({
+              id: `sec_${scan.scan_id}_${file.file_path.replace(/\W/g, "_")}_${ind.line}_${ind.id}`,
+              severity: severityFromIndicator(ind.severity),
+              type: inferSecretType(ind.label),
+              label: ind.label,
+              file_path: file.file_path, repo: scan.repo,
+              line_number: ind.line as number,
+              masked_value: masked,
+              context,
+              pr_number: scan.pr_number, scan_id: scan.scan_id,
+              detected_at: scan.timestamp, status: "open",
+            });
+          });
+        });
+      });
+
+      const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
+      setFindings(merged);
+      // Cache for next visit so the page loads instantly
+      localStorage.setItem("tl_secrets_cache", JSON.stringify(liveFindings));
+      localStorage.setItem("tl_secret_total", String(merged.length));
+      setLastRefreshed(new Date());
+      // Notify sidebar to update badge immediately
+      window.dispatchEvent(new Event("tl:badge"));
+    } catch { /* offline — keep whatever's currently shown */ }
+  }, [profile?.org_id, profile?.org_slug]);
+
+  async function handleRefreshClick() {
+    setRefreshing(true);
+    try { await fetchLive(); } finally { setRefreshing(false); }
+  }
 
   // Load seed findings (opt-in dev mode) → otherwise live scan detections only
   useEffect(() => {
     const isSeed = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id;
-
-    // Status overrides (resolved/open) — applied on top of whatever base we load
-    const raw  = (() => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Record<string, SecretStatus>; } catch { return {} as Record<string, SecretStatus>; } })();
-    const saved = Object.fromEntries(Object.entries(raw).filter(([,v]) => v === "resolved")) as Record<string, SecretStatus>;
+    const saved = readStatusOverrides();
     const applyOverrides = (data: SecretFinding[]) =>
       data.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
 
@@ -165,8 +242,8 @@ export default function SecretsPage() {
       return;
     }
 
-    // 2. Not seed mode — show cached findings immediately, then refresh from live scans
-    // Load cached findings from localStorage so the page is useful instantly
+    // 2. Not seed mode — show cached findings immediately (so the page is
+    // useful instantly), then always fetch live data in the background.
     try {
       const cached = JSON.parse(localStorage.getItem("tl_secrets_cache") ?? "[]") as SecretFinding[];
       if (cached.length > 0) {
@@ -174,59 +251,7 @@ export default function SecretsPage() {
       }
     } catch { /* ignore */ }
 
-    (async () => {
-      if (!profile?.org_id) return; // wait until profile is loaded
-      try {
-        const data = await api.dashboard(profile?.org_slug || "org", 90);
-        // Dedupe to one scan per repo (the latest) — fetching more than one
-        // scan per repo would re-surface the same still-present secret once
-        // per scan it appeared in, the same "multiple scans of one PR"
-        // duplication bug already fixed for violations/alerts.
-        const repoToScanId = new Map<string, string>();
-        data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
-        const scanIds = [...repoToScanId.values()].slice(0, 5);
-        const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
-        const existingKeys = new Set<string>();
-        const liveFindings: SecretFinding[] = [];
-
-        results.forEach(r => {
-          if (r.status !== "fulfilled" || !r.value) return;
-          const scan = r.value;
-          scan.files.forEach(file => {
-            const secretIndicators = (file.indicators ?? []).filter((i: FileIndicator) => SECRET_INDICATOR_IDS.has(i.id) && i.line != null);
-            secretIndicators.forEach((ind: FileIndicator) => {
-              const key = `${scan.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
-              if (existingKeys.has(key)) return;
-              existingKeys.add(key);
-
-              const rawLine = file.content?.split("\n")[(ind.line as number) - 1] ?? ind.detail ?? ind.label;
-              const { context, masked } = buildContext(rawLine);
-
-              liveFindings.push({
-                id: `sec_${scan.scan_id}_${file.file_path.replace(/\W/g, "_")}_${ind.line}_${ind.id}`,
-                severity: severityFromIndicator(ind.severity),
-                type: inferSecretType(ind.label),
-                label: ind.label,
-                file_path: file.file_path, repo: scan.repo,
-                line_number: ind.line as number,
-                masked_value: masked,
-                context,
-                pr_number: scan.pr_number, scan_id: scan.scan_id,
-                detected_at: scan.timestamp, status: "open",
-              });
-            });
-          });
-        });
-
-        const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
-        setFindings(merged);
-        // Cache for next visit so the page loads instantly
-        localStorage.setItem("tl_secrets_cache", JSON.stringify(liveFindings));
-        localStorage.setItem("tl_secret_total", String(merged.length));
-        // Notify sidebar to update badge immediately
-        window.dispatchEvent(new Event("tl:badge"));
-      } catch { /* offline — keep cached */ }
-    })();
+    fetchLive();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
@@ -316,13 +341,29 @@ export default function SecretsPage() {
               Hardcoded credentials detected in AI-generated code — review and remediate before production.
             </p>
           </div>
-          <button onClick={exportCSV}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-            Export CSV
-          </button>
+          <div className="flex items-center gap-2">
+            {lastRefreshed && (
+              <span className="text-[11px] text-gray-400 hidden sm:inline">
+                Updated {timeAgo(lastRefreshed.toISOString())}
+              </span>
+            )}
+            <button onClick={handleRefreshClick} disabled={refreshing}
+              title="Re-check for stale/resolved secrets — fetches current findings instead of the cached view"
+              className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                className={refreshing ? "animate-spin" : ""}>
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </button>
+            <button onClick={exportCSV}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Export CSV
+            </button>
+          </div>
         </div>
 
         {/* Summary cards */}
