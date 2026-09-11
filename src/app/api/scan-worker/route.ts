@@ -28,6 +28,13 @@ import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import type { ScanJob } from "@/lib/queue";
 
+// The "300s timeout budget" this file's own header comment describes was
+// never actually configured anywhere -- without this export, the route ran
+// on whatever the platform's unconfigured default is instead. Vercel clamps
+// this to the account's actual plan maximum regardless of what's set here,
+// so this is safe to set at the originally-intended value either way.
+export const maxDuration = 300;
+
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean> {
