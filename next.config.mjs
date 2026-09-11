@@ -24,13 +24,18 @@ const nextConfig = {
   reactStrictMode:             true,     // catch subtle bugs
   swcMinify:                   true,     // faster minification
 
-  // ── Production image optimization ────────────────────────────────────────────
+  // ── Image optimization: disabled ─────────────────────────────────────────────
+  // next/image is not used anywhere in this app (avatars render via plain
+  // <img>), so the optimizer -- and its remotePatterns/AVIF processing --
+  // was pure attack surface with zero product benefit. It's also the
+  // component behind several CVEs in the installed Next 13.5.11, including
+  // a critical unauthenticated RCE when decoding AVIF files
+  // (GHSA-2xp9-vwfh-vxw4). unoptimized:true turns off the /_next/image
+  // route's transformation pipeline entirely, closing that surface without
+  // needing the Next 13->16 major-version migration that would otherwise
+  // be required to patch it in place.
   images: {
-    formats:         ["image/avif","image/webp"],
-    remotePatterns:  [
-      { protocol:"https", hostname:"avatars.githubusercontent.com" },
-      { protocol:"https", hostname:"**.supabase.co" },
-    ],
+    unoptimized: true,
   },
 
   // ── Experimental ─────────────────────────────────────────────────────────────
