@@ -16,6 +16,7 @@ import { createServiceClient } from "@/lib/supabase";
 import {
   getInstallationToken,
   getPRFiles,
+  getPRHeadSha,
   getCommitDiff,
   fetchFileContents,
   updateCheckRun,
@@ -140,6 +141,32 @@ export async function POST(req: NextRequest) {
 
   try {
     const { token } = await getInstallationToken(installationId);
+
+    // ── Supersession check ────────────────────────────────────────────────────
+    // A rapid sequence of pushes to the same PR fires one webhook (and one
+    // scan-worker job) per push, all enqueued independently with no
+    // awareness of each other. Without this check, all of them run their
+    // full scan concurrently -- wasting GitHub API quota and compute -- and
+    // whichever happens to finish LAST wins the "latest scan" slot in the
+    // dashboard, even if it was processing an older, already-superseded
+    // commit. Bail out here (before any expensive work) if GitHub's
+    // authoritative current head has already moved past what this job was
+    // queued for. getPRHeadSha() returns null on API failure, which we
+    // treat as "proceed" (fail open) rather than silently dropping work
+    // over a transient GitHub blip.
+    const currentHeadSha = await getPRHeadSha(token, owner, repoName, prNumber);
+    if (currentHeadSha && currentHeadSha !== headSha) {
+      console.log(`[scan-worker] superseded: queued for ${headSha}, PR is now at ${currentHeadSha} — skipping`);
+      if (checkRunId) {
+        try {
+          await updateCheckRun(token, owner, repoName, checkRunId, {
+            name: "TrustLedger AI Governance", status: "completed", conclusion: "neutral",
+            output: { title: "Superseded by a newer push", summary: "A newer commit was pushed to this PR before this scan started; see the check for the latest commit instead." },
+          });
+        } catch { /* best-effort — don't block the response */ }
+      }
+      return NextResponse.json({ ok: true, skipped: true, reason: "superseded" });
+    }
 
     // ── Delta scanning ────────────────────────────────────────────────────────
     const isDelta = action === "synchronize" && !!beforeSha && !!orgId;
@@ -555,6 +582,27 @@ export async function POST(req: NextRequest) {
       })),
     ];
     const mergedResult = { ...result, files: mergedFiles };
+
+    // Re-check supersession before finalizing -- the scan itself (fetch +
+    // analyze + persist) can take tens of seconds, long enough for another
+    // push to land mid-run. The scan_files/violations rows already written
+    // above stay as a valid historical record either way; what we skip here
+    // is presenting a now-stale commit's results as the PR's current state
+    // (updating the check run, posting a comment) when a newer scan is
+    // already in flight or about to be.
+    const headAtFinish = await getPRHeadSha(token, owner, repoName, prNumber);
+    if (headAtFinish && headAtFinish !== headSha) {
+      console.log(`[scan-worker] superseded before finalizing: queued for ${headSha}, PR is now at ${headAtFinish} — skipping check/comment`);
+      if (checkRunId) {
+        try {
+          await updateCheckRun(token, owner, repoName, checkRunId, {
+            name: "TrustLedger AI Governance", status: "completed", conclusion: "neutral",
+            output: { title: "Superseded by a newer push", summary: "A newer commit was pushed to this PR while this scan was running; see the check for the latest commit instead." },
+          });
+        } catch { /* best-effort */ }
+      }
+      return NextResponse.json({ ok: true, superseded_at_finish: true, scan_id: result.scan_id });
+    }
 
     if (checkRunId) {
       let conclusion: "success" | "action_required" | "neutral" = "success";

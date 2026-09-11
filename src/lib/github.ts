@@ -93,9 +93,35 @@ function b64(obj: object): string {
   return Buffer.from(JSON.stringify(obj)).toString("base64url");
 }
 
+// ── Bounded concurrency ───────────────────────────────────────────────────────
+// A worker-pool mapper: at most `limit` calls to `fn` are ever in flight at
+// once, regardless of how many `items` there are. Plain `Promise.all` has no
+// such bound -- for a 1,700-file PR that means 1,700 simultaneous requests
+// fired at once, which risks tripping GitHub's secondary rate limit / abuse
+// detection (and gets worse now that multiple scans can run concurrently
+// against the same shared installation token -- see queue.ts flowControl).
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // ── File content ───────────────────────────────────────────────────────────────
 
 export interface GitHubFile { path: string; content: string }
+
+const FILE_FETCH_CONCURRENCY = 15;
 
 /** Fetch file contents for a list of paths at a given commit. */
 export async function fetchFileContents(
@@ -107,27 +133,25 @@ export async function fetchFileContents(
 ): Promise<GitHubFile[]> {
   const results: GitHubFile[] = [];
 
-  await Promise.all(
-    paths.map(async path => {
-      try {
-        const res = await fetch(
-          `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${ref}`,
-          {
-            headers: {
-              Authorization: `token ${token}`,
-              Accept:        "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28",
-            },
+  await mapWithConcurrency(paths, FILE_FETCH_CONCURRENCY, async path => {
+    try {
+      const res = await fetch(
+        `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${ref}`,
+        {
+          headers: {
+            Authorization: `token ${token}`,
+            Accept:        "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
           },
-        );
-        if (!res.ok) return;
-        const data = await res.json() as { content?: string; encoding?: string };
-        if (data.content && data.encoding === "base64") {
-          results.push({ path, content: Buffer.from(data.content, "base64").toString("utf8") });
-        }
-      } catch { /* skip unreadable files */ }
-    }),
-  );
+        },
+      );
+      if (!res.ok) return;
+      const data = await res.json() as { content?: string; encoding?: string };
+      if (data.content && data.encoding === "base64") {
+        results.push({ path, content: Buffer.from(data.content, "base64").toString("utf8") });
+      }
+    } catch { /* skip unreadable files */ }
+  });
 
   return results;
 }
@@ -165,6 +189,43 @@ export async function getPRFiles(
   }
 
   return files;
+}
+
+/**
+ * Returns the PR's CURRENT head commit SHA, straight from GitHub.
+ *
+ * Used for scan supersession: a scan-worker invocation queued for commit X
+ * can take tens of seconds, during which a developer may push commit Y. If
+ * this returns something other than the SHA the caller was processing, a
+ * newer scan for this PR is either already running or about to be queued,
+ * so the caller should bail out rather than finish and present commit X's
+ * (now stale) results as current. Returns null on any API failure so
+ * callers fail open (proceed with the scan) rather than silently dropping
+ * work over a transient GitHub API blip.
+ */
+export async function getPRHeadSha(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}`,
+      {
+        headers: {
+          Authorization: `token ${token}`,
+          Accept:        "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      },
+    );
+    if (!res.ok) return null;
+    const data = await res.json() as { head?: { sha?: string } };
+    return data.head?.sha ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -63,7 +63,20 @@ export async function enqueueScan(job: ScanJob): Promise<void> {
   }
 
   try {
-    await client().publishJSON({ url: workerUrl, body: job, retries: 3 });
+    await client().publishJSON({
+      url: workerUrl,
+      body: job,
+      retries: 3,
+      // Caps concurrent scan-worker runs sharing the same GitHub App
+      // installation token -- without this, a burst of PR activity in one
+      // org (mass rebase, a bot force-pushing many open PRs at once) fires
+      // every scan fully concurrently, all racing for the same shared
+      // GitHub API rate-limit budget (5000 req/hour per installation) and
+      // hammering the database simultaneously. Keyed per-installation, not
+      // globally, so different orgs still scan fully in parallel with each
+      // other -- this only throttles bursts *within* one org.
+      flowControl: { key: `installation:${job.installation_id}`, parallelism: 5 },
+    });
     console.log("[queue] job enqueued to QStash successfully");
   } catch (err) {
     console.error("[queue] QStash failed, running scan directly:", String(err).slice(0, 200));
