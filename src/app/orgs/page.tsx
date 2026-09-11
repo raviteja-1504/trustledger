@@ -70,7 +70,7 @@ export default function OrgsPage() {
 
     authedFetch<{ orgs: OrgSummary[] }>("/api/orgs")
       .then(res => setOrgs(res.orgs ?? []))
-      .catch(e => setError(String(e)))
+      .catch(e => setError(e instanceof Error ? e.message : "We couldn't load organizations. Please try again."))
       .finally(() => setLoading(false));
   }, [profile]);
 
@@ -86,7 +86,7 @@ export default function OrgsPage() {
       setShowNew(false);
       setNewOrg({ slug:"", name:"", github_org:"", plan:"starter" });
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : "We couldn't create that organization. Please try again.");
     } finally {
       setCreating(false);
     }

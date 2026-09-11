@@ -17,6 +17,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
+import crypto from "crypto";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
@@ -124,10 +126,12 @@ export async function POST(req: NextRequest) {
   });
 
   if (authErr || !authUser.user) {
+    const refId = crypto.randomBytes(4).toString("hex");
+    logger.error("scim_user_create_failed", { ref_id: refId, detail: authErr?.message });
     return NextResponse.json({
       schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
       status:  "409",
-      detail:  authErr?.message ?? "User creation failed",
+      detail:  `User provisioning failed. Reference: ${refId}`,
     }, { status: 409, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
   }
 

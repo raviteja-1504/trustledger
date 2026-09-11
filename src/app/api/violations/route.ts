@@ -4,6 +4,7 @@ import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationUpdateSchema } from "@/lib/validation";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { safeError } from "@/lib/errors";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
   if (prAuthorFilter)    query = query.eq("scans.pr_author", prAuthorFilter);
 
   const { data, error: qErr } = await query;
-  if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
+  if (qErr) return safeError(qErr, { code: "violations_fetch_failed", message: "We couldn't load violations right now. Please try again." });
 
   let violations = data ?? [];
 

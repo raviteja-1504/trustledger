@@ -325,7 +325,7 @@ export default function NewScanPanel({ open, onClose }: Props) {
       // If the animation already finished before the API returned, navigate now
       if (animDone.current) router.push(`/pr/${result.scan_id}`);
     } catch (e: unknown) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : "We couldn't submit that scan. Please try again.");
       setStep("config");
     }
   }

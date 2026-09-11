@@ -4,6 +4,7 @@ import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { safeError } from "@/lib/errors";
 
 // ── GET — list alerts ──────────────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ export async function GET(req: NextRequest) {
   if (sev)    query = query.eq("severity", sev);
 
   const { data, error: qErr } = await query;
-  if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
+  if (qErr) return safeError(qErr, { code: "alerts_fetch_failed", message: "We couldn't load alerts right now. Please try again." });
 
   const rows = (data ?? []) as AlertRow[];
 

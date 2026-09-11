@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
@@ -33,9 +34,16 @@ export async function GET() {
       const { error } = await db.from("organizations").select("id").limit(1);
       dbOk  = !error;
       pool  = await getPoolStats(db);
-      if (error) dbDetail = (error as { message?: string }).message;
+      // This endpoint is unauthenticated (see middleware.ts's public-path
+      // list) -- never echo the raw DB error to an anonymous caller. Log it
+      // server-side and surface only a generic status here.
+      if (error) {
+        logger.error("healthz_db_check_failed", { detail: error.message });
+        dbDetail = "database check failed";
+      }
     } catch (e) {
-      dbDetail = String(e);
+      logger.error("healthz_db_check_failed", { detail: e instanceof Error ? e.message : String(e) });
+      dbDetail = "database check failed";
     }
   } else {
     dbDetail = "SUPABASE_URL not configured (demo mode)";

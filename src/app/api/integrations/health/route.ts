@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
+import { logger } from "@/lib/logger";
 
 interface IntegrationStatus {
   name:        string;
@@ -74,7 +75,8 @@ async function checkStripe(): Promise<IntegrationStatus> {
     await stripe.balance.retrieve();
     return { name:"Stripe", connected:true, healthy:true, last_check:new Date().toISOString(), details:"Connected" };
   } catch (e) {
-    return { name:"Stripe", connected:!!key, healthy:false, last_check:new Date().toISOString(), error:String(e) };
+    logger.error("integration_health_stripe_check_failed", { detail: e instanceof Error ? e.message : String(e) });
+    return { name:"Stripe", connected:!!key, healthy:false, last_check:new Date().toISOString(), error:"Connection check failed" };
   }
 }
 

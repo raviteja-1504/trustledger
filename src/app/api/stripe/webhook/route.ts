@@ -14,6 +14,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyStripeWebhook, PLAN_NAMES } from "@/lib/stripe";
 import { writeAuditLog } from "@/lib/audit";
 import { sendEmailAlert } from "@/lib/alertDelivery";
+import { logger } from "@/lib/logger";
 import type Stripe from "stripe";
 
 // Next.js App Router route handlers receive raw body via req.text() — no config needed
@@ -156,9 +157,11 @@ export async function POST(req: NextRequest) {
       }
     }
   } catch (err) {
-    console.error("Stripe webhook processing error:", err);
-    // Return 200 to prevent Stripe from retrying — log the error
-    return NextResponse.json({ ok: true, warning: String(err) });
+    logger.error("stripe_webhook_processing_failed", { detail: err instanceof Error ? err.message : String(err) });
+    // Return 200 to prevent Stripe from retrying -- the error is logged
+    // server-side; the response body is visible in the Stripe dashboard's
+    // webhook delivery log, so it shouldn't carry raw error text either.
+    return NextResponse.json({ ok: true, warning: "processing_error" });
   }
 
   return NextResponse.json({ ok: true, event: event.type });

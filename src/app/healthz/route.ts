@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { cacheGet, cacheSet } from "@/lib/cache";
+import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,7 +22,9 @@ async function checkDatabase(): Promise<ServiceCheck> {
     const { error: e2 } = await db.from("organizations").select("id").limit(1);
     return { status: e2 ? "degraded" : "ok", latency_ms: Date.now() - t0 };
   } catch (e) {
-    return { status: "unavailable", latency_ms: Date.now() - t0, detail: String(e) };
+    // Public, unauthenticated endpoint -- never echo raw DB errors here.
+    logger.error("healthz_db_check_failed", { detail: e instanceof Error ? e.message : String(e) });
+    return { status: "unavailable", latency_ms: Date.now() - t0, detail: "database check failed" };
   }
 }
 
@@ -37,7 +40,8 @@ async function checkCache(): Promise<ServiceCheck> {
       detail:     process.env.UPSTASH_REDIS_REST_URL ? "redis" : "in-memory",
     };
   } catch (e) {
-    return { status: "degraded", latency_ms: Date.now() - t0, detail: String(e) };
+    logger.error("healthz_cache_check_failed", { detail: e instanceof Error ? e.message : String(e) });
+    return { status: "degraded", latency_ms: Date.now() - t0, detail: "cache check failed" };
   }
 }
 

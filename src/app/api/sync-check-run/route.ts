@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
+import { safeError } from "@/lib/errors";
 
 /**
  * POST /api/sync-check-run
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest) {
           message:   "Recovered check run from webhook_deliveries — scan was never persisted.",
         });
       } catch (e) {
-        return NextResponse.json({ error: "github_update_failed", detail: String(e) }, { status: 502 });
+        return safeError(e, { code: "github_update_failed", message: "We couldn't update the GitHub check for this PR. Please try again.", status: 502 });
       }
     }
 
@@ -145,7 +146,7 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json({ synced: true, conclusion: "neutral", scan_id: scan.id });
     } catch (e) {
-      return NextResponse.json({ error: "github_update_failed", detail: String(e) }, { status: 502 });
+      return safeError(e, { code: "github_update_failed", message: "We couldn't update the GitHub check for this PR. Please try again.", status: 502 });
     }
   }
 
@@ -212,10 +213,6 @@ export async function POST(req: NextRequest) {
       total,
     });
   } catch (e) {
-    console.error("[sync-check-run] Failed to update GitHub check run:", e);
-    return NextResponse.json(
-      { error: "github_update_failed", detail: String(e) },
-      { status: 502 },
-    );
+    return safeError(e, { code: "github_update_failed", message: "We couldn't update the GitHub check for this PR. Please try again.", status: 502 });
   }
 }

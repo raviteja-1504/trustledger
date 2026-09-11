@@ -27,6 +27,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { safeError } from "@/lib/errors";
 import type { ScanJob } from "@/lib/queue";
 
 // The "300s timeout budget" this file's own header comment describes was
@@ -689,6 +690,6 @@ export async function POST(req: NextRequest) {
         });
       } catch { /* don't mask the original error */ }
     }
-    return NextResponse.json({ error: "scan_failed", detail: String(err) }, { status: 500 });
+    return safeError(err, { code: "scan_failed", message: "The scan could not be completed due to an internal error. Push a new commit to retry." });
   }
 }

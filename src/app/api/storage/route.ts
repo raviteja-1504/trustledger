@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { safeError } from "@/lib/errors";
 
 const BUCKET = "evidence";
 
@@ -32,7 +33,7 @@ export async function GET(req: NextRequest) {
       .from(BUCKET)
       .list(org_id, { limit: 200, sortBy: { column: "created_at", order: "desc" } });
 
-    if (listErr) return NextResponse.json({ error: listErr.message }, { status: 500 });
+    if (listErr) return safeError(listErr, { code: "storage_list_failed", message: "We couldn't load evidence files right now. Please try again." });
 
     // Generate signed URLs for all files
     const signed = await Promise.all(
@@ -60,7 +61,7 @@ export async function GET(req: NextRequest) {
     .from(BUCKET)
     .createSignedUrl(safePath, 3600);
 
-  if (signErr) return NextResponse.json({ error: signErr.message }, { status: 404 });
+  if (signErr) return safeError(signErr, { code: "storage_download_failed", message: "That file couldn't be found or is no longer accessible.", status: 404 });
   return NextResponse.json({ url: data.signedUrl });
 }
 
@@ -88,7 +89,7 @@ export async function POST(req: NextRequest) {
       upsert:      false,
     });
 
-  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+  if (upErr) return safeError(upErr, { code: "storage_upload_failed", message: "We couldn't upload that file. Please try again." });
 
   const { data: signed } = await db.storage
     .from(BUCKET)
@@ -126,7 +127,7 @@ export async function DELETE(req: NextRequest) {
   const db       = createServiceClient();
 
   const { error: delErr } = await db.storage.from(BUCKET).remove([safePath]);
-  if (delErr) return NextResponse.json({ error: delErr.message }, { status: 500 });
+  if (delErr) return safeError(delErr, { code: "storage_delete_failed", message: "We couldn't delete that file. Please try again." });
 
   await writeAuditLog(db, {
     org_id,

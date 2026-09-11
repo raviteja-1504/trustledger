@@ -42,16 +42,19 @@ export async function authedFetch<T>(
     headers: { "Content-Type": "application/json", ...headers, ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string; detail?: string };
+    // API routes return { error: <code>, message: <safe human-readable text> }
+    // (see src/lib/errors.ts). Prefer message -- error is a machine code like
+    // "attestation_failed", not meant to be shown as-is, and older routes'
+    // "detail" fields could carry raw DB/exception text that shouldn't reach
+    // the client at all.
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
     if (body.error === "session_revoked") {
       await supabase.auth.signOut();
       if (typeof window !== "undefined") {
         window.location.href = "/login?error=session_revoked";
       }
     }
-    // Include detail so callers can see the underlying DB/API error
-    const msg = [body.error, body.detail].filter(Boolean).join(": ") || `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
   }
   return res.json() as Promise<T>;
 }
@@ -99,7 +102,7 @@ export function useRealData<T>(
       setData(result);
       setIsRealData(true);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : "Something went wrong loading this data. Please try again.";
       setError(msg);
       // 3. Fallback to seed/local even if not in seed mode
       if (seedRef.current) {

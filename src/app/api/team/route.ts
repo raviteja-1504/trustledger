@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { safeError } from "@/lib/errors";
 
 const VALID_ROLES = ["developer", "security_reviewer", "admin"] as const;
 type MemberRole = typeof VALID_ROLES[number];
@@ -96,7 +97,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (insertErr || !member) {
-    return NextResponse.json({ error: "invite_failed", detail: insertErr?.message }, { status: 500 });
+    return safeError(insertErr, { code: "invite_failed", message: "We couldn't send that invite. Please check the email address and try again." });
   }
 
   await writeAuditLog(db, {
@@ -250,7 +251,7 @@ export async function PUT(req: NextRequest) {
   });
 
   if (linkErr || !linkData?.properties?.action_link) {
-    return NextResponse.json({ error: "link_generation_failed", detail: linkErr?.message }, { status: 500 });
+    return safeError(linkErr, { code: "link_generation_failed", message: "We couldn't generate an invite link right now. Please try again." });
   }
 
   // Supabase doesn't expose a "send email" API directly — return the link

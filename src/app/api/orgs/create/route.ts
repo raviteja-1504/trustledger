@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyJWT } from "../../_middleware";
+import { safeError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyJWT(req);
@@ -63,7 +64,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (orgErr || !org) {
-    return NextResponse.json({ error: "org_create_failed", detail: orgErr?.message }, { status: 500 });
+    return safeError(orgErr, { code: "org_create_failed", message: "We couldn't create the organization. Please try again." });
   }
 
   // Create admin member
@@ -79,7 +80,7 @@ export async function POST(req: NextRequest) {
   if (memberErr) {
     // Rollback org
     await db.from("organizations").delete().eq("id", org.id);
-    return NextResponse.json({ error: "member_create_failed", detail: memberErr.message }, { status: 500 });
+    return safeError(memberErr, { code: "member_create_failed", message: "We couldn't finish setting up your account in the new organization. Please try again." });
   }
 
   return NextResponse.json({ org_id: org.id, slug: org.slug, name: org.name }, { status: 201 });

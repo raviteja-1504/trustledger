@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { safeError } from "@/lib/errors";
 
 interface TicketPayload {
   provider:    "jira" | "linear";
@@ -241,7 +242,6 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (e) {
-    console.error("Ticket creation failed:", e);
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    return safeError(e, { code: "ticket_creation_failed", message: "We couldn't create that ticket. Please check your integration settings and try again." });
   }
 }

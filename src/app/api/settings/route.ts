@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { safeError } from "@/lib/errors";
 
 // â”€â”€ GET org settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -136,7 +137,7 @@ export async function POST(req: NextRequest) {
       redirectTo:  `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`,
     });
 
-    if (invErr) return NextResponse.json({ error: invErr.message }, { status: 500 });
+    if (invErr) return safeError(invErr, { code: "invite_failed", message: "We couldn't send that invite. Please check the email address and try again." });
 
     // Pre-create org membership (will be confirmed when user accepts)
     await db.from("org_members").upsert({

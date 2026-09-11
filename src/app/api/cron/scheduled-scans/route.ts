@@ -13,6 +13,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
+import { logger } from "@/lib/logger";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -265,7 +266,8 @@ export async function GET(req: NextRequest) {
       triggered++;
 
     } catch (e) {
-      errors.push(`${repo}: ${e instanceof Error ? e.message : String(e)}`);
+      logger.error("scheduled_scan_failed", { repo, detail: e instanceof Error ? e.message : String(e) });
+      errors.push(`${repo}: scan failed, see server logs`);
     }
   }
 

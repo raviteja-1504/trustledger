@@ -34,7 +34,7 @@ export default function GithubAppSetupPage() {
       document.body.appendChild(form);
       form.submit();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(e instanceof Error ? e.message : "We couldn't start GitHub App creation. Please try again.");
       setLoading(false);
     }
   }

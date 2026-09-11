@@ -8,6 +8,7 @@ import { validateBody, AttestSchema } from "@/lib/validation";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
+import { safeError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -80,7 +81,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (insErr || !inserted) {
-      return NextResponse.json({ error: "attestation_failed", detail: insErr?.message }, { status: 500 });
+      return safeError(insErr, { code: "attestation_failed", message: "We couldn't record this attestation. Please try again." });
     }
     attestation = inserted as { id: string; created_at: string };
   }

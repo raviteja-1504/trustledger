@@ -32,8 +32,14 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    // API routes return { error: <code>, message: <safe human-readable text> }
+    // (see src/lib/errors.ts) -- prefer message, since error is a machine code
+    // like "attestation_failed" that isn't meant to be shown as-is. Some
+    // older/simple routes only set error; fall back to that, then to a
+    // generic status-based message so nothing ever surfaces raw JS/HTTP
+    // internals (e.g. "TypeError: Failed to fetch") to the user.
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
   }
   return res.json() as Promise<T>;
 }
