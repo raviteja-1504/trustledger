@@ -275,6 +275,7 @@ export async function POST(req: NextRequest) {
       // "New Scan" panel, direct API submissions) persisted no evidence
       // breakdown at all.
       evidence_breakdown:  result.evidence_breakdown,
+      repository_trust:    result.repository_trust,
     })
     .select("id")
     .single();

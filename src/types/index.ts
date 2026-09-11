@@ -46,6 +46,20 @@ export interface EvidenceBreakdown {
   };
 }
 
+export interface RepositoryTrustScore {
+  score: number;  // 0-1 (1 = fully trusted)
+  factors: {
+    ai_percentage:    number;
+    security_density: number;
+    cicd_trust:       number;
+    dep_risk:         number;
+    compliance_score: number;
+    watermark_count:  number;
+    backdoor_risk:    number;
+  };
+  label: "TRUSTED" | "LOW_RISK" | "MODERATE_RISK" | "HIGH_RISK" | "CRITICAL_RISK";
+}
+
 export interface ScanResult {
   scan_id: string;
   repo: string;
@@ -60,6 +74,7 @@ export interface ScanResult {
   triggered_by?: string;
   timestamp: string;
   evidence_breakdown?: EvidenceBreakdown;
+  repository_trust?:   RepositoryTrustScore;
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

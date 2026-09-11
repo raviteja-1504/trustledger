@@ -905,7 +905,10 @@ function PRDetailContent() {
       return new Set(paths);
     } catch { return new Set<string>(); }
   });
-  const [riskFilter, setRiskFilter]   = useState<"all" | "unattested" | "high">("all");
+  // Defaults to "high" (CRITICAL + HIGH only) rather than "all" -- MEDIUM/LOW
+  // files mixed in at equal visual weight buried what actually needs review.
+  // The full file list (including MEDIUM/LOW) is still one click away.
+  const [riskFilter, setRiskFilter]   = useState<"all" | "unattested" | "high">("high");
   const [reviewerEmail,  setReviewerEmail]  = useState("");
   const [reviewerGithub, setReviewerGithub] = useState("");
   const [attestingAll, setAttestingAll]     = useState(false);
@@ -1506,6 +1509,73 @@ function PRDetailContent() {
           </div>
         )}
 
+        {/* ── Trust Score panel ────────────────────────────────────────────
+            AI% alone isn't a security verdict -- AI-written code can be
+            secure, human-written code can be terrible. This surfaces the
+            repository_trust score runScan() already computes (security
+            density, dependency risk, CI/CD trust, compliance, watermarks,
+            behavioral/backdoor risk, AI content as one input among several)
+            as the headline metric, ahead of the AI-likelihood breakdown. */}
+        {scan?.repository_trust && (() => {
+          const rt = scan.repository_trust;
+          const trustPct = Math.round(rt.score * 100);
+          const labelMeta: Record<typeof rt.label, { text: string; color: string }> = {
+            TRUSTED:        { text: "Trusted",        color: "#10b981" },
+            LOW_RISK:       { text: "Low Risk",        color: "#22c55e" },
+            MODERATE_RISK:  { text: "Moderate Risk",   color: "#f59e0b" },
+            HIGH_RISK:      { text: "High Risk",        color: "#f97316" },
+            CRITICAL_RISK:  { text: "Critical Risk",    color: "#ef4444" },
+          };
+          const meta = labelMeta[rt.label];
+          const factorBars: Array<{ label: string; pct: number; color: string; detail?: string }> = [
+            { label: "Security",     pct: Math.round((1 - rt.factors.security_density) * 100), color: "#6366f1" },
+            { label: "Dependencies", pct: Math.round((1 - rt.factors.dep_risk) * 100),          color: "#8b5cf6" },
+            { label: "CI/CD Trust",  pct: Math.round(rt.factors.cicd_trust * 100),               color: "#0ea5e9" },
+            { label: "Compliance",   pct: Math.round(rt.factors.compliance_score * 100),         color: "#14b8a6" },
+            { label: "Behavior",     pct: Math.round((1 - rt.factors.backdoor_risk) * 100),      color: "#f97316" },
+            {
+              label: "AI Content", pct: Math.round(rt.factors.ai_percentage * 100), color: "#ec4899",
+              detail: "informational — not inherently a risk factor",
+            },
+          ];
+          return (
+            <div className="animate-fade-up section-card p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <p className="font-bold text-gray-900 text-sm">Code Trust Score</p>
+                  <p className="text-xs text-gray-400 mt-0.5">Security, provenance, dependencies &amp; compliance — combined</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-3xl font-black tabular-nums" style={{ color: meta.color }}>{trustPct}</p>
+                  <p className="text-[10px] font-semibold text-gray-500">{meta.text} · out of 100</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+                {factorBars.map(f => (
+                  <div key={f.label} title={f.detail}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-semibold text-gray-600">{f.label}</span>
+                      <span className="text-[11px] font-bold tabular-nums" style={{ color: f.color }}>{f.pct}%</span>
+                    </div>
+                    <div className="h-1.5 rounded-full overflow-hidden bg-gray-100">
+                      <div className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${Math.max(0, Math.min(100, f.pct))}%`, background: f.color }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {rt.factors.watermark_count > 0 && (
+                <div className="flex items-center gap-2 text-[11px] text-violet-700 bg-violet-50 border border-violet-100 rounded-lg px-3 py-1.5">
+                  <span className="shrink-0">💧</span>
+                  <span>{rt.factors.watermark_count} watermark{rt.factors.watermark_count === 1 ? "" : "s"} detected in scanned files</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* ── Evidence breakdown panel ────────────────────────────────────── */}
         {scan?.evidence_breakdown && (
           <div className="animate-fade-up section-card p-5">
@@ -1689,9 +1759,9 @@ function PRDetailContent() {
               </div>
               <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg self-start sm:self-auto">
                 {([
-                  ["all",        "All",           null],
-                  ["high",       "HIGH / CRIT",   null],
-                  ["unattested", "Needs Attest",  unattested],
+                  ["high",       "Critical & High", null],
+                  ["unattested", "Needs Attest",     unattested],
+                  ["all",        "All Files",        null],
                 ] as const).map(([v, label, count]) => (
                   <button
                     key={v}

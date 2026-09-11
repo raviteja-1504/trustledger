@@ -29,7 +29,7 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, repository_trust")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
@@ -58,6 +58,7 @@ export async function GET(
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
+    repository_trust:    scan.repository_trust ?? null,
     files: (files ?? []).map((f, i) => {
       // Always re-run analyzeFile() on stored content when available, rather
       // than trusting scan_files.indicators as-is. Indicators are written once
