@@ -8,10 +8,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
+
+  const rl = await checkRateLimit(org_id, RATE_LIMITS.report);
+  if (!rl.success) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429, headers: rl.headers });
+  }
 
   const body = await req.json() as {
     framework:    string;   // SOC2 | EUAI | PCIDSS

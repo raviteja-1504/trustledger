@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
@@ -27,6 +28,11 @@ export async function POST(req: NextRequest) {
   const roleErr = requireRole(auth, "admin");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
   const { org_id, user_id, actor_email } = auth;
+
+  const rl = await checkRateLimit(org_id, RATE_LIMITS.keyCreate);
+  if (!rl.success) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429, headers: rl.headers });
+  }
 
   const body = await req.json() as { name: string; expires_days?: number };
   if (!body.name) return NextResponse.json({ error: "missing_name" }, { status: 400 });

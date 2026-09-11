@@ -7,6 +7,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { checkRateLimit } from "@/lib/rateLimit";
 
 const SKIP_AUTH  = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 const IS_PROD    = process.env.NODE_ENV === "production";
@@ -18,6 +19,25 @@ const DEV_ONLY_PATHS = new Set(["/seed", "/dev-seed"]);
 
 // Max request body size for API routes (10MB)
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+// Blanket per-IP rate limit applied to every API route here in the edge
+// middleware, rather than relying on each route to opt in individually.
+// Routes that need a tighter, endpoint-specific limit (scans, attest, key
+// creation, webhooks, etc.) layer their own checkRateLimit() call on top of
+// this -- this is just the floor every route gets for free.
+// Webhooks are excluded: they're driven by the source platform's own
+// infrastructure (GitHub/GitLab/Bitbucket shared egress IPs), already have
+// per-installation/per-repo limits in their handlers, and a global per-IP
+// cap here would risk throttling legitimate delivery traffic from a shared IP.
+const GLOBAL_API_LIMIT = { limit: 300, windowMs: 60_000, prefix: "global" };
+
+function isRateLimitExempt(pathname: string): boolean {
+  return pathname.startsWith("/api/webhook")
+    || pathname.startsWith("/api/health")
+    || pathname === "/healthz"
+    || pathname.startsWith("/api/docs")
+    || pathname === "/api/scan-worker"; // internal, called by QStash/self, not user-facing
+}
 
 function isPublic(pathname: string): boolean {
   if (PUBLIC_PATHS.has(pathname))              return true;
@@ -63,8 +83,23 @@ export async function middleware(req: NextRequest) {
     return res;
   }
 
-  // Skip API routes — they handle their own auth
-  if (pathname.startsWith("/api/")) return NextResponse.next();
+  // API routes handle their own auth, but get a blanket per-IP rate limit here
+  // so no route can accidentally ship without one.
+  if (pathname.startsWith("/api/")) {
+    if (!isRateLimitExempt(pathname)) {
+      const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+        ?? req.headers.get("x-real-ip")
+        ?? "unknown";
+      const rl = await checkRateLimit(ip, GLOBAL_API_LIMIT);
+      if (!rl.success) {
+        return NextResponse.json(
+          { error: "too_many_requests", detail: "Global rate limit exceeded. Slow down." },
+          { status: 429, headers: rl.headers },
+        );
+      }
+    }
+    return NextResponse.next();
+  }
 
   // Check Supabase session from cookie
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";

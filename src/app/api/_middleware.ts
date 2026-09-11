@@ -6,34 +6,17 @@
  *
  * Also enforces:
  *   - IP allowlist (per API key)
- *   - Global per-IP rate limiting (prevents brute force)
- *   - Request size limit (10MB max)
+ *
+ * Global per-IP rate limiting and the 10MB request-body cap live in
+ * src/middleware.ts (edge middleware, applied to every /api/* route
+ * automatically). Endpoint-specific limits (scan submission, attestation,
+ * key creation, webhooks) are still applied per-route via checkRateLimit().
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { checkRateLimit } from "@/lib/rateLimit";
 import { getJwtSessionId } from "@/lib/jwt";
 import crypto from "crypto";
-
-// ── Global per-IP rate limit (applied to ALL API routes) ────────────────────
-// 300 requests/minute per IP — generous for legitimate use, blocks bots
-const GLOBAL_API_LIMIT = { limit: 300, windowMs: 60_000, prefix: "global" };
-
-export async function applyGlobalRateLimit(req: NextRequest): Promise<NextResponse | null> {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    ?? req.headers.get("x-real-ip")
-    ?? "unknown";
-
-  const rl = await checkRateLimit(ip, GLOBAL_API_LIMIT);
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "too_many_requests", detail: "Global rate limit exceeded. Slow down." },
-      { status: 429, headers: rl.headers },
-    );
-  }
-  return null; // allowed
-}
 
 /** Add standard API response headers (version, timing, request ID). */
 export function addApiHeaders(res: NextResponse, startMs?: number): NextResponse {

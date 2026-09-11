@@ -7,10 +7,16 @@ import { cacheDel, cacheKeys } from "@/lib/cache";
 import { validateBody, AttestSchema } from "@/lib/validation";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
+
+  const rl = await checkRateLimit(org_id, RATE_LIMITS.attest);
+  if (!rl.success) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429, headers: rl.headers });
+  }
 
   const validation = await validateBody(req, AttestSchema);
   if (!validation.ok) return validation.response;

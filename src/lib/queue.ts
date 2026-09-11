@@ -1,4 +1,5 @@
 import { Client } from "@upstash/qstash";
+import { sendSlackAlert } from "@/lib/alertDelivery";
 
 export interface ScanJob {
   org_id:           string | null;
@@ -79,7 +80,29 @@ export async function enqueueScan(job: ScanJob): Promise<void> {
     });
     console.log("[queue] job enqueued to QStash successfully");
   } catch (err) {
-    console.error("[queue] QStash failed, running scan directly:", String(err).slice(0, 200));
+    const detail = String(err).slice(0, 200);
+    console.error("[queue] QStash failed, running scan directly:", detail);
+
+    // QStash failing silently (wrong region endpoint, bad signing key, quota
+    // exhausted) previously went unnoticed until a user complained that PR
+    // checks weren't running -- nothing paged anyone. This is a real
+    // degraded-mode fallback (synchronous scan, no retries, no flow-control
+    // concurrency cap), so it should be loud, not just a log line nobody is
+    // tailing.
+    const webhook = cleanEnv(process.env.SLACK_WEBHOOK_URL);
+    if (webhook) {
+      sendSlackAlert(webhook, {
+        alert_id:  `qstash-fallback-${job.installation_id}-${Date.now()}`,
+        severity:  "P2",
+        title:     "QStash enqueue failed -- scan ran synchronously without retries/concurrency limits",
+        body:      `Scan for \`${job.repo_full_name}\` PR #${job.pr_number} fell back to direct execution.\nError: \`${detail}\``,
+        repo:      job.repo_full_name,
+        pr_number: job.pr_number,
+        org_name:  job.repo_full_name.split("/")[0] ?? "unknown",
+        app_url:   cleanEnv(process.env.NEXT_PUBLIC_APP_URL, "https://app.trustledger.dev"),
+      }).catch(() => { /* best-effort */ });
+    }
+
     await directFetch(workerUrl, job);
   }
 }
