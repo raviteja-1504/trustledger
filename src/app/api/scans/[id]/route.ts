@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { analyzeFile, type FunctionAIScore } from "@/lib/scanner";
+import { cached, TTL } from "@/lib/cache";
 
 // Hard bound on worst-case execution time. analyzeFile() is fully
 // synchronous (regex/string analysis, no I/O) -- if one file's content
@@ -17,6 +18,35 @@ export const maxDuration = 60;
 // snapshot already persisted at scan time rather than growing worst-case
 // latency linearly with scan size (some scans in this org have 1000+ files).
 const MAX_LIVE_REANALYSIS_FILES = 60;
+
+interface ReanalysisResult {
+  indicators: { id: string; label: string; severity: string; line?: number; detail?: string }[];
+  function_scores: FunctionAIScore[];
+}
+
+// Re-running analyzeFile() (AST/SSA/semantic-graph/ML-classifier/47-signal
+// analysis) on every page load showed up as sustained high Active CPU for
+// this route in Vercel's fluid-compute metrics -- the "cheap" assumption in
+// the comment below didn't hold once real traffic hit it. The result is a
+// pure function of (file content, scanner logic): for the same content_hash
+// it's identical every time, so there's no reason to pay that CPU cost more
+// than once per (content, scanner-behavior-at-time-of-caching) pair.
+// Cached for TTL.SCAN (1h) -- long enough to absorb repeat views of the same
+// PR (by the same or different reviewers) and unchanged files reused across
+// incremental scans (same content_hash), short enough that a scanner
+// false-positive fix still reaches the page within the hour without a new
+// scan needing to run.
+async function reanalyze(filePath: string, content: string, contentHash: string): Promise<ReanalysisResult> {
+  return cached(`reanalysis:${contentHash}`, TTL.SCAN, async () => {
+    const analysis = analyzeFile(filePath, content);
+    return {
+      indicators: analysis.indicators
+        .filter(i2 => i2.line != null)
+        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail })),
+      function_scores: analysis.function_scores,
+    };
+  });
+}
 
 export async function GET(
   req: NextRequest,
@@ -59,20 +89,20 @@ export async function GET(
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
     repository_trust:    scan.repository_trust ?? null,
-    files: (files ?? []).map((f, i) => {
-      // Always re-run analyzeFile() on stored content when available, rather
-      // than trusting scan_files.indicators as-is. Indicators are written once
-      // at scan time — if the scanner's detection patterns are improved later
-      // (false-positive fixes, new signals), files scanned before that change
-      // would otherwise keep showing stale/incorrect highlighted lines forever
-      // until a brand-new PR scan happens to run. Re-analysing on every page
-      // load is cheap (in-memory regex, no network calls) and guarantees the
-      // PR page always reflects the current scanner logic immediately.
+    files: await Promise.all((files ?? []).map(async (f, i) => {
+      // Prefer freshly re-analysed indicators (current scanner logic) over
+      // the snapshot written at scan time — if detection patterns improve
+      // later (false-positive fixes, new signals), files scanned before that
+      // change would otherwise keep showing stale/incorrect highlighted
+      // lines forever until a brand-new PR scan happens to run. reanalyze()
+      // caches the actual analyzeFile() call by content_hash (see above),
+      // so this is a cache lookup, not a full re-analysis, for any file
+      // that's been viewed before.
       //
       // Capped to the first MAX_LIVE_REANALYSIS_FILES (query already orders
       // by ai_percentage desc, so this keeps the highest-signal files live
       // and lets large scans fall back to the persisted snapshot beyond
-      // that, rather than paying full-analysis cost per file with no bound).
+      // that, rather than paying analysis cost per file with no bound).
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
@@ -83,11 +113,9 @@ export async function GET(
       let functionScores: FunctionAIScore[] = [];
       if (f.content && i < MAX_LIVE_REANALYSIS_FILES) {
         try {
-          const analysis = analyzeFile(f.file_path, f.content);
-          freshIndicators = analysis.indicators
-            .filter(i2 => i2.line != null)
-            .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail }));
-          functionScores = analysis.function_scores;
+          const result = await reanalyze(f.file_path, f.content, f.content_hash);
+          freshIndicators = result.indicators;
+          functionScores  = result.function_scores;
         } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
       }
       return {
@@ -106,6 +134,6 @@ export async function GET(
         attested:        attestedSet.has(f.file_path),
         content:         f.content ?? undefined,
       };
-    }),
+    })),
   });
 }
