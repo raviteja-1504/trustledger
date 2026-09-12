@@ -81,6 +81,15 @@ export interface Database {
         Insert: Omit<Database["public"]["Tables"]["secret_findings"]["Row"], "id"|"created_at"> & { id?: string };
         Update: Partial<Database["public"]["Tables"]["secret_findings"]["Insert"]>;
       };
+      violation_overrides: {
+        Row: {
+          org_id: string; violation_id: string; status: string;
+          assigned_email: string | null; note: string | null; escalated: boolean;
+          updated_by: string | null; updated_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["violation_overrides"]["Row"]> & { org_id: string; violation_id: string };
+        Update: Partial<Database["public"]["Tables"]["violation_overrides"]["Row"]>;
+      };
       incidents: {
         Row: {
           id: string; org_id: string; title: string; description: string | null;

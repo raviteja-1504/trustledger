@@ -56,6 +56,22 @@ export const ViolationUpdateSchema = z.object({
   note:           z.string().max(2000).optional(),
 });
 
+export const SecretUpdateSchema = z.object({
+  id:     uuidSchema,
+  status: z.enum(["open", "resolved"]),
+});
+
+// violation_id here is a client-derived synthetic id (e.g. "crit::<scan_id>::<file_path>",
+// "deploy::blocked", "ai-thresh::<repo>") rather than a table row UUID -- see
+// src/lib/violations.ts deriveViolations() and api/violation-status/route.ts.
+export const ViolationOverrideSchema = z.object({
+  violation_id:   z.string().min(1).max(500),
+  status:         z.enum(["open", "in_review", "resolved"]),
+  assigned_email: emailSchema.optional(),
+  note:           z.string().max(2000).optional(),
+  escalated:      z.boolean().optional(),
+});
+
 export const AlertUpdateSchema = z.object({
   id:            uuidSchema,
   status:        z.enum(["firing","acknowledged","snoozed","resolved"]),

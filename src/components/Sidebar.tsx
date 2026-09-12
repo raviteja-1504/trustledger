@@ -11,7 +11,6 @@ import { isSeedMode, authedFetch } from "@/lib/useRealData";
 import { countOpenViolations } from "@/lib/violations";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { api } from "@/lib/api";
-import { SECRET_INDICATOR_IDS } from "@/lib/secretIndicators";
 import type { DashboardData } from "@/types";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -228,6 +227,14 @@ const ALL_LINKS: Array<{
   { href: "/billing",         label: "Billing & Usage", icon: AnalyticsIcon,   permission: "canManageSettings" as const },
 ];
 
+function syncedLabel(at: Date): string {
+  const s = Math.round((Date.now() - at.getTime()) / 1000);
+  if (s < 5)    return "just now";
+  if (s < 60)   return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Sidebar() {
@@ -243,187 +250,135 @@ export default function Sidebar() {
   const [firingAlerts,    setFiringAlerts]    = useState(0);
   const [activeIncidents, setActiveIncidents] = useState(0);
   const [vulnDeps,        setVulnDeps]        = useState(0);
+  const [syncing,         setSyncing]         = useState(false);
+  const [lastSynced,      setLastSynced]      = useState<Date | null>(null);
 
+  // Every badge below reads live, server-authoritative data on every refresh —
+  // nothing is derived from a localStorage snapshot or a locally-owned status
+  // map. That's a deliberate fix: violation/secret resolution used to be
+  // tracked ONLY in localStorage (tl_violation_statuses / tl_secret_status),
+  // so resolving something on one device never showed up on another, and a
+  // badge could sit wrong until whichever page repopulated its own cache was
+  // visited. Now every consumer of those two statuses (this sidebar, the
+  // Violations/Secrets pages, the dashboard's own widgets) reads the same
+  // /api/violation-status and /api/secrets endpoints, so they can't drift
+  // from each other or from reality.
   useEffect(() => {
-    function refresh() {
-      try {
-        const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null;
+    let cancelled = false;
 
-        // ── Build resolved-file set from tl_violation_statuses ──────────────
-        // Key format: "{pfx}::{scan_id}::{file_path}"
-        const vstats = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
+    async function refreshAll(showSpinner: boolean) {
+      if (!profile?.org_id) return;
+      if (showSpinner) setSyncing(true);
+
+      if (isSeedMode()) {
+        refreshSeedMode();
+        if (showSpinner) setSyncing(false);
+        return;
+      }
+
+      try {
+        const [dashData, overridesRes, secretsRes, incidentsRes, alertsRes] = await Promise.all([
+          api.dashboard(profile.org_slug || "org", 90),
+          authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status").catch(() => ({ overrides: {} })),
+          authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open").catch(() => ({ findings: [] })),
+          authedFetch<{ incidents: { status: string }[] }>("/api/incidents").catch(() => ({ incidents: [] })),
+          authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200").catch(() => ({ alerts: [] })),
+        ]);
+        if (cancelled) return;
+
+        localStorage.setItem("tl_notif_snapshot", JSON.stringify(dashData));
+
+        const statuses: Record<string, string> = {};
+        for (const [id, o] of Object.entries(overridesRes.overrides ?? {})) statuses[id] = o.status;
+
+        // Reports: CRITICAL/HIGH files still pending attestation and not
+        // marked resolved/in_review via a violation override.
         const resolvedFiles = new Set<string>();
-        for (const [key, status] of Object.entries(vstats)) {
+        for (const [key, status] of Object.entries(statuses)) {
           if (status === "resolved" || status === "in_review") {
             const first  = key.indexOf("::");
             const second = key.indexOf("::", first + 2);
             if (second !== -1) resolvedFiles.add(key.slice(second + 2));
           }
         }
+        const riskFiles = dashData.top_risk_files ?? [];
+        const pending = riskFiles.filter(f =>
+          (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !f.attested && !resolvedFiles.has(f.file_path)
+        ).length;
+        setPendingCount(pending);
 
-        // ── Risk file counts (excluding attested + resolved) ─────────────────
-        const riskFiles = snap?.top_risk_files ?? [];
-        const critUnatt = riskFiles.filter(f => f.risk_score === "CRITICAL" && !f.attested && !resolvedFiles.has(f.file_path));
-        const highUnatt = riskFiles.filter(f => f.risk_score === "HIGH"     && !f.attested && !resolvedFiles.has(f.file_path));
-        const openCount = critUnatt.length + highUnatt.length;
+        // Violations: single source of truth shared with /violations and the
+        // dashboard's own "Needs attention" strip (src/lib/violations.ts).
+        setOpenViolations(countOpenViolations(patchDataWithAttestations(dashData), statuses));
 
-        // Reports: files pending attestation (same set)
-        setPendingCount(openCount);
+        // Secrets: exact server-side open count — same query the /secrets
+        // page itself runs, no client-side re-derivation.
+        setOpenSecrets((secretsRes.findings ?? []).length);
 
-        // ── Violations: single source of truth shared with /violations and the
-        // dashboard's "Needs attention" strip (src/lib/violations.ts) ──────────
-        setOpenViolations(snap ? countOpenViolations(patchDataWithAttestations(snap), vstats) : 0);
+        // Incidents: active + contained.
+        setActiveIncidents((incidentsRes.incidents ?? []).filter(i =>
+          i.status === "active" || i.status === "contained"
+        ).length);
 
-        // A repo clears once ALL its CRIT/HIGH files are attested — used below
-        // to scope the "deploy blocked" alert count to repos still affected.
-        const unresolvedDeployRepos = new Set(
-          riskFiles
-            .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !resolvedFiles.has(f.file_path))
-            .map(f => f.repo)
-        );
-
-        // ── Secrets ──────────────────────────────────────────────────────────
-        // tl_secret_total is only set once the /secrets page has loaded (mock or live);
-        // a real org that hasn't visited it yet has no findings to show.
-        // tl_notif_snapshot with repos means this org has real data, so a stale
-        // tl_force_seed flag must not inject the demo "8" default.
-        const hasRealData = !!(snap?.repos && snap.repos.length > 0);
-        const seed = isSeedMode() && !hasRealData;
-        const secretStatuses = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
-        const resolvedSecrets = Object.values(secretStatuses).filter(v => v === "resolved").length;
-        const rawSecretTotal = parseInt(localStorage.getItem("tl_secret_total") ?? (seed ? "8" : "0"), 10);
-        const secretTotal = isNaN(rawSecretTotal) ? 0 : rawSecretTotal;
-        setOpenSecrets(Math.max(0, secretTotal - resolvedSecrets));
-
-        // ── Alerts: read from DB (same source as /alerts page) ───────────
-        // Previously derived from the snapshot, which diverged from the DB when
-        // alerts were resolved or deduplicated. Now uses the real API so the badge
-        // always matches what the /alerts page shows.
-        if (profile?.org_id && !isSeedMode()) {
-          authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>(
-            "/api/alerts?status=firing&limit=200"
-          ).then(res => {
-            // Deduplicate same as the alerts page: keep latest per scan_id+source
-            const deduped = new Map<string, string>();
-            for (const a of (res.alerts ?? [])) {
-              const key = a.scan_id ? `${a.scan_id}::${a.source ?? "policy"}` : a.id;
-              if (!deduped.has(key)) deduped.set(key, a.id);
-            }
-            // Subtract any that are locally actioned in tl_alerts_state
-            const alertState = JSON.parse(localStorage.getItem("tl_alerts_state") ?? "null") as {
-              statuses?: Record<string, string>;
-            } | null;
-            const actioned = alertState?.statuses
-              ? [...deduped.values()].filter(id => {
-                  const s = alertState.statuses![id];
-                  return s && s !== "firing";
-                }).length
-              : 0;
-            setFiringAlerts(Math.max(0, deduped.size - actioned));
-          }).catch(() => {
-            // API unavailable — fall back to 0 rather than showing a stale count
-            setFiringAlerts(0);
-          });
-        } else if (snap && isSeedMode()) {
-          // Seed/demo mode: derive as before
-          const aiCritRepos  = (snap.repos ?? []).filter(r => r.ai_pct > 0.85).length;
-          const aiSpikeRepos = (snap.repos ?? []).filter(r => r.ai_pct > 0.7 && r.ai_pct <= 0.85).length;
-          const lowAttestRepos = (snap.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
-          const baseFiring = Math.min(critUnatt.length, 3) + (unresolvedDeployRepos.size > 0 ? 1 : 0)
-            + aiCritRepos + Math.min(highUnatt.length, 3) + Math.min(critUnatt.length, 2)
-            + aiSpikeRepos + lowAttestRepos;
-          setFiringAlerts(Math.max(0, baseFiring));
-        } else {
-          setFiringAlerts(0);
+        // Alerts: dedupe same as the /alerts page (latest per scan_id+source).
+        const deduped = new Map<string, string>();
+        for (const a of (alertsRes.alerts ?? [])) {
+          const key = a.scan_id ? `${a.scan_id}::${a.source ?? "policy"}` : a.id;
+          if (!deduped.has(key)) deduped.set(key, a.id);
         }
+        setFiringAlerts(deduped.size);
 
-        // ── Incidents: active + contained ─────────────────────────────────
-        const rawIncidents = JSON.parse(localStorage.getItem("tl_incidents") ?? "null");
-        if (Array.isArray(rawIncidents) && rawIncidents.length > 0) {
-          setActiveIncidents(rawIncidents.filter((i: { status: string }) =>
-            i.status === "active" || i.status === "contained"
-          ).length);
-        } else {
-          // No incidents in localStorage means no active incidents
-          setActiveIncidents(0);
-        }
-
-        // ── Dependencies: vulnerable package count ────────────────────────
+        // Dependencies: no lightweight org-aggregate endpoint yet — falls
+        // back to whatever the /dependencies page last cached this session.
         const depCount = parseInt(localStorage.getItem("tl_dep_vuln_count") ?? "0", 10);
         setVulnDeps(isNaN(depCount) ? 0 : depCount);
 
+        setLastSynced(new Date());
+      } catch { /* offline — leave existing counts as-is rather than zeroing them */ }
+      if (showSpinner) setSyncing(false);
+    }
+
+    function refreshSeedMode() {
+      try {
+        const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null;
+        if (!snap) return;
+        const riskFiles = snap.top_risk_files ?? [];
+        const critUnatt = riskFiles.filter(f => f.risk_score === "CRITICAL" && !f.attested);
+        const highUnatt = riskFiles.filter(f => f.risk_score === "HIGH"     && !f.attested);
+        setPendingCount(critUnatt.length + highUnatt.length);
+        setOpenViolations(countOpenViolations(patchDataWithAttestations(snap), {}));
+        setOpenSecrets(parseInt(localStorage.getItem("tl_secret_total") ?? "8", 10) || 0);
+        const aiCritRepos    = (snap.repos ?? []).filter(r => r.ai_pct > 0.85).length;
+        const aiSpikeRepos   = (snap.repos ?? []).filter(r => r.ai_pct > 0.7 && r.ai_pct <= 0.85).length;
+        const lowAttestRepos = (snap.repos ?? []).filter(r => r.attestation_rate < 0.6 && r.scan_count > 0).length;
+        setFiringAlerts(Math.min(critUnatt.length, 3) + aiCritRepos + Math.min(highUnatt.length, 3) + aiSpikeRepos + lowAttestRepos);
+        const rawIncidents = JSON.parse(localStorage.getItem("tl_incidents") ?? "null");
+        setActiveIncidents(Array.isArray(rawIncidents)
+          ? rawIncidents.filter((i: { status: string }) => i.status === "active" || i.status === "contained").length
+          : 0);
+        setVulnDeps(parseInt(localStorage.getItem("tl_dep_vuln_count") ?? "0", 10) || 0);
+        setLastSynced(new Date());
       } catch { /* no-op */ }
     }
 
-    // Violations, Reports and Secrets badges previously only reflected
-    // reality after the user had actually visited /dashboard or /secrets at
-    // least once -- those pages were the only thing that ever wrote
-    // tl_notif_snapshot / tl_secret_total, so a badge stayed at whatever was
-    // last cached (often 0, i.e. invisible) until a page visit populated it.
-    // This fetches the same data those pages fetch, directly, so the sidebar
-    // is correct on its own instead of depending on which pages happen to
-    // have been opened this session. Deliberately not on the 5s interval
-    // below -- this does a dashboard fetch plus up to 5 scan fetches, which
-    // is meaningfully heavier than the alerts poll; event-driven (mount,
-    // focus, tab visible again, tl:badge) is enough to fix the staleness
-    // without polling that cost every 5 seconds.
-    async function refreshLive() {
-      if (!profile?.org_id || isSeedMode()) return;
-      try {
-        const data = await api.dashboard(profile.org_slug || "org", 90);
-        localStorage.setItem("tl_notif_snapshot", JSON.stringify(data));
-
-        // Secrets: same "latest scan per repo, up to 5" approach as the
-        // /secrets page itself -- there's no lightweight count-only endpoint,
-        // so this reuses the same scan fetches to derive both.
-        const repoToScanId = new Map<string, string>();
-        data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
-        const scanIds = [...repoToScanId.values()].slice(0, 5);
-        const scanResults = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
-        const seenSecretKeys = new Set<string>();
-        let secretCount = 0;
-        scanResults.forEach(r => {
-          if (r.status !== "fulfilled" || !r.value) return;
-          r.value.files.forEach(file => {
-            (file.indicators ?? []).forEach(ind => {
-              if (!SECRET_INDICATOR_IDS.has(ind.id) || ind.line == null) return;
-              const key = `${r.value.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
-              if (seenSecretKeys.has(key)) return;
-              seenSecretKeys.add(key);
-              secretCount++;
-            });
-          });
-        });
-        localStorage.setItem("tl_secret_total", String(secretCount));
-
-        // Incidents: fetch directly rather than waiting for /incidents to
-        // have been visited and written tl_incidents itself.
-        try {
-          const inc = await authedFetch<{ incidents: { status: string }[] }>("/api/incidents");
-          localStorage.setItem("tl_incidents", JSON.stringify(inc.incidents ?? []));
-        } catch { /* leave tl_incidents as-is */ }
-
-        refresh(); // recompute badge state now that the underlying data is fresh
-      } catch { /* offline — leave existing counts as-is */ }
-    }
-
-    refresh();
-    refreshLive();
-    // Interval as safety net; tl:badge event gives instant updates
-    const id = setInterval(refresh, 5_000);
-    const refreshBoth = () => { refresh(); refreshLive(); };
-    window.addEventListener("focus",                refreshBoth);
-    window.addEventListener("tl:badge",             refreshBoth);
-    window.addEventListener("tl:attest-complete",   refreshBoth);
-    document.addEventListener("visibilitychange",   refreshBoth);
+    refreshAll(true);
+    // 30s safety-net poll (matches the /violations page's own poll interval)
+    // plus event-driven refresh for instant updates right after an action.
+    const id = setInterval(() => refreshAll(false), 30_000);
+    const onEvent = () => refreshAll(false);
+    window.addEventListener("focus",              onEvent);
+    window.addEventListener("tl:badge",            onEvent);
+    window.addEventListener("tl:attest-complete",  onEvent);
+    document.addEventListener("visibilitychange",  onEvent);
     return () => {
+      cancelled = true;
       clearInterval(id);
-      window.removeEventListener("focus",                refreshBoth);
-      window.removeEventListener("tl:badge",             refreshBoth);
-      window.removeEventListener("tl:attest-complete",   refreshBoth);
-      document.removeEventListener("visibilitychange",   refreshBoth);
+      window.removeEventListener("focus",              onEvent);
+      window.removeEventListener("tl:badge",            onEvent);
+      window.removeEventListener("tl:attest-complete",  onEvent);
+      document.removeEventListener("visibilitychange",  onEvent);
     };
-  // Re-run when org_id becomes available so the API call fires after login
+  // Re-run when org_id becomes available so the API calls fire after login
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
@@ -437,25 +392,60 @@ export default function Sidebar() {
     router.push("/login");
   }
 
-  function badge(count: number, color: string, pulse = false): JSX.Element | null {
-    if (!Number.isFinite(count) || count <= 0) return null;
+  // Every count behind this is now a live, exact server value (see the
+  // refreshAll effect above) — so the badge shows the real number, not a
+  // "9+" truncation, and doesn't render at all until the first sync
+  // actually lands (a neutral placeholder dot instead of a misleading "0"
+  // while that's in flight). `ready` gates all badges together so they pop
+  // in as one coherent batch rather than trickling in independently.
+  const ready = lastSynced !== null;
+
+  function badge(count: number, accent: string, pulse = false): JSX.Element {
+    if (!ready) {
+      return (
+        <span className="ml-auto shrink-0 w-3 h-3 rounded-full"
+          style={{ background: "rgba(255,255,255,0.08)" }}
+          aria-hidden="true" />
+      );
+    }
+    if (!Number.isFinite(count) || count <= 0) return <></>;
     return (
       <span
-        className={`min-w-[16px] h-4 rounded-full flex items-center justify-center text-[8px] font-black text-white px-0.5 tabular-nums ml-auto${pulse ? " animate-pulse" : ""}`}
-        style={{ background: color }}
+        className="ml-auto shrink-0 inline-flex items-center gap-1 h-[18px] px-1.5 rounded-md text-[10px] font-bold tabular-nums"
+        style={{ background: `${accent}22`, color: accent, border: `1px solid ${accent}40` }}
+        title={pulse ? "Needs attention now" : undefined}
       >
-        {count > 9 ? "9+" : count}
+        {pulse && <span className="w-1.5 h-1.5 rounded-full shrink-0 animate-pulse" style={{ background: accent }} />}
+        {count > 999 ? "999+" : count}
       </span>
     );
   }
 
-  const BADGE: Record<string, JSX.Element | null> = {
-    "/violations":   badge(openViolations,  "linear-gradient(135deg,#ef4444,#dc2626)"),
-    "/alerts":       badge(firingAlerts,    "linear-gradient(135deg,#f97316,#ea580c)", true),
-    "/secrets":      badge(openSecrets,     "linear-gradient(135deg,#a78bfa,#7c3aed)"),
-    "/reports":      badge(pendingCount,    "linear-gradient(135deg,#f87171,#ef4444)"),
-    "/incidents":    badge(activeIncidents, "linear-gradient(135deg,#ef4444,#b91c1c)", true),
-    "/dependencies": badge(vulnDeps,        "linear-gradient(135deg,#f59e0b,#d97706)"),
+  const BADGE_COUNT: Record<string, number> = {
+    "/violations":   openViolations,
+    "/alerts":       firingAlerts,
+    "/secrets":      openSecrets,
+    "/reports":      pendingCount,
+    "/incidents":    activeIncidents,
+    "/dependencies": vulnDeps,
+  };
+
+  const BADGE_STYLE: Record<string, { accent: string; pulse: boolean }> = {
+    "/violations":   { accent: "#f87171", pulse: false },
+    "/alerts":       { accent: "#fb923c", pulse: true  },
+    "/secrets":      { accent: "#a78bfa", pulse: false },
+    "/reports":      { accent: "#fbbf24", pulse: false },
+    "/incidents":    { accent: "#e11d48", pulse: true  },
+    "/dependencies": { accent: "#38bdf8", pulse: false },
+  };
+
+  const BADGE: Record<string, JSX.Element> = {
+    "/violations":   badge(openViolations,  "#f87171"),
+    "/alerts":       badge(firingAlerts,    "#fb923c", true),
+    "/secrets":      badge(openSecrets,     "#a78bfa"),
+    "/reports":      badge(pendingCount,    "#fbbf24"),
+    "/incidents":    badge(activeIncidents, "#e11d48", true),
+    "/dependencies": badge(vulnDeps,        "#38bdf8"),
   };
 
   return (
@@ -520,8 +510,10 @@ export default function Sidebar() {
               {collapsed && <div className="h-px bg-white/[0.06] mb-1.5" />}
               <div className="space-y-0.5">
                 {groupLinks.map(({ href, label, icon: Icon }) => {
-                  const active = pathname === href || pathname.startsWith(href + "/");
-                  const badge  = BADGE[href] ?? null;
+                  const active   = pathname === href || pathname.startsWith(href + "/");
+                  const badge    = BADGE[href] ?? null;
+                  const hasCount = ready && (BADGE_COUNT[href] ?? 0) > 0;
+                  const style    = BADGE_STYLE[href];
                   return (
                     <Link
                       key={href}
@@ -544,8 +536,11 @@ export default function Sidebar() {
                       {/* Icon + optional dot badge when collapsed */}
                       <span className={clsx("shrink-0 relative", active ? "text-white" : "text-white/35")}>
                         <Icon />
-                        {collapsed && badge && (
-                          <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-rose-500" />
+                        {collapsed && hasCount && style && (
+                          <span
+                            className={clsx("absolute -top-1 -right-1 w-2 h-2 rounded-full ring-2", style.pulse && "animate-pulse")}
+                            style={{ background: style.accent, "--tw-ring-color": "#0f172a" } as React.CSSProperties}
+                          />
                         )}
                       </span>
                       {!collapsed && <span className="flex-1 truncate">{label}</span>}
@@ -573,8 +568,11 @@ export default function Sidebar() {
       <div className={clsx("space-y-2", collapsed ? "p-2" : "p-4")} style={{ borderTop:"1px solid rgba(255,255,255,0.06)" }}>
         {!collapsed && (
           <div className="flex items-center gap-2.5 px-1">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-glow-pulse"
-              style={{ boxShadow:"0 0 6px rgba(52,211,153,0.6)" }} />
+            <div
+              className={clsx("w-2 h-2 rounded-full shrink-0", syncing ? "bg-amber-400" : "bg-emerald-400", !syncing && "animate-glow-pulse")}
+              style={{ boxShadow: syncing ? "0 0 6px rgba(251,191,36,0.6)" : "0 0 6px rgba(52,211,153,0.6)" }}
+              title={syncing ? "Syncing badge counts…" : lastSynced ? `Badges synced ${syncedLabel(lastSynced)}` : undefined}
+            />
             <p className="text-xs font-medium truncate" style={{ color:"rgba(255,255,255,0.38)" }}>{profile?.org_id ? (profile.org_name || profile.org_slug || (process.env.NEXT_PUBLIC_ORG ?? "novapay")) : (process.env.NEXT_PUBLIC_ORG ?? "novapay")}</p>
             <span className="ml-auto text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md"
               style={{ color:"rgba(165,180,252,0.7)", background:"rgba(99,102,241,0.15)" }}>

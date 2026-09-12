@@ -41,7 +41,7 @@ export interface Violation {
 // Sidebar nav badge. Keeping this in one place avoids the three call sites
 // drifting into different totals for what should be the same list.
 
-export function deriveViolations(data: DashboardData): Violation[] {
+export function deriveViolations(data: DashboardData, statuses: Record<string, string> = {}): Violation[] {
   const now  = Date.now();
   const out: Violation[] = [];
   const SLA_CRIT = 24 * 3600_000;
@@ -56,23 +56,22 @@ export function deriveViolations(data: DashboardData): Violation[] {
     return new Date(now - hoursAgo * 3_600_000 - jitter).toISOString();
   }
 
-  // Compute effective unattested deploy count from localStorage (reflects local attestations)
+  // Effective unattested deploy count, reflecting whatever statuses the caller
+  // passed in (server-backed overrides — see api/violation-status/route.ts —
+  // rather than a localStorage read done here).
   const effectiveDeployCount = (() => {
-    try {
-      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
-      const riskPfx = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
-      const unresolvedRepos = new Set(
-        data.top_risk_files
-          .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"))
-          .filter(f => {
-            const pfx = riskPfx(f.risk_score);
-            const s   = statuses[`${pfx}::${f.scan_id}::${f.file_path}`];
-            return s !== "resolved" && s !== "in_review";
-          })
-          .map(f => f.repo)
-      );
-      return unresolvedRepos.size;
-    } catch { return data.unattested_deploy_count; }
+    const riskPfx = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
+    const unresolvedRepos = new Set(
+      data.top_risk_files
+        .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"))
+        .filter(f => {
+          const pfx = riskPfx(f.risk_score);
+          const s   = statuses[`${pfx}::${f.scan_id}::${f.file_path}`];
+          return s !== "resolved" && s !== "in_review";
+        })
+        .map(f => f.repo)
+    );
+    return unresolvedRepos.size;
   })();
 
   // 1. CRITICAL unattested files (detected ~6h ago — within SLA so no duplicate SLA entry needed)
@@ -201,5 +200,5 @@ export function violationStatus(id: string, statuses: Record<string, string>): V
 // Mirrors the "Open" tab on /violations and the Sidebar nav badge.
 
 export function countOpenViolations(data: DashboardData, statuses: Record<string, string>): number {
-  return deriveViolations(data).filter(v => violationStatus(v.id, statuses) === "open").length;
+  return deriveViolations(data, statuses).filter(v => violationStatus(v.id, statuses) === "open").length;
 }

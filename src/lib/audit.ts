@@ -10,7 +10,7 @@ import type { Database } from "@/types/supabase";
 
 export type AuditEventType =
   | "scan_complete" | "attestation" | "merge_blocked" | "merge_allowed"
-  | "policy_violation" | "policy_change" | "secret_detected"
+  | "policy_violation" | "policy_change" | "secret_detected" | "secret_resolved"
   | "integration_connected" | "user_added" | "user_removed"
   | "sla_breach" | "alert_fired" | "alert_resolved"
   | "incident_created" | "incident_resolved"

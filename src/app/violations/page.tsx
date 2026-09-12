@@ -217,14 +217,9 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
 
 // ── Persistence ────────────────────────────────────────────────────────────────
 
-const STATUS_KEY   = "tl_violation_statuses";
 const ASSIGNEE_KEY = "tl_violation_assignees";
 
-function loadStatuses(): Record<string, VStatus> {
-  try { return JSON.parse(localStorage.getItem(STATUS_KEY) ?? "{}"); } catch { return {}; }
-}
-function saveStatuses(s: Record<string, VStatus>) {
-  localStorage.setItem(STATUS_KEY, JSON.stringify(s));
+function notifyBadgeSync() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event("tl:badge"));
     window.dispatchEvent(new Event("tl:attestation"));
@@ -352,7 +347,6 @@ export default function ViolationsPage() {
 
   // Load all persisted state
   useEffect(() => {
-    setStatuses(loadStatuses());
     setAssignees(loadAssignees());
     try { setNotes(JSON.parse(localStorage.getItem(NOTES_KEY) ?? "{}")); } catch {}
     try {
@@ -360,6 +354,24 @@ export default function ViolationsPage() {
       setEscalated(new Set(Array.isArray(esc) ? esc : []));
     } catch {}
   }, []);
+
+  // Violation status (open/in_review/resolved) is the one piece of state that
+  // drives the Sidebar badge count, so it's the one that must be identical on
+  // every device -- it now lives server-side in violation_overrides instead of
+  // localStorage (see api/violation-status/route.ts). Everything else on this
+  // page (notes, assignee, escalation) is per-browser convenience state only
+  // and isn't part of what the badge reports.
+  const fetchStatuses = useCallback(async () => {
+    if (!profile?.org_id) return;
+    try {
+      const res = await authedFetch<{ overrides: Record<string, { status: VStatus }> }>("/api/violation-status");
+      const next: Record<string, VStatus> = {};
+      for (const [id, o] of Object.entries(res.overrides ?? {})) next[id] = o.status;
+      setStatuses(next);
+    } catch { /* offline — keep whatever's currently shown */ }
+  }, [profile?.org_id]);
+
+  useEffect(() => { fetchStatuses(); }, [fetchStatuses]);
 
   // Fetch real team members for the reviewer dropdown
   useEffect(() => {
@@ -410,15 +422,16 @@ export default function ViolationsPage() {
   // Realtime: refresh when violations table changes in DB
   useViolationsRealtime(profile?.org_id, () => fetchData(false));
 
-  // Sync violation status resolution to real API (alongside localStorage)
-  const syncViolationToAPI = useCallback(async (id: string, status: string, note?: string) => {
-    if (!profile?.org_id) return;
-    try {
-      await authedFetch("/api/violations", {
-        method: "PATCH",
-        body:   JSON.stringify({ id, status, note }),
-      });
-    } catch { /* non-fatal — localStorage already updated */ }
+  // Write violation status through to the server. This is now the only
+  // place status is persisted -- no localStorage fallback -- so a failure
+  // must roll the UI back to what the server actually has, rather than
+  // leaving it showing a change that never took effect.
+  const syncViolationToAPI = useCallback(async (violation_id: string, status: VStatus, note?: string) => {
+    if (!profile?.org_id) throw new Error("no org");
+    await authedFetch("/api/violation-status", {
+      method: "PATCH",
+      body:   JSON.stringify({ violation_id, status, note }),
+    });
   }, [profile?.org_id]);
 
   // Derive violations from live data, apply persisted statuses.
@@ -427,11 +440,11 @@ export default function ViolationsPage() {
   const violations = useMemo<(Violation & { status: VStatus; assignee?: string })[]>(() => {
     if (!data) return [];
     const raw     = data;
-    const active  = deriveViolations(patchDataWithAttestations(raw));
+    const active  = deriveViolations(patchDataWithAttestations(raw), statuses);
     const activeIds = new Set(active.map(v => v.id));
 
     // Violations that patchData removed (resolved files) — add them back for history
-    const resolvedExtras = deriveViolations(raw)
+    const resolvedExtras = deriveViolations(raw, statuses)
       .filter(v => !activeIds.has(v.id) && statuses[v.id] === "resolved");
 
     return [...active, ...resolvedExtras].map(v => ({
@@ -442,11 +455,13 @@ export default function ViolationsPage() {
   }, [data, statuses, assignees]);
 
   function setStatus(id: string, status: VStatus) {
-    const next = { ...statuses, [id]: status };
-    setStatuses(next);
-    saveStatuses(next);
-    // Sync to real API (fire-and-forget)
-    syncViolationToAPI(id, status);
+    const prev = statuses;
+    setStatuses({ ...statuses, [id]: status });
+    notifyBadgeSync();
+    syncViolationToAPI(id, status).catch(() => {
+      setStatuses(prev);
+      toastError("Couldn't save", "That status change didn't reach the server — please try again.");
+    });
     if (status === "in_review") {
       // Clear any hide override so the code panel auto-opens
       if (reviewingId === `hide::${id}`) setReviewingId(null);
@@ -483,12 +498,17 @@ export default function ViolationsPage() {
   }
 
   function bulkResolve() {
+    const prev = statuses;
+    const ids  = Array.from(selected);
     const next = { ...statuses };
-    selected.forEach(id => { next[id] = "resolved"; });
+    ids.forEach(id => { next[id] = "resolved"; });
     setStatuses(next);
-    saveStatuses(next);
+    notifyBadgeSync();
     setSelected(new Set());
-    success(`${selected.size} violation${selected.size > 1 ? "s" : ""} resolved`, "Bulk resolution complete.");
+    Promise.all(ids.map(id => syncViolationToAPI(id, "resolved"))).then(
+      () => success(`${ids.length} violation${ids.length > 1 ? "s" : ""} resolved`, "Bulk resolution complete."),
+      () => { setStatuses(prev); toastError("Couldn't save", "Bulk resolution didn't reach the server — please try again."); },
+    );
   }
 
   function toggleSelect(id: string) {
@@ -748,10 +768,15 @@ export default function ViolationsPage() {
               Resolve All
             </button>
             <button onClick={() => {
+              const prev = statuses;
+              const ids  = Array.from(selected);
               const next = { ...statuses };
-              selected.forEach(id => { next[id] = "in_review"; });
-              setStatuses(next); saveStatuses(next); setSelected(new Set());
-              info(`${selected.size} violations moved to review`, "");
+              ids.forEach(id => { next[id] = "in_review"; });
+              setStatuses(next); notifyBadgeSync(); setSelected(new Set());
+              Promise.all(ids.map(id => syncViolationToAPI(id, "in_review"))).then(
+                () => info(`${ids.length} violations moved to review`, ""),
+                () => { setStatuses(prev); toastError("Couldn't save", "That change didn't reach the server — please try again."); },
+              );
             }}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-400 rounded-lg transition-colors">
               Mark In Review

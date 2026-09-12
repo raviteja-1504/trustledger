@@ -28,6 +28,7 @@ import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
 import type { DashboardData, RepoStat, RiskLevel, ActivityEvent } from "@/types";
 import { countOpenViolations } from "@/lib/violations";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
 type DaysOption = (typeof DAYS_OPTIONS)[number];
@@ -397,21 +398,12 @@ function RiskHeatmap({ data }: { data: DashboardData }) {
 
 // ── Security Inbox (compact strip below stats) ───────────────────────────────
 
-function SecurityInbox({ data }: { data: DashboardData }) {
+function SecurityInbox({ data, violationStatuses, openSecrets }: {
+  data: DashboardData; violationStatuses: Record<string, string>; openSecrets: number;
+}) {
   const crit    = data.top_risk_files.filter(f => !f.attested && f.risk_score === "CRITICAL").length;
   const high    = data.top_risk_files.filter(f => !f.attested && f.risk_score === "HIGH").length;
   const deploys = data.unattested_deploy_count;
-
-  // Open secret findings — total comes from the /secrets page (tl_secret_total,
-  // populated from live scan data), minus anything resolved there.
-  const openSecrets = (() => {
-    try {
-      const total     = parseInt(localStorage.getItem("tl_secret_total") ?? "0", 10);
-      const statuses  = JSON.parse(localStorage.getItem("tl_secret_status") ?? "{}") as Record<string, string>;
-      const resolved  = Object.values(statuses).filter(v => v === "resolved").length;
-      return Math.max(0, (isNaN(total) ? 0 : total) - resolved);
-    } catch { return 0; }
-  })();
 
   // Hallucinated/typosquatting packages — published by the /dependencies page
   // (tl_dep_risky_count) from live scan data.
@@ -424,13 +416,9 @@ function SecurityInbox({ data }: { data: DashboardData }) {
 
   // Total open policy violations — same list shown on /violations and counted
   // in the Sidebar nav badge (src/lib/violations.ts), so this stays in sync
-  // with those views instead of re-deriving its own subset/sum.
-  const violationsCount = (() => {
-    try {
-      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
-      return countOpenViolations(data, statuses);
-    } catch { return crit + high + (deploys > 0 ? 1 : 0); }
-  })();
+  // with those views instead of re-deriving its own subset/sum. Status now
+  // comes from the server (violationStatuses prop) instead of localStorage.
+  const violationsCount = countOpenViolations(data, violationStatuses);
 
   type Chip = { label: string; count: number; href: string; bg: string; text: string; border: string; dot: string };
 
@@ -862,11 +850,8 @@ export default function DashboardPage() {
   const [slaExpanded,   setSlaExpanded]   = useState(false);
   const [pulseCount,    setPulseCount]    = useState(0);
   const [reloadKey,     setReloadKey]     = useState(0);
-  const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>(() => {
-    if (typeof window === "undefined") return {};
-    try { return JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>; }
-    catch { return {}; }
-  });
+  const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
+  const [openSecretsCount,  setOpenSecretsCount]  = useState(0);
 
   const { role, permissions } = useRole();
   const roleColor = ROLE_COLORS[role];
@@ -887,27 +872,44 @@ export default function DashboardPage() {
   // Load watchlist from localStorage
   useEffect(() => { setWatchlistState(loadWatchlist()); }, []);
 
-  // Keep violation statuses in sync — refreshes immediately when user returns to dashboard
+  // Violation status and open-secrets count now live server-side (see
+  // api/violation-status and api/secrets) instead of in localStorage, so this
+  // widget can't disagree with the Sidebar badge or the Violations/Secrets
+  // pages themselves — resolving something on any device updates all of them.
   useEffect(() => {
-    function syncStatuses() {
+    function syncFromSeed() {
+      try { setViolationStatuses({}); } catch {}
+      const total = parseInt(localStorage.getItem("tl_secret_total") ?? "8", 10);
+      setOpenSecretsCount(isNaN(total) ? 0 : total);
+    }
+    async function syncStatuses() {
+      if (!profile?.org_id) return;
+      if (isSeedMode()) { syncFromSeed(); return; }
       try {
-        const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
-        setViolationStatuses(s);
-      } catch {}
+        const [overridesRes, secretsRes] = await Promise.all([
+          authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status"),
+          authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
+        ]);
+        const next: Record<string, string> = {};
+        for (const [id, o] of Object.entries(overridesRes.overrides ?? {})) next[id] = o.status;
+        setViolationStatuses(next);
+        setOpenSecretsCount((secretsRes.findings ?? []).length);
+      } catch { /* offline — keep whatever's currently shown */ }
     }
     function onVisible() { if (!document.hidden) syncStatuses(); }
     syncStatuses();
-    window.addEventListener("storage", syncStatuses);   // cross-tab
-    window.addEventListener("focus",   syncStatuses);   // window regains focus
-    document.addEventListener("visibilitychange", onVisible); // tab/page switch
-    const id = setInterval(syncStatuses, 2_000);        // 2s poll for same-tab changes
+    window.addEventListener("focus",              syncStatuses);
+    window.addEventListener("tl:badge",            syncStatuses);
+    document.addEventListener("visibilitychange",  onVisible);
+    const id = setInterval(syncStatuses, 30_000);
     return () => {
-      window.removeEventListener("storage", syncStatuses);
-      window.removeEventListener("focus",   syncStatuses);
+      window.removeEventListener("focus",             syncStatuses);
+      window.removeEventListener("tl:badge",           syncStatuses);
       document.removeEventListener("visibilitychange", onVisible);
       clearInterval(id);
     };
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.org_id]);
 
   // Sync local attestation events from PR page — updates on focus so new attestations appear immediately
   useEffect(() => {
@@ -1694,7 +1696,7 @@ export default function DashboardPage() {
             </div>
 
             {/* ── Security Inbox strip — admin/security_reviewer only ──── */}
-            {!isDeveloperView && <SecurityInbox data={effectiveData} />}
+            {!isDeveloperView && <SecurityInbox data={effectiveData} violationStatuses={violationStatuses} openSecrets={openSecretsCount} />}
 
 
             {/* ── Empty state ──────────────────────────────────────────── */}

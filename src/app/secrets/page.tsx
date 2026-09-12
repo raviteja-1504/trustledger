@@ -1,89 +1,55 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import InfoTooltip from "@/components/InfoTooltip";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
-import { api } from "@/lib/api";
+import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
-import { SECRET_INDICATOR_IDS } from "@/lib/secretIndicators";
-import type { FileIndicator } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 type SecretSeverity = "CRITICAL" | "HIGH" | "MEDIUM";
-type SecretType = "api_key" | "jwt_secret" | "db_password" | "private_key" | "oauth_token" | "webhook_url";
 type SecretStatus = "open" | "resolved";
 
+// Matches the shape returned by GET /api/secrets — a direct read of the
+// secret_findings table (see api/secrets/route.ts). Previously this page
+// re-derived "findings" client-side by re-fetching every repo's latest scan
+// and re-scanning file content for secret-shaped indicators, and stored
+// resolved/open status ONLY in localStorage. That's exactly why the same
+// secret could show a different status on different devices or sessions --
+// the "resolved" flag never left whichever one browser's storage it was
+// written to. Now the server is the only source of truth for both read and
+// write; nothing here is ever stored in localStorage.
 interface SecretFinding {
-  id: string;
-  severity: SecretSeverity;
-  type: SecretType;
-  label: string;
-  file_path: string;
-  repo: string;
-  line_number: number;
-  masked_value: string;
-  context: string;
-  pr_number: number;
-  scan_id: string;
-  detected_at: string;
-  status: SecretStatus;
-  resolved_by?: string;
-  resolved_at?: string;
+  id:            string;
+  severity:      SecretSeverity;
+  type:          string;
+  label:         string;
+  file_path:     string;
+  repo:          string;
+  line_number:   number | null;
+  masked_value:  string;
+  pr_number:     number;
+  scan_id:       string;
+  detected_at:   string;
+  status:        SecretStatus;
+  resolved_by?:  string;
+  resolved_at?:  string;
 }
 
+const TYPE_LABELS: Record<string, string> = {
+  api_key:     "API Key",
+  jwt_secret:  "JWT Secret",
+  db_password: "DB Password",
+  private_key: "Private Key",
+  oauth_token: "OAuth Token",
+  webhook_url: "Webhook URL",
+};
 
-
-const STORAGE_KEY = "tl_secret_status";
-
-// ── Secret detection ─────────────────────────────────────────────────────────
-//
-// Findings come from the real scanner (analyzeFile() in lib/scanner.ts, via
-// /api/scans/[id]'s freshly-computed `indicators`) rather than a separate
-// client-side regex pass. This page previously ran its own independent
-// SECRET_PATTERNS engine with none of scanner.ts's false-positive guards
-// (TEST_FILE_RE, looksLikeRealSecret entropy/dummy-value checks) — it flagged
-// things like `jwt_secret = "test-secret-for-unit-tests"` in *_test.go files
-// that the real scanner correctly ignores. Consuming the same indicators the
-// rest of the app uses (violations, vulnerabilities, PR code viewer) keeps
-// detection consistent everywhere and inherits every future scanner fix
-// automatically.
-
-function severityFromIndicator(sev: string): SecretSeverity {
-  const s = sev.toLowerCase();
-  if (s === "critical") return "CRITICAL";
-  if (s === "high")     return "HIGH";
-  return "MEDIUM";
-}
-
-// Coarse category for the Type column/filter — derived from the indicator's
-// label text (e.g. "Hardcoded Stripe API key", "Hardcoded JWT").
-function inferSecretType(label: string): SecretType {
-  const l = label.toLowerCase();
-  if (l.includes("jwt"))                                          return "jwt_secret";
-  if (/postgres|mongodb|db connection|password/.test(l))          return "db_password";
-  if (/private key|service account key|certificate/.test(l))      return "private_key";
-  if (/webhook/.test(l))                                          return "webhook_url";
-  if (/bearer|basic auth| token/.test(l))                         return "oauth_token";
-  return "api_key";
-}
-
-// Masks any 8+ char run of credential-shaped characters in a line, keeping
-// the first 4 chars visible — used to show real source context without
-// exposing the full secret value in the UI.
-function maskSecretsInLine(line: string): string {
-  return line.replace(/[A-Za-z0-9_\-./+=]{8,}/g, m => m.slice(0, 4) + "•".repeat(Math.max(4, m.length - 4)));
-}
-
-function buildContext(rawLine: string): { context: string; masked: string } {
-  const trimmed = rawLine.trim().slice(0, 160);
-  const masked  = maskSecretsInLine(trimmed);
-  const eqIdx   = masked.search(/[:=]/);
-  if (eqIdx === -1) return { context: masked, masked: "••••••••" };
-  const value = masked.slice(eqIdx + 1).trim().replace(/^["'`]|["'`;,]+$/g, "") || "••••••••";
-  return { context: masked, masked: value };
+function typeLabel(type: string): string {
+  return TYPE_LABELS[type] ?? type.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 }
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
@@ -113,15 +79,6 @@ const SEV: Record<SecretSeverity, { bg: string; text: string; border: string; do
   MEDIUM:   { bg: "#fef3c7", text: "#78350f", border: "#fde68a", dot: "#f59e0b" },
 };
 
-const TYPE_LABELS: Record<SecretType, string> = {
-  api_key:     "API Key",
-  jwt_secret:  "JWT Secret",
-  db_password: "DB Password",
-  private_key: "Private Key",
-  oauth_token: "OAuth Token",
-  webhook_url: "Webhook URL",
-};
-
 function timeAgo(iso: string) {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60)   return "just now";
@@ -134,167 +91,75 @@ function timeAgo(iso: string) {
 
 export default function SecretsPage() {
   const { profile } = useAuth();
-  const [findings, setFindings] = useState<SecretFinding[]>([]);
+  const [findings,     setFindings]     = useState<SecretFinding[]>([]);
+  const [loading,      setLoading]      = useState(true);
   const [filterSev,    setFilterSev]    = useState<SecretSeverity | "all">("all");
   const [filterStatus, setFilterStatus] = useState<SecretStatus | "all">("all");
   const [filterRepo,   setFilterRepo]   = useState("all");
   const [expanded,     setExpanded]     = useState<string | null>(null);
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [pendingIds,   setPendingIds]   = useState<Set<string>>(new Set());
 
-  // Re-reads status overrides fresh each call (rather than capturing them
-  // once) so a manual refresh also picks up resolve/re-open actions made in
-  // another tab, not just new/changed findings from the server.
-  function readStatusOverrides(): Record<string, SecretStatus> {
-    try {
-      const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Record<string, SecretStatus>;
-      return Object.fromEntries(Object.entries(raw).filter(([, v]) => v === "resolved")) as Record<string, SecretStatus>;
-    } catch { return {}; }
-  }
-
-  // Fetches current findings from the live scans (bypassing any client-side
-  // cache) and replaces `findings` with the result. Previously this only ran
-  // once on mount -- if the tab stayed open, a new scan landed, a secret got
-  // rotated/resolved elsewhere, or the initial fetch silently failed
-  // (offline at the time), there was no way to see current data short of a
-  // full page reload. Exposed as a standalone function so both the initial
-  // load and the Refresh button use the exact same live-fetch logic.
+  // The single source of truth: GET /api/secrets, a direct read of
+  // secret_findings. No caching, no localStorage merge -- whatever the
+  // server returns is exactly what's shown, on every device, every time.
   const fetchLive = useCallback(async () => {
     if (!profile?.org_id) return;
-    const saved = readStatusOverrides();
     try {
-      const data = await api.dashboard(profile?.org_slug || "org", 90);
-      // Dedupe to one scan per repo (the latest) — fetching more than one
-      // scan per repo would re-surface the same still-present secret once
-      // per scan it appeared in, the same "multiple scans of one PR"
-      // duplication bug already fixed for violations/alerts.
-      const repoToScanId = new Map<string, string>();
-      data.repos.forEach(r => { if (r.latest_scan_id) repoToScanId.set(r.repo, r.latest_scan_id); });
-      const scanIds = [...repoToScanId.values()].slice(0, 5);
-      const results = await Promise.allSettled(scanIds.map(id => api.getScan(id)));
-      const existingKeys = new Set<string>();
-      const liveFindings: SecretFinding[] = [];
-
-      results.forEach(r => {
-        if (r.status !== "fulfilled" || !r.value) return;
-        const scan = r.value;
-        scan.files.forEach(file => {
-          const secretIndicators = (file.indicators ?? []).filter((i: FileIndicator) => SECRET_INDICATOR_IDS.has(i.id) && i.line != null);
-          secretIndicators.forEach((ind: FileIndicator) => {
-            const key = `${scan.scan_id}::${file.file_path}::${ind.line}::${ind.id}`;
-            if (existingKeys.has(key)) return;
-            existingKeys.add(key);
-
-            const rawLine = file.content?.split("\n")[(ind.line as number) - 1] ?? ind.detail ?? ind.label;
-            const { context, masked } = buildContext(rawLine);
-
-            liveFindings.push({
-              id: `sec_${scan.scan_id}_${file.file_path.replace(/\W/g, "_")}_${ind.line}_${ind.id}`,
-              severity: severityFromIndicator(ind.severity),
-              type: inferSecretType(ind.label),
-              label: ind.label,
-              file_path: file.file_path, repo: scan.repo,
-              line_number: ind.line as number,
-              masked_value: masked,
-              context,
-              pr_number: scan.pr_number, scan_id: scan.scan_id,
-              detected_at: scan.timestamp, status: "open",
-            });
-          });
-        });
-      });
-
-      const merged = liveFindings.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
-      setFindings(merged);
-      // Cache for next visit so the page loads instantly
-      localStorage.setItem("tl_secrets_cache", JSON.stringify(liveFindings));
-      localStorage.setItem("tl_secret_total", String(merged.length));
+      const data = await authedFetch<{ findings: SecretFinding[] }>("/api/secrets");
+      setFindings(data.findings ?? []);
       setLastRefreshed(new Date());
-      // Notify sidebar to update badge immediately
       window.dispatchEvent(new Event("tl:badge"));
     } catch { /* offline — keep whatever's currently shown */ }
-  }, [profile?.org_id, profile?.org_slug]);
+    finally { setLoading(false); }
+  }, [profile?.org_id]);
 
   async function handleRefreshClick() {
     setRefreshing(true);
     try { await fetchLive(); } finally { setRefreshing(false); }
   }
 
-  // Load seed findings (opt-in dev mode) → otherwise live scan detections only
   useEffect(() => {
-    const isSeed = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id;
-    const saved = readStatusOverrides();
-    const applyOverrides = (data: SecretFinding[]) =>
-      data.map(f => saved[f.id] ? { ...f, status: saved[f.id] as SecretStatus } : f);
-
-    // 1. Seed mode — load from tl_secrets_findings
-    if (isSeed) {
-      try {
-        const seedRaw = localStorage.getItem("tl_secrets_findings");
-        const seedFindings = seedRaw ? JSON.parse(seedRaw) as SecretFinding[] : [];
-        const merged = applyOverrides(seedFindings);
-        setFindings(merged);
-        localStorage.setItem("tl_secret_total", String(merged.length));
-      } catch {
-        setFindings([]);
-      }
-      return;
-    }
-
-    // 2. Not seed mode — show cached findings immediately (so the page is
-    // useful instantly), then always fetch live data in the background.
-    try {
-      const cached = JSON.parse(localStorage.getItem("tl_secrets_cache") ?? "[]") as SecretFinding[];
-      if (cached.length > 0) {
-        setFindings(applyOverrides(cached));
-      }
-    } catch { /* ignore */ }
-
     fetchLive();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.org_id]);
+  }, [fetchLive]);
 
-  function setStatus(id: string, status: SecretStatus) {
-    setFindings(prev => {
-      const next = prev.map(f => f.id === id ? {
-        ...f, status,
-        resolved_by: status === "resolved" ? (() => { try { const m = JSON.parse(localStorage.getItem("tl_team_members") ?? "[]"); return m[0]?.email ?? `reviewer@trustledger.local`; } catch { return `reviewer@trustledger.local`; } })() : undefined,
-        resolved_at: status === "resolved" ? new Date().toISOString() : undefined,
-      } : f);
-      // Only persist non-default (resolved) overrides — saves "open" as default avoids
-      // old live-finding IDs accumulating across sessions and inflating resolved count
-      const overrides: Record<string, SecretStatus> = {};
-      next.forEach(f => { if (f.status !== "open") overrides[f.id] = f.status; });
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides));
+  // Resolve/re-open now writes through to the server first. The local state
+  // update only happens after the server confirms, so there's no window
+  // where the UI claims a status the database doesn't actually have --
+  // and no per-device drift, since every device reads the same row.
+  async function setStatus(id: string, status: SecretStatus) {
+    setPendingIds(prev => new Set(prev).add(id));
+    try {
+      await authedFetch("/api/secrets", { method: "PATCH", body: JSON.stringify({ id, status }) });
+      setFindings(prev => prev.map(f => f.id === id
+        ? { ...f, status, resolved_by: status === "resolved" ? (profile?.email ?? "you") : undefined,
+            resolved_at: status === "resolved" ? new Date().toISOString() : undefined }
+        : f));
       window.dispatchEvent(new Event("tl:badge"));
-      return next;
-    });
+    } catch {
+      // Failed server-side -- re-sync with the real state rather than
+      // leaving the UI showing a status change that didn't actually persist.
+      fetchLive();
+    } finally {
+      setPendingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    }
   }
 
   const repos = useMemo(() => Array.from(new Set(findings.map(f => f.repo))), [findings]);
 
-  // Explicit per-value filter — avoids any string comparison edge cases
   function matchesSev(f: SecretFinding): boolean {
-    if (filterSev === "all")      return true;
-    if (filterSev === "CRITICAL") return f.severity === "CRITICAL";
-    if (filterSev === "HIGH")     return f.severity === "HIGH";
-    if (filterSev === "MEDIUM")   return f.severity === "MEDIUM";
-    return true;
+    return filterSev === "all" || f.severity === filterSev;
   }
   function matchesStatus(f: SecretFinding): boolean {
-    if (filterStatus === "all")      return true;
-    if (filterStatus === "open")     return f.status === "open";
-    if (filterStatus === "resolved") return f.status === "resolved";
-    return true;
+    return filterStatus === "all" || f.status === filterStatus;
   }
   function matchesRepo(f: SecretFinding): boolean {
     return filterRepo === "all" || f.repo === filterRepo;
   }
 
-  // bySevRepo: severity + repo filtered (for counts shown in tabs)
   const bySevRepo = findings.filter(f => matchesSev(f) && matchesRepo(f));
-  // filtered: full filter including status (for the table)
-  const filtered  = bySevRepo.filter(f => matchesStatus(f));
+  const filtered  = bySevRepo.filter(matchesStatus);
 
   const open     = bySevRepo.filter(f => f.status === "open").length;
   const critical = bySevRepo.filter(f => f.severity === "CRITICAL" && f.status === "open").length;
@@ -304,8 +169,8 @@ export default function SecretsPage() {
     const rows = [
       ["Severity","Type","File","Repository","Line","Status","Detected","Resolved By"],
       ...filtered.map(f => [
-        f.severity, TYPE_LABELS[f.type], f.file_path, f.repo,
-        String(f.line_number), f.status, f.detected_at,
+        f.severity, typeLabel(f.type), f.file_path, f.repo,
+        String(f.line_number ?? ""), f.status, f.detected_at,
         f.resolved_by ?? "",
       ]),
     ];
@@ -343,11 +208,11 @@ export default function SecretsPage() {
           <div className="flex items-center gap-2">
             {lastRefreshed && (
               <span className="text-[11px] text-gray-400 hidden sm:inline">
-                Updated {timeAgo(lastRefreshed.toISOString())}
+                Synced {timeAgo(lastRefreshed.toISOString())}
               </span>
             )}
             <button onClick={handleRefreshClick} disabled={refreshing}
-              title="Re-check for stale/resolved secrets — fetches current findings instead of the cached view"
+              title="Re-fetch current findings from the server"
               className="flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                 className={refreshing ? "animate-spin" : ""}>
@@ -426,7 +291,14 @@ export default function SecretsPage() {
         {/* Findings table */}
         <div className="animate-fade-up section-card overflow-hidden">
 
-          {filtered.filter(f => matchesSev(f) && matchesStatus(f) && matchesRepo(f)).length === 0 ? (
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
+              <svg className="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+              </svg>
+              <p className="text-sm font-semibold">Loading findings…</p>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-500">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -453,9 +325,10 @@ export default function SecretsPage() {
               </div>
 
               <div className="divide-y divide-gray-50">
-                {filtered.filter(f => matchesSev(f) && matchesStatus(f) && matchesRepo(f)).map(f => {
-                  const sev    = SEV[f.severity];
-                  const isOpen = expanded === f.id;
+                {filtered.map(f => {
+                  const sev     = SEV[f.severity];
+                  const isOpen  = expanded === f.id;
+                  const pending = pendingIds.has(f.id);
                   return (
                     <div key={f.id}>
                       <div
@@ -471,13 +344,13 @@ export default function SecretsPage() {
                         </span>
 
                         {/* Type */}
-                        <span className="text-xs font-semibold text-gray-600">{TYPE_LABELS[f.type]}</span>
+                        <span className="text-xs font-semibold text-gray-600">{typeLabel(f.type)}</span>
 
                         {/* File */}
                         <div className="min-w-0 pr-3">
                           <p className="text-[11px] font-mono font-semibold text-gray-800 truncate">
                             {f.file_path.split("/").pop()}
-                            <span className="text-gray-400 font-normal">:{f.line_number}</span>
+                            {f.line_number != null && <span className="text-gray-400 font-normal">:{f.line_number}</span>}
                           </p>
                           <p className="text-[10px] text-gray-400 mt-0.5">{f.repo.split("/").pop()}</p>
                         </div>
@@ -496,9 +369,10 @@ export default function SecretsPage() {
                           {f.status === "open" ? (
                             <button
                               onClick={() => setStatus(f.id, "resolved")}
-                              className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap flex items-center gap-1">
+                              disabled={pending}
+                              className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg hover:bg-emerald-100 disabled:opacity-50 transition-colors whitespace-nowrap flex items-center gap-1">
                               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                              Resolve
+                              {pending ? "Saving…" : "Resolve"}
                             </button>
                           ) : (
                             <>
@@ -508,8 +382,9 @@ export default function SecretsPage() {
                               </span>
                               <button
                                 onClick={() => setStatus(f.id, "open")}
-                                className="text-[10px] text-gray-400 hover:text-rose-600 transition-colors whitespace-nowrap">
-                                Re-open
+                                disabled={pending}
+                                className="text-[10px] text-gray-400 hover:text-rose-600 disabled:opacity-50 transition-colors whitespace-nowrap">
+                                {pending ? "Saving…" : "Re-open"}
                               </button>
                             </>
                           )}
@@ -521,16 +396,18 @@ export default function SecretsPage() {
                         <div className="px-5 pb-4 border-b border-gray-100"
                           style={{ background: "linear-gradient(90deg,rgba(248,250,252,0.9),rgba(248,250,252,0.3))" }}>
                           <div className="space-y-3">
-                            {/* Code context */}
+                            {/* Masked value */}
                             <div>
                               <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5">Detected Pattern</p>
                               <div className="bg-gray-900 rounded-xl px-4 py-3 font-mono text-xs">
                                 <p className="text-gray-500 mb-1">
-                                  <span className="text-gray-600 select-none">{f.file_path}:{f.line_number}  </span>
+                                  <span className="text-gray-600 select-none">
+                                    {f.file_path}{f.line_number != null ? `:${f.line_number}` : ""}
+                                  </span>
                                 </p>
                                 <p>
-                                  <span className="text-rose-400">{f.context.split("=")[0].trim()}</span>
-                                  <span className="text-gray-400"> = </span>
+                                  <span className="text-rose-400">{f.label}</span>
+                                  <span className="text-gray-400"> — </span>
                                   <span className="text-amber-300">"{f.masked_value}"</span>
                                 </p>
                               </div>
@@ -548,7 +425,7 @@ export default function SecretsPage() {
                             {f.status === "resolved" && f.resolved_by && (
                               <p className="text-xs text-emerald-700 flex items-center gap-1.5">
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                                Resolved by <strong>{f.resolved_by}</strong> · {timeAgo(f.resolved_at!)}
+                                Resolved by <strong>{f.resolved_by}</strong>{f.resolved_at ? <> · {timeAgo(f.resolved_at)}</> : null}
                               </p>
                             )}
                           </div>
