@@ -334,28 +334,32 @@ export default function AlertsPage() {
     if (spinner) setRefreshing(true);
     const orgSlug = profile?.org_slug || "";
 
-    // Try real API first when authenticated
+    // Try real API first when authenticated. A successful response is
+    // trusted as-is -- including an empty one, which is a real "zero
+    // alerts", not a signal to fall back to the synthetic risk-derived
+    // list below. Falling through on an empty-but-successful result is
+    // exactly why this page could show alerts the Sidebar badge (reading
+    // the same table) correctly reported as zero: those were browser-only
+    // fabrications that never existed in the database.
     if (profile?.org_id) {
       try {
         const res = await authedFetch<{ alerts: Alert[] }>("/api/alerts?limit=200");
-        if (res.alerts.length > 0) {
-          // Deduplicate: for the same scan + alert_type, keep only the most recent.
-          // This collapses the N duplicate SLA breach alerts (one per cron run) into one.
-          const deduped = new Map<string, Alert>();
-          for (const a of res.alerts) {
-            const key = a.scan_id ? `${a.scan_id}::${a.source}` : a.id;
-            const prev = deduped.get(key);
-            if (!prev || new Date(a.fired_at) > new Date(prev.fired_at)) {
-              deduped.set(key, a);
-            }
+        // Deduplicate: for the same scan + alert_type, keep only the most recent.
+        // This collapses the N duplicate SLA breach alerts (one per cron run) into one.
+        const deduped = new Map<string, Alert>();
+        for (const a of res.alerts) {
+          const key = a.scan_id ? `${a.scan_id}::${a.source}` : a.id;
+          const prev = deduped.get(key);
+          if (!prev || new Date(a.fired_at) > new Date(prev.fired_at)) {
+            deduped.set(key, a);
           }
-          setBaseAlerts(Array.from(deduped.values()));
-          setLoadError(null);
-          setLastRefreshed(new Date());
-          if (spinner) setRefreshing(false);
-          return;
         }
-      } catch { /* fall through to derived */ }
+        setBaseAlerts(Array.from(deduped.values()));
+        setLoadError(null);
+        setLastRefreshed(new Date());
+        if (spinner) setRefreshing(false);
+        return;
+      } catch { /* fall through to derived — genuine fetch failure only */ }
     }
 
     // No fired alerts on record — derive from risk state.
