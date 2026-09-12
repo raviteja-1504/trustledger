@@ -114,6 +114,7 @@ export const cacheKeys = {
   violations: (orgId: string, status: string) => `viol:${orgId}:${status}`,
   orgSettings:(orgId: string)              => `org:${orgId}`,
   billing:    (orgId: string)              => `bill:${orgId}`,
+  dependencies:(orgId: string)             => `deps:${orgId}`,
 };
 
 // ── TTL presets ────────────────────────────────────────────────────────────
@@ -124,4 +125,5 @@ export const TTL = {
   VIOLATIONS:  60,   //  1 minute (changes frequently)
   ORG_SETTINGS:600,  // 10 minutes
   BILLING:     300,  //  5 minutes
+  DEPENDENCIES:300,  //  5 minutes (parsing every repo's file content is expensive)
 };

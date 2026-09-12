@@ -144,6 +144,7 @@ export async function GET(req: NextRequest) {
       if (scanRow) {
         // Invalidate cached dashboard stats so this scan shows up immediately
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+        await cacheDel(cacheKeys.dependencies(orgId));
       }
 
       if (scanRow && result.files.length > 0) {

@@ -326,6 +326,7 @@ export async function POST(req: NextRequest) {
 
       if (scan) {
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+        await cacheDel(cacheKeys.dependencies(orgId));
 
         if (result.files.length > 0) {
           const contentByPath = new Map(fileContents.map(f => [f.path, f.content]));

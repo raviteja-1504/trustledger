@@ -205,6 +205,7 @@ export async function POST(req: NextRequest) {
       if (scan) {
         // Invalidate cached dashboard stats so this scan shows up immediately
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
+        await cacheDel(cacheKeys.dependencies(orgId));
       }
 
       if (scan && result.files.length > 0) {

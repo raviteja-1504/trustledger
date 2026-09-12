@@ -45,6 +45,7 @@ export async function POST(req: NextRequest) {
 
   // Bust cache
   await Promise.all(DASHBOARD_CACHE_DAYS.map(d => cacheDel(cacheKeys.dashboard(org_id, d))));
+  await cacheDel(cacheKeys.dependencies(org_id));
 
   return NextResponse.json({ ok: true });
 }

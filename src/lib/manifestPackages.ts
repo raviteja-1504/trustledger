@@ -1,5 +1,4 @@
 import { parsePackageJson, parseRequirementsTxt, parseGoMod } from "./depAnalysis";
-import type { ScanResult } from "@/types";
 
 export interface ManifestPackage {
   name:    string;
@@ -8,10 +7,17 @@ export interface ManifestPackage {
   aiPr:    boolean;
 }
 
+/** Minimal shape this needs — deliberately narrower than the app's full
+ *  ScanResult so it can run server-side too without fabricating unused fields. */
+interface ScanForManifest {
+  repo: string;
+  files: { file_path: string; content?: string | null; ai_percentage: number }[];
+}
+
 // Extract every dependency declared in a package.json / requirements.txt / go.mod
 // across a set of scans — used by /dependencies (CVE/typosquat matching) and
 // /phantom-deps (live npm/PyPI existence check).
-export function collectManifestPackages(scans: ScanResult[]): ManifestPackage[] {
+export function collectManifestPackages(scans: ScanForManifest[]): ManifestPackage[] {
   const out: ManifestPackage[] = [];
   const seen = new Set<string>();
   for (const scan of scans) {

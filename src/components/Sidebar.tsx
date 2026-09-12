@@ -288,9 +288,10 @@ export default function Sidebar() {
         authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
         authedFetch<{ incidents: { status: string }[] }>("/api/incidents"),
         authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200"),
+        authedFetch<{ counts: { vulnerable: number } }>("/api/dependencies"),
       ]);
       if (cancelled) return;
-      const [dashRes, overridesRes, secretsRes, incidentsRes, alertsRes] = results;
+      const [dashRes, overridesRes, secretsRes, incidentsRes, alertsRes, depsRes] = results;
 
       if (dashRes.status === "fulfilled") {
         const dashData = dashRes.value;
@@ -347,13 +348,18 @@ export default function Sidebar() {
         setFiringAlerts(deduped.size);
       }
 
-      // Dependencies: no lightweight org-aggregate endpoint yet — falls
-      // back to whatever the /dependencies page last cached this session.
-      // tl_dep_badge_count is the exact "Vulnerable" count shown on that
-      // page (NOT tl_dep_vuln_count, which is a differently-weighted score
-      // meant only for the Posture page's internal risk model).
-      const depCount = parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10);
-      setVulnDeps(isNaN(depCount) ? 0 : depCount);
+      if (depsRes.status === "fulfilled") {
+        // Dependencies: exact server-computed "Vulnerable" count — same
+        // derivation the /dependencies page itself now calls, cached
+        // server-side (api/dependencies/route.ts) instead of a stale,
+        // session-only localStorage number.
+        setVulnDeps(depsRes.value.counts?.vulnerable ?? 0);
+      } else {
+        // Fall back to whatever the /dependencies page last cached this
+        // session, in case the live endpoint is briefly unavailable.
+        const depCount = parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10);
+        setVulnDeps(isNaN(depCount) ? 0 : depCount);
+      }
 
       if (results.some(r => r.status === "fulfilled")) setLastSynced(new Date());
       if (showSpinner) setSyncing(false);
