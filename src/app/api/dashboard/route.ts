@@ -208,19 +208,42 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   });
 
   // Risk trend (group by ISO week — Monday-anchored)
+  //
+  // Previously counted whole SCANS (one per PR/commit), tagged by that
+  // scan's single overall_risk -- despite every consumer of this data
+  // (RiskTrendChart's tooltip, RiskDonut's "risk files" label and center
+  // count, the dashboard's own "HIGH, CRITICAL & MEDIUM files over time"
+  // caption) presenting it as a FILE count. A scan with 50 CRITICAL files
+  // still only ever added "1" to critical for that week, so both charts
+  // read far lower than the real number of at-risk files -- worse for
+  // repos with large PRs, since one heavy scan is one data point either way.
+  //
+  // Fixed by counting scan_files rows directly. Capped at 1000 (this
+  // project's Supabase max_rows ceiling -- see the comment above the
+  // riskFiles query; a larger .limit() wouldn't return more rows anyway),
+  // ordered newest-first so a truncation drops the oldest/least-relevant
+  // weeks rather than the most recent ones.
   const toMonday = (iso: string) => {
     const d = new Date(iso);
     const dow = d.getUTCDay(); // 0=Sun
     d.setUTCDate(d.getUTCDate() - (dow === 0 ? 6 : dow - 1));
     return d.toISOString().slice(0, 10);
   };
+  const scanIdsInRange = scans.map(s => s.id);
+  const { data: trendFiles } = scanIdsInRange.length === 0 ? { data: [] } : await db
+    .from("scan_files")
+    .select("risk_score, created_at")
+    .in("scan_id", scanIdsInRange)
+    .in("risk_score", ["CRITICAL", "HIGH", "MEDIUM"])
+    .order("created_at", { ascending: false })
+    .limit(1000);
   const trendMap = new Map<string, { high: number; critical: number; medium: number }>();
-  scans.forEach(s => {
-    const week = toMonday(s.created_at);
+  (trendFiles ?? []).forEach(f => {
+    const week = toMonday(f.created_at);
     const t = trendMap.get(week) ?? { high: 0, critical: 0, medium: 0 };
-    if (s.overall_risk === "CRITICAL") t.critical++;
-    else if (s.overall_risk === "HIGH") t.high++;
-    else if (s.overall_risk === "MEDIUM") t.medium++;
+    if (f.risk_score === "CRITICAL") t.critical++;
+    else if (f.risk_score === "HIGH") t.high++;
+    else if (f.risk_score === "MEDIUM") t.medium++;
     trendMap.set(week, t);
   });
   const risk_trend = Array.from(trendMap.entries())
