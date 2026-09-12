@@ -150,7 +150,10 @@ export default function ThreatIntelPage() {
       .catch(() => { /* keep DEFAULT_THREATS */ });
     try {
       const raw = localStorage.getItem("tl_threat_intel");
-      if (raw) { setEnrichedThreats(JSON.parse(raw) as ThreatEntry[]); setLastSync(new Date()); return; }
+      const cached = raw ? (JSON.parse(raw) as ThreatEntry[]) : null;
+      // A cached [] (e.g. from an earlier enrichment race) must not mask the
+      // static catalog — an empty threat feed is never a legitimate result.
+      if (Array.isArray(cached) && cached.length > 0) { setEnrichedThreats(cached); setLastSync(new Date()); return; }
     } catch {}
     setEnrichedThreats(DEFAULT_THREATS as ThreatEntry[]);
   }, []);
@@ -179,10 +182,12 @@ export default function ThreatIntelPage() {
 
       const hasCritical = data.top_risk_files.some(f => f.risk_score === "CRITICAL");
       const enriched = threatFeed.map(t => enrichThreat(t, detected, riskPats, data.overall_ai_pct, hasCritical));
-      setEnrichedThreats(enriched);
+      if (enriched.length > 0) {
+        setEnrichedThreats(enriched);
+        // Cache enriched result so next page load is pre-enriched
+        try { localStorage.setItem("tl_threat_intel", JSON.stringify(enriched)); } catch {}
+      }
       setLastSync(new Date());
-      // Cache enriched result so next page load is pre-enriched
-      try { localStorage.setItem("tl_threat_intel", JSON.stringify(enriched)); } catch {}
     } catch {
       // keep current data on error
     } finally {

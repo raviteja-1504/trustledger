@@ -345,6 +345,32 @@ export async function POST(req: NextRequest) {
           })));
         }
 
+        // Create secret finding records — mirrors the manual/API scan path
+        // (api/scans/route.ts). This was missing here entirely, which meant
+        // secrets were never recorded for scans triggered by the GitHub
+        // webhook (the actual production path) — the /secrets page and its
+        // sidebar badge had nothing to show no matter what was scanned.
+        const secretFiles = result.files.filter(f => f.risk_indicators.includes("hardcoded-secret"));
+        if (secretFiles.length > 0) {
+          const { error: secretErr } = await db.from("secret_findings").insert(
+            secretFiles.flatMap(f =>
+              f.indicators
+                .filter(i => i.id === "hardcoded-secret")
+                .map(i => ({
+                  org_id: orgId,
+                  scan_id:      scan.id,
+                  file_path:    f.file_path,
+                  secret_type:  "detected",
+                  severity:     (i.severity === "critical" ? "CRITICAL" : i.severity === "high" ? "HIGH" : "MEDIUM") as "CRITICAL"|"HIGH"|"MEDIUM",
+                  label:        i.label,
+                  masked_value: "detected",
+                  line_number:  i.line ?? null,
+                }))
+            ),
+          );
+          if (secretErr) console.error("[scan-worker] secret_findings insert failed:", scan.id, secretErr.message);
+        }
+
         if (inheritedFiles.length > 0) {
           await db.from("scan_files").insert(inheritedFiles.map(f => ({
             scan_id: scan.id, org_id: orgId,
