@@ -139,6 +139,10 @@ export interface DashboardData {
   attestation_rate: number;
   unattested_deploy_count: number;
   risk_trend: RiskTrendPoint[];
+  // Exact CRITICAL/HIGH/MEDIUM file totals for the period -- NOT derivable
+  // by summing risk_trend, which is row-limited for per-week bucketing.
+  // Optional so older cached/seed payloads without it still type-check.
+  risk_totals?: { critical_count: number; high_count: number; medium_count: number };
   scan_count: number;
   file_count: number;
   top_risk_files: TopRiskFile[];

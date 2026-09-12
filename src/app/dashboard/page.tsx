@@ -1720,7 +1720,7 @@ export default function DashboardPage() {
                       <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
                       <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
                     </div>
-                    <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} />
+                    <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
                   </div>
                 </div>
 

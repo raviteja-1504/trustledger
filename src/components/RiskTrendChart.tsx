@@ -61,7 +61,7 @@ export default function RiskTrendChart({ data }: { data: RiskTrendPoint[] }) {
 
   return (
     <ResponsiveContainer width="100%" height={252}>
-      <AreaChart data={data} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
         <defs>
           <linearGradient id="gradMedium" x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%"  stopColor="#f59e0b" stopOpacity={0.22} />
@@ -96,7 +96,7 @@ export default function RiskTrendChart({ data }: { data: RiskTrendPoint[] }) {
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
-          width={28}
+          width={34}
         />
         <Tooltip content={<CustomTooltip />} cursor={{ stroke: "rgba(99,102,241,0.15)", strokeWidth: 1.5, strokeDasharray: "3 3" }} />
 

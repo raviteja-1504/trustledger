@@ -6,6 +6,11 @@ import type { RiskTrendPoint } from "@/types";
 interface Props {
   data: RiskTrendPoint[];
   attestationRate: number;
+  // Exact totals for the period, when available. `data` (risk_trend) is
+  // row-limited server-side for per-week bucketing, so summing it can read
+  // well below the true total for a vulnerability-dense org -- prefer this
+  // when present instead of deriving totals from `data`.
+  totals?: { critical_count: number; high_count: number; medium_count: number };
 }
 
 function CustomTooltip({ active, payload }: { active?: boolean; payload?: { name: string; value: number }[] }) {
@@ -53,12 +58,20 @@ function AttestBar({ pct }: { pct: number }) {
   );
 }
 
-export default function RiskDonut({ data, attestationRate }: Props) {
+const TOTALS_KEY: Record<typeof SEGMENTS[number]["key"], "critical_count" | "high_count" | "medium_count"> = {
+  critical_count: "critical_count",
+  high_count:     "high_count",
+  medium_count:   "medium_count",
+};
+
+export default function RiskDonut({ data, attestationRate, totals: exactTotals }: Props) {
   const totals = SEGMENTS.map(s => ({
     name:     s.name,
     color:    s.color,
     gradient: s.gradient,
-    value:    data.reduce((sum, d) => sum + ((d[s.key] as number) ?? 0), 0),
+    value:    exactTotals
+      ? exactTotals[TOTALS_KEY[s.key]]
+      : data.reduce((sum, d) => sum + ((d[s.key] as number) ?? 0), 0),
   })).filter(d => d.value > 0);
 
   const total  = totals.reduce((s, d) => s + d.value, 0);

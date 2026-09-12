@@ -218,11 +218,12 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
   // read far lower than the real number of at-risk files -- worse for
   // repos with large PRs, since one heavy scan is one data point either way.
   //
-  // Fixed by counting scan_files rows directly. Capped at 1000 (this
-  // project's Supabase max_rows ceiling -- see the comment above the
-  // riskFiles query; a larger .limit() wouldn't return more rows anyway),
-  // ordered newest-first so a truncation drops the oldest/least-relevant
-  // weeks rather than the most recent ones.
+  // Fixed by counting scan_files rows directly, ordered newest-first so a
+  // truncation (very large orgs) drops the oldest/least-relevant weeks
+  // rather than the most recent ones. This row-based query is inherently
+  // bounded (needed for per-week bucketing, which the JS client can't do
+  // as a server-side GROUP BY) -- see risk_totals below for why the
+  // Risk Distribution donut does NOT derive its totals from this array.
   const toMonday = (iso: string) => {
     const d = new Date(iso);
     const dow = d.getUTCDay(); // 0=Sun
@@ -236,7 +237,7 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .in("scan_id", scanIdsInRange)
     .in("risk_score", ["CRITICAL", "HIGH", "MEDIUM"])
     .order("created_at", { ascending: false })
-    .limit(1000);
+    .limit(5000);
   const trendMap = new Map<string, { high: number; critical: number; medium: number }>();
   (trendFiles ?? []).forEach(f => {
     const week = toMonday(f.created_at);
@@ -250,6 +251,30 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .sort(([a], [b]) => a.localeCompare(b))
     .slice(-10)
     .map(([date, t]) => ({ date, high_count: t.high, critical_count: t.critical, medium_count: t.medium }));
+
+  // Risk Distribution totals — deliberately NOT derived by summing
+  // risk_trend above. That array is a row-limited, per-week breakdown (it
+  // has to fetch actual rows to bucket by week); summing it silently
+  // truncates at whatever the row limit happens to be. A vulnerability-
+  // dense org blew straight through 1000 and the donut displayed exactly
+  // "1000" -- a dead giveaway it was hitting the cap rather than showing
+  // the real total. These are separate, exact COUNT queries (head:true --
+  // no rows transferred, so PostgREST's max_rows row-transfer cap doesn't
+  // apply), one per risk level, so the distribution is always accurate
+  // regardless of how many files that entails.
+  const countByRisk = async (risk: string): Promise<number> => {
+    if (scanIdsInRange.length === 0) return 0;
+    const { count } = await db
+      .from("scan_files")
+      .select("id", { count: "exact", head: true })
+      .in("scan_id", scanIdsInRange)
+      .eq("risk_score", risk);
+    return count ?? 0;
+  };
+  const [criticalTotal, highTotal, mediumTotal] = await Promise.all([
+    countByRisk("CRITICAL"), countByRisk("HIGH"), countByRisk("MEDIUM"),
+  ]);
+  const risk_totals = { critical_count: criticalTotal, high_count: highTotal, medium_count: mediumTotal };
 
   // Top risk files — dedupe by repo+file_path, keeping each file's most
   // recent scan (riskFiles is ordered created_at desc), then rank by AI%.
@@ -345,6 +370,7 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     attestation_rate:        repos.length === 0 ? 0 : repos.reduce((s, r) => s + r.attestation_rate, 0) / repos.length,
     unattested_deploy_count: unattested,
     risk_trend,
+    risk_totals,
     scan_count:   scans.length,
     file_count:   totalFiles,
     top_risk_files,
