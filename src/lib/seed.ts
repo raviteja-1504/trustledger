@@ -483,6 +483,7 @@ const SEED: Record<string, unknown> = {
 
   // ── Posture/analytics supporting data ──────────────────────────────────────
   "tl_dep_vuln_count": "11",
+  "tl_dep_badge_count": "19",
 
   // ── Security policy ──────────────────────────────────────────────────────────
   "tl_org_policy": {
@@ -699,7 +700,7 @@ export function clearSeed(): void {
     "tl_alerts_state", "tl_secret_status", "tl_secret_total",
     "tl_incidents", "tl_risk_register",
     "tl_evidence_state", "tl_exceptions_state",
-    "tl_dep_vuln_count", "tl_org_policy",
+    "tl_dep_vuln_count", "tl_dep_badge_count", "tl_org_policy",
     "tl_team_members", "tl_api_keys",
     "tl_local_activity", "tl_evidence_owners",
     "tl_evidence_dues", "tl_violation_notes",

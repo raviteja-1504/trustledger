@@ -330,7 +330,10 @@ export default function Sidebar() {
 
         // Dependencies: no lightweight org-aggregate endpoint yet — falls
         // back to whatever the /dependencies page last cached this session.
-        const depCount = parseInt(localStorage.getItem("tl_dep_vuln_count") ?? "0", 10);
+        // tl_dep_badge_count is the exact "Vulnerable" count shown on that
+        // page (NOT tl_dep_vuln_count, which is a differently-weighted score
+        // meant only for the Posture page's internal risk model).
+        const depCount = parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10);
         setVulnDeps(isNaN(depCount) ? 0 : depCount);
 
         setLastSynced(new Date());
@@ -356,7 +359,7 @@ export default function Sidebar() {
         setActiveIncidents(Array.isArray(rawIncidents)
           ? rawIncidents.filter((i: { status: string }) => i.status === "active" || i.status === "contained").length
           : 0);
-        setVulnDeps(parseInt(localStorage.getItem("tl_dep_vuln_count") ?? "0", 10) || 0);
+        setVulnDeps(parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10) || 0);
         setLastSynced(new Date());
       } catch { /* no-op */ }
     }

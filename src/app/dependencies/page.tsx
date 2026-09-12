@@ -527,10 +527,17 @@ export default function DependenciesPage() {
   const crit    = findings.filter(f => f.risk === "CRITICAL").length;
   const exploits= findings.filter(f => f.exploit_public).length;
 
-  // Publish vuln count so posture page can read it
+  // Publish vuln count so posture page can read it (a weighted score for
+  // Posture's own risk model — NOT a display count, don't reuse it as one).
   useEffect(() => {
     try { localStorage.setItem("tl_dep_vuln_count", String(crit + Math.round(vuln * 0.5))); } catch {}
   }, [crit, vuln]);
+
+  // Publish the exact "Vulnerable" count shown above so the Sidebar badge
+  // matches this page precisely instead of showing an unrelated number.
+  useEffect(() => {
+    try { localStorage.setItem("tl_dep_badge_count", String(vuln)); } catch {}
+  }, [vuln]);
 
   // Publish hallucinated/typosquatting count so the dashboard's "Needs attention" strip can read it
   useEffect(() => {
