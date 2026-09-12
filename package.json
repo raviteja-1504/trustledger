@@ -20,7 +20,9 @@
     "typecheck": "tsc --noEmit --skipLibCheck",
     "migrate": "npx tsx scripts/migrate.ts",
     "migrate:status": "npx tsx scripts/migrate.ts --status",
-    "migrate:dry": "npx tsx scripts/migrate.ts --dry-run"
+    "migrate:dry": "npx tsx scripts/migrate.ts --dry-run",
+    "backfill:secrets": "npx tsx scripts/backfill-secrets.ts",
+    "backfill:secrets:dry": "npx tsx scripts/backfill-secrets.ts --dry-run"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.5.1",
