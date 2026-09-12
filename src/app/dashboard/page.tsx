@@ -679,6 +679,67 @@ function RepoRiskMatrix({ data }: { data: DashboardData }) {
   );
 }
 
+// ── Top Risk Repos ───────────────────────────────────────────────────────────
+// Ranks repos by concentration of actionable risk (CRITICAL/HIGH files in
+// their latest scan) -- a different question than RepoRiskMatrix's AI% vs
+// attestation scatter: "where is risk concentrated" rather than "which repos
+// combine high AI content with low review coverage."
+
+function TopRiskRepos({ data }: { data: DashboardData }) {
+  const ranked = [...data.repos]
+    .map(r => ({ ...r, risk: r.high_crit_count ?? 0 }))
+    .filter(r => r.risk > 0)
+    .sort((a, b) => b.risk - a.risk)
+    .slice(0, 5);
+
+  const maxRisk = Math.max(1, ...ranked.map(r => r.risk));
+
+  return (
+    <div className="section-card p-5 h-full flex flex-col">
+      <div className="mb-3">
+        <p className="font-bold text-gray-900 text-sm">Top Risk Repos</p>
+        <p className="text-xs text-gray-400 mt-0.5">Ranked by CRITICAL &amp; HIGH files needing attestation</p>
+      </div>
+
+      {ranked.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-6 text-center">
+          <div className="w-11 h-11 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-500">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+          </div>
+          <p className="text-xs font-bold text-gray-700">No repos need attention</p>
+          <p className="text-[10px] text-gray-400">Every repo is clear of CRITICAL/HIGH risk</p>
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col justify-center gap-3">
+          {ranked.map(r => {
+            const pct = Math.round((r.risk / maxRisk) * 100);
+            const attestedShare = Math.round(r.attestation_rate * 100);
+            return (
+              <Link key={r.repo} href={`/repo/${r.repo}`} className="group block">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-gray-700 truncate group-hover:text-indigo-600 transition-colors">
+                    {r.repo.split("/").pop()}
+                  </span>
+                  <span className="text-xs font-black text-rose-600 tabular-nums shrink-0 ml-2">{r.risk}</span>
+                </div>
+                <div className="h-2 rounded-full overflow-hidden bg-gray-100">
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${pct}%`, background: "linear-gradient(90deg,#f97316,#ef4444)" }}
+                  />
+                </div>
+                <p className="text-[9px] text-gray-400 mt-0.5">{attestedShare}% attested</p>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Empty State ───────────────────────────────────────────────────────────────
 
 function EmptyState({ org }: { org: string }) {
@@ -1689,38 +1750,49 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                {/* ── Charts row ─────────────────────────────────────────── */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 animate-fade-up delay-250">
-                  <div className="section-card p-5 lg:col-span-2">
-                    <div className="flex items-center justify-between mb-4">
-                      <div>
-                        <p className="font-bold text-gray-900 text-sm">Risk Trend</p>
-                        <p className="text-xs text-gray-400 mt-0.5">HIGH, CRITICAL &amp; MEDIUM files over time</p>
-                      </div>
-                      <div className="flex items-center gap-3 text-xs text-gray-400">
-                        {riskVelocity && (
-                          <span className={`flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ring-1 ${
-                            riskVelocity.direction === "up"    ? "bg-rose-50 text-rose-700 ring-rose-200" :
-                            riskVelocity.direction === "down"  ? "bg-emerald-50 text-emerald-700 ring-emerald-200" :
-                            "bg-gray-50 text-gray-600 ring-gray-200"
-                          }`}>
-                            {riskVelocity.direction === "up" ? "↑" : riskVelocity.direction === "down" ? "↓" : "—"}
-                            {riskVelocity.delta}% vs prev period
-                          </span>
-                        )}
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400 rounded inline-block" />MED</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-orange-500 rounded inline-block" />HIGH</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
-                      </div>
+                {/* ── Risk Intelligence row ─────────────────────────────── */}
+                <div className="animate-fade-up delay-250">
+                  <div className="flex items-center justify-between mb-3 px-0.5">
+                    <div>
+                      <p className="font-black text-gray-900 text-base tracking-tight">Risk Intelligence</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Trend, composition and where risk is concentrated</p>
                     </div>
-                    <RiskTrendChart data={effectiveData.risk_trend} />
+                    {riskVelocity && (
+                      <span className={`flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${
+                        riskVelocity.direction === "up"    ? "bg-rose-50 text-rose-700 ring-rose-200" :
+                        riskVelocity.direction === "down"  ? "bg-emerald-50 text-emerald-700 ring-emerald-200" :
+                        "bg-gray-50 text-gray-600 ring-gray-200"
+                      }`}>
+                        {riskVelocity.direction === "up" ? "↑" : riskVelocity.direction === "down" ? "↓" : "—"}
+                        {riskVelocity.delta}% vs prev period
+                      </span>
+                    )}
                   </div>
-                  <div className="section-card p-5">
-                    <div className="mb-3">
-                      <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <div className="section-card p-5 lg:col-span-2">
+                      <div className="flex items-center justify-between mb-4">
+                        <div>
+                          <p className="font-bold text-gray-900 text-sm">Risk Trend</p>
+                          <p className="text-xs text-gray-400 mt-0.5">HIGH, CRITICAL &amp; MEDIUM files over time</p>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-gray-400">
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400 rounded inline-block" />MED</span>
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-orange-500 rounded inline-block" />HIGH</span>
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
+                        </div>
+                      </div>
+                      <RiskTrendChart data={effectiveData.risk_trend} />
                     </div>
-                    <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
+                    <div className="flex flex-col gap-4">
+                      <div className="section-card p-5">
+                        <div className="mb-3">
+                          <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
+                          <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
+                        </div>
+                        <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
+                      </div>
+                      <TopRiskRepos data={effectiveData} />
+                    </div>
                   </div>
                 </div>
 

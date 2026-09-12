@@ -204,6 +204,10 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
       scan_count:       r.scan_count,
       file_count:       r.file_count,
       latest_scan_id:   r.latest_scan_id,
+      // CRITICAL/HIGH file count in the latest scan -- already computed
+      // above for attestRate's denominator; exposing it lets the UI rank
+      // repos by concentration of actionable risk (see "Top Risk Repos").
+      high_crit_count:  highCrit,
     };
   });
 
@@ -251,6 +255,21 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     .sort(([a], [b]) => a.localeCompare(b))
     .slice(-10)
     .map(([date, t]) => ({ date, high_count: t.high, critical_count: t.critical, medium_count: t.medium }));
+
+  // If the most recent bucket is the CURRENT (still in-progress) week,
+  // relabel it with today's actual date instead of that week's Monday.
+  // Otherwise the chart's rightmost point can look stale -- e.g. showing
+  // "09-07" as the last tick when today is "09-12" -- even though that
+  // point already includes everything scanned today; only the label was
+  // anchored to the week's start rather than how far the week has run.
+  if (risk_trend.length > 0) {
+    const todayIso = new Date().toISOString();
+    const currentWeekMonday = toMonday(todayIso);
+    const last = risk_trend[risk_trend.length - 1];
+    if (last.date === currentWeekMonday) {
+      last.date = todayIso.slice(0, 10);
+    }
+  }
 
   // Risk Distribution totals — deliberately NOT derived by summing
   // risk_trend above. That array is a row-limited, per-week breakdown (it

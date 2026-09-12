@@ -119,6 +119,9 @@ export interface RepoStat {
   scan_count: number;
   file_count: number;
   latest_scan_id: string;
+  // CRITICAL/HIGH file count in the latest scan. Optional so older
+  // cached/seed payloads without it still type-check.
+  high_crit_count?: number;
 }
 
 export interface TopRiskFile {
