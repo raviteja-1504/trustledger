@@ -177,9 +177,25 @@ async function fetchDashboard(org_id: string, days: number, prAuthorFilter: stri
     if (repo) attestedPerRepo.set(repo, (attestedPerRepo.get(repo) ?? 0) + 1);
   });
 
+  // Denominator for attestation rate must be CRITICAL/HIGH files in the
+  // latest scan (same scope as `attests` above and the app-wide formula:
+  // "attested_high_crit_files ÷ total_high_crit_files") -- this previously
+  // divided by r.file_count, which is EVERY file across EVERY scan in the
+  // date range regardless of risk level. Since most files in a scan are
+  // LOW/MEDIUM and never need attestation, that denominator was 10-100x too
+  // large, so every repo showed ~0% even when 100% of its actual CRITICAL/
+  // HIGH files were attested. riskFiles is already fetched (CRITICAL/HIGH,
+  // scoped to latestScanIdPerRepo) for top_risk_files -- reuse it here.
+  const highCritPerRepo = new Map<string, number>();
+  (riskFiles ?? []).forEach(f => {
+    const repo = f.scans?.repo_full_name;
+    if (repo) highCritPerRepo.set(repo, (highCritPerRepo.get(repo) ?? 0) + 1);
+  });
+
   const repos = Array.from(repoMap.entries()).map(([repo, r]) => {
-    const attested   = attestedPerRepo.get(repo) ?? 0;
-    const attestRate = r.file_count === 0 ? 1 : Math.min(1, attested / r.file_count);
+    const attested    = attestedPerRepo.get(repo) ?? 0;
+    const highCrit     = highCritPerRepo.get(repo) ?? 0;
+    const attestRate  = highCrit === 0 ? 1 : Math.min(1, attested / highCrit);
     return {
       repo,
       ai_pct:           r.ai_count === 0 ? 0 : r.ai_sum / r.ai_count,
