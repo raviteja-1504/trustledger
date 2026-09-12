@@ -276,20 +276,30 @@ export default function Sidebar() {
         return;
       }
 
-      try {
-        const [dashData, overridesRes, secretsRes, incidentsRes, alertsRes] = await Promise.all([
-          api.dashboard(profile.org_slug || "org", 90),
-          authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status").catch(() => ({ overrides: {} })),
-          authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open").catch(() => ({ findings: [] })),
-          authedFetch<{ incidents: { status: string }[] }>("/api/incidents").catch(() => ({ incidents: [] })),
-          authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200").catch(() => ({ alerts: [] })),
-        ]);
-        if (cancelled) return;
+      // Each source is fetched and applied independently — a failure in one
+      // (e.g. a slow/flaky dashboard aggregate query) must not blank out
+      // badges whose own fetch succeeded fine. Previously these were all in
+      // one Promise.all with only one of the five calls actually caught, so
+      // any hiccup in that one call silently zeroed every badge at once even
+      // though the DB had real, correct data the whole time.
+      const results = await Promise.allSettled([
+        api.dashboard(profile.org_slug || "org", 90),
+        authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status"),
+        authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
+        authedFetch<{ incidents: { status: string }[] }>("/api/incidents"),
+        authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200"),
+      ]);
+      if (cancelled) return;
+      const [dashRes, overridesRes, secretsRes, incidentsRes, alertsRes] = results;
 
-        localStorage.setItem("tl_notif_snapshot", JSON.stringify(dashData));
+      if (dashRes.status === "fulfilled") {
+        const dashData = dashRes.value;
+        try { localStorage.setItem("tl_notif_snapshot", JSON.stringify(dashData)); } catch { /* e.g. private-mode storage quota */ }
 
         const statuses: Record<string, string> = {};
-        for (const [id, o] of Object.entries(overridesRes.overrides ?? {})) statuses[id] = o.status;
+        if (overridesRes.status === "fulfilled") {
+          for (const [id, o] of Object.entries(overridesRes.value.overrides ?? {})) statuses[id] = o.status;
+        }
 
         // Reports: CRITICAL/HIGH files still pending attestation and not
         // marked resolved/in_review via a violation override.
@@ -310,34 +320,42 @@ export default function Sidebar() {
         // Violations: single source of truth shared with /violations and the
         // dashboard's own "Needs attention" strip (src/lib/violations.ts).
         setOpenViolations(countOpenViolations(patchDataWithAttestations(dashData), statuses));
+      }
+      // else: leave pendingCount/openViolations as they were — a failed
+      // dashboard fetch shouldn't reset them to 0.
 
+      if (secretsRes.status === "fulfilled") {
         // Secrets: exact server-side open count — same query the /secrets
         // page itself runs, no client-side re-derivation.
-        setOpenSecrets((secretsRes.findings ?? []).length);
+        setOpenSecrets((secretsRes.value.findings ?? []).length);
+      }
 
+      if (incidentsRes.status === "fulfilled") {
         // Incidents: active + contained.
-        setActiveIncidents((incidentsRes.incidents ?? []).filter(i =>
+        setActiveIncidents((incidentsRes.value.incidents ?? []).filter(i =>
           i.status === "active" || i.status === "contained"
         ).length);
+      }
 
+      if (alertsRes.status === "fulfilled") {
         // Alerts: dedupe same as the /alerts page (latest per scan_id+source).
         const deduped = new Map<string, string>();
-        for (const a of (alertsRes.alerts ?? [])) {
+        for (const a of (alertsRes.value.alerts ?? [])) {
           const key = a.scan_id ? `${a.scan_id}::${a.source ?? "policy"}` : a.id;
           if (!deduped.has(key)) deduped.set(key, a.id);
         }
         setFiringAlerts(deduped.size);
+      }
 
-        // Dependencies: no lightweight org-aggregate endpoint yet — falls
-        // back to whatever the /dependencies page last cached this session.
-        // tl_dep_badge_count is the exact "Vulnerable" count shown on that
-        // page (NOT tl_dep_vuln_count, which is a differently-weighted score
-        // meant only for the Posture page's internal risk model).
-        const depCount = parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10);
-        setVulnDeps(isNaN(depCount) ? 0 : depCount);
+      // Dependencies: no lightweight org-aggregate endpoint yet — falls
+      // back to whatever the /dependencies page last cached this session.
+      // tl_dep_badge_count is the exact "Vulnerable" count shown on that
+      // page (NOT tl_dep_vuln_count, which is a differently-weighted score
+      // meant only for the Posture page's internal risk model).
+      const depCount = parseInt(localStorage.getItem("tl_dep_badge_count") ?? "0", 10);
+      setVulnDeps(isNaN(depCount) ? 0 : depCount);
 
-        setLastSynced(new Date());
-      } catch { /* offline — leave existing counts as-is rather than zeroing them */ }
+      if (results.some(r => r.status === "fulfilled")) setLastSynced(new Date());
       if (showSpinner) setSyncing(false);
     }
 
