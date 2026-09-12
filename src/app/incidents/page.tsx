@@ -4,26 +4,17 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
-import { api } from "@/lib/api";
-import type { DashboardData } from "@/types";
 import { authedFetch } from "@/lib/useRealData";
-import { patchDataWithAttestations } from "@/lib/trustScore";
 import { useIncidentsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
+import { PLAYBOOK_TEMPLATES, type IncidentType, type PlaybookStepTemplate } from "@/lib/incidentPlaybooks";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 type IncidentSeverity = "P1" | "P2" | "P3";
 type IncidentStatus   = "active" | "contained" | "resolved" | "post-mortem";
-type IncidentType     = "secret-exposed" | "supply-chain" | "rce-pattern" | "auth-bypass" | "data-breach" | "policy-violation";
 
-interface PlaybookStep {
-  step: number;
-  action: string;
-  owner: string;
-  duration: string;
-  completed: boolean;
-}
+type PlaybookStep = PlaybookStepTemplate & { completed: boolean };
 
 interface Incident {
   id: string;
@@ -44,262 +35,6 @@ interface Incident {
   stakeholders: string[];
   related_cve?: string;
   lesson_learned?: string;
-}
-
-// ── Playbooks ──────────────────────────────────────────────────────────────────
-
-const PLAYBOOK_TEMPLATES: Record<IncidentType, { name:string; steps: Omit<PlaybookStep,"completed">[] }> = {
-  "secret-exposed": {
-    name:"Exposed Credential Response",
-    steps:[
-      { step:1, action:"Immediately rotate the exposed credential in the issuing system (Stripe, AWS, etc.)", owner:"Security Lead",    duration:"<15 min" },
-      { step:2, action:"Revoke all active sessions using the compromised credential",                        owner:"Security Lead",    duration:"<30 min" },
-      { step:3, action:"Audit logs for unauthorized access using the exposed credential",                    owner:"SecOps",           duration:"<1 hour" },
-      { step:4, action:"Remove secret from source code and git history (git-filter-repo)",                   owner:"Developer",        duration:"<2 hours" },
-      { step:5, action:"Force-push cleaned history and notify all affected team members",                    owner:"Tech Lead",        duration:"<3 hours" },
-      { step:6, action:"Add secret scanning pre-commit hook and CI/CD gate",                                 owner:"DevOps",           duration:"<4 hours" },
-      { step:7, action:"File incident report and notify affected parties per regulatory requirements",       owner:"CISO",             duration:"<24 hours" },
-      { step:8, action:"Conduct post-mortem — why was the secret in code and how to prevent recurrence",    owner:"Security Lead",    duration:"<1 week" },
-    ],
-  },
-  "supply-chain": {
-    name:"Supply Chain Attack Response",
-    steps:[
-      { step:1, action:"Immediately pull the affected package from all environments",                        owner:"DevOps",           duration:"<15 min" },
-      { step:2, action:"Identify all systems where the malicious package was installed",                     owner:"Security Lead",    duration:"<1 hour" },
-      { step:3, action:"Assume all systems with the package are compromised — begin forensics",              owner:"SecOps",           duration:"<2 hours" },
-      { step:4, action:"Revoke all credentials on affected systems",                                         owner:"Security Lead",    duration:"<2 hours" },
-      { step:5, action:"Alert team and deploy clean images from trusted snapshots",                          owner:"DevOps",           duration:"<4 hours" },
-      { step:6, action:"Report to package registry (PyPI, npm) and upstream maintainer",                    owner:"CISO",             duration:"<4 hours" },
-      { step:7, action:"Update dependency allowlist and add verification checks",                            owner:"DevOps",           duration:"<8 hours" },
-      { step:8, action:"Full regulatory notification if customer data may have been exposed",                owner:"Legal/CISO",       duration:"<72 hours" },
-    ],
-  },
-  "rce-pattern": {
-    name:"RCE Vulnerability Response",
-    steps:[
-      { step:1, action:"Assess if the vulnerable code path is reachable from an untrusted input",           owner:"Developer",        duration:"<30 min" },
-      { step:2, action:"If reachable: take affected service offline until patched",                          owner:"DevOps",           duration:"<1 hour" },
-      { step:3, action:"Apply emergency patch — replace eval/exec with safe alternative",                   owner:"Developer",        duration:"<2 hours" },
-      { step:4, action:"Scan all logs for exploitation attempts against the affected endpoint",              owner:"SecOps",           duration:"<4 hours" },
-      { step:5, action:"Deploy patched version with enhanced monitoring",                                    owner:"DevOps",           duration:"<6 hours" },
-      { step:6, action:"Run full vulnerability scan against all repos for similar patterns",                 owner:"Security Lead",    duration:"<8 hours" },
-      { step:7, action:"Update CI/CD to block eval/exec patterns in future code",                           owner:"DevOps",           duration:"<24 hours" },
-    ],
-  },
-  "auth-bypass": {
-    name:"Authentication Bypass Response",
-    steps:[
-      { step:1, action:"Identify all endpoints affected by the bypass — check access logs",                  owner:"SecOps",           duration:"<1 hour" },
-      { step:2, action:"Force-expire all active sessions across affected services",                          owner:"Security Lead",    duration:"<1 hour" },
-      { step:3, action:"Apply emergency hotfix — add proper authentication checks",                          owner:"Developer",        duration:"<3 hours" },
-      { step:4, action:"Audit affected endpoints for unauthorized data access",                              owner:"SecOps",           duration:"<4 hours" },
-      { step:5, action:"Notify affected users if their data may have been accessed",                         owner:"Legal/CISO",       duration:"<24 hours" },
-      { step:6, action:"Comprehensive authentication audit across all services",                             owner:"Security Lead",    duration:"<1 week" },
-    ],
-  },
-  "data-breach": {
-    name:"Data Breach Response",
-    steps:[
-      { step:1, action:"Immediately isolate affected systems to prevent further data exfiltration",          owner:"SecOps",           duration:"<30 min" },
-      { step:2, action:"Identify and scope the breach — what data, how much, what period",                  owner:"Security Lead",    duration:"<2 hours" },
-      { step:3, action:"Preserve forensic evidence — snapshot logs before rotation",                        owner:"SecOps",           duration:"<2 hours" },
-      { step:4, action:"Notify executive team and legal counsel",                                            owner:"CISO",             duration:"<4 hours" },
-      { step:5, action:"Regulatory notification (GDPR: 72h, CCPA: 45d, PCI-DSS: immediate)",               owner:"Legal/CISO",       duration:"<72 hours" },
-      { step:6, action:"Notify affected individuals",                                                        owner:"Legal",            duration:"<30 days" },
-      { step:7, action:"Full post-incident forensic report",                                                 owner:"Security Lead",    duration:"<1 month" },
-    ],
-  },
-  "policy-violation": {
-    name:"Policy Violation Response",
-    steps:[
-      { step:1, action:"Block the PR/merge that triggered the violation",                                    owner:"TrustLedger",      duration:"Auto" },
-      { step:2, action:"Notify the code author and their manager",                                           owner:"Security Lead",    duration:"<1 hour" },
-      { step:3, action:"Conduct risk assessment — is the violation exploitable in current context",          owner:"Security Reviewer",duration:"<4 hours" },
-      { step:4, action:"Require security training completion before merge is unblocked",                     owner:"Security Lead",    duration:"<24 hours" },
-      { step:5, action:"Update detection rules if this is a new pattern",                                    owner:"Security Lead",    duration:"<48 hours" },
-    ],
-  },
-};
-
-const STORAGE_KEY = "tl_incidents";
-
-
-// ── Local-storage–based auto-resolution ───────────────────────────────────────
-// Checks tl_violation_statuses (written by the attestation flow) and resolves:
-//   1. File-tied incidents (P1) where the specific file is now attested
-//   2. Auto-generated deploy-count incidents (P2 "N unattested deployments…")
-//      when ANY file has been attested — the count-based trigger is moot once
-//      the team is actively attesting
-// Does NOT need the dashboard API and cannot fail silently.
-function autoResolveFromLocalStorage(incidents: Incident[]): Incident[] {
-  let resolvedFiles: Set<string>;
-  let hasAnyResolved = false;
-  try {
-    const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
-    const entries = Object.entries(statuses);
-    hasAnyResolved = entries.some(([, v]) => v === "resolved");
-    resolvedFiles = new Set(
-      entries
-        .filter(([, val]) => val === "resolved")
-        .map(([key]) => key.split("::").slice(2).join("::")),
-    );
-  } catch {
-    return incidents;
-  }
-  if (!hasAnyResolved) return incidents;
-  const now = new Date().toISOString();
-  let changed = false;
-  const next = incidents.map(inc => {
-    if (inc.status !== "active") return inc;
-    // Case 1: file-tied incident — specific file is now attested
-    if (inc.affected_file && resolvedFiles.has(inc.affected_file)) {
-      changed = true;
-      return {
-        ...inc,
-        status: "resolved" as IncidentStatus,
-        resolved_at: now,
-        timeline: [...inc.timeline,
-          { time: now, action: "Auto-resolved: file has been attested", actor: "TrustLedger" }],
-      };
-    }
-    // Case 2: auto-generated deploy-count policy-violation incident
-    // Identifiable by title pattern "N unattested deployments exceed policy threshold"
-    // Resolve these once the team has started attesting (any file resolved)
-    if (
-      !inc.affected_file &&
-      inc.type === "policy-violation" &&
-      /^\d+ unattested deployments/.test(inc.title)
-    ) {
-      changed = true;
-      return {
-        ...inc,
-        status: "resolved" as IncidentStatus,
-        resolved_at: now,
-        timeline: [...inc.timeline,
-          { time: now, action: "Auto-resolved: all files have been attested", actor: "TrustLedger" }],
-      };
-    }
-    return inc;
-  });
-  if (!changed) return incidents;
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch {}
-  return next;
-}
-
-// ── Dynamic incident generation ────────────────────────────────────────────────
-
-// Returns the full updated incident list:
-// - auto-resolves "active" incidents whose trigger (unattested file / deploy count) is now clear
-// - appends new incidents for newly-detected issues not yet tracked
-function incidentsFromDashboard(data: DashboardData, existing: Incident[], members: { email: string; role: string }[] = []): Incident[] {
-  const adminEmails    = members.filter(m => m.role === "admin" || m.role === "security_reviewer").map(m => m.email);
-  const secStakeholders = adminEmails.slice(0, 3).length > 0 ? adminEmails.slice(0, 3) : [];
-  const devStakeholders = adminEmails.slice(0, 2).length > 0 ? adminEmails.slice(0, 2) : [];
-  const now = new Date().toISOString();
-
-  // File paths still CRITICAL + unattested in the latest dashboard snapshot
-  const stillOpenFiles = new Set(
-    data.top_risk_files
-      .filter(f => f.risk_score === "CRITICAL" && !f.attested)
-      .map(f => f.file_path),
-  );
-
-  // 1. Auto-resolve active incidents whose trigger has cleared
-  const updated: Incident[] = existing.map(inc => {
-    if (inc.status !== "active") return inc;
-    // File-tied incident: file is now attested (no longer in open set)
-    if (inc.affected_file && !stillOpenFiles.has(inc.affected_file)) {
-      return {
-        ...inc,
-        status: "resolved" as IncidentStatus,
-        resolved_at: now,
-        timeline: [
-          ...inc.timeline,
-          { time: now, action: "Auto-resolved: file has been reviewed and attested", actor: "TrustLedger" },
-        ],
-      };
-    }
-    // Policy-violation deploy-count incident: count now at or below threshold
-    if (!inc.affected_file && inc.type === "policy-violation" && data.unattested_deploy_count <= 3) {
-      return {
-        ...inc,
-        status: "resolved" as IncidentStatus,
-        resolved_at: now,
-        timeline: [
-          ...inc.timeline,
-          { time: now, action: `Auto-resolved: unattested deploy count is now ${data.unattested_deploy_count}`, actor: "TrustLedger" },
-        ],
-      };
-    }
-    return inc;
-  });
-
-  // 2. Generate new incidents for issues not yet tracked
-  const trackedKeys = new Set(
-    updated.map(i =>
-      i.affected_file ??
-      (!i.affected_file && i.type === "policy-violation" ? "unattested-deployments" : i.affected_repo ?? ""),
-    ),
-  );
-  const generated: Incident[] = [];
-  let seq = updated.length + 1;
-
-  // P1 for every CRITICAL unattested file (max 3 to avoid noise)
-  data.top_risk_files
-    .filter(f => f.risk_score === "CRITICAL" && !f.attested)
-    .slice(0, 3)
-    .forEach(f => {
-      if (trackedKeys.has(f.file_path)) return;
-      const incType: IncidentType = f.file_path.match(/auth|login|oauth|session/i)
-        ? "auth-bypass"
-        : f.file_path.match(/secret|key|token|pass/i)
-        ? "secret-exposed"
-        : "rce-pattern";
-      const id = `INC-${String(seq++).padStart(3,"0")}`;
-      const ts = new Date(Date.now() - Math.random() * 48 * 3600000).toISOString();
-      generated.push({
-        id, title:`CRITICAL unattested file: ${f.file_path.split("/").pop()}`,
-        type: incType, severity:"P1", status:"active",
-        affected_repo: f.repo, affected_file: f.file_path,
-        detected_at: ts,
-        description:`TrustLedger detected a CRITICAL-risk AI-generated file that has not been attested. File ${f.file_path} in ${f.repo} has AI percentage of ${(f.ai_pct * 100).toFixed(0)}% and risk score CRITICAL. This file was deployed without security review.`,
-        impact:`Unreviewed AI-generated code in production. AI percentage: ${(f.ai_pct * 100).toFixed(0)}%. Deploy #${f.pr_number} blocked from full attestation.`,
-        timeline:[
-          { time: ts, action:"CRITICAL file detected by TrustLedger scan", actor:"TrustLedger" },
-          { time: new Date(new Date(ts).getTime() + 60000).toISOString(), action:"P1 incident auto-created", actor:"TrustLedger" },
-        ],
-        playbook: PLAYBOOK_TEMPLATES[incType].steps.map(s => ({ ...s, completed:false })),
-        stakeholders:secStakeholders,
-      });
-    });
-
-  // P2 for unattested deploy count > 3 (only if not already tracked)
-  if (data.unattested_deploy_count > 3 && !trackedKeys.has("unattested-deployments")) {
-    const id = `INC-${String(seq++).padStart(3,"0")}`;
-    const ts = new Date(Date.now() - 2 * 3600000).toISOString();
-    // Use the repo with the lowest attestation rate as the most-affected repo
-    const worstRepo = data.repos.length > 0
-      ? data.repos.slice().sort((a, b) => a.attestation_rate - b.attestation_rate)[0].repo
-      : "unknown";
-    const attPct = Math.round(data.attestation_rate * 100);
-    generated.push({
-      id, title:`${data.unattested_deploy_count} file${data.unattested_deploy_count !== 1 ? "s" : ""} unattested across ${data.repos.length} repo${data.repos.length !== 1 ? "s" : ""}`,
-      type:"policy-violation", severity:"P2", status:"active",
-      affected_repo: worstRepo,
-      detected_at: ts,
-      description:`${data.unattested_deploy_count} CRITICAL/HIGH files require attestation. Organisation-wide attestation rate: ${attPct}%. Policy requires all CRITICAL and HIGH files to be reviewed before merge.`,
-      impact:`${data.unattested_deploy_count} file${data.unattested_deploy_count !== 1 ? "s" : ""} unreviewed across ${data.repos.length} repo${data.repos.length !== 1 ? "s" : ""}. Compliance posture: ${attPct < 50 ? "critical" : attPct < 80 ? "degraded" : "at risk"}.`,
-      timeline:[
-        { time: ts, action:`${data.unattested_deploy_count} unattested CRITICAL/HIGH files detected`, actor:"TrustLedger" },
-        { time: new Date(new Date(ts).getTime() + 120000).toISOString(), action:"P2 policy-violation incident created", actor:"TrustLedger" },
-      ],
-      playbook: PLAYBOOK_TEMPLATES["policy-violation"].steps.map(s => ({ ...s, completed:false })),
-      stakeholders:devStakeholders,
-    });
-  }
-
-  return [...updated, ...generated];
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -344,7 +79,6 @@ const INC_TYPE_COLOR: Record<IncidentType, string> = {
 
 export default function IncidentsPage() {
   const { profile } = useAuth();
-  const orgName = profile?.org_name || profile?.org_slug || "your organisation";
   const orgSlug = profile?.org_slug || "";
 
   const [incidents,    setIncidents]    = useState<Incident[]>([]);
@@ -369,182 +103,132 @@ export default function IncidentsPage() {
       .catch(() => {});
   }, [profile?.org_id]);
 
-  const seedFromAPI = useCallback(async (base: Incident[], spinner = false) => {
+  // Raw DB rows use `incident_type`, not `type` -- and playbook/timeline/
+  // stakeholders can be null on very old rows -- so every real API response
+  // is normalized through this before it reaches the rest of the page.
+  function mapRow(row: Record<string, unknown>): Incident {
+    return {
+      id: row.id as string,
+      title: row.title as string,
+      type: (row.incident_type as IncidentType) ?? "policy-violation",
+      severity: row.severity as IncidentSeverity,
+      status: row.status as IncidentStatus,
+      affected_repo: (row.affected_repo as string | null) ?? undefined,
+      affected_file: (row.affected_file as string | null) ?? undefined,
+      detected_at: row.detected_at as string,
+      contained_at: (row.contained_at as string | null) ?? undefined,
+      resolved_at: (row.resolved_at as string | null) ?? undefined,
+      description: (row.description as string | null) ?? "",
+      impact: (row.impact as string | null) ?? "",
+      root_cause: (row.root_cause as string | null) ?? undefined,
+      timeline: Array.isArray(row.timeline) ? row.timeline as Incident["timeline"] : [],
+      playbook: Array.isArray(row.playbook) ? row.playbook as PlaybookStep[] : [],
+      stakeholders: Array.isArray(row.stakeholders) ? row.stakeholders as string[] : [],
+      related_cve: (row.related_cve as string | null) ?? undefined,
+      lesson_learned: (row.lesson_learned as string | null) ?? undefined,
+    };
+  }
+
+  // The database is the only source of truth now -- an empty result is a
+  // real "zero incidents", not a signal to fall back to anything local.
+  // Previously an empty API response fell back to localStorage, which is
+  // exactly why this page could show incidents the Sidebar badge (reading
+  // the same table) correctly reported as zero: those were browser-local
+  // fabrications that never existed in the database.
+  const fetchIncidents = useCallback(async (spinner = false) => {
+    if (!profile?.org_id) return;
     if (spinner) setRefreshing(true);
-    // Always apply localStorage-based resolution first — reliable regardless of API
-    const preResolved = autoResolveFromLocalStorage(base);
     try {
-      const rawData = await api.dashboard(orgSlug || "org", 90);
-      // Apply local attestations so already-attested files don't trigger new incidents
-      const data = patchDataWithAttestations(rawData);
-      // Returns the full list: dashboard-based auto-resolutions + any new incidents
-      const next = incidentsFromDashboard(data, preResolved, teamMembers);
-      const changed =
-        next.length !== base.length ||
-        next.some((inc, i) => inc.status !== base[i]?.status || inc.id !== base[i]?.id);
-      if (changed) {
-        setIncidents(next);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      }
-    } catch {
-      // Dashboard API unavailable — use localStorage-only resolution result
-      const changed =
-        preResolved.length !== base.length ||
-        preResolved.some((inc, i) => inc.status !== base[i]?.status);
-      if (changed) setIncidents(preResolved);
-    }
+      const res = await authedFetch<{ incidents: Record<string, unknown>[] }>("/api/incidents");
+      setIncidents((res.incidents ?? []).map(mapRow));
+    } catch { /* offline — keep whatever's currently shown */ }
     finally { if (spinner) setRefreshing(false); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgSlug, teamMembers]);
+  }, [profile?.org_id]);
+
+  useEffect(() => { fetchIncidents(); }, [fetchIncidents]);
 
   useEffect(() => {
-    // Try real API first, fall back to localStorage, then defaults
-    if (profile?.org_id) {
-      authedFetch<{ incidents: Incident[] }>("/api/incidents")
-        .then(res => {
-          if (res.incidents.length > 0) {
-            // Apply localStorage-based resolution even on real API data
-            const resolved = autoResolveFromLocalStorage(res.incidents);
-            setIncidents(resolved);
-            return;
-          }
-          loadLocalFallback();
-        })
-        .catch(() => loadLocalFallback());
-    } else {
-      loadLocalFallback();
-    }
+    const id = setInterval(() => fetchIncidents(), 30_000);
+    window.addEventListener("tl:attest-complete", () => fetchIncidents());
+    return () => clearInterval(id);
+  }, [fetchIncidents]);
 
-    function loadLocalFallback() {
-      let base: Incident[] = [];
-      try {
-        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-        if (Array.isArray(saved) && saved.length > 0) base = saved;
-      } catch {}
-      const resolved = autoResolveFromLocalStorage(base);
-      // Write back immediately when auto-resolution changes any status so that
-      // the sidebar badge reads the correct count from localStorage.
-      if (resolved !== base) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
-        window.dispatchEvent(new Event("tl:badge"));
-      }
-      setIncidents(resolved);
-      seedFromAPI(resolved);
-    }
-
-    const id = setInterval(() => {
-      setIncidents(prev => {
-        const resolved = autoResolveFromLocalStorage(prev);
-        if (resolved !== prev) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
-          window.dispatchEvent(new Event("tl:badge"));
-          seedFromAPI(resolved);
-        } else {
-          seedFromAPI(prev);
-        }
-        return resolved;
-      });
-    }, 30_000);
-    // Immediate refresh when PR page attestAll() completes
-    const onAttestComplete = () => {
-      setIncidents(prev => {
-        const resolved = autoResolveFromLocalStorage(prev);
-        if (resolved !== prev) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(resolved));
-          window.dispatchEvent(new Event("tl:badge"));
-        }
-        seedFromAPI(resolved);
-        return resolved;
-      });
-    };
-    window.addEventListener("tl:attest-complete", onAttestComplete);
-
-    return () => {
-      clearInterval(id);
-      window.removeEventListener("tl:attest-complete", onAttestComplete);
-    };
-  }, [seedFromAPI, profile?.org_id]);
-
-  // Realtime — refresh when incidents change in DB
-  useIncidentsRealtime(profile?.org_id, () => {
-    if (profile?.org_id) {
-      authedFetch<{ incidents: Incident[] }>("/api/incidents")
-        .then(res => {
-          if (res.incidents.length > 0)
-            setIncidents(autoResolveFromLocalStorage(res.incidents));
-        })
-        .catch(() => {});
-    }
-  });
-
-  const save = (next: Incident[]) => {
-    setIncidents(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    window.dispatchEvent(new Event("tl:badge"));
-  };
+  // Realtime — refresh when incidents change in DB (including auto-generated
+  // ones created/resolved server-side by lib/autoIncidents.ts)
+  useIncidentsRealtime(profile?.org_id, () => fetchIncidents());
 
   function toggleStep(incId:string, stepNum:number) {
-    save(incidents.map(inc => inc.id !== incId ? inc : {
+    // Playbook checklist state is a per-browser convenience only -- there's
+    // no server field for it yet, so this intentionally doesn't persist.
+    setIncidents(prev => prev.map(inc => inc.id !== incId ? inc : {
       ...inc,
       playbook: inc.playbook.map(s => s.step === stepNum ? { ...s, completed:!s.completed } : s),
     }));
   }
 
-  function advanceStatus(incId:string) {
+  async function advanceStatus(incId:string) {
     const order: IncidentStatus[] = ["active","contained","resolved","post-mortem"];
-    save(incidents.map(inc => {
-      if (inc.id !== incId) return inc;
-      const idx = order.indexOf(inc.status);
-      const next = order[Math.min(idx+1, order.length-1)];
-      const now = new Date().toISOString();
-      return {
-        ...inc, status:next,
-        contained_at: next==="contained" ? now : inc.contained_at,
-        resolved_at:  next==="resolved"  ? now : inc.resolved_at,
-        timeline: [...inc.timeline, { time:now, action:`Status advanced to ${next}`, actor:"you" }],
-      };
+    const inc = incidents.find(i => i.id === incId);
+    if (!inc) return;
+    const idx  = order.indexOf(inc.status);
+    const next = order[Math.min(idx+1, order.length-1)];
+    const prevIncidents = incidents;
+    const now = new Date().toISOString();
+    setIncidents(incidents.map(i => i.id !== incId ? i : {
+      ...i, status:next,
+      contained_at: next==="contained" ? now : i.contained_at,
+      resolved_at:  next==="resolved"  ? now : i.resolved_at,
+      timeline: [...i.timeline, { time:now, action:`Status advanced to ${next}`, actor:"you" }],
     }));
+    try {
+      await authedFetch("/api/incidents", {
+        method: "PATCH",
+        body: JSON.stringify({ id: incId, status: next, timeline_entry: { action: `Status advanced to ${next}` } }),
+      });
+    } catch {
+      setIncidents(prevIncidents);
+    }
   }
 
-  function addTimelineEntry(incId: string, text: string) {
+  async function addTimelineEntry(incId: string, text: string) {
     if (!text.trim()) return;
+    const prevIncidents = incidents;
     const now = new Date().toISOString();
-    save(incidents.map(inc => inc.id !== incId ? inc : {
+    setIncidents(incidents.map(inc => inc.id !== incId ? inc : {
       ...inc,
       timeline: [...inc.timeline, { time: now, action: text.trim(), actor: "you" }],
     }));
     setNewEntry("");
     setShowEntryForm(false);
+    try {
+      await authedFetch("/api/incidents", {
+        method: "PATCH",
+        body: JSON.stringify({ id: incId, timeline_entry: { action: text.trim() } }),
+      });
+    } catch {
+      setIncidents(prevIncidents);
+    }
   }
 
-  function createIncident() {
-    if (!newInc.title) return;
-    const id  = `INC-${Date.now().toString(36).toUpperCase().slice(-5)}`;
-    const now = new Date().toISOString();
-    const inc: Incident = {
-      id, title:newInc.title, type:newInc.type, severity:newInc.severity,
-      status:"active", affected_repo:newInc.affected_repo||undefined,
-      detected_at:now, description:newInc.description,
-      impact:"Under investigation",
-      timeline:[{time:now,action:"Incident created",actor:"you"}],
-      playbook: PLAYBOOK_TEMPLATES[newInc.type].steps.map(s=>({...s,completed:false})),
-      stakeholders:teamMembers.map(m => m.email).slice(0, 2),
-    };
-    save([inc, ...incidents]);
-    // Also persist to real API
-    if (profile?.org_id) {
-      authedFetch("/api/incidents", {
+  async function createIncident() {
+    if (!newInc.title || !profile?.org_id) return;
+    try {
+      const res = await authedFetch<{ incident_id: string }>("/api/incidents", {
         method: "POST",
         body: JSON.stringify({
           title: newInc.title, severity: newInc.severity,
           incident_type: newInc.type, affected_repo: newInc.affected_repo || undefined,
           description: newInc.description,
         }),
-      }).catch(() => {});
-    }
-    setSelected(id);
-    setShowNewForm(false);
-    setNewInc({ title:"", type:"secret-exposed", severity:"P2", affected_repo:"", description:"" });
+      });
+      // Re-fetch rather than fabricating a local row -- guarantees the id,
+      // playbook (now populated server-side from PLAYBOOK_TEMPLATES), and
+      // every other field exactly match what's actually in the database.
+      await fetchIncidents();
+      setSelected(res.incident_id);
+      setShowNewForm(false);
+      setNewInc({ title:"", type:"secret-exposed", severity:"P2", affected_repo:"", description:"" });
+    } catch { /* leave the form open so the user can retry */ }
   }
 
   const repos = useMemo(() => Array.from(new Set(incidents.filter(i => i.affected_repo).map(i => i.affected_repo as string))), [incidents]);
@@ -594,7 +278,7 @@ export default function IncidentsPage() {
             <p className="text-sm text-gray-400">Structured incident management with playbooks, timeline tracking, and stakeholder coordination</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => seedFromAPI(incidents, true)} disabled={refreshing}
+            <button onClick={() => fetchIncidents(true)} disabled={refreshing}
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm">
               <svg className={refreshing?"animate-spin":""} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>

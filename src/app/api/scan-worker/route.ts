@@ -27,6 +27,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
 import type { ScanJob } from "@/lib/queue";
 
@@ -484,6 +485,12 @@ export async function POST(req: NextRequest) {
             });
           }
         }
+
+        // Auto-generate/resolve incidents for CRITICAL unattested files and
+        // the org-wide unattested-deploy backlog, now that this scan's
+        // violations are recorded. Best-effort — syncAutoIncidents swallows
+        // its own errors so a failure here never breaks the scan response.
+        await syncAutoIncidents(db, orgId);
 
         // ── Cross-PR attestation inheritance ──────────────────────────────────
         const allScanFiles = [

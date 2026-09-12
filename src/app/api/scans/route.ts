@@ -7,6 +7,7 @@ import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { validateBody, CreateScanSchema } from "@/lib/validation";
 import { logger } from "@/lib/logger";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -347,6 +348,11 @@ export async function POST(req: NextRequest) {
     );
     if (secretErr) logger.warn("secret_findings insert failed", { scan_id: scan.id, error: secretErr.message });
   }
+
+  // Auto-generate/resolve incidents for CRITICAL unattested files and the
+  // org-wide unattested-deploy backlog, now that this scan's violations are
+  // recorded. Best-effort — swallows its own errors.
+  await syncAutoIncidents(db, org_id);
 
   // Write audit log entry
   await writeAuditLog(db, {

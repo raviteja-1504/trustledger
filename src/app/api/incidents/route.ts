@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert } from "@/lib/alertDelivery";
+import { PLAYBOOK_TEMPLATES, type IncidentType } from "@/lib/incidentPlaybooks";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -47,6 +48,8 @@ export async function POST(req: NextRequest) {
   const db = createServiceClient();
   const now = new Date().toISOString();
 
+  const template = PLAYBOOK_TEMPLATES[body.incident_type as IncidentType];
+
   const { data: incident, error: insErr } = await db
     .from("incidents")
     .insert({
@@ -60,7 +63,11 @@ export async function POST(req: NextRequest) {
       affected_file:  body.affected_file ?? null,
       stakeholders:   body.stakeholders ?? [],
       timeline:       [{ time: now, action: "Incident created", actor: actor_email ?? "system" }],
-      playbook:       [],
+      // Populate the playbook checklist from the matching template so a real
+      // incident has the same checklist the old client-only version always
+      // showed but never actually persisted (playbook was hardcoded to []
+      // here before). Unknown/custom types get an empty checklist.
+      playbook:       template ? template.steps.map(s => ({ ...s, completed: false })) : [],
       detected_at:    now,
       created_by:     user_id ?? null,
     })

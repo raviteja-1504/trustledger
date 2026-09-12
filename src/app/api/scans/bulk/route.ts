@@ -14,6 +14,7 @@ import { buildAttestationHash } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -102,6 +103,10 @@ export async function POST(req: NextRequest) {
 
     // Invalidate dashboard cache
     await cacheDel(cacheKeys.dashboard(org_id, 90));
+
+    // Bulk-attesting can clear the trigger for one or more auto-generated
+    // incidents — best-effort, swallows its own errors.
+    await syncAutoIncidents(db, org_id);
 
     await fireOrgWebhooks(db, org_id, {
       type: "attestation.created",

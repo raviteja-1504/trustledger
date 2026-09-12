@@ -8,6 +8,7 @@ import { validateBody, AttestSchema } from "@/lib/validation";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
@@ -188,6 +189,10 @@ export async function POST(req: NextRequest) {
   // previously only 90 and 30 were cleared, so viewing the 7-day range right
   // after attesting served a stale unattested_deploy_count for up to TTL.DASHBOARD.
   await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
+
+  // Attesting a file can clear the trigger for an auto-generated incident —
+  // best-effort, swallows its own errors.
+  await syncAutoIncidents(db, org_id);
 
   return NextResponse.json({
     attestation_id: attestation.id,
