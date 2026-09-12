@@ -1167,6 +1167,40 @@ export default function DashboardPage() {
     return { delta: Math.abs(Math.round(delta)), direction: delta > 5 ? "up" : delta < -5 ? "down" : "neutral" } as const;
   }, [data]);
 
+  // Fills the space below the Risk Trend chart with numbers actually worth
+  // reading, rather than leaving it blank -- peak/current/average week
+  // totals, plus a streak callout when CRITICAL/HIGH has moved the same
+  // direction for 2+ consecutive weeks (the "medium" tier is excluded from
+  // the streak specifically because it's noisier and less decision-relevant
+  // than the two tiers that actually block merges).
+  const trendInsights = useMemo(() => {
+    const trend = data?.risk_trend ?? [];
+    if (trend.length === 0) return null;
+
+    const totals = trend.map(t => t.critical_count + t.high_count + t.medium_count);
+    const peakIdx = totals.reduce((best, v, i) => v > totals[best] ? i : best, 0);
+    const avg = Math.round(totals.reduce((a, b) => a + b, 0) / totals.length);
+
+    const actionable = trend.map(t => t.critical_count + t.high_count);
+    let streak = 0;
+    let dir: "up" | "down" | null = null;
+    for (let i = actionable.length - 1; i > 0; i--) {
+      const d: "up" | "down" | null =
+        actionable[i] > actionable[i - 1] ? "up" : actionable[i] < actionable[i - 1] ? "down" : null;
+      if (d === null) break;
+      if (dir === null) dir = d;
+      else if (d !== dir) break;
+      streak++;
+    }
+
+    return {
+      peak:    { total: totals[peakIdx], date: trend[peakIdx].date },
+      current: { total: totals[totals.length - 1], date: trend[trend.length - 1].date },
+      avg,
+      streak, dir,
+    };
+  }, [data]);
+
   // SLA tracker — use effectiveData so locally-attested files are excluded from breach count
   const sla = effectiveData ? slaStatus(effectiveData) : null;
 
@@ -1782,6 +1816,40 @@ export default function DashboardPage() {
                         </div>
                       </div>
                       <RiskTrendChart data={effectiveData.risk_trend} />
+                      {trendInsights && (
+                        <div className="mt-4 pt-4 border-t border-gray-100">
+                          <div className="grid grid-cols-3 gap-3">
+                            {([
+                              { label: "Peak Week",    stat: trendInsights.peak,    color: "#7c3aed" },
+                              { label: "Current",      stat: trendInsights.current, color: "#f97316" },
+                            ] as const).map(({ label, stat, color }) => (
+                              <div key={label}>
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">{label}</p>
+                                <p className="text-xl font-black tabular-nums" style={{ color }}>{stat.total}</p>
+                                <p className="text-[10px] text-gray-400">
+                                  {new Date(stat.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
+                                </p>
+                              </div>
+                            ))}
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Weekly Average</p>
+                              <p className="text-xl font-black text-gray-700 tabular-nums">{trendInsights.avg}</p>
+                              <p className="text-[10px] text-gray-400">across shown period</p>
+                            </div>
+                          </div>
+                          {trendInsights.streak >= 2 && trendInsights.dir && (
+                            <div className={`mt-3 flex items-center gap-2 text-[11px] font-semibold rounded-lg px-3 py-2 ${
+                              trendInsights.dir === "up" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"
+                            }`}>
+                              <span>{trendInsights.dir === "up" ? "📈" : "📉"}</span>
+                              <span>
+                                {trendInsights.streak} consecutive week{trendInsights.streak !== 1 ? "s" : ""} of{" "}
+                                {trendInsights.dir === "up" ? "rising" : "falling"} CRITICAL/HIGH risk
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="flex flex-col gap-4">
                       <div className="section-card p-5">
