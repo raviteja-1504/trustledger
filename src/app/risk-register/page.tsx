@@ -385,10 +385,14 @@ export default function RiskRegisterPage() {
     setLoading(false); if (spinner) setRefreshing(false);
   }, []);
 
+  // No auto-poll interval: fetchData fans out to one scan fetch per repo with
+  // no cap, the heaviest per-tick cost of any page in the app. The Refresh
+  // button above covers on-demand updates; focus still re-syncs.
   useEffect(() => {
     fetchData();
-    const id = setInterval(() => fetchData(), 30_000);
-    return () => clearInterval(id);
+    const onFocus = () => fetchData();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

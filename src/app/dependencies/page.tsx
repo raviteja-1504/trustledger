@@ -196,8 +196,10 @@ export default function DependenciesPage() {
 
   useEffect(() => {
     fetchFindings();
-    const id = setInterval(() => fetchFindings(), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) fetchFindings(); }, 180_000);
+    const onFocus = () => fetchFindings();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

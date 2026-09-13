@@ -148,9 +148,17 @@ export default function IncidentsPage() {
   useEffect(() => { fetchIncidents(); }, [fetchIncidents]);
 
   useEffect(() => {
-    const id = setInterval(() => fetchIncidents(), 30_000);
-    window.addEventListener("tl:attest-complete", () => fetchIncidents());
-    return () => clearInterval(id);
+    // 3min drift safety-net, skipped while hidden -- useIncidentsRealtime
+    // below already gives instant updates on DB changes.
+    const id = setInterval(() => { if (!document.hidden) fetchIncidents(); }, 180_000);
+    const onEvent = () => fetchIncidents();
+    window.addEventListener("tl:attest-complete", onEvent);
+    window.addEventListener("focus", onEvent);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("tl:attest-complete", onEvent);
+      window.removeEventListener("focus", onEvent);
+    };
   }, [fetchIncidents]);
 
   // Realtime — refresh when incidents change in DB (including auto-generated

@@ -414,7 +414,11 @@ export default function AlertsPage() {
 
   useEffect(() => {
     fetchAlerts();
-    const id = setInterval(() => fetchAlerts(), 30_000);
+    // 3min drift safety-net, skipped while hidden -- useAlertsRealtime below
+    // plus the event listeners here already give instant updates.
+    const id = setInterval(() => { if (!document.hidden) fetchAlerts(); }, 180_000);
+    const onFocus = () => fetchAlerts();
+    window.addEventListener("focus", onFocus);
 
     // Re-derive immediately when violation statuses change (cross-tab or same-tab)
     const onStorage = (e: StorageEvent | Event) => {
@@ -429,6 +433,7 @@ export default function AlertsPage() {
 
     return () => {
       clearInterval(id);
+      window.removeEventListener("focus", onFocus);
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("tl:attestation", onStorage);
       window.removeEventListener("tl:attest-complete", onAttestComplete);

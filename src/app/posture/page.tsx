@@ -454,8 +454,9 @@ export default function PosturePage() {
 
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) fetchData(); }, 180_000);
+    window.addEventListener("focus", fetchData);
+    return () => { clearInterval(id); window.removeEventListener("focus", fetchData); };
   }, [fetchData]);
 
   useEffect(() => {

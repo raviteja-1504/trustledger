@@ -195,10 +195,15 @@ export default function ThreatIntelPage() {
     }
   }, [threatFeed]);
 
+  // No auto-poll interval: this enrichment fans out to the dashboard aggregate
+  // plus up to 5 per-repo scan fetches, the heaviest per-tick cost of any page
+  // in the app. A stale threat feed for a few minutes is harmless, and the
+  // Refresh button above covers on-demand updates; focus still re-syncs.
   useEffect(() => {
     enrichThreats();
-    const id = setInterval(enrichThreats, 30_000);
-    return () => clearInterval(id);
+    const onFocus = () => enrichThreats();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [enrichThreats]);
 
   const filtered = useMemo(() => enrichedThreats.filter(t => {

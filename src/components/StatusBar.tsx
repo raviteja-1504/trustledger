@@ -16,7 +16,10 @@ export default function StatusBar() {
   const [refreshAgo,  setRefreshAgo]  = useState("");
   const [now,         setNow]         = useState<Date | null>(null); // null until after hydration
 
-  // Check API health every 30s (use our own /healthz instead of old Python backend)
+  // Check API health every 5 min, skipped while the tab is hidden. This
+  // component is mounted globally on every page for every user, so its
+  // poll cost multiplies across the whole session base -- a status
+  // indicator doesn't need sub-minute freshness.
   useEffect(() => {
     async function check() {
       try {
@@ -28,7 +31,7 @@ export default function StatusBar() {
       setLastCheck(new Date());
     }
     check();
-    const id = setInterval(check, 30_000);
+    const id = setInterval(() => { if (!document.hidden) check(); }, 300_000);
     return () => clearInterval(id);
   }, []);
 

@@ -403,11 +403,14 @@ export default function ViolationsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
-  // Initial fetch + 30s auto-poll
+  // Initial fetch + 3min drift safety-net poll (skipped while tab is hidden).
+  // useViolationsRealtime below already gives instant updates on DB changes.
   useEffect(() => {
     fetchData();
-    const id = setInterval(() => fetchData(), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) fetchData(); }, 180_000);
+    const onFocus = () => fetchData();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -107,8 +107,10 @@ export default function SLAPage() {
 
   useEffect(() => {
     fetchData();
-    const id = setInterval(() => fetchData(true), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) fetchData(); }, 180_000);
+    const onFocus = () => fetchData();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 

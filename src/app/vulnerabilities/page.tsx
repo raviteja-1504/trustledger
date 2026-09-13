@@ -505,11 +505,16 @@ export default function ViolationsPage() {
     setLoading(false); if (spinner) setRefreshing(false);
   }, []);
 
-  // Initial fetch + 30s auto-poll
+  // Initial fetch + 3min drift safety-net poll (skipped while tab is hidden).
+  // The realtime subscription below already gives instant updates when
+  // violations change, so this interval only needs to catch anything realtime
+  // might miss -- it doesn't need to be fast.
   useEffect(() => {
     fetchData();
-    const id = setInterval(() => fetchData(), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) fetchData(); }, 180_000);
+    const onFocus = () => fetchData();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

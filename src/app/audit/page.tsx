@@ -420,11 +420,19 @@ export default function AuditPage() {
     }
   }, [profile?.org_id]);
 
-  // Initial fetch + auto-poll every 30 s
+  // Initial fetch + auto-poll every 3 min, skipped while the tab is hidden.
+  // Focus-triggered refresh (below-window scroll listeners elsewhere already
+  // cover the common "came back to this tab" case for other pages; here the
+  // interval is purely a drift safety net, not the primary freshness source.
   useEffect(() => {
     fetchActivity();
-    timerRef.current = setInterval(() => fetchActivity(), 30_000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    timerRef.current = setInterval(() => { if (!document.hidden) fetchActivity(); }, 180_000);
+    const onFocus = () => fetchActivity();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [fetchActivity]);
 
   // Refresh-ago ticker
