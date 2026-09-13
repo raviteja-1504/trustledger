@@ -15,7 +15,7 @@ const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname   = usePathname() ?? "/";
-  const isPublic   = pathname === "/" || pathname === "/login" || pathname === "/onboarding" || pathname === "/status" || pathname === "/docs" || pathname === "/auth/callback";
+  const isPublic   = pathname === "/" || pathname === "/login" || pathname === "/onboarding" || pathname === "/status" || pathname === "/docs" || pathname === "/auth/callback" || pathname === "/privacy" || pathname === "/terms" || pathname === "/changelog";
   const [mobileNav, setMobileNav] = useState(false);
   const { user, loading } = useAuth();
 
