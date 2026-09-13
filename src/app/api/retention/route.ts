@@ -88,24 +88,59 @@ export async function DELETE(req: NextRequest) {
   const db = createServiceClient();
   const cutoff = cutoffDate.toISOString();
   let deleted = 0;
+  const skipped: Record<string, string> = {};
 
-  const tables: Record<string, string> = {
-    scans:      "scans",
-    violations: "violations",
-    secrets:    "secret_findings",
-    incidents:  "incidents",
-    alerts:     "alerts",
+  // scans, violations, secret_findings, and alerts all reference `scans`
+  // with NO ACTION (not CASCADE) -- deleting an old scan while any of those
+  // still point at it fails outright, and attestations reference it too but
+  // can NEVER be deleted (immutable by DB rule -- see 001_initial.sql's
+  // attestations_no_delete rule, a deliberate "reviewer sign-off is a
+  // permanent record" guarantee). So an attested scan can never actually be
+  // purged through this endpoint, by design -- only scans nobody ever
+  // reviewed are eligible. This used to attempt the delete anyway (with the
+  // error never checked), which silently did nothing for almost every real
+  // org instead of cleaning up what it safely could.
+  if (scope === "scans" || scope === "all") {
+    const { data: oldScans } = await db
+      .from("scans").select("id").eq("org_id", org_id).lt("created_at", cutoff);
+    const oldScanIds = (oldScans ?? []).map(s => s.id);
+
+    if (oldScanIds.length > 0) {
+      const { data: attested } = await db
+        .from("attestations").select("scan_id").in("scan_id", oldScanIds);
+      const attestedSet = new Set((attested ?? []).map(a => a.scan_id));
+      const eligibleIds = oldScanIds.filter(id => !attestedSet.has(id));
+
+      if (eligibleIds.length > 0) {
+        // Clear FK-dependent rows first -- scan_files cascades automatically.
+        await db.from("violations").delete().in("scan_id", eligibleIds);
+        await db.from("secret_findings").delete().in("scan_id", eligibleIds);
+        await db.from("alerts").delete().in("scan_id", eligibleIds);
+        const { count, error: delErr } = await db
+          .from("scans").delete({ count: "exact" }).in("id", eligibleIds) as { count: number | null; error: unknown };
+        if (delErr) skipped.scans = "delete failed";
+        else deleted += count ?? 0;
+      }
+      if (eligibleIds.length < oldScanIds.length) {
+        skipped.scans = `${oldScanIds.length - eligibleIds.length} attested scan(s) retained (cannot be deleted)`;
+      }
+    }
+  }
+
+  // The remaining scopes don't have anything referencing them with NO ACTION,
+  // so a plain per-org, per-cutoff delete is safe on its own.
+  const otherTables: Record<string, string> = {
+    violations: "violations", secrets: "secret_findings", incidents: "incidents", alerts: "alerts",
   };
-
-  const targetTables = scope === "all" ? Object.values(tables) : [tables[scope]].filter(Boolean);
-
-  for (const table of targetTables) {
-    const { count } = await db
+  const targetOther = scope === "all" ? Object.values(otherTables) : [otherTables[scope]].filter(Boolean);
+  for (const table of targetOther) {
+    const { count, error: delErr } = await db
       .from(table)
       .delete({ count: "exact" })
       .eq("org_id", org_id)
-      .lt("created_at", cutoff) as { count: number | null };
-    deleted += count ?? 0;
+      .lt("created_at", cutoff) as { count: number | null; error: unknown };
+    if (delErr) skipped[table] = "delete failed";
+    else deleted += count ?? 0;
   }
 
   await writeAuditLog(db, {
@@ -114,10 +149,10 @@ export async function DELETE(req: NextRequest) {
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "data_deletion",
-    payload:       { scope, before: cutoff, records_deleted: deleted },
+    payload:       { scope, before: cutoff, records_deleted: deleted, skipped },
   });
 
-  return NextResponse.json({ ok: true, deleted, scope, before: cutoff });
+  return NextResponse.json({ ok: true, deleted, scope, before: cutoff, skipped });
 }
 
 export async function POST(req: NextRequest) {
@@ -156,13 +191,41 @@ export async function POST(req: NextRequest) {
 
   if (action === "delete_account") {
     // GDPR Article 17: Right to erasure
-    // Keeps audit log (legal obligation) but removes all operational data
-    const tables = ["scans","scan_files","violations","secret_findings",
-                    "incidents","alerts","risk_register","attestations",
-                    "webhook_configs","repositories"];
+    // Keeps audit log (legal obligation) but removes all operational data.
+    //
+    // Note: `attestations` is immutable by DB rule (attestations_no_delete,
+    // 001_initial.sql) -- a deliberate "reviewer sign-off is a permanent
+    // record" guarantee for SOC 2. That means this delete call for
+    // attestations below is a guaranteed no-op: attestation rows (which can
+    // include a reviewer's email) are NOT actually erased by this endpoint,
+    // regardless of table ordering. Resolving that tension between the
+    // audit-immutability guarantee and GDPR erasure is a legal/product
+    // decision, not something to silently paper over here -- flagging it
+    // rather than changing the immutability rule myself.
+    //
+    // violations/secret_findings/alerts reference `scans` with NO ACTION
+    // (not CASCADE), so they must be cleared before scans is deleted, or
+    // that delete fails outright. scan_files cascades from scans
+    // automatically. Order matters here in a way it didn't before.
+    const dependents = ["violations", "secret_findings", "alerts"];
+    // attestations deliberately excluded -- the DB rule that makes it
+    // immutable replaces DELETE with a no-op rather than raising an error,
+    // so attempting it would silently "succeed" at deleting nothing and
+    // wrongly report itself as cleared below.
+    const rest = ["incidents", "risk_register", "webhook_configs", "repositories"];
+    const cleared: string[] = [];
+    const retained: string[] = ["attestations"];
+    const failed:  string[] = [];
 
-    for (const table of tables) {
-      await db.from(table).delete().eq("org_id", org_id);
+    for (const table of dependents) {
+      const { error: delErr } = await db.from(table).delete().eq("org_id", org_id);
+      if (delErr) failed.push(table); else cleared.push(table);
+    }
+    const { error: scansErr } = await db.from("scans").delete().eq("org_id", org_id);
+    if (scansErr) failed.push("scans"); else cleared.push("scans", "scan_files" /* cascades */);
+    for (const table of rest) {
+      const { error: delErr } = await db.from(table).delete().eq("org_id", org_id);
+      if (delErr) failed.push(table); else cleared.push(table);
     }
 
     await writeAuditLog(db, {
@@ -171,12 +234,13 @@ export async function POST(req: NextRequest) {
       actor_id:      user_id ?? null,
       actor_email:   actor_email ?? null,
       resource_type: "account_deletion",
-      payload:       { action: "gdpr_erasure", tables_cleared: tables },
+      payload:       { action: "gdpr_erasure", tables_cleared: cleared, tables_retained: retained, tables_failed: failed },
     });
 
     return NextResponse.json({
       ok:      true,
-      message: "Account data erased. Audit log retained per SOC 2 requirements (7 years).",
+      message: "Account data erased. Audit log retained per SOC 2 requirements (7 years). Attestation records are also retained (immutable by design) -- see attestations_no_delete.",
+      tables_failed: failed,
     });
   }
 
