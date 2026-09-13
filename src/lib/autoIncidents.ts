@@ -20,7 +20,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
-import { fetchDashboard } from "@/lib/dashboardAggregate";
+import { fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "./incidentPlaybooks";
 import { writeAuditLog } from "./audit";
 
@@ -28,7 +28,7 @@ type IncidentRow = Database["public"]["Tables"]["incidents"]["Row"];
 
 export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
   try {
-    const data = await fetchDashboard(orgId, 90, null);
+    const data = await fetchUnattestedRiskState(orgId);
     const now  = new Date().toISOString();
 
     const stillOpenFiles = new Set(

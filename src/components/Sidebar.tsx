@@ -389,21 +389,28 @@ export default function Sidebar() {
     }
 
     refreshAll(true);
-    // 30s safety-net poll (matches the /violations page's own poll interval)
-    // plus event-driven refresh for instant updates right after an action.
-    const id = setInterval(() => refreshAll(false), 30_000);
+    // 2min safety-net poll, skipped while the tab is hidden -- this runs on
+    // every authenticated page for every user, so it's a meaningful chunk of
+    // total compute. Event-driven refresh (focus, tl:badge, tab becoming
+    // visible again) still gives instant updates right after an action;
+    // the interval only exists to catch drift from changes made elsewhere
+    // (another device, another tab) while this one sits idle but open.
+    const id = setInterval(() => {
+      if (!document.hidden) refreshAll(false);
+    }, 120_000);
     const onEvent = () => refreshAll(false);
+    const onVisible = () => { if (!document.hidden) refreshAll(false); };
     window.addEventListener("focus",              onEvent);
     window.addEventListener("tl:badge",            onEvent);
     window.addEventListener("tl:attest-complete",  onEvent);
-    document.addEventListener("visibilitychange",  onEvent);
+    document.addEventListener("visibilitychange",  onVisible);
     return () => {
       cancelled = true;
       clearInterval(id);
       window.removeEventListener("focus",              onEvent);
       window.removeEventListener("tl:badge",            onEvent);
       window.removeEventListener("tl:attest-complete",  onEvent);
-      document.removeEventListener("visibilitychange",  onEvent);
+      document.removeEventListener("visibilitychange",  onVisible);
     };
   // Re-run when org_id becomes available so the API calls fire after login
   // eslint-disable-next-line react-hooks/exhaustive-deps
