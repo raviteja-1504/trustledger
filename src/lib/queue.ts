@@ -76,7 +76,15 @@ export async function enqueueScan(job: ScanJob): Promise<void> {
       // hammering the database simultaneously. Keyed per-installation, not
       // globally, so different orgs still scan fully in parallel with each
       // other -- this only throttles bursts *within* one org.
-      flowControl: { key: `installation:${job.installation_id}`, parallelism: 5 },
+      // QStash rejects flow-control keys containing anything but
+      // alphanumeric/hyphen/underscore/period -- a colon here was silently
+      // failing every single publish call ("flowControlKey must be
+      // alphanumeric, hyphen, underscore, or period"), which is why every
+      // scan since this feature was added actually ran through the
+      // synchronous directFetch() fallback below instead of through QStash,
+      // and why GitHub webhook deliveries were timing out (that fallback
+      // blocks the webhook response on the full scan duration).
+      flowControl: { key: `installation-${job.installation_id}`, parallelism: 5 },
     });
     console.log("[queue] job enqueued to QStash successfully");
   } catch (err) {
