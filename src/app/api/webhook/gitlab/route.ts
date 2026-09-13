@@ -19,7 +19,7 @@ import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
-import { cacheDel, cacheKeys } from "@/lib/cache";
+import { cacheDel, cacheKeys, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import crypto from "crypto";
 
@@ -222,6 +222,7 @@ export async function POST(req: NextRequest) {
             org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
             sla_deadline: new Date(Date.now() + (f.risk_score === "CRITICAL" ? 24 : 48) * 3600_000).toISOString(),
           })));
+          await invalidateViolationsCache(orgId);
         }
       }
 

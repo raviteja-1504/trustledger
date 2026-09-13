@@ -10,7 +10,6 @@ import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import { authedFetch } from "@/lib/useRealData";
-import { useAlertsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import type { DashboardData } from "@/types";
@@ -441,8 +440,16 @@ export default function AlertsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
-  // Realtime — refresh when alerts change in DB
-  useAlertsRealtime(profile?.org_id, () => fetchAlerts(false));
+  // Refresh when alerts change in DB. Listens for the "tl:alerts-changed"
+  // event dispatched by the global useLiveAlertNotifications subscription
+  // (mounted once in Nav.tsx for the whole session) instead of opening a
+  // second, page-specific Supabase Realtime channel for the same table.
+  useEffect(() => {
+    const onChange = () => fetchAlerts(false);
+    window.addEventListener("tl:alerts-changed", onChange);
+    return () => window.removeEventListener("tl:alerts-changed", onChange);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Merge base alerts with persisted overrides
   const alerts = useMemo<Alert[]>(() =>

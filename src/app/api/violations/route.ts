@@ -3,7 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationUpdateSchema } from "@/lib/validation";
-import { cacheDel, cacheKeys } from "@/lib/cache";
+import { cached, cacheDel, cacheKeys, TTL, invalidateViolationsCache } from "@/lib/cache";
 import { safeError } from "@/lib/errors";
 
 export async function GET(req: NextRequest) {
@@ -35,41 +35,55 @@ export async function GET(req: NextRequest) {
   const isUnresolved = status === "unresolved";
   const dedupe = status === "open" || status === "in_review" || isUnresolved;
 
-  // Filter violations through their parent scan's pr_author when scoped
-  let query = db
-    .from("violations")
-    .select("*, scans!inner(repo_full_name, pr_number, commit_sha, pr_author, triggered_by, created_at)")
-    .eq("org_id", org_id)
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  async function fetchViolations() {
+    // Filter violations through their parent scan's pr_author when scoped
+    let query = db
+      .from("violations")
+      .select("*, scans!inner(repo_full_name, pr_number, commit_sha, pr_author, triggered_by, created_at)")
+      .eq("org_id", org_id)
+      .order("created_at", { ascending: false })
+      .limit(limit);
 
-  if (isUnresolved)         query = query.neq("status", "resolved");
-  else if (status && !dedupe) query = query.eq("status", status);
-  if (repo)              query = query.eq("scans.repo_full_name", repo);
-  if (prAuthorFilter)    query = query.eq("scans.pr_author", prAuthorFilter);
+    if (isUnresolved)         query = query.neq("status", "resolved");
+    else if (status && !dedupe) query = query.eq("status", status);
+    if (repo)              query = query.eq("scans.repo_full_name", repo);
+    if (prAuthorFilter)    query = query.eq("scans.pr_author", prAuthorFilter);
 
-  const { data, error: qErr } = await query;
-  if (qErr) return safeError(qErr, { code: "violations_fetch_failed", message: "We couldn't load violations right now. Please try again." });
+    const { data, error: qErr } = await query;
+    if (qErr) throw qErr;
 
-  let violations = data ?? [];
+    let violations = data ?? [];
 
-  // Dedupe by repo+file_path, keeping only the most recent scan's violation
-  // (rows are already ordered created_at desc, so the first one seen per key
-  // is the latest), then keep it only if it still matches the requested status.
-  if (dedupe) {
-    const latestByFile = new Map<string, typeof violations[number]>();
-    violations.forEach(v => {
-      const scans = v.scans as { repo_full_name?: string } | { repo_full_name?: string }[] | null;
-      const scan  = Array.isArray(scans) ? scans[0] : scans;
-      const key   = `${scan?.repo_full_name ?? ""}::${v.file_path}`;
-      if (!latestByFile.has(key)) latestByFile.set(key, v);
-    });
-    violations = Array.from(latestByFile.values()).filter(v =>
-      isUnresolved ? v.status !== "resolved" : v.status === status
-    );
+    // Dedupe by repo+file_path, keeping only the most recent scan's violation
+    // (rows are already ordered created_at desc, so the first one seen per key
+    // is the latest), then keep it only if it still matches the requested status.
+    if (dedupe) {
+      const latestByFile = new Map<string, typeof violations[number]>();
+      violations.forEach(v => {
+        const scans = v.scans as { repo_full_name?: string } | { repo_full_name?: string }[] | null;
+        const scan  = Array.isArray(scans) ? scans[0] : scans;
+        const key   = `${scan?.repo_full_name ?? ""}::${v.file_path}`;
+        if (!latestByFile.has(key)) latestByFile.set(key, v);
+      });
+      violations = Array.from(latestByFile.values()).filter(v =>
+        isUnresolved ? v.status !== "resolved" : v.status === status
+      );
+    }
+
+    return violations;
   }
 
-  return NextResponse.json({ violations });
+  try {
+    // repo-filtered and developer-scoped requests are narrower/per-user --
+    // only the plain org-wide request (what every real caller sends today)
+    // is safe to share across requests via a short cache.
+    const violations = (!repo && !prAuthorFilter)
+      ? await cached(`${cacheKeys.violations(org_id, status ?? "")}:${limit}`, TTL.VIOLATIONS, fetchViolations)
+      : await fetchViolations();
+    return NextResponse.json({ violations });
+  } catch (qErr) {
+    return safeError(qErr, { code: "violations_fetch_failed", message: "We couldn't load violations right now. Please try again." });
+  }
 }
 
 export async function PATCH(req: NextRequest) {
@@ -126,6 +140,8 @@ export async function PATCH(req: NextRequest) {
   // Invalidate dashboard cache so resolving a violation here is reflected
   // immediately in unattested_deploy_count / SLA breach counts.
   await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
+
+  await invalidateViolationsCache(org_id);
 
   return NextResponse.json({ ok: true, violation: data });
 }

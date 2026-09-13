@@ -21,6 +21,7 @@ import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, SecretUpdateSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
+import { cached, cacheKeys, TTL, invalidateSecretsCache } from "@/lib/cache";
 
 interface ScanJoin { repo_full_name: string; pr_number: number; pr_author: string | null }
 
@@ -46,41 +47,55 @@ export async function GET(req: NextRequest) {
     prAuthorFilter = member?.github_login ?? null;
   }
 
-  let query = db
-    .from("secret_findings")
-    .select("id, scan_id, file_path, secret_type, severity, label, masked_value, line_number, status, resolved_by, resolved_email, resolved_at, created_at, scans!inner(repo_full_name, pr_number, pr_author)")
-    .eq("org_id", org_id)
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  async function fetchFindings() {
+    let query = db
+      .from("secret_findings")
+      .select("id, scan_id, file_path, secret_type, severity, label, masked_value, line_number, status, resolved_by, resolved_email, resolved_at, created_at, scans!inner(repo_full_name, pr_number, pr_author)")
+      .eq("org_id", org_id)
+      .order("created_at", { ascending: false })
+      .limit(limit);
 
-  if (status)         query = query.eq("status", status);
-  if (prAuthorFilter) query = query.eq("scans.pr_author", prAuthorFilter);
+    if (status)         query = query.eq("status", status);
+    if (prAuthorFilter) query = query.eq("scans.pr_author", prAuthorFilter);
 
-  const { data, error } = await query;
-  if (error) return safeError(error, { code: "secrets_fetch_failed", message: "We couldn't load secrets right now. Please try again." });
+    const { data, error } = await query;
+    if (error) throw error;
 
-  const findings = (data ?? []).map(f => {
-    const scanRaw = f.scans as unknown as ScanJoin | ScanJoin[] | null;
-    const scan    = Array.isArray(scanRaw) ? scanRaw[0] : scanRaw;
-    return {
-      id:            f.id,
-      severity:      f.severity,
-      type:          f.secret_type,
-      label:         f.label,
-      file_path:     f.file_path,
-      repo:          scan?.repo_full_name ?? "",
-      pr_number:     scan?.pr_number ?? 0,
-      line_number:   f.line_number,
-      masked_value:  f.masked_value,
-      scan_id:       f.scan_id,
-      detected_at:   f.created_at,
-      status:        f.status,
-      resolved_by:   f.resolved_email ?? undefined,
-      resolved_at:   f.resolved_at ?? undefined,
-    };
-  });
+    return (data ?? []).map(f => {
+      const scanRaw = f.scans as unknown as ScanJoin | ScanJoin[] | null;
+      const scan    = Array.isArray(scanRaw) ? scanRaw[0] : scanRaw;
+      return {
+        id:            f.id,
+        severity:      f.severity,
+        type:          f.secret_type,
+        label:         f.label,
+        file_path:     f.file_path,
+        repo:          scan?.repo_full_name ?? "",
+        pr_number:     scan?.pr_number ?? 0,
+        line_number:   f.line_number,
+        masked_value:  f.masked_value,
+        scan_id:       f.scan_id,
+        detected_at:   f.created_at,
+        status:        f.status,
+        resolved_by:   f.resolved_email ?? undefined,
+        resolved_at:   f.resolved_at ?? undefined,
+      };
+    });
+  }
 
-  return NextResponse.json({ findings });
+  try {
+    // Developer-scoped results are per-user (github_login-filtered) and a
+    // non-default limit is rare -- only the plain org-wide, default-limit
+    // request (what every real caller actually sends: Sidebar and the
+    // dashboard poll `?status=open`, the Secrets page itself sends no
+    // params at all) is safe to share across requests via a short cache.
+    const findings = (!prAuthorFilter && limit === 500)
+      ? await cached(cacheKeys.secrets(org_id, status ?? ""), TTL.SECRETS, fetchFindings)
+      : await fetchFindings();
+    return NextResponse.json({ findings });
+  } catch (error) {
+    return safeError(error, { code: "secrets_fetch_failed", message: "We couldn't load secrets right now. Please try again." });
+  }
 }
 
 export async function PATCH(req: NextRequest) {
@@ -109,6 +124,8 @@ export async function PATCH(req: NextRequest) {
   if (upErr || !data) {
     return safeError(upErr, { code: "secret_update_failed", message: "We couldn't update that finding. Please try again." });
   }
+
+  await invalidateSecretsCache(org_id);
 
   if (body.status === "resolved") {
     await writeAuditLog(db, {

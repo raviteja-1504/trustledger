@@ -142,6 +142,14 @@ function alertToNotification(alert: Record<string, unknown>): LiveNotification {
 /**
  * Live notification stream from the database.
  * Returns only firing P1/P2 alerts from the current session (last 24h).
+ *
+ * This is mounted globally (src/components/Nav.tsx, on every authenticated
+ * page), so it's the one persistent `alerts` table subscription for the
+ * whole session. Rather than let the Alerts page open a second, separate
+ * `alerts` channel of its own just to know "something changed, refetch,"
+ * this also dispatches a plain "tl:alerts-changed" window event on every
+ * insert/update/delete -- any page can listen for that instead of paying
+ * for its own websocket connection to the same table.
  */
 export function useLiveAlertNotifications(
   onNew: (n: LiveNotification) => void,
@@ -159,16 +167,19 @@ export function useLiveAlertNotifications(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "postgres_changes" as any,
         {
-          event:  "INSERT",
+          event:  "*",
           schema: "public",
           table:  "alerts",
           filter: `org_id=eq.${profile.org_id}`,
         },
-        (payload: { new: Record<string, unknown> }) => {
-          const alert = payload.new;
-          if (alert.severity === "P1" || alert.severity === "P2") {
-            onNewRef.current(alertToNotification(alert));
+        (payload: { eventType: "INSERT" | "UPDATE" | "DELETE"; new: Record<string, unknown> }) => {
+          if (payload.eventType === "INSERT") {
+            const alert = payload.new;
+            if (alert.severity === "P1" || alert.severity === "P2") {
+              onNewRef.current(alertToNotification(alert));
+            }
           }
+          window.dispatchEvent(new Event("tl:alerts-changed"));
         },
       )
       .subscribe();

@@ -73,12 +73,11 @@ export async function POST(req: NextRequest) {
   // Try to recover the check_run_id from the webhook_deliveries table
   // (we store it there since we can't guarantee the scan row exists).
   if (!scan && body.repo_full_name && body.pr_number) {
-    const repoPayloadFilter = `%"full_name":"${body.repo_full_name}"%`;
     const { data: delivery } = await db
       .from("webhook_deliveries")
       .select("payload, org_id")
       .eq("org_id", org_id)
-      .ilike("payload::text", repoPayloadFilter)
+      .eq("repo_full_name", body.repo_full_name)
       .order("created_at", { ascending: false })
       .limit(5)
       .maybeSingle();

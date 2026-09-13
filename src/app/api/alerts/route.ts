@@ -100,10 +100,8 @@ export async function GET(req: NextRequest) {
 
   if (activeRepos.length > 0) {
     const now = new Date().toISOString();
-    const staleRepos: string[] = [];
-    for (const repo of activeRepos) {
-      if (!(await hasOpenRepoViolations(db, org_id, repo))) staleRepos.push(repo);
-    }
+    const openChecks = await Promise.all(activeRepos.map(repo => hasOpenRepoViolations(db, org_id, repo)));
+    const staleRepos = activeRepos.filter((_, i) => !openChecks[i]);
     if (staleRepos.length > 0) {
       await db.from("alerts")
         .update({ status: "resolved", resolved_at: now })

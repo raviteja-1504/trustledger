@@ -112,10 +112,31 @@ export const cacheKeys = {
   dashboard:  (orgId: string, days: number) => `dash:${orgId}:${days}`,
   scan:       (scanId: string)              => `scan:${scanId}`,
   violations: (orgId: string, status: string) => `viol:${orgId}:${status}`,
+  secrets:    (orgId: string, status: string) => `sec:${orgId}:${status}`,
   orgSettings:(orgId: string)              => `org:${orgId}`,
   billing:    (orgId: string)              => `bill:${orgId}`,
   dependencies:(orgId: string)             => `deps:${orgId}`,
 };
+
+// Every status value each of the above list endpoints can be filtered to,
+// including "" for the unfiltered/all-statuses request -- used to bust every
+// cached variant on write, since Upstash's REST API can't pattern-delete.
+export const VIOLATION_STATUS_VARIANTS = ["", "open", "in_review", "resolved", "unresolved"];
+export const SECRET_STATUS_VARIANTS    = ["", "open", "resolved"];
+
+/** Bust every cached GET /api/violations variant for an org. */
+export async function invalidateViolationsCache(orgId: string): Promise<void> {
+  await Promise.all(
+    VIOLATION_STATUS_VARIANTS.flatMap(s => [100, 500].map(lim =>
+      cacheDel(`${cacheKeys.violations(orgId, s)}:${lim}`)
+    )),
+  );
+}
+
+/** Bust every cached GET /api/secrets variant for an org. */
+export async function invalidateSecretsCache(orgId: string): Promise<void> {
+  await Promise.all(SECRET_STATUS_VARIANTS.map(s => cacheDel(cacheKeys.secrets(orgId, s))));
+}
 
 // ── TTL presets ────────────────────────────────────────────────────────────
 
@@ -123,6 +144,7 @@ export const TTL = {
   DASHBOARD:   300,  //  5 minutes
   SCAN:        3600, //  1 hour (immutable after creation)
   VIOLATIONS:  60,   //  1 minute (changes frequently)
+  SECRETS:     60,   //  1 minute (changes frequently)
   ORG_SETTINGS:600,  // 10 minutes
   BILLING:     300,  //  5 minutes
   DEPENDENCIES:300,  //  5 minutes (parsing every repo's file content is expensive)

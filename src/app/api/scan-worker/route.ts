@@ -24,7 +24,7 @@ import {
 } from "@/lib/github";
 import { runScan } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
-import { cacheDel, cacheKeys } from "@/lib/cache";
+import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
@@ -371,6 +371,7 @@ export async function POST(req: NextRequest) {
             ),
           );
           if (secretErr) console.error("[scan-worker] secret_findings insert failed:", scan.id, secretErr.message);
+          else await invalidateSecretsCache(orgId);
         }
 
         if (inheritedFiles.length > 0) {
@@ -451,6 +452,7 @@ export async function POST(req: NextRequest) {
             org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
             sla_deadline: new Date(Date.now() + slaH * 3600_000).toISOString(),
           })));
+          await invalidateViolationsCache(orgId);
 
           // ── Create a single alert per scan for the sidebar badge ──────────
           // One P1/P2 alert per scan (not per file) so the alerts page shows

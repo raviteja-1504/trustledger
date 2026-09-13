@@ -6,7 +6,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { validateBody, CreateScanSchema } from "@/lib/validation";
 import { logger } from "@/lib/logger";
-import { cacheDel, cacheKeys } from "@/lib/cache";
+import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
@@ -325,6 +325,7 @@ export async function POST(req: NextRequest) {
       })),
     );
     if (violErr) logger.warn("violations insert failed", { scan_id: scan.id, error: violErr.message });
+    else await invalidateViolationsCache(org_id);
   }
 
   // Create secret finding records
@@ -347,6 +348,7 @@ export async function POST(req: NextRequest) {
       ),
     );
     if (secretErr) logger.warn("secret_findings insert failed", { scan_id: scan.id, error: secretErr.message });
+    else await invalidateSecretsCache(org_id);
   }
 
   // Auto-generate/resolve incidents for CRITICAL unattested files and the
