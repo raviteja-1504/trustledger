@@ -606,7 +606,7 @@ export default function Sidebar() {
               style={{ boxShadow: syncing ? "0 0 6px rgba(251,191,36,0.6)" : "0 0 6px rgba(52,211,153,0.6)" }}
               title={syncing ? "Syncing badge counts…" : lastSynced ? `Badges synced ${syncedLabel(lastSynced)}` : undefined}
             />
-            <p className="text-xs font-medium truncate" style={{ color:"rgba(255,255,255,0.38)" }}>{profile?.org_id ? (profile.org_name || profile.org_slug || (process.env.NEXT_PUBLIC_ORG ?? "novapay")) : (process.env.NEXT_PUBLIC_ORG ?? "novapay")}</p>
+            <p className="text-xs font-medium truncate" style={{ color:"rgba(255,255,255,0.38)" }}>{profile?.org_id ? (profile.org_name || profile.org_slug || (process.env.NEXT_PUBLIC_ORG ?? "acme")) : (process.env.NEXT_PUBLIC_ORG ?? "acme")}</p>
             <span className="ml-auto text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md"
               style={{ color:"rgba(165,180,252,0.7)", background:"rgba(99,102,241,0.15)" }}>
               v1.0

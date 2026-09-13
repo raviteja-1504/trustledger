@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 export type UserRole = "developer" | "security_reviewer" | "admin";
 

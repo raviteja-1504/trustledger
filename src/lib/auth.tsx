@@ -92,8 +92,8 @@ function getDemoProfile(role: string): OrgProfile {
   };
   return {
     org_id:       "demo-org",
-    org_slug:     process.env.NEXT_PUBLIC_ORG ?? "novapay",
-    org_name:     process.env.NEXT_PUBLIC_ORG ?? "novapay",
+    org_slug:     process.env.NEXT_PUBLIC_ORG ?? "acme",
+    org_name:     process.env.NEXT_PUBLIC_ORG ?? "acme",
     role,
     email:        EMAILS[role] ?? "demo@trustledger.dev",
     name:         NAMES[role]  ?? "Demo User",

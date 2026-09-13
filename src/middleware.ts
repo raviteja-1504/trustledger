@@ -12,7 +12,7 @@ import { checkRateLimit } from "@/lib/rateLimit";
 const SKIP_AUTH  = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 const IS_PROD    = process.env.NODE_ENV === "production";
 
-const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz"]);
+const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz", "/privacy", "/terms"]);
 
 // Routes blocked in production (dev/seed tools)
 const DEV_ONLY_PATHS = new Set(["/seed", "/dev-seed"]);

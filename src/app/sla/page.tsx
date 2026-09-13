@@ -22,7 +22,7 @@ interface SLAViolation {
   hours_overdue: number;
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 const RISK_COLOR: Record<string, string> = {
   CRITICAL:"#7c3aed", HIGH:"#ea580c", MEDIUM:"#d97706", LOW:"#15803d",

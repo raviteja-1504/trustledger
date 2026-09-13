@@ -55,7 +55,7 @@ function ProgressRing({ value, max = 100, color, size = 64, strokeWidth = 5 }: {
   );
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

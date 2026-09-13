@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
 
@@ -723,7 +723,8 @@ function Footer() {
                 { label: "Dashboard",  href: "/dashboard" },
                 { label: "Settings",   href: "/settings"  },
                 { label: "Contact",    href: "mailto:hello@trustledger.dev" },
-                { label: "Privacy",    href: "#"          },
+                { label: "Privacy",    href: "/privacy"   },
+                { label: "Terms",      href: "/terms"     },
               ].map(l => (
                 <li key={l.label}>
                   <a href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</a>

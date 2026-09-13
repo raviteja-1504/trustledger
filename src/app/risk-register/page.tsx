@@ -11,7 +11,7 @@ import { readSeed } from "@/lib/offlineData";
 import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

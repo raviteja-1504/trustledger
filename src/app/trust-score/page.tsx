@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 import { computeTrustScore, scoreColor, patchDataWithAttestations } from "@/lib/trustScore";
 import type { DashboardData } from "@/types";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 function rd(daysBack: number): string {
   return new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];

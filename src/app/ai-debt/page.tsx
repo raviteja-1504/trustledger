@@ -18,7 +18,7 @@ import { readSeed } from "@/lib/offlineData";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import type { DashboardData } from "@/types";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Debt calculation ───────────────────────────────────────────────────────────
 

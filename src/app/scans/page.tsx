@@ -10,7 +10,7 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import type { RiskLevel } from "@/types";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

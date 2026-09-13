@@ -33,7 +33,7 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 const DAYS_OPTIONS = [7, 30, 90] as const;
 type DaysOption = (typeof DAYS_OPTIONS)[number];
 type RangeMode = DaysOption | "custom";
-const ORG       = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG       = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 function deriveActivity(data: DashboardData): ActivityEvent[] {
   const events: ActivityEvent[] = [];

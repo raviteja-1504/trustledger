@@ -89,7 +89,7 @@ function slaInfo(t: ThreatEntry): { label: string; color: string; bg: string } |
   return { label:`SLA: ${hoursLeft}h left`, color:"#15803d", bg:"#f0fdf4" };
 }
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Language detection helpers ─────────────────────────────────────────────────
 

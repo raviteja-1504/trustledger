@@ -34,7 +34,7 @@ const ECO_COLOR: Record<LangEcosystem, { bg:string; text:string }> = {
   unknown:    { bg:"#f8fafc", text:"#475569" },
 };
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Offline fallback ───────────────────────────────────────────────────────────
 

@@ -10,7 +10,7 @@ import { api } from "@/lib/api";
 import type { DashboardData } from "@/types";
 import { readSeed } from "@/lib/offlineData";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "novapay";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

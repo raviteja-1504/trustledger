@@ -4,7 +4,7 @@ import { makeDefaultFrameworks as makeFrameworks, CROSS_FRAMEWORK_THEMES } from 
 import type { FrameworkDef, CrossFrameworkTheme } from "@/lib/complianceConfig";
 
 export async function GET(req: NextRequest) {
-  const org = new URL(req.url).searchParams.get("org") ?? "novapay";
+  const org = new URL(req.url).searchParams.get("org") ?? "acme";
   try {
     const db = createServiceClient();
     const [framesRes, themesRes] = await Promise.all([
