@@ -77,6 +77,23 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
   return false;
 }
 
+// webhook_deliveries.processed/scan_id/error were written once at insert
+// time (in the github webhook route) and never updated again -- there was
+// no way to tell a delivered-and-scanned webhook from one that silently
+// failed without reading raw payload JSON. This lets each exit path below
+// report its outcome back onto that same row. Best-effort: a bookkeeping
+// failure here must never affect the scan's own response to QStash.
+async function markDelivery(
+  db: ReturnType<typeof createServiceClient>,
+  deliveryId: string | null | undefined,
+  fields: { processed: boolean; scan_id?: string | null; error?: string | null },
+): Promise<void> {
+  if (!deliveryId) return;
+  try {
+    await db.from("webhook_deliveries").update(fields).eq("id", deliveryId);
+  } catch { /* best-effort */ }
+}
+
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
 
@@ -96,6 +113,7 @@ export async function POST(req: NextRequest) {
     before_sha:       beforeSha,
     action,
     check_run_id:     checkRunId,
+    delivery_id:      deliveryId,
     pr_additions,
     pr_deletions,
     pr_commits,
@@ -105,6 +123,7 @@ export async function POST(req: NextRequest) {
 
   const [owner, repoName] = repoFullName.split("/");
   const db = createServiceClient();
+  let persistedScanId: string | null = null;
 
   // Idempotency: if a scan for this commit already exists, skip (QStash retry safety)
   const { data: existing } = await db
@@ -138,6 +157,7 @@ export async function POST(req: NextRequest) {
         });
       } catch { /* best-effort — don't block the 200 response */ }
     }
+    await markDelivery(db, deliveryId, { processed: true, scan_id: existing.id });
     return NextResponse.json({ ok: true, skipped: true, reason: "already_scanned" });
   }
 
@@ -167,6 +187,7 @@ export async function POST(req: NextRequest) {
           });
         } catch { /* best-effort — don't block the response */ }
       }
+      await markDelivery(db, deliveryId, { processed: true });
       return NextResponse.json({ ok: true, skipped: true, reason: "superseded" });
     }
 
@@ -227,6 +248,7 @@ export async function POST(req: NextRequest) {
           output: { title: "No scannable files", summary: "No source files to analyse in this PR." },
         });
       }
+      await markDelivery(db, deliveryId, { processed: true });
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
@@ -326,6 +348,7 @@ export async function POST(req: NextRequest) {
       }).select("id").single();
 
       if (scan) {
+        persistedScanId = scan.id;
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
         await cacheDel(cacheKeys.dependencies(orgId));
 
@@ -651,6 +674,7 @@ export async function POST(req: NextRequest) {
           });
         } catch { /* best-effort */ }
       }
+      await markDelivery(db, deliveryId, { processed: true, scan_id: persistedScanId });
       return NextResponse.json({ ok: true, superseded_at_finish: true, scan_id: result.scan_id });
     }
 
@@ -713,6 +737,7 @@ export async function POST(req: NextRequest) {
       } catch { /* non-fatal */ }
     }
 
+    await markDelivery(db, deliveryId, { processed: true, scan_id: persistedScanId });
     return NextResponse.json({
       ok:              true,
       scan_id:         result.scan_id,
@@ -723,6 +748,7 @@ export async function POST(req: NextRequest) {
 
   } catch (err) {
     console.error("[scan-worker] error:", err);
+    await markDelivery(db, deliveryId, { processed: true, scan_id: persistedScanId, error: String(err).slice(0, 500) });
     // Best-effort: mark the check run as failed so the PR isn't left stuck
     // in "Scanning…" indefinitely. Do this before returning 500 (which
     // causes QStash to retry) — on retry the idempotency block above

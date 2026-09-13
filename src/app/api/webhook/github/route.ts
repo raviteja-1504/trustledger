@@ -96,7 +96,10 @@ export async function POST(req: NextRequest) {
 
     // Log delivery receipt — include check_run_id so recovery is possible
     // even if the scan-worker crashes before persisting the scan row.
-    await db.from("webhook_deliveries").insert({
+    // Captures its own id so scan-worker can report processed/scan_id/error
+    // back onto this same row once the job finishes, instead of leaving
+    // those columns permanently at their insert-time defaults.
+    const { data: deliveryRow } = await db.from("webhook_deliveries").insert({
       org_id:          orgId,
       source:          "github",
       event_type:      `pull_request.${action}`,
@@ -104,7 +107,7 @@ export async function POST(req: NextRequest) {
       payload:         { ...payload, tl_check_run_id: checkRunId },
       signature_ok:    true,
       processed:       false,
-    });
+    }).select("id").single();
 
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
     // Deferred via waitUntil rather than awaited: the response below doesn't
@@ -130,6 +133,7 @@ export async function POST(req: NextRequest) {
         before_sha:       beforeSha,
         action,
         check_run_id:     checkRunId,
+        delivery_id:      deliveryRow?.id ?? null,
         pr_additions:     prAdditions,
         pr_deletions:     prDeletions,
         pr_commits:       prCommits,

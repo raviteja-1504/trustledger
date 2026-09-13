@@ -12,6 +12,7 @@ export interface ScanJob {
   before_sha:       string | null;
   action:           string;
   check_run_id:     number | null;
+  delivery_id:      string | null;
   // PR behavior metadata for multi-signal evidence scoring
   pr_additions?:    number;
   pr_deletions?:    number;
