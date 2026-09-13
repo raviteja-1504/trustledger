@@ -233,7 +233,7 @@ function buildFrameworks(data: DashboardData | null, auditStart: string, auditEn
               title:"EU AI Act compliance report",
               description:"Risk management system documentation for audit period",
               status:"pending" },
-            { id:"e-art9-2", control_id:"Art.9", type:"scan-log", auto_collect:true, link:"/vulnerabilities",
+            { id:"e-art9-2", control_id:"Art.9", type:"scan-log", auto_collect:true, link:"/violations",
               title:`${sc} risk classification assessments`,
               description:"CRITICAL/HIGH/MEDIUM/LOW classification per file per PR",
               status:sc>0?"collected":"pending", collected_at:sc>0?now:undefined, expires_at:expiry },
@@ -295,7 +295,7 @@ function buildFrameworks(data: DashboardData | null, auditStart: string, auditEn
           id:"6.2.4", label:"Prevention of Software Attacks", weight:30,
           description:"AI code screened for injection and logic vulnerabilities",
           evidence:[
-            { id:"e-624-1", control_id:"6.2.4", type:"scan-log", auto_collect:true, link:"/vulnerabilities",
+            { id:"e-624-1", control_id:"6.2.4", type:"scan-log", auto_collect:true, link:"/violations",
               title:`${sc} vulnerability signal scans`,
               description:"SQL injection, eval/exec, JWT bypass detection log per PR",
               status:sc>0?"collected":"pending", collected_at:sc>0?now:undefined, expires_at:expiry },

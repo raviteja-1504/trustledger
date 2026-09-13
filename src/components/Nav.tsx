@@ -348,7 +348,6 @@ const PAGE_TITLES: Record<string, { title: string; sub: string; icon: ReactNode 
   "/sla":                  { title: "SLA Dashboard",           sub: "Violation SLA tracking and breach alerts",     icon: <WarnIcon />       },
   "/risk-register":        { title: "Risk Register",           sub: "Likelihood × impact risk log",                 icon: <WarnIcon />       },
   "/evidence":             { title: "Evidence Locker",         sub: "Compliance evidence by framework",             icon: <DocIcon />        },
-  "/vulnerabilities":      { title: "Vulnerability Intelligence", sub: "CVE mapping for AI patterns",              icon: <WarnIcon />       },
   "/violations":           { title: "Policy Violations",       sub: "Active violations requiring remediation",      icon: <BlockIcon />      },
   "/alerts":               { title: "Security Alerts",         sub: "Real-time security incident management",       icon: <BellNavIcon />    },
   "/secrets":              { title: "Secret Scanner",          sub: "Hardcoded credential detection",               icon: <LockIcon />       },

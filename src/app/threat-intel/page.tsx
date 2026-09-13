@@ -515,7 +515,7 @@ export default function ThreatIntelPage() {
                         <p className="text-xs font-bold text-rose-800 mb-1">⚠ Pattern detected in your repositories</p>
                         <p className="text-xs text-rose-600">Run a targeted scan to identify affected files. Check the Vulnerabilities page for specific file locations.</p>
                         <div className="flex gap-2 mt-2">
-                          <Link href="/vulnerabilities" className="text-[10px] font-bold text-rose-700 bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg hover:bg-rose-200 transition-colors">
+                          <Link href="/violations" className="text-[10px] font-bold text-rose-700 bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg hover:bg-rose-200 transition-colors">
                             View in Vulnerabilities →
                           </Link>
                           <Link href="/dependencies" className="text-[10px] font-bold text-rose-700 bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg hover:bg-rose-200 transition-colors">

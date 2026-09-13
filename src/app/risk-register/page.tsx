@@ -152,7 +152,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
         owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
         mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
-        related_cve:"CVE-2021-44228", related_link:"/vulnerabilities",
+        related_cve:"CVE-2021-44228", related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -168,7 +168,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
         owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
         mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
-        related_cve:"CVE-2023-20052", related_link:"/vulnerabilities",
+        related_cve:"CVE-2023-20052", related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -184,7 +184,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
         owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
         mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
-        related_cve:"CVE-2022-21449", related_link:"/vulnerabilities",
+        related_cve:"CVE-2022-21449", related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -918,7 +918,7 @@ export default function RiskRegisterPage() {
 
                     {/* Links + delete */}
                     <div className="flex items-center gap-3 flex-wrap pt-1 border-t border-gray-100">
-                      {r.related_cve&&<Link href="/vulnerabilities" className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg hover:bg-indigo-100">{r.related_cve} ↗</Link>}
+                      {r.related_cve&&<Link href="/violations" className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg hover:bg-indigo-100">{r.related_cve} ↗</Link>}
                       {r.related_link&&<Link href={r.related_link} className="text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-lg hover:bg-gray-100">View Evidence ↗</Link>}
                       <span className="text-[9px] text-gray-400 ml-auto">Identified {fmtDate(r.identified_at)}</span>
                       {!r.auto_derived&&(

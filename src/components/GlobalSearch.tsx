@@ -28,7 +28,6 @@ function makeStaticResults(): SearchResult[] {
   { id:"p-dash",    kind:"page",      title:"Overview Dashboard",        sub:"Org-wide health score and metrics",          href:"/dashboard",      badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-posture", kind:"page",      title:"Security Posture",          sub:"Real-time security health score and trend",  href:"/posture",        badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-comp",    kind:"page",      title:"Compliance Center",         sub:"SOC 2 · EU AI Act · PCI-DSS status",         href:"/compliance",     badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-vuln",    kind:"page",      title:"Vulnerability Intelligence", sub:"CVE mapping for AI code patterns",           href:"/vulnerabilities",badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-viol",    kind:"page",      title:"Policy Violations",         sub:"Active violations requiring remediation",     href:"/violations",     badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-alert",   kind:"page",      title:"Security Alerts",           sub:"Real-time incident management",               href:"/alerts",         badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-secrets", kind:"page",      title:"Secret Scanner",            sub:"Hardcoded credential detection",              href:"/secrets",         badge:"Page",     badgeColor:"#6366f1" },
@@ -51,9 +50,9 @@ function makeStaticResults(): SearchResult[] {
   { id:"v-cv2",     kind:"violation", title:"CRITICAL file unattested — risk_scorer.ts",    sub:"fraud-detection · SLA breach",            href:"/violations", badge:"Violation", badgeColor:"#ef4444" },
   { id:"v-sla",     kind:"violation", title:"SLA breach — stripe_client.py unattested 50h", sub:"payments-api · HIGH risk",                href:"/violations", badge:"Violation", badgeColor:"#f97316" },
   // CVEs
-  { id:"c-sql",     kind:"cve",       title:"CVE-2023-20052 — SQL Injection",      sub:"CVSS 9.8 · CRITICAL · payments-api, fraud-detection", href:"/vulnerabilities", badge:"CVE", badgeColor:"#dc2626" },
-  { id:"c-jwt",     kind:"cve",       title:"CVE-2022-21449 — JWT None Algorithm", sub:"CVSS 9.1 · CRITICAL · auth-service",                  href:"/vulnerabilities", badge:"CVE", badgeColor:"#dc2626" },
-  { id:"c-eval",    kind:"cve",       title:"CVE-2021-44228 — eval/exec RCE",      sub:"CVSS 10.0 · CRITICAL · payments-api, risk-engine",    href:"/vulnerabilities", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-sql",     kind:"cve",       title:"CVE-2023-20052 — SQL Injection",      sub:"CVSS 9.8 · CRITICAL · payments-api, fraud-detection", href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-jwt",     kind:"cve",       title:"CVE-2022-21449 — JWT None Algorithm", sub:"CVSS 9.1 · CRITICAL · auth-service",                  href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-eval",    kind:"cve",       title:"CVE-2021-44228 — eval/exec RCE",      sub:"CVSS 10.0 · CRITICAL · payments-api, risk-engine",    href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
   // PRs
   { id:"pr-482",    kind:"pr",        title:"PR #482 — payments-api",    sub:"CRITICAL risk · 8 files · 91% AI",  href:"/pr/sc_mock_001", badge:"PR", badgeColor:"#10b981" },
   { id:"pr-341",    kind:"pr",        title:"PR #341 — auth-service",    sub:"HIGH risk · 4 files · 68% AI",     href:"/pr/sc_mock_002", badge:"PR", badgeColor:"#10b981" },

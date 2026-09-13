@@ -205,7 +205,6 @@ const ALL_LINKS: Array<{
   { href: "/scans",           label: "Scan History",    icon: ScansNavIcon,    permission: null                         },
   { href: "/secrets",         label: "Secrets",         icon: SecretsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/dependencies",    label: "Dependencies",    icon: DepsIcon,        permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/vulnerabilities", label: "Vulnerabilities", icon: VulnIcon,        permission: null,  roles: ["admin","security_reviewer"] },
   // Compliance
   { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
@@ -525,7 +524,7 @@ export default function Sidebar() {
         {[
           { label:"Overview",    hrefs:["/dashboard","/analytics","/posture"] },
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
-          { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/vulnerabilities"] },
+          { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register","/evidence"] },
           { label:"Audit",       hrefs:["/audit","/aibom","/reports"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
