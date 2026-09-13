@@ -11,7 +11,7 @@ export default function GithubAppSetupPage() {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState<string | null>(null);
 
-  async function createApp(target: "user" | "novapay") {
+  async function createApp() {
     setLoading(true);
     setError(null);
     try {
@@ -21,9 +21,7 @@ export default function GithubAppSetupPage() {
 
       const form = document.createElement("form");
       form.method = "post";
-      form.action = target === "novapay"
-        ? "https://github.com/organizations/novapay/settings/apps/new"
-        : "https://github.com/settings/apps/new";
+      form.action = "https://github.com/settings/apps/new";
 
       const input = document.createElement("input");
       input.type  = "hidden";
@@ -53,19 +51,12 @@ export default function GithubAppSetupPage() {
 
       <div className="space-y-3">
         <button
-          onClick={() => createApp("novapay")}
+          onClick={() => createApp()}
           disabled={loading}
           className="w-full py-3 rounded-2xl font-bold text-white text-sm transition-all disabled:opacity-50"
           style={{ background: "#24292f" }}
         >
-          {loading ? "Redirecting to GitHub…" : "Create app under novapay org →"}
-        </button>
-        <button
-          onClick={() => createApp("user")}
-          disabled={loading}
-          className="w-full py-3 rounded-2xl font-bold text-gray-700 text-sm border border-gray-200 transition-all disabled:opacity-50"
-        >
-          Create under my personal account instead
+          {loading ? "Redirecting to GitHub…" : "Create the GitHub App →"}
         </button>
       </div>
 
