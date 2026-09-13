@@ -72,13 +72,36 @@ async function computeFindings(orgId: string): Promise<DependencyResult> {
   const scanIds = latestScans.map(s => s.id);
   const { data: files } = await db
     .from("scan_files")
-    .select("scan_id, file_path, content, ai_percentage")
+    .select("scan_id, file_path, content, content_hash, ai_percentage")
     .in("scan_id", scanIds);
+
+  // Files carried forward unchanged across an incremental scan don't store
+  // their own copy of `content` (see api/scan-worker/route.ts) -- backfill
+  // from any other row for this org sharing the same content_hash.
+  const missingHashes = [...new Set(
+    (files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string),
+  )];
+  const contentByHash = new Map<string, string>();
+  if (missingHashes.length > 0) {
+    const { data: rows } = await db
+      .from("scan_files")
+      .select("content_hash, content")
+      .eq("org_id", orgId)
+      .in("content_hash", missingHashes)
+      .not("content", "is", null);
+    for (const r of rows ?? []) {
+      if (!contentByHash.has(r.content_hash) && r.content) contentByHash.set(r.content_hash, r.content);
+    }
+  }
 
   const filesByScan = new Map<string, { file_path: string; content: string | null; ai_percentage: number }[]>();
   for (const f of files ?? []) {
     const list = filesByScan.get(f.scan_id) ?? [];
-    list.push(f);
+    list.push({
+      file_path: f.file_path,
+      ai_percentage: f.ai_percentage,
+      content: f.content ?? (f.content_hash ? contentByHash.get(f.content_hash) ?? null : null),
+    });
     filesByScan.set(f.scan_id, list);
   }
 

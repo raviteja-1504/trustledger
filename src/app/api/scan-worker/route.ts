@@ -176,7 +176,7 @@ export async function POST(req: NextRequest) {
     type PrevScanFile = {
       file_path: string; language: string; ai_percentage: number;
       risk_score: string; risk_indicators: unknown; content_hash: string;
-      line_count: number; content: string | null;
+      line_count: number; content: string | null; indicators: unknown;
     };
     type PrevScan = { id: string; files: PrevScanFile[] };
     let prevScan: PrevScan | null = null;
@@ -195,7 +195,7 @@ export async function POST(req: NextRequest) {
       if (prevScanRow) {
         const { data: prevFiles } = await db
           .from("scan_files")
-          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content")
+          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators")
           .eq("scan_id", prevScanRow.id);
         prevScan = { id: prevScanRow.id, files: (prevFiles ?? []) as PrevScanFile[] };
       }
@@ -375,12 +375,24 @@ export async function POST(req: NextRequest) {
         }
 
         if (inheritedFiles.length > 0) {
+          // content is NOT re-copied here -- an unchanged file across N pushes
+          // to the same PR used to store its full source N times (once per
+          // scan_files row), the single largest avoidable storage-growth
+          // source found in the cost audit. Since content is unchanged by
+          // definition (that's what "inherited" means), content_hash already
+          // uniquely identifies it; readers that need the source
+          // (api/scans/[id], api/dependencies) look it up by content_hash
+          // from any row that still has it once and cache the result.
+          // indicators IS still forwarded from the previous scan's row so
+          // this file's findings keep showing up without needing content at
+          // all -- they can't have changed either, since the content hasn't.
           await db.from("scan_files").insert(inheritedFiles.map(f => ({
             scan_id: scan.id, org_id: orgId,
             file_path: f.file_path, language: f.language,
             ai_percentage: f.ai_percentage, risk_score: f.risk_score,
             risk_indicators: f.risk_indicators, content_hash: f.content_hash, line_count: f.line_count,
-            content: f.content,
+            content: null,
+            indicators: f.indicators ?? [],
           })));
 
           // For inherited (unchanged) files, copy attestations from any prior

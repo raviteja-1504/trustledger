@@ -72,6 +72,28 @@ export async function GET(
     .eq("scan_id", params.id)
     .order("ai_percentage", { ascending: false });
 
+  // Unchanged files carried forward across an incremental (delta) scan don't
+  // store their own copy of `content` -- see api/scan-worker/route.ts's
+  // "inherited files" comment -- so backfill it here from whichever row for
+  // this org still has it under the same content_hash. One extra query,
+  // only when needed, instead of storing the same source text N times over
+  // for a file untouched across N pushes to the same PR.
+  const missingHashes = [...new Set(
+    (files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string),
+  )];
+  const contentByHash = new Map<string, string>();
+  if (missingHashes.length > 0) {
+    const { data: rows } = await db
+      .from("scan_files")
+      .select("content_hash, content")
+      .eq("org_id", org_id)
+      .in("content_hash", missingHashes)
+      .not("content", "is", null);
+    for (const r of rows ?? []) {
+      if (!contentByHash.has(r.content_hash) && r.content) contentByHash.set(r.content_hash, r.content);
+    }
+  }
+
   const { data: attests } = await db
     .from("attestations")
     .select("file_path")
@@ -103,6 +125,7 @@ export async function GET(
       // by ai_percentage desc, so this keeps the highest-signal files live
       // and lets large scans fall back to the persisted snapshot beyond
       // that, rather than paying analysis cost per file with no bound).
+      const content = f.content ?? (f.content_hash ? contentByHash.get(f.content_hash) : undefined) ?? null;
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
@@ -111,9 +134,9 @@ export async function GET(
       // re-analysis-on-read pattern already existed), so it's only available
       // for files that get live re-analysis; empty beyond the cap.
       let functionScores: FunctionAIScore[] = [];
-      if (f.content && i < MAX_LIVE_REANALYSIS_FILES) {
+      if (content && i < MAX_LIVE_REANALYSIS_FILES) {
         try {
-          const result = await reanalyze(f.file_path, f.content, f.content_hash);
+          const result = await reanalyze(f.file_path, content, f.content_hash);
           freshIndicators = result.indicators;
           functionScores  = result.function_scores;
         } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
@@ -132,7 +155,7 @@ export async function GET(
         indicators:      freshIndicators ?? storedIndicators ?? [],
         function_scores: functionScores,
         attested:        attestedSet.has(f.file_path),
-        content:         f.content ?? undefined,
+        content:         content ?? undefined,
       };
     })),
   });
