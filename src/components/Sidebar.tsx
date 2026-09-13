@@ -389,15 +389,17 @@ export default function Sidebar() {
     }
 
     refreshAll(true);
-    // 2min safety-net poll, skipped while the tab is hidden -- this runs on
+    // 5min safety-net poll, skipped while the tab is hidden -- this runs on
     // every authenticated page for every user, so it's a meaningful chunk of
-    // total compute. Event-driven refresh (focus, tl:badge, tab becoming
-    // visible again) still gives instant updates right after an action;
-    // the interval only exists to catch drift from changes made elsewhere
+    // total compute. Badges are now a plain existence indicator rather than
+    // an exact count, which tolerates far more staleness, so this can be
+    // long. Event-driven refresh (focus, tl:badge, tab becoming visible
+    // again) still gives instant updates right after an action; the
+    // interval only exists to catch drift from changes made elsewhere
     // (another device, another tab) while this one sits idle but open.
     const id = setInterval(() => {
       if (!document.hidden) refreshAll(false);
-    }, 120_000);
+    }, 300_000);
     const onEvent = () => refreshAll(false);
     const onVisible = () => { if (!document.hidden) refreshAll(false); };
     window.addEventListener("focus",              onEvent);
@@ -426,18 +428,18 @@ export default function Sidebar() {
     router.push("/login");
   }
 
-  // Every count behind this is now a live, exact server value (see the
-  // refreshAll effect above) — so the badge shows the real number, not a
-  // "9+" truncation, and doesn't render at all until the first sync
-  // actually lands (a neutral placeholder dot instead of a misleading "0"
-  // while that's in flight). `ready` gates all badges together so they pop
-  // in as one coherent batch rather than trickling in independently.
+  // Badges are a plain "there's something here" indicator, not an exact
+  // count -- an existence signal tolerates far more staleness than a number
+  // does, which is what lets the sync interval below stay long. Doesn't
+  // render at all until the first sync lands (a neutral placeholder dot
+  // instead of a misleading "nothing" while that's in flight). `ready`
+  // gates all badges together so they pop in as one coherent batch.
   const ready = lastSynced !== null;
 
   function badge(count: number, accent: string, pulse = false): JSX.Element {
     if (!ready) {
       return (
-        <span className="ml-auto shrink-0 w-3 h-3 rounded-full"
+        <span className="ml-auto shrink-0 w-2 h-2 rounded-full"
           style={{ background: "rgba(255,255,255,0.08)" }}
           aria-hidden="true" />
       );
@@ -445,13 +447,11 @@ export default function Sidebar() {
     if (!Number.isFinite(count) || count <= 0) return <></>;
     return (
       <span
-        className="ml-auto shrink-0 inline-flex items-center gap-1 h-[18px] px-1.5 rounded-md text-[10px] font-bold tabular-nums"
-        style={{ background: `${accent}22`, color: accent, border: `1px solid ${accent}40` }}
-        title={pulse ? "Needs attention now" : undefined}
-      >
-        {pulse && <span className="w-1.5 h-1.5 rounded-full shrink-0 animate-pulse" style={{ background: accent }} />}
-        {count > 999 ? "999+" : count}
-      </span>
+        className={clsx("ml-auto shrink-0 w-2 h-2 rounded-full", pulse && "animate-pulse")}
+        style={{ background: accent, boxShadow: `0 0 6px ${accent}99` }}
+        title={pulse ? "Needs attention now" : "There's something here"}
+        aria-label={pulse ? "Needs attention now" : "There's something here"}
+      />
     );
   }
 
