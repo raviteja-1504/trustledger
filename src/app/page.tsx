@@ -23,14 +23,6 @@ function ArrowRightIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-function CheckIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
 function GitHubIcon({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
@@ -40,6 +32,10 @@ function GitHubIcon({ size = 18 }: { size?: number }) {
 }
 
 // ── Data ───────────────────────────────────────────────────────────────────────
+// Mirrors the sidebar's real nav groups (Threats / Code Risk / Compliance /
+// Audit) rather than describing only the AI-detection piece — the product
+// has grown into a full PR-time risk platform, and the homepage was still
+// pitching just the AI% slice of it.
 
 const FEATURES = [
   {
@@ -50,10 +46,35 @@ const FEATURES = [
       </svg>
     ),
     title: "AI Detection Engine",
-    desc: "Combines ML structural analysis with pattern-based vulnerability scanning. Detects SQL injection, hardcoded secrets, eval/exec, and JWT issues introduced by AI assistants.",
+    desc: "47 signals across AST structure, semantic call-graphs, and git provenance — detects AI-generated code and attributes it to the tool that wrote it.",
     accent: "from-violet-500 to-indigo-600",
-    tag: "ML + Pattern",
+    tag: "ML + Static Analysis",
     glow: "rgba(124,58,237,0.2)",
+  },
+  {
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+      </svg>
+    ),
+    title: "Secrets Detection",
+    desc: "Flags hardcoded API keys, tokens, and credentials the moment they land in a PR — before they reach a commit history you can't rewrite.",
+    accent: "from-rose-500 to-pink-600",
+    tag: "Secrets",
+    glow: "rgba(244,63,94,0.2)",
+  },
+  {
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+        <polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" />
+      </svg>
+    ),
+    title: "Dependency & Supply Chain Risk",
+    desc: "Tracks vulnerable and phantom dependencies across every repo, with an exportable AI Bill of Materials (AIBOM) for procurement and audit requests.",
+    accent: "from-sky-500 to-blue-600",
+    tag: "SBOM",
+    glow: "rgba(56,189,248,0.2)",
   },
   {
     icon: (
@@ -62,8 +83,8 @@ const FEATURES = [
         <polyline points="9 12 11 14 15 10" />
       </svg>
     ),
-    title: "Configurable Policy Engine",
-    desc: "Define merge gates per risk level. Require 1 or 2 reviewers for CRITICAL files. Block MEDIUM-risk code in regulated repos. Preset Standard and Strict policies included.",
+    title: "Policy Engine & PR Gating",
+    desc: "Define merge gates per risk level. Require reviewer sign-off on CRITICAL files, block MEDIUM-risk code in regulated repos. Presets included, fully configurable.",
     accent: "from-indigo-500 to-blue-600",
     tag: "Governance",
     glow: "rgba(99,102,241,0.2)",
@@ -75,11 +96,24 @@ const FEATURES = [
         <path d="M3 9h18" /><path d="M9 21V9" />
       </svg>
     ),
-    title: "GitHub Status Checks",
-    desc: "Posts pass/fail status checks directly on pull requests. Blocks merging when policy violations exist. Comments a risk summary so reviewers see exactly what needs attention.",
+    title: "Status Checks Everywhere",
+    desc: "Posts pass/fail checks directly on pull requests across GitHub, GitLab, and Bitbucket. Comments a risk summary so reviewers see exactly what needs attention.",
     accent: "from-slate-600 to-slate-800",
     tag: "Integration",
     glow: "rgba(100,116,139,0.2)",
+  },
+  {
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      </svg>
+    ),
+    title: "Incident Response & Alerting",
+    desc: "Auto-escalates unattested CRITICAL findings into tracked incidents with SLA deadlines, and fires real-time alerts to Slack, email, or PagerDuty on policy breaches.",
+    accent: "from-amber-500 to-orange-600",
+    tag: "Response",
+    glow: "rgba(245,158,11,0.2)",
   },
   {
     icon: (
@@ -89,23 +123,11 @@ const FEATURES = [
         <line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
       </svg>
     ),
-    title: "Compliance Reports",
-    desc: "Generate cryptographically-signed audit packages for SOC 2, EU AI Act Article 9, and PCI-DSS Req. 6.4. Evidence-ready PDFs with attestation trails and risk summaries.",
+    title: "Compliance Evidence",
+    desc: "Cryptographically-signed audit packages mapped to SOC 2, EU AI Act Article 9, and PCI-DSS Req. 6.4 — plus a compliance calendar for recurring obligations.",
     accent: "from-emerald-500 to-teal-600",
     tag: "Compliance",
     glow: "rgba(16,185,129,0.2)",
-  },
-  {
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-      </svg>
-    ),
-    title: "Real-Time Dashboard",
-    desc: "Org-wide health score, AI% trends, per-repo risk breakdown, and an activity feed. See which PRs are blocked, which files are unattested, and where AI adoption is accelerating.",
-    accent: "from-amber-500 to-orange-600",
-    tag: "Visibility",
-    glow: "rgba(245,158,11,0.2)",
   },
   {
     icon: (
@@ -114,11 +136,23 @@ const FEATURES = [
         <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
       </svg>
     ),
-    title: "Reviewer Attestation",
-    desc: "Named reviewer sign-off recorded per file with PGP signature, timestamp, and AI% at time of review. Immutable audit log that answers 'who reviewed this AI code and when.'",
-    accent: "from-rose-500 to-pink-600",
+    title: "Reviewer Attestation & Audit Trail",
+    desc: "Named reviewer sign-off recorded per file with signature, timestamp, and risk context at review time. An immutable log that answers 'who reviewed this, and when' — forever.",
+    accent: "from-fuchsia-500 to-purple-600",
     tag: "Audit Trail",
-    glow: "rgba(244,63,94,0.2)",
+    glow: "rgba(217,70,239,0.2)",
+  },
+  {
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+      </svg>
+    ),
+    title: "Real-Time Security Posture",
+    desc: "One score per org, trended over time — health, AI adoption, attestation coverage, SLA compliance, and open risk, all in a dashboard your board can read.",
+    accent: "from-cyan-500 to-teal-600",
+    tag: "Visibility",
+    glow: "rgba(45,212,191,0.2)",
   },
 ];
 
@@ -126,14 +160,14 @@ const STEPS = [
   {
     n: "01",
     title: "Connect your repos",
-    desc: "Install the GitHub App in under 2 minutes. TrustLedger automatically scans every pull request — no config files, no CI changes.",
+    desc: "Install the GitHub App in under 2 minutes (GitLab and Bitbucket also supported). TrustLedger scans every pull request automatically — no config files, no CI changes.",
     color: "from-indigo-500 to-violet-600",
     num: 1,
   },
   {
     n: "02",
-    title: "See exactly what AI wrote",
-    desc: "Each PR shows AI% per file, detected vulnerability patterns, and a risk score. Expand any file to read the source code with risky lines highlighted.",
+    title: "See every risk in one place",
+    desc: "Each PR shows AI% per file, flagged secrets, vulnerable dependencies, and a risk score. Expand any file to read the source with risky lines highlighted.",
     color: "from-violet-500 to-purple-600",
     num: 2,
   },
@@ -146,72 +180,35 @@ const STEPS = [
   },
 ];
 
-const PRICING = [
+const WHY_ROWS = [
   {
-    name:    "Starter",
-    price:   "$299",
-    period:  "/ month",
-    desc:    "For growing teams adopting AI-assisted development with compliance obligations.",
-    cta:     "Start 14-day free trial",
-    ctaHref: "/login",
-    popular: false,
-    features: [
-      "10 repositories",
-      "1,000 scans / month",
-      "5 team members",
-      "GitHub PR status checks",
-      "AI% detection + risk scoring",
-      "Standard + Strict policy engine",
-      "Slack + email alerts",
-      "PDF reports (SOC 2, PCI-DSS)",
-      "90-day data retention",
-    ],
+    vs: "GitHub Advanced Security / Snyk",
+    them: "Finds known CVEs in dependencies and secrets in committed history — after the fact.",
+    us: "Catches AI-written code risk, hardcoded secrets, and vulnerable dependencies together, at PR time — before any of it merges. Complements GHAS/Snyk; doesn't replace them.",
+    accent: "#6366f1",
   },
   {
-    name:    "Growth",
-    price:   "$999",
-    period:  "/ month",
-    desc:    "For regulated engineering organisations shipping AI code at scale.",
-    cta:     "Start 14-day free trial",
-    ctaHref: "/login",
-    popular: true,
-    features: [
-      "50 repositories",
-      "10,000 scans / month",
-      "20 team members",
-      "Everything in Starter, plus:",
-      "JIRA / Linear ticket creation",
-      "EU AI Act + PCI-DSS compliance reports",
-      "AIBOM (AI Bill of Materials) export",
-      "AI model attribution (Copilot, ChatGPT…)",
-      "PagerDuty / webhook integrations",
-      "Compliance calendar + email reminders",
-      "1-year data retention",
-    ],
+    vs: "SonarQube / Semgrep",
+    them: "Static analysis rules run on the final diff. No concept of who — or what — wrote the code, and no path from a finding to a resolution.",
+    us: "Attributes code to the AI tool that wrote it, tracks every finding through to a named reviewer's sign-off, and rolls it into an SLA-tracked queue instead of a report nobody closes out.",
+    accent: "#10b981",
   },
   {
-    name:    "Enterprise",
-    price:   "Custom",
-    period:  "",
-    desc:    "Unlimited scale, custom SLA, and dedicated support for large organisations.",
-    cta:     "Talk to sales",
-    ctaHref: "mailto:sales@trustledger.dev",
-    popular: false,
-    features: [
-      "Unlimited repositories + scans",
-      "Unlimited team members",
-      "SSO / SAML 2.0 (Okta, Azure AD)",
-      "SCIM user provisioning",
-      "Self-hosted Docker deployment",
-      "Multi-org MSP dashboard",
-      "Custom policy engine",
-      "Dedicated Slack support",
-      "MSA + DPA + custom data residency",
-      "Custom SLA and uptime guarantee",
-    ],
+    vs: "Manual review + spreadsheets",
+    them: "Reviewers eyeball the diff, chase compliance evidence by hand, and track incidents in a doc that's out of date by Friday.",
+    us: "Every PR gets a risk score, a named attestation, and an audit-ready trail. Violations, incidents, and compliance evidence live in one system that's always current — because it's generated, not maintained.",
+    accent: "#f59e0b",
   },
 ];
 
+const ARCH_SIGNALS = [
+  { label: "AST structural analysis",        desc: "Parses source into an abstract syntax tree and scores structural patterns that correlate with LLM output — long function bodies, uniform naming, missing edge-case handling." },
+  { label: "SSA-form taint tracking",         desc: "Converts code to static single-assignment form and follows tainted data across function boundaries. Catches injection paths and credential leaks that single-file scanners miss." },
+  { label: "Cross-file semantic graph",       desc: "Builds a call graph across the entire PR. Detects AI-generated glue code that wires together real modules in unsafe ways — a class of bug invisible to per-file tools." },
+  { label: "Git provenance scoring",          desc: "Scores commit velocity, message entropy, signing rate, and LOC/commit ratio against norms. A 1,300 LOC/commit average from a single author is a signal, not a fact — weighted accordingly." },
+  { label: "Developer baseline deviation",    desc: "Tracks each GitHub login's historical AI%, file count, and commit cadence. A sudden 3× spike in AI content on a PR flags as anomalous even if the absolute score is moderate." },
+  { label: "AI tool attribution",             desc: "Detects .cursor/, .claude/, .copilot-instructions, Windsurf config, and inline marker comments to attribute code to specific AI assistants — not just 'AI wrote this' but 'Cursor wrote this'." },
+];
 
 // ── NavBar ─────────────────────────────────────────────────────────────────────
 
@@ -229,7 +226,7 @@ function NavBar() {
         </div>
 
         <nav className="hidden md:flex items-center gap-6">
-          {["Features", "How it works", "Pricing"].map(l => (
+          {["Features", "Why TrustLedger", "How it works"].map(l => (
             <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`}
               className="text-sm text-white/45 hover:text-white/80 transition-colors font-medium">
               {l}
@@ -262,18 +259,14 @@ function HeroSection() {
 
       {/* Layered background glows */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        {/* Primary center glow */}
         <div className="absolute top-[38%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] rounded-full"
           style={{ background: "radial-gradient(circle, rgba(99,102,241,0.18) 0%, transparent 65%)" }} />
-        {/* Secondary glows */}
         <div className="absolute bottom-[5%] left-[15%] w-[500px] h-[350px] rounded-full"
           style={{ background: "radial-gradient(circle, rgba(168,85,247,0.1) 0%, transparent 70%)" }} />
         <div className="absolute top-[20%] right-[10%] w-[350px] h-[350px] rounded-full"
           style={{ background: "radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 70%)" }} />
-        {/* Grid */}
         <div className="absolute inset-0"
           style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)", backgroundSize: "64px 64px", opacity: 1 }} />
-        {/* Horizontal fade gradient over grid bottom */}
         <div className="absolute bottom-0 left-0 right-0 h-40"
           style={{ background: "linear-gradient(to top, #020617, transparent)" }} />
       </div>
@@ -283,21 +276,21 @@ function HeroSection() {
         <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-indigo-300 border"
           style={{ background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.25)" }}>
           <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-          Now with EU AI Act compliance reports
+          One gate for AI code, secrets & dependency risk
         </div>
 
         {/* Headline */}
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black text-white tracking-tight leading-[1.05]">
           Know exactly<br />
           <span style={{ background: "linear-gradient(90deg, #818cf8, #a78bfa, #c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>
-            how much AI
+            what shipped
           </span><br />
-          wrote your code.
+          in every PR.
         </h1>
 
         {/* Subheadline */}
         <p className="text-lg sm:text-xl text-white/45 max-w-2xl mx-auto leading-relaxed">
-          TrustLedger scans every pull request for AI-generated code, flags security risks before they reach production, and records human reviewer sign-off — so you can always prove what shipped.
+          TrustLedger scans every pull request for AI-generated code, hardcoded secrets, and vulnerable dependencies — then gates merges on policy and records human sign-off, so you can always prove what shipped.
         </p>
 
         {/* CTAs */}
@@ -305,20 +298,19 @@ function HeroSection() {
           <Link href="/login"
             className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white font-bold text-sm transition-all active:scale-[0.98]"
             style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 4px 24px rgba(99,102,241,0.45)" }}>
-            Start free 14-day trial
+            Get started free
             <ArrowRightIcon size={15} />
           </Link>
           <Link href="/dashboard"
             className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/70 font-semibold text-sm transition-all border border-white/10 hover:border-white/20 hover:text-white/90"
             style={{ background: "rgba(255,255,255,0.04)" }}>
             <GitHubIcon size={15} />
-            View live demo
+            Explore the dashboard
           </Link>
         </div>
 
-        {/* Social proof */}
         <p className="text-xs text-white/25 font-medium pt-2">
-          Trusted by 50+ engineering teams · No credit card required to start
+          No credit card required to start
         </p>
       </div>
 
@@ -343,10 +335,10 @@ function HeroSection() {
           <div className="p-5 space-y-4">
             <div className="grid grid-cols-4 gap-3">
               {[
-                { label: "Health Score", value: "74", color: "#f59e0b" },
-                { label: "AI Content",   value: "48%", color: "#a78bfa" },
-                { label: "Attested",     value: "81%", color: "#34d399" },
-                { label: "Blocked PRs",  value: "3",   color: "#f87171" },
+                { label: "Health Score",   value: "74", color: "#f59e0b" },
+                { label: "Open Violations", value: "12", color: "#f87171" },
+                { label: "Secrets Found",  value: "3",  color: "#a78bfa" },
+                { label: "SLA Breaches",   value: "0",  color: "#38bdf8" },
               ].map(s => (
                 <div key={s.label} className="rounded-xl p-3 border border-white/[0.06]"
                   style={{ background: "rgba(255,255,255,0.04)" }}>
@@ -362,15 +354,15 @@ function HeroSection() {
                 <span className="text-[10px] text-white/20 font-mono">{ORG} · last 7 days</span>
               </div>
               {[
-                { repo: "payments-core",   pr: "#104", risk: "CRITICAL", ai: "94%", bg: "rgba(124,58,237,0.12)", color: "#a78bfa" },
-                { repo: "auth-gateway",    pr: "#204", risk: "HIGH",     ai: "71%", bg: "rgba(249,115,22,0.10)", color: "#fb923c" },
-                { repo: "fraud-detection", pr: "#303", risk: "CRITICAL", ai: "88%", bg: "rgba(124,58,237,0.12)", color: "#a78bfa" },
+                { repo: "payments-core",   pr: "#104", risk: "CRITICAL", finding: "AI code · 94%",   bg: "rgba(124,58,237,0.12)", color: "#a78bfa" },
+                { repo: "auth-gateway",    pr: "#204", risk: "HIGH",     finding: "Vulnerable dep",  bg: "rgba(249,115,22,0.10)", color: "#fb923c" },
+                { repo: "fraud-detection", pr: "#303", risk: "CRITICAL", finding: "Hardcoded secret",bg: "rgba(244,63,94,0.12)",  color: "#fb7185" },
               ].map(row => (
                 <div key={row.pr} className="px-4 py-2.5 flex items-center gap-4 border-b border-white/[0.04] last:border-0">
                   <span className="font-mono text-xs text-white/45 shrink-0">{row.repo}</span>
                   <span className="text-[10px] text-white/25 font-mono">{row.pr}</span>
                   <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-md" style={{ background: row.bg, color: row.color }}>{row.risk}</span>
-                  <span className="text-xs font-bold tabular-nums w-8 text-right" style={{ color: row.color }}>{row.ai}</span>
+                  <span className="text-xs font-semibold w-28 text-right" style={{ color: row.color }}>{row.finding}</span>
                 </div>
               ))}
             </div>
@@ -402,10 +394,10 @@ function FeaturesSection() {
             Features
           </span>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
-            Everything you need to govern AI code
+            Everything you need to govern what ships
           </h2>
           <p className="text-white/40 mt-3 max-w-xl mx-auto text-lg">
-            From first scan to audit report — TrustLedger covers the entire AI code lifecycle in your engineering workflow.
+            From first scan to audit report — TrustLedger covers AI code, secrets, and dependency risk in one PR-time workflow.
           </p>
         </div>
 
@@ -450,39 +442,9 @@ function FeaturesSection() {
 
 // ── WhySection ────────────────────────────────────────────────────────────────
 
-const WHY_ROWS = [
-  {
-    vs: "GitHub Advanced Security / Snyk",
-    them: "Finds known CVEs and dependency vulnerabilities in human-written code.",
-    us: "Detects AI-generated code patterns — structural, semantic, and behavioral — and enforces human sign-off before it ships. Complements GHAS; doesn't replace it.",
-    accent: "#6366f1",
-  },
-  {
-    vs: "SonarQube / Semgrep",
-    them: "Static analysis rules run on the final diff. No concept of who or what wrote the code.",
-    us: "47-signal scanner attributes code to AI tooling (Cursor, Copilot, Claude Code, ChatGPT) and tracks deviation from each developer's historical baseline — catching AI spikes even when the code is syntactically clean.",
-    accent: "#10b981",
-  },
-  {
-    vs: "Manual PR review",
-    them: "Reviewers eyeball the diff. AI-generated code looks like human code. Reviewers miss it.",
-    us: "Every PR gets a per-file AI% score, a risk level, and a named attestation requirement. Reviewers sign off with cryptographic proof. The audit trail answers 'who reviewed this AI code and when' — forever.",
-    accent: "#f59e0b",
-  },
-];
-
-const ARCH_SIGNALS = [
-  { label: "AST structural analysis",        desc: "Parses source into an abstract syntax tree and scores structural patterns that correlate with LLM output — long function bodies, uniform naming, missing edge-case handling." },
-  { label: "SSA-form taint tracking",         desc: "Converts code to static single-assignment form and follows tainted data across function boundaries. Catches injection paths and credential leaks that single-file scanners miss." },
-  { label: "Cross-file semantic graph",       desc: "Builds a call graph across the entire PR. Detects AI-generated glue code that wires together real modules in unsafe ways — a class of bug invisible to per-file tools." },
-  { label: "Git provenance scoring",          desc: "Scores commit velocity, message entropy, signing rate, and LOC/commit ratio against norms. A 1,300 LOC/commit average from a single author is a signal, not a fact — weighted accordingly." },
-  { label: "Developer baseline deviation",    desc: "Tracks each GitHub login's historical AI%, file count, and commit cadence. A sudden 3× spike in AI content on a PR flags as anomalous even if the absolute score is moderate." },
-  { label: "AI tool attribution",             desc: "Detects .cursor/, .claude/, .copilot-instructions, Windsurf config, and inline marker comments to attribute code to specific AI assistants — not just 'AI wrote this' but 'Cursor wrote this'." },
-];
-
 function WhySection() {
   return (
-    <section className="py-24 px-5"
+    <section id="why-trustledger" className="py-24 px-5"
       style={{ background: "linear-gradient(180deg, #020617 0%, #080c1a 100%)" }}>
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
@@ -491,10 +453,10 @@ function WhySection() {
             Why TrustLedger
           </span>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
-            Different problem. Different tool.
+            One platform, not five point tools.
           </h2>
           <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">
-            Existing security scanners were built for human-written code. TrustLedger is built specifically for the AI coding era — where the risk is not just what the code does, but who (or what) wrote it.
+            Existing scanners were built for human-written code and one risk type at a time. TrustLedger covers AI code, secrets, and dependency risk together, with a single audit trail behind all of it.
           </p>
         </div>
 
@@ -542,7 +504,7 @@ function ArchSection() {
             A real detection engine, not regex.
           </h2>
           <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">
-            47 signals across six analysis layers. Every scan combines static, semantic, behavioral, and provenance evidence — then weights them against your team's own baseline.
+            47 signals across six analysis layers power the AI-detection half of the platform. Every scan combines static, semantic, behavioral, and provenance evidence — then weights it against your team's own baseline.
           </p>
         </div>
 
@@ -575,6 +537,7 @@ function ArchSection() {
               { label: "File fetch", color: "#1e3a5f" },
               { label: "AST + SSA", color: "#2d1f5e" },
               { label: "Semantic graph", color: "#2d1f5e" },
+              { label: "Secrets + deps", color: "#3b1f1f" },
               { label: "Git provenance", color: "#1a3a2a" },
               { label: "ML classifier", color: "#1a3a2a" },
               { label: "Risk score", color: "#3b1f1f" },
@@ -629,7 +592,7 @@ function HowItWorksSection() {
             Up and running in 5 minutes
           </h2>
           <p className="text-white/40 mt-3 text-lg">
-            No CI/CD changes. No config files. Just install the GitHub App and every PR is scanned automatically.
+            No CI/CD changes. No config files. Install once and every PR is scanned for AI code, secrets, and dependency risk automatically.
           </p>
         </div>
 
@@ -652,99 +615,12 @@ function HowItWorksSection() {
         <div className="mt-10 p-5 rounded-2xl overflow-x-auto border border-white/[0.08]"
           style={{ background: "#0d1117" }}>
           <p className="text-xs text-white/30 font-mono mb-3"># Or submit scans via the REST API</p>
-          <pre className="text-xs text-emerald-400 font-mono leading-relaxed whitespace-pre">{`curl -X POST https://api.trustledger.dev/api/v1/scan \\
-  -H 'Authorization: Bearer YOUR_TOKEN' \\
+          <pre className="text-xs text-emerald-400 font-mono leading-relaxed whitespace-pre">{`curl -X POST https://app.trustledger.dev/api/scans \\
+  -H 'X-TrustLedger-Key: YOUR_API_KEY' \\
   -H 'Content-Type: application/json' \\
   -d '{"repo": "myorg/myrepo", "pr_number": 42,
        "commit_sha": "abc1234",
        "files": [{"path": "src/auth.py", "content": "..."}]}'`}</pre>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-
-// ── PricingSection ─────────────────────────────────────────────────────────────
-
-function PricingSection() {
-  return (
-    <section id="pricing" className="py-24 px-5"
-      style={{ background: "linear-gradient(180deg, #0d1320 0%, #0a0f1e 100%)" }}>
-      <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="text-xs font-bold uppercase tracking-widest text-indigo-400 px-3 py-1 rounded-full border"
-            style={{ background: "rgba(99,102,241,0.1)", borderColor: "rgba(99,102,241,0.25)" }}>
-            Pricing
-          </span>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">
-            Simple, transparent pricing
-          </h2>
-          <p className="text-white/40 mt-3 text-lg">
-            Start free. Scale as your team grows. No surprises.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {PRICING.map(plan => (
-            <div key={plan.name} className={`relative flex flex-col rounded-2xl p-6 transition-all duration-200`}
-              style={plan.popular ? {
-                background: "linear-gradient(160deg, rgba(99,102,241,0.15) 0%, rgba(124,58,237,0.08) 100%)",
-                border: "1px solid rgba(99,102,241,0.35)",
-                boxShadow: "0 8px 40px rgba(99,102,241,0.2)",
-              } : {
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.08)",
-              }}>
-
-              {plan.popular && (
-                <div className="absolute -top-3.5 left-1/2 -translate-x-1/2">
-                  <span className="text-white text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full"
-                    style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 2px 10px rgba(99,102,241,0.4)" }}>
-                    Most popular
-                  </span>
-                </div>
-              )}
-
-              <div className="mb-5">
-                <p className="text-sm font-bold text-white">{plan.name}</p>
-                <div className="flex items-end gap-1 mt-2">
-                  <span className={`text-4xl font-black ${plan.popular ? "text-indigo-300" : "text-white"}`}>
-                    {plan.price}
-                  </span>
-                  {plan.period && <span className="text-white/35 text-sm mb-1">{plan.period}</span>}
-                </div>
-                <p className="text-xs text-white/35 mt-1.5 leading-relaxed">{plan.desc}</p>
-              </div>
-
-              <ul className="space-y-2.5 flex-1 mb-6">
-                {plan.features.map(f => (
-                  <li key={f} className="flex items-start gap-2.5 text-sm text-white/55">
-                    <span className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                      plan.popular ? "bg-indigo-500/20 text-indigo-400" : "bg-white/8 text-white/35"
-                    }`}>
-                      <CheckIcon size={10} />
-                    </span>
-                    {f}
-                  </li>
-                ))}
-              </ul>
-
-              <Link href={(plan as typeof plan & { ctaHref?: string }).ctaHref ?? "/login"}
-                className="w-full flex items-center justify-center py-3 rounded-xl font-bold text-sm transition-all"
-                style={plan.popular ? {
-                  background: "linear-gradient(135deg,#6366f1,#7c3aed)",
-                  color: "white",
-                  boxShadow: "0 4px 16px rgba(99,102,241,0.4)",
-                } : {
-                  background: "rgba(255,255,255,0.07)",
-                  color: "rgba(255,255,255,0.7)",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                }}>
-                {plan.cta}
-              </Link>
-            </div>
-          ))}
         </div>
       </div>
     </section>
@@ -767,22 +643,22 @@ function CTASection() {
           <ShieldIcon size={26} />
         </div>
         <h2 className="text-4xl font-black text-white tracking-tight">
-          Stop shipping AI code blind.
+          Stop shipping risk blind.
         </h2>
         <p className="text-white/45 text-lg max-w-xl mx-auto leading-relaxed">
-          Every AI assistant can introduce vulnerabilities. TrustLedger makes sure a human reviewed and signed off before any of it reaches production.
+          AI assistants, leaked secrets, and vulnerable dependencies can all slip into a PR unnoticed. TrustLedger makes sure a human reviewed and signed off before any of it reaches production.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
           <Link href="/dashboard"
             className="flex items-center gap-2 px-8 py-4 rounded-xl text-white font-bold transition-all active:scale-[0.98]"
             style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 4px 24px rgba(99,102,241,0.45)" }}>
-            See the live demo
+            See the platform in action
             <ArrowRightIcon />
           </Link>
           <a href="mailto:hello@trustledger.dev"
             className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/60 font-semibold transition-all border border-white/[0.1] hover:border-white/[0.2] hover:text-white/80"
             style={{ background: "rgba(255,255,255,0.04)" }}>
-            Talk to sales
+            Contact us
           </a>
         </div>
       </div>
@@ -806,7 +682,7 @@ function Footer() {
             <span className="font-bold text-white text-sm">TrustLedger</span>
           </div>
           <p className="text-xs text-white/25 max-w-xs leading-relaxed">
-            AI code provenance tracking and attestation for teams that care about what ships.
+            AI code, secrets, and dependency risk — scanned, gated, and attested — for teams that care about what ships.
           </p>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-8 text-sm">
@@ -814,10 +690,10 @@ function Footer() {
             <p className="font-bold text-white/40 text-xs uppercase tracking-wider mb-3">Product</p>
             <ul className="space-y-2">
               {[
-                { label: "Features",  href: "#features"     },
-                { label: "Pricing",   href: "#pricing"      },
-                { label: "How it works", href: "#how-it-works" },
-                { label: "Live demo", href: "/dashboard"    },
+                { label: "Features",     href: "#features"        },
+                { label: "Why TrustLedger", href: "#why-trustledger" },
+                { label: "How it works", href: "#how-it-works"    },
+                { label: "Explore dashboard", href: "/dashboard"  },
               ].map(l => (
                 <li key={l.label}>
                   <a href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</a>
@@ -879,7 +755,6 @@ export default function LandingPage() {
       <WhySection />
       <ArchSection />
       <HowItWorksSection />
-      <PricingSection />
       <CTASection />
       <Footer />
     </div>
