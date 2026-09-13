@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase"; // used in handleSetPassword
@@ -172,6 +173,22 @@ function DemoLoginPage() {
 
 // ── Production login page ─────────────────────────────────────────────────────
 
+function BackHomeLink() {
+  return (
+    <Link href="/"
+      className="fixed top-6 left-6 flex items-center gap-1.5 text-xs font-medium transition-colors"
+      style={{ color: "rgba(255,255,255,0.4)" }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.75)"; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.4)"; }}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+      </svg>
+      Back to home
+    </Link>
+  );
+}
+
 function GitHubIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -259,6 +276,7 @@ function ProductionLoginPage() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-4"
         style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e1040 50%,#0f172a 100%)" }}>
+        <BackHomeLink />
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center mb-8">
             <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-4"
@@ -294,6 +312,7 @@ function ProductionLoginPage() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-4"
       style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e1040 50%,#0f172a 100%)" }}>
+      <BackHomeLink />
       <div className="w-full max-w-sm">
 
         {/* Branding */}
