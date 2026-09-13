@@ -11,6 +11,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { createServiceClient } from "@/lib/supabase";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { verifyWebhookSignature, getInstallationToken, createCheckRun } from "@/lib/github";
@@ -106,8 +107,19 @@ export async function POST(req: NextRequest) {
     });
 
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
-    try {
-      await enqueueScan({
+    // Deferred via waitUntil rather than awaited: the response below doesn't
+    // depend on enqueueScan's outcome (it already reports queued: true
+    // unconditionally), so there's no reason to hold the webhook response on
+    // it. This matters even with QStash working correctly, because
+    // enqueueScan() has its own directFetch() fallback that runs the entire
+    // scan inline if QStash is ever unavailable for any reason -- awaiting
+    // that here is exactly what caused real GitHub webhook deliveries to
+    // time out ("context deadline exceeded... awaiting headers") the last
+    // time QStash's publish call started failing. waitUntil keeps this
+    // function alive to finish the work after the response is already sent,
+    // instead of a bare un-awaited promise that Vercel could kill outright.
+    waitUntil(
+      enqueueScan({
         org_id:           orgId,
         installation_id:  installationId!,
         repo_full_name:   repoFullName,
@@ -123,10 +135,8 @@ export async function POST(req: NextRequest) {
         pr_commits:       prCommits,
         pr_changed_files: prChangedFiles,
         pr_created_at:    prCreatedAt,
-      });
-    } catch (err) {
-      console.error("[webhook] enqueueScan failed:", err);
-    }
+      }).catch(err => console.error("[webhook] enqueueScan failed:", err)),
+    );
 
     return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });
   }

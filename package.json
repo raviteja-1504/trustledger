@@ -33,6 +33,7 @@
     "@upstash/qstash": "^2.11.1",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
+    "@vercel/functions": "^3.9.7",
     "clsx": "^2.1.1",
     "next": "^13.5.11",
     "posthog-js": "^1.378.1",
