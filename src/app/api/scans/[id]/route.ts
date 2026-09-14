@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { analyzeFile, type FunctionAIScore } from "@/lib/scanner";
+import { analyzeFile } from "@/lib/scanner";
 import { cached, TTL } from "@/lib/cache";
 
 // Hard bound on worst-case execution time. analyzeFile() is fully
@@ -21,7 +21,6 @@ const MAX_LIVE_REANALYSIS_FILES = 60;
 
 interface ReanalysisResult {
   indicators: { id: string; label: string; severity: string; line?: number; detail?: string }[];
-  function_scores: FunctionAIScore[];
 }
 
 // Re-running analyzeFile() (AST/SSA/semantic-graph/ML-classifier/47-signal
@@ -43,7 +42,6 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
       indicators: analysis.indicators
         .filter(i2 => i2.line != null)
         .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail })),
-      function_scores: analysis.function_scores,
     };
   });
 }
@@ -59,7 +57,7 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, repository_trust")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
@@ -110,7 +108,6 @@ export async function GET(
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
-    repository_trust:    scan.repository_trust ?? null,
     files: await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
       // the snapshot written at scan time — if detection patterns improve
@@ -130,15 +127,10 @@ export async function GET(
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
       let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] | null = null;
-      // function_scores was never persisted at scan time (added after this
-      // re-analysis-on-read pattern already existed), so it's only available
-      // for files that get live re-analysis; empty beyond the cap.
-      let functionScores: FunctionAIScore[] = [];
       if (content && i < MAX_LIVE_REANALYSIS_FILES) {
         try {
           const result = await reanalyze(f.file_path, content, f.content_hash);
           freshIndicators = result.indicators;
-          functionScores  = result.function_scores;
         } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
       }
       return {
@@ -153,7 +145,6 @@ export async function GET(
         // content was unavailable or re-analysis threw (freshIndicators is
         // null in both cases, distinct from a legitimate empty array).
         indicators:      freshIndicators ?? storedIndicators ?? [],
-        function_scores: functionScores,
         attested:        attestedSet.has(f.file_path),
         content:         content ?? undefined,
       };

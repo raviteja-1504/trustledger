@@ -62,22 +62,6 @@ export interface ScanIndicator {
   supportingDetectors?: string[];
 }
 
-export interface FunctionAIScore {
-  name:          string;
-  line:          number;
-  endLine:       number;
-  ai_percentage: number;
-  // How many of the 45 signals found enough content in this function body to
-  // even apply (not how many "fired" as AI-like -- just how many had an
-  // opinion at all). A short function body has too little surface area for
-  // most signals to engage, so ai_percentage collapses toward the sigmoid's
-  // ~2.9% floor (combined=0) regardless of the function's real authorship --
-  // that floor looks like a confident low measurement but is actually "no
-  // signal". Callers should treat a low applicable_signals count as "not
-  // enough content to assess", not as evidence of human authorship.
-  applicable_signals: number;
-}
-
 export interface FixSuggestion {
   vuln_id:      string;
   title:        string;
@@ -162,7 +146,6 @@ export interface FileAnalysis {
   ast_risks:          AstRisk[];
   ssa_taint_paths:    TaintPath[];
   ml_score:           MLScoreResult | null;
-  function_scores:    FunctionAIScore[];
 }
 
 // ── Language detection ─────────────────────────────────────────────────────────
@@ -3710,7 +3693,6 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     line_attribution: [], explained_signals: [],
     exploitability: null, compliance: null,
     ast_metrics: null, ast_risks: [], ssa_taint_paths: [], ml_score: null,
-    function_scores: [],
   });
 
   if (!content || content.trim().length < 50) return emptyResult();
@@ -3915,25 +3897,6 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     }
   }
 
-  // Per-function AI attribution -- same signal set as the file-level score,
-  // just re-run against each function's own body instead of the whole file.
-  // Skips trivial functions (< 5 lines, e.g. one-line getters) where the
-  // signal set has too little content to say anything meaningful, and caps
-  // at 40 functions/file as a bound against pathological generated files
-  // with hundreds of tiny functions.
-  const function_scores: FunctionAIScore[] = [];
-  if (!fileMeta.skipAI) {
-    for (const fn of astResult.functions.slice(0, 40)) {
-      const bodyLen = fn.endLine - fn.line;
-      if (bodyLen < 5) continue;
-      const bodyLines = extractFunctionBody(content, fn.line, fn.endLine);
-      const bodyContent = bodyLines.join("\n");
-      if (bodyContent.trim().length < 50) continue;
-      const { score, applicableCount } = computeAIPercentage(bodyContent, lang, bodyLines.length, 0, attribution.humanEvidence);
-      function_scores.push({ name: fn.name || "(anonymous)", line: fn.line, endLine: fn.endLine, ai_percentage: score, applicable_signals: applicableCount });
-    }
-  }
-
   // ML classifier — independent probability estimate
   const ml_score = !fileMeta.skipAI
     ? classifyCode(content, ast_metrics, ai_percentage)
@@ -3944,7 +3907,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     content_hash: hash, line_count: lineCount, attribution, scan_quality,
     fix_suggestions, watermarks, supply_chain, behavioral_risk, provenance,
     line_attribution, explained_signals, exploitability, compliance,
-    ast_metrics, ast_risks, ssa_taint_paths, ml_score, function_scores,
+    ast_metrics, ast_risks, ssa_taint_paths, ml_score,
   };
 }
 
@@ -4195,20 +4158,6 @@ export interface CrossFileConsistency {
   mixed_languages:   boolean;          // PR spans multiple languages
 }
 
-export interface RepositoryTrustScore {
-  score:             number;  // 0–1 (1 = fully trusted)
-  factors: {
-    ai_percentage:    number;  // weighted AI% across all files
-    security_density: number;  // security findings per 100 lines
-    cicd_trust:       number;  // CI/CD pipeline score
-    dep_risk:         number;  // dependency risk
-    compliance_score: number;  // compliance score
-    watermark_count:  number;  // total watermarks found
-    backdoor_risk:    number;  // max behavioral risk score
-  };
-  label:  "TRUSTED" | "LOW_RISK" | "MODERATE_RISK" | "HIGH_RISK" | "CRITICAL_RISK";
-}
-
 export interface ScanOutput {
   scan_id:              string;
   repo:                 string;
@@ -4226,7 +4175,6 @@ export interface ScanOutput {
   cicd_trust:           CICDTrustScore | null;
   trust_chain:          TrustChain;
   cross_file_consistency: CrossFileConsistency;
-  repository_trust:     RepositoryTrustScore;
   dep_report:           DependencyReport | null;
   compliance:           ComplianceReport;
   skipped_unchanged:    number;  // incremental scan: files skipped because hash unchanged
@@ -4535,39 +4483,6 @@ export function runScan(input: ScanInput): ScanOutput {
     baseline_deviation: baselineDev ?? undefined,
   };
 
-  // ── Repository trust score ────────────────────────────────────────────────
-  const totalLines2 = files.reduce((s, f) => s + f.line_count, 0) || 1;
-  const secDensity  = (criticalCount + highCount) / (totalLines2 / 100);
-  const depRisk     = dep_report ? 1 - dep_report.overall_score : 0;
-  const cicdScore   = cicd_trust ? cicd_trust.score : 1;
-  const compScore   = compliance.overall_score;
-  const maxBehav    = Math.max(0, ...files.map(f => f.behavioral_risk.score));
-  const wmCount     = files.reduce((s, f) => s + f.watermarks.length, 0);
-  const factors = {
-    ai_percentage:    boostedAI,
-    security_density: Math.min(1, secDensity / 5),
-    cicd_trust:       cicdScore,
-    dep_risk:         depRisk,
-    compliance_score: compScore,
-    watermark_count:  wmCount,
-    backdoor_risk:    maxBehav,
-  };
-  const trustRaw = 1
-    - boostedAI          * 0.25
-    - factors.security_density * 0.20
-    - (1 - cicdScore)    * 0.10
-    - depRisk            * 0.15
-    - (1 - compScore)    * 0.10
-    - Math.min(1, wmCount * 0.3) * 0.10
-    - maxBehav           * 0.10;
-  const trustScore = Math.max(0, Math.min(1, trustRaw));
-  const trustLabel: RepositoryTrustScore["label"] =
-    trustScore >= 0.85 ? "TRUSTED"
-    : trustScore >= 0.70 ? "LOW_RISK"
-    : trustScore >= 0.50 ? "MODERATE_RISK"
-    : trustScore >= 0.30 ? "HIGH_RISK"
-    : "CRITICAL_RISK";
-  const repository_trust: RepositoryTrustScore = { score: trustScore, factors, label: trustLabel };
 
   return {
     scan_id,
@@ -4593,7 +4508,6 @@ export function runScan(input: ScanInput): ScanOutput {
     cicd_trust,
     trust_chain,
     cross_file_consistency,
-    repository_trust,
     dep_report,
     compliance,
     skipped_unchanged,

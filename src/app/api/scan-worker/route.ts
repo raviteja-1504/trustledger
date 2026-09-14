@@ -344,7 +344,6 @@ export async function POST(req: NextRequest) {
         check_run_id:        checkRunId,
         installation_id:     installationId,
         evidence_breakdown:  result.evidence_breakdown,
-        repository_trust:    result.repository_trust,
       }).select("id").single();
 
       if (scan) {

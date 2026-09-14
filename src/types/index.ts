@@ -10,14 +10,6 @@ export interface FileIndicator {
   detail?:  string;
 }
 
-export interface FunctionScore {
-  name:          string;
-  line:          number;
-  endLine:       number;
-  ai_percentage: number;
-  applicable_signals?: number;
-}
-
 export interface FileResult {
   file_path: string;
   language: string;
@@ -25,7 +17,6 @@ export interface FileResult {
   risk_score: RiskLevel;
   risk_indicators: string[];
   indicators?: FileIndicator[];
-  function_scores?: FunctionScore[];
   attested: boolean;
   content?: string;
 }
@@ -47,20 +38,6 @@ export interface EvidenceBreakdown {
   };
 }
 
-export interface RepositoryTrustScore {
-  score: number;  // 0-1 (1 = fully trusted)
-  factors: {
-    ai_percentage:    number;
-    security_density: number;
-    cicd_trust:       number;
-    dep_risk:         number;
-    compliance_score: number;
-    watermark_count:  number;
-    backdoor_risk:    number;
-  };
-  label: "TRUSTED" | "LOW_RISK" | "MODERATE_RISK" | "HIGH_RISK" | "CRITICAL_RISK";
-}
-
 export interface ScanResult {
   scan_id: string;
   repo: string;
@@ -75,7 +52,6 @@ export interface ScanResult {
   triggered_by?: string;
   timestamp: string;
   evidence_breakdown?: EvidenceBreakdown;
-  repository_trust?:   RepositoryTrustScore;
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

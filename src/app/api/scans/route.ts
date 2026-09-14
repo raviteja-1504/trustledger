@@ -166,7 +166,6 @@ export async function POST(req: NextRequest) {
         ast_risks:         [],
         ssa_taint_paths:   [],
         ml_score:          null,
-        function_scores:   [],
       };
     });
     const riskOrder: Record<string, number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3, UNKNOWN:-1 };
@@ -198,7 +197,6 @@ export async function POST(req: NextRequest) {
       cicd_trust:  null,
       trust_chain: { genesis_hash:"", file_hashes:[], chain_hash:"", scan_seal:"", timestamp: new Date().toISOString() },
       cross_file_consistency: { dominant_model:"unknown", style_agreement:1, outlier_files:[], mixed_languages:false },
-      repository_trust: { score:1, factors:{ ai_percentage:0, security_density:0, cicd_trust:1, dep_risk:0, compliance_score:1, watermark_count:0, backdoor_risk:0 }, label:"TRUSTED" as const },
       dep_report:  null,
       compliance:  { frameworks:[], overall_score:1, top_findings:[] },
       skipped_unchanged: 0,
@@ -276,7 +274,6 @@ export async function POST(req: NextRequest) {
       // "New Scan" panel, direct API submissions) persisted no evidence
       // breakdown at all.
       evidence_breakdown:  result.evidence_breakdown,
-      repository_trust:    result.repository_trust,
     })
     .select("id")
     .single();
