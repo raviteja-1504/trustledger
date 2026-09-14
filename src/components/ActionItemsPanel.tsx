@@ -1,10 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useRole } from "@/lib/roles";
-import { api } from "@/lib/api";
-import type { DashboardData, ScanResult } from "@/types";
+import type { DashboardData } from "@/types";
 
 interface Props {
   data: DashboardData;
@@ -78,41 +76,6 @@ function ArrowIcon() {
   );
 }
 
-// ── AI Pattern Breakdown ─────────────────────────────────────────────────────
-
-const PATTERN_CATS = [
-  { key: "sql-injection",   label: "SQL Injection",  color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
-  { key: "hardcoded-secret", label: "Hardcoded Keys", color: "#ef4444", bg: "#fef2f2", border: "#fecdd3" },
-  { key: "jwt-none-alg",    label: "JWT Bypass",     color: "#f97316", bg: "#fff7ed", border: "#fed7aa" },
-  { key: "eval-exec",       label: "Eval / Exec",    color: "#f59e0b", bg: "#fffbeb", border: "#fde68a" },
-  { key: "access-control",  label: "Access Control", color: "#6366f1", bg: "#eef2ff", border: "#c7d2fe" },
-] as const;
-
-// Indicators that don't have a dedicated bucket above roll up into "Access Control"
-// (cookie/session/auth-adjacent and other misc findings).
-function bucketFor(indicator: string): typeof PATTERN_CATS[number]["key"] {
-  if (indicator === "sql-injection") return "sql-injection";
-  if (indicator === "hardcoded-secret" || indicator === "high-entropy-secret") return "hardcoded-secret";
-  if (indicator === "jwt-none-alg") return "jwt-none-alg";
-  if (indicator === "eval-exec") return "eval-exec";
-  return "access-control";
-}
-
-function computePatternBreakdown(scans: ScanResult[]) {
-  const counts: Record<string, number> = {};
-  let total = 0;
-  scans.forEach(s => s.files.forEach(f => f.risk_indicators.forEach(ind => {
-    const bucket = bucketFor(ind);
-    counts[bucket] = (counts[bucket] ?? 0) + 1;
-    total++;
-  })));
-  if (total === 0) return [];
-  return PATTERN_CATS
-    .map(c => ({ ...c, pct: Math.round(((counts[c.key] ?? 0) / total) * 100) }))
-    .filter(c => c.pct > 0)
-    .sort((a, b) => b.pct - a.pct);
-}
-
 function computeSla(repos: DashboardData["repos"], affectedRepos: string[], slaHours: number) {
   const matched = repos.filter(r => affectedRepos.includes(r.repo) && r.last_scan);
   if (!matched.length) return null;
@@ -146,18 +109,6 @@ function SlaChip({ sla }: { sla: { remainingH: number; overdue: boolean } }) {
 
 export default function ActionItemsPanel({ data, violationStatuses = {} }: Props) {
   const { role, permissions } = useRole();
-
-  const [scans, setScans] = useState<ScanResult[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    const scanIds = [...new Set(data.repos.filter(r => r.latest_scan_id).map(r => r.latest_scan_id))];
-    Promise.all(scanIds.map(id => api.getScan(id).catch(() => null))).then(results => {
-      if (!cancelled) setScans(results.filter((s): s is ScanResult => s !== null));
-    });
-    return () => { cancelled = true; };
-  }, [data.repos]);
-
-  const patterns = useMemo(() => computePatternBreakdown(scans), [scans]);
 
   const unattested  = data.top_risk_files.filter(f => !f.attested);
   const critUnatt   = unattested.filter(f => f.risk_score === "CRITICAL");
@@ -245,6 +196,18 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
 
   const openCount = items.filter(i => i.priority !== "done").length;
 
+  // Riskiest-first: lowest attestation coverage, then highest AI% -- this is
+  // a glanceable risk summary, not an alphabetical repo list, so surface the
+  // repos that actually need attention at the top.
+  const GLANCE_SHOWN = 6;
+  const sortedGlance = [...data.repos].sort((a, b) =>
+    a.attestation_rate !== b.attestation_rate
+      ? a.attestation_rate - b.attestation_rate
+      : b.ai_pct - a.ai_pct
+  );
+  const glanceRepos  = sortedGlance.slice(0, GLANCE_SHOWN);
+  const glanceHidden = sortedGlance.length - glanceRepos.length;
+
   return (
     <div className="section-card overflow-hidden flex flex-col h-full">
 
@@ -285,29 +248,29 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
       )}
 
       {/* ── Action cards ── */}
-      <div className="flex flex-col gap-0 divide-y divide-gray-100/80">
+      <div className="flex flex-col gap-2 px-3 py-3">
         {items.map(item => {
           const s = PRIORITY_STYLE[item.priority];
           return (
             <div
               key={item.id}
-              className="flex items-start gap-3 px-4 py-3 transition-colors group"
+              className="flex items-start gap-3 rounded-xl border px-3 py-2.5 transition-all hover:shadow-sm hover:-translate-y-px"
               style={{
                 background: s.bg,
-                borderLeft: `3px solid ${s.accent}`,
+                borderColor: `${s.accent}30`,
               }}
             >
               {/* Icon */}
-              <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-sm"
                 style={{ background: s.iconBg, color: s.iconColor }}>
                 {item.icon}
               </div>
 
               {/* Content */}
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                  <span className="text-[9px] font-black tracking-widest uppercase"
-                    style={{ color: s.labelColor }}>
+                <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                  <span className="text-[9px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded"
+                    style={{ color: s.labelColor, background: "rgba(255,255,255,0.65)" }}>
                     {s.label}
                   </span>
                   {item.sla && <SlaChip sla={item.sla} />}
@@ -315,26 +278,28 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
                 <p className="text-[12px] font-bold text-gray-800 leading-snug truncate">
                   {item.label}
                 </p>
-                <p className="text-[10px] text-gray-400 truncate leading-snug mt-0.5">
-                  {item.detail}
-                </p>
+                {item.detail && (
+                  <p className="text-[10px] text-gray-500 truncate leading-snug mt-0.5">
+                    {item.detail}
+                  </p>
+                )}
               </div>
 
               {/* CTA */}
               {item.cta ? (
                 <Link
                   href={item.href}
-                  className="shrink-0 inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors mt-0.5 whitespace-nowrap"
+                  className="shrink-0 inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-1.5 rounded-full transition-all hover:shadow-sm hover:brightness-95 mt-0.5 whitespace-nowrap"
                   style={{
-                    color: s.iconColor,
-                    background: s.iconBg,
+                    color: "#fff",
+                    background: s.accent,
                   }}
                 >
                   {item.cta}
                   <ArrowIcon />
                 </Link>
               ) : (
-                <div className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center mt-0.5"
+                <div className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center mt-0.5 shadow-sm"
                   style={{ background: "#f0fdf4", color: "#10b981" }}>
                   <CheckIcon />
                 </div>
@@ -345,73 +310,48 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
       </div>
 
       {/* ── Repos at a Glance ── */}
-      <div className="border-t border-gray-100 px-3 pt-2.5 pb-2.5">
+      <div className="flex-1 flex flex-col border-t border-gray-100 px-3 pt-2.5 pb-3 min-h-0">
         <div className="flex items-center justify-between mb-2 px-1">
           <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Repos at a Glance</p>
           <Link href="/dashboard" className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-700">All →</Link>
         </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          {data.repos.slice(0, 4).map(r => {
-            const name     = r.repo.split("/").pop() ?? r.repo;
-            const aiPct    = Math.round(r.ai_pct * 100);
-            const good     = r.attestation_rate >= 0.8;
-            const warn     = r.attestation_rate >= 0.5 && !good;
-            const dotColor = good ? "#10b981" : warn ? "#f59e0b" : "#ef4444";
-            const barColor = r.ai_pct > 0.7 ? "#ef4444" : r.ai_pct > 0.4 ? "#f59e0b" : "#22c55e";
-            const bg       = good ? "#f0fdf4" : warn ? "#fffbeb" : "#fef2f2";
-            const border   = good ? "#bbf7d0" : warn ? "#fde68a" : "#fecdd3";
-            return (
-              <Link key={r.repo} href={`/pr/${r.latest_scan_id}`}
-                className="rounded-lg px-2.5 py-2 border hover:shadow-sm hover:-translate-y-px transition-all flex flex-col gap-1.5"
-                style={{ background: bg, borderColor: border }}>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotColor }} />
-                  <span className="text-[10px] font-bold text-gray-700 truncate leading-none">
-                    {name.length > 10 ? name.slice(0, 10) + "…" : name}
-                  </span>
-                </div>
-                <div className="h-1 rounded-full overflow-hidden bg-white/70">
-                  <div className="h-full rounded-full" style={{ width: `${aiPct}%`, background: barColor }} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[9px] font-bold tabular-nums" style={{ color: barColor }}>{aiPct}% AI</span>
-                  <span className="text-[9px] font-semibold text-gray-400">{Math.round(r.attestation_rate * 100)}% att.</span>
-                </div>
-              </Link>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── AI Pattern Breakdown ── */}
-      <div className="flex-1 flex flex-col border-t border-gray-100 px-3 pt-2 pb-3 min-h-0">
-        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2 px-1">AI Pattern Breakdown</p>
-        {patterns.length === 0 ? (
+        {glanceRepos.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
-            <p className="text-[10px] text-gray-400">No risk patterns detected in recent scans</p>
+            <p className="text-[10px] text-gray-400">No repos scanned yet</p>
           </div>
         ) : (
-          <>
-            <div className="flex h-2 rounded-full overflow-hidden gap-px mb-3">
-              {patterns.map(p => (
-                <div key={p.label} className="h-full transition-all duration-700"
-                  style={{ width: `${p.pct}%`, background: p.color }} />
-              ))}
-            </div>
-            <div className="flex-1 grid grid-cols-2 gap-1.5" style={{ gridAutoRows: "1fr" }}>
-              {patterns.map(p => (
-                <div key={p.label}
-                  className="rounded-xl px-2.5 py-2 border flex flex-col justify-between"
-                  style={{ background: p.bg, borderColor: p.border }}>
-                  <span className="text-lg font-black tabular-nums leading-none" style={{ color: p.color }}>{p.pct}%</span>
-                  <div className="h-1 rounded-full overflow-hidden my-1.5" style={{ background: p.border }}>
-                    <div className="h-full rounded-full" style={{ width: `${p.pct}%`, background: p.color }} />
+          <div className="flex-1 flex flex-col gap-1.5 overflow-y-auto">
+            {glanceRepos.map(r => {
+              const name      = r.repo.split("/").pop() ?? r.repo;
+              const aiPct     = Math.round(r.ai_pct * 100);
+              const attPct    = Math.round(r.attestation_rate * 100);
+              const good      = r.attestation_rate >= 0.8;
+              const warn      = r.attestation_rate >= 0.5 && !good;
+              const dotColor  = good ? "#10b981" : warn ? "#f59e0b" : "#ef4444";
+              const barColor  = r.ai_pct > 0.7 ? "#ef4444" : r.ai_pct > 0.4 ? "#f59e0b" : "#22c55e";
+              const bg        = good ? "#f0fdf4" : warn ? "#fffbeb" : "#fef2f2";
+              const border    = good ? "#bbf7d0" : warn ? "#fde68a" : "#fecdd3";
+              return (
+                <Link key={r.repo} href={`/pr/${r.latest_scan_id}`}
+                  className="rounded-lg border px-2.5 py-2 hover:shadow-sm hover:-translate-y-px transition-all flex items-center gap-2.5"
+                  style={{ background: bg, borderColor: border }}>
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotColor }} />
+                  <span className="flex-1 min-w-0 truncate text-[11px] font-bold text-gray-700">{name}</span>
+                  <div className="hidden sm:block w-12 h-1 rounded-full overflow-hidden bg-white/70 shrink-0">
+                    <div className="h-full rounded-full" style={{ width: `${aiPct}%`, background: barColor }} />
                   </div>
-                  <span className="text-[9px] font-bold leading-snug" style={{ color: p.color, opacity: 0.8 }}>{p.label}</span>
-                </div>
-              ))}
-            </div>
-          </>
+                  <span className="shrink-0 text-[9px] font-bold tabular-nums w-12 text-right" style={{ color: barColor }}>{aiPct}% AI</span>
+                  <span className="shrink-0 text-[9px] font-semibold tabular-nums w-14 text-right" style={{ color: dotColor }}>{attPct}% att.</span>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+        {glanceHidden > 0 && (
+          <Link href="/dashboard"
+            className="mt-1.5 text-center text-[9px] font-semibold text-gray-400 hover:text-indigo-600 transition-colors">
+            +{glanceHidden} more repo{glanceHidden !== 1 ? "s" : ""}
+          </Link>
         )}
       </div>
 
