@@ -118,6 +118,18 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
   );
   const lowCovRepos = data.repos.filter(r => r.attestation_rate < 0.5);
 
+  // Attestation coverage split by severity -- distinct from the single
+  // blended attestation_rate % shown in the stats row up top: this answers
+  // "how much of the CRITICAL backlog is cleared" separately from HIGH,
+  // which that one aggregate number can't (a repo could be 100% covered on
+  // HIGH but 0% on CRITICAL and the blended rate would still look fine).
+  const critTotal    = data.top_risk_files.filter(f => f.risk_score === "CRITICAL").length;
+  const highTotal    = data.top_risk_files.filter(f => f.risk_score === "HIGH").length;
+  const coverageRows = [
+    { key: "critical", label: "CRITICAL", total: critTotal, attested: critTotal - critUnatt.length, color: "#7c3aed", track: "#ede9fe" },
+    { key: "high",     label: "HIGH",     total: highTotal, attested: highTotal - highUnatt.length, color: "#ef4444", track: "#fef2f2" },
+  ].filter(r => r.total > 0);
+
   const sessionResolved = Object.values(violationStatuses).filter(v => v === "resolved").length;
 
   const critSla = critUnatt.length > 0
@@ -195,18 +207,6 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
   }
 
   const openCount = items.filter(i => i.priority !== "done").length;
-
-  // Riskiest-first: lowest attestation coverage, then highest AI% -- this is
-  // a glanceable risk summary, not an alphabetical repo list, so surface the
-  // repos that actually need attention at the top.
-  const GLANCE_SHOWN = 6;
-  const sortedGlance = [...data.repos].sort((a, b) =>
-    a.attestation_rate !== b.attestation_rate
-      ? a.attestation_rate - b.attestation_rate
-      : b.ai_pct - a.ai_pct
-  );
-  const glanceRepos  = sortedGlance.slice(0, GLANCE_SHOWN);
-  const glanceHidden = sortedGlance.length - glanceRepos.length;
 
   return (
     <div className="section-card overflow-hidden flex flex-col h-full">
@@ -309,49 +309,33 @@ export default function ActionItemsPanel({ data, violationStatuses = {} }: Props
         })}
       </div>
 
-      {/* ── Repos at a Glance ── */}
+      {/* ── Attestation Coverage ── */}
       <div className="flex-1 flex flex-col border-t border-gray-100 px-3 pt-2.5 pb-3 min-h-0">
-        <div className="flex items-center justify-between mb-2 px-1">
-          <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Repos at a Glance</p>
-          <Link href="/dashboard" className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-700">All →</Link>
+        <div className="flex items-center justify-between mb-3 px-1">
+          <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Attestation Coverage</p>
+          <Link href="/violations" className="text-[9px] font-semibold text-indigo-500 hover:text-indigo-700">Review →</Link>
         </div>
-        {glanceRepos.length === 0 ? (
+        {coverageRows.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
-            <p className="text-[10px] text-gray-400">No repos scanned yet</p>
+            <p className="text-[10px] text-gray-400">No CRITICAL or HIGH files flagged</p>
           </div>
         ) : (
-          <div className="flex-1 flex flex-col gap-1.5 overflow-y-auto">
-            {glanceRepos.map(r => {
-              const name      = r.repo.split("/").pop() ?? r.repo;
-              const aiPct     = Math.round(r.ai_pct * 100);
-              const attPct    = Math.round(r.attestation_rate * 100);
-              const good      = r.attestation_rate >= 0.8;
-              const warn      = r.attestation_rate >= 0.5 && !good;
-              const dotColor  = good ? "#10b981" : warn ? "#f59e0b" : "#ef4444";
-              const barColor  = r.ai_pct > 0.7 ? "#ef4444" : r.ai_pct > 0.4 ? "#f59e0b" : "#22c55e";
-              const bg        = good ? "#f0fdf4" : warn ? "#fffbeb" : "#fef2f2";
-              const border    = good ? "#bbf7d0" : warn ? "#fde68a" : "#fecdd3";
+          <div className="flex-1 flex flex-col justify-center gap-4 px-1">
+            {coverageRows.map(row => {
+              const pct = Math.round((row.attested / row.total) * 100);
               return (
-                <Link key={r.repo} href={`/pr/${r.latest_scan_id}`}
-                  className="rounded-lg border px-2.5 py-2 hover:shadow-sm hover:-translate-y-px transition-all flex items-center gap-2.5"
-                  style={{ background: bg, borderColor: border }}>
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dotColor }} />
-                  <span className="flex-1 min-w-0 truncate text-[11px] font-bold text-gray-700">{name}</span>
-                  <div className="hidden sm:block w-12 h-1 rounded-full overflow-hidden bg-white/70 shrink-0">
-                    <div className="h-full rounded-full" style={{ width: `${aiPct}%`, background: barColor }} />
+                <div key={row.key}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-black tracking-widest" style={{ color: row.color }}>{row.label}</span>
+                    <span className="text-[10px] font-bold text-gray-500 tabular-nums">{row.attested}/{row.total} attested · {pct}%</span>
                   </div>
-                  <span className="shrink-0 text-[9px] font-bold tabular-nums w-12 text-right" style={{ color: barColor }}>{aiPct}% AI</span>
-                  <span className="shrink-0 text-[9px] font-semibold tabular-nums w-14 text-right" style={{ color: dotColor }}>{attPct}% att.</span>
-                </Link>
+                  <div className="h-2 rounded-full overflow-hidden" style={{ background: row.track }}>
+                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: row.color }} />
+                  </div>
+                </div>
               );
             })}
           </div>
-        )}
-        {glanceHidden > 0 && (
-          <Link href="/dashboard"
-            className="mt-1.5 text-center text-[9px] font-semibold text-gray-400 hover:text-indigo-600 transition-colors">
-            +{glanceHidden} more repo{glanceHidden !== 1 ? "s" : ""}
-          </Link>
         )}
       </div>
 
