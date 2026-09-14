@@ -1170,17 +1170,16 @@ export default function DashboardPage() {
   }, [data]);
 
   // Fills the space below the Risk Trend chart with numbers actually worth
-  // reading, rather than leaving it blank -- peak/current/average week
-  // totals, plus a streak callout when CRITICAL/HIGH has moved the same
-  // direction for 2+ consecutive weeks (the "medium" tier is excluded from
-  // the streak specifically because it's noisier and less decision-relevant
-  // than the two tiers that actually block merges).
+  // reading, rather than leaving it blank -- current/average week totals,
+  // plus a streak callout when CRITICAL/HIGH has moved the same direction
+  // for 2+ consecutive weeks (the "medium" tier is excluded from the streak
+  // specifically because it's noisier and less decision-relevant than the
+  // two tiers that actually block merges).
   const trendInsights = useMemo(() => {
     const trend = data?.risk_trend ?? [];
     if (trend.length === 0) return null;
 
     const totals = trend.map(t => t.critical_count + t.high_count + t.medium_count);
-    const peakIdx = totals.reduce((best, v, i) => v > totals[best] ? i : best, 0);
     const avg = Math.round(totals.reduce((a, b) => a + b, 0) / totals.length);
 
     const actionable = trend.map(t => t.critical_count + t.high_count);
@@ -1196,7 +1195,6 @@ export default function DashboardPage() {
     }
 
     return {
-      peak:    { total: totals[peakIdx], date: trend[peakIdx].date },
       current: { total: totals[totals.length - 1], date: trend[trend.length - 1].date },
       avg,
       streak, dir,
@@ -1820,42 +1818,28 @@ export default function DashboardPage() {
                       <RiskTrendChart data={effectiveData.risk_trend} />
                       {trendInsights && (
                         <div className="mt-4 pt-4 border-t border-gray-100">
-                          <div className="grid grid-cols-3 gap-3">
-                            {([
-                              {
-                                key: "peak", label: "Peak Week", icon: "▲", stat: trendInsights.peak,
-                                cls: "bg-violet-50 border-violet-100 text-violet-700", numCls: "text-violet-800",
-                                blurb: "Worst week shown",
-                                tooltip: "The single highest-risk week in the period shown — combined CRITICAL, HIGH & MEDIUM flagged files across all repos. Use it to spot exactly when a particularly risky change landed.",
-                              },
-                              {
-                                key: "current", label: "Current Week", icon: "●", stat: trendInsights.current,
-                                cls: "bg-orange-50 border-orange-100 text-orange-700", numCls: "text-orange-800",
-                                blurb: "Where risk stands now",
-                                tooltip: "Total CRITICAL, HIGH & MEDIUM files scanned so far in the most recent week (through today). This is your current risk exposure, not a historical figure.",
-                              },
-                            ] as const).map(({ key, label, icon, stat, cls, numCls, blurb, tooltip }) => (
-                              <div key={key} className={`rounded-xl border p-3 ${cls}`}>
-                                <div className="flex items-center justify-between mb-1">
-                                  <span className="text-[10px] font-bold uppercase tracking-wider">{label}</span>
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-sm font-black">{icon}</span>
-                                    <InfoTooltip position="top" size="sm" title={label} description={tooltip} />
-                                  </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="rounded-xl border p-3 bg-orange-50 border-orange-100 text-orange-700">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-bold uppercase tracking-wider">Current Week</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-sm font-black">●</span>
+                                  <InfoTooltip position="top" size="sm" title="Current Week"
+                                    description="Total CRITICAL, HIGH & MEDIUM files scanned so far in the most recent week (through today). This is your current risk exposure, not a historical figure." />
                                 </div>
-                                <p className={`text-2xl font-extrabold tabular-nums ${numCls}`}>{stat.total}</p>
-                                <p className="text-[10px] opacity-70 mt-0.5">
-                                  {blurb} · {new Date(stat.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
-                                </p>
                               </div>
-                            ))}
+                              <p className="text-2xl font-extrabold tabular-nums text-orange-800">{trendInsights.current.total}</p>
+                              <p className="text-[10px] opacity-70 mt-0.5">
+                                Where risk stands now · {new Date(trendInsights.current.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
+                              </p>
+                            </div>
                             <div className="rounded-xl border p-3 bg-slate-50 border-slate-200 text-slate-600">
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-[10px] font-bold uppercase tracking-wider">Weekly Average</span>
                                 <div className="flex items-center gap-1">
                                   <span className="text-sm font-black">—</span>
                                   <InfoTooltip position="top" size="sm" title="Weekly Average"
-                                    description="The average number of CRITICAL, HIGH & MEDIUM flagged files per week across the entire period shown. Use it as a baseline — compare Current Week or Peak Week against this to judge whether things are unusually high or low right now." />
+                                    description="The average number of CRITICAL, HIGH & MEDIUM flagged files per week across the entire period shown. Use it as a baseline — compare Current Week against this to judge whether things are unusually high or low right now." />
                                 </div>
                               </div>
                               <p className="text-2xl font-extrabold tabular-nums text-slate-800">{trendInsights.avg}</p>

@@ -181,12 +181,18 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // read far lower than the real number of at-risk files -- worse for
   // repos with large PRs, since one heavy scan is one data point either way.
   //
-  // Fixed by counting scan_files rows directly, ordered newest-first so a
-  // truncation (very large orgs) drops the oldest/least-relevant weeks
-  // rather than the most recent ones. This row-based query is inherently
-  // bounded (needed for per-week bucketing, which the JS client can't do
-  // as a server-side GROUP BY) -- see risk_totals below for why the
-  // Risk Distribution donut does NOT derive its totals from this array.
+  // Then fixed by counting scan_files rows directly and bucketing by week
+  // in JS -- but that still fetched up to 5000 raw rows, and Supabase's
+  // server-side max_rows setting on this project silently caps every query
+  // at 1000 regardless of the client's .limit() (same cap called out below
+  // for risk_totals). A single day's scanning burst can fill all 1000 rows
+  // with one week's data, collapsing the whole chart down to one point --
+  // which is exactly what "Peak/Current/Weekly Average all read 1000, only
+  // one x-axis tick shown" means. Now computed via get_risk_trend(), a
+  // Postgres function that does the GROUP BY server-side (see migration
+  // 20260914_risk_trend_rpc.sql) -- it returns at most 10 rows (one per
+  // week) no matter how many scan_files rows exist underneath it, so it's
+  // both exact and immune to the row cap.
   const toMonday = (iso: string) => {
     const d = new Date(iso);
     const dow = d.getUTCDay(); // 0=Sun
@@ -194,26 +200,14 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     return d.toISOString().slice(0, 10);
   };
   const scanIdsInRange = scans.map(s => s.id);
-  const { data: trendFiles } = scanIdsInRange.length === 0 ? { data: [] } : await db
-    .from("scan_files")
-    .select("risk_score, created_at")
-    .in("scan_id", scanIdsInRange)
-    .in("risk_score", ["CRITICAL", "HIGH", "MEDIUM"])
-    .order("created_at", { ascending: false })
-    .limit(5000);
-  const trendMap = new Map<string, { high: number; critical: number; medium: number }>();
-  (trendFiles ?? []).forEach(f => {
-    const week = toMonday(f.created_at);
-    const t = trendMap.get(week) ?? { high: 0, critical: 0, medium: 0 };
-    if (f.risk_score === "CRITICAL") t.critical++;
-    else if (f.risk_score === "HIGH") t.high++;
-    else if (f.risk_score === "MEDIUM") t.medium++;
-    trendMap.set(week, t);
-  });
-  const risk_trend = Array.from(trendMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(-10)
-    .map(([date, t]) => ({ date, high_count: t.high, critical_count: t.critical, medium_count: t.medium }));
+  const { data: trendRows } = scanIdsInRange.length === 0 ? { data: [] } : await db
+    .rpc("get_risk_trend", { p_scan_ids: scanIdsInRange }) as {
+      data: Array<{ week_start: string; critical_count: number; high_count: number; medium_count: number }> | null;
+    };
+  const risk_trend = (trendRows ?? [])
+    .slice()
+    .sort((a, b) => a.week_start.localeCompare(b.week_start))
+    .map(t => ({ date: t.week_start, high_count: t.high_count, critical_count: t.critical_count, medium_count: t.medium_count }));
 
   // If the most recent bucket is the CURRENT (still in-progress) week,
   // relabel it with today's actual date instead of that week's Monday.
