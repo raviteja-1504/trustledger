@@ -43,11 +43,23 @@ import { detectorRegistry }      from "./detectorRegistry";
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export interface ScanIndicator {
-  id:       string;
-  label:    string;
-  severity: "critical" | "high" | "medium" | "low" | "info";
-  line?:    number;
-  detail?:  string;
+  id:           string;
+  label:        string;
+  severity:     "critical" | "high" | "medium" | "low" | "info";
+  line?:        number;
+  detail?:      string;
+  // 0-100. How specific was the match, not how severe the vuln class is:
+  // a named-taint match (a variable traced from request input to a sink) is
+  // more confident than a same-line keyword-co-occurrence regex, which is
+  // more confident than a bare pattern match with no taint context at all.
+  confidence?:  number;
+  // "third_party" for a match inside vendored/minified code -- preserved as
+  // evidence but excluded from risk-level escalation (see calculateRisk).
+  codeCategory?: "application" | "third_party";
+  cwe?:         string;
+  // Which detector(s) independently flagged this same id+line -- populated
+  // when analyzeFile's dedup pass collapses multiple hits into one finding.
+  supportingDetectors?: string[];
 }
 
 export interface FunctionAIScore {
@@ -458,7 +470,7 @@ const CMD_INJECTION_RE = [
   /Runtime\.getRuntime\s*\(\s*\)\s*\.\s*exec\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
   /new\s+ProcessBuilder\s*\([^)]*request\.getParameter\s*\(/i,
   // Go — exec.Command with a query/form-derived argument
-  /exec\.Command\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  /exec\.Command\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
   // PHP
   /(?:shell_exec|system|passthru|popen)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby — backtick/system() with interpolated params
@@ -478,7 +490,7 @@ const SSRF_RE = [
   /RestTemplate\s*\(\s*\)\s*\.\s*(?:getForObject|getForEntity|postForObject|exchange)\s*\([^)]*request\.getParameter\s*\(/i,
   /new\s+URL\s*\(\s*request\.getParameter\s*\(/i,
   // Go
-  /http\.(?:Get|Post|Head)\s*\(\s*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  /http\.(?:Get|Post|Head)\s*\(\s*r\.(?:URL\.Query\(\)|FormValue\b)/i,
   // PHP — curl target URL from user input
   /curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*\$_(?:GET|POST|REQUEST)\b/i,
   // Python requests library
@@ -499,8 +511,8 @@ const PATH_TRAVERSAL_RE = [
   /\bopen\s*\([^)]*\+\s*request\.(?:args|form|GET|POST)\b/i,
   /os\.path\.join\s*\([^)]*request\.(?:args|form|GET|POST)\b/i,
   // Go
-  /os\.Open\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
-  /filepath\.Join\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  /os\.Open\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
+  /filepath\.Join\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
   // PHP
   /(?:fopen|file_get_contents|readfile|include|include_once|require|require_once)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby
@@ -583,7 +595,7 @@ const SSTI_RE = [
   /Velocity\.evaluate\s*\([^)]*request\.getParameter\s*\(/i,
   /new\s+Template\s*\([^)]*request\.getParameter\s*\(/i,
   // Go — text/template parsing a query/form-derived string
-  /template\.(?:New|Must)\s*\([^)]*\)\s*\.\s*Parse\s*\(\s*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  /template\.(?:New|Must)\s*\([^)]*\)\s*\.\s*Parse\s*\(\s*r\.(?:URL\.Query\(\)|FormValue\b)/i,
 ];
 
 // HTTP Header Injection (CRLF injection into response headers)
@@ -3036,15 +3048,21 @@ function computeCrossFileTaintIndicators(
 // ── Risk calculation ───────────────────────────────────────────────────────────
 
 function calculateRisk(indicators: ScanIndicator[], aiPct: number): RiskLevel {
-  if (indicators.some(i => i.severity === "critical")) return "CRITICAL";
-  if (indicators.some(i => i.severity === "high"))     return "HIGH";
+  // Third-party/vendored findings (e.g. a pattern match inside jQuery's own
+  // minified internals) are preserved as evidence on the file but must not
+  // drive the file's own risk level -- they aren't code this repo's authors
+  // wrote or can fix, and treating them as CRITICAL is exactly what produced
+  // false-positive attestation requirements on vendor bundles.
+  const own = indicators.filter(i => i.codeCategory !== "third_party");
+  if (own.some(i => i.severity === "critical")) return "CRITICAL";
+  if (own.some(i => i.severity === "high"))     return "HIGH";
   // Thresholds calibrated for the new three-phase sigmoid (centred at 0.55).
   // A clearly AI file scores 0.80–0.96; a borderline human/AI file scores ~0.50.
   if (aiPct > 0.75)                                    return "HIGH";
   if (aiPct > 0.52)                                    return "MEDIUM";
-  if (aiPct > 0.38 && indicators.length >= 2)          return "MEDIUM";
-  if (indicators.some(i => i.severity === "medium"))   return "MEDIUM";
-  if (indicators.length > 0)                           return "MEDIUM";
+  if (aiPct > 0.38 && own.length >= 2)                 return "MEDIUM";
+  if (own.some(i => i.severity === "medium"))          return "MEDIUM";
+  if (own.length > 0)                                  return "MEDIUM";
   return "LOW";
 }
 
@@ -3354,6 +3372,58 @@ export function getFixSuggestions(indicators: ScanIndicator[]): FixSuggestion[] 
   return out;
 }
 
+// CWE reference for vulnerability ids that don't already carry one via
+// FIX_MAP (checked first, so the mapping isn't maintained in two places).
+const EXTRA_CWE_MAP: Record<string, string> = {
+  "high-entropy-secret":   "CWE-798",
+  "pii-in-logs":           "CWE-532",
+  "mass-assignment":       "CWE-915",
+  "jwt-none-alg":          "CWE-347",
+  "insecure-randomness":   "CWE-330",
+  "redos":                 "CWE-1333",
+  "timing-attack":         "CWE-208",
+  "header-injection":      "CWE-113",
+  "sensitive-url-data":    "CWE-598",
+  "verbose-error":         "CWE-209",
+  "graphql-injection":     "CWE-943",
+  "insecure-file-upload":  "CWE-434",
+  "toctou":                "CWE-367",
+  "cookie-no-httponly":    "CWE-1004",
+  "cookie-no-secure":      "CWE-614",
+};
+
+function cweFor(id: string): string | undefined {
+  return FIX_MAP[id]?.cwe ?? EXTRA_CWE_MAP[id];
+}
+
+// Base confidence per severity, bumped for named-taint matches (a variable
+// actually traced from a request source to a sink, not just a same-line
+// keyword co-occurrence) and for secrets (already passed the entropy/
+// class-count filter in looksLikeRealSecret before reaching here).
+function baseConfidence(ind: ScanIndicator): number {
+  if (ind.id === "hardcoded-secret" || ind.id === "high-entropy-secret") return 92;
+  const bySeverity: Record<string, number> = { critical: 85, high: 78, medium: 65, low: 50, info: 40 };
+  let c = bySeverity[ind.severity] ?? 60;
+  if (ind.detail && /named variable|tainted variable/i.test(ind.detail)) c = Math.min(98, c + 10);
+  return c;
+}
+
+// Attaches cwe/confidence/codeCategory evidence to security-scan indicators
+// (not AI-heuristic signals, which have their own explained_signals model).
+// thirdParty marks the file as vendored/minified -- see analyzeFile's
+// looksMinified check -- so these findings are preserved as evidence without
+// driving the file's own risk_score (calculateRisk excludes them).
+function attachEvidence(indicators: ScanIndicator[], thirdParty: boolean): ScanIndicator[] {
+  return indicators.map(ind => ({
+    ...ind,
+    cwe:          ind.cwe ?? cweFor(ind.id),
+    confidence:   ind.confidence ?? baseConfidence(ind),
+    codeCategory: thirdParty && ind.id !== "hardcoded-secret" && ind.id !== "high-entropy-secret"
+      ? "third_party" as const
+      : "application" as const,
+  }));
+}
+
 // ── Line-level AI attribution ─────────────────────────────────────────────────
 
 const LINE_AI_PATTERNS: RegExp[] = [
@@ -3650,7 +3720,12 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findHighEntropySecrets(lines, file_path),
   ];
 
-  const vulnIndicators: ScanIndicator[] = looksMinified ? [] : [
+  // Vulnerability detectors now always run, even on vendored/minified files —
+  // attachEvidence() below tags the resulting findings as "third_party"
+  // instead of silently dropping them, so a real issue inside a vendored
+  // library is still visible (just not risk-scored as if it were this repo's
+  // own code). This replaces the earlier blunt on/off gate.
+  const vulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
     ...findWeakCrypto(lines),
@@ -3689,10 +3764,11 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
   ];
+  const vulnIndicators = attachEvidence(vulnIndicatorsRaw, looksMinified);
 
   // Security scan — all detectors
   const rawIndicators: ScanIndicator[] = [
-    ...secretIndicators,
+    ...attachEvidence(secretIndicators, false),
     ...vulnIndicators,
     // Pluggable detectors registered via detectorRegistry.register() -- see
     // detectorRegistry.ts. Empty by default; this is the on-ramp for new
@@ -3700,14 +3776,20 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"),
   ];
 
-  // Dedup by id+line
-  const seen: Record<string, true> = {};
-  const indicators = rawIndicators.filter(i => {
+  // Dedup by id+line, preserving which detector(s) independently flagged the
+  // same finding (spec: "multiple regexes may identify the same
+  // vulnerability... deduplicate... store primaryDetector/supportingDetectors").
+  const byKey = new Map<string, ScanIndicator>();
+  for (const i of rawIndicators) {
     const k = `${i.id}:${i.line ?? ""}`;
-    if (seen[k]) return false;
-    seen[k] = true;
-    return true;
-  });
+    const existing = byKey.get(k);
+    if (!existing) { byKey.set(k, i); continue; }
+    if (i.label !== existing.label) {
+      existing.supportingDetectors = existing.supportingDetectors ?? [];
+      if (!existing.supportingDetectors.includes(i.label)) existing.supportingDetectors.push(i.label);
+    }
+  }
+  const indicators = Array.from(byKey.values());
 
   // AI detection — skipped for config/generated files
   let ai_percentage    = 0;

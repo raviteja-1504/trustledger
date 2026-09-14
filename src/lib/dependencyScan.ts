@@ -117,9 +117,18 @@ export const VULN_DB: Record<string, VulnEntry> = {
   "gopkg.in/yaml.v2":            { risk:"MEDIUM",   type:"vulnerable", cve:"CVE-2022-28948", cvss:7.5, safeVersion:"v3",     description:"Denial of service via crafted YAML. Upgrade to gopkg.in/yaml.v3.", fix:"go get gopkg.in/yaml.v3", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"2M", last_publish:"2022-05-14", health_score:60, exploit_public:false },
 
   // ── Java ──────────────────────────────────────────────────────────────────
-  "log4j-core":    { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2021-44228", cvss:10.0, exploit_public:true, exploit_detail:"Log4Shell — remotely exploitable worldwide. Patch within hours.", safeVersion:"2.17.1", description:"Log4Shell: RCE via JNDI lookup in log4j-core < 2.16.0. CVSS 10.0. Actively exploited globally.", fix:"Update to log4j-core >= 2.17.1 in pom.xml or build.gradle", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"5M", last_publish:"2022-02-01", health_score:85, cvss_vector:"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H" },
-  "commons-text":  { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-42889", cvss:9.8, exploit_public:true, exploit_detail:"Text4Shell PoC widely available", safeVersion:"1.10.0", description:"Text4Shell: RCE via StringLookup interpolation in commons-text < 1.10.0.", fix:"Update commons-text to >= 1.10.0", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"3M", last_publish:"2023-08-14", health_score:82 },
-  "spring-webmvc": { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Spring4Shell — mass exploitation observed", safeVersion:"5.3.18",  description:"Spring4Shell: RCE via DataBinder in Spring Framework < 5.3.18.", fix:"Update Spring Framework to >= 5.3.18", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
+  // Keyed by full Maven coordinate ("groupId:artifactId"), not bare
+  // artifactId -- see parsePomXml/parseBuildGradle below. Java import
+  // statements (org.springframework.*) never reliably map to an exact
+  // artifact id, so manifest-based coordinates are the only correct source
+  // of truth for these entries; keying by artifactId alone silently
+  // matched nothing, since nothing ever produced a bare "spring-webmvc"
+  // string to look up.
+  "org.apache.logging.log4j:log4j-core": { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2021-44228", cvss:10.0, exploit_public:true, exploit_detail:"Log4Shell — remotely exploitable worldwide. Patch within hours.", safeVersion:"2.17.1", description:"Log4Shell: RCE via JNDI lookup in log4j-core < 2.16.0. CVSS 10.0. Actively exploited globally.", fix:"Update to log4j-core >= 2.17.1 in pom.xml or build.gradle", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"5M", last_publish:"2022-02-01", health_score:85, cvss_vector:"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H" },
+  "org.apache.commons:commons-text":      { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-42889", cvss:9.8, exploit_public:true, exploit_detail:"Text4Shell PoC widely available", safeVersion:"1.10.0", description:"Text4Shell: RCE via StringLookup interpolation in commons-text < 1.10.0.", fix:"Update commons-text to >= 1.10.0", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"3M", last_publish:"2023-08-14", health_score:82 },
+  "org.springframework:spring-webmvc":    { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Spring4Shell — mass exploitation observed", safeVersion:"5.3.18",  description:"Spring4Shell: RCE via DataBinder in Spring Framework < 5.3.18.", fix:"Update Spring Framework to >= 5.3.18", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
+  "org.springframework:spring-core":      { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Spring4Shell — mass exploitation observed", safeVersion:"5.3.18",  description:"Spring4Shell: RCE via DataBinder in Spring Framework < 5.3.18.", fix:"Update Spring Framework to >= 5.3.18", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
+  "org.springframework.boot:spring-boot-starter-web": { risk:"HIGH", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Bundles vulnerable spring-webmvc transitively", safeVersion:"2.6.6", description:"Bundles a vulnerable Spring Framework version affected by Spring4Shell unless overridden.", fix:"Update spring-boot-starter-web to >= 2.6.6, or override spring-core/spring-webmvc directly", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
 
   // ── Rust ──────────────────────────────────────────────────────────────────
   "openssl":     { risk:"HIGH",   type:"vulnerable", cve:"CVE-2023-0286", cvss:7.4, safeVersion:"0.10.55", description:"Type confusion in X.400 address processing in openssl crate.", fix:"openssl = \"0.10.55\" in Cargo.toml", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"1M", last_publish:"2024-03-20", health_score:85, exploit_public:false },
@@ -207,6 +216,12 @@ export function parseImports(content: string, eco: LangEcosystem): string[] {
     } else if (eco === "go") {
       const m = t.match(/["'](github\.com\/[^"'/]+\/[^"'/]+)/); if (m) pkgs.add(m[1]);
     } else if (eco === "java") {
+      // Package prefix only (e.g. "org.springframework") -- an import
+      // statement alone can't reliably identify the exact Maven artifactId,
+      // so this never matches VULN_DB's groupId:artifactId-keyed Java
+      // entries. Kept as a best-effort signal for callers that just want
+      // "what packages does this file reference"; parsePomXml/
+      // parseBuildGradle above are the real source of truth for CVE matching.
       const m = t.match(/^import\s+([\w.]+)/);
       if (m) { const parts = m[1].split("."); if (parts.length >= 2) pkgs.add(parts.slice(0,2).join(".")); }
     } else if (eco === "rust") {
@@ -258,14 +273,49 @@ export function buildFinding(pkg: string, eco: LangEcosystem, repo: string, file
   };
 }
 
-// Manifest files (package.json, requirements.txt, go.mod) declare dependencies
-// directly — parse the declared package names instead of scanning for import
-// statements (which a JSON/manifest file won't contain).
+// Maven's <dependency> blocks — matches both direct dependencies and
+// <dependencyManagement>/BOM entries (not distinguished; a first pass).
+// Regex-based rather than a full XML parser since pom.xml's dependency shape
+// is simple and consistent enough not to need one.
+export function parsePomXml(content: string): string[] {
+  const coords: string[] = [];
+  const depBlockRe = /<dependency>([\s\S]*?)<\/dependency>/g;
+  let m: RegExpExecArray | null;
+  while ((m = depBlockRe.exec(content)) !== null) {
+    const block = m[1];
+    const g = /<groupId>\s*([^<]+?)\s*<\/groupId>/.exec(block);
+    const a = /<artifactId>\s*([^<]+?)\s*<\/artifactId>/.exec(block);
+    if (!g || !a) continue;
+    coords.push(`${g[1].trim()}:${a[1].trim()}`);
+  }
+  return coords;
+}
+
+// Gradle (Groovy or Kotlin DSL) dependency declarations — the two common
+// shapes: 'group:artifact:version' string notation, and the
+// group:/name:/version: map notation.
+export function parseBuildGradle(content: string): string[] {
+  const coords: string[] = [];
+  const stringForm = /(?:implementation|api|compile|testImplementation|runtimeOnly|compileOnly|annotationProcessor)\s*[( ]?\s*['"]([^:'"]+):([^:'"]+):[^'"]*['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = stringForm.exec(content)) !== null) coords.push(`${m[1].trim()}:${m[2].trim()}`);
+
+  const mapForm = /group\s*:\s*['"]([^'"]+)['"]\s*,\s*name\s*:\s*['"]([^'"]+)['"]/g;
+  while ((m = mapForm.exec(content)) !== null) coords.push(`${m[1].trim()}:${m[2].trim()}`);
+
+  return coords;
+}
+
+// Manifest files declare dependencies directly — parse the declared package
+// identifiers instead of scanning for import statements (which a
+// JSON/XML/Gradle manifest won't contain in the same shape as source code).
 function manifestPackages(filePath: string, content: string): string[] | null {
   const name = filePath.toLowerCase();
   if (name.endsWith("package.json"))     return parsePackageJson(content).map(p => p.name);
   if (name.endsWith("requirements.txt")) return parseRequirementsTxt(content).map(p => p.name);
   if (name.endsWith("go.mod"))           return parseGoMod(content).map(p => p.name);
+  if (name.endsWith("pom.xml"))          return parsePomXml(content);
+  if (name.endsWith("build.gradle") || name.endsWith("build.gradle.kts")) return parseBuildGradle(content);
   return null;
 }
 

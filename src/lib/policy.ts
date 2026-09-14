@@ -89,12 +89,56 @@ export interface PolicyViolation {
   file: string;
   reason: string;
   severity: "critical" | "high" | "medium";
+  // Populated when a real indicator drove the reason (as opposed to the
+  // generic risk-level fallback below) -- lets the UI show CWE/confidence/
+  // detail instead of just a templated "CRITICAL risk — requires N
+  // attestation(s)" string with no explanation of what was actually found.
+  indicator_id?:  string;
+  cwe?:           string;
+  confidence?:    number;
 }
 
 export interface PolicyResult {
   pass: boolean;
   violations: PolicyViolation[];
   gated: boolean; // would actually block merge
+}
+
+interface FileIndicator {
+  id: string; label: string; severity: string; detail?: string;
+  cwe?: string; confidence?: number; codeCategory?: string;
+}
+
+const SEVERITY_RANK: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0, info: -1 };
+
+// The most specific non-third-party indicator at or above the violation's
+// own severity -- this is what actually drove risk_score to this level (see
+// scanner.ts's calculateRisk), so it's the right evidence to explain with.
+function bestIndicatorFor(indicators: FileIndicator[] | undefined, minSeverity: string): FileIndicator | undefined {
+  if (!indicators) return undefined;
+  const candidates = indicators.filter(i =>
+    i.codeCategory !== "third_party" &&
+    (SEVERITY_RANK[i.severity] ?? -1) >= (SEVERITY_RANK[minSeverity] ?? 0)
+  );
+  if (candidates.length === 0) return undefined;
+  return candidates.sort((a, b) =>
+    (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0) ||
+    (b.confidence ?? 0) - (a.confidence ?? 0)
+  )[0];
+}
+
+function explainedReason(fallback: string, ind: FileIndicator | undefined): Pick<PolicyViolation, "reason" | "indicator_id" | "cwe" | "confidence"> {
+  if (!ind) return { reason: fallback };
+  const parts = [ind.label];
+  if (ind.detail) parts.push(ind.detail);
+  const suffix = [
+    ind.cwe ? ind.cwe : null,
+    ind.confidence != null ? `${ind.confidence}% confidence` : null,
+  ].filter(Boolean).join(" · ");
+  return {
+    reason: suffix ? `${parts.join(" — ")} (${suffix})` : parts.join(" — "),
+    indicator_id: ind.id, cwe: ind.cwe, confidence: ind.confidence,
+  };
 }
 
 export function evaluatePolicy(
@@ -104,6 +148,7 @@ export function evaluatePolicy(
     risk_score: string;
     attested: boolean;
     ai_percentage: number;
+    indicators?: FileIndicator[];
   }>,
   attestedSet: Set<string>
 ): PolicyResult {
@@ -118,8 +163,11 @@ export function evaluatePolicy(
       if (!attested) {
         violations.push({
           file: f.file_path,
-          reason: `CRITICAL risk — requires ${required} attestation${required !== 1 ? "s" : ""}`,
           severity: "critical",
+          ...explainedReason(
+            `CRITICAL risk — requires ${required} attestation${required !== 1 ? "s" : ""}`,
+            bestIndicatorFor(f.indicators, "critical"),
+          ),
         });
       }
     }
@@ -128,8 +176,11 @@ export function evaluatePolicy(
       if (!attested) {
         violations.push({
           file: f.file_path,
-          reason: `HIGH risk — requires ${policy.attestations_high} attestation`,
           severity: "high",
+          ...explainedReason(
+            `HIGH risk — requires ${policy.attestations_high} attestation`,
+            bestIndicatorFor(f.indicators, "high"),
+          ),
         });
       }
     }
@@ -138,8 +189,11 @@ export function evaluatePolicy(
       if (!attested) {
         violations.push({
           file: f.file_path,
-          reason: `MEDIUM risk — policy requires attestation`,
           severity: "medium",
+          ...explainedReason(
+            `MEDIUM risk — policy requires attestation`,
+            bestIndicatorFor(f.indicators, "medium"),
+          ),
         });
       }
     }
