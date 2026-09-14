@@ -2081,14 +2081,12 @@ export default function DashboardPage() {
                                   <div className="flex items-center gap-3 text-[10px] text-gray-400 border-t border-gray-50 pt-2">
                                     <span>{r.scan_count} scans</span>
                                     <span>{r.file_count} files</span>
-                                    {r.latest_scan_id && (
-                                      <span
-                                        onClick={e => { e.preventDefault(); window.location.href = `/pr/${r.latest_scan_id}`; }}
-                                        className="ml-auto text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity"
-                                      >
-                                        Latest PR →
-                                      </span>
-                                    )}
+                                    <span
+                                      onClick={e => { e.preventDefault(); window.location.href = `/scans?repo=${encodeURIComponent(r.repo)}`; }}
+                                      className="ml-auto text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                      View PRs →
+                                    </span>
                                   </div>
                                 </Link>
                               );
@@ -2206,12 +2204,10 @@ export default function DashboardPage() {
                                       <span className="text-xs text-gray-400 tabular-nums whitespace-nowrap">{relativeDate(r.last_scan)}</span>
                                     </td>
                                     <td className="px-3 py-3 pr-4">
-                                      {r.latest_scan_id && (
-                                        <Link href={`/pr/${r.latest_scan_id}`}
-                                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                          PR <ExternalLinkIcon />
-                                        </Link>
-                                      )}
+                                      <Link href={`/scans?repo=${encodeURIComponent(r.repo)}`}
+                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                                        PRs <ExternalLinkIcon />
+                                      </Link>
                                     </td>
                                   </tr>
                                 );

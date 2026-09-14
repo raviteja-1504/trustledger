@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import AuthGuard from "@/components/AuthGuard";
 import { formatDateTime, formatDateOnly, relativeTime as tzRelativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
@@ -254,12 +255,16 @@ function effectiveAttestedCount(s: ScanSummary, statuses: Record<string, string>
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-export default function ScansPage() {
+function ScansContent() {
     const tz = useTimezone();
   const { profile } = useAuth();
+  const searchParams = useSearchParams();
   const [scans,            setScans]            = useState<ScanSummary[]>([]);
   const [loading,          setLoading]          = useState(true);
-  const [repoFilter,       setRepoFilter]       = useState("all");
+  // Deep-linkable from a repo row elsewhere in the app (e.g. dashboard
+  // "Repositories" section's "View PRs →") so "what PRs are in this repo"
+  // lands here pre-filtered instead of requiring the dropdown below.
+  const [repoFilter,       setRepoFilter]       = useState(() => searchParams?.get("repo") ?? "all");
   const [riskFilter,       setRiskFilter]       = useState<RiskLevel | "all">("all");
   const [trigFilter,       setTrigFilter]       = useState<"all" | "webhook" | "push">("all");
   const [dateFilter,       setDateFilter]       = useState<"7" | "30" | "90" | "all">("30");
@@ -609,5 +614,19 @@ export default function ScansPage() {
 
       </div>
     </AuthGuard>
+  );
+}
+
+export default function ScansPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-64">
+        <svg className="animate-spin w-8 h-8 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+        </svg>
+      </div>
+    }>
+      <ScansContent />
+    </Suspense>
   );
 }
