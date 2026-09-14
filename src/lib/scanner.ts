@@ -697,6 +697,12 @@ const XXE_RE = [
   /DocumentBuilderFactory\.newInstance\s*\(\s*\)(?![\s\S]{0,300}setFeature\s*\([^)]*FEATURE_SECURE_PROCESSING)/,
   /SAXParserFactory\.newInstance\s*\(\s*\)(?![\s\S]{0,300}setFeature)/,
   /XMLReaderFactory\.createXMLReader\s*\(\s*\)/,
+  // StAX (XMLInputFactory) -- a third Java XML parsing API alongside DOM and
+  // SAX above, missing entirely until a real-WebGoat benchmark (XXE lesson's
+  // CommentsCache.parseXml()) surfaced that it uses this one specifically.
+  // Same "no nearby hardening call" shape as the DocumentBuilderFactory
+  // check; XMLInputFactory defaults IS_SUPPORTING_EXTERNAL_ENTITIES to true.
+  /XMLInputFactory\.newInstance\s*\(\s*\)(?![\s\S]{0,300}setProperty\s*\([^)]*ACCESS_EXTERNAL_DTD)/,
   /etree\.(?:fromstring|parse)\s*\(\s*(?:req|request)\./i,
   /lxml\.etree\.(?:fromstring|parse)\s*\(\s*(?:req|request)\./i,
   /libxml\.parseXml(?:String)?\s*\(\s*(?:req|request)\./i,
