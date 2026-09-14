@@ -15,6 +15,7 @@ export interface FunctionScore {
   line:          number;
   endLine:       number;
   ai_percentage: number;
+  applicable_signals?: number;
 }
 
 export interface FileResult {

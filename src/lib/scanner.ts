@@ -67,6 +67,15 @@ export interface FunctionAIScore {
   line:          number;
   endLine:       number;
   ai_percentage: number;
+  // How many of the 45 signals found enough content in this function body to
+  // even apply (not how many "fired" as AI-like -- just how many had an
+  // opinion at all). A short function body has too little surface area for
+  // most signals to engage, so ai_percentage collapses toward the sigmoid's
+  // ~2.9% floor (combined=0) regardless of the function's real authorship --
+  // that floor looks like a confident low measurement but is actually "no
+  // signal". Callers should treat a low applicable_signals count as "not
+  // enough content to assess", not as evidence of human authorship.
+  applicable_signals: number;
 }
 
 export interface FixSuggestion {
@@ -3920,8 +3929,8 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
       const bodyLines = extractFunctionBody(content, fn.line, fn.endLine);
       const bodyContent = bodyLines.join("\n");
       if (bodyContent.trim().length < 50) continue;
-      const { score } = computeAIPercentage(bodyContent, lang, bodyLines.length, 0, attribution.humanEvidence);
-      function_scores.push({ name: fn.name || "(anonymous)", line: fn.line, endLine: fn.endLine, ai_percentage: score });
+      const { score, applicableCount } = computeAIPercentage(bodyContent, lang, bodyLines.length, 0, attribution.humanEvidence);
+      function_scores.push({ name: fn.name || "(anonymous)", line: fn.line, endLine: fn.endLine, ai_percentage: score, applicable_signals: applicableCount });
     }
   }
 

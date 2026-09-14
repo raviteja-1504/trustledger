@@ -718,22 +718,46 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
               {/* Per-function AI breakdown */}
               {(file.function_scores?.length ?? 0) > 0 && (
                 <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
+                  <p
+                    className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2 inline-flex items-center gap-1 cursor-help"
+                    title="Each function's own AI-authorship likelihood, scored the same way as the file-level score but against just that function's body. Short or simple functions often don't contain enough content for the signal set to say anything meaningful — those show as low-confidence rather than a specific percentage, since a low score from too little content isn't the same as confidently human-written."
+                  >
                     Per-Function AI Content ({file.function_scores!.length})
+                    <span className="text-gray-300">ⓘ</span>
                   </p>
                   <div className="space-y-1.5">
                     {[...file.function_scores!]
                       .sort((a, b) => b.ai_percentage - a.ai_percentage)
-                      .map(fn => (
-                        <div key={`${fn.name}-${fn.line}`} className="flex items-center gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2">
-                          <code className="text-xs font-mono font-semibold text-gray-700 truncate min-w-0 flex-1">{fn.name}()</code>
-                          <span className="text-[10px] font-mono text-gray-400 shrink-0">L{fn.line}–{fn.endLine}</span>
-                          <div className="w-24 shrink-0"><ProgressBar value={fn.ai_percentage} mode="ai" height="h-1.5" /></div>
-                          <span className="text-xs font-black text-gray-800 tabular-nums w-12 text-right shrink-0">
-                            {(fn.ai_percentage * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                      ))}
+                      .map(fn => {
+                        // computeAIPercentage's sigmoid floors at ~2.9% when
+                        // zero signals found enough content to apply (see
+                        // scanner.ts) -- that's a "no signal" result, not a
+                        // confident "mostly human" measurement. Below 3
+                        // applicable signals, show that honestly instead of
+                        // a specific-looking percentage.
+                        const lowConfidence = fn.applicable_signals != null && fn.applicable_signals < 3;
+                        return (
+                          <div key={`${fn.name}-${fn.line}`} className="flex items-center gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2">
+                            <code className="text-xs font-mono font-semibold text-gray-700 truncate min-w-0 flex-1">{fn.name}()</code>
+                            <span className="text-[10px] font-mono text-gray-400 shrink-0">L{fn.line}–{fn.endLine}</span>
+                            {lowConfidence ? (
+                              <span
+                                className="text-[10px] font-semibold text-gray-400 italic shrink-0 cursor-help"
+                                title="This function is too short/simple for the signal set to assess confidently — not enough content, not a measurement of human authorship."
+                              >
+                                Not enough content to assess
+                              </span>
+                            ) : (
+                              <>
+                                <div className="w-24 shrink-0"><ProgressBar value={fn.ai_percentage} mode="ai" height="h-1.5" /></div>
+                                <span className="text-xs font-black text-gray-800 tabular-nums w-12 text-right shrink-0">
+                                  {(fn.ai_percentage * 100).toFixed(0)}%
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })}
                   </div>
                 </div>
               )}
@@ -1527,15 +1551,30 @@ function PRDetailContent() {
             CRITICAL_RISK:  { text: "Critical Risk",    color: "#ef4444" },
           };
           const meta = labelMeta[rt.label];
-          const factorBars: Array<{ label: string; pct: number; color: string; detail?: string }> = [
-            { label: "Security",     pct: Math.round((1 - rt.factors.security_density) * 100), color: "#6366f1" },
-            { label: "Dependencies", pct: Math.round((1 - rt.factors.dep_risk) * 100),          color: "#8b5cf6" },
-            { label: "CI/CD Trust",  pct: Math.round(rt.factors.cicd_trust * 100),               color: "#0ea5e9" },
-            { label: "Compliance",   pct: Math.round(rt.factors.compliance_score * 100),         color: "#14b8a6" },
-            { label: "Behavior",     pct: Math.round((1 - rt.factors.backdoor_risk) * 100),      color: "#f97316" },
+          const factorBars: Array<{ label: string; pct: number; color: string; detail: string }> = [
+            {
+              label: "Security", pct: Math.round((1 - rt.factors.security_density) * 100), color: "#6366f1",
+              detail: "How dense CRITICAL/HIGH security findings are across this scan, per 100 lines of code. Fewer findings relative to code size scores higher.",
+            },
+            {
+              label: "Dependencies", pct: Math.round((1 - rt.factors.dep_risk) * 100), color: "#8b5cf6",
+              detail: "Based on known CVEs, typosquatting risk, and deprecated/unmaintained packages found in this scan's dependency manifests.",
+            },
+            {
+              label: "CI/CD Trust", pct: Math.round(rt.factors.cicd_trust * 100), color: "#0ea5e9",
+              detail: "Checks CI/CD workflow files (GitHub Actions, Jenkinsfile, GitLab CI) in this scan for unpinned third-party actions, dangerous steps, and secret-scanning tooling. Shows 100% by default when no CI/CD config file was part of this scan — that means \"nothing checked\", not \"verified secure\".",
+            },
+            {
+              label: "Compliance", pct: Math.round(rt.factors.compliance_score * 100), color: "#14b8a6",
+              detail: "How much of this scan's code maps cleanly to your configured compliance framework controls (SOC 2 / PCI-DSS / EU AI Act), based on open violations.",
+            },
+            {
+              label: "Behavior", pct: Math.round((1 - rt.factors.backdoor_risk) * 100), color: "#f97316",
+              detail: "Checks scanned files for suspicious behavioral patterns — logic bombs, hidden data-exfiltration code, timing channels. Lower detected risk scores higher.",
+            },
             {
               label: "AI Content", pct: Math.round(rt.factors.ai_percentage * 100), color: "#ec4899",
-              detail: "informational — not inherently a risk factor",
+              detail: "Average AI-authorship likelihood across scanned files. AI-written code isn't inherently less secure, but this does still count toward the trust score above (25% weight, the largest single factor) — read it alongside the other factors, not as a standalone verdict.",
             },
           ];
           return (
@@ -1553,9 +1592,12 @@ function PRDetailContent() {
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
                 {factorBars.map(f => (
-                  <div key={f.label} title={f.detail}>
+                  <div key={f.label} title={f.detail} className="cursor-help">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] font-semibold text-gray-600">{f.label}</span>
+                      <span className="text-[10px] font-semibold text-gray-600 inline-flex items-center gap-1">
+                        {f.label}
+                        <span className="text-gray-300">ⓘ</span>
+                      </span>
                       <span className="text-[11px] font-bold tabular-nums" style={{ color: f.color }}>{f.pct}%</span>
                     </div>
                     <div className="h-1.5 rounded-full overflow-hidden bg-gray-100">
