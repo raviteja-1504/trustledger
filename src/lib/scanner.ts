@@ -155,6 +155,7 @@ const LANG_MAP: Record<string, string> = {
   swift: "swift", yaml: "yaml",     yml: "yaml",
   json: "json",   sh: "shell",      sql: "sql",
   md: "markdown", tf: "terraform",  ex: "elixir",
+  xml: "xml",     properties: "properties", gradle: "gradle",
 };
 
 export function detectLanguage(path: string): string {
@@ -176,11 +177,12 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
   const base    = lower.split(/[\\/]/).pop() ?? lower;
   const ext     = base.split(".").pop() ?? "";
 
-  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2"]);
+  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle"]);
   if (SKIP_EXTS.has(ext)) return { skipAI:true, isGenerated:false, isTestFile:false, aiPriorBias:0 };
 
   const isGenerated =
-    /\.(d\.ts|min\.js|bundle\.js|pb\.ts|pb\.js)$/.test(lower) ||
+    /[.-](?:d\.ts|min\.js|min\.css|bundle\.js)$/.test(lower) ||
+    /\.pb\.(?:ts|js|go)$/.test(lower) ||
     base.includes(".generated.") || base.includes("_pb.") ||
     base.includes("_generated.") || base.endsWith(".gen.ts") ||
     base.endsWith(".gen.js");
@@ -355,6 +357,15 @@ const TAINT_SOURCES = [
   /\bsearch[Pp]arams\.get\b/,
   /\bformData\.get\b/,
   /\buserInput\b|\buserData\b/,
+  // Java/Kotlin (Servlet + Spring MVC)
+  /\brequest\.getParameter\b|\brequest\.getHeader\b/,
+  /@(?:PathVariable|RequestParam|RequestBody|RequestHeader)\b/,
+  // Go (net/http + gin/echo)
+  /\br\.URL\.Query\(\)|r\.FormValue\b|r\.PostFormValue\b|mux\.Vars\(r\)/,
+  /\bc\.(?:Param|Query|PostForm)\s*\(/,  // gin/echo context
+  // C# (ASP.NET) — Ruby's params[...] is already covered by the generic
+  // /\bparams(?:\[|\.)\b/ pattern above.
+  /\bRequest\.(?:Query|Form)\[|\[From(?:Query|Route|Body|Header)\]/,
 ];
 
 function hasTaintNearby(lines: string[], sinkLine: number, window = 12): boolean {
@@ -389,6 +400,15 @@ function extractTaintedVars(lines: string[]): Set<string> {
     // PHP: $url = $_GET['url']
     const phpAssign = /^\$(\w+)\s*=\s*\$_(?:POST|GET|REQUEST|COOKIE|SERVER)\s*\[/.exec(line.trim());
     if (phpAssign) { tainted.add(phpAssign[1]); continue; }
+    // Java/Kotlin: String url = request.getParameter("url");  or  val url = call.parameters["url"]
+    const javaAssign = /\b(?:String|Long|Integer|int|long|val|var)\s+(\w+)\s*=\s*request\.getParameter\s*\(/.exec(line.trim());
+    if (javaAssign) { tainted.add(javaAssign[1]); continue; }
+    // Go: url := r.URL.Query().Get("url")  or  url := r.FormValue("url")
+    const goAssign = /\b(\w+)\s*:=\s*r\.(?:URL\.Query\(\)\.Get|FormValue|PostFormValue)\s*\(/.exec(line.trim());
+    if (goAssign) { tainted.add(goAssign[1]); continue; }
+    // C#: var url = Request.Query["url"];
+    const csAssign = /\b(?:var|string)\s+(\w+)\s*=\s*Request\.(?:Query|Form)\s*\[/.exec(line.trim());
+    if (csAssign) { tainted.add(csAssign[1]); continue; }
   }
   return tainted;
 }
@@ -434,6 +454,18 @@ const CMD_INJECTION_RE = [
   /child_process\.exec\s*\(`[^`]*\$\{/,
   /spawn\s*\([^,)]*\$\{[^}]+\}/,
   /\bexec\s*\(\s*`[^`]*\$\{/,
+  // Java/Kotlin — Runtime.exec / ProcessBuilder built from concatenated request input
+  /Runtime\.getRuntime\s*\(\s*\)\s*\.\s*exec\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
+  /new\s+ProcessBuilder\s*\([^)]*request\.getParameter\s*\(/i,
+  // Go — exec.Command with a query/form-derived argument
+  /exec\.Command\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  // PHP
+  /(?:shell_exec|system|passthru|popen)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
+  // Ruby — backtick/system() with interpolated params
+  /`[^`]*#\{\s*params\[/,
+  /\bsystem\s*\([^)]*params\[/i,
+  // C#
+  /Process\.Start\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
 const SSRF_RE = [
@@ -442,6 +474,15 @@ const SSRF_RE = [
   /https?\.(?:get|request)\s*\(\s*(?:req\.|request\.|body\.|params\.)\w+/i,
   /got\s*\(\s*(?:req\.|body\.|params\.|query\.)\w+/i,
   /axios\s*\(\s*\{\s*url\s*:\s*(?:req\.|body\.|params\.)\w+/i,
+  // Java/Kotlin — RestTemplate/URL/HttpClient built from request input
+  /RestTemplate\s*\(\s*\)\s*\.\s*(?:getForObject|getForEntity|postForObject|exchange)\s*\([^)]*request\.getParameter\s*\(/i,
+  /new\s+URL\s*\(\s*request\.getParameter\s*\(/i,
+  // Go
+  /http\.(?:Get|Post|Head)\s*\(\s*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  // PHP — curl target URL from user input
+  /curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*\$_(?:GET|POST|REQUEST)\b/i,
+  // Python requests library
+  /requests\.(?:get|post|put|delete|head)\s*\(\s*request\.(?:args|form|GET|POST)\b/i,
 ];
 
 const PATH_TRAVERSAL_RE = [
@@ -449,6 +490,23 @@ const PATH_TRAVERSAL_RE = [
   /fs\.(?:readFile|writeFile|readdir|stat|unlink|createReadStream|createWriteStream)\s*\([^)]*(?:req\.|params\.|body\.|query\.)\w+/i,
   /__dirname\s*\+\s*(?:req\.|params\.|body\.|query\.)\w+/i,
   /path\.join\s*\([^)]*['"]\.\.['"]/,
+  // Java/Kotlin — File/Paths/Files built from a request-derived path segment
+  /new\s+File\s*\([^)]*request\.getParameter\s*\(/i,
+  /Paths\.get\s*\([^)]*request\.getParameter\s*\(/i,
+  /Files\.(?:newInputStream|newOutputStream|readAllBytes|newBufferedReader|newBufferedWriter|delete)\s*\([^)]*request\.getParameter\s*\(/i,
+  /new\s+FileInputStream\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
+  // Python — open()/os.path.join() with a request-derived component
+  /\bopen\s*\([^)]*\+\s*request\.(?:args|form|GET|POST)\b/i,
+  /os\.path\.join\s*\([^)]*request\.(?:args|form|GET|POST)\b/i,
+  // Go
+  /os\.Open\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  /filepath\.Join\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue)\b/i,
+  // PHP
+  /(?:fopen|file_get_contents|readfile|include|include_once|require|require_once)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
+  // Ruby
+  /File\.(?:read|open|new|delete)\s*\([^)]*\bparams\[/i,
+  // C#
+  /File\.(?:ReadAllText|ReadAllBytes|OpenRead|OpenWrite|Delete)\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
 const PROTO_POLLUTION_RE = [
@@ -462,6 +520,16 @@ const PROTO_POLLUTION_RE = [
 const INSECURE_RANDOM_RE = [
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\s*=.*Math\.random\(\)/i,
   /Math\.random\(\).*(?:token|secret|key|auth|session|cookie)/i,
+  // Java/Kotlin/C# — java.util.Random / System.Random are not CSPRNGs
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bnew\s+Random\s*\(\s*\)/i,
+  // Python
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\brandom\.random\s*\(\s*\)/i,
+  // Go — math/rand instead of crypto/rand
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bmath\/rand\b/i,
+  // PHP
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\b(?:rand|mt_rand)\s*\(/i,
+  // Ruby
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bKernel\.rand\b|\brand\s*\(\s*\d/i,
 ];
 
 const REDOS_RE = [
@@ -477,6 +545,14 @@ const OPEN_REDIRECT_RE = [
   /res\.redirect\s*\(\s*(?:req\.query|req\.body|req\.params)[\.[]/i,
   /(?:redirect|location)\s*\(\s*(?:req\.|body\.|params\.|query\.)\w+/i,
   /window\.location(?:\.href)?\s*=\s*(?:params|query|search|url)\b/i,
+  // Java/Kotlin — response.sendRedirect(request.getParameter(...))
+  /response\.sendRedirect\s*\([^)]*request\.getParameter\s*\(/i,
+  // Python Flask/Django
+  /\bredirect\s*\(\s*request\.(?:args|GET|form)\b/i,
+  // PHP
+  /header\s*\(\s*["']Location:\s*["']\s*\.\s*\$_(?:GET|POST|REQUEST)\b/i,
+  // Ruby on Rails
+  /redirect_to\s+params\[/i,
 ];
 
 // Require one side of the comparison to be clearly request-derived
@@ -503,6 +579,11 @@ const SSTI_RE = [
   /render_template_string\s*\(\s*(?:request\.data|request\.json|request\.args)/i,
   /env\.from_string\s*\(\s*(?:request\.|req\.)\w+/i,
   /\.render\s*\(\s*(?:req|request)\.(?:body|query)\.\w+/i,
+  // Java — Velocity/FreeMarker evaluating a string built from request input
+  /Velocity\.evaluate\s*\([^)]*request\.getParameter\s*\(/i,
+  /new\s+Template\s*\([^)]*request\.getParameter\s*\(/i,
+  // Go — text/template parsing a query/form-derived string
+  /template\.(?:New|Must)\s*\([^)]*\)\s*\.\s*Parse\s*\(\s*r\.(?:URL\.Query\(\)|FormValue)\b/i,
 ];
 
 // HTTP Header Injection (CRLF injection into response headers)
@@ -511,6 +592,8 @@ const HEADER_INJECT_RE = [
   /res\.setHeader\s*\(\s*["'](?:Location|Refresh|Set-Cookie)["'],\s*(?:req|request)\./i,
   /response\.headers\s*\[["'][\w-]+["']\]\s*=\s*(?:req|request)\./i,
   /headers\s*\[(?:req|request)\.(?:query|body|params)\b/i,
+  // Java/Kotlin
+  /response\.(?:setHeader|addHeader)\s*\([^,]+,\s*request\.getParameter\s*\(/i,
 ];
 
 // Weak CORS policy
@@ -520,6 +603,9 @@ const WEAK_CORS_RE = [
   /res\.(?:header|setHeader)\s*\(\s*["']Access-Control-Allow-Origin["'],\s*["']\*["']\)/,
   /app\.use\s*\(\s*cors\s*\(\s*\)\s*\)/,
   /allowedOrigins\s*=\s*\[\s*["']\*["']/,
+  // Java Spring
+  /@CrossOrigin\s*\(\s*origins\s*=\s*["']\*["']/i,
+  /\.allowedOrigins\s*\(\s*["']\*["']\s*\)/i,
 ];
 
 // IDOR — insecure direct object reference (no ownership check)
@@ -529,6 +615,24 @@ const IDOR_RE = [
   /(?:db|conn|pool|client)\.(?:get|find|query)\s*\(\s*(?:req|request)\.(?:params|query)\b/i,
   /SELECT\s+\*\s+FROM\s+\w+\s+WHERE\s+(?:id|user_id|owner_id)\s*=\s*\$\{(?:req|request)\./i,
   /\bgetById\s*\(\s*(?:req|request)\.(?:params|query)\b/i,
+];
+
+// XPath injection — user input concatenated into an XPath expression
+const XPATH_INJECT_RE = [
+  /XPathExpression\s*\w*\s*=[\s\S]{0,200}\+\s*request\.getParameter\s*\(/i,
+  /\.evaluate\s*\(\s*["'][^"']*["']\s*\+\s*(?:req|request)\.(?:query|body|params)\b/i,
+  /\.evaluate\s*\(\s*["'][^"']*["']\s*\+\s*request\.getParameter\s*\(/i,
+  /xpath\.evaluate\s*\([^)]*\+\s*(?:request\.|req\.)/i,
+];
+
+// CSRF protection explicitly disabled at the framework level — a high-
+// confidence positive pattern, unlike detecting "missing" protection
+// (which regex can't do reliably without producing constant false positives).
+const CSRF_DISABLED_RE = [
+  /\.csrf\s*\(\s*\)\s*\.\s*disable\s*\(\s*\)/i,   // Spring Security: http.csrf().disable()
+  /@csrf_exempt/i,                                 // Django
+  /CSRF_ENABLED\s*=\s*False/i,                     // Flask-WTF
+  /protect_from_forgery\s+with:\s*:null_session/i, // Rails, common misconfiguration
 ];
 
 // Sensitive data exposed in URL query string
@@ -559,6 +663,11 @@ const VERBOSE_ERROR_RE = [
   // Sending the entire error object (not just message) in a response body
   /(?:res\.json|res\.send)\s*\(\s*(?:error|err|e)\s*\)/i,
   /(?:res\.status\s*\([^)]+\)\s*\.json|NextResponse\.json)\s*\(\s*(?:\{[^}]*\})?\s*(?:error|err|e)\s*\)/i,
+  // Java — stack trace or exception message written directly to the servlet response
+  /(?:e|ex|exception)\.printStackTrace\s*\(\s*response\.getWriter\s*\(\s*\)\s*\)/i,
+  /response\.getWriter\s*\(\s*\)\.print\s*\([^)]*(?:e|ex|exception)\.getMessage\s*\(\s*\)/i,
+  // Python Flask — exception message returned in a JSON response
+  /jsonify\s*\(\s*\{[^}]*(?:error|message)\s*:\s*str\s*\(\s*e\s*\)/i,
 ];
 
 // GraphQL injection (user input in query template)
@@ -588,6 +697,9 @@ const LDAP_INJECT_RE = [
   /(?:ldap|ad)\.(?:search|query|findUser|bind)\s*\([^)]*\+\s*(?:req|request)\./i,
   /\(\s*(?:cn|uid|mail|sAMAccountName)\s*=\s*['"]?\s*\+\s*(?:req|request)\./i,
   /\.search(?:Entries)?\s*\([^)]*(?:req|request)\.(?:query|body|params)\b/i,
+  // Java — javax.naming.directory DirContext.search with a concatenated filter
+  /(?:DirContext|InitialDirContext)[\s\S]{0,200}\.search\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
+  /String\s+\w*[Ff]ilter\w*\s*=\s*["'][^"']*["']\s*\+\s*request\.getParameter\s*\(/i,
 ];
 
 // Insecure file upload (missing MIME/size validation)
@@ -717,9 +829,19 @@ function runDetector(
   return found;
 }
 
+// Java's native .properties config format (db.password=supersecret123) has
+// no string-quoting syntax at all, so every generic word-keyed pattern above
+// — which all require a quoted ["'] value — silently misses it entirely.
+// Applied only to .properties files themselves, so it can't fire on
+// `String password = someVariable;`-shaped code in .java/.js/etc, where an
+// unquoted right-hand side is almost always a reference, not a literal.
+const PROPERTIES_SECRET_RE =
+  /^\s*[\w.]*(?:password|passwd|pwd|secret|token|api[._]?key)[\w.]*\s*=\s*(\S{8,})\s*$/i;
+
 function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const isTestFile = TEST_FILE_RE.test(file_path);
+  const isPropertiesFile = /\.properties$/i.test(file_path);
   const found: ScanIndicator[] = [];
   for (const { re, label, severity, genericValue } of SECRET_PATTERNS) {
     // Generic word-keyed patterns are suppressed in test/fixture/mock files —
@@ -733,6 +855,15 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       if (!m) continue;
       if (genericValue && !looksLikeRealSecret(m[1] ?? "")) continue;
       found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
+    }
+  }
+  if (isPropertiesFile && !isTestFile) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim().startsWith("#")) continue;
+      const m = PROPERTIES_SECRET_RE.exec(lines[i]);
+      if (!m || !looksLikeRealSecret(m[1])) continue;
+      found.push({ id:"hardcoded-secret", label:"Hardcoded credential in .properties file", severity:"critical",
+        line:i+1, detail:"Unquoted key=value credential in a Java properties file — move to an environment variable or secrets manager" });
     }
   }
   return found;
@@ -917,6 +1048,46 @@ function findIDOR(lines: string[]): ScanIndicator[] {
     "User-supplied ID used in DB lookup without ownership check — verify caller owns the resource");
 }
 
+function findXPathInjection(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, XPATH_INJECT_RE, "xpath-injection", "XPath Injection", "critical",
+    "User input concatenated into an XPath expression — use XPath variable binding instead of string concatenation");
+}
+
+function findCSRFDisabled(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, CSRF_DISABLED_RE, "csrf-protection-disabled", "CSRF Protection Disabled", "high",
+    "Framework-level CSRF protection explicitly disabled — re-enable it or add explicit token validation for state-changing endpoints");
+}
+
+// Java Spring IDOR: an @PathVariable/@RequestParam-bound identifier flowing
+// into a repository lookup within the same method, with no authorization
+// check in between. Requires cross-line pairing (the annotation lives on the
+// method signature, the lookup a few lines later) — regex on IDOR_RE only
+// sees `req.params`-style inline JS taint, so this is a dedicated pass
+// rather than an array entry, mirroring findTOCTOU's block-scan shape.
+const JAVA_TAINT_PARAM_RE = /@(?:PathVariable|RequestParam)(?:\([^)]*\))?\s+(?:final\s+)?\w+(?:<[^>]+>)?\s+(\w+)\b/;
+const JAVA_REPO_LOOKUP_RE = /\.(?:findById|getOne|getById)\s*\(\s*(\w+)\s*\)/;
+const AUTH_CHECK_NEARBY_RE = /@PreAuthorize|hasPermission|getPrincipal|isOwner|checkOwnership|\.equals\s*\(\s*(?:current|principal|auth)/i;
+
+function findIDORJava(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const pm = JAVA_TAINT_PARAM_RE.exec(lines[i]);
+    if (!pm) continue;
+    const paramName = pm[1];
+    for (let j = i; j < Math.min(lines.length, i + 15); j++) {
+      if (AUTH_CHECK_NEARBY_RE.test(lines[j])) break; // ownership check present — not IDOR
+      const lm = JAVA_REPO_LOOKUP_RE.exec(lines[j]);
+      if (lm && lm[1] === paramName) {
+        found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"high", line:j+1,
+          detail:`'${paramName}' comes directly from @PathVariable/@RequestParam and is used in a repository lookup with no ownership check nearby` });
+        break;
+      }
+    }
+  }
+  return found;
+}
+
 function findSensitiveDataInURL(lines: string[]): ScanIndicator[] {
   return runDetector(lines, SENSITIVE_URL_RE, "sensitive-url-data", "Sensitive Data in URL", "medium",
     "Credentials or tokens in URL query string — use POST body or Authorization header instead");
@@ -1003,6 +1174,41 @@ function findCookieInsecurity(lines: string[]): ScanIndicator[] {
         seen.add(i);
         found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
           line:i+1, detail:`Session/auth cookie "${cookieName}" set without secure:true — transmitted over unencrypted HTTP` });
+      }
+    }
+  }
+  return found;
+}
+
+// Cookie security for Java (servlet Cookie built then mutated via setters,
+// rather than an options-object literal) and Python Flask (set_cookie kwargs)
+// — structurally different enough from res.cookie(name, val, {opts}) that
+// findCookieInsecurity's block-parsing above doesn't apply.
+function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+
+    // Java servlet: Cookie c = new Cookie("session", value);
+    const jm = /(\w+)\s*=\s*new\s+Cookie\s*\(\s*["']([^"']+)["']/.exec(lines[i]);
+    if (jm && AUTH_COOKIE_RE.test(jm[2])) {
+      const varName  = jm[1];
+      const block    = lines.slice(i, Math.min(lines.length, i + 8)).join(" ");
+      if (!new RegExp(`${varName}\\s*\\.\\s*setHttpOnly\\s*\\(\\s*true\\s*\\)`).test(block)) {
+        found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+          line:i+1, detail:`Session/auth cookie "${jm[2]}" created without a nearby setHttpOnly(true) call — XSS can steal it via document.cookie` });
+      }
+      continue;
+    }
+
+    // Python Flask: response.set_cookie("session", value, ...)
+    if (/\.set_cookie\s*\(/.test(lines[i])) {
+      const block = lines.slice(i, Math.min(lines.length, i + 4)).join(" ");
+      const nameMatch  = block.match(/\.set_cookie\s*\(\s*["']([^"']+)["']/);
+      const cookieName = nameMatch?.[1] ?? "";
+      if (AUTH_COOKIE_RE.test(cookieName) && !/httponly\s*=\s*True/i.test(block)) {
+        found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+          line:i+1, detail:`Session/auth cookie "${cookieName}" set without httponly=True — XSS can steal it via document.cookie` });
       }
     }
   }
@@ -3096,6 +3302,45 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     description: "Remove zero-width / soft-hyphen / word-joiner characters embedded as AI watermarks.",
     effort: "low",
   },
+  "xxe": {
+    title: "Disable external entity resolution",
+    description: "Call setFeature(...) to disable DOCTYPE/external-entity processing before parsing untrusted XML.",
+    code_before: "DocumentBuilderFactory.newInstance()",
+    code_after:  'DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();\ndbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);',
+    cwe: "CWE-611", effort: "low",
+  },
+  "ldap-injection": {
+    title: "Escape LDAP special characters or use parameterised filters",
+    description: "Never concatenate user input into an LDAP filter string — escape special characters (*, (, ), \\, NUL) first.",
+    cwe: "CWE-90", effort: "low",
+  },
+  "idor": {
+    title: "Verify the caller owns the requested resource",
+    description: "Check the authenticated user's ID against the resource's owner field before returning or modifying it.",
+    code_before: "repo.findById(id)",
+    code_after:  "repo.findById(id).filter(r -> r.getOwnerId().equals(currentUser.getId()))",
+    cwe: "CWE-639", effort: "medium",
+  },
+  "nosql-injection": {
+    title: "Validate query shape with a schema before passing to the driver",
+    description: "Never pass a raw request body/params object as a MongoDB query — validate it against an expected schema first.",
+    cwe: "CWE-943", effort: "medium",
+  },
+  "ssti": {
+    title: "Use static templates, never user input as a template string",
+    description: "Pass user data as template variables, not as the template source itself.",
+    cwe: "CWE-1336", effort: "medium",
+  },
+  "xpath-injection": {
+    title: "Use XPath variable binding instead of string concatenation",
+    description: "Pass user input through an XPathVariableResolver rather than concatenating it into the expression string.",
+    cwe: "CWE-643", effort: "medium",
+  },
+  "csrf-protection-disabled": {
+    title: "Re-enable framework CSRF protection",
+    description: "Remove the explicit disable and add per-request CSRF tokens for state-changing endpoints, exempting only true API-key-authenticated routes.",
+    cwe: "CWE-352", effort: "medium",
+  },
 };
 
 export function getFixSuggestions(indicators: ScanIndicator[]): FixSuggestion[] {
@@ -3389,10 +3634,23 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   const lineCount = lines.length;
   const hash      = crypto.createHash("sha256").update(content).digest("hex");
 
-  // Security scan — all detectors
-  const rawIndicators: ScanIndicator[] = [
+  // Vendored/minified files (jQuery, etc.) aren't always caught by
+  // getFileTypeMeta's filename check (e.g. "ace.js", "underscore-min.js" was
+  // itself missed until the filename regex was broadened) — their giveaway
+  // is structural: one or a handful of extremely long lines. Those lines
+  // routinely contain substrings like ".innerHTML=" as part of the library's
+  // OWN internal DOM code, which used to trip the XSS/SSRF/etc. detectors as
+  // if it were attacker-tainted application code. Secrets detectors still
+  // run regardless (a real leaked key in a vendor bundle is still real).
+  const avgLineLen    = content.length / Math.max(1, lineCount);
+  const looksMinified = fileMeta.isGenerated || (lineCount < 30 && avgLineLen > 400);
+
+  const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
     ...findHighEntropySecrets(lines, file_path),
+  ];
+
+  const vulnIndicators: ScanIndicator[] = looksMinified ? [] : [
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
     ...findWeakCrypto(lines),
@@ -3415,6 +3673,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findHeaderInjection(lines),
     ...findWeakCORS(lines),
     ...findIDOR(lines),
+    ...findIDORJava(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintXSS(lines),
@@ -3423,9 +3682,18 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findGraphQLInjection(lines),
     ...findXXE(lines),
     ...findLDAPInjection(lines),
+    ...findXPathInjection(lines),
+    ...findCSRFDisabled(lines),
     ...findInsecureFileUpload(lines),
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
+    ...findCookieInsecurityOtherLangs(lines),
+  ];
+
+  // Security scan — all detectors
+  const rawIndicators: ScanIndicator[] = [
+    ...secretIndicators,
+    ...vulnIndicators,
     // Pluggable detectors registered via detectorRegistry.register() -- see
     // detectorRegistry.ts. Empty by default; this is the on-ramp for new
     // detectors that don't require editing this function.
