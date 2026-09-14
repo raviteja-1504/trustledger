@@ -36,8 +36,7 @@ function isRateLimitExempt(pathname: string): boolean {
     || pathname.startsWith("/api/health")
     || pathname === "/healthz"
     || pathname.startsWith("/api/docs")
-    || pathname === "/api/scan-worker"       // internal, called by QStash/self, not user-facing
-    || pathname === "/api/repo-scan-worker"; // internal, called by QStash/self, not user-facing
+    || pathname === "/api/scan-worker"; // internal, called by QStash/self, not user-facing
 }
 
 function isPublic(pathname: string): boolean {

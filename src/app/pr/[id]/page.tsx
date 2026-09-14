@@ -959,18 +959,6 @@ function PRDetailContent() {
     api.getScan(id).then(setScan).catch(() => setError("404 Not Found"));
   }, [id]);
 
-  // Whole-repository scans run async (see api/repo-scan-worker) -- poll
-  // while queued/analyzing so the page moves off the "0 files" empty state
-  // on its own once the scan actually finishes, without the reviewer having
-  // to manually refresh.
-  useEffect(() => {
-    if (!scan || (scan.status !== "queued" && scan.status !== "analyzing")) return;
-    const t = setInterval(() => {
-      api.getScan(id).then(setScan).catch(() => {});
-    }, 5000);
-    return () => clearInterval(t);
-  }, [id, scan]);
-
   async function syncCheckRun(force = false) {
     if (!scan) return;
     setSyncingCheck(true);
@@ -1740,37 +1728,6 @@ function PRDetailContent() {
                   </button>
                 )}
               </div>
-            )}
-          </div>
-        )}
-
-        {/* ── Repo scan progress/failure banner ─────────────────────────────── */}
-        {scan && scan.scan_mode === "repo" && scan.status !== "completed" && (
-          <div className={`animate-fade-up rounded-2xl border p-4 flex items-center gap-3 ${
-            scan.status === "failed" ? "bg-rose-50 border-rose-200" : "bg-indigo-50 border-indigo-200"
-          }`}>
-            {scan.status === "failed" ? (
-              <>
-                <span className="text-lg">✕</span>
-                <div>
-                  <p className="text-sm font-bold text-rose-800">Repository scan failed</p>
-                  <p className="text-xs text-rose-600 mt-0.5">{scan.error_message ?? "Unknown error."}</p>
-                </div>
-              </>
-            ) : (
-              <>
-                <span className="w-4 h-4 rounded-full border-2 border-indigo-300 border-t-indigo-600 animate-spin shrink-0" />
-                <div>
-                  <p className="text-sm font-bold text-indigo-800">
-                    {scan.status === "queued" ? "Repository scan queued…" : "Scanning repository…"}
-                  </p>
-                  <p className="text-xs text-indigo-500 mt-0.5">
-                    {scan.files_total != null
-                      ? `${scan.files_scanned ?? 0} of ${scan.files_total} files analysed so far — this page updates automatically.`
-                      : "Fetching the repository file list — this page updates automatically."}
-                  </p>
-                </div>
-              </>
             )}
           </div>
         )}

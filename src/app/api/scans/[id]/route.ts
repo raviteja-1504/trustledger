@@ -59,35 +59,12 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, repository_trust, status, scan_mode, error_message, files_total, files_scanned")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, repository_trust")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
-
-  // A repo scan still queued/analyzing has no scan_files yet -- return early
-  // rather than let the file loop below run over an empty array and read as
-  // "scanned, found nothing" instead of "not finished yet".
-  if (scan.status === "queued" || scan.status === "analyzing") {
-    return NextResponse.json({
-      scan_id: scan.id, repo: scan.repo_full_name, pr_number: scan.pr_number,
-      commit_sha: scan.commit_sha, overall_risk: scan.overall_risk, total_ai_percentage: 0,
-      timestamp: scan.created_at, evidence_breakdown: null, repository_trust: null,
-      status: scan.status, scan_mode: scan.scan_mode,
-      files_total: scan.files_total, files_scanned: scan.files_scanned,
-      files: [],
-    });
-  }
-  if (scan.status === "failed") {
-    return NextResponse.json({
-      scan_id: scan.id, repo: scan.repo_full_name, pr_number: scan.pr_number,
-      commit_sha: scan.commit_sha, overall_risk: scan.overall_risk, total_ai_percentage: 0,
-      timestamp: scan.created_at, evidence_breakdown: null, repository_trust: null,
-      status: scan.status, scan_mode: scan.scan_mode, error_message: scan.error_message,
-      files: [],
-    });
-  }
 
   const { data: files } = await db
     .from("scan_files")
@@ -134,10 +111,6 @@ export async function GET(
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
     repository_trust:    scan.repository_trust ?? null,
-    status:              scan.status,
-    scan_mode:           scan.scan_mode,
-    files_total:         scan.files_total,
-    files_scanned:       scan.files_scanned,
     files: await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
       // the snapshot written at scan time — if detection patterns improve
