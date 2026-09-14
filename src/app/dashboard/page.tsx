@@ -279,123 +279,6 @@ function repoRiskLevel(r: RepoStat): RiskLevel {
   return "LOW";
 }
 
-// ── Risk Heatmap ──────────────────────────────────────────────────────────────
-
-const HEATMAP_COLORS: Record<0|1|2|3|4, string> = {
-  0: "#e2e8f0",   // no activity — visible gray
-  1: "#22c55e",   // low risk — strong green
-  2: "#eab308",   // medium — strong yellow
-  3: "#f97316",   // high — strong orange
-  4: "#ef4444",   // critical — strong red
-};
-const HEATMAP_LABELS: Record<0|1|2|3|4, string> = {
-  0:"None", 1:"Low", 2:"Medium", 3:"High", 4:"Critical",
-};
-const DAY_LABELS = ["Mon","","Wed","","Fri","","Sun"];
-
-function RiskHeatmap({ data }: { data: DashboardData }) {
-  const today = new Date();
-  const cells: { date: string; level: 0|1|2|3|4; label: string }[] = [];
-
-  for (let i = 89; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    const iso = d.toISOString().split("T")[0];
-    const tp  = data.risk_trend.find(t => t.date === iso);
-    let level: 0|1|2|3|4 = 0;
-    if (tp) {
-      const tot = tp.critical_count + tp.high_count + tp.medium_count;
-      level = tot === 0 ? 0 : tot <= 2 ? 2 : tot <= 5 ? 3 : 4;
-    }
-    const mo = d.toLocaleDateString("en-GB", { month:"short", day:"numeric" });
-    cells.push({ date: iso, level, label: `${mo} — ${HEATMAP_LABELS[level]} risk` });
-  }
-
-  // Pad start to Monday boundary
-  const firstDay = new Date(cells[0].date).getDay(); // 0=Sun..6=Sat
-  const padCount = firstDay === 0 ? 6 : firstDay - 1; // days to pad so col starts on Mon
-  const padded = [
-    ...Array.from({ length: padCount }, (_, i) => ({ date: "", level: -1 as -1, label: "" })),
-    ...cells,
-  ];
-  const weeks: typeof padded[] = [];
-  for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
-
-  // Month labels above weeks
-  const monthLabels = weeks.map(week => {
-    const firstReal = week.find(c => c.date);
-    if (!firstReal) return "";
-    const d = new Date(firstReal.date);
-    return d.getDate() <= 7 ? d.toLocaleDateString("en-GB", { month:"short" }) : "";
-  });
-
-  return (
-    <div className="section-card p-5 animate-fade-up delay-400">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <p className="font-bold text-gray-900 text-sm">Risk Activity Heatmap</p>
-          <p className="text-xs text-gray-400 mt-0.5">Daily risk level across all repos — gray cells have no scan data</p>
-        </div>
-      </div>
-
-      <div className="flex gap-1.5 overflow-x-auto pb-2">
-        {/* Day-of-week axis */}
-        <div className="flex flex-col gap-1.5 shrink-0 mr-1 mt-5">
-          {DAY_LABELS.map((d, i) => (
-            <span key={i} className="h-[18px] flex items-center text-[9px] text-gray-400 font-medium leading-none">
-              {d}
-            </span>
-          ))}
-        </div>
-
-        {/* Weeks */}
-        <div className="flex flex-col">
-          {/* Month labels */}
-          <div className="flex gap-1.5 mb-1.5 h-4">
-            {weeks.map((_, wi) => (
-              <div key={wi} className="w-[18px] shrink-0">
-                {monthLabels[wi] && (
-                  <span className="text-[9px] text-gray-500 font-bold leading-none">{monthLabels[wi]}</span>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {/* Grid */}
-          <div className="flex gap-1.5">
-            {weeks.map((week, wi) => (
-              <div key={wi} className="flex flex-col gap-1.5 shrink-0">
-                {week.map((cell, di) => (
-                  cell.level === -1
-                    ? <div key={di} className="w-[18px] h-[18px]" />
-                    : <div
-                        key={cell.date}
-                        className="w-[18px] h-[18px] rounded cursor-default transition-all hover:scale-110 hover:ring-2 hover:ring-offset-1 hover:ring-gray-400"
-                        style={{ background: HEATMAP_COLORS[cell.level as 0|1|2|3|4] }}
-                        title={cell.label}
-                      />
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Legend */}
-      <div className="flex items-center gap-3 mt-3 flex-wrap">
-        <span className="text-[9px] text-gray-400">Risk level:</span>
-        {([0,1,2,3,4] as const).map(l => (
-          <div key={l} className="flex items-center gap-1">
-            <span className="w-[14px] h-[14px] rounded-sm inline-block"
-              style={{ background: HEATMAP_COLORS[l], border:"1px solid rgba(0,0,0,0.08)" }} />
-            <span className="text-[9px] text-gray-500 font-medium">{HEATMAP_LABELS[l]}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ── Security Inbox (compact strip below stats) ───────────────────────────────
 
 function SecurityInbox({ data, violationStatuses, openSecrets }: {
@@ -2363,13 +2246,6 @@ export default function DashboardPage() {
           </>
         )}
       </div>
-
-      {/* ── Risk Heatmap ─────────────────────────────────────────────── */}
-      {effectiveData && !isDeveloperView && (
-        <div className="max-w-7xl mx-auto">
-          <RiskHeatmap data={effectiveData} />
-        </div>
-      )}
 
       <NewScanPanel open={scanPanelOpen} onClose={() => setScanPanelOpen(false)} />
       {showShortcuts && <ShortcutsToast onClose={() => setShowShortcuts(false)} />}
