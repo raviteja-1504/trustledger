@@ -123,9 +123,14 @@ export interface GitHubFile { path: string; content: string }
 
 const FILE_FETCH_CONCURRENCY = 15;
 
-/** Fetch file contents for a list of paths at a given commit. */
+/**
+ * Fetch file contents for a list of paths at a given commit.
+ * `token` is optional so whole-repo scans of a public repo with no
+ * connected GitHub App installation can still fetch content (unauthenticated
+ * GitHub API access works for public repos, just at a lower rate limit).
+ */
 export async function fetchFileContents(
-  token: string,
+  token: string | undefined,
   owner: string,
   repo: string,
   ref: string,
@@ -139,7 +144,7 @@ export async function fetchFileContents(
         `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${ref}`,
         {
           headers: {
-            Authorization: `token ${token}`,
+            ...(token ? { Authorization: `token ${token}` } : {}),
             Accept:        "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
           },
@@ -257,6 +262,62 @@ export async function getCommitDiff(
   } catch {
     return new Set();
   }
+}
+
+// ── Whole-repository scanning ───────────────────────────────────────────────
+
+/** The repo's default branch name (used when the caller doesn't specify one). */
+export async function getDefaultBranch(token: string | undefined, owner: string, repo: string): Promise<string> {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, {
+    headers: {
+      ...(token ? { Authorization: `token ${token}` } : {}),
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub repo lookup failed: ${res.status}`);
+  const data = await res.json() as { default_branch?: string };
+  return data.default_branch ?? "main";
+}
+
+/** Resolves a branch/tag/ref name to its current commit SHA. */
+export async function resolveCommitSha(token: string | undefined, owner: string, repo: string, ref: string): Promise<string> {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`, {
+    headers: {
+      ...(token ? { Authorization: `token ${token}` } : {}),
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub commit lookup failed for ref "${ref}": ${res.status}`);
+  const data = await res.json() as { sha?: string };
+  if (!data.sha) throw new Error(`GitHub commit lookup returned no sha for ref "${ref}"`);
+  return data.sha;
+}
+
+export interface RepoTreeEntry { path: string; type: "blob" | "tree"; size?: number }
+
+/**
+ * Full recursive file listing at a commit. GitHub caps a single recursive
+ * tree response (~100k+ entries typically, but it can truncate on very
+ * large monorepos) -- `truncated` is surfaced so the caller can decide how
+ * to react (repo-scan-worker just proceeds with what it got, since the
+ * MAX_FILES cap downstream means most repos never get anywhere near the
+ * truncation point anyway).
+ */
+export async function listRepoTree(
+  token: string | undefined, owner: string, repo: string, sha: string,
+): Promise<{ entries: RepoTreeEntry[]; truncated: boolean }> {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`, {
+    headers: {
+      ...(token ? { Authorization: `token ${token}` } : {}),
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub tree fetch failed: ${res.status}`);
+  const data = await res.json() as { tree?: RepoTreeEntry[]; truncated?: boolean };
+  return { entries: (data.tree ?? []).filter(e => e.type === "blob"), truncated: data.truncated ?? false };
 }
 
 // ── Check runs ────────────────────────────────────────────────────────────────

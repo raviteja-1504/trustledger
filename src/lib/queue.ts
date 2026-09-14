@@ -21,6 +21,14 @@ export interface ScanJob {
   pr_created_at?:   string;
 }
 
+export interface RepoScanJob {
+  scan_id:  string;
+  org_id:   string;
+  owner:    string;
+  repo:     string;
+  branch:   string | null;  // null = use the repo's default branch
+}
+
 /** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */
 function cleanEnv(val: string | undefined, fallback = ""): string {
   return (val ?? fallback).replace(/^﻿/, "").trim();
@@ -113,5 +121,48 @@ export async function enqueueScan(job: ScanJob): Promise<void> {
     }
 
     await directFetch(workerUrl, job);
+  }
+}
+
+async function directFetchRepo(workerUrl: string, job: RepoScanJob): Promise<void> {
+  const secret = cleanEnv(process.env.INTERNAL_SECRET, "dev");
+  const res = await fetch(workerUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "x-internal-secret": secret },
+    body:    JSON.stringify(job),
+  });
+  const body = await res.json().catch(() => ({}));
+  console.log("[queue] repo-scan-worker response:", res.status, JSON.stringify(body).slice(0, 300));
+}
+
+/**
+ * Enqueues a whole-repository scan. Mirrors enqueueScan's QStash-first,
+ * direct-fallback shape, but keyed and routed separately: a repo scan can
+ * touch hundreds of files and run far longer than a single-PR scan, so it
+ * gets its own worker endpoint and its own flow-control key (per-org, since
+ * there's no per-PR installation token contention to protect against here --
+ * the concern is one org kicking off several repo scans at once, not
+ * cross-installation GitHub API contention).
+ */
+export async function enqueueRepoScan(job: RepoScanJob): Promise<void> {
+  const appUrl = cleanEnv(process.env.NEXT_PUBLIC_APP_URL)
+    || cleanEnv(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+  const workerUrl = `${appUrl}/api/repo-scan-worker`;
+
+  if (!cleanEnv(process.env.QSTASH_TOKEN)) {
+    await directFetchRepo(workerUrl, job);
+    return;
+  }
+
+  try {
+    await client().publishJSON({
+      url: workerUrl,
+      body: job,
+      retries: 1, // a partially-completed repo scan retrying from scratch would double-write scan_files; safer to fail once and let the user retry manually
+      flowControl: { key: `repo-scan-${job.org_id}`, parallelism: 2 },
+    });
+  } catch (err) {
+    console.error("[queue] repo-scan QStash enqueue failed, running directly:", String(err).slice(0, 200));
+    await directFetchRepo(workerUrl, job);
   }
 }

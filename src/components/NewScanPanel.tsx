@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { authedFetch } from "@/lib/useRealData";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
@@ -237,6 +238,11 @@ function ScanningState({ files, onDone }: { files: FileEntry[]; onDone: () => vo
 
 export default function NewScanPanel({ open, onClose }: Props) {
   const router = useRouter();
+  const [mode,          setMode]          = useState<"paste" | "repo">("paste");
+  const [repoOwner,     setRepoOwner]     = useState("");
+  const [repoName,      setRepoName]      = useState("");
+  const [repoBranch,    setRepoBranch]    = useState("");
+  const [repoSubmitting, setRepoSubmitting] = useState(false);
   const [step,         setStep]         = useState<"config" | "scanning">("config");
   const [repo,         setRepo]         = useState(`${ORG}/payments-api`);
   const [prNumber,     setPrNumber]     = useState("50");
@@ -260,6 +266,9 @@ export default function NewScanPanel({ open, onClose }: Props) {
       scanIdRef.current = null;
       animDone.current  = false;
       setActiveFile(0);
+      setMode("paste");
+      setRepoOwner(""); setRepoName(""); setRepoBranch("");
+      setRepoSubmitting(false);
     }
   }, [open]);
 
@@ -327,6 +336,26 @@ export default function NewScanPanel({ open, onClose }: Props) {
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "We couldn't submit that scan. Please try again.");
       setStep("config");
+    }
+  }
+
+  async function handleSubmitRepo() {
+    const owner = repoOwner.trim();
+    const name  = repoName.trim();
+    if (!owner || !name) { setError("Owner and repository name are required."); return; }
+
+    setError(null);
+    setRepoSubmitting(true);
+    try {
+      const result = await authedFetch<{ scan_id: string }>("/api/scans/repo", {
+        method: "POST",
+        body: JSON.stringify({ owner, repo: name, branch: repoBranch.trim() || undefined }),
+      });
+      router.push(`/pr/${result.scan_id}`);
+      onClose();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "We couldn't start that repository scan. Please try again.");
+      setRepoSubmitting(false);
     }
   }
 
@@ -399,8 +428,25 @@ export default function NewScanPanel({ open, onClose }: Props) {
             </button>
           </div>
 
-          {/* Step progress bar */}
+          {/* Mode toggle */}
           {step === "config" && (
+            <div className="flex px-6 pb-4 gap-1.5">
+              {([["paste", "Paste code"], ["repo", "Scan a repository"]] as const).map(([m, label]) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors ${
+                    mode === m ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Step progress bar */}
+          {step === "config" && mode === "paste" && (
             <div className="flex px-6 pb-4 gap-2">
               {["PR Details", "Scan Scope", "Files"].map((label, i) => {
                 const filled = validFiles.length > 0 ? i <= 2 : i === 0 ? true : i === 1 ? scopes.size > 0 : false;
@@ -415,13 +461,49 @@ export default function NewScanPanel({ open, onClose }: Props) {
           )}
         </div>
 
+        {/* ── Repo-scan body ───────────────────────────────────────────────────── */}
+        {step === "config" && mode === "repo" && (
+          <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Repository</p>
+            <p className="text-xs text-gray-500 -mt-2">
+              Fetches and scans every source file in the repository, not just a pull request&apos;s changed files.
+              Large repos are capped and processed in the background — this can take a minute or two.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1.5">Owner / org</label>
+                <input
+                  type="text" value={repoOwner} onChange={e => setRepoOwner(e.target.value)} placeholder="WebGoat"
+                  className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono bg-gray-50/50"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1.5">Repository</label>
+                <input
+                  type="text" value={repoName} onChange={e => setRepoName(e.target.value)} placeholder="WebGoat"
+                  className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono bg-gray-50/50"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-600 mb-1.5">
+                Branch <span className="font-normal text-gray-400">(optional — defaults to the repo&apos;s default branch)</span>
+              </label>
+              <input
+                type="text" value={repoBranch} onChange={e => setRepoBranch(e.target.value)} placeholder="main"
+                className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono bg-gray-50/50"
+              />
+            </div>
+          </div>
+        )}
+
         {/* ── Scanning state ──────────────────────────────────────────────────── */}
         {step === "scanning" && (
           <ScanningState files={validFiles.length > 0 ? validFiles : files} onDone={onScanAnimDone} />
         )}
 
         {/* ── Config body ─────────────────────────────────────────────────────── */}
-        {step === "config" && (
+        {step === "config" && mode === "paste" && (
           <div className="flex-1 overflow-y-auto">
 
             {/* PR Details */}
@@ -688,7 +770,11 @@ export default function NewScanPanel({ open, onClose }: Props) {
             )}
             <div className="flex items-center justify-between gap-3">
               <div>
-                {validFiles.length === 0 ? (
+                {mode === "repo" ? (
+                  <p className="text-xs text-gray-400">
+                    {repoOwner.trim() && repoName.trim() ? `${repoOwner.trim()}/${repoName.trim()}` : "Enter a repository to begin"}
+                  </p>
+                ) : validFiles.length === 0 ? (
                   <p className="text-xs text-gray-400">Paste code into a file to begin</p>
                 ) : (
                   <p className="text-xs text-gray-500">
@@ -702,18 +788,28 @@ export default function NewScanPanel({ open, onClose }: Props) {
                 <button onClick={onClose} className="px-4 py-2 text-sm font-semibold text-gray-500 rounded-xl hover:bg-gray-100 transition-colors">
                   Cancel
                 </button>
-                <button
-                  onClick={handleSubmit}
-                  disabled={validFiles.length === 0 || scopes.size === 0}
-                  className="flex items-center gap-2 px-5 py-2 text-sm font-bold bg-gradient-to-r from-indigo-600 to-violet-600 text-white rounded-xl hover:from-indigo-700 hover:to-violet-700 disabled:opacity-40 transition-all active:scale-[0.98] shadow-md shadow-indigo-200"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/>
-                    <path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
-                    <rect x="7" y="7" width="10" height="10" rx="1"/>
-                  </svg>
-                  Scan {validFiles.length > 0 ? `${validFiles.length} file${validFiles.length !== 1 ? "s" : ""}` : "PR"}
-                </button>
+                {mode === "repo" ? (
+                  <button
+                    onClick={handleSubmitRepo}
+                    disabled={!repoOwner.trim() || !repoName.trim() || repoSubmitting}
+                    className="flex items-center gap-2 px-5 py-2 text-sm font-bold bg-gradient-to-r from-indigo-600 to-violet-600 text-white rounded-xl hover:from-indigo-700 hover:to-violet-700 disabled:opacity-40 transition-all active:scale-[0.98] shadow-md shadow-indigo-200"
+                  >
+                    {repoSubmitting ? "Starting…" : "Scan repository"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSubmit}
+                    disabled={validFiles.length === 0 || scopes.size === 0}
+                    className="flex items-center gap-2 px-5 py-2 text-sm font-bold bg-gradient-to-r from-indigo-600 to-violet-600 text-white rounded-xl hover:from-indigo-700 hover:to-violet-700 disabled:opacity-40 transition-all active:scale-[0.98] shadow-md shadow-indigo-200"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+                      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+                      <rect x="7" y="7" width="10" height="10" rx="1"/>
+                    </svg>
+                    Scan {validFiles.length > 0 ? `${validFiles.length} file${validFiles.length !== 1 ? "s" : ""}` : "PR"}
+                  </button>
+                )}
               </div>
             </div>
           </div>

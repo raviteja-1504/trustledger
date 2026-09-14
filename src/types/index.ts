@@ -75,6 +75,14 @@ export interface ScanResult {
   timestamp: string;
   evidence_breakdown?: EvidenceBreakdown;
   repository_trust?:   RepositoryTrustScore;
+  // Whole-repository scans (scan_mode "repo") are async -- status starts
+  // "queued"/"analyzing" and files is empty until it reaches "completed" or
+  // "failed" (see error_message). A PR scan is always "completed" already.
+  status?:        "queued" | "analyzing" | "completed" | "failed";
+  scan_mode?:     "pr" | "repo";
+  error_message?: string;
+  files_total?:   number | null;
+  files_scanned?: number | null;
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

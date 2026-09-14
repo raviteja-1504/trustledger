@@ -126,6 +126,9 @@ export const RATE_LIMITS = {
   keyCreate:    { limit: 10,   windowMs: 3600_000, prefix: "keyc"    },
   // Report generation — 20/hour per org
   report:       { limit: 20,   windowMs: 3600_000, prefix: "report"  },
+  // Whole-repository scan — 5/hour per org (each one can fetch + analyse
+  // hundreds of files, unlike a single-PR scan; far more expensive per call)
+  repoScan:     { limit: 5,    windowMs: 3600_000, prefix: "repoScan" },
   // Login attempts — 5/minute per IP
   login:        { limit: 5,    windowMs: 60_000,   prefix: "login"   },
 } as const;
