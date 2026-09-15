@@ -49,6 +49,21 @@ interface FrameworkDef {
   controls: ControlObjective[];
 }
 
+// ── Real evidence engine (GET /api/evidence/collect) ────────────────────────────
+// SOC 2 only -- its control-to-evidence mapping is hand-built for SOC 2's
+// Trust Services Criteria. Other frameworks below still use the
+// weighted-heuristic computeScore(), clearly labelled as estimated rather
+// than presented with the same rigor as SOC 2's real, live-computed score.
+
+interface RealControlEvidence {
+  control_id: string;
+  score: number;
+}
+interface RealEvidencePackage {
+  overall_score: number;
+  controls: RealControlEvidence[];
+}
+
 interface Exception {
   id: string;
   control_id: string;
@@ -147,16 +162,6 @@ function computeScore(fw: FrameworkDef, data: DashboardData | null, exceptions: 
   return Math.min(100, Math.max(0, pct));
 }
 
-function predictReadiness(score: number, target = 90): { days: number; date: string } {
-  const gap = target - score;
-  if (gap <= 0) return { days: 0, date: "Ready now" };
-  const daysPerPoint = 1.8; // estimated from evidence velocity
-  const days = Math.ceil(gap * daysPerPoint);
-  const date = new Date(Date.now() + days * 86400000)
-    .toLocaleDateString("en-GB", { day:"numeric", month:"short", year:"numeric" });
-  return { days, date };
-}
-
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function daysUntil(iso: string) {
@@ -214,6 +219,7 @@ export default function CompliancePage() {
   const [excForm,     setExcForm]     = useState({ title:"", description:"", control_id:"", owner: profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
   const [refreshing,  setRefreshing]  = useState(false);
   const [teamMembers, setTeamMembers] = useState<{ email: string; role: string; name: string | null }[]>([]);
+  const [realEvidence, setRealEvidence] = useState<RealEvidencePackage | null>(null);
 
   useEffect(() => {
     if (isSeedMode() && !profile?.org_id) { setExceptions(loadSeedExceptions()); return; }
@@ -221,6 +227,18 @@ export default function CompliancePage() {
     authedFetch<{ exceptions: ExceptionRow[] }>("/api/compliance-exceptions")
       .then(res => setExceptions((res.exceptions ?? []).map(rowToException)))
       .catch(() => { /* keep empty -- page still renders derived scores */ });
+  }, [profile?.org_id]);
+
+  // Real SOC 2 score, computed live from scans/attestations/violations/
+  // audit_log by GET /api/evidence/collect -- the same engine the Evidence
+  // page uses (Phase 2). SOC 2's compliance score below is this number,
+  // not a second, independently-invented formula.
+  useEffect(() => {
+    if (isSeedMode() && !profile?.org_id) return;
+    if (!profile?.org_id) return;
+    authedFetch<RealEvidencePackage>("/api/evidence/collect?framework=SOC2")
+      .then(setRealEvidence)
+      .catch(() => { /* SOC 2 falls back to the same weighted heuristic as other frameworks */ });
   }, [profile?.org_id]);
 
   // Load real team members and map role-label owners to real emails
@@ -292,12 +310,17 @@ export default function CompliancePage() {
   const scores = useMemo(() =>
     frameworks.map(f => ({
       id: f.id,
-      score: computeScore(f, data, exceptions),
+      // SOC 2's score is the real, live-computed number from the Evidence
+      // engine when available -- every other framework still uses the
+      // weighted heuristic (see the "Estimated" disclaimer on their
+      // Controls tab).
+      score: f.id === "soc2" && realEvidence
+        ? Math.round(realEvidence.overall_score)
+        : computeScore(f, data, exceptions),
       exceptions: exceptions.filter(e => e.framework_id === f.id && e.status !== "resolved").length,
-    })), [data, exceptions]);
+    })), [frameworks, data, exceptions, realEvidence]);
 
-  const fwScore    = scores.find(s => s.id === activeFw)?.score ?? 0;
-  const prediction = predictReadiness(fwScore);
+  const fwScore     = scores.find(s => s.id === activeFw)?.score ?? 0;
   const overallPct = Math.round(scores.reduce((s, x) => s + x.score, 0) / scores.length);
 
   // Control-level scores
@@ -305,11 +328,13 @@ export default function CompliancePage() {
     if (!data) return {};
     const map: Record<string, number> = {};
     fw.controls.forEach(ctrl => {
+      const real = fw.id === "soc2" ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
+      if (real) { map[ctrl.id] = Math.round(real.score); return; }
       const strength = evidenceStrength(ctrl, data);
       map[ctrl.id] = Math.round((strength / 5) * 100);
     });
     return map;
-  }, [fw, data]);
+  }, [fw, data, realEvidence]);
 
   async function addException() {
     if (!excForm.title || !excForm.control_id) return;
@@ -389,7 +414,7 @@ export default function CompliancePage() {
       framework: fw.fullName,
       standard: fw.standard,
       compliance_score: fwScore,
-      prediction: prediction,
+      score_source: fw.id === "soc2" && realEvidence ? "live evidence engine" : "estimated from scan activity",
       controls: fw.controls.map(ctrl => ({
         id:            ctrl.id,
         label:         ctrl.label,
@@ -481,7 +506,6 @@ export default function CompliancePage() {
             </div>
             {frameworks.map(f => {
               const s = scores.find(x => x.id === f.id)!;
-              const pred = predictReadiness(s.score);
               return (
                 <button key={f.id} onClick={() => setActiveFw(f.id)}
                   className="text-left rounded-xl p-3 transition-all"
@@ -492,7 +516,7 @@ export default function CompliancePage() {
                     <div className="h-full rounded-full" style={{ width:`${s.score}%`, background:f.gradient }} />
                   </div>
                   <p className="text-[9px] text-white/30 mt-1.5">
-                    {pred.days === 0 ? "✓ Audit-ready" : `${pred.days}d to 90%`}
+                    {s.score >= 90 ? "✓ Audit-ready" : s.score >= 75 ? "On track" : s.score >= 60 ? "Needs work" : "At risk"}
                     {s.exceptions > 0 && ` · ${s.exceptions} exception${s.exceptions>1?"s":""}`}
                   </p>
                 </button>
@@ -519,7 +543,6 @@ export default function CompliancePage() {
             <div className="space-y-3">
               {frameworks.map(f => {
                 const s    = scores.find(x => x.id === f.id)!;
-                const pred = predictReadiness(s.score);
                 const days = daysUntil(f.nextAudit);
                 return (
                   <button key={f.id} onClick={() => setActiveFw(f.id)}
@@ -542,7 +565,7 @@ export default function CompliancePage() {
                     </div>
                     <div className="px-4 py-2 bg-white flex items-center gap-4 text-[10px]">
                       <span className="text-emerald-600 font-bold">{s.score}% compliant</span>
-                      {pred.days > 0 && <span className="text-gray-400">{pred.days}d → 90%</span>}
+                      {s.score < 90 && <span className="text-gray-400">{90 - s.score} pts to 90%</span>}
                       {s.exceptions > 0 && <span className="text-amber-600 font-bold">{s.exceptions} exc.</span>}
                       {f.certBody && <span className="text-gray-400 ml-auto text-[9px] truncate">{f.certBody}</span>}
                     </div>
@@ -550,22 +573,23 @@ export default function CompliancePage() {
                 );
               })}
 
-              {/* Predictive readiness card */}
+              {/* Compliance gap card -- points needed to reach 90%, not a
+                  predicted date (there's no real evidence-velocity signal
+                  to extrapolate a timeline from). */}
               <div className="rounded-2xl p-4 border border-indigo-100" style={{ background:"rgba(238,242,255,0.5)" }}>
                 <div className="flex items-center gap-1.5 mb-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-indigo-600">Predictive Readiness</p>
-                  <InfoTooltip title="Predictive Readiness" description="Estimated days to reach 90% compliance for the active framework, based on current evidence collection velocity and outstanding gaps." position="right" />
+                  <p className="text-[9px] font-black uppercase tracking-widest text-indigo-600">Compliance Gap</p>
+                  <InfoTooltip title="Compliance Gap" description="Percentage points needed for the active framework to reach the 90% audit-ready threshold, based on its current live score." position="right" />
                 </div>
-                {prediction.days === 0 ? (
+                {fwScore >= 90 ? (
                   <div>
                     <p className="text-2xl font-black text-emerald-600">Audit-ready ✓</p>
                     <p className="text-[10px] text-emerald-600/70 mt-1">{fw.shortName} exceeds 90% threshold</p>
                   </div>
                 ) : (
                   <div>
-                    <p className="text-2xl font-black text-indigo-700 tabular-nums">{prediction.days} days</p>
-                    <p className="text-[10px] text-indigo-500 mt-1">Estimated {prediction.date}</p>
-                    <p className="text-[9px] text-gray-400 mt-1">At current evidence velocity</p>
+                    <p className="text-2xl font-black text-indigo-700 tabular-nums">{90 - fwScore} points</p>
+                    <p className="text-[10px] text-indigo-500 mt-1">To reach 90% for {fw.shortName}</p>
                   </div>
                 )}
               </div>
@@ -670,6 +694,14 @@ export default function CompliancePage() {
         {/* ══ CONTROLS DEEP-DIVE TAB ════════════════════════════════════════════ */}
         {tab === "controls" && (
           <div className="animate-fade-up space-y-4">
+            {fw.id !== "soc2" && (
+              <div className="flex items-center gap-2.5 rounded-xl px-4 py-2.5 border border-amber-200 bg-amber-50 text-amber-800 text-[11px] font-semibold">
+                <svg className="shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                Estimated from general scan activity — {fw.shortName}&apos;s per-control scoring isn&apos;t independently verified yet the way SOC 2&apos;s is.
+              </div>
+            )}
             {fw.controls.map(ctrl => {
               const strength = evidenceStrength(ctrl, data);
               const ctrlPct  = controlScores[ctrl.id] ?? 0;
@@ -691,7 +723,17 @@ export default function CompliancePage() {
                         <p className="text-[10px] text-gray-400 mt-0.5">{ctrl.test_frequency} testing · owner: <strong>{ctrl.owner.split("@")[0]}</strong></p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-3">
+                      {fw.id === "soc2" && realEvidence?.controls.some(c => c.control_id === ctrl.id) && (
+                        <span className="inline-flex items-center gap-1 text-[9px] font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-200"
+                          title="Computed live from real scan/attestation/audit_log data, not estimated">
+                          <span className="relative flex w-1.5 h-1.5">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-500" />
+                          </span>
+                          Live
+                        </span>
+                      )}
                       <StrengthStars score={strength} />
                       <span className="text-lg font-black tabular-nums" style={{ color:ctrlPct>=80?"#15803d":ctrlPct>=50?"#b45309":"#be123c" }}>
                         {ctrlPct}%
