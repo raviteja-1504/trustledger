@@ -536,11 +536,28 @@ export async function POST(req: NextRequest) {
 
         if (allScanFiles.length > 0) {
           const uniqueHashes = [...new Set(allScanFiles.map(f => f.content_hash))];
-          const { data: prevScanFileMatches } = await db
+          // Scoped to THIS repo's own scan history only. Without this, two
+          // different repos in the same org that happen to share a byte-
+          // identical file (a vendored library, a boilerplate config, a
+          // shared license header) would silently inherit one repo's human
+          // attestation into the other -- auto-resolving that file's
+          // violation, and the alert along with it, for a file nobody
+          // actually reviewed in THIS repo. "Cross-PR" inheritance was
+          // always meant to mean "an earlier PR of the same repo," never
+          // "any repo in the org."
+          const { data: repoScansForInherit } = await db
+            .from("scans")
+            .select("id")
+            .eq("org_id", orgId)
+            .eq("repo_full_name", repoFullName);
+          const repoScanIdsForInherit = (repoScansForInherit ?? []).map(s => s.id as string);
+
+          const { data: prevScanFileMatches } = repoScanIdsForInherit.length === 0 ? { data: [] } : await db
             .from("scan_files")
             .select("file_path, content_hash, scan_id")
             .eq("org_id", orgId)
             .neq("scan_id", scan.id)
+            .in("scan_id", repoScanIdsForInherit)
             .in("content_hash", uniqueHashes);
 
           if (prevScanFileMatches && prevScanFileMatches.length > 0) {

@@ -173,17 +173,31 @@ export async function GET(req: NextRequest) {
         }
 
         // ── Attestation carry-over ──────────────────────────────────────────
-        // If a file with the same content_hash was previously attested in any
-        // scan in this org, auto-inherit that attestation. This prevents a
-        // scheduled re-scan from wiping attestations on unchanged files.
+        // If a file with the same content_hash was previously attested in an
+        // earlier scan of THIS SAME REPO, auto-inherit that attestation. This
+        // prevents a scheduled re-scan from wiping attestations on unchanged
+        // files. Scoped to this repo's own scans only -- matching purely on
+        // (org_id, content_hash) would let two different repos that happen to
+        // share a byte-identical file (a vendored library, a shared config,
+        // a license header) inherit one repo's human attestation into the
+        // other, auto-resolving a violation nobody actually reviewed for
+        // this repo.
         if (result.files.length > 0) {
           const hashes = result.files.map(f => f.content_hash).filter(Boolean);
           if (hashes.length > 0) {
-            const { data: prevMatches } = await db
+            const { data: repoScansForInherit } = await db
+              .from("scans")
+              .select("id")
+              .eq("org_id", orgId)
+              .eq("repo_full_name", repo);
+            const repoScanIdsForInherit = (repoScansForInherit ?? []).map(s => s.id as string);
+
+            const { data: prevMatches } = repoScanIdsForInherit.length === 0 ? { data: [] } : await db
               .from("scan_files")
               .select("file_path, content_hash, scan_id")
               .eq("org_id", orgId)
               .neq("scan_id", scanRow.id)
+              .in("scan_id", repoScanIdsForInherit)
               .in("content_hash", hashes);
 
             if (prevMatches && prevMatches.length > 0) {
