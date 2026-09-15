@@ -8,8 +8,10 @@ import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import type { DashboardData } from "@/types";
-import { authedFetch } from "@/lib/useRealData";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { useRole } from "@/lib/roles";
+import { useToastHelpers } from "@/lib/toast";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,24 @@ interface FrameworkDef {
   nextAudit?: string;
   auditor?: string;
   controls: Control[];
+}
+
+// ── Real evidence engine (GET /api/evidence/collect) ────────────────────────────
+// SOC 2 only -- its control-to-evidence mapping is hand-built for SOC 2's
+// Trust Services Criteria (CC6.1/CC6.2/CC7.2/CC8.1/A1.2). EU AI Act and
+// PCI-DSS below still use the estimate-from-usage-data catalog, clearly
+// labelled as such rather than presented with the same rigor as SOC 2.
+
+interface RealControlEvidence {
+  control_id: string;
+  status: "pass" | "partial" | "fail" | "not_tested";
+  score: number;
+}
+
+interface RealEvidencePackage {
+  overall_score: number;
+  controls: RealControlEvidence[];
+  audit_integrity: { valid: boolean; total: number };
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────────
@@ -125,13 +145,16 @@ function freshnessBadge(collectedAt?: string): { label: string; color: string; b
 // ── Evidence catalog builder — uses real data where available ─────────────────
 
 function buildFrameworks(data: DashboardData | null, auditStart: string, auditEnd: string): FrameworkDef[] {
-  const sc     = data?.scan_count          ?? 51;
-  const fc     = data?.file_count          ?? 431;
-  const repos  = data?.repos.length        ?? 5;
-  const attPct = Math.round((data?.attestation_rate ?? 0.78) * 100);
-  const attCount = data ? Math.round(data.attestation_rate * data.top_risk_files.length) : 29;
-  const total  = data?.top_risk_files.length ?? 37;
-  const blocked= data?.unattested_deploy_count ?? 3;
+  // No plausible-looking placeholder numbers while data is loading or
+  // unavailable -- these are real counts or they're 0, never a fabricated
+  // "51 scans" that happens to look like a real org.
+  const sc     = data?.scan_count          ?? 0;
+  const fc     = data?.file_count          ?? 0;
+  const repos  = data?.repos.length        ?? 0;
+  const attPct = Math.round((data?.attestation_rate ?? 0) * 100);
+  const attCount = data ? Math.round(data.attestation_rate * data.top_risk_files.length) : 0;
+  const total  = data?.top_risk_files.length ?? 0;
+  const blocked= data?.unattested_deploy_count ?? 0;
   const now    = new Date().toISOString().split("T")[0];
   const expiry = new Date(new Date(auditEnd).getTime() + 365 * 86400_000).toISOString().split("T")[0]; // 12-month validity
 
@@ -151,9 +174,9 @@ function buildFrameworks(data: DashboardData | null, auditStart: string, auditEn
               description:`PGP-signed reviewer attestations across ${sc} scans in audit period ${auditStart} → ${auditEnd}`,
               status:attCount>0?"collected":"pending", collected_at:attCount>0?now:undefined, expires_at:expiry },
             { id:"e-cc61-2", control_id:"CC6.1", type:"policy", link:"/settings",
-              title:"Attestation policy document v1.2",
+              title:"Attestation policy document",
               description:"Standard policy defining reviewer requirements and merge gate rules",
-              status:"collected", collected_at:"2026-05-01", expires_at:expiry },
+              status:"pending", expires_at:expiry },
             { id:"e-cc61-3", control_id:"CC6.1", type:"audit-trail", auto_collect:true, link:"/audit",
               title:"GitHub App merge gate log",
               description:`Audit trail of policy gate decisions — ${blocked} merge${blocked===1?"":"s"} blocked by unattested-file policy`,
@@ -408,10 +431,13 @@ interface TeamMember { email: string; name: string | null; role: string; github_
 
 export default function EvidencePage() {
   const { profile } = useAuth();
+  const { permissions } = useRole();
+  const { error: toastError } = useToastHelpers();
   const orgName = profile?.org_name || profile?.org_slug || "your organisation";
   const orgSlug = profile?.org_slug || "";
 
   const [data,          setData]          = useState<DashboardData | null>(null);
+  const [realEvidence,  setRealEvidence]  = useState<RealEvidencePackage | null>(null);
   const [teamMembers,   setTeamMembers]   = useState<TeamMember[]>([]);
   const [auditStart,    setAuditStart]    = useState(() => {
     const d = new Date(); d.setMonth(d.getMonth() - 3);
@@ -448,6 +474,18 @@ export default function EvidencePage() {
       .then(r => setTeamMembers((r.members ?? []).filter(m => m.email)))
       .catch(() => {});
   }, [profile?.org_id]);
+
+  // Real SOC 2 evidence package (genuine per-control scores computed from
+  // scans/attestations/violations/audit_log, plus the tamper-evident hash-
+  // chain check) -- merged onto the SOC 2 catalog below instead of relying
+  // solely on the client-side heuristic readiness calculation.
+  useEffect(() => {
+    if (isSeedMode() && !profile?.org_id) return;
+    if (!profile?.org_id) return;
+    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=SOC2&period_start=${auditStart}&period_end=${auditEnd}`)
+      .then(setRealEvidence)
+      .catch(() => { /* SOC 2 tab falls back to the estimate-based catalog like the other frameworks */ });
+  }, [profile?.org_id, auditStart, auditEnd]);
 
   const getOwners = useCallback((): string[] =>
     teamMembers.length > 0 ? teamMembers.map(m => m.email) : [],
@@ -488,11 +526,17 @@ export default function EvidencePage() {
       return s + (items.length > 0 ? (colled / items.length) * c.weight : c.weight);
     }, 0);
     const totalWeight = f.controls.reduce((s, c) => s + c.weight, 0);
-    const pct = Math.round((weighted / totalWeight) * 100);
+    // SOC 2's overall readiness comes from the real evidence engine's
+    // score (genuine per-control computation from live data) when
+    // available, rather than this page's own weighted-item heuristic --
+    // one source of truth instead of two independently-computed numbers.
+    const pct = f.id === "soc2" && realEvidence
+      ? Math.round(realEvidence.overall_score)
+      : Math.round((weighted / totalWeight) * 100);
     const pending = allItems.filter(i => (overrides[i.id]?.status ?? i.status) === "pending").length;
     const expired = allItems.filter(i => evidenceExpiry(i, overrides[i.id]) === "expired").length;
     return { id:f.id, pct, pending, expired };
-  }), [frameworks, overrides, resolvedItems]);
+  }), [frameworks, overrides, resolvedItems, realEvidence]);
 
   const fwReadiness = readiness.find(r => r.id === activeFw) ?? readiness[0];
   const grade = readinessGrade(fwReadiness?.pct ?? 0);
@@ -551,6 +595,22 @@ export default function EvidencePage() {
       const no = { ...owners, [id]: ownr };
       setOwners(no); localStorage.setItem("tl_evidence_owners", JSON.stringify(no));
     }
+
+    // Real, append-only evidence log entry (see Phase 1) -- who collected
+    // what evidence for which control, when. Best-effort: the item above
+    // already reflects "collected" locally regardless of whether this
+    // succeeds, since the local override is this page's actual source of
+    // truth for per-item status today.
+    if (!(isSeedMode() && !profile?.org_id) && profile?.org_id) {
+      const item = fw.controls.flatMap(c => c.evidence).find(i => i.id === id);
+      if (item) {
+        authedFetch("/api/evidence/collect", {
+          method: "POST",
+          body: JSON.stringify({ control_id: item.control_id, framework_id: fw.id, notes: uploadNote.trim() || undefined, url: storedUrl || undefined }),
+        }).catch(err => toastError("Evidence saved locally, but the audit log entry failed", err instanceof Error ? err.message : undefined));
+      }
+    }
+
     setUploadId(null); setUploadNote(""); setUploadUrl(""); setUploadOwner(""); setUploadFile(null); setUploading(false);
   }
 
@@ -574,6 +634,18 @@ export default function EvidencePage() {
     const next = { ...overrides };
     ids.forEach(id => { next[id] = { status:"collected" as EvidenceStatus, collected_at:now }; });
     setOverrides(next); saveOverrides(next);
+
+    if (!(isSeedMode() && !profile?.org_id) && profile?.org_id) {
+      const allItems = fw.controls.flatMap(c => c.evidence);
+      ids.forEach(id => {
+        const item = allItems.find(i => i.id === id);
+        if (!item) return;
+        authedFetch("/api/evidence/collect", {
+          method: "POST",
+          body: JSON.stringify({ control_id: item.control_id, framework_id: fw.id, notes: "Bulk-collected" }),
+        }).catch(() => { /* item already reflects "collected" locally; log entry is best-effort */ });
+      });
+    }
   }
 
   function exportPackage() {
@@ -686,13 +758,13 @@ export default function EvidencePage() {
                 {showGuide === ev.id ? "Hide guide" : "How to collect"}
               </button>
             )}
-            {(ev.resolvedStatus === "pending" || ev.resolvedStatus === "expired") && !ev.auto_collect && (
+            {(ev.resolvedStatus === "pending" || ev.resolvedStatus === "expired") && !ev.auto_collect && permissions.canAttest && (
               <button onClick={() => { setUploadId(isUpload?null:ev.id); setUploadNote(""); setUploadUrl(""); setUploadOwner(""); }}
                 className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap">
                 {isUpload?"Cancel":"Collect"}
               </button>
             )}
-            {ev.resolvedStatus === "collected" && !ev.auto_collect && (
+            {ev.resolvedStatus === "collected" && !ev.auto_collect && permissions.canAttest && (
               <button onClick={() => markPending(ev.id)}
                 className="text-[9px] font-semibold text-gray-400 hover:text-rose-600 hover:bg-rose-50 px-2 py-0.5 rounded-lg transition-colors">
                 Revoke
@@ -871,6 +943,22 @@ export default function EvidencePage() {
           </span>
         </div>
 
+        {/* Audit log integrity — real tamper-evident hash-chain check */}
+        {realEvidence && (
+          <div className={`animate-fade-up flex items-center gap-2.5 rounded-xl px-4 py-2.5 border text-xs font-semibold ${
+            realEvidence.audit_integrity.valid
+              ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+              : "bg-rose-50 border-rose-200 text-rose-700"
+          }`}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              {realEvidence.audit_integrity.valid
+                ? <><path d="M9 12l2 2 4-4"/><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></>
+                : <><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></>}
+            </svg>
+            Audit log integrity: {realEvidence.audit_integrity.valid ? "verified" : "chain broken"} — {realEvidence.audit_integrity.total} records, cryptographically chained
+          </div>
+        )}
+
         {/* Framework selector */}
         <div className="animate-fade-up grid grid-cols-1 sm:grid-cols-3 gap-3">
           {frameworks.map(f => {
@@ -1029,6 +1117,14 @@ export default function EvidencePage() {
         {/* Controls + evidence view */}
         {view === "controls" && (
           <div className="animate-fade-up space-y-4">
+            {fw.id !== "soc2" && (
+              <div className="flex items-center gap-2.5 rounded-xl px-4 py-2.5 border border-amber-200 bg-amber-50 text-amber-800 text-[11px] font-semibold">
+                <svg className="shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                Estimated from general scan activity — {fw.shortName}&apos;s per-control mapping isn&apos;t independently verified yet the way SOC 2&apos;s is (see the &quot;Live&quot; badge on SOC 2 controls).
+              </div>
+            )}
             {fw.controls.every(ctrl => resolvedItems(ctrl.evidence).filter(i => matchesFilter(i, search, filterStatus)).length === 0) && (
               <div className="section-card py-14 text-center">
                 <p className="text-sm font-bold text-gray-500">No evidence matches your search</p>
@@ -1044,6 +1140,7 @@ export default function EvidencePage() {
               const ctrlPct     = Math.round((ctrlColl / Math.max(ctrlTotal, 1)) * 100);
               const allDone     = ctrlColl === ctrlTotal && ctrlTotal > 0;
               const displayItems = items.filter(i => matchesFilter(i, search, filterStatus));
+              const realCtrl    = fw.id === "soc2" ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
               if (displayItems.length === 0) return null;
               return (
                 <div key={ctrl.id} className="section-card overflow-hidden">
@@ -1056,7 +1153,19 @@ export default function EvidencePage() {
                         {ctrl.id}
                       </span>
                       <div>
-                        <p className="text-sm font-bold text-gray-900">{ctrl.label}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-bold text-gray-900">{ctrl.label}</p>
+                          {realCtrl && (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-200"
+                              title="Computed live from real scan/attestation/audit_log data, not estimated">
+                              <span className="relative flex w-1.5 h-1.5">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-500" />
+                              </span>
+                              Live: {Math.round(realCtrl.score)}/100
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[10px] text-gray-400 mt-0.5">{ctrl.description}</p>
                       </div>
                     </div>
@@ -1067,7 +1176,7 @@ export default function EvidencePage() {
                         </div>
                         <span className="text-[10px] font-black tabular-nums" style={{ color:fw.color }}>{ctrlColl}/{ctrlTotal}</span>
                       </div>
-                      {!allDone && ctrlTotal > ctrlColl && (
+                      {!allDone && ctrlTotal > ctrlColl && permissions.canAttest && (
                         <button
                           onClick={() => bulkCollect(items.filter(i => i.resolvedStatus === "pending" && !i.auto_collect).map(i => i.id))}
                           className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap">

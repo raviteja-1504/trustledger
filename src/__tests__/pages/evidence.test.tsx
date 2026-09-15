@@ -3,6 +3,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 
 jest.mock("@/components/AuthGuard",    () => ({ __esModule:true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/components/PageSkeleton", () => ({ __esModule:true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
+jest.mock("@/lib/toast", () => ({
+  useToast:        () => ({ toast: null, setToast: jest.fn() }),
+  useToastHelpers: () => ({ success: jest.fn(), error: jest.fn(), info: jest.fn(), warn: jest.fn() }),
+  ToastProvider:   ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 
 import EvidencePage from "@/app/evidence/page";
 
