@@ -671,6 +671,101 @@ export default function AuditPage() {
           </div>
         )}
 
+        {/* ── Tamper-evidence ── */}
+        {/* Moved above the event list/filters (was at the page bottom, after
+            up to hundreds of events) -- this is the page's core trust claim
+            ("nothing here has been altered"), so it should be the first
+            thing a compliance reviewer sees, not something they have to
+            scroll past the whole log to find. */}
+        <div className="animate-fade-up flex items-start gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3">
+          <svg className="shrink-0 mt-0.5 text-indigo-500" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <p className="text-xs text-indigo-800 leading-relaxed">
+            <span className="font-bold">Tamper-evident audit log.</span>{" "}
+            Every event is cryptographically chained — deletions and retroactive modifications are detectable.
+            Satisfies SOC 2 CC7.2 (monitoring) and CC8.1 (change management) evidence requirements.
+          </p>
+        </div>
+
+        {/* ── Hash chain integrity ── */}
+        <div className="animate-fade-up section-card overflow-hidden">
+          <div className="flex items-center gap-3 px-5 py-3.5 border-b border-gray-100 flex-wrap">
+            <svg className="text-indigo-400 shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+            <p className="text-sm font-bold text-gray-900">Hash Chain Integrity</p>
+            {verifyState === "valid" && (
+              <span className="text-[9px] font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">✓ Verified</span>
+            )}
+            {verifyState === "invalid" && (
+              <span className="text-[9px] font-black text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">✗ Tampered</span>
+            )}
+            {verifyState === "checking" && (
+              <span className="text-[9px] font-black text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200 animate-pulse">Verifying…</span>
+            )}
+            {verifyState === "idle" && (
+              <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-2 py-0.5 rounded-full border border-gray-200">SHA-256 chained</span>
+            )}
+            <button onClick={verifyChain} disabled={verifyState==="checking"}
+              className="text-[10px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-full px-2.5 py-0.5 transition-colors disabled:opacity-50">
+              Verify Chain
+            </button>
+            <p className="text-[10px] text-gray-400 ml-auto">SHA-256 · {allEvents.length} events</p>
+          </div>
+          {verifyDetail && (
+            <div className={`px-5 py-2 text-[10px] font-mono border-b ${verifyState==="invalid" ? "bg-rose-50 text-rose-700 border-rose-100" : "bg-emerald-50 text-emerald-700 border-emerald-100"}`}>
+              {verifyDetail}
+            </div>
+          )}
+          <div className="px-5 py-4 overflow-x-auto">
+            <div className="flex items-center gap-0 min-w-max">
+              {(() => {
+                const orderedAsc = [...allEvents].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                const slice = orderedAsc.slice(-chainCount);
+                const hiddenBefore = orderedAsc.length - slice.length;
+                return (
+                  <>
+                    {hiddenBefore > 0 && (
+                      <button onClick={() => setChainCount(c => c + 8)}
+                        className="text-[10px] text-indigo-500 hover:text-indigo-700 font-semibold mr-3 shrink-0 underline">
+                        ··· +{hiddenBefore} earlier
+                      </button>
+                    )}
+                    {slice.map((e, idx) => {
+                      const hash = chainHashes[e.id];
+                      const cfg  = EVENT_CONFIG[e.type];
+                      return (
+                        <div key={e.id} className="flex items-center gap-0">
+                          {idx > 0 && (
+                            <div className="flex items-center mx-2 text-gray-300">
+                              <div className="w-4 h-px bg-gray-300" />
+                              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                            </div>
+                          )}
+                          <button onClick={() => hash && copyHash(hash)}
+                            className="rounded-xl px-3 py-2.5 border min-w-[155px] text-left hover:ring-2 hover:ring-indigo-200 transition-all"
+                            style={{ background:cfg.bg, borderColor:cfg.border }}>
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <span className="text-[9px] font-black uppercase tracking-wider" style={{ color:cfg.text }}>{cfg.label}</span>
+                              <span className="text-[8px] text-gray-400 font-mono ml-auto">{e.id.slice(0,10)}</span>
+                            </div>
+                            <p className="text-[8px] font-mono text-gray-500 leading-relaxed break-all">
+                              {hash ? (copiedHash === hash ? "Copied!" : hash) : "computing…"}
+                            </p>
+                            <p className="text-[8px] text-gray-400 mt-0.5">{new Date(e.timestamp).toISOString().slice(11,19)} UTC</p>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+
         {/* ── Summary + activity bars ── */}
         <div className="animate-fade-up grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
@@ -924,96 +1019,6 @@ export default function AuditPage() {
               </div>
             </div>
           ))}
-        </div>
-
-        {/* ── Tamper-evidence ── */}
-        <div className="animate-fade-up flex items-start gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3">
-          <svg className="shrink-0 mt-0.5 text-indigo-500" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
-          <p className="text-xs text-indigo-800 leading-relaxed">
-            <span className="font-bold">Tamper-evident audit log.</span>{" "}
-            Every event is cryptographically chained — deletions and retroactive modifications are detectable.
-            Satisfies SOC 2 CC7.2 (monitoring) and CC8.1 (change management) evidence requirements.
-          </p>
-        </div>
-
-        {/* ── Hash chain integrity ── */}
-        <div className="animate-fade-up section-card overflow-hidden">
-          <div className="flex items-center gap-3 px-5 py-3.5 border-b border-gray-100 flex-wrap">
-            <svg className="text-indigo-400 shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-            </svg>
-            <p className="text-sm font-bold text-gray-900">Hash Chain Integrity</p>
-            {verifyState === "valid" && (
-              <span className="text-[9px] font-black text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">✓ Verified</span>
-            )}
-            {verifyState === "invalid" && (
-              <span className="text-[9px] font-black text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">✗ Tampered</span>
-            )}
-            {verifyState === "checking" && (
-              <span className="text-[9px] font-black text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200 animate-pulse">Verifying…</span>
-            )}
-            {verifyState === "idle" && (
-              <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-2 py-0.5 rounded-full border border-gray-200">SHA-256 chained</span>
-            )}
-            <button onClick={verifyChain} disabled={verifyState==="checking"}
-              className="text-[10px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-full px-2.5 py-0.5 transition-colors disabled:opacity-50">
-              Verify Chain
-            </button>
-            <p className="text-[10px] text-gray-400 ml-auto">SHA-256 · {allEvents.length} events</p>
-          </div>
-          {verifyDetail && (
-            <div className={`px-5 py-2 text-[10px] font-mono border-b ${verifyState==="invalid" ? "bg-rose-50 text-rose-700 border-rose-100" : "bg-emerald-50 text-emerald-700 border-emerald-100"}`}>
-              {verifyDetail}
-            </div>
-          )}
-          <div className="px-5 py-4 overflow-x-auto">
-            <div className="flex items-center gap-0 min-w-max">
-              {(() => {
-                const orderedAsc = [...allEvents].sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-                const slice = orderedAsc.slice(-chainCount);
-                const hiddenBefore = orderedAsc.length - slice.length;
-                return (
-                  <>
-                    {hiddenBefore > 0 && (
-                      <button onClick={() => setChainCount(c => c + 8)}
-                        className="text-[10px] text-indigo-500 hover:text-indigo-700 font-semibold mr-3 shrink-0 underline">
-                        ··· +{hiddenBefore} earlier
-                      </button>
-                    )}
-                    {slice.map((e, idx) => {
-                      const hash = chainHashes[e.id];
-                      const cfg  = EVENT_CONFIG[e.type];
-                      return (
-                        <div key={e.id} className="flex items-center gap-0">
-                          {idx > 0 && (
-                            <div className="flex items-center mx-2 text-gray-300">
-                              <div className="w-4 h-px bg-gray-300" />
-                              <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-                            </div>
-                          )}
-                          <button onClick={() => hash && copyHash(hash)}
-                            className="rounded-xl px-3 py-2.5 border min-w-[155px] text-left hover:ring-2 hover:ring-indigo-200 transition-all"
-                            style={{ background:cfg.bg, borderColor:cfg.border }}>
-                            <div className="flex items-center gap-1.5 mb-1">
-                              <span className="text-[9px] font-black uppercase tracking-wider" style={{ color:cfg.text }}>{cfg.label}</span>
-                              <span className="text-[8px] text-gray-400 font-mono ml-auto">{e.id.slice(0,10)}</span>
-                            </div>
-                            <p className="text-[8px] font-mono text-gray-500 leading-relaxed break-all">
-                              {hash ? (copiedHash === hash ? "Copied!" : hash) : "computing…"}
-                            </p>
-                            <p className="text-[8px] text-gray-400 mt-0.5">{new Date(e.timestamp).toISOString().slice(11,19)} UTC</p>
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </>
-                );
-              })()}
-            </div>
-          </div>
         </div>
 
       </div>
