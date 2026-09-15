@@ -14,6 +14,7 @@ import { useRole } from "@/lib/roles";
 import { useToastHelpers } from "@/lib/toast";
 import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
+import { cweFor } from "@/lib/cweMap";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
@@ -37,7 +38,8 @@ interface RiskItem {
   owner: string;
   due_date?: string;
   mitigation: string;
-  related_cve?: string;
+  related_cve?: string;      // free-text, manually-entered risks only -- never auto-derived (see related_cwe)
+  related_cwe?: string;      // e.g. "CWE-89 — SQL Injection", derived from the real matched indicator
   related_link?: string;
   identified_at: string;
   auto_derived: boolean;     // derived from scan data vs manually entered
@@ -101,6 +103,7 @@ interface RiskRow {
   due_date:            string | null;
   mitigation:          string | null;
   related_cve:         string | null;
+  related_cwe:         string | null;
   related_link:        string | null;
   repo:                string | null;
   notes:               string[];
@@ -139,6 +142,7 @@ function rowsToStore(rows: RiskRow[]): PersistStore {
         due_date:      r.due_date ?? undefined,
         mitigation:    r.mitigation ?? "",
         related_cve:   r.related_cve ?? undefined,
+        related_cwe:   r.related_cwe ?? undefined,
         related_link:  r.related_link ?? undefined,
         identified_at: r.created_at.split("T")[0],
         notes:         r.notes ?? [],
@@ -160,6 +164,13 @@ function groupByRepo<T>(items: T[], repoOf: (t: T) => string): Map<string, T[]> 
     m.set(repo, arr);
   }
   return m;
+}
+
+// "CWE-89 — SQL Injection" or undefined if this indicator id has no
+// mapping -- never falls back to a made-up value.
+function cweLabel(indicatorId: string): string | undefined {
+  const cwe = cweFor(indicatorId);
+  return cwe ? `${cwe.id} — ${cwe.title}` : undefined;
 }
 
 function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[]): RiskItem[] {
@@ -210,7 +221,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${secretFiles.map(f=>f.file_path.split("/").pop()).join(", ")} contain API keys, passwords, or tokens in source. Treat as compromised.`,
         owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
         mitigation:"Rotate all exposed credentials immediately. Move to AWS Secrets Manager or HashiCorp Vault. Add gitleaks pre-commit hook.",
-        related_cve:"CVE-2021-42013", related_link:"/secrets",
+        related_cwe:cweLabel("hardcoded-secret"), related_link:"/secrets",
         identified_at:now, notes:[],
       });
     }
@@ -226,7 +237,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
         owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
         mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
-        related_cve:"CVE-2021-44228", related_link:"/violations",
+        related_cwe:cweLabel("eval-exec"), related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -242,7 +253,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
         owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
         mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
-        related_cve:"CVE-2023-20052", related_link:"/violations",
+        related_cwe:cweLabel("sql-injection"), related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -258,7 +269,7 @@ function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[])
         description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
         owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
         mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
-        related_cve:"CVE-2022-21449", related_link:"/violations",
+        related_cwe:cweLabel("jwt-none-alg"), related_link:"/violations",
         identified_at:now, notes:[],
       });
     }
@@ -479,7 +490,7 @@ export default function RiskRegisterPage() {
             risks: derived.map(r => ({
               id: r.id, title: r.title, description: r.description, category: r.category,
               likelihood: r.likelihood, impact: r.impact, repo: r.repo,
-              related_cve: r.related_cve, related_link: r.related_link,
+              related_cve: r.related_cve, related_cwe: r.related_cwe, related_link: r.related_link,
             })),
           }),
         }).catch(() => { /* best-effort -- page still works from derived + last-known store */ });
@@ -607,7 +618,7 @@ export default function RiskRegisterPage() {
       if (filterOwner  !== "all" && r.owner    !== filterOwner)  return false;
       if (filterRepo   !== "all" && r.repo     !== filterRepo)   return false;
       if (heatFilter   !== null  && !(r.likelihood===heatFilter[0] && r.impact===heatFilter[1])) return false;
-      if (search) { const q=search.toLowerCase(); if (![r.title,r.description,r.id,r.related_cve??""].join(" ").toLowerCase().includes(q)) return false; }
+      if (search) { const q=search.toLowerCase(); if (![r.title,r.description,r.id,r.related_cve??"",r.related_cwe??""].join(" ").toLowerCase().includes(q)) return false; }
       return true;
     });
     if (sortBy === "score") return list.sort((a,b) => riskScore(b) - riskScore(a));
@@ -633,8 +644,8 @@ export default function RiskRegisterPage() {
 
   function exportCSV() {
     const rows = [
-      ["ID","Title","Category","Likelihood","Impact","Score","Level","Residual Score","Status","Treatment","Owner","Due","CVE","Identified"],
-      ...filtered.map(r=>[r.id,r.title,CAT_LABELS[r.category],r.likelihood,r.impact,riskScore(r),riskLevel(riskScore(r)).label,residualScore(r)??"—",r.status,r.treatment,r.owner,r.due_date??"",r.related_cve??"",r.identified_at]),
+      ["ID","Title","Category","Likelihood","Impact","Score","Level","Residual Score","Status","Treatment","Owner","Due","CVE","CWE","Identified"],
+      ...filtered.map(r=>[r.id,r.title,CAT_LABELS[r.category],r.likelihood,r.impact,riskScore(r),riskLevel(riskScore(r)).label,residualScore(r)??"—",r.status,r.treatment,r.owner,r.due_date??"",r.related_cve??"",r.related_cwe??"",r.identified_at]),
     ];
     const blob=new Blob([rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n")],{type:"text/csv"});
     Object.assign(document.createElement("a"),{href:URL.createObjectURL(blob),download:"risk-register.csv"}).click();
@@ -942,6 +953,7 @@ export default function RiskRegisterPage() {
                         </span>
                       )}
                       {r.related_cve&&<span className="font-mono text-indigo-600">{r.related_cve}</span>}
+                      {r.related_cwe&&<span className="font-mono text-violet-600">{r.related_cwe.split(" — ")[0]}</span>}
                       <span className="text-gray-400">L={r.likelihood} × I={r.impact}</span>
                     </div>
                   </div>
@@ -1060,6 +1072,15 @@ export default function RiskRegisterPage() {
                     {/* Links + delete */}
                     <div className="flex items-center gap-3 flex-wrap pt-1 border-t border-gray-100">
                       {r.related_cve&&<Link href="/violations" className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg hover:bg-indigo-100">{r.related_cve} ↗</Link>}
+                      {r.related_cwe&&(() => {
+                        const num = r.related_cwe!.split(" — ")[0].replace("CWE-", "");
+                        return (
+                          <a href={`https://cwe.mitre.org/data/definitions/${num}.html`} target="_blank" rel="noopener noreferrer"
+                            className="text-[10px] font-bold text-violet-600 bg-violet-50 border border-violet-100 px-2.5 py-1 rounded-lg hover:bg-violet-100">
+                            {r.related_cwe} ↗
+                          </a>
+                        );
+                      })()}
                       {r.related_link&&<Link href={r.related_link} className="text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-lg hover:bg-gray-100">View Evidence ↗</Link>}
                       <span className="text-[9px] text-gray-400 ml-auto">Identified {fmtDate(r.identified_at)}</span>
                       {!r.auto_derived&&permissions.canAttest&&(

@@ -50,16 +50,16 @@ interface FrameworkDef {
 }
 
 // ── Real evidence engine (GET /api/evidence/collect) ────────────────────────────
-// SOC 2 only -- its control-to-evidence mapping is hand-built for SOC 2's
-// Trust Services Criteria. Other frameworks below still use the
-// weighted-heuristic computeScore(), clearly labelled as estimated rather
-// than presented with the same rigor as SOC 2's real, live-computed score.
+// All four frameworks now have a real, live-computed control mapping (see
+// src/app/api/evidence/collect/route.ts) -- fetched for whichever
+// framework is currently active, one at a time.
 
 interface RealControlEvidence {
   control_id: string;
   score: number;
 }
 interface RealEvidencePackage {
+  framework: string;
   overall_score: number;
   controls: RealControlEvidence[];
 }
@@ -229,17 +229,18 @@ export default function CompliancePage() {
       .catch(() => { /* keep empty -- page still renders derived scores */ });
   }, [profile?.org_id]);
 
-  // Real SOC 2 score, computed live from scans/attestations/violations/
-  // audit_log by GET /api/evidence/collect -- the same engine the Evidence
-  // page uses (Phase 2). SOC 2's compliance score below is this number,
-  // not a second, independently-invented formula.
+  // Real score for the active framework, computed live from scans/
+  // attestations/violations/audit_log by GET /api/evidence/collect -- the
+  // same engine the Evidence page uses (Phase 2). The active framework's
+  // compliance score below is this number, not a second, independently-
+  // invented formula. Re-fetched whenever the active framework changes.
   useEffect(() => {
     if (isSeedMode() && !profile?.org_id) return;
     if (!profile?.org_id) return;
-    authedFetch<RealEvidencePackage>("/api/evidence/collect?framework=SOC2")
+    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=${activeFw}`)
       .then(setRealEvidence)
-      .catch(() => { /* SOC 2 falls back to the same weighted heuristic as other frameworks */ });
-  }, [profile?.org_id]);
+      .catch(() => { /* falls back to the weighted heuristic for this framework */ });
+  }, [profile?.org_id, activeFw]);
 
   // Load real team members and map role-label owners to real emails
   useEffect(() => {
@@ -310,11 +311,11 @@ export default function CompliancePage() {
   const scores = useMemo(() =>
     frameworks.map(f => ({
       id: f.id,
-      // SOC 2's score is the real, live-computed number from the Evidence
-      // engine when available -- every other framework still uses the
-      // weighted heuristic (see the "Estimated" disclaimer on their
-      // Controls tab).
-      score: f.id === "soc2" && realEvidence
+      // A framework's score is the real, live-computed number from the
+      // Evidence engine when it's the one currently loaded -- otherwise
+      // it falls back to the weighted heuristic (see the "Estimated"
+      // disclaimer on the Controls tab).
+      score: f.id === realEvidence?.framework
         ? Math.round(realEvidence.overall_score)
         : computeScore(f, data, exceptions),
       exceptions: exceptions.filter(e => e.framework_id === f.id && e.status !== "resolved").length,
@@ -328,7 +329,7 @@ export default function CompliancePage() {
     if (!data) return {};
     const map: Record<string, number> = {};
     fw.controls.forEach(ctrl => {
-      const real = fw.id === "soc2" ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
+      const real = fw.id === realEvidence?.framework ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
       if (real) { map[ctrl.id] = Math.round(real.score); return; }
       const strength = evidenceStrength(ctrl, data);
       map[ctrl.id] = Math.round((strength / 5) * 100);
@@ -414,7 +415,7 @@ export default function CompliancePage() {
       framework: fw.fullName,
       standard: fw.standard,
       compliance_score: fwScore,
-      score_source: fw.id === "soc2" && realEvidence ? "live evidence engine" : "estimated from scan activity",
+      score_source: fw.id === realEvidence?.framework ? "live evidence engine" : "estimated from scan activity",
       controls: fw.controls.map(ctrl => ({
         id:            ctrl.id,
         label:         ctrl.label,
@@ -694,12 +695,12 @@ export default function CompliancePage() {
         {/* ══ CONTROLS DEEP-DIVE TAB ════════════════════════════════════════════ */}
         {tab === "controls" && (
           <div className="animate-fade-up space-y-4">
-            {fw.id !== "soc2" && (
+            {fw.id !== realEvidence?.framework && (
               <div className="flex items-center gap-2.5 rounded-xl px-4 py-2.5 border border-amber-200 bg-amber-50 text-amber-800 text-[11px] font-semibold">
                 <svg className="shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                 </svg>
-                Estimated from general scan activity — {fw.shortName}&apos;s per-control scoring isn&apos;t independently verified yet the way SOC 2&apos;s is.
+                Estimated from general scan activity — live verification for {fw.shortName} hasn&apos;t loaded yet.
               </div>
             )}
             {fw.controls.map(ctrl => {
@@ -724,7 +725,7 @@ export default function CompliancePage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      {fw.id === "soc2" && realEvidence?.controls.some(c => c.control_id === ctrl.id) && (
+                      {fw.id === realEvidence?.framework && realEvidence?.controls.some(c => c.control_id === ctrl.id) && (
                         <span className="inline-flex items-center gap-1 text-[9px] font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-200"
                           title="Computed live from real scan/attestation/audit_log data, not estimated">
                           <span className="relative flex w-1.5 h-1.5">

@@ -37,13 +37,14 @@ interface RiskRow {
   due_date:             string | null;
   mitigation:           string | null;
   related_cve:          string | null;
+  related_cwe:          string | null;
   related_link:         string | null;
   repo:                 string | null;
   notes:                string[];
   created_at:           string;
 }
 
-const SELECT_COLS = "external_id, auto_derived, title, description, category, likelihood, impact, residual_likelihood, residual_impact, status, treatment, owner_email, due_date, mitigation, related_cve, related_link, repo, notes, created_at";
+const SELECT_COLS = "external_id, auto_derived, title, description, category, likelihood, impact, residual_likelihood, residual_impact, status, treatment, owner_email, due_date, mitigation, related_cve, related_cwe, related_link, repo, notes, created_at";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);

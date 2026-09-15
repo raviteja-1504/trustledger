@@ -53,10 +53,9 @@ interface FrameworkDef {
 }
 
 // ── Real evidence engine (GET /api/evidence/collect) ────────────────────────────
-// SOC 2 only -- its control-to-evidence mapping is hand-built for SOC 2's
-// Trust Services Criteria (CC6.1/CC6.2/CC7.2/CC8.1/A1.2). EU AI Act and
-// PCI-DSS below still use the estimate-from-usage-data catalog, clearly
-// labelled as such rather than presented with the same rigor as SOC 2.
+// All four frameworks now have a real, live-computed control-to-evidence
+// mapping (see src/app/api/evidence/collect/route.ts) instead of the
+// static catalog below being the only source of truth for any of them.
 
 interface RealControlEvidence {
   control_id: string;
@@ -65,6 +64,7 @@ interface RealControlEvidence {
 }
 
 interface RealEvidencePackage {
+  framework: string;
   overall_score: number;
   controls: RealControlEvidence[];
   audit_integrity: { valid: boolean; total: number };
@@ -339,7 +339,17 @@ function buildFrameworks(data: DashboardData | null, auditStart: string, auditEn
           ],
         },
         {
-          id:"6.4.2", label:"Change Control Process", weight:30,
+          id:"6.4.1", label:"Change Control Process", weight:20,
+          description:"Deploys blocked until code changes pass the policy gate",
+          evidence:[
+            { id:"e-641-1", control_id:"6.4.1", type:"audit-trail", auto_collect:true, link:"/violations",
+              title:`${blocked} open violation${blocked===1?"":"s"} requiring remediation`,
+              description:"Currently open violations blocking deploy until resolved",
+              status:blocked===0?"collected":"pending", collected_at:blocked===0?now:undefined, expires_at:expiry },
+          ],
+        },
+        {
+          id:"6.4.2", label:"Change Control — Dual Review", weight:30,
           description:"Payment-system changes require dual-reviewer attestation",
           evidence:[
             { id:"e-642-1", control_id:"6.4.2", type:"attestation", auto_collect:true, link:"/audit",
@@ -361,6 +371,64 @@ function buildFrameworks(data: DashboardData | null, auditStart: string, auditEn
               title:"Payment path AI content monitoring",
               description:"High-risk AI files in payment-related repos flagged and tracked",
               status:sc>0?"collected":"pending", collected_at:sc>0?now:undefined, expires_at:expiry },
+          ],
+        },
+      ],
+    },
+    {
+      id:"iso27001", name:"ISO/IEC 27001:2022", shortName:"ISO 27001",
+      color:"#8b5cf6", gradient:"linear-gradient(135deg,#8b5cf6,#6366f1)",
+      headerBg:"linear-gradient(135deg,#0f172a,#2e1065)",
+      nextAudit:"2026-09-10", auditor:"BSI Group",
+      controls: [
+        {
+          id:"A.8.25", label:"Secure Development Lifecycle", weight:20,
+          description:"Automated security scanning integrated into every code change",
+          evidence:[
+            { id:"e-825-1", control_id:"A.8.25", type:"scan-log", auto_collect:true, link:"/audit",
+              title:`${sc} automated scans across the development lifecycle`,
+              description:"Every pull request scanned before merge",
+              status:sc>0?"collected":"pending", collected_at:sc>0?now:undefined, expires_at:expiry },
+          ],
+        },
+        {
+          id:"A.8.26", label:"Application Security Requirements", weight:20,
+          description:"Open vulnerabilities tracked to resolution",
+          evidence:[
+            { id:"e-826-1", control_id:"A.8.26", type:"audit-trail", auto_collect:true, link:"/violations",
+              title:`${blocked} open violation${blocked===1?"":"s"} requiring remediation`,
+              description:"Security requirement violations tracked from detection to resolution",
+              status:blocked===0?"collected":"pending", collected_at:blocked===0?now:undefined, expires_at:expiry },
+          ],
+        },
+        {
+          id:"A.8.28", label:"Secure Coding", weight:25,
+          description:"Human reviewer sign-off on AI-authored code before merge",
+          evidence:[
+            { id:"e-828-1", control_id:"A.8.28", type:"attestation", auto_collect:true, link:"/audit",
+              title:`${attCount} reviewer attestation${attCount===1?"":"s"} recorded`,
+              description:"Signed reviewer attestations for AI-authored changes",
+              status:attCount>0?"collected":"pending", collected_at:attCount>0?now:undefined, expires_at:expiry },
+          ],
+        },
+        {
+          id:"A.8.30", label:"Outsourced Development", weight:15,
+          description:"Every contributor's code (human or AI) scanned and logged",
+          evidence:[
+            { id:"e-830-1", control_id:"A.8.30", type:"audit-trail", auto_collect:true, link:"/audit",
+              title:`${fc} files with full scan coverage`,
+              description:"Complete file-level scan coverage regardless of authorship",
+              status:fc>0?"collected":"pending", collected_at:fc>0?now:undefined, expires_at:expiry },
+          ],
+        },
+        {
+          id:"A.5.33", label:"Protection of Records", weight:20,
+          description:"Audit trail retained and cryptographically tamper-evident",
+          evidence:[
+            { id:"e-533-1", control_id:"A.5.33", type:"audit-trail", auto_collect:true, link:"/audit",
+              title:"Tamper-evident audit log chain",
+              description:"SHA-256 hash-chained event log — deletions and edits are detectable",
+              status:"collected", collected_at:now, expires_at:expiry },
           ],
         },
       ],
@@ -475,17 +543,19 @@ export default function EvidencePage() {
       .catch(() => {});
   }, [profile?.org_id]);
 
-  // Real SOC 2 evidence package (genuine per-control scores computed from
-  // scans/attestations/violations/audit_log, plus the tamper-evident hash-
-  // chain check) -- merged onto the SOC 2 catalog below instead of relying
-  // solely on the client-side heuristic readiness calculation.
+  // Real evidence package for the framework currently being viewed --
+  // genuine per-control scores computed from scans/attestations/
+  // violations/audit_log, plus the tamper-evident hash-chain check --
+  // merged onto that framework's catalog below instead of relying solely
+  // on the client-side heuristic readiness calculation. Re-fetched
+  // whenever the active framework tab changes.
   useEffect(() => {
     if (isSeedMode() && !profile?.org_id) return;
     if (!profile?.org_id) return;
-    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=SOC2&period_start=${auditStart}&period_end=${auditEnd}`)
+    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=${activeFw}&period_start=${auditStart}&period_end=${auditEnd}`)
       .then(setRealEvidence)
-      .catch(() => { /* SOC 2 tab falls back to the estimate-based catalog like the other frameworks */ });
-  }, [profile?.org_id, auditStart, auditEnd]);
+      .catch(() => { /* falls back to the estimate-based catalog for this framework */ });
+  }, [profile?.org_id, activeFw, auditStart, auditEnd]);
 
   const getOwners = useCallback((): string[] =>
     teamMembers.length > 0 ? teamMembers.map(m => m.email) : [],
@@ -526,11 +596,12 @@ export default function EvidencePage() {
       return s + (items.length > 0 ? (colled / items.length) * c.weight : c.weight);
     }, 0);
     const totalWeight = f.controls.reduce((s, c) => s + c.weight, 0);
-    // SOC 2's overall readiness comes from the real evidence engine's
-    // score (genuine per-control computation from live data) when
-    // available, rather than this page's own weighted-item heuristic --
-    // one source of truth instead of two independently-computed numbers.
-    const pct = f.id === "soc2" && realEvidence
+    // A framework's overall readiness comes from the real evidence
+    // engine's score (genuine per-control computation from live data)
+    // when it's the one currently loaded, rather than this page's own
+    // weighted-item heuristic -- one source of truth instead of two
+    // independently-computed numbers.
+    const pct = f.id === realEvidence?.framework
       ? Math.round(realEvidence.overall_score)
       : Math.round((weighted / totalWeight) * 100);
     const pending = allItems.filter(i => (overrides[i.id]?.status ?? i.status) === "pending").length;
@@ -960,7 +1031,7 @@ export default function EvidencePage() {
         )}
 
         {/* Framework selector */}
-        <div className="animate-fade-up grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="animate-fade-up grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {frameworks.map(f => {
             const r = readiness.find(x => x.id === f.id)!;
             const g = readinessGrade(r.pct);
@@ -1117,12 +1188,12 @@ export default function EvidencePage() {
         {/* Controls + evidence view */}
         {view === "controls" && (
           <div className="animate-fade-up space-y-4">
-            {fw.id !== "soc2" && (
+            {fw.id !== realEvidence?.framework && (
               <div className="flex items-center gap-2.5 rounded-xl px-4 py-2.5 border border-amber-200 bg-amber-50 text-amber-800 text-[11px] font-semibold">
                 <svg className="shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                 </svg>
-                Estimated from general scan activity — {fw.shortName}&apos;s per-control mapping isn&apos;t independently verified yet the way SOC 2&apos;s is (see the &quot;Live&quot; badge on SOC 2 controls).
+                Estimated from general scan activity — live verification for {fw.shortName} hasn&apos;t loaded yet (see the &quot;Live&quot; badge once it does).
               </div>
             )}
             {fw.controls.every(ctrl => resolvedItems(ctrl.evidence).filter(i => matchesFilter(i, search, filterStatus)).length === 0) && (
@@ -1140,7 +1211,7 @@ export default function EvidencePage() {
               const ctrlPct     = Math.round((ctrlColl / Math.max(ctrlTotal, 1)) * 100);
               const allDone     = ctrlColl === ctrlTotal && ctrlTotal > 0;
               const displayItems = items.filter(i => matchesFilter(i, search, filterStatus));
-              const realCtrl    = fw.id === "soc2" ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
+              const realCtrl    = fw.id === realEvidence?.framework ? realEvidence?.controls.find(c => c.control_id === ctrl.id) : undefined;
               if (displayItems.length === 0) return null;
               return (
                 <div key={ctrl.id} className="section-card overflow-hidden">

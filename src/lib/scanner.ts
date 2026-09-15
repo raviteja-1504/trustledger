@@ -39,6 +39,7 @@ import type { ProvenanceSummary as GitProvenanceSummary } from "./gitProvenance"
 import { classifyCode }          from "./mlClassifier";
 import type { MLScoreResult }    from "./mlClassifier";
 import { detectorRegistry }      from "./detectorRegistry";
+import { cweFor as cweEntryFor } from "./cweMap";
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
@@ -3372,26 +3373,11 @@ export function getFixSuggestions(indicators: ScanIndicator[]): FixSuggestion[] 
 
 // CWE reference for vulnerability ids that don't already carry one via
 // FIX_MAP (checked first, so the mapping isn't maintained in two places).
-const EXTRA_CWE_MAP: Record<string, string> = {
-  "high-entropy-secret":   "CWE-798",
-  "pii-in-logs":           "CWE-532",
-  "mass-assignment":       "CWE-915",
-  "jwt-none-alg":          "CWE-347",
-  "insecure-randomness":   "CWE-330",
-  "redos":                 "CWE-1333",
-  "timing-attack":         "CWE-208",
-  "header-injection":      "CWE-113",
-  "sensitive-url-data":    "CWE-598",
-  "verbose-error":         "CWE-209",
-  "graphql-injection":     "CWE-943",
-  "insecure-file-upload":  "CWE-434",
-  "toctou":                "CWE-367",
-  "cookie-no-httponly":    "CWE-1004",
-  "cookie-no-secure":      "CWE-614",
-};
-
+// Ids not in FIX_MAP fall back to the shared client-safe map (./cweMap)
+// that the Risk Register page also reads from directly, so a finding's
+// CWE classification is the same wherever it's shown.
 function cweFor(id: string): string | undefined {
-  return FIX_MAP[id]?.cwe ?? EXTRA_CWE_MAP[id];
+  return FIX_MAP[id]?.cwe ?? cweEntryFor(id)?.id;
 }
 
 // Base confidence per severity, bumped for named-taint matches (a variable

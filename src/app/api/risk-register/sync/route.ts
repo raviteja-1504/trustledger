@@ -28,6 +28,7 @@ interface DerivedRiskInput {
   impact:        number;
   repo?:         string;
   related_cve?:  string;
+  related_cwe?:  string;
   related_link?: string;
 }
 
@@ -52,6 +53,7 @@ export async function POST(req: NextRequest) {
       impact:       r.impact,
       repo:         r.repo ?? null,
       related_cve:  r.related_cve ?? null,
+      related_cwe:  r.related_cwe ?? null,
       related_link: r.related_link ?? null,
     })),
     { onConflict: "org_id,external_id" },
