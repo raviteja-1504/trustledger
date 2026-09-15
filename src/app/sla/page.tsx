@@ -7,6 +7,7 @@ import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import SLATrendChart, { type SLATrendPoint } from "@/components/SLATrendChart";
 
 interface SLAViolation {
   id:           string;
@@ -56,6 +57,7 @@ export default function SLAPage() {
   const [repoFilter, setRepoFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<"urgency"|"risk"|"repo">("urgency");
+  const [trend,  setTrend]  = useState<SLATrendPoint[]>([]);
 
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true); else setLoading(true);
@@ -104,6 +106,20 @@ export default function SLAPage() {
     } catch { setItems([]); }
     setLoading(false); setRefreshing(false);
   }, [profile?.org_id]);
+
+  // Weekly-bucketed history -- unlike the live overdue-items list above,
+  // this tolerates being minutes-to-hours stale, so it's fetched on mount
+  // and manual refresh only, not on the 3-minute interval or window focus.
+  const fetchTrend = useCallback(async () => {
+    if (isSeedMode() && !profile?.org_id) return;
+    if (!profile?.org_id) return;
+    try {
+      const res = await authedFetch<{ trend: SLATrendPoint[] }>("/api/sla/trend?weeks=12");
+      setTrend(res.trend ?? []);
+    } catch { /* trend section just shows its empty state */ }
+  }, [profile?.org_id]);
+
+  useEffect(() => { fetchTrend(); }, [fetchTrend]);
 
   useEffect(() => {
     fetchData();
@@ -182,7 +198,7 @@ export default function SLAPage() {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 Export
               </button>
-              <button onClick={() => fetchData(true)} disabled={refreshing}
+              <button onClick={() => { fetchData(true); fetchTrend(); }} disabled={refreshing}
                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm">
                 <svg className={refreshing?"animate-spin":""} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                 Refresh
@@ -224,6 +240,21 @@ export default function SLAPage() {
             Average overdue item is {avgOverdueHrs}h past its SLA deadline
           </div>
         )}
+
+        {/* SLA Trend — breach rate + resolution time over the last 12 weeks */}
+        <div className="animate-fade-up section-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className="font-bold text-gray-900 text-sm">SLA Trend</p>
+              <p className="text-xs text-gray-400 mt-0.5">Weekly breach count &amp; average resolution time — last 12 weeks</p>
+            </div>
+            <div className="flex items-center gap-3 text-xs text-gray-400">
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-orange-500 inline-block" />Breaches</span>
+              <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-indigo-500 rounded inline-block" />Avg resolve time</span>
+            </div>
+          </div>
+          <SLATrendChart data={trend} />
+        </div>
 
         {/* Filters */}
         <div className="animate-fade-up flex flex-wrap items-center gap-2">
