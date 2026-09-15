@@ -10,8 +10,10 @@ import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import { makeDefaultFrameworks, CROSS_FRAMEWORK_THEMES as DEFAULT_THEMES } from "@/lib/complianceConfig";
 import type { FrameworkDef as FrameworkDefLib, CrossFrameworkTheme } from "@/lib/complianceConfig";
-import { authedFetch } from "@/lib/useRealData";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { useRole } from "@/lib/roles";
+import { useToastHelpers } from "@/lib/toast";
 import type { DashboardData } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -70,13 +72,32 @@ function makeFrameworks(org = "org"): FrameworkDef[] {
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────────
+// Real, server-backed via /api/compliance-exceptions -- was previously
+// localStorage-only, invisible to other reviewers and lost on a new
+// device. The seed-only fallback below applies solely when there's no
+// real org to persist against (offline demo mode).
 
-const EXC_KEY = "tl_exceptions_state";
+const EXC_SEED_KEY = "tl_exceptions_state_seed";
 
-function loadExceptions(): Exception[] {
-  try { return JSON.parse(localStorage.getItem(EXC_KEY) ?? "[]"); } catch { return []; }
+function loadSeedExceptions(): Exception[] {
+  try { return JSON.parse(localStorage.getItem(EXC_SEED_KEY) ?? "[]"); } catch { return []; }
 }
-function saveExceptions(e: Exception[]) { localStorage.setItem(EXC_KEY, JSON.stringify(e)); }
+function saveSeedExceptions(e: Exception[]) { localStorage.setItem(EXC_SEED_KEY, JSON.stringify(e)); }
+
+interface ExceptionRow {
+  id: string; control_id: string; framework_id: string; title: string;
+  description: string | null; risk_accepted: boolean; owner_email: string | null;
+  due_date: string | null; remediation: string | null;
+  status: "open" | "in-progress" | "resolved"; created_at: string;
+}
+function rowToException(r: ExceptionRow): Exception {
+  return {
+    id: r.id, control_id: r.control_id, framework_id: r.framework_id, title: r.title,
+    description: r.description ?? "", risk_accepted: r.risk_accepted, owner: r.owner_email ?? "",
+    due_date: r.due_date ?? "", remediation: r.remediation ?? "",
+    created_at: r.created_at.split("T")[0], status: r.status,
+  };
+}
 
 // ── Dynamic score computation ─────────────────────────────────────────────────
 
@@ -178,6 +199,8 @@ type PageTab = "overview" | "controls" | "mapping" | "exceptions";
 export default function CompliancePage() {
   const tz = useTimezone();
   const { profile } = useAuth();
+  const { permissions } = useRole();
+  const { error: toastError } = useToastHelpers();
   const orgName = profile?.org_name || profile?.org_slug || "your organisation";
   const orgSlug = profile?.org_slug || "";
 
@@ -192,7 +215,13 @@ export default function CompliancePage() {
   const [refreshing,  setRefreshing]  = useState(false);
   const [teamMembers, setTeamMembers] = useState<{ email: string; role: string; name: string | null }[]>([]);
 
-  useEffect(() => { setExceptions(loadExceptions()); }, []);
+  useEffect(() => {
+    if (isSeedMode() && !profile?.org_id) { setExceptions(loadSeedExceptions()); return; }
+    if (!profile?.org_id) return;
+    authedFetch<{ exceptions: ExceptionRow[] }>("/api/compliance-exceptions")
+      .then(res => setExceptions((res.exceptions ?? []).map(rowToException)))
+      .catch(() => { /* keep empty -- page still renders derived scores */ });
+  }, [profile?.org_id]);
 
   // Load real team members and map role-label owners to real emails
   useEffect(() => {
@@ -282,32 +311,71 @@ export default function CompliancePage() {
     return map;
   }, [fw, data]);
 
-  function addException() {
+  async function addException() {
     if (!excForm.title || !excForm.control_id) return;
-    const exc: Exception = {
-      id: `exc-${Date.now()}`,
-      control_id:   excForm.control_id,
-      framework_id: activeFw,
-      title:        excForm.title,
-      description:  excForm.description,
-      risk_accepted: excForm.risk_accepted,
-      owner:         excForm.owner,
-      due_date:      excForm.due_date,
-      remediation:   excForm.remediation,
-      created_at:    new Date().toISOString().split("T")[0],
-      status:        "open",
-    };
-    const next = [...exceptions, exc];
-    setExceptions(next);
-    saveExceptions(next);
-    setShowExcForm(false);
-    setExcForm({ title:"", description:"", control_id:"", owner:profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
+
+    if (isSeedMode() && !profile?.org_id) {
+      const exc: Exception = {
+        id: `exc-${Date.now()}`,
+        control_id:   excForm.control_id,
+        framework_id: activeFw,
+        title:        excForm.title,
+        description:  excForm.description,
+        risk_accepted: excForm.risk_accepted,
+        owner:         excForm.owner,
+        due_date:      excForm.due_date,
+        remediation:   excForm.remediation,
+        created_at:    new Date().toISOString().split("T")[0],
+        status:        "open",
+      };
+      const next = [...exceptions, exc];
+      setExceptions(next);
+      saveSeedExceptions(next);
+      setShowExcForm(false);
+      setExcForm({ title:"", description:"", control_id:"", owner:profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
+      return;
+    }
+
+    try {
+      const res = await authedFetch<{ exception: ExceptionRow }>("/api/compliance-exceptions", {
+        method: "POST",
+        body: JSON.stringify({
+          control_id:    excForm.control_id,
+          framework_id:  activeFw,
+          title:         excForm.title,
+          description:   excForm.description,
+          risk_accepted: excForm.risk_accepted,
+          owner_email:   excForm.owner,
+          due_date:      excForm.due_date,
+          remediation:   excForm.remediation,
+        }),
+      });
+      setExceptions(prev => [rowToException(res.exception), ...prev]);
+      setShowExcForm(false);
+      setExcForm({ title:"", description:"", control_id:"", owner:profile?.email ?? "", due_date:"", remediation:"", risk_accepted:false });
+    } catch (err) {
+      toastError("Couldn't log exception", err instanceof Error ? err.message : undefined);
+    }
   }
 
-  function closeException(id: string) {
-    const next = exceptions.map(e => e.id === id ? { ...e, status:"resolved" as const } : e);
-    setExceptions(next);
-    saveExceptions(next);
+  async function closeException(id: string) {
+    const prev = exceptions;
+    setExceptions(exceptions.map(e => e.id === id ? { ...e, status:"resolved" as const } : e));
+
+    if (isSeedMode() && !profile?.org_id) {
+      saveSeedExceptions(exceptions.map(e => e.id === id ? { ...e, status:"resolved" as const } : e));
+      return;
+    }
+
+    try {
+      await authedFetch("/api/compliance-exceptions", {
+        method: "PATCH",
+        body: JSON.stringify({ id, status: "resolved" }),
+      });
+    } catch (err) {
+      setExceptions(prev); // roll back on failure
+      toastError("Couldn't resolve exception", err instanceof Error ? err.message : undefined);
+    }
   }
 
   const fwExceptions = exceptions.filter(e => e.framework_id === activeFw);
@@ -803,11 +871,13 @@ export default function CompliancePage() {
                 <p className="text-sm font-bold text-gray-900">Exception Register — {fw.shortName}</p>
                 <p className="text-xs text-gray-400 mt-0.5">Formally tracked control gaps, risk acceptances, and remediation plans</p>
               </div>
-              <button onClick={() => setShowExcForm(v=>!v)}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                Log Exception
-              </button>
+              {permissions.canAttest && (
+                <button onClick={() => setShowExcForm(v=>!v)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  Log Exception
+                </button>
+              )}
             </div>
 
             {/* Add exception form */}
@@ -926,7 +996,7 @@ export default function CompliancePage() {
                         </div>
                       )}
                     </div>
-                    {exc.status !== "resolved" && (
+                    {exc.status !== "resolved" && permissions.canAttest && (
                       <button onClick={() => closeException(exc.id)}
                         className="shrink-0 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap">
                         Mark Resolved

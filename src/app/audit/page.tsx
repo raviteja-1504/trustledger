@@ -285,6 +285,10 @@ const RAW_TYPE_MAP: Record<string, AuditEventType> = {
   violation_escalated:   "policy_violation",
   report_generated:      "policy_change",
   org_settings_changed:  "policy_change",
+  exception_created:     "policy_violation",
+  exception_resolved:    "policy_change",
+  risk_updated:          "policy_change",
+  evidence_collected:    "policy_change",
 };
 
 const SEVERITY_BY_TYPE: Partial<Record<AuditEventType, AuditEvent["severity"]>> = {

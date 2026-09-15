@@ -16,8 +16,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
-import { verifyAuditChain } from "@/lib/audit";
+import { verifyApiKey, requireRole } from "../../_middleware";
+import { verifyAuditChain, writeAuditLog } from "@/lib/audit";
+import { safeError } from "@/lib/errors";
 
 interface ControlEvidence {
   control_id:   string;
@@ -197,8 +198,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "security_reviewer");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   const body = await req.json() as {
     control_id:   string;
@@ -209,18 +212,35 @@ export async function POST(req: NextRequest) {
 
   if (!body.control_id) return NextResponse.json({ error:"missing_control_id" }, { status:400 });
 
-  const db  = createServiceClient();
-  const now = new Date().toISOString();
+  const db = createServiceClient();
 
-  // Mark evidence as collected for this control
-  await db.from("compliance_exceptions").upsert({
-    org_id,
-    framework_id: body.framework_id ?? "soc2",
-    control_id:   body.control_id,
-    title:        `Evidence collected for ${body.control_id}`,
-    description:  body.notes ?? "Auto-collected by TrustLedger",
-    status:       "resolved",
-  }, { onConflict: "org_id,framework_id,control_id" });
+  // Append-only evidence log entry -- previously this wrote a fake
+  // "resolved" row into compliance_exceptions (a table meant for tracked
+  // control gaps, not evidence), which also had no unique constraint
+  // matching the upsert's onConflict target and would error. Real table,
+  // real record: who collected what evidence for which control, when.
+  const { data, error } = await db
+    .from("evidence_log")
+    .insert({
+      org_id:             auth.org_id,
+      framework_id:       body.framework_id ?? "soc2",
+      control_id:         body.control_id,
+      note:               body.notes ?? null,
+      file_url:           body.url ?? null,
+      collected_by:       auth.user_id ?? null,
+      collected_by_email: auth.actor_email ?? null,
+    })
+    .select("id, created_at")
+    .single() as { data: { id: string; created_at: string } | null; error: unknown };
 
-  return NextResponse.json({ ok: true, control_id: body.control_id, collected_at: now });
+  if (error || !data) return safeError(error, { code: "evidence_collect_failed", message: "We couldn't record that evidence. Please try again." });
+
+  await writeAuditLog(db, {
+    org_id: auth.org_id!, event_type: "evidence_collected",
+    actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "evidence_log", resource_id: data.id,
+    payload: { control_id: body.control_id, framework_id: body.framework_id ?? "soc2" },
+  });
+
+  return NextResponse.json({ ok: true, control_id: body.control_id, collected_at: data.created_at });
 }

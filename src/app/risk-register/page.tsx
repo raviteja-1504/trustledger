@@ -8,6 +8,10 @@ import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
+import { useRole } from "@/lib/roles";
+import { useToastHelpers } from "@/lib/toast";
 import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 
@@ -64,7 +68,13 @@ interface PersistStore {
   manuals:   ManualRisk[];
 }
 
-function loadStore(): PersistStore {
+// Real, server-backed via /api/risk-register/state (and synced from live
+// derivation via /api/risk-register/sync) -- was previously localStorage-
+// only, invisible to other reviewers and lost on a new device. The
+// seed-only fallback below applies solely when there's no real org to
+// persist against (offline demo mode).
+
+function loadSeedStore(): PersistStore {
   try {
     const raw = JSON.parse(localStorage.getItem(RISK_KEY) ?? "null");
     if (!raw) return { overrides:{}, manuals:[] };
@@ -73,7 +83,71 @@ function loadStore(): PersistStore {
     return { overrides: raw.overrides ?? {}, manuals: Array.isArray(raw.manuals) ? raw.manuals : [] };
   } catch { return { overrides:{}, manuals:[] }; }
 }
-function saveStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.stringify(s)); }
+function saveSeedStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.stringify(s)); }
+
+interface RiskRow {
+  external_id:         string | null;
+  auto_derived:        boolean;
+  title:               string;
+  description:         string | null;
+  category:            string;
+  likelihood:          number;
+  impact:              number;
+  residual_likelihood: number | null;
+  residual_impact:     number | null;
+  status:              string;
+  treatment:           string;
+  owner_email:         string | null;
+  due_date:            string | null;
+  mitigation:          string | null;
+  related_cve:         string | null;
+  related_link:        string | null;
+  repo:                string | null;
+  notes:               string[];
+  created_at:          string;
+}
+
+function rowsToStore(rows: RiskRow[]): PersistStore {
+  const overrides: Record<string, PersistedRisk> = {};
+  const manuals: ManualRisk[] = [];
+  for (const r of rows) {
+    if (!r.external_id) continue;
+    if (r.auto_derived) {
+      overrides[r.external_id] = {
+        status:               r.status as RiskStatus,
+        treatment:            r.treatment as TreatmentType,
+        owner:                r.owner_email ?? undefined,
+        due_date:             r.due_date ?? undefined,
+        mitigation:           r.mitigation ?? undefined,
+        residual_likelihood:  (r.residual_likelihood ?? undefined) as 1|2|3|4|5|undefined,
+        residual_impact:      (r.residual_impact ?? undefined) as 1|2|3|4|5|undefined,
+        notes:                r.notes ?? [],
+      };
+    } else {
+      manuals.push({
+        _manual: true,
+        id:            r.external_id,
+        auto_derived:  false,
+        title:         r.title,
+        description:   r.description ?? "",
+        category:      r.category as RiskCategory,
+        likelihood:    r.likelihood as 1|2|3|4|5,
+        impact:        r.impact as 1|2|3|4|5,
+        status:        r.status as RiskStatus,
+        treatment:     r.treatment as TreatmentType,
+        owner:         r.owner_email ?? "",
+        due_date:      r.due_date ?? undefined,
+        mitigation:    r.mitigation ?? "",
+        related_cve:   r.related_cve ?? undefined,
+        related_link:  r.related_link ?? undefined,
+        identified_at: r.created_at.split("T")[0],
+        notes:         r.notes ?? [],
+        repo:          r.repo ?? undefined,
+      });
+    }
+  }
+  return { overrides, manuals };
+}
 
 // ── Derive risks from scan data ────────────────────────────────────────────────
 
@@ -346,6 +420,9 @@ const BLANK: NewRisk = {
 
 export default function RiskRegisterPage() {
     const tz = useTimezone();
+  const { profile } = useAuth();
+  const { permissions } = useRole();
+  const { error: toastError } = useToastHelpers();
   const [store,        setStore]        = useState<PersistStore>({ overrides:{}, manuals:[] });
   const [derivedRisks, setDerivedRisks] = useState<RiskItem[]>([]);
   const [owners,       setOwners]       = useState<string[]>([]);
@@ -364,7 +441,15 @@ export default function RiskRegisterPage() {
   const [newRisk,      setNewRisk]      = useState<NewRisk>(BLANK);
   const [noteInput,    setNoteInput]    = useState<Record<string,string>>({});
 
-  useEffect(() => { setStore(loadStore()); }, []);
+  const loadStoreFromServer = useCallback(() => {
+    if (isSeedMode() && !profile?.org_id) { setStore(loadSeedStore()); return; }
+    if (!profile?.org_id) return;
+    authedFetch<{ risks: RiskRow[] }>("/api/risk-register/state")
+      .then(res => setStore(rowsToStore(res.risks ?? [])))
+      .catch(() => { /* keep whatever's already loaded -- page still works on derived data alone */ });
+  }, [profile?.org_id]);
+
+  useEffect(() => { loadStoreFromServer(); }, [loadStoreFromServer]);
 
   const fetchData = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
@@ -381,9 +466,27 @@ export default function RiskRegisterPage() {
       const derived = deriveRisks(patchDataWithAttestations(data), scans, memberEmails);
       setDerivedRisks(derived);
       setLastRefreshed(new Date());
+
+      // Keep the derived risks' metadata in sync in the database (title,
+      // category, likelihood/impact, repo, CVE links) without touching any
+      // human-set workflow field -- see /api/risk-register/sync. Skipped
+      // entirely in seed/offline mode, where there's no real org to persist
+      // against.
+      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && derived.length > 0) {
+        authedFetch("/api/risk-register/sync", {
+          method: "POST",
+          body: JSON.stringify({
+            risks: derived.map(r => ({
+              id: r.id, title: r.title, description: r.description, category: r.category,
+              likelihood: r.likelihood, impact: r.impact, repo: r.repo,
+              related_cve: r.related_cve, related_link: r.related_link,
+            })),
+          }),
+        }).catch(() => { /* best-effort -- page still works from derived + last-known store */ });
+      }
     }
     setLoading(false); if (spinner) setRefreshing(false);
-  }, []);
+  }, [profile?.org_id]);
 
   // No auto-poll interval: fetchData fans out to one scan fetch per repo with
   // no cap, the heaviest per-tick cost of any page in the app. The Refresh
@@ -406,12 +509,22 @@ export default function RiskRegisterPage() {
     }).sort((a,b) => riskScore(b) - riskScore(a));
   }, [derivedRisks, store]);
 
-  function updateOverride(id: string, patch: Partial<PersistedRisk>) {
-    setStore(prev => {
-      const next = { ...prev, overrides: { ...prev.overrides, [id]: { ...prev.overrides[id], ...patch } } };
-      saveStore(next);
-      return next;
-    });
+  async function updateOverride(id: string, patch: Partial<PersistedRisk>) {
+    const prevStore = store;
+    const next = { ...store, overrides: { ...store.overrides, [id]: { ...store.overrides[id], ...patch } } };
+    setStore(next);
+
+    if (isSeedMode() && !profile?.org_id) { saveSeedStore(next); return; }
+
+    try {
+      await authedFetch("/api/risk-register/state", {
+        method: "PATCH",
+        body: JSON.stringify({ external_id: id, patch }),
+      });
+    } catch (err) {
+      setStore(prevStore);
+      toastError("Couldn't update risk", err instanceof Error ? err.message : undefined);
+    }
   }
 
   function addNote(id: string) {
@@ -424,7 +537,7 @@ export default function RiskRegisterPage() {
     setNoteInput(p=>({...p,[id]:""}));
   }
 
-  function addManualRisk() {
+  async function addManualRisk() {
     if (!newRisk.title.trim()) return;
     const id = `MR-${Date.now()}`;
     const item: ManualRisk = {
@@ -444,21 +557,45 @@ export default function RiskRegisterPage() {
       identified_at:new Date().toISOString().split("T")[0],
       notes:[],
     };
-    setStore(prev => {
-      const next = { ...prev, manuals:[...prev.manuals, item] };
-      saveStore(next);
-      return next;
-    });
-    setNewRisk(BLANK);
-    setShowAddForm(false);
+
+    if (isSeedMode() && !profile?.org_id) {
+      const next = { ...store, manuals:[...store.manuals, item] };
+      setStore(next); saveSeedStore(next);
+      setNewRisk(BLANK); setShowAddForm(false);
+      return;
+    }
+
+    try {
+      await authedFetch("/api/risk-register/state", {
+        method: "POST",
+        body: JSON.stringify({
+          external_id: id, title: item.title, description: item.description, category: item.category,
+          likelihood: item.likelihood, impact: item.impact, treatment: item.treatment,
+          owner_email: item.owner, due_date: item.due_date, mitigation: item.mitigation,
+          related_cve: item.related_cve, related_link: item.related_link,
+        }),
+      });
+      setStore(prev => ({ ...prev, manuals:[...prev.manuals, item] }));
+      setNewRisk(BLANK);
+      setShowAddForm(false);
+    } catch (err) {
+      toastError("Couldn't add risk", err instanceof Error ? err.message : undefined);
+    }
   }
 
-  function deleteManual(id: string) {
-    setStore(prev => {
-      const next = { ...prev, manuals:prev.manuals.filter(m=>m.id!==id) };
-      saveStore(next);
-      return next;
-    });
+  async function deleteManual(id: string) {
+    const prevStore = store;
+    const next = { ...store, manuals: store.manuals.filter(m=>m.id!==id) };
+    setStore(next);
+
+    if (isSeedMode() && !profile?.org_id) { saveSeedStore(next); return; }
+
+    try {
+      await authedFetch("/api/risk-register/state", { method: "DELETE", body: JSON.stringify({ external_id: id }) });
+    } catch (err) {
+      setStore(prevStore);
+      toastError("Couldn't remove risk", err instanceof Error ? err.message : undefined);
+    }
   }
 
   const repos = useMemo(() => Array.from(new Set(allRisks.filter(r => r.repo).map(r => r.repo as string))), [allRisks]);
@@ -530,11 +667,13 @@ export default function RiskRegisterPage() {
           </div>
           <div className="flex flex-col items-end gap-0.5">
             <div className="flex items-center gap-2">
-              <button onClick={() => setShowAddForm(v=>!v)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition-all shadow-sm ${showAddForm?"text-indigo-800 bg-indigo-100 border-indigo-300":"text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100"}`}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                Add Risk
-              </button>
+              {permissions.canAttest && (
+                <button onClick={() => setShowAddForm(v=>!v)}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition-all shadow-sm ${showAddForm?"text-indigo-800 bg-indigo-100 border-indigo-300":"text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100"}`}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  Add Risk
+                </button>
+              )}
               <button onClick={exportCSV}
                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -858,39 +997,39 @@ export default function RiskRegisterPage() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</p>
-                        <select value={r.status} onChange={e=>updateOverride(r.id,{status:e.target.value as RiskStatus})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                        <select value={r.status} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{status:e.target.value as RiskStatus})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed">
                           {(["open","mitigating","accepted","closed"] as const).map(s=><option key={s} value={s}>{STATUS_STYLE[s].label}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Treatment</p>
-                        <select value={r.treatment} onChange={e=>updateOverride(r.id,{treatment:e.target.value as TreatmentType})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none">
+                        <select value={r.treatment} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{treatment:e.target.value as TreatmentType})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
                           {(["mitigate","accept","transfer","avoid"] as const).map(t=><option key={t} value={t}>{TREATMENT_STYLE[t].label}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Owner</p>
-                        <select value={r.owner} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none">
+                        <select value={r.owner} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
                           {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Due Date</p>
-                        <input type="date" value={r.due_date??""} onChange={e=>updateOverride(r.id,{due_date:e.target.value})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none" />
+                        <input type="date" value={r.due_date??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{due_date:e.target.value})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" />
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual L</p>
-                        <input type="number" min={1} max={5} value={r.residual_likelihood??""} onChange={e=>updateOverride(r.id,{residual_likelihood:Number(e.target.value) as 1|2|3|4|5})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none" placeholder="1–5" />
+                        <input type="number" min={1} max={5} value={r.residual_likelihood??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{residual_likelihood:Number(e.target.value) as 1|2|3|4|5})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual I</p>
-                        <input type="number" min={1} max={5} value={r.residual_impact??""} onChange={e=>updateOverride(r.id,{residual_impact:Number(e.target.value) as 1|2|3|4|5})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none" placeholder="1–5" />
+                        <input type="number" min={1} max={5} value={r.residual_impact??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{residual_impact:Number(e.target.value) as 1|2|3|4|5})}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
                       </div>
                     </div>
 
@@ -904,16 +1043,18 @@ export default function RiskRegisterPage() {
                           ))}
                         </div>
                       )}
-                      <div className="flex gap-2">
-                        <input value={noteInput[r.id]??""} onChange={e=>setNoteInput(p=>({...p,[r.id]:e.target.value}))}
-                          onKeyDown={e=>{if(e.key==="Enter")addNote(r.id);}}
-                          placeholder="Add a note (Enter to save)…"
-                          className="flex-1 text-xs border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white" />
-                        <button onClick={()=>addNote(r.id)}
-                          className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-lg hover:bg-indigo-100 transition-colors">
-                          Save
-                        </button>
-                      </div>
+                      {permissions.canAttest && (
+                        <div className="flex gap-2">
+                          <input value={noteInput[r.id]??""} onChange={e=>setNoteInput(p=>({...p,[r.id]:e.target.value}))}
+                            onKeyDown={e=>{if(e.key==="Enter")addNote(r.id);}}
+                            placeholder="Add a note (Enter to save)…"
+                            className="flex-1 text-xs border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white" />
+                          <button onClick={()=>addNote(r.id)}
+                            className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-lg hover:bg-indigo-100 transition-colors">
+                            Save
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Links + delete */}
@@ -921,7 +1062,7 @@ export default function RiskRegisterPage() {
                       {r.related_cve&&<Link href="/violations" className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg hover:bg-indigo-100">{r.related_cve} ↗</Link>}
                       {r.related_link&&<Link href={r.related_link} className="text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-lg hover:bg-gray-100">View Evidence ↗</Link>}
                       <span className="text-[9px] text-gray-400 ml-auto">Identified {fmtDate(r.identified_at)}</span>
-                      {!r.auto_derived&&(
+                      {!r.auto_derived&&permissions.canAttest&&(
                         <button onClick={()=>{if(confirm("Delete this risk?"))deleteManual(r.id);}}
                           className="text-[10px] font-bold text-rose-600 hover:text-rose-800 px-2.5 py-1 rounded-lg hover:bg-rose-50 transition-colors">
                           Delete

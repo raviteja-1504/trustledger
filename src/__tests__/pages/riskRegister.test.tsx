@@ -3,6 +3,11 @@ import { render, screen } from "@testing-library/react";
 
 jest.mock("@/components/AuthGuard",    () => ({ __esModule:true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/components/PageSkeleton", () => ({ __esModule:true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
+jest.mock("@/lib/toast", () => ({
+  useToast:        () => ({ toast: null, setToast: jest.fn() }),
+  useToastHelpers: () => ({ success: jest.fn(), error: jest.fn(), info: jest.fn(), warn: jest.fn() }),
+  ToastProvider:   ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 
 import RiskRegisterPage from "@/app/risk-register/page";
 
@@ -35,10 +40,12 @@ describe("RiskRegisterPage", () => {
     expect(screen.getByText("Risk Heat Map")).toBeInTheDocument();
   });
 
-  it("renders multiple risk items sorted by score", () => {
+  it("shows an empty state when no risks are loaded", () => {
+    // No network/auth in this render, so deriveRisks() never runs and the
+    // register is genuinely empty -- this asserts the real empty-state
+    // copy rather than hardcoded risk IDs the app no longer produces
+    // (risks are now derived from live scan data, see deriveRisks()).
     render(<RiskRegisterPage />);
-    // Risk IDs should be present
-    expect(screen.getByText("RR-001")).toBeInTheDocument();
-    expect(screen.getByText("RR-002")).toBeInTheDocument();
+    expect(screen.getByText("No risks match this filter")).toBeInTheDocument();
   });
 });
