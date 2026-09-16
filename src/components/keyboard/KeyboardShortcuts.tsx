@@ -74,7 +74,7 @@ export function useKeyboardShortcuts() {
         d: "/dashboard", v: "/violations", a: "/alerts",
         i: "/incidents", r: "/reports",    s: "/settings",
         c: "/compliance",p: "/posture",    l: "/audit",
-        e: "/evidence",  k: "/risks",      b: "/billing",
+        k: "/risks",     b: "/billing",
       };
       if (e.key in nav) {
         e.preventDefault();

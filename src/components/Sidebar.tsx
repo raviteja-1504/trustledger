@@ -114,14 +114,6 @@ function RiskRegIcon() {
     </svg>
   );
 }
-function EvidenceIcon2() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-      <line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>
-    </svg>
-  );
-}
 function ComplianceIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -209,10 +201,8 @@ const ALL_LINKS: Array<{
   { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/risk-register",   label: "Risk Register",   icon: RiskRegIcon,     permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/evidence",        label: "Evidence",        icon: EvidenceIcon2,   permission: null,  roles: ["admin","security_reviewer"] },
   // Audit
   { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/aibom",           label: "AIBOM",           icon: ReportsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
   // AI Intel
   { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
@@ -525,8 +515,8 @@ export default function Sidebar() {
           { label:"Overview",    hrefs:["/dashboard","/analytics","/posture"] },
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
           { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies"] },
-          { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register","/evidence"] },
-          { label:"Audit",       hrefs:["/audit","/aibom","/reports"] },
+          { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
+          { label:"Audit",       hrefs:["/audit","/reports"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
           { label:"Config",      hrefs:["/settings/team","/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {

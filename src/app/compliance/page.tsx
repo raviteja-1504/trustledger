@@ -1076,7 +1076,7 @@ export default function CompliancePage() {
         {/* ── Actions row ── */}
         <div className="animate-fade-up grid grid-cols-1 sm:grid-cols-3 gap-3">
           {[
-            { label:"View Evidence Locker",  sub:"Manage control evidence artifacts", href:"/evidence",   color:"#10b981", bg:"#f0fdf4", border:"#bbf7d0" },
+            { label:"View Risk Register",    sub:"Likelihood × impact risk log",      href:"/risk-register", color:"#10b981", bg:"#f0fdf4", border:"#bbf7d0" },
             { label:"Generate Report PDF",   sub:`Signed ${fw.shortName} evidence package`, href:`/reports?fw=${encodeURIComponent(fw.shortName)}`, color:"#6366f1", bg:"#eef2ff", border:"#c7d2fe" },
             { label:"Audit Trail",           sub:"View all compliance-relevant events", href:"/audit",     color:"#7c3aed", bg:"#f5f3ff", border:"#ddd6fe" },
           ].map(a => (

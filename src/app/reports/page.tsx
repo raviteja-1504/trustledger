@@ -355,8 +355,8 @@ interface RealControlEvidence { control_id: string; score: number; status: strin
 interface RealEvidencePackage { framework: string; controls: RealControlEvidence[] }
 
 // Prefers the real Evidence engine's live-computed per-control score
-// (GET /api/evidence/collect, same engine the Compliance and Evidence
-// pages use) over this page's own heuristic -- this was previously a
+// (GET /api/evidence/collect, same engine the Compliance page and this
+// report's PDF use) over this page's own heuristic -- this was previously a
 // third, independently-invented scoring formula that could disagree
 // with the other two for the same control.
 function criterionEvidence(id: string, data: DashboardData, real?: RealEvidencePackage | null): { text: string; pct: number } {

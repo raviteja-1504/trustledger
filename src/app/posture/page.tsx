@@ -320,7 +320,7 @@ function buildRecommendations(domains: DomainScore[], data: DashboardData): Reco
       id:"r6", priority:"medium",
       title:`${compD.issues} compliance exception${compD.issues>1?"s":""} active — review or remediate before audit window`,
       impact:4, effort:"high",
-      domain:"compliance", link:"/evidence", action:"Collect evidence",
+      domain:"compliance", link:"/compliance", action:"Review exceptions",
     });
   }
   if (depsD.score < 80 && depsD.issues > 0) {

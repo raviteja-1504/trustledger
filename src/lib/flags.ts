@@ -35,7 +35,6 @@ const DEFAULT_FLAGS: FeatureFlag[] = [
   { key:"keyboard_shortcuts",    description:"Global keyboard navigation shortcuts",          enabled:true                                    },
   { key:"dark_mode",             description:"Dark mode toggle",                              enabled:true                                    },
   { key:"scan_comparison",       description:"Side-by-side scan diff view",                   enabled:true                                    },
-  { key:"aibom_page",            description:"AI Bill of Materials inventory page",           enabled:true                                    },
   { key:"sla_dashboard",         description:"Dedicated SLA breach tracking page",            enabled:true                                    },
   { key:"bitbucket_integration", description:"Bitbucket PR scanning",                         enabled:true                                    },
   { key:"gitlab_integration",    description:"GitLab MR scanning",                            enabled:true                                    },
