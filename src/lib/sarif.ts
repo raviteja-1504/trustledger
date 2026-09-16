@@ -47,6 +47,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "watermark-detection":      { title: "AI Watermark Detected",         description: "Invisible Unicode watermark characters embedded in source." },
   "ai-model-attribution":     { title: "AI Model Attribution",          description: "Code attributed to a specific AI coding assistant." },
   "hallucinated-method-call": { title: "Hallucinated Method Call",      description: "Call to a method/property that does not exist on this built-in type — likely an AI-invented API that will throw TypeError at runtime." },
+  "license-header-contamination": { title: "License Header Contamination", description: "An SPDX identifier, license header, or third-party copyright notice was found in this file — may indicate code copied from a licensed source." },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

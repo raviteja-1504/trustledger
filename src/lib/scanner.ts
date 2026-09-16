@@ -41,6 +41,7 @@ import type { MLScoreResult }    from "./mlClassifier";
 import { detectorRegistry }      from "./detectorRegistry";
 import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
+import { scanLicenseContamination } from "./licenseContamination";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -49,6 +50,11 @@ detectorRegistry.register({
   id: "hallucinated-method-call",
   category: "security",
   scan: scanHallucinatedMethodCalls,
+});
+detectorRegistry.register({
+  id: "license-header-contamination",
+  category: "security",
+  scan: scanLicenseContamination,
 });
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
