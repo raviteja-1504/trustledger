@@ -46,6 +46,15 @@ const nextConfig = {
       "@supabase/supabase-js",
       "@supabase/auth-helpers-nextjs",
     ],
+    // @react-pdf/renderer needs the full "react" package (React.Component,
+    // full reconciler) for its own custom renderer. Left in the normal
+    // webpack bundle, the App Router's build graph resolves react through
+    // the restricted "react-server" condition for anything under app/**
+    // (route handlers included), which is missing what react-pdf needs --
+    // it crashed in production with "X.Component is not a constructor".
+    // Marking it external makes Next require() it directly from
+    // node_modules at runtime instead, getting the full React build.
+    serverComponentsExternalPackages: ["@react-pdf/renderer"],
   },
 
   // ── Security headers (supplements middleware.ts) ─────────────────────────────
