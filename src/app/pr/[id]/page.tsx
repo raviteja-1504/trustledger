@@ -53,6 +53,7 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "cross-file-taint-exposure":{ label: "Cross-file Taint",        desc: "Tainted data from an imported module may reach a sensitive sink in this file",                sev: "high",     security: true },
   "hallucinated-method-call": { label: "Hallucinated Method Call", desc: "Call to a method/property that does not exist on this built-in type — will throw TypeError at runtime", sev: "medium",   security: true },
   "license-header-contamination": { label: "License Header Contamination", desc: "An SPDX identifier, license header, or third-party copyright notice was found in this file — may indicate code copied from a licensed source", sev: "medium", security: true },
+  "ai-blast-radius": { label: "AI Blast Radius", desc: "An AI-generated file that's imported by other files in this PR and/or sits in a sensitive area (payment, auth, webhooks) — risk compounds with reach", sev: "medium", security: true },
   // ── AI detection signals (file-level, no line numbers) ───────────────────────
   "comment-phrasing":        { label: "AI Comment Phrasing",       desc: "Formulaic, instructional comment style matches AI generation signatures",                    sev: "low"  },
   "language-specific":       { label: "Language-specific Pattern", desc: "Stereotyped per-language patterns frequently produced by AI code generators",                sev: "low"  },

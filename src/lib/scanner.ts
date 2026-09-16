@@ -3060,6 +3060,66 @@ function computeCrossFileTaintIndicators(
   return out;
 }
 
+// ── AI blast-radius indicators ──────────────────────────────────────────────
+// Combines two zero-new-infrastructure signals for "does this AI-heavy
+// file's risk actually matter beyond itself": (1) semanticGraph.ts's real
+// import-reverseEdges reach, scoped to this PR's own changeset -- there is
+// no visibility into the rest of the repo (see semanticGraph.ts's
+// blastRadius doc comment); (2) a path-keyword proxy for "sensitive area,"
+// standing in for real call-graph criticality data this pipeline doesn't
+// have access to.
+
+const CRITICAL_PATH_KEYWORDS = [
+  "payment", "billing", "checkout", "stripe", "invoice",
+  "auth", "login", "session", "token", "credential", "secret",
+  "webhook", "admin", "permission", "role", "acl",
+];
+
+function pathCriticality(filePath: string): string | null {
+  const lower = filePath.toLowerCase();
+  return CRITICAL_PATH_KEYWORDS.find(k => lower.includes(k)) ?? null;
+}
+
+function computeBlastRadiusIndicators(
+  files: FileAnalysis[], graph: SemanticGraph,
+): Map<string, ScanIndicator[]> {
+  const out = new Map<string, ScanIndicator[]>();
+  const blastByFile = new Map(graph.blastRadius.map(b => [b.sourceFile, b]));
+
+  for (const f of files) {
+    if (f.ai_percentage < 0.4) continue; // only meaningfully-AI files carry blast-radius risk
+
+    const blast = blastByFile.get(f.file_path);
+    const pathHit = pathCriticality(f.file_path);
+    if (!blast && !pathHit) continue;
+
+    const reasons: string[] = [];
+    if (blast) {
+      const shown = blast.reachesFiles.slice(0, 3).join(", ");
+      const more = blast.reachesFiles.length > 3 ? `, +${blast.reachesFiles.length - 3} more` : "";
+      reasons.push(`imported (directly or transitively) by ${blast.reachesFiles.length} other file(s) in this PR: ${shown}${more}`);
+    }
+    if (pathHit) reasons.push(`file path suggests a sensitive area ("${pathHit}")`);
+
+    // Mirror the file's own vendored/third-party status -- this indicator is
+    // injected post-analyzeFile() and so never passes through
+    // attachEvidence(), which is what normally sets codeCategory.
+    const isThirdParty = f.indicators.some(i => i.codeCategory === "third_party");
+
+    const list = out.get(f.file_path) ?? [];
+    list.push({
+      id:           "ai-blast-radius",
+      label:        "AI Blast Radius",
+      severity:     "medium",
+      detail:       `${Math.round(f.ai_percentage * 100)}% AI-generated file: ${reasons.join("; ")}. Risk compounds with reach — review carefully before merging.`,
+      confidence:   blast ? 70 : 50,
+      codeCategory: isThirdParty ? "third_party" : "application",
+    });
+    out.set(f.file_path, list);
+  }
+  return out;
+}
+
 // ── Risk calculation ───────────────────────────────────────────────────────────
 
 function calculateRisk(indicators: ScanIndicator[], aiPct: number): RiskLevel {
@@ -4245,6 +4305,17 @@ export function runScan(input: ScanInput): ScanOutput {
   const crossFileTaintIndicators = computeCrossFileTaintIndicators(files, semantic_graph);
   for (const f of files) {
     const extra = crossFileTaintIndicators.get(f.file_path);
+    if (!extra || extra.length === 0) continue;
+    f.indicators = [...f.indicators, ...extra];
+    f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));
+    f.risk_score = calculateRisk(f.indicators, f.ai_percentage);
+  }
+
+  // Blast radius: does an AI-heavy file's risk compound with real reach
+  // (other changed files in this PR importing it) or a sensitive-path proxy?
+  const blastRadiusIndicators = computeBlastRadiusIndicators(files, semantic_graph);
+  for (const f of files) {
+    const extra = blastRadiusIndicators.get(f.file_path);
     if (!extra || extra.length === 0) continue;
     f.indicators = [...f.indicators, ...extra];
     f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));

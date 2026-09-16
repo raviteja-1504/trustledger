@@ -15,6 +15,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "ai-comment-pattern": "AI comment pattern",
   "hallucinated-method-call": "Hallucinated method call",
   "license-header-contamination": "License header contamination",
+  "ai-blast-radius": "AI blast radius",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

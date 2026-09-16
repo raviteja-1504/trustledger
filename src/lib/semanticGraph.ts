@@ -43,6 +43,18 @@ export interface TaintSpread {
   riskScore:    number;  // 0–1: how broadly taint spreads
 }
 
+// AI risk radiating OUTWARD from an AI-heavy file to the files (within this
+// PR's changeset) that import it -- the opposite direction from
+// aiContamination below, which propagates INWARD from a file's own
+// dependencies. Powers "blast radius" scoring: an AI-heavy file matters
+// more when other changed files in the same PR actually depend on it.
+export interface BlastRadius {
+  sourceFile:   string;
+  aiPercentage: number;
+  reachesFiles: string[];   // direct + transitive importers within this PR's changeset
+  blastScore:   number;     // 0–1: aiPercentage compounded with fan-out
+}
+
 export interface SemanticGraph {
   modules:          Map<string, ModuleNode>;
   edges:            Map<string, Set<string>>;   // file → files it imports from
@@ -53,6 +65,7 @@ export interface SemanticGraph {
   circularDeps:     string[][];                 // each inner array is a cycle
   taintSpreads:     TaintSpread[];
   aiContamination:  Map<string, number>;        // file → max AI score of its dependencies
+  blastRadius:      BlastRadius[];
 }
 
 // ── Graph builder ─────────────────────────────────────────────────────────────
@@ -141,7 +154,11 @@ export function buildSemanticGraph(
   // AI contamination: for each file, what's the max AI score of its transitive dependencies?
   const aiContamination = computeAIContamination(modules, edges);
 
-  return { modules, edges, reverseEdges, symbolTable, crossFileCalls, deadExports, circularDeps, taintSpreads, aiContamination };
+  // Blast radius: for each AI-heavy file, how far does its own risk radiate
+  // outward to files (in this PR) that import it?
+  const blastRadius = computeAIBlastRadius(modules, reverseEdges);
+
+  return { modules, edges, reverseEdges, symbolTable, crossFileCalls, deadExports, circularDeps, taintSpreads, aiContamination, blastRadius };
 }
 
 // ── Import path resolver ──────────────────────────────────────────────────────
@@ -255,6 +272,50 @@ function computeTaintSpreads(
 
   void edges;
   return spreads;
+}
+
+// ── AI blast-radius propagation ─────────────────────────────────────────────
+// Structural sibling of computeTaintSpreads above (same BFS-outward-through-
+// reverseEdges shape), rooted at high-AI-score files instead of tainted
+// ones -- "how many other files in this changeset import (transitively)
+// from this AI-heavy file."
+
+function computeAIBlastRadius(
+  modules:      Map<string, ModuleNode>,
+  reverseEdges: Map<string, Set<string>>,
+  threshold = 0.4,
+): BlastRadius[] {
+  const result: BlastRadius[] = [];
+
+  for (const [path, mod] of Array.from(modules.entries())) {
+    const aiScore = mod.aiScore ?? 0;
+    if (aiScore < threshold) continue;
+
+    const reachable = new Set<string>();
+    const queue = [path];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const consumer of Array.from(reverseEdges.get(cur) ?? [])) {
+        if (!reachable.has(consumer)) {
+          reachable.add(consumer);
+          queue.push(consumer);
+        }
+      }
+    }
+    reachable.delete(path);
+
+    if (reachable.size > 0) {
+      const total = modules.size || 1;
+      result.push({
+        sourceFile:   path,
+        aiPercentage: aiScore,
+        reachesFiles: Array.from(reachable),
+        blastScore:   Math.min(1, aiScore * (reachable.size / total) * 1.5),
+      });
+    }
+  }
+
+  return result;
 }
 
 // ── AI contamination propagation ──────────────────────────────────────────────
