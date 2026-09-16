@@ -81,6 +81,14 @@ function riskStyle(risk: string) {
   return S.low;
 }
 
+// Real production rows have occasionally shown up with a null path (bad
+// seed data / a scan record written before a field was required) -- a bare
+// .split("/") on that crashes @react-pdf/renderer mid-render, which the API
+// route's catch-all then silently swaps for a JSON body still named *.pdf.
+function shortPath(p: string | null | undefined) {
+  return p ? p.split("/").slice(-2).join("/") : "—";
+}
+
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-GB", { day:"numeric", month:"short", year:"numeric" });
 }
@@ -224,7 +232,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
           </View>
           {recentAttests.map((a, i) => (
             <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
-              <Text style={[S.td, { flex:2 }]}>{a.file_path.split("/").slice(-2).join("/")}</Text>
+              <Text style={[S.td, { flex:2 }]}>{shortPath(a.file_path)}</Text>
               <Text style={[S.td, riskStyle(a.risk_score)]}>{a.risk_score}</Text>
               <Text style={[S.td, { flex:1.5 }]}>{a.reviewer_email}</Text>
               <Text style={S.td}>{fmtDate(a.created_at)}</Text>
@@ -244,7 +252,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
               </View>
               {data.secrets.slice(0,20).map((s, i) => (
                 <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
-                  <Text style={[S.td, { flex:2 }]}>{s.file_path.split("/").slice(-2).join("/")}</Text>
+                  <Text style={[S.td, { flex:2 }]}>{shortPath(s.file_path)}</Text>
                   <Text style={S.td}>{s.label}</Text>
                   <Text style={[S.td, riskStyle(s.severity)]}>{s.severity}</Text>
                   <Text style={S.td}>{s.status}</Text>

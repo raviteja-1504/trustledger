@@ -131,8 +131,12 @@ export async function POST(req: NextRequest) {
       },
     });
 
-  } catch {
-    // Fallback: return JSON if PDF renderer unavailable
-    return NextResponse.json({ ...reportData, signature });
+  } catch (err) {
+    // Fallback: return JSON if PDF rendering failed. Logged (previously
+    // silent) because a silent catch here means the client still gets a
+    // 200 and force-downloads the JSON body as "*.pdf" -- a file that
+    // can't be opened, with no trace of why in the response.
+    console.error("report PDF render failed", { org_id, framework: body.framework, err });
+    return NextResponse.json({ ...reportData, signature, pdf_render_failed: true });
   }
 }

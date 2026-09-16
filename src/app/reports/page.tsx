@@ -1478,6 +1478,16 @@ function ReportsContent() {
         period_start: new Date(start).toISOString(),
         period_end:   new Date(end).toISOString(),
       });
+      // The API can return 200 with a JSON body (not a PDF) if server-side
+      // PDF rendering failed -- previously this got force-downloaded as
+      // "*.pdf" anyway, producing a file that looked generated but wouldn't
+      // open. Only ever download bytes the server actually labelled as a PDF.
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!res.ok || !contentType.includes("application/pdf")) {
+        setError("The server couldn't render a PDF for this report. Please try again, or a different date range.");
+        setGenerating(false);
+        return;
+      }
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement("a");
