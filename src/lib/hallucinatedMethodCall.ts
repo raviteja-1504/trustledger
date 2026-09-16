@@ -228,7 +228,13 @@ function tierAFindings(lines: string[], content: string): ScanIndicator[] {
         realMethods = ARRAY_INSTANCE_METHODS;
       } else if (first === '"' || first === "'" || first === "`") {
         realMethods = STRING_INSTANCE_METHODS;
-      } else if (receiver in STATIC_NAMESPACES) {
+      } else if (Object.prototype.hasOwnProperty.call(STATIC_NAMESPACES, receiver)) {
+        // Object.hasOwn/hasOwnProperty, not `in` -- `in` also matches
+        // inherited Object.prototype property names (toString, valueOf,
+        // constructor, hasOwnProperty itself, ...), so a receiver literally
+        // named e.g. "toString" would look up Object.prototype.toString
+        // (a function) instead of undefined, and the .has() call below
+        // would throw since it's not a Set.
         realMethods = STATIC_NAMESPACES[receiver];
       } else {
         const kind = resolveIdentifierReceiver(lines, i, receiver);

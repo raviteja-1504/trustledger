@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { analyzeFile } from "@/lib/scanner";
 import { cached, TTL } from "@/lib/cache";
+import type { AttributionResult } from "@/lib/aiAttribution";
 
 // Hard bound on worst-case execution time. analyzeFile() is fully
 // synchronous (regex/string analysis, no I/O) -- if one file's content
@@ -21,6 +22,7 @@ const MAX_LIVE_REANALYSIS_FILES = 60;
 
 interface ReanalysisResult {
   indicators: { id: string; label: string; severity: string; line?: number; detail?: string }[];
+  attribution: AttributionResult;
 }
 
 // Re-running analyzeFile() (AST/SSA/semantic-graph/ML-classifier/47-signal
@@ -42,6 +44,7 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
       indicators: analysis.indicators
         .filter(i2 => i2.line != null)
         .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail })),
+      attribution: analysis.attribution,
     };
   });
 }
@@ -57,7 +60,7 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, ai_tooling")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
@@ -66,7 +69,7 @@ export async function GET(
 
   const { data: files } = await db
     .from("scan_files")
-    .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators")
+    .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
     .eq("scan_id", params.id)
     .order("ai_percentage", { ascending: false });
 
@@ -108,6 +111,7 @@ export async function GET(
     total_ai_percentage: scan.total_ai_percentage,
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
+    ai_tooling:          scan.ai_tooling ?? [],
     files: await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
       // the snapshot written at scan time — if detection patterns improve
@@ -127,11 +131,13 @@ export async function GET(
         ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
         : null;
       let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] | null = null;
+      let freshAttribution: AttributionResult | null = null;
       if (content && i < MAX_LIVE_REANALYSIS_FILES) {
         try {
           const result = await reanalyze(f.file_path, content, f.content_hash);
           freshIndicators = result.indicators;
-        } catch { /* re-analysis threw — freshIndicators stays null, falls back below */ }
+          freshAttribution = result.attribution;
+        } catch { /* re-analysis threw — freshIndicators/freshAttribution stay null, falls back below */ }
       }
       return {
         file_path:       f.file_path,
@@ -145,6 +151,10 @@ export async function GET(
         // content was unavailable or re-analysis threw (freshIndicators is
         // null in both cases, distinct from a legitimate empty array).
         indicators:      freshIndicators ?? storedIndicators ?? [],
+        // Same freshness preference as indicators above -- attributeCode()'s
+        // patterns can improve over time (see the requiresCoSignal hardening),
+        // and this comes free from the same reanalyze() call.
+        attribution:     freshAttribution ?? (f.attribution as AttributionResult | null) ?? undefined,
         attested:        attestedSet.has(f.file_path),
         content:         content ?? undefined,
       };

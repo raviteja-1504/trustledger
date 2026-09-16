@@ -198,6 +198,7 @@ export async function POST(req: NextRequest) {
       file_path: string; language: string; ai_percentage: number;
       risk_score: string; risk_indicators: unknown; content_hash: string;
       line_count: number; content: string | null; indicators: unknown;
+      attribution: unknown;
     };
     type PrevScan = { id: string; files: PrevScanFile[] };
     let prevScan: PrevScan | null = null;
@@ -216,7 +217,7 @@ export async function POST(req: NextRequest) {
       if (prevScanRow) {
         const { data: prevFiles } = await db
           .from("scan_files")
-          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators")
+          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
           .eq("scan_id", prevScanRow.id);
         prevScan = { id: prevScanRow.id, files: (prevFiles ?? []) as PrevScanFile[] };
       }
@@ -344,6 +345,7 @@ export async function POST(req: NextRequest) {
         check_run_id:        checkRunId,
         installation_id:     installationId,
         evidence_breakdown:  result.evidence_breakdown,
+        ai_tooling:          result.ai_tooling,
       }).select("id").single();
 
       if (scan) {
@@ -366,6 +368,7 @@ export async function POST(req: NextRequest) {
                   .filter(i => i.line)
                   .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }))
               : [],
+            attribution: f.attribution,
           })));
         }
 
@@ -415,6 +418,7 @@ export async function POST(req: NextRequest) {
             risk_indicators: f.risk_indicators, content_hash: f.content_hash, line_count: f.line_count,
             content: null,
             indicators: f.indicators ?? [],
+            attribution: f.attribution ?? null,
           })));
 
           // For inherited (unchanged) files, copy attestations from any prior

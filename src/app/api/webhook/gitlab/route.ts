@@ -200,6 +200,7 @@ export async function POST(req: NextRequest) {
         file_count:          result.files.length,
         triggered_by:        "webhook",
         duration_ms:         result.duration_ms,
+        ai_tooling:          result.ai_tooling,
       }).select("id").single() as { data: { id: string } | null };
 
       if (scan) {
@@ -225,6 +226,7 @@ export async function POST(req: NextRequest) {
                 .filter(i => i.line)
                 .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail }))
             : [],
+          attribution: f.attribution,
         })));
 
         const highRisk = result.files.filter(f => f.risk_score === "CRITICAL" || f.risk_score === "HIGH");

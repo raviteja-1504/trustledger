@@ -1,3 +1,5 @@
+import type { AttributionResult } from "@/lib/aiAttribution";
+
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "UNKNOWN";
 
 // ── Scan ─────────────────────────────────────────────────────────────────────
@@ -10,6 +12,15 @@ export interface FileIndicator {
   detail?:  string;
 }
 
+// An explicit AI-tooling artifact (a repo config file or a commit/content
+// marker) detected by detectAIToolingArtifacts() -- a literal fact ("this
+// file exists" / "this string is present"), not a stylistic inference.
+export interface AIToolingArtifact {
+  tool:  string;
+  file:  string;
+  label: string;
+}
+
 export interface FileResult {
   file_path: string;
   language: string;
@@ -19,6 +30,7 @@ export interface FileResult {
   indicators?: FileIndicator[];
   attested: boolean;
   content?: string;
+  attribution?: AttributionResult;
 }
 
 export interface EvidenceBreakdown {
@@ -52,6 +64,7 @@ export interface ScanResult {
   triggered_by?: string;
   timestamp: string;
   evidence_breakdown?: EvidenceBreakdown;
+  ai_tooling?: AIToolingArtifact[];
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

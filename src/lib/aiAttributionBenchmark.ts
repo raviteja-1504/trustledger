@@ -13,6 +13,8 @@
 
 import { runScan } from "./scanner";
 import { BENCHMARK_SAMPLES, type BenchmarkSample, type BenchmarkLabel } from "./aiAttributionBenchmark.fixtures";
+import { attributeCode, type AIModel } from "./aiAttribution";
+import { TOOL_BENCHMARK_SAMPLES, type ToolBenchmarkSample } from "./aiAttributionBenchmark.fixtures.tools";
 
 export interface SampleResult {
   id:          string;
@@ -113,6 +115,59 @@ export function formatBenchmarkReport(report: BenchmarkReport): string {
   for (const r of report.results) {
     const mark = r.correct ? "✓" : "✗";
     lines.push(`    ${mark} ${r.id.padEnd(20)} label=${r.label.padEnd(5)} ai_pct=${(r.ai_percentage * 100).toFixed(1).padStart(5)}% predicted=${r.predicted}`);
+  }
+  return lines.join("\n");
+}
+
+// ── Per-tool attribution benchmark ──────────────────────────────────────────
+// Checks whether attributeCode() predicts the correct TOOL (not just
+// ai-vs-human) against a small labeled per-tool fixture set -- see
+// aiAttributionBenchmark.fixtures.tools.ts for corpus notes/limitations.
+// This is the first per-tool quality gate this engine has ever had.
+
+export interface ToolAttributionResult {
+  id:         string;
+  expected:   AIModel;
+  predicted:  AIModel;
+  confidence: number;
+  correct:    boolean;
+}
+
+export interface ToolAttributionReport {
+  results:  ToolAttributionResult[];
+  accuracy: number;
+  perModel: Record<string, { correct: number; total: number }>;
+}
+
+export function runToolAttributionBenchmark(
+  samples: ToolBenchmarkSample[] = TOOL_BENCHMARK_SAMPLES,
+): ToolAttributionReport {
+  const results: ToolAttributionResult[] = samples.map(s => {
+    const r = attributeCode(s.content, s.language);
+    return { id: s.id, expected: s.expectedModel, predicted: r.model, confidence: r.confidence, correct: r.model === s.expectedModel };
+  });
+
+  const perModel: Record<string, { correct: number; total: number }> = {};
+  for (const r of results) {
+    perModel[r.expected] ??= { correct: 0, total: 0 };
+    perModel[r.expected].total += 1;
+    if (r.correct) perModel[r.expected].correct += 1;
+  }
+
+  const accuracy = results.length > 0 ? results.filter(r => r.correct).length / results.length : 0;
+  return { results, accuracy, perModel };
+}
+
+/** Formats a ToolAttributionReport as a human-readable string (for logs/CLI). */
+export function formatToolAttributionReport(report: ToolAttributionReport): string {
+  const lines: string[] = [
+    `AI Tool Attribution Benchmark (n=${report.results.length})`,
+    `  Accuracy: ${(report.accuracy * 100).toFixed(1)}%`,
+    `  Per-sample:`,
+  ];
+  for (const r of report.results) {
+    const mark = r.correct ? "✓" : "✗";
+    lines.push(`    ${mark} ${r.id.padEnd(28)} expected=${r.expected.padEnd(15)} predicted=${r.predicted.padEnd(15)} confidence=${(r.confidence * 100).toFixed(0)}%`);
   }
   return lines.join("\n");
 }

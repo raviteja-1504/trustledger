@@ -274,6 +274,7 @@ export async function POST(req: NextRequest) {
       // "New Scan" panel, direct API submissions) persisted no evidence
       // breakdown at all.
       evidence_breakdown:  result.evidence_breakdown,
+      ai_tooling:          result.ai_tooling,
     })
     .select("id")
     .single();
@@ -301,6 +302,7 @@ export async function POST(req: NextRequest) {
         content_hash:    f.content_hash,
         line_count:      f.line_count,
         content:         contentByPath.get(f.file_path) ?? null,
+        attribution:     f.attribution,
       })),
     );
     if (filesErr) logger.warn("scan_files insert failed", { scan_id: scan.id, error: filesErr.message });

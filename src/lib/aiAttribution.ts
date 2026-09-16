@@ -39,6 +39,12 @@ interface Pattern {
   re:     RegExp;
   weight: number;    // contribution when matched
   note:   string;    // shown in signals list
+  // When true, this pattern alone is not enough -- it only counts once
+  // another (non-gated) positive pattern for the SAME model has also
+  // matched. Used for signals that are real evidence when combined with
+  // other usage but too weak alone (e.g. a bare `import boto3` with no
+  // other AWS-specific code nearby shouldn't outweigh every other model).
+  requiresCoSignal?: boolean;
 }
 
 interface ModelDef {
@@ -124,10 +130,13 @@ const MODELS: ModelDef[] = [
       { re: /@dataclass(?:\s*\(.*\))?\s*\nclass\s+\w+/, weight: 0.20, note: "@dataclass usage (Gemini preference for data classes)" },
       // Pydantic BaseModel usage
       { re: /class\s+\w+\s*\(\s*BaseModel\s*\)/, weight: 0.15, note: "Pydantic BaseModel (Gemini API patterns)" },
-      // Google Cloud SDK imports
-      { re: /from\s+google\.\w+\s+import\b|import\s+google\.\w+/, weight: 0.15, note: "Google Cloud SDK import (Gemini training data bias)" },
-      // Protocol Buffers or gRPC
-      { re: /import\s+grpc\b|pb2\b|\.proto\b/, weight: 0.15, note: "gRPC/Protobuf usage (Google ecosystem)" },
+      // Google Cloud SDK imports -- a bare import alone conflates "uses
+      // GCP" with "written by Gemini" (ordinary human GCP code would
+      // trigger this), so it only counts once another Gemini-style
+      // signal (docstring/typed-signature/dataclass/Pydantic) also fires.
+      { re: /from\s+google\.\w+\s+import\b|import\s+google\.\w+/, weight: 0.10, note: "Google Cloud SDK import (Gemini training data bias)", requiresCoSignal: true },
+      // Protocol Buffers or gRPC -- same reasoning as above.
+      { re: /import\s+grpc\b|pb2\b|\.proto\b/, weight: 0.10, note: "gRPC/Protobuf usage (Google ecosystem)", requiresCoSignal: true },
     ],
     negative: [
       { re: /import\s+boto3\b|from\s+boto3/, weight: 0.40, note: "boto3 import (AWS/CodeWhisperer, not Gemini)" },
@@ -166,8 +175,12 @@ const MODELS: ModelDef[] = [
     prior: 0.08,
     langBoost: { python:1.6, java:1.4, javascript:1.0 },
     positive: [
-      // boto3 is the clearest single signal
-      { re: /import\s+boto3\b|from\s+boto3\s+import/, weight: 0.40, note: "boto3 import (AWS SDK — strong CodeWhisperer signal)" },
+      // boto3 alone conflates "uses AWS" with "written by CodeWhisperer" --
+      // ordinary human AWS code would trigger this too, so a bare import
+      // only counts once another CodeWhisperer-style signal (an AWS
+      // exception class, an ARN, a Lambda handler, a boto3 service call)
+      // also fires.
+      { re: /import\s+boto3\b|from\s+boto3\s+import/, weight: 0.20, note: "boto3 import (AWS SDK — CodeWhisperer signal)", requiresCoSignal: true },
       // AWS-specific exception classes
       { re: /except\s+(?:ClientError|BotoCoreError|NoCredentialsError|EndpointResolutionError)\b/, weight: 0.30, note: "AWS botocore exception (CodeWhisperer error handling)" },
       // ARN patterns
@@ -176,8 +189,15 @@ const MODELS: ModelDef[] = [
       { re: /def\s+(?:handler|lambda_handler)\s*\(\s*event\s*,\s*context\s*\)/, weight: 0.25, note: "Lambda handler signature (CodeWhisperer AWS pattern)" },
       // S3/DynamoDB/SQS method chains
       { re: /boto3\.(?:client|resource)\s*\(\s*["'](?:s3|dynamodb|sqs|sns|lambda|iam|ec2)["']/, weight: 0.20, note: "boto3 service client (CodeWhisperer AWS service pattern)" },
-      // AWS SDK for JavaScript/TypeScript (v3)
-      { re: /@aws-sdk\/client-\w+/, weight: 0.20, note: "@aws-sdk import (CodeWhisperer JavaScript/TypeScript)" },
+      // AWS SDK for JavaScript/TypeScript (v3) -- same bare-import reasoning as boto3 above.
+      { re: /@aws-sdk\/client-\w+/, weight: 0.12, note: "@aws-sdk import (CodeWhisperer JavaScript/TypeScript)", requiresCoSignal: true },
+      // Real AWS SDK v3 usage: `.send(new XCommand(...))` is a highly
+      // distinctive idiom unique to the AWS SDK v3 command pattern (unlike
+      // a bare "Client"/"Command" class name, which other libraries could
+      // plausibly use too) -- the JS/TS-side equivalent of boto3.client(...)
+      // above, giving a JS/TS file an ungated way to corroborate the
+      // @aws-sdk import beyond the Python-only patterns elsewhere here.
+      { re: /\.send\s*\(\s*new\s+\w+Command\s*\(/, weight: 0.20, note: "AWS SDK v3 command usage (CodeWhisperer JavaScript/TypeScript)" },
     ],
     negative: [
       { re: /from\s+google\.\w+\s+import\b/, weight: 0.30, note: "Google Cloud import (Gemini, not CodeWhisperer)" },
@@ -271,11 +291,18 @@ export function attributeCode(content: string, language: string): AttributionRes
 
     // Positive evidence accumulation
     for (const p of def.positive) {
-      if (p.re.test(content)) {
-        raw += p.weight;
-        if (raw - def.prior > 0.1 && !evidenceLog.includes(p.note)) {
-          evidenceLog.push(`[${def.model}] ${p.note}`);
-        }
+      if (!p.re.test(content)) continue;
+      if (p.requiresCoSignal) {
+        // A bare import alone (e.g. `import boto3`) is too weak to count on
+        // its own -- only counts once another, non-gated signal for this
+        // same model has also fired, proving genuine usage rather than an
+        // incidental import in otherwise-ordinary human code.
+        const corroborated = def.positive.some(q => q !== p && !q.requiresCoSignal && q.re.test(content));
+        if (!corroborated) continue;
+      }
+      raw += p.weight;
+      if (raw - def.prior > 0.1 && !evidenceLog.includes(p.note)) {
+        evidenceLog.push(`[${def.model}] ${p.note}`);
       }
     }
 

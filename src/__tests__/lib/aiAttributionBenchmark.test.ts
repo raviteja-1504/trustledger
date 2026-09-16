@@ -1,4 +1,4 @@
-import { runAIAttributionBenchmark, formatBenchmarkReport } from "@/lib/aiAttributionBenchmark";
+import { runAIAttributionBenchmark, formatBenchmarkReport, runToolAttributionBenchmark, formatToolAttributionReport } from "@/lib/aiAttributionBenchmark";
 
 // This is a small (n=10), TS/JS-only internal benchmark — see
 // aiAttributionBenchmark.fixtures.ts for sample provenance. It is a
@@ -18,5 +18,23 @@ describe("AI attribution benchmark", () => {
     }
     expect(report.rocAuc).toBeGreaterThanOrEqual(0);
     expect(report.rocAuc).toBeLessThanOrEqual(1);
+  });
+});
+
+// First-ever per-tool quality gate for attributeCode()'s predicted `model`
+// field -- previously zero validation existed for whether a specific tool
+// (Copilot vs Claude vs Gemini vs ...) was identified correctly, only
+// whether the binary ai/human call was right. Deliberately modest bar
+// given a ~10-sample corpus and that 7-way tool attribution is intrinsically
+// harder than binary classification -- a real regression check, not a
+// tight overfit target.
+describe("AI tool attribution benchmark (per-model)", () => {
+  it("predicts the correct tool at or above a baseline accuracy bar", () => {
+    const report = runToolAttributionBenchmark();
+    // eslint-disable-next-line no-console
+    console.log(formatToolAttributionReport(report));
+
+    expect(report.results.length).toBeGreaterThan(0);
+    expect(report.accuracy).toBeGreaterThanOrEqual(0.6);
   });
 });

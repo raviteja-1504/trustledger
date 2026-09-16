@@ -633,7 +633,12 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                 {file.content && (
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">Likely Source</p>
-                    <AIAttributionBadge content={file.content} language={file.language} showBreakdown={false} />
+                    <AIAttributionBadge
+                      content={file.content}
+                      language={file.language}
+                      attribution={file.attribution}
+                      showBreakdown
+                    />
                   </div>
                 )}
                 <div>
@@ -1551,6 +1556,57 @@ function PRDetailContent() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── AI Tool Provenance ──────────────────────────────────────────────
+            Distinct from the "AI Likelihood" panel above (a blended multi-
+            signal score) and the per-file "Likely Source" badges in the files
+            table below (a stylistic guess). These are explicit, literal
+            facts: a specific config file is present, or a specific string
+            appears verbatim in a file or commit -- not an inference. */}
+        {scan?.ai_tooling && scan.ai_tooling.length > 0 && (
+          <div className="animate-fade-up section-card p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="font-bold text-gray-900 text-sm">AI Tool Provenance</p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Explicit AI-tooling artifacts found in this PR — agent config files and generated-by/co-authorship markers
+                </p>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1 shrink-0">
+                Factual detection
+              </span>
+            </div>
+
+            <div className="space-y-2 mb-4">
+              {scan.ai_tooling.map((a, i) => (
+                <div key={`${a.tool}-${a.file}-${i}`} className="flex items-start gap-3 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                  <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-indigo-700 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 mt-0.5">
+                    {a.tool}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-gray-800">{a.label}</p>
+                    <code className="text-[11px] text-gray-500 font-mono truncate block">{a.file}</code>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-indigo-700 mb-1.5">
+                How This Differs From Per-File &quot;Likely Source&quot; Badges
+              </p>
+              <p className="text-xs text-gray-700 leading-relaxed">
+                The detections above are explicit facts — a specific AI-agent config file exists in this repo, or a
+                specific co-authorship/generated-by string appears verbatim in a file or commit trailer. They are not
+                a stylistic inference. The per-file &quot;Likely Source&quot; badges shown in the files table below are a
+                separate, much softer signal: a statistical estimate from comment style, docstring formatting, and
+                naming conventions, which can misattribute short, heavily-edited, or unusually-styled human code.
+                Treat tool-provenance artifacts as strong evidence; treat per-file attribution badges as a hint worth
+                a second look, not a verdict.
+              </p>
+            </div>
           </div>
         )}
 
