@@ -46,6 +46,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "backdoor-detection":       { title: "Suspicious Backdoor Pattern",    description: "Logic bomb or covert data exfiltration pattern.", cwe: "CWE-506" },
   "watermark-detection":      { title: "AI Watermark Detected",         description: "Invisible Unicode watermark characters embedded in source." },
   "ai-model-attribution":     { title: "AI Model Attribution",          description: "Code attributed to a specific AI coding assistant." },
+  "hallucinated-method-call": { title: "Hallucinated Method Call",      description: "Call to a method/property that does not exist on this built-in type — likely an AI-invented API that will throw TypeError at runtime." },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

@@ -13,6 +13,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "jwt-none-alg":       "JWT none-algorithm",
   "command-injection":  "Command injection",
   "ai-comment-pattern": "AI comment pattern",
+  "hallucinated-method-call": "Hallucinated method call",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

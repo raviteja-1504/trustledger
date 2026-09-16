@@ -30,6 +30,7 @@ const SIGNAL_DESC: Record<string, string> = {
   "path-traversal":        "File path constructed from user input without sanitization — directory traversal risk",
   "xxe-injection":         "XML parser configured with external entity expansion enabled — XXE attack vector",
   "insecure-deserialize":  "Untrusted data passed to pickle/unserialize — arbitrary object injection risk",
+  "hallucinated-method-call": "Call to a non-existent method on a built-in array/object/string — AI-generated code invented an API that will throw at runtime",
 
   // AI provenance signals
   "ai-comment-pattern":    "Comment verbosity and phrasing match GitHub Copilot / ChatGPT output signatures — over-explained, instructional tone",
@@ -43,6 +44,7 @@ const SEV_SIGNAL: Record<string, string> = {
   "sql-injection":"#7c3aed","hardcoded-secret":"#ef4444","eval-exec":"#ef4444",
   "jwt-none-alg":"#f97316","ai-comment-pattern":"#94a3b8",
   "structural-uniformity":"#f59e0b","comment-density":"#94a3b8","identifier-entropy":"#f59e0b",
+  "hallucinated-method-call":"#f59e0b",
 };
 
 interface InlineCodeReviewProps {

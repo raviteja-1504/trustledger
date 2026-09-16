@@ -40,6 +40,16 @@ import { classifyCode }          from "./mlClassifier";
 import type { MLScoreResult }    from "./mlClassifier";
 import { detectorRegistry }      from "./detectorRegistry";
 import { cweFor as cweEntryFor } from "./cweMap";
+import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
+
+// Registered once at module load (detectorRegistry.register() throws on a
+// duplicate id, so this must not live inside analyzeFile). First real
+// consumer of detectorRegistry.ts's plugin point -- see hallucinatedMethodCall.ts.
+detectorRegistry.register({
+  id: "hallucinated-method-call",
+  category: "security",
+  scan: scanHallucinatedMethodCalls,
+});
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
@@ -3755,8 +3765,11 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...vulnIndicators,
     // Pluggable detectors registered via detectorRegistry.register() -- see
     // detectorRegistry.ts. Empty by default; this is the on-ramp for new
-    // detectors that don't require editing this function.
-    ...detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"),
+    // detectors that don't require editing this function. Wrapped in
+    // attachEvidence so registry detectors get the same cwe/confidence
+    // defaults and third-party/vendored-file exclusion as every other
+    // security detector below.
+    ...attachEvidence(detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"), looksMinified),
   ];
 
   // Dedup by id+line, preserving which detector(s) independently flagged the

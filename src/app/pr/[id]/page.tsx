@@ -51,6 +51,7 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "behavioral-risk":         { label: "Behavioral Risk",           desc: "Suspicious behavioral pattern (logic bomb, exfiltration, hidden channel)",                    sev: "high",     security: true },
   "supply-chain-risk":       { label: "Supply Chain Risk",         desc: "Risky or typosquatted package imports detected",                                              sev: "medium",   security: true },
   "cross-file-taint-exposure":{ label: "Cross-file Taint",        desc: "Tainted data from an imported module may reach a sensitive sink in this file",                sev: "high",     security: true },
+  "hallucinated-method-call": { label: "Hallucinated Method Call", desc: "Call to a method/property that does not exist on this built-in type — will throw TypeError at runtime", sev: "medium",   security: true },
   // ── AI detection signals (file-level, no line numbers) ───────────────────────
   "comment-phrasing":        { label: "AI Comment Phrasing",       desc: "Formulaic, instructional comment style matches AI generation signatures",                    sev: "low"  },
   "language-specific":       { label: "Language-specific Pattern", desc: "Stereotyped per-language patterns frequently produced by AI code generators",                sev: "low"  },
