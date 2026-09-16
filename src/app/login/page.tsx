@@ -39,7 +39,7 @@ const DEMO_ROLES = [
     color:   "#d97706",
     bg:      "rgba(217,119,6,0.12)",
     border:  "rgba(217,119,6,0.3)",
-    desc:    "Attest files, view violations, export compliance reports",
+    desc:    "Attest files, view violations, export evidence assessments",
     badges:  ["Attest", "Violations", "Compliance"],
   },
   {
@@ -63,7 +63,7 @@ const DEMO_ROLES = [
     color:   "#16a34a",
     bg:      "rgba(22,163,74,0.12)",
     border:  "rgba(22,163,74,0.3)",
-    desc:    "Read-only access to compliance reports and audit trail",
+    desc:    "Read-only access to evidence assessments and audit trail",
     badges:  ["Audit Trail", "Compliance", "Export"],
   },
 ];

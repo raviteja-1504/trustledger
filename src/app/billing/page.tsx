@@ -19,7 +19,7 @@ interface UsageData {
 const PLAN_FEATURES: Record<string, string[]> = {
   trial:      ["100 scans / month","3 repositories","3 team members","Community support"],
   starter:    ["1,000 scans / month","10 repositories","5 team members","Email support","PDF reports"],
-  growth:     ["10,000 scans / month","50 repositories","20 team members","Priority support","Compliance reports","JIRA / Linear integration"],
+  growth:     ["10,000 scans / month","50 repositories","20 team members","Priority support","Evidence assessments","JIRA / Linear integration"],
   enterprise: ["Unlimited scans","Unlimited repos","Unlimited members","Dedicated support","Custom SLA","SSO / SAML","Self-hosted option","Custom contracts"],
 };
 

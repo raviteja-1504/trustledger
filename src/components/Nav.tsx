@@ -354,7 +354,7 @@ const PAGE_TITLES: Record<string, { title: string; sub: string; icon: ReactNode 
   "/dependencies":         { title: "Dependency Scanner",      sub: "AI-introduced package risk assessment",        icon: <BoxIcon />        },
   "/phantom-deps":         { title: "Phantom Dependencies",    sub: "Hallucinated package detection",               icon: <BoxIcon />        },
   "/scans":                { title: "Scan History",            sub: "All scan runs across repositories",            icon: <ListIcon />       },
-  "/reports":              { title: "Audit Reports",           sub: "Compliance report generation",                 icon: <DocIcon />        },
+  "/reports":              { title: "Audit Reports",           sub: "AI code review evidence assessments",          icon: <DocIcon />        },
   "/audit":                { title: "Audit Trail",             sub: "Tamper-evident security event log",            icon: <ListIcon />       },
   "/aibom":                { title: "AI Bill of Materials",    sub: "AI component inventory and export",            icon: <DocIcon />        },
   "/trust-score":          { title: "TrustScore™",            sub: "Governance credit score 0–1000",               icon: <ShieldCheckIcon />},

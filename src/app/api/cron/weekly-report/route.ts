@@ -112,7 +112,7 @@ export async function GET(req: NextRequest) {
         View Full Report →
       </a>
       <p style="color:#64748b;font-size:13px;margin-top:16px">
-        ${pdfBuffer ? "A PDF compliance report is attached to this email." : "Log in to TrustLedger to download PDF reports."}
+        ${pdfBuffer ? "A signed PDF evidence assessment is attached to this email." : "Log in to TrustLedger to download PDF evidence assessments."}
       </p>
     </div>
     <div style="padding:14px 32px;background:#f8fafc;border-top:1px solid #e2e8f0">

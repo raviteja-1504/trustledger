@@ -1051,7 +1051,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
 
             {/* Report title */}
             <h2 className="text-2xl font-black text-white leading-tight mb-1">
-              {def.shortName} Compliance Report
+              {def.shortName} Evidence Assessment
             </h2>
             <p className="text-sm font-medium text-white/50">{def.fullName}</p>
             <p className="text-[11px] text-white/30 mt-0.5">{def.standard}</p>
@@ -1511,7 +1511,7 @@ function ReportsContent() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-xl font-black text-gray-900">Audit Reports</h1>
-            <p className="text-xs text-gray-400 mt-0.5">Generate signed compliance evidence reports for SOC 2, EU AI Act, and PCI-DSS</p>
+            <p className="text-xs text-gray-400 mt-0.5">Generate signed AI code review evidence assessments for {visibleFrameworks.join(", ")}</p>
           </div>
           <div className="flex items-center gap-2">
             {visibleFrameworks.map(f => (

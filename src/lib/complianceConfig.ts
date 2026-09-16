@@ -67,7 +67,7 @@ export function makeDefaultFrameworks(
           evidence_items:[{ type:"scan-log", description:"OAuth token log per attestation call", auto:true },{ type:"config", description:"GitHub App OAuth scope configuration", auto:false }],
           cross_map:[{ framework:"pcidss", control_id:"6.4.2" }] },
         { id:"CC7.2", label:"System Monitoring", description:"Continuous AI content scanning on every pull request — zero manual triggers required.", weight:20, owner:"DevOps Lead", last_tested:"2026-05-20", next_test:"2026-08-20", test_frequency:"quarterly",
-          evidence_items:[{ type:"scan-log", description:"Automated scan logs per PR", auto:true },{ type:"report", description:"SOC 2 compliance report PDF", auto:false }],
+          evidence_items:[{ type:"scan-log", description:"Automated scan logs per PR", auto:true },{ type:"report", description:"SOC 2 Evidence Assessment PDF", auto:false }],
           cross_map:[{ framework:"euai", control_id:"Art.17" },{ framework:"pcidss", control_id:"6.2.4" }] },
         { id:"CC8.1", label:"Change Management", description:"All changes formally attested before deployment — policy gate enforces this automatically.", weight:25, owner:"Security Lead", last_tested:"2026-05-15", next_test:"2026-08-15", test_frequency:"quarterly",
           evidence_items:[{ type:"attestation", description:"Attestation coverage across audit period", auto:true },{ type:"audit-trail", description:"Tamper-evident change management log", auto:true },{ type:"screenshot", description:"Blocked deploy evidence", auto:false }],
@@ -109,7 +109,7 @@ export function makeDefaultFrameworks(
       certBody:"QSA — SecurityMetrics", nextAudit:auditDate("pcidss","2026-08-22"), certExpiry:auditDate("pcidss","2026-08-22"),
       controls: [
         { id:"6.2.4", label:"Prevention of Software Attacks", description:"AI code screened for injection, eval/exec, JWT bypass, and hardcoded credential patterns.", weight:30, owner:"Security Lead", last_tested:"2026-05-20", next_test:"2026-08-20", test_frequency:"quarterly",
-          evidence_items:[{ type:"scan-log", description:"Vulnerability signal detection log per PR", auto:true },{ type:"report", description:"PCI-DSS compliance report — Req 6.4", auto:false }],
+          evidence_items:[{ type:"scan-log", description:"Vulnerability signal detection log per PR", auto:true },{ type:"report", description:"PCI-DSS Evidence Assessment — Req 6.4", auto:false }],
           cross_map:[{ framework:"soc2", control_id:"CC7.2" },{ framework:"euai", control_id:"Art.9" }] },
         { id:"6.3.2", label:"Software Inventory", description:"AI-authored code logged per file and pull request — full AIBOM maintained.", weight:25, owner:"DevOps Lead", last_tested:"2026-05-01", next_test:"2026-08-01", test_frequency:"quarterly",
           evidence_items:[{ type:"audit-trail", description:"AI Bill of Materials (AIBOM) — all files", auto:true }],

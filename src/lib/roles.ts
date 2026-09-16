@@ -30,7 +30,7 @@ export const ROLE_COLORS: Record<UserRole, { bg: string; text: string; ring: str
 
 export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   developer:         "Read-only: can view scans and reports. Cannot attest or change settings.",
-  security_reviewer: "Can view all repos, attest high-risk files, and export compliance reports.",
+  security_reviewer: "Can view all repos, attest high-risk files, and export evidence assessments.",
   admin:             "Full access — settings, team management, attestation, and all operations.",
 };
 

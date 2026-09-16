@@ -231,7 +231,7 @@ export function inviteEmail(opts: {
 }): EmailTemplate {
   const body = `
     <p style="font-size:14px;color:#334155;line-height:1.6"><strong>${opts.inviterName}</strong> has invited you to join the <strong>${opts.orgName}</strong> organisation on TrustLedger as a <strong>${opts.role.replace(/_/g," ")}</strong>.</p>
-    <p style="font-size:13px;color:#64748b;line-height:1.6">TrustLedger is an AI code governance platform that scans pull requests for AI-generated code, enforces reviewer attestation, and generates compliance reports.</p>
+    <p style="font-size:13px;color:#64748b;line-height:1.6">TrustLedger is an AI code governance platform that scans pull requests for AI-generated code, enforces reviewer attestation, and generates signed evidence assessments.</p>
     <a href="${opts.acceptUrl}" class="cta">Accept Invitation →</a>
     <p style="font-size:11px;text-align:center;color:#94a3b8">This invitation expires in 7 days. If you didn't expect this, you can ignore this email.</p>
   `;

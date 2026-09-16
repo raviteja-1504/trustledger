@@ -77,7 +77,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
         </h2>
         <p className="text-gray-500 mt-2 max-w-sm mx-auto text-sm leading-relaxed">
           TrustLedger governs AI-generated code across your engineering org — scanning every PR,
-          enforcing reviewer attestation, and generating signed compliance reports.
+          enforcing reviewer attestation, and generating signed evidence assessments.
         </p>
       </div>
       <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">

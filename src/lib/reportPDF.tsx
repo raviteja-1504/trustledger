@@ -1,6 +1,8 @@
 /**
  * PDF Report Document — React PDF
- * Generates professional compliance reports for SOC 2, EU AI Act, PCI-DSS.
+ * Generates signed AI code review evidence assessments scoped to a single
+ * framework's narrow control set (SOC 2, EU AI Act, PCI-DSS, ISO 27001) --
+ * not a full compliance report. See each framework's scopeNote.
  */
 
 import React from "react";
@@ -144,7 +146,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
 
         <View style={S.logo}>
           <Text style={S.logoText}>TrustLedger</Text>
-          <Text style={S.coverTitle}>{meta.full} Compliance Report</Text>
+          <Text style={S.coverTitle}>{meta.full} Evidence Assessment</Text>
           <Text style={S.coverOrg}>{data.org.name}  ·  {data.org.github_org ?? data.org.slug}</Text>
         </View>
 

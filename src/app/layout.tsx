@@ -15,7 +15,7 @@ export const metadata: Metadata = {
     default:  "TrustLedger — AI Code Governance",
     template: "%s | TrustLedger",
   },
-  description: "Scan every pull request for AI-generated code, enforce reviewer attestation, and generate signed SOC 2, EU AI Act, and PCI-DSS compliance reports.",
+  description: "Scan every pull request for AI-generated code, enforce reviewer attestation, and generate signed SOC 2, EU AI Act, PCI-DSS and ISO 27001 evidence assessments.",
   keywords:    ["AI code governance","AI attestation","SOC2","PCI-DSS","EU AI Act","code provenance","GitHub security","AI code review"],
   authors:     [{ name:"TrustLedger", url:"https://trustledger.dev" }],
   creator:     "TrustLedger",
@@ -36,7 +36,7 @@ export const metadata: Metadata = {
     type:        "website",
     siteName:    "TrustLedger",
     title:       "TrustLedger — AI Code Governance Platform",
-    description: "Know exactly how much AI wrote your code. Scan PRs, enforce policy, generate compliance reports.",
+    description: "Know exactly how much AI wrote your code. Scan PRs, enforce policy, generate evidence assessments.",
     url:         APP_URL,
     locale:      "en_US",
     images: [{
