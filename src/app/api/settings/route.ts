@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
 
   const { data: org } = await db
     .from("organizations")
-    .select("id, slug, name, github_org, plan, ai_threshold, attest_sla_hours, block_on_critical, block_on_high, require_two_reviewers, created_at")
+    .select("id, slug, name, github_org, plan, ai_threshold, attest_sla_hours, block_on_critical, block_on_high, require_two_reviewers, pci_applicable, created_at")
     .eq("id", org_id)
     .single() as { data: Record<string, unknown> | null };
 
@@ -65,10 +65,11 @@ export async function PATCH(req: NextRequest) {
     block_on_critical?:      boolean;
     block_on_high?:          boolean;
     require_two_reviewers?:  boolean;
+    pci_applicable?:         boolean;
   };
 
   const allowed = ["name","github_org","ai_threshold","attest_sla_hours",
-                   "block_on_critical","block_on_high","require_two_reviewers"];
+                   "block_on_critical","block_on_high","require_two_reviewers","pci_applicable"];
   const updates = Object.fromEntries(
     Object.entries(body).filter(([k]) => allowed.includes(k))
   );

@@ -33,6 +33,7 @@ interface FwDef {
   standard:    string;
   tagline:     string;
   description: string;
+  scopeNote:   string;          // explicit "what this does / doesn't cover" disclaimer
   color:       string;          // primary hex
   colorDark:   string;
   gradientCss: string;
@@ -50,6 +51,7 @@ const FW: Record<Framework, FwDef> = {
     standard:    "AICPA Trust Services Criteria",
     tagline:     "Reviewer attestations & change management log",
     description: "AI code provenance evidence for Trust Services Criteria CC6.1, CC7.2 and CC8.1.",
+    scopeNote:   "This report provides evidence for a narrow slice of SOC 2 Type II — the Trust Services Criteria listed in Compliance Mapping below, as they relate to AI-generated code review. It does not cover the full Trust Services Criteria set (e.g. availability infrastructure, confidentiality, privacy) and is not a substitute for a SOC 2 Type II audit performed by a licensed CPA firm.",
     color:       "#6366f1",
     colorDark:   "#4338ca",
     gradientCss: "linear-gradient(135deg,#6366f1,#7c3aed)",
@@ -85,6 +87,7 @@ const FW: Record<Framework, FwDef> = {
     standard:    "Regulation (EU) 2024/1689",
     tagline:     "AI system provenance & human oversight evidence",
     description: "Technical documentation evidence for high-risk AI systems per Article 9 risk management obligations.",
+    scopeNote:   "This report provides evidence for AI system provenance and human oversight as they relate to AI-generated source code, mapped to the Articles listed in Compliance Mapping below. It does not perform risk-tier classification, conformity assessment, or cover the Act's other obligations, and is not a substitute for a full EU AI Act compliance assessment.",
     color:       "#3b82f6",
     colorDark:   "#1d4ed8",
     gradientCss: "linear-gradient(135deg,#3b82f6,#0891b2)",
@@ -120,6 +123,7 @@ const FW: Record<Framework, FwDef> = {
     standard:    "PCI Security Standards Council",
     tagline:     "Dual-reviewer attestations & change control audit trail",
     description: "Code review evidence for payment system changes satisfying PCI-DSS v4.0 Requirement 6.4.2.",
+    scopeNote:   "This report provides evidence for PCI-DSS v4.0 Requirement 6.2–6.4 (secure software development) only, as it relates to AI-generated code changes. It does not cover network segmentation, cardholder data encryption, physical security, ASV scanning, or any of PCI-DSS's other requirements, and is not a substitute for a Report on Compliance (ROC) or SAQ performed by a Qualified Security Assessor. Only relevant to organisations with a cardholder data environment (CDE) — see Compliance Scope in Settings.",
     color:       "#10b981",
     colorDark:   "#047857",
     gradientCss: "linear-gradient(135deg,#10b981,#0d9488)",
@@ -155,6 +159,7 @@ const FW: Record<Framework, FwDef> = {
     standard:    "ISO/IEC 27001:2022 Annex A",
     tagline:     "Secure development lifecycle & audit trail evidence",
     description: "Information security management evidence for Annex A controls A.8.25–A.8.30 and A.5.33.",
+    scopeNote:   "This report provides evidence for the Annex A controls listed in Compliance Mapping below, as they relate to AI-generated code review. It does not cover the full ISMS scope, risk assessment, or the remainder of Annex A's controls, and is not a substitute for a certification audit performed by an accredited certification body.",
     color:       "#8b5cf6",
     colorDark:   "#6d28d9",
     gradientCss: "linear-gradient(135deg,#8b5cf6,#6366f1)",
@@ -1085,6 +1090,17 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
       {/* ── Body ── */}
       <div className="p-8 space-y-10">
 
+        {/* Scope & Limitations — what this report does and does not cover, stated
+            up front rather than left implicit. See the compliance-scope review
+            this section came out of: this is a narrow evidence package for a
+            handful of controls, not a full framework assessment. */}
+        <div className="rounded-xl border px-5 py-4" style={{ borderColor: `${def.color}40`, background: def.accentBg }}>
+          <p className="text-[10px] font-black uppercase tracking-widest mb-1.5" style={{ color: def.colorDark }}>
+            Scope &amp; Limitations
+          </p>
+          <p className="text-xs text-gray-700 leading-relaxed">{def.scopeNote}</p>
+        </div>
+
         {/* 1. Executive Summary */}
         <section>
           <SectionHead num={1} title="Executive Summary" color={def.color} />
@@ -1135,7 +1151,10 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
               <p className="text-xs text-gray-700 leading-relaxed">
                 Management of <strong>{org}</strong> asserts that, to the best of its knowledge and belief,
                 the controls described in this report were suitably designed and operating effectively throughout
-                the period <strong>{start}</strong> to <strong>{end}</strong> with respect to the {def.shortName} criteria.
+                the period <strong>{start}</strong> to <strong>{end}</strong> with respect to the specific
+                {" "}{def.shortName} criteria listed in Compliance Mapping above. This assertion does not extend
+                to any {def.shortName} requirement outside that scope — see Scope &amp; Limitations at the top
+                of this report.
               </p>
               <p className="text-xs text-gray-700 leading-relaxed">
                 All AI-generated code changes were subjected to automated risk scanning, and HIGH/CRITICAL-risk
@@ -1339,6 +1358,27 @@ function ReportsContent() {
   const [reportHistory,     setReportHistory]     = useState<ReportHistoryItem[] | null>(null);
   const [realEvidence,      setRealEvidence]      = useState<RealEvidencePackage | null>(null);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
+  const [pciApplicable,     setPciApplicable]     = useState(true); // assume true until settings load, so PCI-DSS isn't visibly yanked from view on first paint
+
+  // PCI-DSS only applies to orgs with a cardholder data environment -- unlike
+  // the other three frameworks, it's opt-in, gated on a real per-org setting
+  // (Settings > Compliance Scope) rather than shown unconditionally.
+  useEffect(() => {
+    authedFetch<{ org: { pci_applicable?: boolean } }>("/api/settings")
+      .then(res => setPciApplicable(!!res.org?.pci_applicable))
+      .catch(() => {});
+  }, []);
+
+  const visibleFrameworks = useMemo(
+    () => pciApplicable ? FRAMEWORKS : FRAMEWORKS.filter(f => f !== "PCI-DSS"),
+    [pciApplicable]
+  );
+
+  // If PCI-DSS was selected (e.g. via ?fw=PCI-DSS) but the org has since
+  // turned off PCI applicability, fall back to a framework that's actually visible.
+  useEffect(() => {
+    if (fw === "PCI-DSS" && !pciApplicable) setFw("SOC2");
+  }, [fw, pciApplicable]);
 
   // Sync violation statuses so attested files reflect immediately
   useEffect(() => {
@@ -1474,7 +1514,7 @@ function ReportsContent() {
             <p className="text-xs text-gray-400 mt-0.5">Generate signed compliance evidence reports for SOC 2, EU AI Act, and PCI-DSS</p>
           </div>
           <div className="flex items-center gap-2">
-            {FRAMEWORKS.map(f => (
+            {visibleFrameworks.map(f => (
               <button key={f} onClick={() => setFw(f)}
                 className="px-3 py-1.5 rounded-xl text-xs font-bold transition-all"
                 style={fw===f
@@ -1497,7 +1537,9 @@ function ReportsContent() {
             <div className="section-card p-5">
               <p className="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-3">Framework</p>
               <div className="space-y-2">
-                {(Object.entries(FW) as [Framework, FwDef][]).map(([key, d]) => (
+                {(Object.entries(FW) as [Framework, FwDef][])
+                  .filter(([key]) => (visibleFrameworks as readonly string[]).includes(key))
+                  .map(([key, d]) => (
                   <button key={key} onClick={() => setFw(key)}
                     className="w-full flex items-center gap-3 p-3.5 rounded-xl text-left transition-all duration-150"
                     style={{

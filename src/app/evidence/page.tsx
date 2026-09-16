@@ -528,6 +528,16 @@ export default function EvidencePage() {
   const [refreshing,    setRefreshing]    = useState(false);
   const [view,          setView]          = useState<"controls" | "gaps" | "owners">("controls");
   const [dragOver,      setDragOver]      = useState(false);
+  const [pciApplicable, setPciApplicable] = useState(true); // assume true until settings load
+
+  // PCI-DSS only applies to orgs with a cardholder data environment -- a
+  // real per-org setting (Settings > Compliance Scope), not shown unconditionally.
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ org: { pci_applicable?: boolean } }>("/api/settings")
+      .then(res => setPciApplicable(!!res.org?.pci_applicable))
+      .catch(() => {});
+  }, [profile?.org_id]);
 
   useEffect(() => {
     setOverrides(loadOverrides());
@@ -578,7 +588,17 @@ export default function EvidencePage() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const frameworks = useMemo(() => buildFrameworks(data, auditStart, auditEnd), [data, auditStart, auditEnd]);
-  const fw = frameworks.find(f => f.id === activeFw) ?? frameworks[0];
+  const visibleFrameworks = useMemo(
+    () => pciApplicable ? frameworks : frameworks.filter(f => f.id !== "pcidss"),
+    [frameworks, pciApplicable]
+  );
+  const fw = visibleFrameworks.find(f => f.id === activeFw) ?? visibleFrameworks[0];
+
+  // If PCI-DSS was active (e.g. from a previous session) but the org has
+  // since turned off PCI applicability, fall back to a visible framework.
+  useEffect(() => {
+    if (activeFw === "pcidss" && !pciApplicable) setActiveFw("soc2");
+  }, [activeFw, pciApplicable]);
 
   // Apply overrides + expiry check
   const resolvedItems = useCallback((items: EvidenceItem[]): Array<EvidenceItem & { resolvedStatus: EvidenceStatus }> =>
@@ -588,7 +608,7 @@ export default function EvidencePage() {
     })), [overrides]);
 
   // Readiness score per framework
-  const readiness = useMemo(() => frameworks.map(f => {
+  const readiness = useMemo(() => visibleFrameworks.map(f => {
     const allItems = f.controls.flatMap(c => c.evidence);
     const weighted = f.controls.reduce((s, c) => {
       const items  = resolvedItems(c.evidence).filter(i => i.resolvedStatus !== "not-required");
@@ -607,7 +627,7 @@ export default function EvidencePage() {
     const pending = allItems.filter(i => (overrides[i.id]?.status ?? i.status) === "pending").length;
     const expired = allItems.filter(i => evidenceExpiry(i, overrides[i.id]) === "expired").length;
     return { id:f.id, pct, pending, expired };
-  }), [frameworks, overrides, resolvedItems, realEvidence]);
+  }), [visibleFrameworks, overrides, resolvedItems, realEvidence]);
 
   const fwReadiness = readiness.find(r => r.id === activeFw) ?? readiness[0];
   const grade = readinessGrade(fwReadiness?.pct ?? 0);
@@ -724,7 +744,7 @@ export default function EvidencePage() {
       generated_at: new Date().toISOString(),
       orgSlug: orgName,
       audit_period: { start: auditStart, end: auditEnd },
-      frameworks: frameworks.map(f => ({
+      frameworks: visibleFrameworks.map(f => ({
         id: f.id,
         name: f.name,
         readiness_pct: readiness.find(r=>r.id===f.id)?.pct ?? 0,
@@ -1032,7 +1052,7 @@ export default function EvidencePage() {
 
         {/* Framework selector */}
         <div className="animate-fade-up grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {frameworks.map(f => {
+          {visibleFrameworks.map(f => {
             const r = readiness.find(x => x.id === f.id)!;
             const g = readinessGrade(r.pct);
             const active = activeFw === f.id;

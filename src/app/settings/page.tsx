@@ -201,11 +201,16 @@ function OrganizationSection() {
   const toast = useToastHelpers();
   const [orgName, setOrgName] = useState("");
   const [saving, setSaving]   = useState(false);
+  const [pciApplicable, setPciApplicable] = useState(false);
+  const [pciSaving, setPciSaving] = useState(false);
 
   useEffect(() => {
     if (!profile?.org_id) return;
-    authedFetch<{ org: { name: string } }>("/api/settings")
-      .then(res => setOrgName(res.org?.name ?? ""))
+    authedFetch<{ org: { name: string; pci_applicable?: boolean } }>("/api/settings")
+      .then(res => {
+        setOrgName(res.org?.name ?? "");
+        setPciApplicable(!!res.org?.pci_applicable);
+      })
       .catch(() => {});
   }, [profile?.org_id]);
 
@@ -225,26 +230,53 @@ function OrganizationSection() {
     }
   }
 
+  async function togglePciApplicable(v: boolean) {
+    const prev = pciApplicable;
+    setPciApplicable(v);
+    setPciSaving(true);
+    try {
+      await authedFetch("/api/settings", { method: "PATCH", body: JSON.stringify({ pci_applicable: v }) });
+      toast.success(v ? "PCI-DSS reporting enabled" : "PCI-DSS reporting disabled");
+    } catch {
+      setPciApplicable(prev);
+      toast.error("Failed to update PCI-DSS setting");
+    } finally {
+      setPciSaving(false);
+    }
+  }
+
   return (
-    <SectionCard title="Organization" subtitle="The display name shown across your dashboard.">
-      <Row label="Organization name" hint="Shown in the header and sidebar">
-        <div className="flex items-center gap-2">
-          <input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="Acme Corp"
-            className="text-sm border border-gray-200 rounded-xl px-3.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 w-56"
-          />
-          <button
-            onClick={save}
-            disabled={saving || !orgName.trim()}
-            className="px-3.5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 disabled:opacity-50"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </Row>
-    </SectionCard>
+    <>
+      <SectionCard title="Organization" subtitle="The display name shown across your dashboard.">
+        <Row label="Organization name" hint="Shown in the header and sidebar">
+          <div className="flex items-center gap-2">
+            <input
+              value={orgName}
+              onChange={e => setOrgName(e.target.value)}
+              placeholder="Acme Corp"
+              className="text-sm border border-gray-200 rounded-xl px-3.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 w-56"
+            />
+            <button
+              onClick={save}
+              disabled={saving || !orgName.trim()}
+              className="px-3.5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </Row>
+      </SectionCard>
+
+      <SectionCard title="Compliance Scope" subtitle="Which frameworks are relevant to your organisation.">
+        <Row
+          label="We process cardholder data (PCI-DSS applies)"
+          hint="PCI-DSS only applies to organisations with a cardholder data environment. Leave this off if you don't handle card payments — the PCI-DSS report will be hidden from Reports, Compliance and Evidence."
+        >
+          <Toggle checked={pciApplicable} onChange={togglePciApplicable} />
+        </Row>
+        {pciSaving && <p className="text-[10px] text-gray-400">Saving…</p>}
+      </SectionCard>
+    </>
   );
 }
 

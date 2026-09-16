@@ -213,6 +213,7 @@ export default function CompliancePage() {
   const [crossThemes, setCrossThemes] = useState<CrossFrameworkTheme[]>(DEFAULT_THEMES);
   const [data,        setData]        = useState<DashboardData | null>(null);
   const [activeFw,    setActiveFw]    = useState<string>("soc2");
+  const [pciApplicable, setPciApplicable] = useState(true); // assume true until settings load
   const [tab,         setTab]         = useState<PageTab>("overview");
   const [exceptions,  setExceptions]  = useState<Exception[]>([]);
   const [showExcForm, setShowExcForm] = useState(false);
@@ -306,10 +307,30 @@ export default function CompliancePage() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const fw = frameworks.find(f => f.id === activeFw) ?? frameworks[0];
+  // PCI-DSS only applies to orgs with a cardholder data environment -- a
+  // real per-org setting (Settings > Compliance Scope), not shown unconditionally.
+  useEffect(() => {
+    if (!profile?.org_id) return;
+    authedFetch<{ org: { pci_applicable?: boolean } }>("/api/settings")
+      .then(res => setPciApplicable(!!res.org?.pci_applicable))
+      .catch(() => {});
+  }, [profile?.org_id]);
+
+  const visibleFrameworks = useMemo(
+    () => pciApplicable ? frameworks : frameworks.filter(f => f.id !== "pcidss"),
+    [frameworks, pciApplicable]
+  );
+
+  // If PCI-DSS was active (e.g. from a previous session) but the org has
+  // since turned off PCI applicability, fall back to a visible framework.
+  useEffect(() => {
+    if (activeFw === "pcidss" && !pciApplicable) setActiveFw("soc2");
+  }, [activeFw, pciApplicable]);
+
+  const fw = visibleFrameworks.find(f => f.id === activeFw) ?? visibleFrameworks[0];
 
   const scores = useMemo(() =>
-    frameworks.map(f => ({
+    visibleFrameworks.map(f => ({
       id: f.id,
       // A framework's score is the real, live-computed number from the
       // Evidence engine when it's the one currently loaded -- otherwise
@@ -319,7 +340,7 @@ export default function CompliancePage() {
         ? Math.round(realEvidence.overall_score)
         : computeScore(f, data, exceptions),
       exceptions: exceptions.filter(e => e.framework_id === f.id && e.status !== "resolved").length,
-    })), [frameworks, data, exceptions, realEvidence]);
+    })), [visibleFrameworks, data, exceptions, realEvidence]);
 
   const fwScore     = scores.find(s => s.id === activeFw)?.score ?? 0;
   const overallPct = Math.round(scores.reduce((s, x) => s + x.score, 0) / scores.length);
@@ -505,7 +526,7 @@ export default function CompliancePage() {
                   style={{ width:`${overallPct}%`, background:"linear-gradient(90deg,#6366f1,#10b981)" }} />
               </div>
             </div>
-            {frameworks.map(f => {
+            {visibleFrameworks.map(f => {
               const s = scores.find(x => x.id === f.id)!;
               return (
                 <button key={f.id} onClick={() => setActiveFw(f.id)}
@@ -542,7 +563,7 @@ export default function CompliancePage() {
 
             {/* Left: framework selector */}
             <div className="space-y-3">
-              {frameworks.map(f => {
+              {visibleFrameworks.map(f => {
                 const s    = scores.find(x => x.id === f.id)!;
                 const days = daysUntil(f.nextAudit);
                 return (
@@ -840,7 +861,7 @@ export default function CompliancePage() {
                   <thead>
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-wider text-gray-400 w-48">Theme</th>
-                      {frameworks.map(f => (
+                      {visibleFrameworks.map(f => (
                         <th key={f.id} className="px-4 py-3 text-center text-[10px] font-black uppercase tracking-wider" style={{ color:f.color }}>
                           {f.shortName}
                         </th>
@@ -855,7 +876,7 @@ export default function CompliancePage() {
                           <p className="text-xs font-bold text-gray-900">{theme.theme}</p>
                           <p className="text-[10px] text-gray-400 mt-0.5 leading-snug">{theme.description}</p>
                         </td>
-                        {frameworks.map(f => {
+                        {visibleFrameworks.map(f => {
                           const ctrlId = (theme.controls as Record<string,string>)[f.id];
                           const ctrl   = f.controls.find(c => c.id === ctrlId);
                           const score  = scores.find(s=>s.id===f.id)?.score ?? 0;
