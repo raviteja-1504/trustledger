@@ -9,6 +9,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
+import crypto from "crypto";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -78,13 +79,25 @@ export async function POST(req: NextRequest) {
     secrets:      secrets ?? [],
   };
 
+  // Real signature over the exact report content -- same pattern as
+  // /api/export/signed: HMAC-SHA256, same already-configured signing key,
+  // honestly labeled. This is what replaced the Reports page's fabricated
+  // "SHA-256 with RSA-4096" / fake PGP block in the on-screen preview --
+  // this is the genuine artifact those claims should have described.
+  const signingKey = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
+  if (!signingKey) {
+    return NextResponse.json({ error: "report_signing_not_configured", detail: "Set EXPORT_SIGNING_KEY or CRON_SECRET" }, { status: 503 });
+  }
+  const contentToSign = JSON.stringify(reportData);
+  const signature = crypto.createHmac("sha256", signingKey).update(contentToSign).digest("hex");
+
   // Generate PDF using @react-pdf/renderer
   try {
     const { renderToBuffer } = await import("@react-pdf/renderer");
     const { createElement }  = await import("react");
     const { buildReportDocument } = await import("@/lib/reportPDF");
 
-    const doc    = createElement(buildReportDocument, { data: reportData });
+    const doc    = createElement(buildReportDocument, { data: reportData, signature });
     const buffer = await renderToBuffer(doc as Parameters<typeof renderToBuffer>[0]);
 
     await writeAuditLog(db, {
@@ -93,7 +106,17 @@ export async function POST(req: NextRequest) {
       actor_id:      user_id ?? null,
       actor_email:   actor_email ?? null,
       resource_type: "report",
-      payload: { framework: body.framework, period_start: body.period_start, period_end: body.period_end },
+      payload: { framework: body.framework, period_start: body.period_start, period_end: body.period_end, signature },
+    });
+
+    // Structured, queryable record (Reports page's "Recent Reports" list)
+    // alongside the audit log entry above -- who generated what, for
+    // which period, with which signature.
+    await db.from("report_generations").insert({
+      org_id, framework: body.framework,
+      period_start: body.period_start, period_end: body.period_end,
+      generated_by: user_id ?? null, generated_by_email: actor_email ?? null,
+      signature,
     });
 
     const filename = `trustledger-${body.framework.toLowerCase()}-${body.period_start.slice(0,7)}.pdf`;
@@ -101,14 +124,15 @@ export async function POST(req: NextRequest) {
 
     return new NextResponse(uint8, {
       headers: {
-        "Content-Type":        "application/pdf",
-        "Content-Disposition": `attachment; filename="${filename}"`,
-        "Content-Length":      String(uint8.length),
+        "Content-Type":            "application/pdf",
+        "Content-Disposition":     `attachment; filename="${filename}"`,
+        "Content-Length":          String(uint8.length),
+        "X-TrustLedger-Signature": signature,
       },
     });
 
   } catch {
     // Fallback: return JSON if PDF renderer unavailable
-    return NextResponse.json(reportData);
+    return NextResponse.json({ ...reportData, signature });
   }
 }

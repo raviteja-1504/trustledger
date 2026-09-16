@@ -56,6 +56,12 @@ const S = StyleSheet.create({
   infoBox: { backgroundColor:"#eff6ff", borderRadius:6, padding:10,
              borderWidth:1, borderColor:"#bfdbfe", marginBottom:12 },
   infoText: { fontSize:8, color:"#1d4ed8", lineHeight:1.5 },
+
+  // Signature
+  sigBox:   { backgroundColor:"#0f172a", borderRadius:6, padding:10, marginBottom:12 },
+  sigLabel: { fontSize:7, color:"#818cf8", marginBottom:3, letterSpacing:0.5 },
+  sigValue: { fontSize:8, color:"#a5b4fc", lineHeight:1.4 },
+  sigNote:  { fontSize:7, color:"#64748b", marginTop:6, lineHeight:1.4 },
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -97,14 +103,15 @@ interface ReportData {
 // ── Framework metadata ─────────────────────────────────────────────────────────
 
 const FRAMEWORK_META: Record<string, { full: string; certBody: string; standard: string }> = {
-  SOC2:   { full:"SOC 2 Type II",            certBody:"AICPA-accredited CPA firm",      standard:"Trust Services Criteria 2017"          },
-  EUAI:   { full:"EU AI Act",                 certBody:"EU Notified Body",               standard:"Regulation (EU) 2024/1689"             },
-  PCIDSS: { full:"PCI DSS v4.0",              certBody:"QSA Assessor",                   standard:"PCI Security Standards Council Req 6"  },
+  SOC2:     { full:"SOC 2 Type II",            certBody:"AICPA-accredited CPA firm",      standard:"Trust Services Criteria 2017"          },
+  EUAI:     { full:"EU AI Act",                 certBody:"EU Notified Body",               standard:"Regulation (EU) 2024/1689"             },
+  PCIDSS:   { full:"PCI DSS v4.0",              certBody:"QSA Assessor",                   standard:"PCI Security Standards Council Req 6"  },
+  ISO27001: { full:"ISO/IEC 27001:2022",        certBody:"Accredited Certification Body",  standard:"ISO/IEC 27001:2022 Annex A"            },
 };
 
 // ── Document component ─────────────────────────────────────────────────────────
 
-export function buildReportDocument({ data }: { data: ReportData }) {
+export function buildReportDocument({ data, signature }: { data: ReportData; signature: string }) {
   const meta = FRAMEWORK_META[data.framework] ?? { full: data.framework, certBody:"—", standard:"—" };
   const topScans = data.scans
     .filter(s => s.overall_risk === "CRITICAL" || s.overall_risk === "HIGH")
@@ -228,6 +235,17 @@ export function buildReportDocument({ data }: { data: ReportData }) {
             signed attestation records. Each attestation payload hash is stored immutably in the
             TrustLedger database with a tamper-evident audit log chain. This document may be
             submitted as evidence to {meta.certBody} during the {meta.full} audit process.
+          </Text>
+        </View>
+
+        <View style={S.sigBox}>
+          <Text style={S.sigLabel}>DOCUMENT SIGNATURE — HMAC-SHA256</Text>
+          <Text style={S.sigValue}>{signature}</Text>
+          <Text style={S.sigNote}>
+            Computed over this report&apos;s exact contents (org, framework, period, metrics, scans,
+            attestations, secrets) using TrustLedger&apos;s export signing key. Recomputing this HMAC
+            over an altered copy of this data will not match — verify by requesting the same report
+            regeneration from TrustLedger and comparing signatures.
           </Text>
         </View>
 

@@ -8,14 +8,22 @@ import AuthGuard from "@/components/AuthGuard";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import type { DashboardData } from "@/types";
 import { api } from "@/lib/api";
+import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BASE_URL = "";
 
-const FRAMEWORKS = ["SOC2", "EU AI Act", "PCI-DSS"] as const;
+const FRAMEWORKS = ["SOC2", "EU AI Act", "PCI-DSS", "ISO 27001"] as const;
 type Framework = (typeof FRAMEWORKS)[number];
+
+// /api/report and /api/evidence/collect expect the compact ids used by
+// reportPDF.tsx's FRAMEWORK_META / evidence/collect's normalizeFramework,
+// not this page's display labels.
+const API_FRAMEWORK_ID: Record<Framework, string> = {
+  "SOC2": "SOC2", "EU AI Act": "EUAI", "PCI-DSS": "PCIDSS", "ISO 27001": "ISO27001",
+};
 
 // ─── Framework definitions ────────────────────────────────────────────────────
 
@@ -140,6 +148,40 @@ const FW: Record<Framework, FwDef> = {
       { key:"cleared",   label:"Cleared",     w:"76px"  },
     ],
   },
+
+  "ISO 27001": {
+    shortName:   "ISO 27001",
+    fullName:    "ISO/IEC 27001:2022",
+    standard:    "ISO/IEC 27001:2022 Annex A",
+    tagline:     "Secure development lifecycle & audit trail evidence",
+    description: "Information security management evidence for Annex A controls A.8.25–A.8.30 and A.5.33.",
+    color:       "#8b5cf6",
+    colorDark:   "#6d28d9",
+    gradientCss: "linear-gradient(135deg,#8b5cf6,#6366f1)",
+    headerBg:    "linear-gradient(135deg,#0f172a 0%,#2e1065 60%,#0f172a 100%)",
+    accentBg:    "rgba(139,92,246,0.07)",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+    ),
+    criteria: [
+      { id:"A.8.25", label:"Secure Development Lifecycle",   desc:"Automated security scanning integrated into every code change" },
+      { id:"A.8.26", label:"Application Security Requirements", desc:"Open vulnerabilities tracked to resolution" },
+      { id:"A.8.28", label:"Secure Coding",                    desc:"Human reviewer sign-off on AI-authored code before merge" },
+      { id:"A.8.30", label:"Outsourced Development",           desc:"Every contributor's code scanned and logged regardless of authorship" },
+      { id:"A.5.33", label:"Protection of Records",            desc:"Audit trail retained and cryptographically tamper-evident" },
+    ],
+    tableColumns: [
+      { key:"pr",          label:"PR",          w:"52px"  },
+      { key:"repo",        label:"Repository",  w:"1fr"   },
+      { key:"reviewer",    label:"Reviewer",    w:"160px" },
+      { key:"ai_pct",      label:"AI %",        w:"56px", align:"right" },
+      { key:"risk",        label:"Risk Level",  w:"96px"  },
+      { key:"status",      label:"Status",      w:"96px"  },
+      { key:"attested_at", label:"Date",        w:"96px"  },
+    ],
+  },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -155,48 +197,19 @@ function fmtDate(iso: string) {
   return formatDateOnly(new Date(iso), getSavedTimezone());
 }
 
-function hashStr(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
-  return h >>> 0;
-}
-
-function reportId(fw: Framework, start: string) {
-  const h = hashStr(fw + start).toString(16).toUpperCase().padStart(8,"0");
-  return `TL-${h.slice(0,8)}`;
-}
-
-function fingerprint(fw: Framework, org: string, start: string) {
-  const parts = [fw+org, org+start, fw+start+org, fw+org+start+"x", start+org+fw]
-    .map(s => hashStr(s).toString(16).toUpperCase().padStart(8,"0"));
-  const flat = parts.join("").slice(0, 40);
-  return (flat.match(/.{4}/g) ?? []).join(" ");
-}
-
-function sha256hex(fw: Framework, org: string, start: string, end: string) {
-  const seed = fw + org + start + end;
-  return [seed, seed+"a", seed+"b", seed+"c"]
-    .map(s => hashStr(s).toString(16).toUpperCase().padStart(8,"0"))
-    .join("");
-}
-
-function pgpLines(fw: Framework, start: string, end: string, org = ""): string[] {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const line = (seed: string, len = 64) => {
-    let s = "";
-    for (let i = 0; i < len; i++) s += chars[hashStr(seed + i) % 64];
-    return s;
-  };
-  return [
-    line(fw + start, 64),
-    line(org + end, 64),
-    line(fw + end + start, 48) + "==",
-  ];
-}
-
 // ─── Data builders ────────────────────────────────────────────────────────────
 
 interface Metric { label: string; value: string; sub: string; status: "good" | "warn" | "bad" | "info" }
+
+interface ReportHistoryItem {
+  id: string;
+  framework: string;
+  period_start: string;
+  period_end: string;
+  generated_by_email: string | null;
+  signature: string;
+  created_at: string;
+}
 
 function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
   const att          = Math.round(d.attestation_rate * 100);
@@ -225,11 +238,18 @@ function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
     { label:"Provenance Complete", value:`${trackedAtt} / ${trackedTotal}`, sub:"AI-flagged files with chain", status: unattBlocking===0?"good":"warn" },
   ];
 
-  return [
+  if (fw === "PCI-DSS") return [
     { label:"Dual-Review Rate",    value:`${att}%`,                      sub:"Req 6.4.2 compliance",         status: att>=90?"good":att>=70?"warn":"bad"  },
     { label:"Repos in Scope",      value:String(d.repos.length),         sub:"Payment system repositories",  status:"info" },
     { label:"AI-Flagged Changes",  value:String(crit+high),              sub:"Require manual sign-off",      status: crit===0?"good":crit<=2?"warn":"bad" },
     { label:"SoD Compliance",      value:unattBlocking===0?"PASS":"PARTIAL", sub:"Separation of duties",    status: unattBlocking===0?"good":"warn" },
+  ];
+
+  return [
+    { label:"Attestation Rate",    value:`${att}%`,                      sub:"A.8.28 secure coding",          status: att>=80?"good":att>=60?"warn":"bad"  },
+    { label:"Open Violations",     value:String(d.unattested_deploy_count), sub:"A.8.26 tracked to resolution", status: d.unattested_deploy_count===0?"good":"warn" },
+    { label:"Critical Files",      value:String(crit),                   sub:"Require immediate review",     status: crit===0?"good":crit<=2?"warn":"bad" },
+    { label:"Scans Completed",     value:String(d.scan_count),           sub:`${d.file_count} files reviewed`, status:"info" },
   ];
 }
 
@@ -258,7 +278,7 @@ function buildRows(fw: Framework, d: DashboardData, start: string): Record<strin
     }));
   }
 
-  return files.map((f) => ({
+  if (fw === "PCI-DSS") return files.map((f) => ({
     pr:        `#${f.pr_number}`,
     repo:      f.repo.split("/").pop() ?? f.repo,
     reviewer1: f.attested_by ?? "—",
@@ -266,6 +286,16 @@ function buildRows(fw: Framework, d: DashboardData, start: string): Record<strin
     ai_pct:    `${(f.ai_pct * 100).toFixed(1)}%`,
     risk:      f.risk_score,
     cleared:   f.attested ? "YES" : "PENDING",
+  }));
+
+  return files.map((f) => ({
+    pr:          `#${f.pr_number}`,
+    repo:        f.repo.split("/").pop() ?? f.repo,
+    reviewer:    f.attested_by ?? "—",
+    ai_pct:      `${(f.ai_pct * 100).toFixed(1)}%`,
+    risk:        f.risk_score,
+    status:      f.attested ? "ATTESTED" : "PENDING",
+    attested_at: f.attested_at ? f.attested_at.split("T")[0] : "—",
   }));
 }
 
@@ -316,7 +346,16 @@ function AIPctBar({ raw }: { raw: number }) {
   );
 }
 
-function criterionEvidence(id: string, data: DashboardData): { text: string; pct: number } {
+interface RealControlEvidence { control_id: string; score: number; status: string }
+interface RealEvidencePackage { framework: string; controls: RealControlEvidence[] }
+
+// Prefers the real Evidence engine's live-computed per-control score
+// (GET /api/evidence/collect, same engine the Compliance and Evidence
+// pages use) over this page's own heuristic -- this was previously a
+// third, independently-invented scoring formula that could disagree
+// with the other two for the same control.
+function criterionEvidence(id: string, data: DashboardData, real?: RealEvidencePackage | null): { text: string; pct: number } {
+  const realCtrl = real?.controls.find(c => c.control_id === id);
   const files    = data.top_risk_files;
   const total    = files.length || 1;
   const attested = files.filter(f => f.attested).length;
@@ -340,8 +379,15 @@ function criterionEvidence(id: string, data: DashboardData): { text: string; pct
     "6.4.1":  { text:`${data.unattested_deploy_count} CRITICAL deployments blocked automatically pre-merge`, pct:data.unattested_deploy_count===0?100:80 },
     "6.4.2":  { text:`${att}% dual-reviewer attestation across all payment-system changes`, pct:att },
     "6.4.3":  { text:`AI content in payment paths flagged in ${crit+high} instances · all escalated`, pct:att },
+    "A.8.25": { text:`${data.scan_count} automated scans integrated into the development lifecycle`, pct:data.scan_count>0?100:0 },
+    "A.8.26": { text:`${data.unattested_deploy_count} open violations requiring remediation`, pct:data.unattested_deploy_count===0?100:80 },
+    "A.8.28": { text:`${att}% of AI-authored code reviewed before merge`, pct:att },
+    "A.8.30": { text:`${data.file_count} files scanned regardless of authorship`, pct:data.file_count>0?100:0 },
+    "A.5.33": { text:`Tamper-evident audit log chain intact`, pct:100 },
   };
-  return MAP[id] ?? { text:"Evidence available in full audit trail", pct:100 };
+  const fallback = MAP[id] ?? { text:"Evidence available in full audit trail", pct:100 };
+  if (!realCtrl) return fallback;
+  return { text: `${fallback.text} (live-verified)`, pct: Math.round(realCtrl.score) };
 }
 
 // ─── StatusPill ───────────────────────────────────────────────────────────────
@@ -754,13 +800,14 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
   );
 }
 
-function ComplianceMapping({ criteria, data, color, accentBg }: {
+function ComplianceMapping({ criteria, data, color, accentBg, realEvidence }: {
   criteria: { id: string; label: string; desc: string }[];
   data: DashboardData;
   color: string;
   accentBg: string;
+  realEvidence?: RealEvidencePackage | null;
 }) {
-  const evidences = criteria.map(c => ({ ...c, ev: criterionEvidence(c.id, data) }));
+  const evidences = criteria.map(c => ({ ...c, ev: criterionEvidence(c.id, data, realEvidence) }));
   const satisfied = evidences.filter(c => c.ev.pct >= 80).length;
   const partial   = evidences.filter(c => c.ev.pct >= 50 && c.ev.pct < 80).length;
   const gaps      = evidences.filter(c => c.ev.pct < 50).length;
@@ -888,12 +935,17 @@ function ComplianceMapping({ criteria, data, color, accentBg }: {
   );
 }
 
-function SignatureBlock({ fw, start, end, org }: { fw: Framework; start: string; end: string; org: string }) {
-  const id  = reportId(fw, start);
-  const fp  = fingerprint(fw, org, start);
-  const sha = sha256hex(fw, org, start, end);
-  const sig = pgpLines(fw, start, end, org);
-  const ts  = new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
+// Real, honest reference metadata for the on-screen preview -- no
+// algorithm claim, no fake PGP block. The genuine cryptographic
+// signature (HMAC-SHA256 over the actual report content) is computed
+// server-side, only for the downloaded PDF (see /api/report), where a
+// real signing key is available -- see docs/plan for the follow-up that
+// wires that in. Faking one here to look complete was worse than not
+// having one.
+function ReportReferenceBlock({ id, fw, start, end, org, generatedBy }: {
+  id: string; fw: Framework; start: string; end: string; org: string; generatedBy?: string;
+}) {
+  const ts = new Date().toISOString().replace("T"," ").slice(0,19) + " UTC";
 
   const row = (label: string, value: ReactNode, mono = false) => (
     <div key={label} className="flex gap-0 border-b border-white/5 last:border-0">
@@ -915,55 +967,36 @@ function SignatureBlock({ fw, start, end, org }: { fw: Framework; start: string;
         style={{ background:"rgba(255,255,255,0.03)", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
         <div className="flex items-center gap-2.5">
           <div className="w-6 h-6 rounded-lg flex items-center justify-center"
-            style={{ background:"rgba(16,185,129,0.15)", border:"1px solid rgba(16,185,129,0.3)" }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            style={{ background:"rgba(99,102,241,0.15)", border:"1px solid rgba(99,102,241,0.3)" }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#818cf8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
           </div>
-          <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-widest">Cryptographic Attestation</span>
+          <span className="text-[11px] font-bold text-indigo-400 uppercase tracking-widest">Report Reference</span>
         </div>
-        <span className="font-mono text-[10px] text-slate-500">{id}</span>
+        <span className="font-mono text-[10px] text-slate-500">{id.slice(0, 8)}</span>
       </div>
 
       {/* Metadata rows */}
       <div className="divide-y divide-white/5">
-        {row("Report ID",    <span className="text-emerald-400 font-bold font-mono">{id}</span>)}
+        {row("Report ID",    <span className="text-indigo-400 font-bold font-mono">{id}</span>)}
         {row("Framework",   fw)}
         {row("Organisation",org)}
         {row("Period",       `${start}  →  ${end}`,  true)}
-        {row("Algorithm",   "SHA-256 with RSA-4096")}
         {row("Generated",    ts,                      true)}
+        {generatedBy && row("Generated by", generatedBy)}
       </div>
 
-      {/* Fingerprint */}
+      {/* Note pointing at the real, signed download */}
       <div style={{ borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-        <div className="px-4 py-2" style={{ background:"rgba(255,255,255,0.02)" }}>
-          <span className="text-[9px] font-bold uppercase tracking-widest text-slate-600">PGP Key Fingerprint</span>
-        </div>
-        <div className="px-4 py-3">
-          <code className="text-[12px] font-mono tracking-wider text-amber-400 break-all leading-loose">{fp}</code>
-        </div>
-      </div>
-
-      {/* SHA-256 */}
-      <div style={{ borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-        <div className="px-4 py-2" style={{ background:"rgba(255,255,255,0.02)" }}>
-          <span className="text-[9px] font-bold uppercase tracking-widest text-slate-600">SHA-256 Digest</span>
-        </div>
-        <div className="px-4 py-3">
-          <code className="text-[11px] font-mono text-cyan-400 break-all">{sha}</code>
-        </div>
-      </div>
-
-      {/* PGP block */}
-      <div style={{ borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-        <div className="px-4 py-2" style={{ background:"rgba(255,255,255,0.02)" }}>
-          <span className="text-[9px] font-bold uppercase tracking-widest text-slate-600">PGP Signature</span>
-        </div>
-        <div className="px-4 py-3 space-y-1">
-          <p className="font-mono text-[10px] text-slate-600">-----BEGIN PGP SIGNATURE-----</p>
-          {sig.map((l, i) => <p key={i} className="font-mono text-[10px] text-slate-400 break-all">{l}</p>)}
-          <p className="font-mono text-[10px] text-slate-600">-----END PGP SIGNATURE-----</p>
+        <div className="px-4 py-3 flex items-start gap-2.5">
+          <svg className="shrink-0 mt-0.5" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#818cf8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          <p className="text-[10px] text-slate-400 leading-relaxed">
+            This on-screen preview is not signed. Use <span className="text-indigo-400 font-semibold">Generate Report</span> to
+            download a PDF with a real HMAC-SHA256 signature over its exact contents.
+          </p>
         </div>
       </div>
     </div>
@@ -972,13 +1005,19 @@ function SignatureBlock({ fw, start, end, org }: { fw: Framework; start: string;
 
 // ─── Full report document ─────────────────────────────────────────────────────
 
-function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
+function ReportDocument({ data, fw, start, end, violationStatuses, org, generatedBy, realEvidence }: {
   data: DashboardData; fw: Framework; start: string; end: string;
   violationStatuses: Record<string, string>;
   org: string;
+  generatedBy?: string;
+  realEvidence?: RealEvidencePackage | null;
 }) {
   const def     = FW[fw];
   const metrics = buildMetrics(fw, data);
+  // One id per render of the document -- shown identically in the
+  // letterhead, the Report Reference section, and the footer, unlike the
+  // two independently-generated fake ids this replaced.
+  const reportId = useMemo(() => crypto.randomUUID().toUpperCase(), []);
 
   return (
     <div id="report-print-area" className="rounded-2xl overflow-hidden border border-gray-200 min-w-[660px]"
@@ -1027,7 +1066,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
             </div>
             <div>
               <p className="text-[9px] font-bold uppercase tracking-widest text-white/30 mb-0.5">Report ID</p>
-              <p className="font-mono text-[10px] text-white/40">{reportId(fw, start)}</p>
+              <p className="font-mono text-[10px] text-white/40">{reportId.slice(0, 8)}</p>
             </div>
           </div>
         </div>
@@ -1072,13 +1111,14 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
             data={data}
             color={def.color}
             accentBg={def.accentBg}
+            realEvidence={realEvidence}
           />
         </section>
 
-        {/* 5. Cryptographic Attestation */}
+        {/* 5. Report Reference */}
         <section>
-          <SectionHead num={5} title="Cryptographic Attestation" color={def.color} />
-          <SignatureBlock fw={fw} start={start} end={end} org={org} />
+          <SectionHead num={5} title="Report Reference" color={def.color} />
+          <ReportReferenceBlock id={reportId} fw={fw} start={start} end={end} org={org} generatedBy={generatedBy} />
         </section>
 
         {/* 6. Management Assertion */}
@@ -1099,8 +1139,9 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
               </p>
               <p className="text-xs text-gray-700 leading-relaxed">
                 All AI-generated code changes were subjected to automated risk scanning, and HIGH/CRITICAL-risk
-                files required named reviewer attestation prior to deployment. The attestation records, scan logs,
-                and cryptographic signatures included in this report constitute the evidence base for this assertion.
+                files required named reviewer attestation prior to deployment. The attestation records and scan
+                logs included in this report constitute the evidence base for this assertion; the downloaded PDF
+                additionally carries a cryptographic signature over its exact contents.
               </p>
               <div className="grid grid-cols-2 gap-6 pt-4 border-t border-gray-100">
                 <div>
@@ -1165,7 +1206,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org }: {
           <p suppressHydrationWarning className="text-[10px] text-gray-400">
             Generated by TrustLedger · {new Date().toLocaleDateString("en-GB", { day:"2-digit", month:"long", year:"numeric" })} · {def.shortName} · {org}
           </p>
-          <p className="text-[10px] text-gray-400 font-mono">{reportId(fw, start)}</p>
+          <p className="text-[10px] text-gray-400 font-mono">{reportId}</p>
         </div>
       </div>
     </div>
@@ -1225,7 +1266,7 @@ function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: stri
       period_start: start,
       period_end: end,
       tool: "TrustLedger v1.0",
-      report_id: reportId(fw, start),
+      report_id: crypto.randomUUID(),
     },
     summary: {
       total_files:      d.top_risk_files.length,
@@ -1251,7 +1292,6 @@ function downloadAIBOM(d: DashboardData, fw: Framework, start: string, end: stri
         attested:    f.attested,
         reviewer:    f.attested_by ?? null,
         attested_at: f.attested_at ?? null,
-        algorithm:   f.attested ? "SHA-256 with RSA-4096" : null,
       },
     })),
     repositories: d.repos.map(r => ({
@@ -1295,6 +1335,9 @@ function ReportsContent() {
   const [success,    setSuccess]    = useState(false);
   const [data,              setData]              = useState<DashboardData | null>(null);
   const [loading,           setLoading]           = useState(true);
+  const [dataError,         setDataError]         = useState(false);
+  const [reportHistory,     setReportHistory]     = useState<ReportHistoryItem[] | null>(null);
+  const [realEvidence,      setRealEvidence]      = useState<RealEvidencePackage | null>(null);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
 
   // Sync violation statuses so attested files reflect immediately
@@ -1339,7 +1382,10 @@ function ReportsContent() {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
-    // Check seed mode first
+    setDataError(false);
+    // Check seed mode first -- FALLBACK_DATA/demo data is only ever shown
+    // here, behind an explicit opt-in toggle, never as a silent stand-in
+    // for a real fetch failure below.
     if (typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") {
       try {
         const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null;
@@ -1349,7 +1395,14 @@ function ReportsContent() {
     try {
       const d = await api.dashboard(orgName, 90);
       setData(d);
-    } catch { /* fall through — page uses FALLBACK_DATA via effectiveData ?? FALLBACK_DATA */ }
+    } catch {
+      // A broken fetch used to silently fall back to FALLBACK_DATA's
+      // fictional repos/scans with no on-screen indication -- a report
+      // generated from a broken backend looked identical to a real one.
+      // Surface the failure instead; see the error state below.
+      setData(null);
+      setDataError(true);
+    }
     setLoading(false);
   }, []);
 
@@ -1357,18 +1410,55 @@ function ReportsContent() {
     fetchData();
   }, [fetchData]);
 
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await authedFetch<{ reports: ReportHistoryItem[] }>("/api/report/history?limit=8");
+      setReportHistory(res.reports ?? []);
+    } catch { setReportHistory([]); }
+  }, []);
+
+  useEffect(() => { fetchHistory(); }, [fetchHistory]);
+
+  // Real per-control scores for the active framework (same engine the
+  // Compliance and Evidence pages use), merged into the Compliance
+  // Mapping section instead of this page's own independent formula.
+  useEffect(() => {
+    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=${API_FRAMEWORK_ID[fw]}`)
+      .then(setRealEvidence)
+      .catch(() => setRealEvidence(null));
+  }, [fw]);
+
   async function generate() {
     if (!start || !end) { setError("Select a date range first."); return; }
     setGenerating(true); setError(null); setSuccess(false);
 
-    // Brief settle delay so any pending renders flush before print snapshot
-    await new Promise(r => setTimeout(r, 120));
-
-    window.print();
-
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 4000);
+    try {
+      const res = await api.generateReport({
+        org: orgName, framework: API_FRAMEWORK_ID[fw],
+        period_start: new Date(start).toISOString(),
+        period_end:   new Date(end).toISOString(),
+      });
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url;
+      a.download = `trustledger-${API_FRAMEWORK_ID[fw].toLowerCase()}-${start}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 4000);
+      fetchHistory();
+    } catch {
+      setError("Couldn't generate the report. Please try again.");
+    }
     setGenerating(false);
+  }
+
+  // On-screen HTML preview only -- not signed, not the compliance-grade
+  // artifact. Kept as a quick way to browse the report before committing
+  // to a download.
+  function printPreview() {
+    window.print();
   }
 
   const def = FW[fw];
@@ -1381,7 +1471,7 @@ function ReportsContent() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-xl font-black text-gray-900">Audit Reports</h1>
-            <p className="text-xs text-gray-400 mt-0.5">Generate cryptographically-signed compliance evidence packages</p>
+            <p className="text-xs text-gray-400 mt-0.5">Generate signed compliance evidence reports for SOC 2, EU AI Act, and PCI-DSS</p>
           </div>
           <div className="flex items-center gap-2">
             {FRAMEWORKS.map(f => (
@@ -1468,12 +1558,22 @@ function ReportsContent() {
             {success && (
               <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-xl text-xs font-semibold">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                Report ready — select "Save as PDF" in the print dialog.
+                Signed report downloaded.
+              </div>
+            )}
+            {dataError && (
+              <div className="flex items-start gap-2.5 bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl text-xs">
+                <svg className="shrink-0 mt-0.5" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <div className="flex-1">
+                  <p className="font-semibold">Couldn&apos;t load your organisation&apos;s data</p>
+                  <p className="mt-0.5 text-rose-600">Report generation is unavailable until this loads — showing fabricated numbers instead would be worse than showing nothing.</p>
+                  <button onClick={fetchData} className="mt-2 font-bold underline hover:no-underline">Try again</button>
+                </div>
               </div>
             )}
 
             {/* Compliance health card */}
-            {(() => {
+            {!dataError && (() => {
               const d = effectiveData ?? FALLBACK_DATA;
               const attPct   = Math.round(d.attestation_rate * 100);
               const crit     = d.top_risk_files.filter(f => f.risk_score==="CRITICAL" && !f.attested).length;
@@ -1517,24 +1617,22 @@ function ReportsContent() {
               );
             })()}
 
-            {/* Generate button */}
-            <button onClick={generate} disabled={generating}
+            {/* Generate button -- downloads the real, signed PDF from /api/report */}
+            <button onClick={generate} disabled={generating || dataError}
               className="w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98]"
-              style={generating
+              style={generating || dataError
                 ? { background:"#f1f5f9", color:"#94a3b8", cursor:"not-allowed" }
                 : { background:def.gradientCss, color:"white", boxShadow:`0 4px 16px ${def.color}40` }
               }>
               {generating ? <Spinner /> : <Download />}
-              {generating ? "Preparing…" : `Save ${fw} Report as PDF`}
+              {generating ? "Signing & generating…" : `Generate Signed ${fw} Report`}
             </button>
 
-            {/* Keyboard shortcut hint */}
-            <p className="text-center text-[10px] text-gray-400">
-              Or press <kbd className="font-mono text-[9px] bg-gray-100 border border-gray-300 rounded px-1 py-0.5">Ctrl+P</kbd>
-              <span className="mx-1">/</span>
-              <kbd className="font-mono text-[9px] bg-gray-100 border border-gray-300 rounded px-1 py-0.5">⌘P</kbd>
-              {" · "}choose <span className="font-semibold">Save as PDF</span>
-            </p>
+            {/* Print preview -- on-screen HTML only, not the signed artifact */}
+            <button onClick={printPreview} disabled={dataError}
+              className="w-full text-center text-[10px] text-gray-400 hover:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+              Or print this on-screen preview (<kbd className="font-mono text-[9px] bg-gray-100 border border-gray-300 rounded px-1 py-0.5">Ctrl</kbd>+<kbd className="font-mono text-[9px] bg-gray-100 border border-gray-300 rounded px-1 py-0.5">P</kbd>) — not signed
+            </button>
 
             {/* AIBOM divider */}
             <div className="flex items-center gap-2">
@@ -1563,8 +1661,9 @@ function ReportsContent() {
                 Machine-readable inventory of all AI-authored files with risk levels, attestations, and reviewer chains — compatible with SLSA and supply-chain tooling.
               </p>
               <button
-                onClick={() => downloadAIBOM(effectiveData ?? FALLBACK_DATA, fw, start, end, orgName)}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold text-indigo-700 border border-indigo-200 hover:bg-indigo-50 transition-colors"
+                onClick={() => effectiveData && downloadAIBOM(effectiveData, fw, start, end, orgName)}
+                disabled={dataError}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold text-indigo-700 border border-indigo-200 hover:bg-indigo-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                 style={{ background:"rgba(99,102,241,0.05)" }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
@@ -1572,6 +1671,28 @@ function ReportsContent() {
                 Download AIBOM (.json)
               </button>
             </div>
+
+            {/* Recent Reports — real generation history, not a cosmetic list */}
+            {reportHistory && reportHistory.length > 0 && (
+              <div className="section-card p-4 space-y-2.5">
+                <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">Recent Reports</p>
+                <div className="divide-y divide-gray-50">
+                  {reportHistory.map(r => (
+                    <div key={r.id} className="py-2 first:pt-0 last:pb-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-gray-700">{r.framework}</span>
+                        <span className="text-[9px] text-gray-400" suppressHydrationWarning>{new Date(r.created_at).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})}</span>
+                      </div>
+                      <p className="text-[9px] text-gray-400 mt-0.5">
+                        {r.period_start.slice(0,10)} → {r.period_end.slice(0,10)}
+                        {r.generated_by_email && <> · {r.generated_by_email}</>}
+                      </p>
+                      <p className="text-[9px] font-mono text-gray-300 truncate mt-0.5" title={r.signature}>sig: {r.signature.slice(0,24)}…</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ── Right: Document preview ── */}
@@ -1587,8 +1708,15 @@ function ReportsContent() {
                 </svg>
                 <p className="text-sm font-medium text-gray-400">Loading report data…</p>
               </div>
+            ) : dataError ? (
+              <div className="section-card flex flex-col items-center justify-center h-80 gap-3 text-center px-8">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#f43f5e" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <p className="text-sm font-bold text-gray-700">Couldn&apos;t load report data</p>
+                <p className="text-xs text-gray-400 max-w-sm">No preview is shown rather than one built from placeholder data.</p>
+                <button onClick={fetchData} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">Try again</button>
+              </div>
             ) : (
-              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} />
+              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} generatedBy={profile?.email ?? undefined} realEvidence={realEvidence} />
             )}
           </div>
         </div>
