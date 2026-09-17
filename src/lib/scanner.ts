@@ -583,6 +583,28 @@ function findWeakSigningSecret(lines: string[]): ScanIndicator[] {
     "Signing key is a literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager");
 }
 
+// Java (and other statement-per-line-wrapped code) commonly splits the
+// declaration from its value across two lines:
+//   private static final String JWT_SECRET =
+//           "literal-value";
+// -- neither WEAK_SIGNING_SECRET_RE's modifier-agnostic bare-constant
+// pattern nor its Java-specific field modifiers can see this, since the
+// value never shares a line with the field name. Joins each line ending in
+// a bare "=" with the next line before re-testing the same patterns, rather
+// than duplicating them for a two-line form.
+function findWeakSigningSecretSplitLine(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!/(?:JWT_SECRET|SECRET_KEY|JWT_SECRET_KEY)\s*=\s*$/.test(lines[i].trim())) continue;
+    const joined = `${lines[i].trim()} ${lines[i + 1].trim()}`;
+    if (!/=\s*["'][^"']+["']/.test(joined)) continue;
+    found.push({ id:"weak-signing-secret", label:"Hardcoded JWT/Session Signing Secret", severity:"critical", line:i+1,
+      detail:"Signing key is a literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager" });
+  }
+  return found;
+}
+
 const CMD_INJECTION_RE = [
   /subprocess\.(?:call|run)\s*\([^)]*f["']/,
   /os\.popen\s*\(\s*(?:f["']|[^)]*\+)/,
@@ -1840,6 +1862,124 @@ function findSSRFTainted(lines: string[]): ScanIndicator[] {
         seen.add(i);
         found.push({ id:"ssrf", label:"SSRF via Taint Propagation", severity:"critical", line:i+1,
           detail:"User input assigned within 10 lines and flows into HTTP request — SSRF risk" });
+      }
+    }
+  }
+  return found;
+}
+
+// Taint-proximity detectors for Java (and other heavily-formatted code)
+// found via a real Spring Boot benchmark: two compounding gaps meant every
+// named-variable detector (SQLi/command-injection/XSS/path-traversal) missed
+// real, textbook vulnerabilities that SSRF (via findSSRFTainted above) still
+// caught. (1) Spring's @RequestParam/@PathVariable/@RequestBody-annotated
+// *method parameters* are a taint source with no assignment statement at all
+// -- extractTaintedVars' named-variable tracker has no way to see them,
+// while TAINT_SOURCES/hasTaintNearby (used by findSSRFTainted) already does.
+// (2) Java's common "one operand per line" formatting style routinely spreads
+// a single concatenation expression across 3+ lines, so no single line ever
+// contains both a SQL/shell keyword and the "+"/tainted-variable half a
+// same-line pattern needs. Mirrors findSSRFTainted's exact shape -- a real
+// sink call name + any taint evidence within a nearby window, rather than
+// exact-name matching -- since that's the one approach already proven to
+// work against this exact problem in this exact codebase.
+function findCommandInjectionTainted(lines: string[]): ScanIndicator[] {
+  const CMD_SINK_RE = [
+    /Runtime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*exec\s*\(/,
+    /new\s+ProcessBuilder\s*\(/,
+  ];
+  const found: ScanIndicator[] = [];
+  const seen = new Set<number>();
+  for (const re of CMD_SINK_RE) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i)) continue;
+      if (isNonExecutableLine(lines[i])) continue;
+      if (!re.test(lines[i])) continue;
+      if (CMD_INJECTION_RE.some(r => r.test(lines[i]))) continue;
+      if (hasTaintNearby(lines, i, 10)) {
+        seen.add(i);
+        found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
+          detail:"User input assigned within 10 lines and flows into a process-execution call — validate/allowlist arguments and avoid shell interpretation" });
+      }
+    }
+  }
+  return found;
+}
+
+function findSQLInjectionJavaTainted(lines: string[]): ScanIndicator[] {
+  const SQL_SINK_RE = [
+    /\bexecuteQuery\s*\(\s*\w+\s*\)/,
+    /\bexecuteUpdate\s*\(\s*\w+\s*\)/,
+    /\.execute\s*\(\s*\w+\s*\)/,
+    /jdbcTemplate\s*\.\s*(?:query|update|execute)\s*\(\s*\w+/,
+  ];
+  const found: ScanIndicator[] = [];
+  const seen = new Set<number>();
+  for (const re of SQL_SINK_RE) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i)) continue;
+      if (isNonExecutableLine(lines[i])) continue;
+      if (!re.test(lines[i])) continue;
+      if (SQL_INJECTION_RE.some(r => r.test(lines[i]))) continue;
+      if (hasTaintNearby(lines, i, 10)) {
+        seen.add(i);
+        found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
+          detail:"User input assigned within 10 lines and flows into a query-execution call — use a PreparedStatement with bound parameters" });
+      }
+    }
+  }
+  return found;
+}
+
+function findReflectedXSSTainted(lines: string[]): ScanIndicator[] {
+  const HTML_SINK_RE = [
+    /\.contentType\s*\(\s*MediaType\.TEXT_HTML\s*\)/,
+    /\.body\s*\(\s*\w+\s*\)\s*;?\s*$/,
+    /\bres\.(?:send|write)\s*\(\s*\w+\s*\)/,
+  ];
+  const found: ScanIndicator[] = [];
+  const seen = new Set<number>();
+  for (const re of HTML_SINK_RE) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i)) continue;
+      if (isNonExecutableLine(lines[i])) continue;
+      if (!re.test(lines[i])) continue;
+      if (XSS_RE.some(r => r.test(lines[i]))) continue;
+      // Restricted to a shorter, backward-only window and requires an
+      // actual HTML-looking string literal nearby (an opening "<" tag) --
+      // .body(x)/res.send(x) are used constantly for plain JSON/text
+      // responses, so without this extra corroboration this would be far
+      // noisier than the other taint-proximity checks here.
+      const window = lines.slice(Math.max(0, i - 8), i + 1);
+      if (!window.some(l => /<\w+[ >]/.test(l))) continue;
+      if (hasTaintNearby(lines, i, 8)) {
+        seen.add(i);
+        found.push({ id:"xss", label:"Reflected XSS", severity:"high", line:i+1,
+          detail:"User input assigned within 8 lines and returned as raw HTML in the response body — sanitize/escape or use a templating engine with auto-escaping" });
+      }
+    }
+  }
+  return found;
+}
+
+function findPathTraversalTainted(lines: string[]): ScanIndicator[] {
+  const FS_SINK_RE = [
+    /Paths\s*\.\s*get\s*\(/,
+    /new\s+File\s*\(/,
+    /Files\s*\.\s*(?:readString|readAllBytes|write|newInputStream|newOutputStream|delete)\s*\(/,
+  ];
+  const found: ScanIndicator[] = [];
+  const seen = new Set<number>();
+  for (const re of FS_SINK_RE) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i)) continue;
+      if (isNonExecutableLine(lines[i])) continue;
+      if (!re.test(lines[i])) continue;
+      if (PATH_TRAVERSAL_RE.some(r => r.test(lines[i]))) continue;
+      if (hasTaintNearby(lines, i, 10)) {
+        seen.add(i);
+        found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+          detail:"User input assigned within 10 lines and flows into a file path — resolve and validate the result stays within the intended base directory" });
       }
     }
   }
@@ -4381,17 +4521,21 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findSQLInjection(lines),
     ...findSQLInjectionTainted(lines),
     ...findSQLInjectionPHPInterpolated(lines),
+    ...findSQLInjectionJavaTainted(lines),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
+    ...findWeakSigningSecretSplitLine(lines),
     ...findCommandInjection(lines),
     ...findNamedTaintCommandInjectionPHP(lines),
     ...findNamedTaintCommandInjectionPython(lines),
     ...findNamedTaintCommandInjectionJS(lines),
+    ...findCommandInjectionTainted(lines),
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
     ...findNamedTaintPathTraversalJS(lines),
+    ...findPathTraversalTainted(lines),
     ...findZipSlip(lines),
     ...findPHPFileInclusion(lines),
     ...findPrototypePollution(lines),
@@ -4413,6 +4557,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintXSS(lines),
     ...findNamedTaintReflectedXSS(lines),
+    ...findReflectedXSSTainted(lines),
     ...findNoSQLInjection(lines),
     ...findVerboseErrors(lines),
     ...findGraphQLInjection(lines),
