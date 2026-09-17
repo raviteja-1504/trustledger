@@ -238,7 +238,19 @@ export function scoreExploitability(
   indicators: ScanIndicator[],
   content:    string,
   graph:      CallGraphResult | null = null,
-  containingFunction = "unknown",
+  // Resolves which function/method a given indicator's line actually falls
+  // inside, so reachability is classified per-indicator rather than once
+  // for the whole file. Previously this took a single `containingFunction`
+  // string applied to every indicator -- found (via direct investigation)
+  // to always be called with the literal default "unknown" (no real
+  // function is ever named that), which made classifyReachability() return
+  // "unreachable" for every single finding in every file, forever,
+  // regardless of what the real BFS/taint-propagation graph actually
+  // computed. A single string could never have fixed this correctly even
+  // with a real value plugged in -- one function's reachability doesn't
+  // apply to every other finding in the file -- hence the signature change
+  // rather than just passing a non-"unknown" default.
+  resolveContainingFunction: (line: number) => string = () => "unknown",
 ): ReachabilityReport {
   const securityIndicators = indicators.filter(i =>
     !i.id.startsWith("ai-") &&
@@ -250,7 +262,7 @@ export function scoreExploitability(
   const scores: ExploitabilityScore[] = securityIndicators.map(ind => {
     const profile  = VULN_PROFILES[ind.id] ?? DEFAULT_PROFILE;
     const base     = cvssBase(profile);
-    const reach    = classifyReachability(containingFunction, graph);
+    const reach    = classifyReachability(resolveContainingFunction(ind.line ?? 1), graph);
     const ctx      = detectContext(content, ind.line ?? 1);
     let   adjScore = base * REACH_MULTIPLIERS[reach];
     if (ctx.auth)        adjScore *= 0.70;

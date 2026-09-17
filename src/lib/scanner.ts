@@ -28,6 +28,8 @@ import { aggregateComplianceReports, evaluateCompliance } from "./compliance";
 import type { ComplianceReport }  from "./compliance";
 import { scoreExploitability }   from "./reachability";
 import type { ReachabilityReport } from "./reachability";
+import { parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel } from "./astTaint";
+import type * as ts from "typescript";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -4456,6 +4458,19 @@ function buildExplainedSignals(fired: SignalResult[], totalScore: number): Expla
     .sort((a, b) => b.contribution - a.contribution);
 }
 
+// Wraps astTaint.ts's real AST-based data-flow findings into the same
+// ScanIndicator shape every regex detector produces. Runs ADDITIVELY
+// alongside the existing JS/TS named-taint regex functions, not as a
+// replacement -- see astTaint.ts's own docblock for why. Confidence fixed
+// at 95: this is real structural evidence (an actual parsed source-to-sink
+// path), not a proximity guess.
+function findAstTaintFindings(content: string, filePath: string, sourceFile: ts.SourceFile): ScanIndicator[] {
+  return scanAstTaint(content, filePath, sourceFile).map(f => ({
+    id: f.id, label: astTaintLabel(f.id), severity: astTaintSeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(file_path: string, content: string, prPriorBias = 0): FileAnalysis {
@@ -4501,6 +4516,18 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   // RCE risk. Vendored takes priority in the rare case a file matches both.
   const fileCategory: "application" | "third_party" | "test_code" =
     looksMinified ? "third_party" : fileMeta.isTestFile ? "test_code" : "application";
+
+  // Real AST parse (JS/TS only, Phase 1 of the multi-language OWASP hardening
+  // effort -- see astTaint.ts). Skips vendored/generated files (already
+  // excluded from risk_score) and a line-count cap, matching the "fall back
+  // silently to regex-only, no regression" safeguard used elsewhere in this
+  // function. Parsed exactly once and reused below for both the taint scan
+  // and the exploitability reachability resolver.
+  const AST_TAINT_LINE_CAP = 5000;
+  const tsSourceFile: ts.SourceFile | null =
+    (lang === "javascript" || lang === "typescript") && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
+      ? parseSourceFile(content, file_path)
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -4570,6 +4597,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
+    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
@@ -4683,10 +4711,20 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   // Suppress unused variable warning for firedSignals
   void firedSignals;
 
-  // Exploitability scoring (CVSS-lite with call-graph reachability)
+  // Exploitability scoring (CVSS-lite with call-graph reachability).
+  // resolveContainingFunction uses the real parsed AST (JS/TS only, when
+  // available) to find which function a given indicator's line actually
+  // falls inside, per-indicator -- see scoreExploitability's own docblock
+  // for why a single containingFunction string could never have been
+  // correct even with a real (non-"unknown") value plugged in.
   const callGraph   = !fileMeta.skipAI ? buildCallGraph(content) : null;
+  const resolveContainingFunction = (line: number): string => {
+    if (!tsSourceFile) return "unknown";
+    const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
+    return findEnclosingFunctionName(findNodeAtPosition(tsSourceFile, pos));
+  };
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
-    ? scoreExploitability(indicators, content, callGraph)
+    ? scoreExploitability(indicators, content, callGraph, resolveContainingFunction)
     : null;
 
   // Compliance evaluation
