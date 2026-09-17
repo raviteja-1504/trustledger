@@ -224,7 +224,7 @@ export async function POST(req: NextRequest) {
           indicators: f.indicators
             ? f.indicators
                 .filter(i => i.line)
-                .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory }))
+                .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe }))
             : [],
           attribution: f.attribution,
         })));

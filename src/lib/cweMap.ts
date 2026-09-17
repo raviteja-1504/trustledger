@@ -34,6 +34,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "graphql-introspection-enabled": { id: "CWE-200", title: "Exposure of Sensitive Information to an Unauthorized Actor" },
   "bola-identity-mismatch":     { id: "CWE-639",  title: "Authorization Bypass Through User-Controlled Key" },
   "plaintext-password-storage": { id: "CWE-256",  title: "Plaintext Storage of a Password" },
+  "debug-mode-enabled":          { id: "CWE-489",  title: "Active Debug Code" },
   "eval-exec":                  { id: "CWE-95",   title: "Eval Injection" },
   "weak-crypto":                { id: "CWE-327",  title: "Broken or Risky Cryptographic Algorithm" },
   "ssrf":                       { id: "CWE-918",  title: "Server-Side Request Forgery" },

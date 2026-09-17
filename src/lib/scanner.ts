@@ -472,6 +472,22 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // C#: var url = Request.Query["url"];
     const csAssign = /\b(?:var|string)\s+(\w+)\s*=\s*Request\.(?:Query|Form)\s*\[/.exec(line.trim());
     if (csAssign) { tainted.add(csAssign[1]); continue; }
+    // Second-hop propagation through simple string concatenation --
+    // command = "ping -c 1 " + host (host already tainted from an earlier
+    // line) is the single most common real-world shape for command
+    // injection (build a shell command string, then execute it), and none
+    // of the direct-source patterns above can see it since the RHS is a
+    // literal, not a request access. Only fires once a captured word on the
+    // RHS is already in the tainted set built so far -- safe against
+    // false-tainting unrelated concatenations, and order-safe since this
+    // loop already runs top-to-bottom in source order.
+    if (tainted.size > 0 && line.includes("+")) {
+      const concatAssign = /^(\w+)\s*=\s*(.+)$/.exec(line.trim());
+      if (concatAssign && !concatAssign[2].includes("==")) {
+        const rhsVars = [...concatAssign[2].matchAll(/\b(\w+)\b/g)].map(m => m[1]);
+        if (rhsVars.some(v => tainted.has(v))) { tainted.add(concatAssign[1]); continue; }
+      }
+    }
   }
   return tainted;
 }
@@ -734,6 +750,10 @@ const HEADER_INJECT_RE = [
 // Weak CORS policy
 const WEAK_CORS_RE = [
   /Access-Control-Allow-Origin["']?\s*[,:]\s*["']?\*/,
+  // Python/Flask dict-bracket assignment: response.headers["Access-Control-
+  // Allow-Origin"] = "*" -- the comma/colon forms above don't match this
+  // shape (a "]" then "=" follows the header name, not "," or ":").
+  /Access-Control-Allow-Origin["']?\s*\]\s*=\s*["']?\*/,
   /cors\s*\(\s*\{\s*origin\s*:\s*["']\*["']/,
   /res\.(?:header|setHeader)\s*\(\s*["']Access-Control-Allow-Origin["'],\s*["']\*["']\)/,
   /app\.use\s*\(\s*cors\s*\(\s*\)\s*\)/,
@@ -1143,6 +1163,31 @@ function findCommandInjection(lines: string[]): ScanIndicator[] {
     "User input interpolated into shell command");
 }
 
+// Python subprocess with shell=True and a tainted variable -- the classic
+// real-world Python command-injection shape (subprocess.check_output(cmd,
+// shell=True) where cmd was built from request input, often via string
+// concatenation on an earlier line: command = "ping -c 1 " + host). None of
+// CMD_INJECTION_RE's Python entries require shell=True or accept a bare
+// variable; they only match an inline f-string/concatenation directly in
+// the call. shell=True is the specific flag that makes this dangerous (it
+// invokes a real shell, enabling command chaining via ;/&&/|), so requiring
+// it keeps this detector precise rather than flagging every subprocess call.
+const PYTHON_SUBPROCESS_SHELL_RE = /subprocess\.(?:check_output|check_call|call|run|Popen)\s*\(\s*(\w+)\s*(?:,[^)]*)?shell\s*=\s*True/;
+
+function findNamedTaintCommandInjectionPython(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = PYTHON_SUBPROCESS_SHELL_RE.exec(lines[i]);
+    if (!m || !tainted.has(m[1])) continue;
+    found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
+      detail:`Tainted variable '${m[1]}' passed to subprocess with shell=True — use a list of arguments and shell=False, or shlex.quote()` });
+  }
+  return found;
+}
+
 // PHP named-variable command injection: $target = $_REQUEST['ip']; ...
 // shell_exec('ping ' . $target) -- CMD_INJECTION_RE's PHP entry only matches
 // $_GET/$_POST/$_REQUEST literally inline inside the call, never a variable
@@ -1287,7 +1332,12 @@ function findTimingAttack(lines: string[]): ScanIndicator[] {
 function findNamedTaintSSRF(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
   if (tainted.size === 0) return [];
-  const HTTP_SINK_RE = /(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|got|needle(?:\.(?:get|post|put|delete|patch|head))?|superagent(?:\.(?:get|post|put|delete|patch|head))?|https?\.(?:get|request))\s*\(\s*(\w+)/i;
+  // Python's `requests` library added here -- found missing via a real
+  // benchmark: `url = request.args.get("url"); requests.get(url)` is the
+  // idiomatic Python shape (SSRF_RE's own Python entry only covers the
+  // request.args literally inline in the call, not a variable assigned on
+  // an earlier line).
+  const HTTP_SINK_RE = /(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|got|needle(?:\.(?:get|post|put|delete|patch|head))?|superagent(?:\.(?:get|post|put|delete|patch|head))?|https?\.(?:get|request)|requests\.(?:get|post|put|delete|head|patch))\s*\(\s*(\w+)/i;
   const found: ScanIndicator[] = [];
   const seen = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
@@ -1441,6 +1491,24 @@ function findHeaderInjection(lines: string[]): ScanIndicator[] {
 function findWeakCORS(lines: string[]): ScanIndicator[] {
   return runDetector(lines, WEAK_CORS_RE, "weak-cors", "Weak CORS Policy", "medium",
     "Wildcard Access-Control-Allow-Origin — use explicit origin allowlist");
+}
+
+// Debug mode left enabled -- exposes the interactive debugger (arbitrary
+// code execution via Werkzeug's PIN-protected console, or Django's DEBUG=True
+// leaking full stack traces, settings, and environment variables on every
+// unhandled exception). A real, common, single-line-detectable
+// misconfiguration in the same spirit as the existing GraphQL-introspection
+// and CSRF-disabled checks.
+const DEBUG_MODE_RE = [
+  /app\.config\s*\[\s*["']DEBUG["']\s*\]\s*=\s*True\b/,
+  /\.run\s*\([^)]*\bdebug\s*=\s*True\b/,
+  /^\s*DEBUG\s*=\s*True\b/,
+  /app\.debug\s*=\s*True\b/,
+];
+
+function findDebugModeEnabled(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, DEBUG_MODE_RE, "debug-mode-enabled", "Debug Mode Enabled", "high",
+    "Framework debug mode is explicitly enabled — exposes stack traces, source code, and (Werkzeug) an interactive RCE console; disable in production");
 }
 
 function findIDOR(lines: string[]): ScanIndicator[] {
@@ -4186,6 +4254,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findWeakSigningSecret(lines),
     ...findCommandInjection(lines),
     ...findNamedTaintCommandInjectionPHP(lines),
+    ...findNamedTaintCommandInjectionPython(lines),
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
@@ -4200,6 +4269,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findSSTI(lines),
     ...findHeaderInjection(lines),
     ...findWeakCORS(lines),
+    ...findDebugModeEnabled(lines),
     ...findIDOR(lines),
     ...findIDORJava(lines),
     ...findNamedTaintIDOR(lines),

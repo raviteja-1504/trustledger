@@ -14,6 +14,10 @@ export interface FileIndicator {
   // preserved as evidence but excluded from the file's risk_score; see
   // calculateRisk() and attachEvidence() in src/lib/scanner.ts.
   codeCategory?: "application" | "third_party" | "test_code";
+  // Presence of a CWE is what the PR page uses to tell a real, CWE-mapped
+  // security finding apart from an AI-heuristic signal when SIGNAL_META has
+  // no curated entry for this id -- see isSecuritySignal() in pr/[id]/page.tsx.
+  cwe?: string;
 }
 
 // An explicit AI-tooling artifact (a repo config file or a commit/content

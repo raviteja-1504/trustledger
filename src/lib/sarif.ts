@@ -54,6 +54,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "graphql-introspection-enabled": { title: "GraphQL Introspection Enabled", description: "GraphiQL/Playground/introspection is explicitly enabled, exposing the complete schema for attacker reconnaissance.", cwe: "CWE-200" },
   "bola-identity-mismatch":  { title: "Broken Object Level Authorization",  description: "Caller identity was established via a token/session check, then a write used a different identifier with no ownership comparison.", cwe: "CWE-639" },
   "plaintext-password-storage": { title: "Plaintext Password Storage",     description: "Password assigned directly from request input with no hashing function anywhere on the line.", cwe: "CWE-256" },
+  "debug-mode-enabled":       { title: "Debug Mode Enabled",              description: "Framework debug mode is explicitly enabled, exposing stack traces, source code, and (Werkzeug) an interactive RCE console.", cwe: "CWE-489" },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

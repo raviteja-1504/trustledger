@@ -17,6 +17,7 @@ import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
+import { isSecuritySignal, realSeverity } from "@/lib/signalClassification";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "graphql-introspection-enabled": { label: "GraphQL Introspection Enabled", desc: "GraphiQL/Playground/introspection is explicitly enabled — exposes the complete schema for attacker reconnaissance", sev: "medium", security: true },
   "bola-identity-mismatch":  { label: "Broken Object Level Authorization", desc: "Caller identity was established via a token/session check, then a write used a different identifier with no ownership comparison", sev: "medium", security: true },
   "plaintext-password-storage": { label: "Plaintext Password Storage", desc: "Password assigned directly from request input with no hashing function anywhere on the line", sev: "high", security: true },
+  "debug-mode-enabled":      { label: "Debug Mode Enabled",         desc: "Framework debug mode is explicitly enabled — exposes stack traces, source code, and (Werkzeug) an interactive RCE console", sev: "high", security: true },
   "ssrf":                    { label: "SSRF",                      desc: "Server-side request forgery — user controls the URL of an outgoing request",                  sev: "critical", security: true },
   "jwt-none-alg":            { label: "JWT None Algorithm",        desc: "JWT verification may accept 'none' algorithm, bypassing signature checks",                    sev: "critical", security: true },
   "prototype-pollution":     { label: "Prototype Pollution",       desc: "Object property assignment from user input can pollute global prototype",                    sev: "high",     security: true },
@@ -414,16 +416,17 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
 
           {/* Signals — split into security vulnerabilities and AI detection */}
           {file.risk_indicators.length > 0 && (() => {
-            const securitySigs = file.risk_indicators.filter(s => SIGNAL_META[s]?.security);
-            const aiSigs       = file.risk_indicators.filter(s => !SIGNAL_META[s]?.security);
+            const securitySigs = file.risk_indicators.filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security));
+            const aiSigs       = file.risk_indicators.filter(s => !isSecuritySignal(s, file, SIGNAL_META[s]?.security));
 
             const renderSignal = (sig: string) => {
-              const meta = SIGNAL_META[sig] ?? { label: sig, desc: "Detection signal", sev: "low" as SignalSev };
-              const { badge, dot } = SEV_COLORS[meta.sev];
               const instances = (file.indicators ?? []).filter(i => i.id === sig);
+              const meta = SIGNAL_META[sig] ?? { label: instances[0]?.label ?? sig, desc: "No curated description for this finding — see detail below." };
+              const sev = realSeverity(instances, SIGNAL_META[sig]?.sev);
+              const { badge, dot } = SEV_COLORS[sev];
               const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
               const detail = instances[0]?.detail;
-              const isSec = !!meta.security;
+              const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
               // Every instance of this signal in this file must share the
               // category for the card to be muted -- if even one instance is
               // real application code, this still reflects the file's real
@@ -435,15 +438,15 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
               return (
                 <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 ${
                   isMuted ? "bg-gray-50 border-gray-100"
-                  : isSec && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
-                  : isSec && meta.sev === "high"   ? "bg-orange-50 border-orange-200"
-                  : isSec && meta.sev === "medium"  ? "bg-amber-50 border-amber-200"
+                  : isSec && sev === "critical" ? "bg-rose-50 border-rose-200"
+                  : isSec && sev === "high"   ? "bg-orange-50 border-orange-200"
+                  : isSec && sev === "medium"  ? "bg-amber-50 border-amber-200"
                   : "bg-gray-50 border-gray-100"}`}>
                   <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${isMuted ? "bg-gray-300" : dot}`} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                       <p className="text-xs font-bold text-gray-900">{meta.label}</p>
-                      <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                      <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{sev}</span>
                       {isMuted && (
                         <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
                           {allThirdParty ? "Third-party code" : "Test code"}
@@ -686,28 +689,30 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
 
               {/* Signals — security vulnerabilities + AI detection */}
               {file.risk_indicators.length > 0 && (() => {
-                const secSigs = file.risk_indicators.filter(s => SIGNAL_META[s]?.security);
-                const aiSigs  = file.risk_indicators.filter(s => !SIGNAL_META[s]?.security);
+                const secSigs = file.risk_indicators.filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security));
+                const aiSigs  = file.risk_indicators.filter(s => !isSecuritySignal(s, file, SIGNAL_META[s]?.security));
                 const renderRowSignal = (sig: string) => {
-                  const meta = SIGNAL_META[sig] ?? { label: sig, desc: "Detection signal", sev: "low" as SignalSev };
-                  const { badge, dot } = SEV_COLORS[meta.sev];
                   const instances = (file.indicators ?? []).filter(i => i.id === sig);
+                  const meta = SIGNAL_META[sig] ?? { label: instances[0]?.label ?? sig, desc: "No curated description for this finding — see detail below." };
+                  const sev = realSeverity(instances, SIGNAL_META[sig]?.sev);
+                  const { badge, dot } = SEV_COLORS[sev];
                   const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
                   const detail = instances[0]?.detail;
+                  const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
                   const allThirdParty = instances.length > 0 && instances.every(i => i.codeCategory === "third_party");
                   const allTestCode   = instances.length > 0 && instances.every(i => i.codeCategory === "test_code");
                   const isMuted = allThirdParty || allTestCode;
                   return (
                     <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 shadow-sm ${
                       isMuted ? "bg-gray-50 border-gray-100"
-                      : meta.security && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
-                      : meta.security && meta.sev === "high"   ? "bg-orange-50 border-orange-200"
+                      : isSec && sev === "critical" ? "bg-rose-50 border-rose-200"
+                      : isSec && sev === "high"   ? "bg-orange-50 border-orange-200"
                       : "bg-white border-gray-100"}`}>
                       <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${isMuted ? "bg-gray-300" : dot}`} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                           <p className="text-xs font-bold text-gray-900">{meta.label}</p>
-                          <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                          <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{sev}</span>
                           {isMuted && (
                             <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
                               {allThirdParty ? "Third-party code" : "Test code"}

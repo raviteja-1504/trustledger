@@ -21,6 +21,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "graphql-introspection-enabled": "GraphQL introspection enabled",
   "bola-identity-mismatch": "Broken Object Level Authorization",
   "plaintext-password-storage": "Plaintext password storage",
+  "debug-mode-enabled": "Debug mode enabled",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {
