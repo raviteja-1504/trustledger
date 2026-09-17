@@ -94,6 +94,34 @@ function getConfigPath() {
     const result = analyzeFile("src/config.ts", content);
     expect(result.indicators.some(i => i.id === "path-traversal")).toBe(false);
   });
+
+  it("flags a tainted path built via string concatenation (no path.join wrapper) fed directly to fs.readFile", () => {
+    const content = `
+app.get("/read", (req, res) => {
+  const filename = String(req.query.file || "");
+  const filePath = "/var/data/" + filename;
+  fs.readFile(filePath, (err, data) => {
+    res.send(data);
+  });
+});
+`;
+    const result = analyzeFile("app.ts", content);
+    const finding = result.indicators.find(i => i.id === "path-traversal");
+    expect(finding).toBeDefined();
+    expect(finding?.detail).toContain("filePath");
+  });
+
+  it("does not flag fs.readFile() with only a static path", () => {
+    const content = `
+function loadConfig() {
+  fs.readFile("/etc/myapp/config.json", (err, data) => {
+    return data;
+  });
+}
+`;
+    const result = analyzeFile("src/config.ts", content);
+    expect(result.indicators.some(i => i.id === "path-traversal")).toBe(false);
+  });
 });
 
 describe("JS named-taint open redirect via res.redirect (found via real-world OWASP-style Express testing)", () => {

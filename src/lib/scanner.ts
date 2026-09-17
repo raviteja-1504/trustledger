@@ -1292,6 +1292,12 @@ function findNamedTaintReflectedXSS(lines: string[]): ScanIndicator[] {
 // precedent of flagging the join() call itself as the vulnerable sink,
 // without needing to trace all the way to a downstream fs/sendFile call.
 const JS_PATH_JOIN_RE = /\bpath\.(?:join|resolve)\s*\(([^)]+)\)/;
+// A second sink shape found missing via direct verification testing: a path
+// built via plain string concatenation (no path.join() at all -- filePath =
+// "/var/data/" + filename) fed straight into an fs.* call. JS_PATH_JOIN_RE
+// only catches the path.join() wrapper form; this catches the fs sink
+// directly when its sole/first argument is a bare tainted variable.
+const JS_FS_SINK_RE = /\bfs\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream|unlink|unlinkSync|stat|statSync)\s*\(\s*(\w+)\b/;
 
 function findNamedTaintPathTraversalJS(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1300,14 +1306,24 @@ function findNamedTaintPathTraversalJS(lines: string[]): ScanIndicator[] {
   for (let i = 0; i < lines.length; i++) {
     if (isNonExecutableLine(lines[i])) continue;
     const line = lines[i];
-    const m = JS_PATH_JOIN_RE.exec(line);
-    if (!m) continue;
     if (PATH_TRAVERSAL_RE.some(r => r.test(line))) continue; // already caught inline
-    const args = [...m[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
-    const hit = args.find(a => tainted.has(a));
-    if (!hit) continue;
-    found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
-      detail:`Tainted variable '${hit}' joined into a file path — resolve and validate the result stays within the intended base directory` });
+
+    const joinMatch = JS_PATH_JOIN_RE.exec(line);
+    if (joinMatch) {
+      const args = [...joinMatch[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+      const hit = args.find(a => tainted.has(a));
+      if (hit) {
+        found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+          detail:`Tainted variable '${hit}' joined into a file path — resolve and validate the result stays within the intended base directory` });
+        continue;
+      }
+    }
+
+    const fsMatch = JS_FS_SINK_RE.exec(line);
+    if (fsMatch && tainted.has(fsMatch[1])) {
+      found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+        detail:`Tainted variable '${fsMatch[1]}' passed directly to a filesystem call — resolve and validate the result stays within the intended base directory` });
+    }
   }
   return found;
 }
