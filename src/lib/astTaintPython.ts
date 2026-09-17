@@ -82,19 +82,24 @@ function initPythonParser(): Promise<LanguageT> {
       const fs = require("fs") as typeof import("fs");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const path = require("path") as typeof import("path");
-      // Deliberately NOT require.resolve("tree-sitter-wasms/out/tree-sitter-python.wasm")
-      // directly: webpack's static analyzer intercepts any literal-string
-      // require.resolve(...) call and tries to parse the TARGET file as a
-      // module to build its dependency graph -- for a .wasm target that
-      // fails the whole production build ("WebAssembly is not enabled by
-      // default"), regardless of serverComponentsExternalPackages (that only
-      // affects require()/import of the package itself, not this). Instead,
-      // resolve the package's package.json (an ordinary JSON file webpack
-      // already knows how to handle) and build the final .wasm path with
-      // plain runtime string ops -- webpack's parser never sees a require
-      // target ending in .wasm anywhere in the source at all.
-      const pkgJsonPath = nodeRequire().resolve("tree-sitter-wasms/package.json");
-      const wasmPath = path.join(path.dirname(pkgJsonPath), "out", "tree-sitter-python.wasm");
+      // Deliberately NOT require.resolve("tree-sitter-wasms/...") at all --
+      // even via nodeRequire(), that would need tree-sitter-wasms itself to
+      // be resolvable at runtime, which it isn't: it's never require()'d in
+      // a webpack-visible way anywhere (only read as raw bytes), so
+      // @vercel/nft's build tracer has no signal it's used and won't include
+      // even its package.json (confirmed directly against a real production
+      // MODULE_NOT_FOUND failure). Instead, anchor on web-tree-sitter's own
+      // main entry point (".", the only guaranteed-resolvable subpath its
+      // package.json "exports" map allows -- "./package.json" is NOT in that
+      // map and throws MODULE_NOT_FOUND under both Node's real exports
+      // enforcement and Jest's resolver, confirmed directly) and reach the
+      // sibling tree-sitter-wasms package with plain path joins. The actual
+      // .wasm binary still needs its own outputFileTracingIncludes entry in
+      // next.config.mjs (next to web-tree-sitter's own tree-sitter.wasm)
+      // since neither is ever really require()'d.
+      const webTreeSitterEntry = nodeRequire().resolve("web-tree-sitter");
+      const nodeModulesDir = path.dirname(path.dirname(webTreeSitterEntry));
+      const wasmPath = path.join(nodeModulesDir, "tree-sitter-wasms", "out", "tree-sitter-python.wasm");
       // Read the bytes ourselves and pass a Uint8Array rather than a path
       // string: Language.load(path) internally does `await import("fs/promises")`
       // in Node, a dynamic ESM import that Jest's CJS VM can't execute without
