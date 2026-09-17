@@ -1025,6 +1025,41 @@ function findPathTraversal(lines: string[]): ScanIndicator[] {
     "User input in file path — resolve and validate against base directory");
 }
 
+// Zip Slip — a distinct path-traversal taint source (CWE-22) from the
+// request-parameter cases above: the tainted value is a ZIP archive entry's
+// own name, which the archive's creator fully controls, so a crafted entry
+// like "../../etc/cron.d/x" escapes the intended extraction directory unless
+// the joined path is canonicalized and checked. Found missing entirely via a
+// real WebGoat benchmark (pathtraversal/ProfileZipSlip.java) — PATH_TRAVERSAL_RE
+// only recognizes req./request.-derived taint, never a zip entry's getName().
+// Requires corroborating zip-extraction context nearby to avoid flagging the
+// same File(dir, x.getName()) shape used for ordinary, trusted file copies.
+const ZIP_SLIP_CONTEXT_RE = /\bZipEntry\b|\bZipInputStream\b|\.getNextEntry\s*\(|\.entries\s*\(\s*\)|\bunzipper\b|\badm-zip\b|\bAdmZip\b/i;
+const ZIP_SLIP_SINK_RE = /(?:new\s+File|Paths\.get)\s*\([\s\S]{0,200}?\.\s*(?:getName|name)\s*\(\s*\)|path\.(?:join|resolve)\s*\([^)]*\.\s*(?:getName|name)\b/i;
+// Deliberately excludes a literal "zipSlip" keyword check: WebGoat's own
+// vulnerable lesson class is itself named ProfileZipSlip, so that keyword
+// would match the vulnerable class name as if it were a guard.
+const ZIP_SLIP_GUARD_RE = /getCanonicalPath|\.normalize\s*\(\s*\)|startsWith\s*\(|resolve\s*\([^)]*\)\.startsWith|toRealPath/i;
+
+function findZipSlip(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!ZIP_SLIP_SINK_RE.test(lines[i])) continue;
+    const windowStart = Math.max(0, i - 15);
+    const contextWindow = lines.slice(windowStart, i + 1);
+    if (!contextWindow.some(l => ZIP_SLIP_CONTEXT_RE.test(l))) continue;
+    // The containment check conventionally validates the *joined* path, so
+    // it's written right after the File/Path is constructed, not before —
+    // unlike contextWindow above, this has to look forward too.
+    const guardWindow = lines.slice(windowStart, Math.min(lines.length, i + 8));
+    if (guardWindow.some(l => ZIP_SLIP_GUARD_RE.test(l))) continue;
+    found.push({ id:"path-traversal", label:"Zip Slip — Path Traversal via Archive Entry Name", severity:"critical", line:i+1,
+      detail:"Archive entry name joined into an extraction path with no canonicalization/containment check — a crafted entry name (e.g. '../../etc/x') can write outside the target directory" });
+  }
+  return found;
+}
+
 function findPrototypePollution(lines: string[]): ScanIndicator[] {
   return runDetector(lines, PROTO_POLLUTION_RE, "prototype-pollution", "Prototype Pollution", "high",
     "Unvalidated user input merged into object — may pollute Object prototype");
@@ -3876,6 +3911,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
+    ...findZipSlip(lines),
     ...findPrototypePollution(lines),
     ...findInsecureRandomness(lines),
     ...findReDoS(lines),

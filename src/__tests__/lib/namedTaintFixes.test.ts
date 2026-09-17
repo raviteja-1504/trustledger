@@ -165,3 +165,66 @@ module.exports = parse;
     expect(result.indicators.some(i => i.id === "xxe")).toBe(false);
   });
 });
+
+describe("Zip Slip via archive entry names (found via real-world OWASP WebGoat testing)", () => {
+  it("flags a File joined from a ZipEntry name with no canonicalization/containment check", () => {
+    const content = `
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+public class ProfileZipSlip {
+  private AttackResult processZipUpload(MultipartFile file, String username) {
+    ZipFile zip = new ZipFile(uploadedZipFile.toFile());
+    Enumeration<? extends ZipEntry> entries = zip.entries();
+    while (entries.hasMoreElements()) {
+      ZipEntry e = entries.nextElement();
+      File f = new File(tmpZipDirectory.toFile(), e.getName());
+      InputStream is = zip.getInputStream(e);
+      Files.copy(is, f.toPath(), StandardCopyOption.REPLACE_EXISTING);
+    }
+    return isSolved();
+  }
+}
+`;
+    const result = analyzeFile("ProfileZipSlip.java", content);
+    const finding = result.indicators.find(i => i.id === "path-traversal" && i.label?.includes("Zip Slip"));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("critical");
+  });
+
+  it("does not flag zip extraction that validates the resolved path stays within the target directory", () => {
+    const content = `
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+public class SafeZipExtract {
+  private void extract(ZipFile zip, File targetDir) throws IOException {
+    Enumeration<? extends ZipEntry> entries = zip.entries();
+    while (entries.hasMoreElements()) {
+      ZipEntry e = entries.nextElement();
+      File f = new File(targetDir, e.getName());
+      if (!f.getCanonicalPath().startsWith(targetDir.getCanonicalPath())) {
+        throw new IOException("Entry is outside of the target dir: " + e.getName());
+      }
+      Files.copy(zip.getInputStream(e), f.toPath());
+    }
+  }
+}
+`;
+    const result = analyzeFile("SafeZipExtract.java", content);
+    expect(result.indicators.some(i => i.id === "path-traversal")).toBe(false);
+  });
+
+  it("does not flag an ordinary File(dir, name) join with no zip-extraction context nearby", () => {
+    const content = `
+public class ProfileImage {
+  public void saveCopy(File sourceFile, File destDir) throws IOException {
+    File copy = new File(destDir, sourceFile.getName());
+    Files.copy(sourceFile.toPath(), copy.toPath());
+  }
+}
+`;
+    const result = analyzeFile("ProfileImage.java", content);
+    expect(result.indicators.some(i => i.id === "path-traversal")).toBe(false);
+  });
+});
