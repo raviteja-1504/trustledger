@@ -111,6 +111,7 @@ function initPythonParser(): Promise<LanguageT> {
       const p = new Parser();
       p.setLanguage(lang);
       parserPool = p;
+      console.log("[astTaintPython] Python AST taint engine ready");
       return lang;
     })().catch(err => {
       console.error("[astTaintPython] WASM init failed -- Python AST taint scanning disabled, regex detectors unaffected:", err);
