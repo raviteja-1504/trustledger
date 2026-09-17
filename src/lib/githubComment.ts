@@ -18,6 +18,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "ai-blast-radius": "AI blast radius",
   "file-inclusion": "PHP file inclusion",
   "weak-signing-secret": "Hardcoded signing secret",
+  "graphql-introspection-enabled": "GraphQL introspection enabled",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

@@ -777,6 +777,22 @@ const GRAPHQL_INJECT_RE = [
   /makeExecutableSchema\s*\(\s*\{[^}]*typeDefs\s*:\s*`[^`]*\$\{(?:req|request)\./i,
 ];
 
+// GraphQL introspection/IDE left enabled -- a real, common, single-line
+// misconfiguration across every major GraphQL server library (graphene/
+// flask-graphql's graphiql=, Apollo Server's introspection:/playground:,
+// graphql-yoga, Ariadne, Django's GRAPHIQL setting). Exposing this in
+// production hands an attacker the complete schema (every type, field,
+// mutation and argument) for reconnaissance with zero effort. Found missing
+// entirely via a real Damn Vulnerable GraphQL Application benchmark
+// (core/views.py registers a /graphiql route with graphiql=True).
+const GRAPHQL_INTROSPECTION_RE = [
+  /\bgraphiql\s*[:=]\s*True\b/i,
+  /\bgraphiql\s*:\s*true\b/,
+  /\bintrospection\s*:\s*true\b/,
+  /\bplayground\s*:\s*true\b/,
+  /\bGRAPHIQL\s*=\s*True\b/,
+];
+
 // XML External Entity injection
 const XXE_RE = [
   /new\s+DOMParser\s*\(\s*\)[\s\S]{0,100}\.parseFromString\s*\(\s*(?:req|request)\./i,
@@ -1384,6 +1400,11 @@ function findVerboseErrors(lines: string[]): ScanIndicator[] {
 function findGraphQLInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, GRAPHQL_INJECT_RE, "graphql-injection", "GraphQL Injection", "critical",
     "User input interpolated into GraphQL query — use parameterized variables instead");
+}
+
+function findGraphQLIntrospectionEnabled(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, GRAPHQL_INTROSPECTION_RE, "graphql-introspection-enabled", "GraphQL Introspection Enabled", "medium",
+    "GraphQL introspection/IDE (GraphiQL/Playground) is explicitly enabled — exposes the complete schema for attacker reconnaissance; disable in production");
 }
 
 function findXXE(lines: string[]): ScanIndicator[] {
@@ -4081,6 +4102,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findNoSQLInjection(lines),
     ...findVerboseErrors(lines),
     ...findGraphQLInjection(lines),
+    ...findGraphQLIntrospectionEnabled(lines),
     ...findXXE(lines),
     ...findLDAPInjection(lines),
     ...findXPathInjection(lines),
