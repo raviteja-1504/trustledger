@@ -14,7 +14,15 @@ export async function register() {
     const { registerShutdownHandlers } = await import("./lib/shutdown");
     registerShutdownHandlers();
 
-    // 3. Log startup banner
+    // 3. Warm the Python AST taint engine's WASM parser (Phase 2 of the
+    //    multi-language OWASP hardening effort) so the first real scan on
+    //    this instance doesn't fall back to regex-only while it's still
+    //    initializing -- see astTaintPython.ts's own docblock for why this
+    //    is a best-effort warm-up rather than a hard startup dependency.
+    const { warmPythonTaintEngine } = await import("./lib/astTaintPython");
+    warmPythonTaintEngine().catch(() => { /* already logged inside astTaintPython.ts */ });
+
+    // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
     const org    = process.env.NEXT_PUBLIC_ORG ?? "unknown";
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";

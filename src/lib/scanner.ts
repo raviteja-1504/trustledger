@@ -30,6 +30,11 @@ import { scoreExploitability }   from "./reachability";
 import type { ReachabilityReport } from "./reachability";
 import { parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel } from "./astTaint";
 import type * as ts from "typescript";
+import {
+  parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
+  findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
+} from "./astTaintPython";
+import type { Node as PySyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -4471,6 +4476,15 @@ function findAstTaintFindings(content: string, filePath: string, sourceFile: ts.
   }));
 }
 
+// Same wrapper for astTaintPython.ts's Phase 2 engine -- see its own
+// docblock for the tree-sitter/WASM warm-cache design.
+function findAstTaintPythonFindings(content: string, filePath: string, rootNode: PySyntaxNode): ScanIndicator[] {
+  return scanAstTaintPython(content, filePath, rootNode).map(f => ({
+    id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(file_path: string, content: string, prPriorBias = 0): FileAnalysis {
@@ -4527,6 +4541,14 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   const tsSourceFile: ts.SourceFile | null =
     (lang === "javascript" || lang === "typescript") && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
       ? parseSourceFile(content, file_path)
+      : null;
+  // Python AST parse (Phase 2 -- see astTaintPython.ts). isPythonParserReady()
+  // gates on the WASM parser's async warm-up having completed already --
+  // if not, this silently falls back to regex-only for this one file, same
+  // "no regression" contract as the JS/TS cap above.
+  const pyTree: PySyntaxNode | null =
+    lang === "python" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
+      ? parsePythonSourceSync(content, file_path)
       : null;
 
   const secretIndicators: ScanIndicator[] = [
@@ -4598,6 +4620,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
@@ -4719,9 +4742,14 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   // correct even with a real (non-"unknown") value plugged in.
   const callGraph   = !fileMeta.skipAI ? buildCallGraph(content) : null;
   const resolveContainingFunction = (line: number): string => {
-    if (!tsSourceFile) return "unknown";
-    const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
-    return findEnclosingFunctionName(findNodeAtPosition(tsSourceFile, pos));
+    if (tsSourceFile) {
+      const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
+      return findEnclosingFunctionName(findNodeAtPosition(tsSourceFile, pos));
+    }
+    if (pyTree) {
+      return findEnclosingFunctionNamePy(findNodeAtRowPy(pyTree, Math.max(0, line - 1)));
+    }
+    return "unknown";
   };
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
     ? scoreExploitability(indicators, content, callGraph, resolveContainingFunction)
