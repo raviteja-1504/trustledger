@@ -521,7 +521,7 @@ const EVAL_EXEC_RE = [
 // also appears when explicitly disabled (ignoreExpiration: false), which is
 // the secure default and must NOT be flagged.
 const JWT_BYPASS_RE =
-  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"})/i;
+  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False)/i;
 
 // A hardcoded JWT/session signing secret -- unlike the SECRET_PATTERNS
 // generic-word detectors above (which require the value to LOOK like a real
