@@ -35,6 +35,8 @@ import {
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
 } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel } from "./astTaintJava";
+import type { CstNode as JavaCstNode } from "java-parser";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -4485,6 +4487,17 @@ function findAstTaintPythonFindings(content: string, filePath: string, rootNode:
   }));
 }
 
+// Same wrapper for astTaintJava.ts's Phase 3 engine -- see its own
+// docblock. No warm-cache concern here (java-parser is pure JS,
+// synchronous, no WASM -- this mirrors astTaint.ts's simplicity, not
+// astTaintPython.ts's).
+function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode): ScanIndicator[] {
+  return scanAstTaintJava(content, filePath, cst).map(f => ({
+    id: f.id, label: astTaintJavaLabel(f.id), severity: astTaintJavaSeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(file_path: string, content: string, prPriorBias = 0): FileAnalysis {
@@ -4549,6 +4562,13 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   const pyTree: PySyntaxNode | null =
     lang === "python" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
       ? parsePythonSourceSync(content, file_path)
+      : null;
+  // Java AST parse (Phase 3 -- see astTaintJava.ts). No readiness gate
+  // needed, unlike pyTree above: java-parser is pure JS and synchronous,
+  // there is nothing to warm up.
+  const javaCst: JavaCstNode | null =
+    lang === "java" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
+      ? parseJavaSource(content)
       : null;
 
   const secretIndicators: ScanIndicator[] = [
@@ -4621,6 +4641,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findCookieInsecurityOtherLangs(lines),
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
