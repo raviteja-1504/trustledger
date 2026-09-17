@@ -70,9 +70,12 @@ export interface ScanIndicator {
   // more confident than a same-line keyword-co-occurrence regex, which is
   // more confident than a bare pattern match with no taint context at all.
   confidence?:  number;
-  // "third_party" for a match inside vendored/minified code -- preserved as
-  // evidence but excluded from risk-level escalation (see calculateRisk).
-  codeCategory?: "application" | "third_party";
+  // "third_party" for a match inside vendored/minified code, "test_code" for
+  // a match inside a test file -- both preserved as evidence but excluded
+  // from risk-level escalation (see calculateRisk). hardcoded-secret and
+  // high-entropy-secret are never downgraded this way (see attachEvidence) --
+  // a real leaked key in a vendor bundle or test fixture is still real.
+  codeCategory?: "application" | "third_party" | "test_code";
   cwe?:         string;
   // Which detector(s) independently flagged this same id+line -- populated
   // when analyzeFile's dedup pass collapses multiple hits into one finding.
@@ -3214,10 +3217,13 @@ function computeBlastRadiusIndicators(
     }
     if (pathHit) reasons.push(`file path suggests a sensitive area ("${pathHit}")`);
 
-    // Mirror the file's own vendored/third-party status -- this indicator is
-    // injected post-analyzeFile() and so never passes through
+    // Mirror the file's own vendored/third-party or test-code status -- this
+    // indicator is injected post-analyzeFile() and so never passes through
     // attachEvidence(), which is what normally sets codeCategory.
-    const isThirdParty = f.indicators.some(i => i.codeCategory === "third_party");
+    const mirroredCategory: "application" | "third_party" | "test_code" =
+      f.indicators.some(i => i.codeCategory === "third_party") ? "third_party"
+      : f.indicators.some(i => i.codeCategory === "test_code") ? "test_code"
+      : "application";
 
     const list = out.get(f.file_path) ?? [];
     list.push({
@@ -3226,7 +3232,7 @@ function computeBlastRadiusIndicators(
       severity:     "medium",
       detail:       `${Math.round(f.ai_percentage * 100)}% AI-generated file: ${reasons.join("; ")}. Risk compounds with reach — review carefully before merging.`,
       confidence:   blast ? 70 : 50,
-      codeCategory: isThirdParty ? "third_party" : "application",
+      codeCategory: mirroredCategory,
     });
     out.set(f.file_path, list);
   }
@@ -3241,7 +3247,7 @@ function calculateRisk(indicators: ScanIndicator[], aiPct: number): RiskLevel {
   // drive the file's own risk level -- they aren't code this repo's authors
   // wrote or can fix, and treating them as CRITICAL is exactly what produced
   // false-positive attestation requirements on vendor bundles.
-  const own = indicators.filter(i => i.codeCategory !== "third_party");
+  const own = indicators.filter(i => i.codeCategory !== "third_party" && i.codeCategory !== "test_code");
   if (own.some(i => i.severity === "critical")) return "CRITICAL";
   if (own.some(i => i.severity === "high"))     return "HIGH";
   // Thresholds calibrated for the new three-phase sigmoid (centred at 0.55).
@@ -3583,16 +3589,18 @@ function baseConfidence(ind: ScanIndicator): number {
 
 // Attaches cwe/confidence/codeCategory evidence to security-scan indicators
 // (not AI-heuristic signals, which have their own explained_signals model).
-// thirdParty marks the file as vendored/minified -- see analyzeFile's
-// looksMinified check -- so these findings are preserved as evidence without
-// driving the file's own risk_score (calculateRisk excludes them).
-function attachEvidence(indicators: ScanIndicator[], thirdParty: boolean): ScanIndicator[] {
+// category marks the file as vendored/minified or a test file -- see
+// analyzeFile's looksMinified/fileMeta.isTestFile checks -- so these findings
+// are preserved as evidence without driving the file's own risk_score
+// (calculateRisk excludes them). Secrets are always "application": a real
+// leaked key in a vendor bundle or test fixture is still a real leaked key.
+function attachEvidence(indicators: ScanIndicator[], category: "application" | "third_party" | "test_code"): ScanIndicator[] {
   return indicators.map(ind => ({
     ...ind,
     cwe:          ind.cwe ?? cweFor(ind.id),
     confidence:   ind.confidence ?? baseConfidence(ind),
-    codeCategory: thirdParty && ind.id !== "hardcoded-secret" && ind.id !== "high-entropy-secret"
-      ? "third_party" as const
+    codeCategory: category !== "application" && ind.id !== "hardcoded-secret" && ind.id !== "high-entropy-secret"
+      ? category
       : "application" as const,
   }));
 }
@@ -3886,6 +3894,11 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   // run regardless (a real leaked key in a vendor bundle is still real).
   const avgLineLen    = content.length / Math.max(1, lineCount);
   const looksMinified = fileMeta.isGenerated || (lineCount < 30 && avgLineLen > 400);
+  // Same "preserve as evidence, exclude from risk escalation" treatment as
+  // vendored code -- an eval() in a *.spec.ts test fixture isn't a production
+  // RCE risk. Vendored takes priority in the rare case a file matches both.
+  const fileCategory: "application" | "third_party" | "test_code" =
+    looksMinified ? "third_party" : fileMeta.isTestFile ? "test_code" : "application";
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -3938,11 +3951,11 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
   ];
-  const vulnIndicators = attachEvidence(vulnIndicatorsRaw, looksMinified);
+  const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
   // Security scan — all detectors
   const rawIndicators: ScanIndicator[] = [
-    ...attachEvidence(secretIndicators, false),
+    ...attachEvidence(secretIndicators, fileCategory),
     ...vulnIndicators,
     // Pluggable detectors registered via detectorRegistry.register() -- see
     // detectorRegistry.ts. Empty by default; this is the on-ramp for new
@@ -3950,7 +3963,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     // attachEvidence so registry detectors get the same cwe/confidence
     // defaults and third-party/vendored-file exclusion as every other
     // security detector below.
-    ...attachEvidence(detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"), looksMinified),
+    ...attachEvidence(detectorRegistry.runAll({ content, lines, file_path, language: lang }, "security"), fileCategory),
   ];
 
   // Dedup by id+line, preserving which detector(s) independently flagged the

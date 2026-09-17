@@ -43,7 +43,7 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
     return {
       indicators: analysis.indicators
         .filter(i2 => i2.line != null)
-        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail })),
+        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail, codeCategory: i2.codeCategory })),
       attribution: analysis.attribution,
     };
   });

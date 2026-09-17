@@ -10,6 +10,10 @@ export interface FileIndicator {
   severity: string;
   line?:    number;
   detail?:  string;
+  // "third_party" (vendored/minified code) or "test_code" (test files) --
+  // preserved as evidence but excluded from the file's risk_score; see
+  // calculateRisk() and attachEvidence() in src/lib/scanner.ts.
+  codeCategory?: "application" | "third_party" | "test_code";
 }
 
 // An explicit AI-tooling artifact (a repo config file or a commit/content

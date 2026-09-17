@@ -419,26 +419,42 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
               const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
               const detail = instances[0]?.detail;
               const isSec = !!meta.security;
+              // Every instance of this signal in this file must share the
+              // category for the card to be muted -- if even one instance is
+              // real application code, this still reflects the file's real
+              // risk and must stay at full severity (mirrors calculateRisk's
+              // own "any own instance escalates" semantics).
+              const allThirdParty = instances.length > 0 && instances.every(i => i.codeCategory === "third_party");
+              const allTestCode   = instances.length > 0 && instances.every(i => i.codeCategory === "test_code");
+              const isMuted = allThirdParty || allTestCode;
               return (
                 <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 ${
-                  isSec && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
+                  isMuted ? "bg-gray-50 border-gray-100"
+                  : isSec && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
                   : isSec && meta.sev === "high"   ? "bg-orange-50 border-orange-200"
                   : isSec && meta.sev === "medium"  ? "bg-amber-50 border-amber-200"
                   : "bg-gray-50 border-gray-100"}`}>
-                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dot}`} />
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${isMuted ? "bg-gray-300" : dot}`} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                       <p className="text-xs font-bold text-gray-900">{meta.label}</p>
                       <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                      {isMuted && (
+                        <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
+                          {allThirdParty ? "Third-party code" : "Test code"}
+                        </span>
+                      )}
                       {lines.length > 0 && (
                         <span className="ml-auto text-[10px] font-bold text-gray-600 bg-white border border-gray-200 px-2 py-px rounded-md font-mono">
                           {lines.length === 1 ? `Line ${lines[0]}` : `Lines ${lines.slice(0, 3).join(", ")}${lines.length > 3 ? ` +${lines.length - 3}` : ""}`}
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] text-gray-500 leading-relaxed">{meta.desc}</p>
+                    <p className="text-[11px] text-gray-500 leading-relaxed">
+                      {meta.desc}{isMuted && " — excluded from this file's risk score."}
+                    </p>
                     {detail && (
-                      <p className="text-[10px] font-mono text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2 py-1 mt-1.5 truncate" title={detail}>
+                      <p className={`text-[10px] font-mono rounded-md px-2 py-1 mt-1.5 truncate ${isMuted ? "text-gray-500 bg-white border border-gray-200" : "text-rose-700 bg-rose-50 border border-rose-100"}`} title={detail}>
                         {detail}
                       </p>
                     )}
@@ -673,25 +689,36 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                   const instances = (file.indicators ?? []).filter(i => i.id === sig);
                   const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
                   const detail = instances[0]?.detail;
+                  const allThirdParty = instances.length > 0 && instances.every(i => i.codeCategory === "third_party");
+                  const allTestCode   = instances.length > 0 && instances.every(i => i.codeCategory === "test_code");
+                  const isMuted = allThirdParty || allTestCode;
                   return (
                     <div key={sig} className={`flex items-start gap-3 rounded-xl border p-3 shadow-sm ${
-                      meta.security && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
+                      isMuted ? "bg-gray-50 border-gray-100"
+                      : meta.security && meta.sev === "critical" ? "bg-rose-50 border-rose-200"
                       : meta.security && meta.sev === "high"   ? "bg-orange-50 border-orange-200"
                       : "bg-white border-gray-100"}`}>
-                      <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dot}`} />
+                      <div className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${isMuted ? "bg-gray-300" : dot}`} />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                           <p className="text-xs font-bold text-gray-900">{meta.label}</p>
                           <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{meta.sev}</span>
+                          {isMuted && (
+                            <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
+                              {allThirdParty ? "Third-party code" : "Test code"}
+                            </span>
+                          )}
                           {lines.length > 0 && (
                             <span className="ml-auto text-[10px] font-bold text-gray-600 bg-white border border-gray-200 px-2 py-px rounded-md font-mono">
                               {lines.length === 1 ? `Line ${lines[0]}` : `Lines ${lines.slice(0,3).join(", ")}${lines.length > 3 ? ` +${lines.length-3}` : ""}`}
                             </span>
                           )}
                         </div>
-                        <p className="text-[11px] text-gray-500 leading-relaxed">{meta.desc}</p>
+                        <p className="text-[11px] text-gray-500 leading-relaxed">
+                          {meta.desc}{isMuted && " — excluded from this file's risk score."}
+                        </p>
                         {detail && (
-                          <p className="text-[10px] font-mono text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2 py-1 mt-1 truncate" title={detail}>{detail}</p>
+                          <p className={`text-[10px] font-mono rounded-md px-2 py-1 mt-1 truncate ${isMuted ? "text-gray-500 bg-white border border-gray-200" : "text-rose-700 bg-rose-50 border border-rose-100"}`} title={detail}>{detail}</p>
                         )}
                       </div>
                     </div>
