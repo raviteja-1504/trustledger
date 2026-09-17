@@ -71,22 +71,29 @@ const nextConfig = {
     // (and doesn't need one -- the file is only ever read as raw bytes via
     // fs.readFileSync, never executed as a webpack module).
     serverComponentsExternalPackages: ["@react-pdf/renderer", "web-tree-sitter", "tree-sitter-wasms"],
-    // web-tree-sitter's Language.load(wasmPath) reads tree-sitter-python.wasm
-    // from disk at runtime via a require.resolve()'d path -- Next's @vercel/nft
-    // build tracer (active because output:"standalone" is set above) needs an
-    // explicit hint to guarantee that binary asset is copied into each
-    // deployed serverless function's bundle, since it's not a plain JS import
-    // the tracer's static analysis is guaranteed to follow. Scoped to only the
-    // routes that actually call runScan()/analyzeFile() on Python files.
-    // IMPORTANT: this can only be verified against a real Vercel deployment,
-    // never locally (next dev/start read node_modules directly) -- see the
-    // Phase 2 plan's verification section.
+    // web-tree-sitter needs TWO .wasm binaries at runtime, both of which
+    // Next's @vercel/nft build tracer (active because output:"standalone" is
+    // set above) needs an explicit hint to copy into each deployed
+    // serverless function's bundle, since neither is a plain JS import the
+    // tracer's static analysis is guaranteed to follow:
+    //   1. web-tree-sitter's OWN internal runtime binary (tree-sitter.wasm,
+    //      shipped inside the web-tree-sitter package itself) -- required by
+    //      Parser.init() before any language grammar is even loaded.
+    //   2. tree-sitter-wasms' prebuilt tree-sitter-python.wasm grammar.
+    // Confirmed via a real production deployment that #1 was originally
+    // missed (it was assumed the language grammar file was the only binary
+    // involved) -- Parser.init() failed with ENOENT for tree-sitter.wasm on
+    // EVERY route that cold-started a Node.js lambda (/healthz, /api/me,
+    // /api/dashboard, not just the scan-related routes), because
+    // instrumentation.ts's register() -- which calls warmPythonTaintEngine()
+    // -- runs on any Node.js serverless function's cold start, not only
+    // scan-specific ones. So this is scoped to every route ("/**"), not just
+    // the handful that call runScan()/analyzeFile() directly.
     outputFileTracingIncludes: {
-      "/api/scan-worker/**":          ["./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm"],
-      "/api/scans/**":                ["./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm"],
-      "/api/cron/scheduled-scans/**": ["./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm"],
-      "/api/webhook/bitbucket/**":    ["./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm"],
-      "/api/webhook/gitlab/**":       ["./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm"],
+      "/**": [
+        "./node_modules/web-tree-sitter/tree-sitter.wasm",
+        "./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm",
+      ],
     },
   },
 
