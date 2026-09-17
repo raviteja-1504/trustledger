@@ -749,6 +749,14 @@ const XXE_RE = [
   /etree\.(?:fromstring|parse)\s*\(\s*(?:req|request)\./i,
   /lxml\.etree\.(?:fromstring|parse)\s*\(\s*(?:req|request)\./i,
   /libxml\.parseXml(?:String)?\s*\(\s*(?:req|request)\./i,
+  // JS/Node XML libraries (libxml2-wasm, libxmljs/libxmljs2) require the
+  // caller to explicitly opt into entity expansion and DTD loading — unlike
+  // the Java parsers above, which are unsafe unless hardened, these default
+  // safe and only become XXE-vulnerable when a caller turns these flags on.
+  // Found via a real OWASP Juice Shop benchmark (lib/xml.ts intentionally
+  // sets both flags for its XXE challenges).
+  /XML_PARSE_NOENT|XML_PARSE_DTDLOAD/,
+  /\b(?:noent|dtdload|resolveExternalEntities|loadExternalEntities)\s*:\s*true\b/i,
 ];
 
 // LDAP injection (filter construction with user input)

@@ -119,3 +119,49 @@ module.exports = render;
     expect(result.indicators.some(i => i.id === "xss")).toBe(true);
   });
 });
+
+describe("XXE via JS XML libraries (found via real-world OWASP Juice Shop testing)", () => {
+  it("flags XXE when a libxml2-based parser is called with entity-expansion/DTD-loading options enabled", () => {
+    const content = `
+import libxml2 from "libxml2-wasm";
+
+export async function parseXmlString(data) {
+  const option = libxml2.ParseOption.XML_PARSE_NOENT | libxml2.ParseOption.XML_PARSE_DTDLOAD;
+  const xmlDoc = libxml2.XmlDocument.fromString(data, { option });
+  const xmlString = xmlDoc.toString();
+  xmlDoc.dispose();
+  return xmlString;
+}
+`;
+    const result = analyzeFile("lib/xml.ts", content);
+    expect(result.indicators.some(i => i.id === "xxe")).toBe(true);
+  });
+
+  it("flags XXE when libxmljs is called with noent/dtdload options set to true", () => {
+    const content = `
+const libxmljs = require("libxmljs");
+
+function parse(data) {
+  return libxmljs.parseXml(data, { noent: true, dtdload: true });
+}
+
+module.exports = parse;
+`;
+    const result = analyzeFile("lib/parse.js", content);
+    expect(result.indicators.some(i => i.id === "xxe")).toBe(true);
+  });
+
+  it("does not flag a safe XML parse with no entity-expansion options", () => {
+    const content = `
+const libxmljs = require("libxmljs");
+
+function parse(data) {
+  return libxmljs.parseXml(data);
+}
+
+module.exports = parse;
+`;
+    const result = analyzeFile("lib/parse.js", content);
+    expect(result.indicators.some(i => i.id === "xxe")).toBe(false);
+  });
+});
