@@ -16,6 +16,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "hallucinated-method-call": "Hallucinated method call",
   "license-header-contamination": "License header contamination",
   "ai-blast-radius": "AI blast radius",
+  "file-inclusion": "PHP file inclusion",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

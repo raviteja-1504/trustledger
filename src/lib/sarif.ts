@@ -49,6 +49,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "hallucinated-method-call": { title: "Hallucinated Method Call",      description: "Call to a method/property that does not exist on this built-in type — likely an AI-invented API that will throw TypeError at runtime." },
   "license-header-contamination": { title: "License Header Contamination", description: "An SPDX identifier, license header, or third-party copyright notice was found in this file — may indicate code copied from a licensed source." },
   "ai-blast-radius": { title: "AI Blast Radius", description: "An AI-generated file that's imported by other files in this PR and/or sits in a sensitive area (payment, auth, webhooks) — risk compounds with reach." },
+  "file-inclusion":           { title: "PHP File Inclusion",            description: "Request-derived value passed to include/require, allowing local (and, if allow_url_include is on, remote) file inclusion.", cwe: "CWE-98" },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

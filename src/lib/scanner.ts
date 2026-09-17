@@ -997,6 +997,30 @@ function findSQLInjection(lines: string[]): ScanIndicator[] {
     "Query built with string interpolation — use parameterised queries");
 }
 
+// PHP-specific: unlike JS/Python, PHP interpolates a bare $var or {$var}
+// directly inside a double-quoted string with no operator at all -- so none
+// of SQL_INJECTION_RE's concatenation/template-literal patterns ever match
+// PHP's most common vulnerable shape: $query = "SELECT ... WHERE id = '$id'";
+// Found missing entirely via a real OWASP DVWA benchmark (sqli/source/low.php).
+const SQL_CLAUSE_PAIR_RE = /\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)\b/i;
+
+function findSQLInjectionPHPInterpolated(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (!SQL_CLAUSE_PAIR_RE.test(line)) continue;
+    if (SQL_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
+    const hit = [...line.matchAll(/\{?\$(\w+)\}?/g)].find(m => tainted.has(m[1]));
+    if (!hit) continue;
+    found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${hit[1]}' interpolated directly into a SQL string — use parameterised queries (mysqli_prepare/PDO)` });
+  }
+  return found;
+}
+
 function findEvalExec(lines: string[]): ScanIndicator[] {
   return runDetector(lines, EVAL_EXEC_RE, "eval-exec", "Arbitrary Code Execution", "critical",
     "eval/exec/Function constructor — severe RCE risk", { skipComments: true });
@@ -1016,6 +1040,35 @@ function findJwtBypass(lines: string[]): ScanIndicator[] {
 function findCommandInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, CMD_INJECTION_RE, "command-injection", "Command Injection", "critical",
     "User input interpolated into shell command");
+}
+
+// PHP named-variable command injection: $target = $_REQUEST['ip']; ...
+// shell_exec('ping ' . $target) -- CMD_INJECTION_RE's PHP entry only matches
+// $_GET/$_POST/$_REQUEST literally inline inside the call, never a variable
+// that already carries the taint from an earlier line via PHP's `.`
+// concatenation operator (as opposed to JS's `+` or template literals, which
+// CMD_INJECTION_RE's other entries do cover). Found missing entirely via a
+// real OWASP DVWA benchmark (exec/source/low.php). Bare "exec(" is excluded
+// unless it's a real PHP shell_exec-style call (i.e. not preceded by "."),
+// so this doesn't collide with the extremely common regex.exec()/array.exec()
+// method-call idiom in JS/TS.
+const PHP_CMD_SINK_RE = /\b(?:shell_exec|system|passthru|popen)\s*\(|(?<!\.)\bexec\s*\(/i;
+
+function findNamedTaintCommandInjectionPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (!PHP_CMD_SINK_RE.test(line)) continue;
+    if (CMD_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
+    const hit = [...line.matchAll(/\$(\w+)/g)].find(m => tainted.has(m[1]));
+    if (!hit) continue;
+    found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${hit[1]}' flows into a shell command — use escapeshellarg()/escapeshellcmd() or an argument array` });
+  }
+  return found;
 }
 
 function findSSRF(lines: string[]): ScanIndicator[] {
@@ -1059,6 +1112,40 @@ function findZipSlip(lines: string[]): ScanIndicator[] {
     if (guardWindow.some(l => ZIP_SLIP_GUARD_RE.test(l))) continue;
     found.push({ id:"path-traversal", label:"Zip Slip — Path Traversal via Archive Entry Name", severity:"critical", line:i+1,
       detail:"Archive entry name joined into an extraction path with no canonicalization/containment check — a crafted entry name (e.g. '../../etc/x') can write outside the target directory" });
+  }
+  return found;
+}
+
+// PHP Local/Remote File Inclusion — a request-derived value passed to
+// include/include_once/require/require_once lets an attacker read arbitrary
+// local files (LFI) or, if allow_url_include is enabled, execute code from a
+// remote URL (RFI). A completely uncovered vulnerability class until now --
+// PATH_TRAVERSAL_RE has no PHP include/require entries at all. Two tiers:
+// direct inline taint ($_GET[...] literally in the call) and named-variable
+// taint (assigned on an earlier line, PHP's overwhelmingly common real-world
+// shape: $file = $_GET['page']; ... include($file);). Severity capped at
+// "high" rather than "critical": unlike SQLi/command injection, exploit
+// impact here depends on server config (allow_url_include, open_basedir)
+// that a pure text scan can't observe.
+const PHP_INCLUDE_SINK_RE = /\b(?:include|include_once|require|require_once)\s*\(?\s*/i;
+const PHP_INCLUDE_INLINE_RE = /\b(?:include|include_once|require|require_once)\s*\(?\s*\$_(?:GET|POST|REQUEST|COOKIE)\b/i;
+
+function findPHPFileInclusion(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const tainted = extractTaintedVars(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (PHP_INCLUDE_INLINE_RE.test(line)) {
+      found.push({ id:"file-inclusion", label:"PHP File Inclusion", severity:"high", line:i+1,
+        detail:"Request parameter passed directly to include/require — allows local (and, if allow_url_include is on, remote) file inclusion; validate against an allowlist of known filenames" });
+      continue;
+    }
+    if (tainted.size === 0 || !PHP_INCLUDE_SINK_RE.test(line)) continue;
+    const hit = [...line.matchAll(/\$(\w+)/g)].find(m => tainted.has(m[1]));
+    if (!hit) continue;
+    found.push({ id:"file-inclusion", label:"PHP File Inclusion", severity:"high", line:i+1,
+      detail:`Tainted variable '$${hit[1]}' passed to include/require — allows local (and, if allow_url_include is on, remote) file inclusion; validate against an allowlist of known filenames` });
   }
   return found;
 }
@@ -3918,13 +4005,16 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findMassAssignment(lines),
     ...findSQLInjection(lines),
     ...findSQLInjectionTainted(lines),
+    ...findSQLInjectionPHPInterpolated(lines),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findCommandInjection(lines),
+    ...findNamedTaintCommandInjectionPHP(lines),
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
     ...findZipSlip(lines),
+    ...findPHPFileInclusion(lines),
     ...findPrototypePollution(lines),
     ...findInsecureRandomness(lines),
     ...findReDoS(lines),

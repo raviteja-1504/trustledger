@@ -33,6 +33,7 @@ const SIGNAL_DESC: Record<string, string> = {
   "hallucinated-method-call": "Call to a non-existent method on a built-in array/object/string — AI-generated code invented an API that will throw at runtime",
   "license-header-contamination": "An SPDX identifier, license header, or third-party copyright notice was found in this file — may indicate code copied from a licensed source",
   "ai-blast-radius": "An AI-generated file that's imported by other files in this PR and/or sits in a sensitive area (payment, auth, webhooks) — risk compounds with reach",
+  "file-inclusion": "Request-derived value passed to PHP include/require — allows local (and, if allow_url_include is on, remote) file inclusion",
 
   // AI provenance signals
   "ai-comment-pattern":    "Comment verbosity and phrasing match GitHub Copilot / ChatGPT output signatures — over-explained, instructional tone",
@@ -47,6 +48,7 @@ const SEV_SIGNAL: Record<string, string> = {
   "jwt-none-alg":"#f97316","ai-comment-pattern":"#94a3b8",
   "structural-uniformity":"#f59e0b","comment-density":"#94a3b8","identifier-entropy":"#f59e0b",
   "hallucinated-method-call":"#f59e0b","license-header-contamination":"#f59e0b","ai-blast-radius":"#f59e0b",
+  "file-inclusion":"#f97316",
 };
 
 interface InlineCodeReviewProps {

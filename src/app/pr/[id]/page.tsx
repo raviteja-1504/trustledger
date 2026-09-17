@@ -30,6 +30,7 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "eval-exec":               { label: "Eval / Exec",               desc: "Dynamic code execution via eval() or exec() — arbitrary code execution risk",                sev: "critical", security: true },
   "command-injection":       { label: "Command Injection",         desc: "User input flows into shell command — allows arbitrary OS command execution",                 sev: "critical", security: true },
   "path-traversal":          { label: "Path Traversal",            desc: "User-controlled path could escape sandbox and read/write arbitrary files",                    sev: "critical", security: true },
+  "file-inclusion":          { label: "PHP File Inclusion",        desc: "Request-derived value reaches include/require — can read arbitrary local files or execute remote code", sev: "high",     security: true },
   "ssrf":                    { label: "SSRF",                      desc: "Server-side request forgery — user controls the URL of an outgoing request",                  sev: "critical", security: true },
   "jwt-none-alg":            { label: "JWT None Algorithm",        desc: "JWT verification may accept 'none' algorithm, bypassing signature checks",                    sev: "critical", security: true },
   "prototype-pollution":     { label: "Prototype Pollution",       desc: "Object property assignment from user input can pollute global prototype",                    sev: "high",     security: true },
