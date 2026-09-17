@@ -487,6 +487,19 @@ const SQL_INJECTION_RE = [
   /(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{/i,
   /knex\.raw\s*\(`[^`]*\$\{/i,
   /sequelize\.query\s*\(\s*`[^`]*\$\{/i,
+  // Ruby/Rails ActiveRecord — .where()/.find_by_sql() etc. accept a raw SQL
+  // (fragment) string directly, so unlike other ORMs there's no need for a
+  // full SELECT...FROM pair to appear -- interpolating a variable into the
+  // string at all is the vulnerable pattern (e.g. .where("id = '#{params...}'")).
+  // Found missing entirely via a real OWASP railsgoat benchmark
+  // (users_controller.rb) -- every other pattern here uses ${} (JS) or is
+  // otherwise ecosystem-specific; none recognize Ruby's #{} interpolation.
+  // Order-agnostic (both substrings anywhere on the line, like the
+  // concatenation pattern above) rather than requiring #{ to directly follow
+  // the opening quote -- SQL string literals routinely wrap the interpolated
+  // value in single quotes first (as in the real example above), which a
+  // strict adjacency match would miss.
+  /(?=[\s\S]*\.(?:where|find_by_sql|order|group|having|pluck|select|calculate)\s*\()(?=[\s\S]*#\{)/,
 ];
 
 const EVAL_EXEC_RE = [
@@ -877,6 +890,14 @@ const MASS_ASSIGN_RE = [
   /User\.new\s*\(\s*(?:params|user_params)\s*\)/i,
   /attributes\s*=\s*(?:params|request\.params)\b/i,
   /\.update_attributes\s*\(\s*(?:params|user_params|request\.params)/i,
+  // Rails strong-parameters bypass -- these two methods exist specifically
+  // to opt out of the permit()-based allow-listing that's otherwise Rails'
+  // default protection against mass assignment, so their mere presence is a
+  // strong, low-noise signal on its own (no taint tracing needed). Found
+  // missing entirely via a real OWASP railsgoat benchmark (both instances
+  // are explicitly commented "VULNERABILITY: mass assignment" in-repo).
+  /\.permit!\s*(?:\(\s*\))?/,
+  /\.to_unsafe_h\b/,
 ];
 
 // ── Detector helper: run patterns over lines, return deduped indicators ────────
