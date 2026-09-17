@@ -30,6 +30,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "command-injection":          { id: "CWE-78",   title: "OS Command Injection" },
   "path-traversal":             { id: "CWE-22",   title: "Path Traversal" },
   "file-inclusion":             { id: "CWE-98",   title: "PHP Local/Remote File Inclusion" },
+  "weak-signing-secret":        { id: "CWE-321",  title: "Use of Hard-coded Cryptographic Key" },
   "eval-exec":                  { id: "CWE-95",   title: "Eval Injection" },
   "weak-crypto":                { id: "CWE-327",  title: "Broken or Risky Cryptographic Algorithm" },
   "ssrf":                       { id: "CWE-918",  title: "Server-Side Request Forgery" },

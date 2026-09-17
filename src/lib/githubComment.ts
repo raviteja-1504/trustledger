@@ -17,6 +17,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "license-header-contamination": "License header contamination",
   "ai-blast-radius": "AI blast radius",
   "file-inclusion": "PHP file inclusion",
+  "weak-signing-secret": "Hardcoded signing secret",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

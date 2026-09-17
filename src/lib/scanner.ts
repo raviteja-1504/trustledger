@@ -504,6 +504,33 @@ const EVAL_EXEC_RE = [
 const JWT_BYPASS_RE =
   /(?:algorithms?\s*[:=]\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"})/i;
 
+// A hardcoded JWT/session signing secret -- unlike the SECRET_PATTERNS
+// generic-word detectors above (which require the value to LOOK like a real
+// random secret, to avoid flagging placeholder text), this flags ANY literal
+// string assigned as a signing key regardless of how it looks: a short,
+// guessable value (found via a real VAmPI benchmark: app.config['SECRET_KEY']
+// = 'random') is itself the vulnerability, and even a strong-looking literal
+// is still compromised the moment it's committed to source control -- best
+// practice is always to load it from an environment variable / secrets
+// manager, so any quoted-literal assignment here is a finding either way.
+const WEAK_SIGNING_SECRET_RE = [
+  // Flask/Python: app.config['SECRET_KEY'] = 'literal'  (dict-key assignment
+  // shape, not a bare variable -- SECRET_PATTERNS' generic entries only
+  // match `secret_key = "..."`, never `config['SECRET_KEY'] = "..."`)
+  /(?:\.config|app\.config)\s*\[\s*["'](?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)["']\s*\]\s*=\s*["'][^"']+["']/,
+  // Flask: app.secret_key = 'literal'
+  /\bapp\.secret_key\s*=\s*["'][^"']+["']/,
+  // Django settings.py / bare module-level constant
+  /^\s*(?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)\s*=\s*["'][^"']+["']/,
+  // Node/Express (jsonwebtoken): jwt.sign(payload, 'literal', ...) / jwt.verify(token, 'literal', ...)
+  /jwt\.(?:sign|verify)\s*\(\s*[^,]+,\s*["'][^"']+["']/,
+];
+
+function findWeakSigningSecret(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, WEAK_SIGNING_SECRET_RE, "weak-signing-secret", "Hardcoded JWT/Session Signing Secret", "critical",
+    "Signing key is a literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager");
+}
+
 const CMD_INJECTION_RE = [
   /subprocess\.(?:call|run)\s*\([^)]*f["']/,
   /os\.popen\s*\(\s*(?:f["']|[^)]*\+)/,
@@ -4008,6 +4035,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findSQLInjectionPHPInterpolated(lines),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
+    ...findWeakSigningSecret(lines),
     ...findCommandInjection(lines),
     ...findNamedTaintCommandInjectionPHP(lines),
     ...findSSRF(lines),
