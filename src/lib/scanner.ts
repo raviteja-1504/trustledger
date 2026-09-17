@@ -442,6 +442,15 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // const/let/var x = req.query.x
     const single = /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
     if (single) { tainted.add(single[1]); continue; }
+    // const command = "cat " + req.query.file -- req.X embedded anywhere in
+    // a concatenation RHS, not assigned to its own variable first (as
+    // opposed to `single` above, which requires req.X to be the entire RHS
+    // on its own). A single-hop sibling of the "second-hop propagation"
+    // check further down, needed because that one only recognizes an
+    // already-tainted *variable name* on the RHS, not an inline req.X
+    // property access.
+    const inlineConcatSource = /\b(?:const|let|var)\s+(\w+)\s*=\s*.*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
+    if (inlineConcatSource) { tainted.add(inlineConcatSource[1]); continue; }
     // const { a, b } = req.query
     const destruct = /\b(?:const|let|var)\s+\{([^}]+)\}\s*=\s*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
     if (destruct) {
@@ -472,20 +481,25 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // C#: var url = Request.Query["url"];
     const csAssign = /\b(?:var|string)\s+(\w+)\s*=\s*Request\.(?:Query|Form)\s*\[/.exec(line.trim());
     if (csAssign) { tainted.add(csAssign[1]); continue; }
-    // Second-hop propagation through simple string concatenation --
-    // command = "ping -c 1 " + host (host already tainted from an earlier
-    // line) is the single most common real-world shape for command
-    // injection (build a shell command string, then execute it), and none
-    // of the direct-source patterns above can see it since the RHS is a
-    // literal, not a request access. Only fires once a captured word on the
-    // RHS is already in the tainted set built so far -- safe against
-    // false-tainting unrelated concatenations, and order-safe since this
-    // loop already runs top-to-bottom in source order.
-    if (tainted.size > 0 && line.includes("+")) {
-      const concatAssign = /^(\w+)\s*=\s*(.+)$/.exec(line.trim());
-      if (concatAssign && !concatAssign[2].includes("==")) {
-        const rhsVars = [...concatAssign[2].matchAll(/\b(\w+)\b/g)].map(m => m[1]);
-        if (rhsVars.some(v => tainted.has(v))) { tainted.add(concatAssign[1]); continue; }
+    // Second-hop taint propagation -- var2 = <expr referencing var1>, where
+    // var1 is already tainted, covers the single most common real-world
+    // shape across every sink this file cares about: a command string built
+    // by concatenation (command = "ping -c 1 " + host), a template literal
+    // (html = `<h1>Hello ${name}</h1>`), or a value threaded through a
+    // helper/library call (filePath = path.join(base, filename)). None of
+    // the direct-source patterns above can see any of these since the RHS
+    // isn't a literal request access. Deliberately generic (any assignment
+    // referencing an already-tainted identifier propagates, regardless of
+    // the operator) rather than special-casing each shape -- same "accept
+    // some imprecision for better recall" tradeoff already made throughout
+    // this taint tracker (no de-tainting on reassignment, no sanitizer
+    // recognition). Skips comparisons (==/!=) so an `if (a == b)` line isn't
+    // misread as an assignment. Order-safe since this loop runs top-to-bottom.
+    if (tainted.size > 0) {
+      const assign = /^(?:(?:const|let|var)\s+)?(\w+)\s*=\s*(.+?);?$/.exec(line.trim());
+      if (assign && !assign[2].includes("==") && !assign[2].includes("!=") && !tainted.has(assign[1])) {
+        const rhsVars = [...assign[2].matchAll(/\b(\w+)\b/g)].map(m => m[1]);
+        if (rhsVars.some(v => tainted.has(v))) { tainted.add(assign[1]); continue; }
       }
     }
   }
@@ -555,8 +569,11 @@ const WEAK_SIGNING_SECRET_RE = [
   /(?:\.config|app\.config)\s*\[\s*["'](?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)["']\s*\]\s*=\s*["'][^"']+["']/,
   // Flask: app.secret_key = 'literal'
   /\bapp\.secret_key\s*=\s*["'][^"']+["']/,
-  // Django settings.py / bare module-level constant
-  /^\s*(?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)\s*=\s*["'][^"']+["']/,
+  // Django settings.py / bare module-level constant, or JS/TS
+  // const/let/var JWT_SECRET = "literal" -- the optional prefix group is
+  // what makes this also match the extremely common Node.js declaration
+  // style, which the bare Django-style pattern alone couldn't.
+  /^\s*(?:(?:const|let|var)\s+)?(?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)\s*=\s*["'][^"']+["']/,
   // Node/Express (jsonwebtoken): jwt.sign(payload, 'literal', ...) / jwt.verify(token, 'literal', ...)
   /jwt\.(?:sign|verify)\s*\(\s*[^,]+,\s*["'][^"']+["']/,
 ];
@@ -1213,6 +1230,105 @@ function findNamedTaintCommandInjectionPHP(lines: string[]): ScanIndicator[] {
     if (!hit) continue;
     found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
       detail:`Tainted variable '$${hit[1]}' flows into a shell command — use escapeshellarg()/escapeshellcmd() or an argument array` });
+  }
+  return found;
+}
+
+// Node child_process named-taint: exec(command)/execSync(command) where
+// command was built on an earlier line (often via the concatenation/
+// template-literal propagation extractTaintedVars now tracks). CMD_INJECTION_RE
+// only matches an inline template literal directly in the call. Bare "exec"/
+// "spawn" require a negative lookbehind for a preceding "." so this doesn't
+// collide with the common regex.exec()/array.exec() method-call idiom --
+// execSync/spawnSync have no such common collision and don't need the guard.
+const JS_CMD_SINK_RE = /\b(?:execSync|spawnSync)\s*\(\s*(\w+)\b|(?<!\.)\b(?:exec|spawn)\s*\(\s*(\w+)\b/;
+
+function findNamedTaintCommandInjectionJS(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = JS_CMD_SINK_RE.exec(line);
+    const ident = m?.[1] ?? m?.[2];
+    if (!ident || !tainted.has(ident)) continue;
+    if (CMD_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
+    found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
+      detail:`Tainted variable '${ident}' flows into a shell command — use execFile()/spawn() with an argument array instead of a shell string` });
+  }
+  return found;
+}
+
+// Server-side reflected XSS: res.send(html)/res.write(html) where html is a
+// raw string built from request input (often via the concatenation/template-
+// literal propagation extractTaintedVars now tracks) and returned directly
+// as the HTTP response body -- a completely different sink from XSS_RE's
+// client-side DOM patterns (innerHTML/document.write), which this doesn't
+// overlap with at all. Any framework that returns raw, un-templated HTML
+// built from request data is vulnerable regardless of whether a browser's
+// DOM APIs are involved.
+const EXPRESS_HTML_RESPONSE_SINK_RE = /\bres\.(?:send|write|end)\s*\(\s*(\w+)\s*\)/;
+
+function findNamedTaintReflectedXSS(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = EXPRESS_HTML_RESPONSE_SINK_RE.exec(line);
+    if (!m || !tainted.has(m[1])) continue;
+    if (XSS_RE.some(r => r.test(line))) continue; // already caught inline
+    found.push({ id:"xss", label:"Reflected XSS", severity:"critical", line:i+1,
+      detail:`Tainted variable '${m[1]}' returned directly as the HTTP response body — sanitize/escape or use a templating engine with auto-escaping` });
+  }
+  return found;
+}
+
+// Named-taint path traversal: path.join(base, filename)/path.resolve(...)
+// where filename is a tainted variable (as opposed to PATH_TRAVERSAL_RE's
+// inline-only req./request. pattern). Mirrors PATH_TRAVERSAL_RE's own
+// precedent of flagging the join() call itself as the vulnerable sink,
+// without needing to trace all the way to a downstream fs/sendFile call.
+const JS_PATH_JOIN_RE = /\bpath\.(?:join|resolve)\s*\(([^)]+)\)/;
+
+function findNamedTaintPathTraversalJS(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = JS_PATH_JOIN_RE.exec(line);
+    if (!m) continue;
+    if (PATH_TRAVERSAL_RE.some(r => r.test(line))) continue; // already caught inline
+    const args = [...m[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+    const hit = args.find(a => tainted.has(a));
+    if (!hit) continue;
+    found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+      detail:`Tainted variable '${hit}' joined into a file path — resolve and validate the result stays within the intended base directory` });
+  }
+  return found;
+}
+
+// Named-taint open redirect: res.redirect(target) where target is a tainted
+// variable, as opposed to OPEN_REDIRECT_RE's inline-only req.query/req.body
+// pattern.
+const JS_REDIRECT_SINK_RE = /\bres\.redirect\s*\(\s*(\w+)\s*\)/;
+
+function findNamedTaintOpenRedirectJS(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = JS_REDIRECT_SINK_RE.exec(line);
+    if (!m || !tainted.has(m[1])) continue;
+    if (OPEN_REDIRECT_RE.some(r => r.test(line))) continue; // already caught inline
+    found.push({ id:"open-redirect", label:"Open Redirect", severity:"medium", line:i+1,
+      detail:`Tainted variable '${m[1]}' used as a redirect target — validate against an allowlist of known paths/origins` });
   }
   return found;
 }
@@ -4255,15 +4371,18 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findCommandInjection(lines),
     ...findNamedTaintCommandInjectionPHP(lines),
     ...findNamedTaintCommandInjectionPython(lines),
+    ...findNamedTaintCommandInjectionJS(lines),
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
+    ...findNamedTaintPathTraversalJS(lines),
     ...findZipSlip(lines),
     ...findPHPFileInclusion(lines),
     ...findPrototypePollution(lines),
     ...findInsecureRandomness(lines),
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
+    ...findNamedTaintOpenRedirectJS(lines),
     ...findTimingAttack(lines),
     ...findPlaintextPasswordStorage(lines),
     ...findSSTI(lines),
@@ -4277,6 +4396,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintXSS(lines),
+    ...findNamedTaintReflectedXSS(lines),
     ...findNoSQLInjection(lines),
     ...findVerboseErrors(lines),
     ...findGraphQLInjection(lines),
