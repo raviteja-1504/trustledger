@@ -43,6 +43,21 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 
+// webpack provides this global on Node.js targets specifically to escape its
+// own require() interception. Needed here because require.resolve(...) from
+// INSIDE webpack-bundled code doesn't do real filesystem resolution at all --
+// even for an externalized package -- it returns webpack's internal numeric
+// module id instead of a real path (confirmed directly against a real
+// production failure: "path.dirname received type number (90625)"). The
+// real Node require's .resolve() is needed here specifically because we want
+// an actual on-disk path to read raw .wasm bytes from, not a module to
+// require() through webpack's own resolution.
+declare const __non_webpack_require__: NodeJS.Require | undefined;
+function nodeRequire(): NodeJS.Require {
+  // eslint-disable-next-line no-undef
+  return typeof __non_webpack_require__ !== "undefined" ? __non_webpack_require__ : require;
+}
+
 export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti";
 
@@ -78,7 +93,7 @@ function initPythonParser(): Promise<LanguageT> {
       // already knows how to handle) and build the final .wasm path with
       // plain runtime string ops -- webpack's parser never sees a require
       // target ending in .wasm anywhere in the source at all.
-      const pkgJsonPath = require.resolve("tree-sitter-wasms/package.json");
+      const pkgJsonPath = nodeRequire().resolve("tree-sitter-wasms/package.json");
       const wasmPath = path.join(path.dirname(pkgJsonPath), "out", "tree-sitter-python.wasm");
       // Read the bytes ourselves and pass a Uint8Array rather than a path
       // string: Language.load(path) internally does `await import("fs/promises")`
