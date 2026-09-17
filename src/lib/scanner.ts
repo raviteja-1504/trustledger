@@ -1296,7 +1296,12 @@ function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
 // suppress if one is found" guard against flooding every legitimate
 // DAO/repository call that happens to take a request-derived id.
 const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|delete|remove)\w*\s*\(\s*(\w+)\b/i;
-const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b/i;
+// Extended (beyond the original ownership-comparison terms) with role/
+// permission/admin-gate language, shared with findAuthenticatedIdentityIgnored
+// below -- a function gated by an admin/role check legitimately acts on
+// another user's identifier by design, so both detectors need to stand down
+// in its presence, not just an explicit ownership comparison.
+const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin/i;
 
 function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1318,6 +1323,70 @@ function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
     // and cross-file heuristics.
     found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
       detail:`Tainted variable '${m[1]}' used as a lookup/update id with no ownership check nearby — verify caller owns the resource` });
+  }
+  return found;
+}
+
+// BOLA (OWASP API #1): a function authenticates the caller (decodes/
+// validates a token into an identity variable), then performs a write/
+// delete/update using a DIFFERENT identifier instead of that identity, with
+// no comparison between the two anywhere in the function. Distinct from and
+// additive to findNamedTaintIDOR above: that detector fires on any raw
+// request-derived id reaching a lookup, regardless of whether the function
+// authenticates at all; this one specifically targets the narrower "auth was
+// established, then ignored" shape, which is a stronger, more specific
+// signal. Found via a real VAmPI benchmark (users.py's update_password): the
+// vulnerable and safe branches differ ONLY in which variable feeds the same
+// filter_by() call, which is exactly what this checks for.
+const AUTH_ESTABLISHED_RE = [
+  // Python: resp = token_validator(...); payload = jwt.decode(...)
+  /\b(\w+)\s*=\s*(?:await\s+)?(?:token_validator|decode_auth_token|jwt\.decode|jwt\.verify)\s*\(/,
+  // JS/TS: const decoded = jwt.verify(...); const payload = await verifyToken(...)
+  /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s+)?(?:jwt\.verify|jwt\.decode|verifyToken|decodeToken)\s*\(/,
+];
+const BOLA_WRITE_SINK_RE = [
+  // Python/SQLAlchemy: User.query.filter_by(username=username).first() -- captured
+  // group only ever matches a BARE identifier, so a correctly-scoped
+  // reference like filter_by(username=resp['sub']) structurally can't match
+  // here at all (the '[' breaks the \w+ capture before the closing paren).
+  /\.filter_by\s*\(\s*(?:username|id|user_id)\s*=\s*(\w+)\s*\)/,
+  // JS/Mongoose
+  /find(?:ByIdAndUpdate|ByIdAndDelete)\s*\(\s*(\w+)/,
+  // Sequelize-style
+  /\.(?:update|destroy|delete)\s*\(\s*\{\s*(?:where\s*:\s*)?\{?\s*id\s*:\s*(\w+)/,
+];
+
+function findAuthenticatedIdentityIgnored(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    let authVar: string | undefined;
+    for (const re of AUTH_ESTABLISHED_RE) {
+      const m = re.exec(lines[i]);
+      if (m) { authVar = m[1]; break; }
+    }
+    if (!authVar) continue;
+
+    const windowEnd = Math.min(lines.length, i + 40);
+    for (let j = i + 1; j < windowEnd; j++) {
+      if (isNonExecutableLine(lines[j])) continue;
+      let ident: string | undefined;
+      for (const re of BOLA_WRITE_SINK_RE) {
+        const m = re.exec(lines[j]);
+        if (m) { ident = m[1]; break; }
+      }
+      if (!ident || ident === authVar) continue;
+
+      const window = lines.slice(i, Math.min(lines.length, j + 1));
+      const ownershipCompared = window.some(l =>
+        (l.includes(authVar as string) && (l.includes("==") || l.includes("!=") || l.includes(".equals("))));
+      if (ownershipCompared) continue;
+      if (window.some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l))) continue;
+
+      found.push({ id:"bola-identity-mismatch", label:"Broken Object Level Authorization", severity:"medium", line:j+1,
+        detail:`Caller identity established via '${authVar}' on line ${i+1}, but this write uses a different identifier ('${ident}') with no ownership check — verify the caller owns the target resource` });
+      break; // one finding per auth-establishment site is enough
+    }
   }
   return found;
 }
@@ -4096,6 +4165,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findIDOR(lines),
     ...findIDORJava(lines),
     ...findNamedTaintIDOR(lines),
+    ...findAuthenticatedIdentityIgnored(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintXSS(lines),

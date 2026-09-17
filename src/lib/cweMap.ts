@@ -32,6 +32,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "file-inclusion":             { id: "CWE-98",   title: "PHP Local/Remote File Inclusion" },
   "weak-signing-secret":        { id: "CWE-321",  title: "Use of Hard-coded Cryptographic Key" },
   "graphql-introspection-enabled": { id: "CWE-200", title: "Exposure of Sensitive Information to an Unauthorized Actor" },
+  "bola-identity-mismatch":     { id: "CWE-639",  title: "Authorization Bypass Through User-Controlled Key" },
   "eval-exec":                  { id: "CWE-95",   title: "Eval Injection" },
   "weak-crypto":                { id: "CWE-327",  title: "Broken or Risky Cryptographic Algorithm" },
   "ssrf":                       { id: "CWE-918",  title: "Server-Side Request Forgery" },

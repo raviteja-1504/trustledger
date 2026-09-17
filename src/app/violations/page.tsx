@@ -36,6 +36,7 @@ const SIGNAL_DESC: Record<string, string> = {
   "file-inclusion": "Request-derived value passed to PHP include/require — allows local (and, if allow_url_include is on, remote) file inclusion",
   "weak-signing-secret": "JWT/session signing key is a hardcoded literal — anyone with repo access can forge valid tokens",
   "graphql-introspection-enabled": "GraphQL introspection/IDE (GraphiQL/Playground) is explicitly enabled — exposes the complete schema for attacker reconnaissance",
+  "bola-identity-mismatch": "Caller identity was established via a token/session check, then a write used a different identifier with no ownership comparison nearby",
 
   // AI provenance signals
   "ai-comment-pattern":    "Comment verbosity and phrasing match GitHub Copilot / ChatGPT output signatures — over-explained, instructional tone",
@@ -50,7 +51,7 @@ const SEV_SIGNAL: Record<string, string> = {
   "jwt-none-alg":"#f97316","ai-comment-pattern":"#94a3b8",
   "structural-uniformity":"#f59e0b","comment-density":"#94a3b8","identifier-entropy":"#f59e0b",
   "hallucinated-method-call":"#f59e0b","license-header-contamination":"#f59e0b","ai-blast-radius":"#f59e0b",
-  "file-inclusion":"#f97316","weak-signing-secret":"#7c3aed","graphql-introspection-enabled":"#f59e0b",
+  "file-inclusion":"#f97316","weak-signing-secret":"#7c3aed","graphql-introspection-enabled":"#f59e0b","bola-identity-mismatch":"#f97316",
 };
 
 interface InlineCodeReviewProps {

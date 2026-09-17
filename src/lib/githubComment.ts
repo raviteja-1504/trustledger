@@ -19,6 +19,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "file-inclusion": "PHP file inclusion",
   "weak-signing-secret": "Hardcoded signing secret",
   "graphql-introspection-enabled": "GraphQL introspection enabled",
+  "bola-identity-mismatch": "Broken Object Level Authorization",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {
