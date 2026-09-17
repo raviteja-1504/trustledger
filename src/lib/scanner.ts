@@ -452,7 +452,13 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
       continue;
     }
     // Python: url = request.args.get(...)
-    const pyAssign = /^(\w+)\s*=\s*request\.(?:args|form|json|data|POST|GET)/.exec(line.trim());
+    // Covers both the attribute form (request.json, request.args) and the
+    // extremely common Flask method-call form (request.get_json(),
+    // request.get_data()) -- found missing via a real VAmPI benchmark, where
+    // `request_data = request.get_json()` is the actual idiom used
+    // throughout the app and was silently invisible to every named-taint
+    // detector that depends on this function.
+    const pyAssign = /^(\w+)\s*=\s*request\.(?:args|form|json|data|POST|GET|get_json|get_data)\s*\(?/.exec(line.trim());
     if (pyAssign) { tainted.add(pyAssign[1]); continue; }
     // PHP: $url = $_GET['url']
     const phpAssign = /^\$(\w+)\s*=\s*\$_(?:POST|GET|REQUEST|COOKIE|SERVER)\s*\[/.exec(line.trim());
@@ -668,6 +674,37 @@ const TIMING_ATTACK_RE = [
   /(?:token|secret|password|hash|hmac|signature)\s*(?:===|==)\s*(?:req\.|body\.|params\.|query\.|request\.|headers\.)\w+/i,
   /(?:req\.|body\.|params\.|request\.|headers\.)[\w.]+\s*(?:===|==)\s*\w*(?:token|secret|password|hash|hmac|signature)\w*/i,
 ];
+
+// Plaintext password storage — a request-derived value assigned directly to
+// a .password/.passwd/.pwd attribute with no hashing function anywhere on
+// the line. Found via a real VAmPI benchmark (api_views/users.py: `user.password
+// = request_data.get('password')`, then straight to db.session.commit() —
+// no bcrypt/argon2/pbkdf2/hashlib call anywhere in the function). Requires
+// confirmed taint (inline request.*/req.*/body.* or a variable already
+// tracked by extractTaintedVars) rather than flagging every bare assignment,
+// so a value hashed on an earlier line and stored in a plain-looking
+// variable name isn't penalized just for lacking a hash call on this
+// specific line — same taint-confirmation discipline as the named-taint
+// detectors elsewhere in this file.
+const HASH_FUNCTION_NEARBY_RE = /bcrypt|scrypt|argon2?|pbkdf2|generate_password_hash|check_password_hash|hashlib|password_hash|\bcrypt\s*\(/i;
+const PASSWORD_ASSIGN_SINK_RE = /\.(?:password|passwd|pwd)\s*=(?!=)/i;
+
+function findPlaintextPasswordStorage(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (!PASSWORD_ASSIGN_SINK_RE.test(line)) continue;
+    if (HASH_FUNCTION_NEARBY_RE.test(line)) continue;
+    const inlineTaint = /(?:request\.|req\.|body\.)\w+/i.test(line);
+    const namedTaint = tainted.size > 0 && [...line.matchAll(/\b(\w+)\b/g)].some(m => tainted.has(m[1]));
+    if (!inlineTaint && !namedTaint) continue;
+    found.push({ id:"plaintext-password-storage", label:"Plaintext Password Storage", severity:"high", line:i+1,
+      detail:"Password assigned directly from request input with no hashing — store only a salted hash (bcrypt/argon2/pbkdf2), never the plaintext value" });
+  }
+  return found;
+}
 
 // SSTI — server-side template injection
 const SSTI_RE = [
@@ -4159,6 +4196,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
     ...findTimingAttack(lines),
+    ...findPlaintextPasswordStorage(lines),
     ...findSSTI(lines),
     ...findHeaderInjection(lines),
     ...findWeakCORS(lines),
