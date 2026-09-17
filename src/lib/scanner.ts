@@ -399,8 +399,41 @@ function hasTaintNearby(lines: string[], sinkLine: number, window = 12): boolean
 
 // Named-variable taint tracker: extracts variable names assigned from user input.
 // Catches patterns like:  const url = req.query.url;  fetch(url);
-function extractTaintedVars(lines: string[]): Set<string> {
+// Collapse a Prettier-style multi-line destructuring assignment —
+//   const {
+//       userId,
+//       benefitStartDate
+//   } = req.body;
+// — into one logical line so the single-line regexes below can see the
+// whole statement. Without this, every taint-tracking detector (SSRF/XSS/
+// IDOR named-variable passes) silently misses any request field destructured
+// across multiple lines, which is the default wrap style for 2+ properties
+// in Prettier/most JS/TS formatters and extremely common in practice.
+function toLogicalLines(lines: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/\b(?:const|let|var)\s*\{\s*$/.test(lines[i].trim())) {
+      let merged = lines[i].trim();
+      let j = i + 1;
+      while (j < lines.length && j < i + 12 && !lines[j].includes("}")) {
+        merged += " " + lines[j].trim();
+        j++;
+      }
+      if (j < lines.length && lines[j].includes("}")) {
+        merged += " " + lines[j].trim();
+        i = j;
+      }
+      out.push(merged);
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return out;
+}
+
+function extractTaintedVars(rawLines: string[]): Set<string> {
   const tainted = new Set<string>();
+  const lines = toLogicalLines(rawLines);
   for (const line of lines) {
     if (isNonExecutableLine(line)) continue;
     // const/let/var x = req.query.x
@@ -494,6 +527,7 @@ const SSRF_RE = [
   /new\s+URL\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
   /https?\.(?:get|request)\s*\(\s*(?:req\.|request\.|body\.|params\.)\w+/i,
   /got\s*\(\s*(?:req\.|body\.|params\.|query\.)\w+/i,
+  /(?:needle|superagent)(?:\.(?:get|post|put|delete|patch|head))?\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
   /axios\s*\(\s*\{\s*url\s*:\s*(?:req\.|body\.|params\.)\w+/i,
   // Java/Kotlin — RestTemplate/URL/HttpClient built from request input
   /RestTemplate\s*\(\s*\)\s*\.\s*(?:getForObject|getForEntity|postForObject|exchange)\s*\([^)]*request\.getParameter\s*\(/i,
@@ -1019,7 +1053,7 @@ function findTimingAttack(lines: string[]): ScanIndicator[] {
 function findNamedTaintSSRF(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
   if (tainted.size === 0) return [];
-  const HTTP_SINK_RE = /(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|got|needle|superagent|https?\.(?:get|request))\s*\(\s*(\w+)/i;
+  const HTTP_SINK_RE = /(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|got|needle(?:\.(?:get|post|put|delete|patch|head))?|superagent(?:\.(?:get|post|put|delete|patch|head))?|https?\.(?:get|request))\s*\(\s*(\w+)/i;
   const found: ScanIndicator[] = [];
   const seen = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
@@ -1051,6 +1085,42 @@ function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
     seen.add(i);
     found.push({ id:"xss", label:"XSS via Named Variable", severity:"critical", line:i+1,
       detail:`Tainted variable '${m[1]}' written to DOM — sanitize with DOMPurify` });
+  }
+  return found;
+}
+
+// Named-variable IDOR: const { userId } = req.body; someDAO.update(userId, ...)
+// with no ownership check anywhere nearby. IDOR_RE only catches the tainted
+// ID literally inline as `req.params`/`req.body` at the call site; once a
+// route destructures/reassigns it to a local variable first (the common
+// real-world shape — see OWASP NodeGoat's benefits.js) that inline pattern
+// never matches. Mirrors findNamedTaintSSRF/findNamedTaintXSS's shape, with
+// findIDORJava's "scan a nearby window for an auth/ownership check, and
+// suppress if one is found" guard against flooding every legitimate
+// DAO/repository call that happens to take a request-derived id.
+const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|delete|remove)\w*\s*\(\s*(\w+)\b/i;
+const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b/i;
+
+function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = IDOR_SINK_RE.exec(lines[i]);
+    if (!m || !tainted.has(m[1])) continue;
+    if (IDOR_RE.some(r => r.test(lines[i]))) continue; // already caught inline
+    const windowStart = Math.max(0, i - 15);
+    const hasAuthCheck = lines.slice(windowStart, i + 1).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
+    if (hasAuthCheck) continue;
+    // Capped at medium (vs. "high" for the literal-inline IDOR_RE match
+    // above): this is a heuristic over a destructured/renamed variable with
+    // no guaranteed way to tell a real owned-resource lookup (unsafe) from a
+    // pre-auth uniqueness check like "is this username taken" (benign) —
+    // same false-positive-risk reasoning as this session's other named-taint
+    // and cross-file heuristics.
+    found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
+      detail:`Tainted variable '${m[1]}' used as a lookup/update id with no ownership check nearby — verify caller owns the resource` });
   }
   return found;
 }
@@ -3808,6 +3878,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findWeakCORS(lines),
     ...findIDOR(lines),
     ...findIDORJava(lines),
+    ...findNamedTaintIDOR(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintXSS(lines),
