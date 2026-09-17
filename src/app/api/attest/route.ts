@@ -191,8 +191,12 @@ export async function POST(req: NextRequest) {
   await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
 
   // Attesting a file can clear the trigger for an auto-generated incident —
-  // best-effort, swallows its own errors.
-  await syncAutoIncidents(db, org_id);
+  // best-effort, swallows its own errors. Only CRITICAL/HIGH files can ever
+  // affect incident state (fetchUnattestedRiskState only looks at those risk
+  // levels), so skip this org-wide aggregation entirely for MEDIUM/LOW files.
+  if (file?.risk_score === "CRITICAL" || file?.risk_score === "HIGH") {
+    await syncAutoIncidents(db, org_id);
+  }
 
   return NextResponse.json({
     attestation_id: attestation.id,

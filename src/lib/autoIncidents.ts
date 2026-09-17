@@ -21,6 +21,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
 import { fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
+import { cached, cacheKeys } from "@/lib/cache";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "./incidentPlaybooks";
 import { writeAuditLog } from "./audit";
 
@@ -28,7 +29,17 @@ type IncidentRow = Database["public"]["Tables"]["incidents"]["Row"];
 
 export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
   try {
-    const data = await fetchUnattestedRiskState(orgId);
+    // fetchUnattestedRiskState() is a full org-wide aggregation (every scan,
+    // repo, attestation, violation and up to 1000 scan_files rows, joined and
+    // grouped in JS) -- expensive enough that running it unconditionally on
+    // every single call here (this function fires on every attest, plus every
+    // new scan landing) was the dominant CPU cost on those hot paths. A short
+    // per-org cache collapses bursts (e.g. "attest all" firing this once per
+    // file in a few seconds) into one real aggregation; a normal, non-bursty
+    // call is unaffected since nothing is cached yet. Incident sync is
+    // already best-effort (see the catch below), so a few seconds of
+    // staleness here is an acceptable trade for the CPU savings.
+    const data = await cached(cacheKeys.autoIncidentState(orgId), 12, () => fetchUnattestedRiskState(orgId));
     const now  = new Date().toISOString();
 
     const stillOpenFiles = new Set(

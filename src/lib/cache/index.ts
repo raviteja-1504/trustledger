@@ -116,6 +116,7 @@ export const cacheKeys = {
   orgSettings:(orgId: string)              => `org:${orgId}`,
   billing:    (orgId: string)              => `bill:${orgId}`,
   dependencies:(orgId: string)             => `deps:${orgId}`,
+  autoIncidentState: (orgId: string)       => `aincsync:${orgId}`,
 };
 
 // Every status value each of the above list endpoints can be filtered to,
