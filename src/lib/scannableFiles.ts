@@ -16,6 +16,10 @@ export const SCANNABLE_EXTS = new Set([
   // hiding entire classes of Java-specific findings regardless of detector
   // quality.
   "xml", "properties",
+  // Razor views -- where C#'s Html.Raw()/Response.Write() XSS escape
+  // hatches predominantly live, not in .cs code-behind. Without this, the
+  // C# XSS detector would rarely see real code.
+  "cshtml",
 ]);
 
 const MANIFEST_BASENAMES = new Set([

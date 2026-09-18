@@ -197,7 +197,7 @@ const LANG_MAP: Record<string, string> = {
   py: "python",   ts: "typescript", tsx: "typescript",
   js: "javascript", jsx: "javascript",
   rb: "ruby",     go: "golang",     rs: "rust",
-  java: "java",   kt: "kotlin",     cs: "csharp",
+  java: "java",   kt: "kotlin",     cs: "csharp",   cshtml: "csharp",
   php: "php",     cpp: "cpp",       c:   "c",
   swift: "swift", yaml: "yaml",     yml: "yaml",
   json: "json",   sh: "shell",      sql: "sql",
@@ -514,6 +514,19 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // C#: var url = Request.Query["url"];
     const csAssign = /\b(?:var|string)\s+(\w+)\s*=\s*Request\.(?:Query|Form)\s*\[/.exec(line.trim());
     if (csAssign) { tainted.add(csAssign[1]); continue; }
+    // C#: public IActionResult GetUser([FromRoute] int id, [FromQuery] string name)
+    // Method-PARAMETER taint source, not an assignment -- [FromRoute]/
+    // [FromQuery]/[FromBody]/[FromHeader]-attributed parameters are ASP.NET
+    // Core's model-binding idiom for pulling untrusted route/query/body/
+    // header data directly into a named parameter, with no local variable
+    // assignment anywhere (unlike every branch above, which all key on
+    // `= request.X`). Uses matchAll (not exec) since a single method
+    // signature routinely declares more than one bound parameter on one
+    // line. Same file-wide-flat-Set imprecision as every other language
+    // here: two different C# methods reusing a parameter name (e.g. both
+    // taking `id`) share taint state -- an accepted, pre-existing tradeoff.
+    const csParams = [...line.matchAll(/\[From(?:Route|Query|Body|Header)\]\s+[\w.]+(?:<[^>]+>)?\??\s+(\w+)/g)];
+    if (csParams.length > 0) { csParams.forEach(m => tainted.add(m[1])); continue; }
     // Second-hop taint propagation -- var2 = <expr referencing var1>, where
     // var1 is already tainted, covers the single most common real-world
     // shape across every sink this file cares about: a command string built
@@ -578,6 +591,21 @@ const SQL_INJECTION_RE = [
   // value in single quotes first (as in the real example above), which a
   // strict adjacency match would miss.
   /(?=[\s\S]*\.(?:where|find_by_sql|order|group|having|pluck|select|calculate)\s*\()(?=[\s\S]*#\{)/,
+  // C# — SqlCommand/SqlDataAdapter constructed with concatenated SQL, or
+  // .CommandText set via concatenation. Already incidentally matched by the
+  // generic "..." + var concatenation entry above (verified) -- made
+  // explicit/deliberate here so C# coverage is a real, documented detector.
+  /(?:new\s+Sql(?:Command|DataAdapter)|\.CommandText)\s*[=(][\s\S]{0,150}?["']\s*\+\s*\w/i,
+  // C#'s $"..." interpolated-string SQL query -- structurally identical gap
+  // to the f-string entry above (no + operator for the generic concat
+  // pattern to key on). CRITICAL: explicitly excludes EF Core's
+  // FromSqlInterpolated/ExecuteSqlInterpolated -- EF's SAFE parameterized-
+  // interpolation APIs, which compile the identical $"...{id}" syntax into
+  // a real parameterized query (unlike FromSqlRaw/ExecuteSqlRaw, which run
+  // it as literal raw SQL). Nothing about the $"..." syntax itself
+  // distinguishes safe from unsafe -- only the wrapping method name does,
+  // hence the leading negative lookahead rather than a syntax-level check.
+  /^(?!.*(?:FromSqlInterpolated|ExecuteSqlInterpolated)).*\$["'][^"']*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\{/i,
 ];
 
 const EVAL_EXEC_RE = [
@@ -684,6 +712,9 @@ const SSRF_RE = [
   /curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*\$_(?:GET|POST|REQUEST)\b/i,
   // Python requests library
   /requests\.(?:get|post|put|delete|head)\s*\(\s*request\.(?:args|form|GET|POST)\b/i,
+  // C# — HttpClient inline call with a request-derived URL argument.
+  /\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync)\s*\([^)]*Request\.(?:Query|Form)\b/i,
+  /WebRequest\.Create\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
 const PATH_TRAVERSAL_RE = [
@@ -705,8 +736,14 @@ const PATH_TRAVERSAL_RE = [
   /(?:fopen|file_get_contents|readfile|include|include_once|require|require_once)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby
   /File\.(?:read|open|new|delete)\s*\([^)]*\bparams\[/i,
-  // C#
+  // C# — broadened beyond the original File.*-only, Request.Query/Form-only
+  // entry with Path.Combine. The [FromRoute]/[FromQuery] attribute form is
+  // deliberately NOT added here -- attributes annotate parameters, they
+  // don't appear as call arguments, so that coverage comes entirely from
+  // extractTaintedVars' attribute-parameter fix feeding the named-taint
+  // function below, not from a new inline entry.
   /File\.(?:ReadAllText|ReadAllBytes|OpenRead|OpenWrite|Delete)\s*\([^)]*Request\.(?:Query|Form)\b/i,
+  /Path\.Combine\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
 const PROTO_POLLUTION_RE = [
@@ -992,6 +1029,12 @@ const XSS_RE = [
   /\$\([^)]+\)\.html\s*\(\s*\w+\s*\)/,
   /\.insertAdjacentHTML\s*\([^,]+,\s*\w+/,
   /\bbypassSecurityTrustHtml\s*\(/i,
+  // C# Razor — Html.Raw()/@Html.Raw() and Response.Write() are the only two
+  // dangerous escape hatches in a template engine that auto-encodes output
+  // by default. Deliberately NOT a broad interpolation-based pattern like
+  // the JS entries above, which would misfire on completely safe,
+  // auto-encoded @Model.Name-style Razor output.
+  /(?:@?Html\.Raw|Response\.Write)\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
 // Insecure deserialization
@@ -1015,6 +1058,13 @@ const INSECURE_DESERIAL_RE = [
   // pickle/ObjectInputStream have. A real, language-specific scoping
   // judgment, not an oversight.
   /gob\.NewDecoder\s*\(\s*[^)]*\.(?:Body|Conn)\b[^)]*\)\s*\.\s*Decode\s*\(/i,
+  // C# — JavaScriptSerializer with a SimpleTypeResolver (or any custom
+  // *TypeResolver) opts into polymorphic type instantiation from the
+  // payload, the same class of risk as Json.NET's TypeNameHandling below.
+  // The default no-arg constructor -- new JavaScriptSerializer() -- is safe
+  // and structurally cannot match, since this requires content inside the
+  // parens.
+  /new\s+JavaScriptSerializer\s*\(\s*new\s+\w*TypeResolver\s*\(/,
 ];
 
 // Weak cryptography
@@ -1223,6 +1273,57 @@ function findInsecureDeserializationGoDecoder(lines: string[]): ScanIndicator[] 
     if (!m || !decoders.has(m[1])) continue;
     found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
       detail:`gob.Decoder '${m[1]}' built from a request body/connection — arbitrary registered-type decode from untrusted data; validate/restrict types or switch to encoding/json` });
+  }
+  return found;
+}
+
+// C# — BinaryFormatter/ObjectStateFormatter.Deserialize instantiates an
+// arbitrary CLR type from the wire data, the direct equivalent of Python
+// pickle/Java ObjectInputStream (RCE-adjacent, not merely data-corruption
+// risk). Microsoft has deprecated/obsoleted BinaryFormatter as a security
+// risk since .NET 5+ -- flat "constructor nearby + Deserialize call" match,
+// no taint-source verification required (same posture as pickle.loads()
+// above). Gated on a nearby constructor (not a bare ".Deserialize(" flat
+// match) so this doesn't flag System.Text.Json's completely safe
+// JsonSerializer.Deserialize<T>(...) calls, which share the same method name.
+const CSHARP_DESERIAL_CTOR_RE = /new\s+(?:BinaryFormatter|ObjectStateFormatter)\s*\(/;
+const CSHARP_DESERIAL_SINK_RE = /\.(?:Deserialize|UnsafeDeserialize)\s*\(/;
+
+function findInsecureDeserializationCSharp(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!CSHARP_DESERIAL_SINK_RE.test(lines[i])) continue;
+    const windowStart = Math.max(0, i - 10);
+    const window = lines.slice(windowStart, i + 1);
+    if (!window.some(l => CSHARP_DESERIAL_CTOR_RE.test(l))) continue;
+    found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
+      detail:"BinaryFormatter/ObjectStateFormatter deserializes data into an arbitrary CLR type from the wire — Microsoft has deprecated BinaryFormatter as a security risk; use System.Text.Json with a known DTO type instead" });
+  }
+  return found;
+}
+
+// C# — JsonConvert.DeserializeObject/JsonSerializer.Deserialize with
+// TypeNameHandling.{All,Auto,Objects,Arrays} set nearby (not necessarily
+// same line -- settings are typically built on a JsonSerializerSettings
+// object a few lines before being passed in). Plain JsonConvert.
+// DeserializeObject<T>(json) with NO TypeNameHandling override anywhere
+// nearby is safe and must not be flagged -- mirrors the Go encoding/json
+// reasoning above: deserializing into a statically-typed DTO has no
+// gadget-chain risk.
+const CSHARP_TYPENAME_HANDLING_RE = /TypeNameHandling\s*=\s*TypeNameHandling\.(?:All|Auto|Objects|Arrays)\b/;
+const CSHARP_JSON_DESERIAL_SINK_RE = /(?:JsonConvert\.DeserializeObject|JsonSerializer\.Deserialize)\s*\(/;
+
+function findInsecureDeserializationCSharpJsonNet(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!CSHARP_JSON_DESERIAL_SINK_RE.test(lines[i])) continue;
+    const windowStart = Math.max(0, i - 15);
+    const window = lines.slice(windowStart, i + 1);
+    if (!window.some(l => CSHARP_TYPENAME_HANDLING_RE.test(l))) continue;
+    found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
+      detail:"JSON deserialization with TypeNameHandling.All/Auto lets the payload specify the concrete .NET type to instantiate — a known Json.NET RCE gadget-chain vector; remove TypeNameHandling or restrict it with a custom SerializationBinder allowlist" });
   }
   return found;
 }
@@ -1576,6 +1677,41 @@ function findNamedTaintPathTraversalGo(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// C# named-taint path traversal, mirroring findNamedTaintPathTraversalGo's
+// exact shape: a tainted variable joined into a path via Path.Combine, or
+// passed directly to a filesystem call, on a different line than the
+// inline PATH_TRAVERSAL_RE C# entries can see.
+const CSHARP_PATH_COMBINE_RE = /\bPath\.Combine\s*\(([^)]+)\)/;
+const CSHARP_FS_SINK_RE = /\b(?:File\.(?:ReadAllText|ReadAllBytes|OpenRead|OpenWrite|Delete|WriteAllText|WriteAllBytes)|Directory\.(?:GetFiles|Delete))\s*\(\s*(\w+)\b/;
+
+function findNamedTaintPathTraversalCSharp(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (PATH_TRAVERSAL_RE.some(r => r.test(line))) continue; // already caught inline
+
+    const joinMatch = CSHARP_PATH_COMBINE_RE.exec(line);
+    if (joinMatch) {
+      const args = [...joinMatch[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+      const hit = args.find(a => tainted.has(a));
+      if (hit) {
+        found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+          detail:`Tainted variable '${hit}' joined into a file path via Path.Combine — resolve and validate the result stays within the intended base directory` });
+        continue;
+      }
+    }
+    const fsMatch = CSHARP_FS_SINK_RE.exec(line);
+    if (fsMatch && tainted.has(fsMatch[1])) {
+      found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+        detail:`Tainted variable '${fsMatch[1]}' passed directly to a filesystem call — resolve and validate the result stays within the intended base directory` });
+    }
+  }
+  return found;
+}
+
 // Zip Slip — a distinct path-traversal taint source (CWE-22) from the
 // request-parameter cases above: the tainted value is a ZIP archive entry's
 // own name, which the archive's creator fully controls, so a crafted entry
@@ -1747,6 +1883,62 @@ function findSSRFGoNewRequest(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// C# named-taint SSRF: an HttpClient call with a tainted URL argument, on a
+// different line than where the URL was assigned.
+const CSHARP_HTTP_SINK_RE = /\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync)\s*\(\s*(\w+)\s*[,)]/;
+
+function findNamedTaintSSRFCSharp(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = CSHARP_HTTP_SINK_RE.exec(lines[i]);
+    if (!m || !tainted.has(m[1])) continue;
+    if (SSRF_RE.some(r => r.test(lines[i]))) continue;
+    found.push({ id:"ssrf", label:"Server-Side Request Forgery", severity:"critical", line:i+1,
+      detail:`Tainted variable '${m[1]}' passed to HttpClient — validate the target host against an allowlist before sending the request` });
+  }
+  return found;
+}
+
+// C# SSRF two-step: var request = new HttpRequestMessage(HttpMethod.Get,
+// url); var response = await client.SendAsync(request); -- mirrors
+// findSSRFGoNewRequest's construct-then-send shape exactly.
+// IHttpClientFactory-based HttpRequestMessage is the dominant modern
+// ASP.NET Core idiom, not optional coverage. Deliberately NOT folded into
+// extractTaintedVars' shared Set for the same reason as Go's `req`: `request`
+// here is an HttpRequestMessage object one hop removed from a tainted
+// string, a different taint "kind".
+//
+// SAFE-PATTERN GUARD: a hardcoded destination -- new HttpRequestMessage(
+// HttpMethod.Get, "https://api.example.com") -- is never flagged, since the
+// URL capture group requires a bare identifier, which a quoted string
+// literal structurally cannot satisfy.
+const CSHARP_NEW_REQUEST_RE = /\b(\w+)\s*=\s*new\s+HttpRequestMessage\s*\([^,]+,\s*(\w+)\s*\)/;
+const CSHARP_SEND_ASYNC_RE = /\.SendAsync\s*\(\s*(\w+)\b/;
+
+function findSSRFCSharpNewRequest(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const taintedRequests = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = CSHARP_NEW_REQUEST_RE.exec(lines[i]);
+    if (m && tainted.has(m[2])) taintedRequests.add(m[1]);
+  }
+  if (taintedRequests.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = CSHARP_SEND_ASYNC_RE.exec(lines[i]);
+    if (!m || !taintedRequests.has(m[1])) continue;
+    found.push({ id:"ssrf", label:"Server-Side Request Forgery", severity:"critical", line:i+1,
+      detail:`Request built from tainted URL via HttpRequestMessage and sent with '${m[1]}' — validate the target host against an allowlist before constructing the request` });
+  }
+  return found;
+}
+
 // Named-variable XSS: const html = req.body.html; elem.innerHTML = html
 function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1763,6 +1955,28 @@ function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
     seen.add(i);
     found.push({ id:"xss", label:"XSS via Named Variable", severity:"critical", line:i+1,
       detail:`Tainted variable '${m[1]}' written to DOM — sanitize with DOMPurify` });
+  }
+  return found;
+}
+
+// C# named-taint XSS: a tainted variable passed to Html.Raw/Response.Write,
+// bypassing Razor's default output encoding. Mirrors findNamedTaintXSS's
+// shape, scoped to the same two named escape hatches as the inline XSS_RE
+// entry above (see its comment for why this stays narrow rather than a
+// broad interpolation pattern).
+const CSHARP_XSS_SINK_RE = /(?:@?Html\.Raw|Response\.Write)\s*\(\s*(\w+)\s*\)/;
+
+function findNamedTaintXSSCSharp(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = CSHARP_XSS_SINK_RE.exec(lines[i]);
+    if (!m || !tainted.has(m[1])) continue;
+    if (XSS_RE.some(r => r.test(lines[i]))) continue; // already caught inline
+    found.push({ id:"xss", label:"Cross-Site Scripting (XSS)", severity:"critical", line:i+1,
+      detail:`Tainted variable '${m[1]}' passed to Html.Raw/Response.Write, bypassing Razor's default output encoding — remove the Raw() call or encode explicitly` });
   }
   return found;
 }
@@ -1785,7 +1999,8 @@ const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|
 // Extended again with Gin's identity-from-context idioms (c.MustGet(...),
 // c.GetString("userID"/...)) -- safe, since this only ever suppresses more,
 // never adds new sink matching, and these tokens can't appear in non-Go code.
-const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)/i;
+// Extended again with C#'s [Authorize] attribute -- safe, suppression-only.
+const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)|\[Authorize\b/i;
 
 function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1833,6 +2048,43 @@ function findNamedTaintIDORGo(lines: string[]): ScanIndicator[] {
     const line = lines[i];
     let hit: string | undefined;
     for (const re of GO_IDOR_SINK_RE) {
+      const m = re.exec(line);
+      if (m) { hit = m[1]; break; }
+    }
+    if (!hit || !tainted.has(hit)) continue;
+    const windowStart = Math.max(0, i - 15);
+    if (lines.slice(windowStart, i + 1).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l))) continue;
+    found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
+      detail:`Tainted variable '${hit}' used as a lookup id with no ownership check nearby — verify caller owns the resource` });
+  }
+  return found;
+}
+
+// C# named-taint IDOR/BOLA: an attribute-bound identifier flows into an EF
+// or Dapper lookup with no ownership check nearby. Mirrors
+// findNamedTaintIDORGo exactly (same 15-line auth-check window, same
+// "medium" severity, same documented "loose keyword-proximity, not real
+// semantic ownership comparison" limitation). "Sensitive action missing
+// [Authorize]" detection is explicitly deferred -- ASP.NET Core commonly
+// applies authorization globally (AuthorizeFilter/.RequireAuthorization()
+// in Program.cs), so its absence on a single action is unknowable from one
+// file in isolation, a structural blind spot, not just a false-positive
+// risk to be tuned away.
+const CSHARP_IDOR_SINK_RE = [
+  /\.Find\s*\(\s*(\w+)\s*\)/,                                                          // EF: db.Users.Find(id)
+  /\.Where\s*\(\s*\w+\s*=>\s*\w+\.\w*[Ii]d\s*==\s*(\w+)\s*\)\s*\.\s*(?:FirstOrDefault|SingleOrDefault|First|Single)\s*\(/, // EF LINQ: .Where(x => x.Id == id).FirstOrDefault()
+  /Query(?:First|Single)OrDefault(?:Async)?\s*<[^>]+>\s*\([^)]*new\s*\{\s*\w+\s*=\s*(\w+)\s*\}\s*\)/, // Dapper: QueryFirstOrDefault<T>("...", new { Id = id })
+];
+
+function findNamedTaintIDORCSharp(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    let hit: string | undefined;
+    for (const re of CSHARP_IDOR_SINK_RE) {
       const m = re.exec(line);
       if (m) { hit = m[1]; break; }
     }
@@ -2017,6 +2269,47 @@ function findXXE(lines: string[]): ScanIndicator[] {
     "XML parser with external entities enabled — disable DTD processing in parser config");
 }
 
+// C# — dedicated multi-line-window function rather than a flat XXE_RE
+// entry. The existing Java entries' forward lookaheads ((?![\s\S]{0,300}
+// setFeature...)) can only ever see hardening calls on the SAME line, since
+// every regex in that array is tested one line at a time (content.split(
+// "\n") strips every newline before matching) -- real code overwhelmingly
+// hardens on a separate line. A deliberate precision improvement for C#,
+// not a deviation from the "config-value-presence, no taint required"
+// posture those entries otherwise establish.
+const CSHARP_XML_DOC_CTOR_RE = /new\s+XmlDocument\s*\(\s*\)/;
+const CSHARP_XML_TEXT_READER_CTOR_RE = /new\s+XmlTextReader\s*\(/;
+const CSHARP_XML_RESOLVER_NULL_RE = /\.XmlResolver\s*=\s*null\b/;
+const CSHARP_XML_RESOLVER_UNSAFE_RE = /\.XmlResolver\s*=\s*new\s+XmlUrlResolver\s*\(/;
+const CSHARP_DTD_PARSE_RE = /DtdProcessing\s*=\s*DtdProcessing\.Parse\b/;
+
+function findXXECSharp(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+
+    if (CSHARP_XML_DOC_CTOR_RE.test(line) || CSHARP_XML_TEXT_READER_CTOR_RE.test(line)) {
+      const forwardWindow = lines.slice(i, Math.min(lines.length, i + 10));
+      if (!forwardWindow.some(l => CSHARP_XML_RESOLVER_NULL_RE.test(l))) {
+        found.push({ id:"xxe", label:"XML External Entity (XXE)", severity:"critical", line:i+1,
+          detail:"XmlDocument/XmlTextReader constructed with no XmlResolver = null nearby — external entity/DTD resolution may be enabled depending on target framework; explicitly set XmlResolver to null" });
+      }
+      continue;
+    }
+    if (CSHARP_DTD_PARSE_RE.test(line)) {
+      found.push({ id:"xxe", label:"XML External Entity (XXE)", severity:"critical", line:i+1,
+        detail:"XmlReaderSettings.DtdProcessing explicitly set to Parse — enables DTD/external-entity resolution; leave at the safe default (Prohibit) or use DtdProcessing.Ignore" });
+      continue;
+    }
+    if (CSHARP_XML_RESOLVER_UNSAFE_RE.test(line)) {
+      found.push({ id:"xxe", label:"XML External Entity (XXE)", severity:"critical", line:i+1,
+        detail:"XmlResolver explicitly set to a live XmlUrlResolver — allows external entity/DTD resolution over the network; set XmlResolver to null instead" });
+    }
+  }
+  return found;
+}
+
 function findLDAPInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, LDAP_INJECT_RE, "ldap-injection", "LDAP Injection", "critical",
     "User input in LDAP filter — escape special chars or use parameterized LDAP libraries");
@@ -2025,6 +2318,32 @@ function findLDAPInjection(lines: string[]): ScanIndicator[] {
 function findInsecureFileUpload(lines: string[]): ScanIndicator[] {
   return runDetector(lines, FILE_UPLOAD_RE, "insecure-file-upload", "Insecure File Upload", "high",
     "File upload without MIME validation and size limits — add fileFilter and limits to config");
+}
+
+// C# — IFormFile saved via CopyToAsync/File.Create/File.WriteAllBytes with
+// no visible extension/content-type validation nearby. Needs a real
+// backward-window function rather than a flat FILE_UPLOAD_RE entry (those
+// use same-line-only forward lookaheads, and validation is almost always on
+// a different line from the save call). Gated on IFormFile being in scope
+// within the window (not a bare File.Create/CopyToAsync flat match) so this
+// doesn't fire on unrelated, trusted internal file I/O that happens to
+// share the same method names.
+const CSHARP_FILE_UPLOAD_SINK_RE = /\.CopyToAsync\s*\(|\bFile\.(?:Create|WriteAllBytes)\s*\(/;
+const CSHARP_FILE_UPLOAD_VALIDATION_RE = /allowedExtensions|AllowedExtensions|ContentType|content.?type|GetExtension|Path\.GetExtension|IsValidExtension|whitelist|allowlist|allowedTypes/i;
+
+function findInsecureFileUploadCSharp(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!CSHARP_FILE_UPLOAD_SINK_RE.test(lines[i])) continue;
+    const windowStart = Math.max(0, i - 20);
+    const window = lines.slice(windowStart, i + 1);
+    if (!window.some(l => /\bIFormFile\b/.test(l))) continue;
+    if (window.some(l => CSHARP_FILE_UPLOAD_VALIDATION_RE.test(l))) continue;
+    found.push({ id:"insecure-file-upload", label:"Insecure File Upload", severity:"high", line:i+1,
+      detail:"IFormFile saved to disk with no visible file-extension/content-type validation nearby — validate against an allowlist of extensions/MIME types and store outside the web root with a generated filename" });
+  }
+  return found;
 }
 
 // TOCTOU: check-then-act race (existsSync/statSync followed by fs operation within 10 lines)
@@ -2202,6 +2521,43 @@ function findSQLInjectionJavaTainted(lines: string[]): ScanIndicator[] {
         seen.add(i);
         found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
           detail:"User input assigned within 10 lines and flows into a query-execution call — use a PreparedStatement with bound parameters" });
+      }
+    }
+  }
+  return found;
+}
+
+// C# — CommandText built on one line, executed several lines later (the
+// dominant ADO.NET idiom: cmd.CommandText = query; ... cmd.ExecuteReader();),
+// or FromSqlRaw/ExecuteSqlRaw called with a bare variable. Mirrors
+// findSQLInjectionJavaTainted's proximity-window shape. Explicitly guards
+// against flagging the common, fully-safe parameterized ADO.NET idiom
+// (cmd.Parameters.AddWithValue(...)) -- without this guard it would
+// over-fire on well-written parameterized code whenever any tainted value
+// happens to be nearby (e.g. the very value being safely bound).
+function findSQLInjectionCSharpTainted(lines: string[]): ScanIndicator[] {
+  const CSHARP_SQL_SINK_RE = [
+    /\.ExecuteReader\s*\(\s*\)/,
+    /\.ExecuteNonQuery\s*\(\s*\)/,
+    /\.ExecuteScalar\s*\(\s*\)/,
+    /\.FromSqlRaw\s*\(\s*\w+\s*[,)]/,
+    /\.ExecuteSqlRaw\s*\(\s*\w+\s*[,)]/,
+  ];
+  const found: ScanIndicator[] = [];
+  const seen = new Set<number>();
+  for (const re of CSHARP_SQL_SINK_RE) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i)) continue;
+      if (isNonExecutableLine(lines[i])) continue;
+      if (!re.test(lines[i])) continue;
+      if (SQL_INJECTION_RE.some(r => r.test(lines[i]))) continue;
+      const windowStart = Math.max(0, i - 10);
+      const window = lines.slice(windowStart, i + 1);
+      if (window.some(l => /\.Parameters\.(?:Add|AddWithValue)\s*\(/.test(l))) continue; // parameterized — safe
+      if (hasTaintNearby(lines, i, 10)) {
+        seen.add(i);
+        found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
+          detail:"User input assigned within 10 lines and flows into a query-execution call — use parameterized queries (SqlParameter/@param) or EF's FromSqlInterpolated" });
       }
     }
   }
@@ -4400,6 +4756,11 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  'DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();\ndbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);',
     cwe: "CWE-611", effort: "low",
   },
+  "insecure-file-upload": {
+    title: "Validate uploaded file type and size",
+    description: "Check file extension and content-type against an allowlist, enforce a size limit, and store outside the web root with a generated filename.",
+    cwe: "CWE-434", effort: "low",
+  },
   "ldap-injection": {
     title: "Escape LDAP special characters or use parameterised filters",
     description: "Never concatenate user input into an LDAP filter string — escape special characters (*, (, ), \\, NUL) first.",
@@ -4895,6 +5256,8 @@ export function analyzeFile(
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
     ...findInsecureDeserializationGoDecoder(lines),
+    ...findInsecureDeserializationCSharp(lines),
+    ...findInsecureDeserializationCSharpJsonNet(lines),
     ...findWeakCrypto(lines),
     ...findPIIInLogs(lines),
     ...findMassAssignment(lines),
@@ -4903,6 +5266,7 @@ export function analyzeFile(
     ...findSQLInjectionPHPInterpolated(lines),
     ...findSQLInjectionJavaTainted(lines),
     ...findSQLInjectionGoSprintf(lines),
+    ...findSQLInjectionCSharpTainted(lines),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
@@ -4918,6 +5282,7 @@ export function analyzeFile(
     ...findPathTraversal(lines),
     ...findNamedTaintPathTraversalJS(lines),
     ...findNamedTaintPathTraversalGo(lines),
+    ...findNamedTaintPathTraversalCSharp(lines),
     ...findPathTraversalTainted(lines),
     ...findZipSlip(lines),
     ...findPHPFileInclusion(lines),
@@ -4936,11 +5301,15 @@ export function analyzeFile(
     ...findIDORJava(lines),
     ...findNamedTaintIDOR(lines),
     ...findNamedTaintIDORGo(lines),
+    ...findNamedTaintIDORCSharp(lines),
     ...findAuthenticatedIdentityIgnored(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findSSRFGoNewRequest(lines),
+    ...findNamedTaintSSRFCSharp(lines),
+    ...findSSRFCSharpNewRequest(lines),
     ...findNamedTaintXSS(lines),
+    ...findNamedTaintXSSCSharp(lines),
     ...findNamedTaintReflectedXSS(lines),
     ...findReflectedXSSTainted(lines),
     ...findNoSQLInjection(lines),
@@ -4948,10 +5317,12 @@ export function analyzeFile(
     ...findGraphQLInjection(lines),
     ...findGraphQLIntrospectionEnabled(lines),
     ...findXXE(lines),
+    ...findXXECSharp(lines),
     ...findLDAPInjection(lines),
     ...findXPathInjection(lines),
     ...findCSRFDisabled(lines),
     ...findInsecureFileUpload(lines),
+    ...findInsecureFileUploadCSharp(lines),
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),

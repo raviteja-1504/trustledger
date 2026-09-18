@@ -32,6 +32,8 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "eval-exec":               { label: "Eval / Exec",               desc: "Dynamic code execution via eval() or exec() — arbitrary code execution risk",                sev: "critical", security: true },
   "command-injection":       { label: "Command Injection",         desc: "User input flows into shell command — allows arbitrary OS command execution",                 sev: "critical", security: true },
   "path-traversal":          { label: "Path Traversal",            desc: "User-controlled path could escape sandbox and read/write arbitrary files",                    sev: "critical", security: true },
+  "xxe":                     { label: "XML External Entity (XXE)", desc: "XML parser with external entities enabled — disable DTD processing in parser config",            sev: "critical", security: true },
+  "insecure-file-upload":    { label: "Insecure File Upload",      desc: "File upload without MIME validation and size limits — add fileFilter and limits to config",       sev: "high",     security: true },
   "file-inclusion":          { label: "PHP File Inclusion",        desc: "Request-derived value reaches include/require — can read arbitrary local files or execute remote code", sev: "high",     security: true },
   "weak-signing-secret":     { label: "Hardcoded Signing Secret",  desc: "JWT/session signing key is a literal committed to source control — anyone with repo access can forge valid tokens", sev: "critical", security: true },
   "graphql-introspection-enabled": { label: "GraphQL Introspection Enabled", desc: "GraphiQL/Playground/introspection is explicitly enabled — exposes the complete schema for attacker reconnaissance", sev: "medium", security: true },
