@@ -407,9 +407,10 @@ const TAINT_SOURCES = [
   // Java/Kotlin (Servlet + Spring MVC)
   /\brequest\.getParameter\b|\brequest\.getHeader\b/,
   /@(?:PathVariable|RequestParam|RequestBody|RequestHeader)\b/,
-  // Go (net/http + gin/echo)
+  // Go (net/http + gin/echo/fiber/chi)
   /\br\.URL\.Query\(\)|r\.FormValue\b|r\.PostFormValue\b|mux\.Vars\(r\)/,
-  /\bc\.(?:Param|Query|PostForm)\s*\(/,  // gin/echo context
+  /\bc\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(/,  // gin/echo/fiber context
+  /\bchi\.URLParam\s*\(\s*r\s*,/,  // chi router
   // C# (ASP.NET) — Ruby's params[...] is already covered by the generic
   // /\bparams(?:\[|\.)\b/ pattern above.
   /\bRequest\.(?:Query|Form)\[|\[From(?:Query|Route|Body|Header)\]/,
@@ -498,9 +499,18 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // Java/Kotlin: String url = request.getParameter("url");  or  val url = call.parameters["url"]
     const javaAssign = /\b(?:String|Long|Integer|int|long|val|var)\s+(\w+)\s*=\s*request\.getParameter\s*\(/.exec(line.trim());
     if (javaAssign) { tainted.add(javaAssign[1]); continue; }
-    // Go: url := r.URL.Query().Get("url")  or  url := r.FormValue("url")
-    const goAssign = /\b(\w+)\s*:=\s*r\.(?:URL\.Query\(\)\.Get|FormValue|PostFormValue)\s*\(/.exec(line.trim());
+    // Go: url := r.URL.Query().Get("url")  or  url := r.FormValue("url")  or
+    // vars := mux.Vars(r)  or  id := chi.URLParam(r, "id")  or gin/echo/fiber's
+    // id := c.Param("id"). Accepts both `:=` (the dominant Go form) and a
+    // bare `=` (occasionally used with `var`).
+    const goAssign = /\b(\w+)\s*(?::=|=)\s*(?:r\.(?:URL\.Query\(\)\.Get|FormValue|PostFormValue)\s*\(|mux\.Vars\s*\(\s*r\s*\)|chi\.URLParam\s*\(\s*r\s*,|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\()/.exec(line.trim());
     if (goAssign) { tainted.add(goAssign[1]); continue; }
+    // Go: id, err := strconv.Atoi(idStr) -- narrow multi-return carve-out for
+    // the single most common idiom (numeric route/query param conversion),
+    // not general multi-return taint propagation. Only taints the LHS if the
+    // value being converted is already tainted.
+    const goStrconvAssign = /^(\w+)\s*,\s*\w+\s*:=\s*strconv\.(?:Atoi|ParseInt|ParseFloat|ParseBool)\s*\(\s*(\w+)/.exec(line.trim());
+    if (goStrconvAssign && tainted.has(goStrconvAssign[2])) { tainted.add(goStrconvAssign[1]); continue; }
     // C#: var url = Request.Query["url"];
     const csAssign = /\b(?:var|string)\s+(\w+)\s*=\s*Request\.(?:Query|Form)\s*\[/.exec(line.trim());
     if (csAssign) { tainted.add(csAssign[1]); continue; }
@@ -518,8 +528,17 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // this taint tracker (no de-tainting on reassignment, no sanitizer
     // recognition). Skips comparisons (==/!=) so an `if (a == b)` line isn't
     // misread as an assignment. Order-safe since this loop runs top-to-bottom.
+    // `:?=` also accepts Go's `:=` short variable declaration -- the
+    // dominant Go assignment form at function scope -- in addition to the
+    // plain `=` every other language here uses. Verified safe for existing
+    // languages: JS/Java/C#/PHP never use a bare `:` immediately before `=`;
+    // Ruby doesn't use `:=` at all; Python's only `:=` use (the walrus
+    // operator) is semantically the same "assign and use" shape this
+    // fallback already generalizes over. Also can't mis-fire on a Go
+    // struct-literal field line (`ID: id,`) -- there's no `=` immediately
+    // after that colon, so the mandatory `=` half still gates the match.
     if (tainted.size > 0) {
-      const assign = /^(?:(?:const|let|var)\s+)?(\w+)\s*=\s*(.+?);?$/.exec(line.trim());
+      const assign = /^(?:(?:const|let|var)\s+)?(\w+)\s*:?=\s*(.+?);?$/.exec(line.trim());
       if (assign && !assign[2].includes("==") && !assign[2].includes("!=") && !tainted.has(assign[1])) {
         const rhsVars = [...assign[2].matchAll(/\b(\w+)\b/g)].map(m => m[1]);
         if (rhsVars.some(v => tainted.has(v))) { tainted.add(assign[1]); continue; }
@@ -638,8 +657,8 @@ const CMD_INJECTION_RE = [
   // Java/Kotlin — Runtime.exec / ProcessBuilder built from concatenated request input
   /Runtime\.getRuntime\s*\(\s*\)\s*\.\s*exec\s*\([^)]*\+\s*request\.getParameter\s*\(/i,
   /new\s+ProcessBuilder\s*\([^)]*request\.getParameter\s*\(/i,
-  // Go — exec.Command with a query/form-derived argument
-  /exec\.Command\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
+  // Go — exec.Command/CommandContext with a query/form/route-param-derived argument
+  /exec\.Command(?:Context)?\s*\([^)]*(?:r\.(?:URL\.Query\(\)|FormValue\b|PostFormValue\b)|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(|chi\.URLParam\s*\(\s*r\s*,)/i,
   // PHP
   /(?:shell_exec|system|passthru|popen)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby — backtick/system() with interpolated params
@@ -660,7 +679,7 @@ const SSRF_RE = [
   /RestTemplate\s*\(\s*\)\s*\.\s*(?:getForObject|getForEntity|postForObject|exchange)\s*\([^)]*request\.getParameter\s*\(/i,
   /new\s+URL\s*\(\s*request\.getParameter\s*\(/i,
   // Go
-  /http\.(?:Get|Post|Head)\s*\(\s*r\.(?:URL\.Query\(\)|FormValue\b)/i,
+  /http\.(?:Get|Post|Head)\s*\(\s*(?:r\.(?:URL\.Query\(\)|FormValue\b)|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(|chi\.URLParam\s*\(\s*r\s*,)/i,
   // PHP — curl target URL from user input
   /curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*\$_(?:GET|POST|REQUEST)\b/i,
   // Python requests library
@@ -681,8 +700,7 @@ const PATH_TRAVERSAL_RE = [
   /\bopen\s*\([^)]*\+\s*request\.(?:args|form|GET|POST)\b/i,
   /os\.path\.join\s*\([^)]*request\.(?:args|form|GET|POST)\b/i,
   // Go
-  /os\.Open\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
-  /filepath\.Join\s*\([^)]*r\.(?:URL\.Query\(\)|FormValue\b)/i,
+  /(?:os\.(?:Open|Create|OpenFile|ReadFile)|ioutil\.ReadFile|filepath\.Join)\s*\([^)]*(?:r\.(?:URL\.Query\(\)|FormValue\b|PostFormValue\b)|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(|chi\.URLParam\s*\(\s*r\s*,)/i,
   // PHP
   /(?:fopen|file_get_contents|readfile|include|include_once|require|require_once)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby
@@ -986,6 +1004,17 @@ const INSECURE_DESERIAL_RE = [
   /ObjectInputStream\s*\(\s*(?:request|socket)\.getInputStream/,
   /node-serialize\b.*\.unserialize/,
   /serialize-javascript.*eval\s*\(/i,
+  // Go — encoding/gob decoding data sourced from an HTTP request body or a
+  // raw network connection: gob can instantiate any type registered via
+  // gob.Register() from the wire data, so network-controlled data selecting
+  // an unexpected concrete type is an RCE-adjacent risk analogous to Python
+  // pickle / Java ObjectInputStream above. encoding/json is deliberately
+  // NOT included -- json.Unmarshal into a typed struct/interface{}/
+  // map[string]interface{} carries no equivalent arbitrary-type-
+  // instantiation risk in Go; there's no built-in "gadget chain" the way
+  // pickle/ObjectInputStream have. A real, language-specific scoping
+  // judgment, not an oversight.
+  /gob\.NewDecoder\s*\(\s*[^)]*\.(?:Body|Conn)\b[^)]*\)\s*\.\s*Decode\s*\(/i,
 ];
 
 // Weak cryptography
@@ -998,6 +1027,14 @@ const WEAK_CRYPTO_RE = [
   /Cipher\.getInstance\s*\(\s*["'](?:DES|AES\/ECB|RC4|Blowfish)/i,
   /Digest\s*\(\s*["'](?:MD5|SHA-1|SHA1)["']/i,
   /bcrypt\.(?:hash|hashSync)\s*\([^,]+,\s*[1-9]\s*[,)]/,  // rounds < 10
+  // Go — crypto/md5, crypto/sha1 (broken hashes); crypto/des, crypto/rc4
+  // (broken ciphers). Flat match, no "used for password" context gate --
+  // matches this file's established precedent above (only the Python
+  // hashlib entry is context-gated, and it's the minority pattern here).
+  /\bmd5\.(?:New|Sum)\s*\(/,
+  /\bsha1\.(?:New|Sum)\s*\(/,
+  /\bdes\.(?:NewCipher|NewTripleDESCipher)\s*\(/,
+  /\brc4\.NewCipher\s*\(/,
 ];
 
 // PII in logs — requires the keyword to appear as a property/variable access
@@ -1160,6 +1197,36 @@ function findInsecureDeserialization(lines: string[]): ScanIndicator[] {
     "Deserializing untrusted data — can lead to RCE (use json.loads or SafeLoader)");
 }
 
+// Go two-step: dec := gob.NewDecoder(r.Body); ... ; dec.Decode(&x) -- the
+// chained one-liner in INSECURE_DESERIAL_RE only catches
+// gob.NewDecoder(...).Decode(...) on a single line; this covers the decoder
+// being assigned first, a very common Go style. Does NOT fire on a
+// gob.NewDecoder reading a local, trusted file (e.g. a cache) -- the source
+// regex below requires the NewDecoder argument itself to end in
+// `.Body`/`.Conn`, which a plain file handle variable never does (verified
+// directly).
+const GO_GOB_NEWDECODER_ASSIGN_RE = /\b(\w+)\s*:=\s*gob\.NewDecoder\s*\(\s*[^)]*\.(?:Body|Conn)\b/;
+const GO_DECODE_CALL_RE = /\b(\w+)\s*\.\s*Decode\s*\(/;
+
+function findInsecureDeserializationGoDecoder(lines: string[]): ScanIndicator[] {
+  const decoders = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = GO_GOB_NEWDECODER_ASSIGN_RE.exec(lines[i]);
+    if (m) decoders.add(m[1]);
+  }
+  if (decoders.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = GO_DECODE_CALL_RE.exec(lines[i]);
+    if (!m || !decoders.has(m[1])) continue;
+    found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
+      detail:`gob.Decoder '${m[1]}' built from a request body/connection — arbitrary registered-type decode from untrusted data; validate/restrict types or switch to encoding/json` });
+  }
+  return found;
+}
+
 function findWeakCrypto(lines: string[]): ScanIndicator[] {
   return runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
     "MD5/SHA1/DES/ECB — broken algorithms or insufficient bcrypt rounds; use SHA-256+/AES-CBC/bcrypt≥12");
@@ -1200,6 +1267,36 @@ function findSQLInjectionPHPInterpolated(lines: string[]): ScanIndicator[] {
     if (!hit) continue;
     found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
       detail:`Tainted variable '$${hit[1]}' interpolated directly into a SQL string — use parameterised queries (mysqli_prepare/PDO)` });
+  }
+  return found;
+}
+
+// Go: fmt.Sprintf building a real SQL string (SELECT...FROM/INSERT INTO/
+// UPDATE...SET/DELETE FROM) with a tainted argument -- Go's idiomatic
+// query-building shape, invisible to SQL_INJECTION_RE's `+`-concatenation/
+// template-literal patterns since Sprintf has no `+` or `${}` on the line.
+// Mirrors findSQLInjectionPHPInterpolated's structure exactly. Go's OWN
+// safe, idiomatic parameterized query -- db.Query("...WHERE id=?", id) --
+// has no fmt.Sprintf call anywhere on the line, so this structurally
+// cannot match it (verified directly, not assumed).
+const GO_SPRINTF_SQL_RE = /fmt\.Sprintf\s*\(\s*["`][^"`]*%[svd][^"`]*["`]\s*,\s*([^)]+)\)/i;
+
+function findSQLInjectionGoSprintf(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (!SQL_CLAUSE_PAIR_RE.test(line)) continue;
+    if (SQL_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
+    const m = GO_SPRINTF_SQL_RE.exec(line);
+    if (!m) continue;
+    const args = [...m[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+    const hit = args.find(a => tainted.has(a));
+    if (!hit) continue;
+    found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
+      detail:`Tainted variable '${hit}' interpolated into a SQL string via fmt.Sprintf — use a parameterised query instead (db.Query("...WHERE id=?", ${hit}))` });
   }
   return found;
 }
@@ -1305,6 +1402,46 @@ function findNamedTaintCommandInjectionJS(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Go named-taint command injection: cmd := exec.Command("ping", host) where
+// host was assigned from request input on an earlier line -- the inline
+// CMD_INJECTION_RE Go entry only matches the tainted call as an argument
+// directly in the exec.Command(...) call itself.
+//
+// Note on Go's real risk model: exec.Command/CommandContext invoke the
+// target binary directly via execve, NOT a shell -- unlike subprocess(
+// shell=True)/os.popen/shell_exec/backtick invocation (the shapes every
+// other CMD_INJECTION_RE entry targets), a tainted *argument* here cannot
+// inject shell metacharacters into a new shell. The real risk is argument/
+// flag injection, or genuine shell injection if the command itself is
+// "sh"/"bash" with "-c". This is a pre-existing scope decision already
+// baked into the shipped inline Go entry above, reused as-is here.
+const GO_CMD_SINK_RE = [
+  /exec\.Command\s*\(\s*[^,)]+(?:,\s*([^)]+))?\)/,
+  /exec\.CommandContext\s*\(\s*[^,]+,\s*[^,)]+(?:,\s*([^)]+))?\)/,
+];
+
+function findNamedTaintCommandInjectionGo(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (CMD_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
+    for (const re of GO_CMD_SINK_RE) {
+      const m = re.exec(line);
+      if (!m || !m[1]) continue;
+      const args = [...m[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+      const hit = args.find(a => tainted.has(a));
+      if (!hit) continue;
+      found.push({ id:"command-injection", label:"Command Injection", severity:"critical", line:i+1,
+        detail:`Tainted variable '${hit}' passed as an argument to exec.Command — validate/allowlist the value (exec.Command does not spawn a shell, but a crafted argument can still act as an unexpected flag or path)` });
+      break;
+    }
+  }
+  return found;
+}
+
 // Server-side reflected XSS: res.send(html)/res.write(html) where html is a
 // raw string built from request input (often via the concatenation/template-
 // literal propagation extractTaintedVars now tracks) and returned directly
@@ -1402,6 +1539,41 @@ function findSSRF(lines: string[]): ScanIndicator[] {
 function findPathTraversal(lines: string[]): ScanIndicator[] {
   return runDetector(lines, PATH_TRAVERSAL_RE, "path-traversal", "Path Traversal", "critical",
     "User input in file path — resolve and validate against base directory");
+}
+
+// Go named-taint path traversal, mirroring findNamedTaintPathTraversalJS's
+// exact shape: a tainted variable joined into a path via filepath.Join, or
+// passed directly to a filesystem call, on a DIFFERENT line than the inline
+// PATH_TRAVERSAL_RE Go entry can see.
+const GO_PATH_JOIN_RE = /\bfilepath\.Join\s*\(([^)]+)\)/;
+const GO_FS_SINK_RE = /\b(?:os\.(?:Open|Create|OpenFile|ReadFile)|ioutil\.ReadFile)\s*\(\s*(\w+)\b/;
+
+function findNamedTaintPathTraversalGo(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (PATH_TRAVERSAL_RE.some(r => r.test(line))) continue; // already caught inline
+
+    const joinMatch = GO_PATH_JOIN_RE.exec(line);
+    if (joinMatch) {
+      const args = [...joinMatch[1].matchAll(/\b(\w+)\b/g)].map(a => a[1]);
+      const hit = args.find(a => tainted.has(a));
+      if (hit) {
+        found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+          detail:`Tainted variable '${hit}' joined into a file path via filepath.Join — resolve and validate the result stays within the intended base directory` });
+        continue;
+      }
+    }
+    const fsMatch = GO_FS_SINK_RE.exec(line);
+    if (fsMatch && tainted.has(fsMatch[1])) {
+      found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+        detail:`Tainted variable '${fsMatch[1]}' passed directly to a filesystem call — resolve and validate the result stays within the intended base directory` });
+    }
+  }
+  return found;
 }
 
 // Zip Slip — a distinct path-traversal taint source (CWE-22) from the
@@ -1530,6 +1702,51 @@ function findNamedTaintSSRF(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Go SSRF two-step: req, _ := http.NewRequest("GET", url, nil); resp, _ :=
+// client.Do(req) -- Go's idiomatic construct-then-execute pattern, which
+// SSRF_RE's inline-only http.Get(url) shape can't see (the tainted URL and
+// the actual send are on two different lines, often separated by error
+// handling). Two regexes, not one with an optional leading arg --
+// http.NewRequest(method, url, body) and http.NewRequestWithContext(ctx,
+// method, url, body) have different argument counts and a single combined
+// regex mis-captures the wrong argument for the WithContext variant
+// (verified directly).
+//
+// Deliberately NOT folded into extractTaintedVars' shared `tainted` Set:
+// `req` here is a *http.Request object one hop removed from a tainted
+// string, a different taint "kind" -- reusing the same flat Set risks a
+// same-named `req`/`client` variable elsewhere in the file cross-
+// contaminating an unrelated detector's sink check.
+//
+// SAFE-PATTERN GUARD: a hardcoded destination -- http.NewRequest("GET",
+// "https://api.example.com", nil) -- is never flagged, because the URL
+// capture group requires a bare identifier, which a quoted string literal
+// structurally cannot satisfy (verified directly).
+const GO_NEW_REQUEST_RE = /\b(\w+)\s*,\s*\w+\s*:=\s*http\.NewRequest\s*\(\s*[^,)]+,\s*(\w+)\s*[,)]/;
+const GO_NEW_REQUEST_CTX_RE = /\b(\w+)\s*,\s*\w+\s*:=\s*http\.NewRequestWithContext\s*\(\s*[^,]+,\s*[^,)]+,\s*(\w+)\s*[,)]/;
+const GO_CLIENT_DO_RE = /\b\w+\.Do\s*\(\s*(\w+)\s*\)/;
+
+function findSSRFGoNewRequest(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const taintedRequests = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = GO_NEW_REQUEST_RE.exec(lines[i]) ?? GO_NEW_REQUEST_CTX_RE.exec(lines[i]);
+    if (m && tainted.has(m[2])) taintedRequests.add(m[1]);
+  }
+  if (taintedRequests.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = GO_CLIENT_DO_RE.exec(lines[i]);
+    if (!m || !taintedRequests.has(m[1])) continue;
+    found.push({ id:"ssrf", label:"Server-Side Request Forgery", severity:"critical", line:i+1,
+      detail:`Request built from tainted URL via http.NewRequest and sent with '${m[1]}' — validate the target host against an allowlist before constructing the request` });
+  }
+  return found;
+}
+
 // Named-variable XSS: const html = req.body.html; elem.innerHTML = html
 function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1565,7 +1782,10 @@ const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|
 // below -- a function gated by an admin/role check legitimately acts on
 // another user's identifier by design, so both detectors need to stand down
 // in its presence, not just an explicit ownership comparison.
-const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin/i;
+// Extended again with Gin's identity-from-context idioms (c.MustGet(...),
+// c.GetString("userID"/...)) -- safe, since this only ever suppresses more,
+// never adds new sink matching, and these tokens can't appear in non-Go code.
+const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)/i;
 
 function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1587,6 +1807,40 @@ function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
     // and cross-file heuristics.
     found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
       detail:`Tainted variable '${m[1]}' used as a lookup/update id with no ownership check nearby — verify caller owns the resource` });
+  }
+  return found;
+}
+
+// Go named-taint IDOR: a route-param identifier flows into a database/sql
+// or GORM lookup with no ownership check nearby. Mirrors findNamedTaintIDOR
+// above exactly (same 15-line auth-check window, same "medium" severity for
+// a heuristic named-taint match). Same documented limitation as this
+// session's Spring BOLA work: this is loose keyword-proximity, not a real
+// semantic ownership comparison -- an accepted posture for a regex-only
+// phase (a real Go AST-based BOLA check is deferred/future work).
+const GO_IDOR_SINK_RE = [
+  /\bdb\.QueryRow\s*\([^)]*,\s*(\w+)\s*\)/,        // database/sql: db.QueryRow("...?", id)
+  /\.First\s*\(\s*&\w+\s*,\s*(\w+)\s*\)/,           // GORM: db.First(&user, id)
+  /\.Where\s*\(\s*["'][^"']*\?["']\s*,\s*(\w+)\s*\)/, // GORM: db.Where("id = ?", id)
+];
+
+function findNamedTaintIDORGo(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    let hit: string | undefined;
+    for (const re of GO_IDOR_SINK_RE) {
+      const m = re.exec(line);
+      if (m) { hit = m[1]; break; }
+    }
+    if (!hit || !tainted.has(hit)) continue;
+    const windowStart = Math.max(0, i - 15);
+    if (lines.slice(windowStart, i + 1).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l))) continue;
+    found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
+      detail:`Tainted variable '${hit}' used as a lookup id with no ownership check nearby — verify caller owns the resource` });
   }
   return found;
 }
@@ -4640,6 +4894,7 @@ export function analyzeFile(
   const vulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
+    ...findInsecureDeserializationGoDecoder(lines),
     ...findWeakCrypto(lines),
     ...findPIIInLogs(lines),
     ...findMassAssignment(lines),
@@ -4647,6 +4902,7 @@ export function analyzeFile(
     ...findSQLInjectionTainted(lines),
     ...findSQLInjectionPHPInterpolated(lines),
     ...findSQLInjectionJavaTainted(lines),
+    ...findSQLInjectionGoSprintf(lines),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
@@ -4655,11 +4911,13 @@ export function analyzeFile(
     ...findNamedTaintCommandInjectionPHP(lines),
     ...findNamedTaintCommandInjectionPython(lines),
     ...findNamedTaintCommandInjectionJS(lines),
+    ...findNamedTaintCommandInjectionGo(lines),
     ...findCommandInjectionTainted(lines),
     ...findSSRF(lines),
     ...findSSRFTainted(lines),
     ...findPathTraversal(lines),
     ...findNamedTaintPathTraversalJS(lines),
+    ...findNamedTaintPathTraversalGo(lines),
     ...findPathTraversalTainted(lines),
     ...findZipSlip(lines),
     ...findPHPFileInclusion(lines),
@@ -4677,9 +4935,11 @@ export function analyzeFile(
     ...findIDOR(lines),
     ...findIDORJava(lines),
     ...findNamedTaintIDOR(lines),
+    ...findNamedTaintIDORGo(lines),
     ...findAuthenticatedIdentityIgnored(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
+    ...findSSRFGoNewRequest(lines),
     ...findNamedTaintXSS(lines),
     ...findNamedTaintReflectedXSS(lines),
     ...findReflectedXSSTainted(lines),
