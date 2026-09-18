@@ -334,4 +334,18 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "`org` (the only interpolated value not locally computed from `score`) is derived from `effectiveData?.repos?.[0]?.repo.split(\"/\")[0]` -- a GitHub org/user login segment, which GitHub itself restricts to alphanumerics and hyphens (no HTML metacharacters possible through this path). Impact is also bounded to self-XSS: document.write runs in a window.open() popup the acting user opened for their own org, not a sink reachable by any other user. Accepted with this specific caveat, not templated -- revisit if `org` is ever sourced from a less-constrained field." },
   { file: "src/lib/ast.ts", id: "xss", lineHash: "a5a8570f0472", line: 484, severity: "critical",
     reason: "This line is inside a detector's own pattern-DEFINITION list (e.g. HIGH_RISKS) -- a regex literal used to detect this vulnerability class elsewhere in scanned code, not an actual occurrence of it in this file." },
+  // Added by the PHP OWASP hardening phase -- confirmed the same
+  // established false-positive root-cause classes above, not new classes.
+  { file: "src/components/NewScanPanel.tsx", id: "php-missing-session-guard", lineHash: "fd30fa60098b", line: 44, severity: "medium",
+    reason: "This line is inside an intentionally-vulnerable code SAMPLE embedded as product demo content in NewScanPanel.tsx (shown to users to illustrate what the scanner detects) -- never executed." },
+  { file: "src/lib/scanner.ts", id: "php-missing-session-guard", lineHash: "517b20014080", line: 1406, severity: "medium",
+    reason: "UI/catalog/label content describing this vulnerability class to users (this specific line is the finding's own `detail` message text, which literally contains the word \"unserialize()\" as documentation) -- not executable code performing the sensitive action itself." },
+  { file: "src/lib/scanner.ts", id: "php-missing-session-guard", lineHash: "cbde63307e5f", line: 1430, severity: "medium",
+    reason: "UI/catalog/label content describing this vulnerability class to users (this specific line is the finding's own `detail` message text, which literally contains the word \"unserialize()\" as documentation) -- not executable code performing the sensitive action itself." },
+  { file: "src/lib/scanner.ts", id: "php-missing-session-guard", lineHash: "4c8b03ec7d7f", line: 5158, severity: "medium",
+    reason: "UI/catalog/label content describing this vulnerability class to users (this line is FIX_MAP's own description string for this very id, which literally contains the word \"unserialize()\" as documentation) -- not executable code performing the sensitive action itself." },
+  { file: "src/lib/seedFileSamples.ts", id: "php-missing-session-guard", lineHash: "cc95ca321ed2", line: 110, severity: "medium",
+    reason: "This line is inside seedFileSamples.ts's demo/seed fixture content (a Python cursor.execute() SQL string) -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
+  { file: "src/lib/scanner.ts", id: "hallucinated-method-call", lineHash: "36d30faeac0f", line: 1532, severity: "medium",
+    reason: "False positive: the detector cannot infer an array-index expression's (e.g. arr[i], match[1]) element type and defaults to flagging real built-in String/Array/Object methods (.trim(), .split(), .toLowerCase(), .sort(), .charCodeAt(), etc.) as hallucinated. Confirmed a genuine built-in at this call site (lines[i].trim(), added by the PHP OWASP hardening phase's multi-line SQL-injection detector)." },
 ];

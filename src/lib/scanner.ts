@@ -461,8 +461,29 @@ function toLogicalLines(lines: string[]): string[] {
 function extractTaintedVars(rawLines: string[]): Set<string> {
   const tainted = new Set<string>();
   const lines = toLogicalLines(rawLines);
+  // PHP: extract($_GET)/extract($_POST)/... bulk-taints an UNBOUNDED,
+  // UNNAMED set of local variables from array keys -- genuinely different
+  // from every other source pattern here (all of which bind one specific,
+  // readable name). No way for a text scan to know the key names (runtime-
+  // determined, attacker-controlled). Mechanism: a file-scoped flag, set
+  // once extract() on a superglobal is seen; every bare $var referenced on
+  // a LATER line is then added to `tainted` directly.
+  // ACCEPTED IMPRECISION (recall-favoring, not a silent gap): once tripped,
+  // this treats essentially every variable used for the rest of the file as
+  // taintable -- there's no way to know which extracted names were really
+  // GET/POST-derived vs. declared locally afterward for unrelated reasons.
+  // A file calling extract() on request data is already a strong code
+  // smell in its own right, so the extra findings this produces in that one
+  // file are an acceptable price for not silently missing the extraction
+  // entirely.
+  let phpExtractTripped = false;
   for (const line of lines) {
     if (isNonExecutableLine(line)) continue;
+    if (phpExtractTripped) {
+      for (const m of line.matchAll(/\$(\w+)/g)) tainted.add(m[1]);
+    }
+    const phpExtractCall = /\bextract\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b/.exec(line);
+    if (phpExtractCall) { phpExtractTripped = true; continue; }
     // const/let/var x = req.query.x
     const single = /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
     if (single) { tainted.add(single[1]); continue; }
@@ -496,6 +517,14 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // PHP: $url = $_GET['url']
     const phpAssign = /^\$(\w+)\s*=\s*\$_(?:POST|GET|REQUEST|COOKIE|SERVER)\s*\[/.exec(line.trim());
     if (phpAssign) { tainted.add(phpAssign[1]); continue; }
+    // PHP: $url = filter_input(INPUT_GET, 'url') / filter_input(INPUT_POST,
+    // 'url', FILTER_...) -- PHP's modern, commonly-recommended way to read
+    // request input. Structurally invisible to phpAssign above (no
+    // `$_GET[` on the line at all) and to every PHP named-taint function
+    // downstream, so code using filter_input() previously got ZERO PHP
+    // named-taint coverage.
+    const phpFilterInput = /^\$(\w+)\s*=\s*filter_input\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|ENV)\s*,/.exec(line.trim());
+    if (phpFilterInput) { tainted.add(phpFilterInput[1]); continue; }
     // Java/Kotlin: String url = request.getParameter("url");  or  val url = call.parameters["url"]
     const javaAssign = /\b(?:String|Long|Integer|int|long|val|var)\s+(\w+)\s*=\s*request\.getParameter\s*\(/.exec(line.trim());
     if (javaAssign) { tainted.add(javaAssign[1]); continue; }
@@ -687,8 +716,26 @@ const CMD_INJECTION_RE = [
   /new\s+ProcessBuilder\s*\([^)]*request\.getParameter\s*\(/i,
   // Go — exec.Command/CommandContext with a query/form/route-param-derived argument
   /exec\.Command(?:Context)?\s*\([^)]*(?:r\.(?:URL\.Query\(\)|FormValue\b|PostFormValue\b)|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(|chi\.URLParam\s*\(\s*r\s*,)/i,
-  // PHP
-  /(?:shell_exec|system|passthru|popen)\s*\(\s*[^)]*\$_(?:GET|POST|REQUEST)\b/i,
+  // PHP -- guarded via a negative lookahead against escapeshellarg()/
+  // escapeshellcmd() ANYWHERE on the same line: PHP's standard sanitizers
+  // for exactly this sink family. Without this, shell_exec("ping -c 1 " .
+  // escapeshellarg($_GET['ip'])) -- properly-sanitized, safe code -- was a
+  // confirmed false positive. Line-granularity guard (matches this
+  // codebase's existing guard precedent, e.g. C#'s FromSqlInterpolated
+  // lookahead) -- accepted imprecision: if $_GET appears twice on one line,
+  // one wrapped and one not, this suppresses both. Extended with
+  // proc_open (a real, commonly-used PHP shell-invocation sink, previously
+  // entirely absent from both this array and PHP_CMD_SINK_RE below).
+  /(?:shell_exec|system|passthru|popen|proc_open)\s*\(\s*(?![^)]*\bescapeshell(?:arg|cmd)\s*\()[^)]*\$_(?:GET|POST|REQUEST)\b/i,
+  // PHP backtick execution operator -- `` `cmd $var` `` is PHP's syntactic
+  // alias for shell_exec(), a distinct syntax (no function-call token) no
+  // existing regex matches. Backtick content is parsed like a double-quoted
+  // string (direct $var interpolation only, no function calls inside), so
+  // the escapeshellarg() guard doesn't apply the same way -- deliberately
+  // NOT guarded here; sanitizing a backtick-interpolated value requires
+  // pre-escaping on an earlier line, a separate problem this phase doesn't
+  // attempt.
+  /`[^`]*\$_(?:GET|POST|REQUEST)\b[^`]*`/,
   // Ruby — backtick/system() with interpolated params
   /`[^`]*#\{\s*params\[/,
   /\bsystem\s*\([^)]*params\[/i,
@@ -1035,6 +1082,14 @@ const XSS_RE = [
   // the JS entries above, which would misfire on completely safe,
   // auto-encoded @Model.Name-style Razor output.
   /(?:@?Html\.Raw|Response\.Write)\s*\([^)]*Request\.(?:Query|Form)\b/i,
+  // PHP -- echo/print of an unescaped $_GET/$_POST/$_REQUEST/$_COOKIE
+  // value is PHP's classic reflected-XSS shape. Guarded via a negative
+  // lookahead against htmlspecialchars()/htmlentities() ANYWHERE on the
+  // same statement (up to the next ';') -- PHP's idiomatic, very common
+  // safe pattern (echo htmlspecialchars($_GET['name']);) must never be
+  // flagged. Mirrors the escapeshellarg-guard/FromSqlInterpolated-guard
+  // precision discipline established elsewhere in this phase.
+  /\b(?:echo|print)\b(?![^;]*\b(?:htmlspecialchars|htmlentities)\s*\()[^;]*\$_(?:GET|POST|REQUEST|COOKIE)\b/i,
 ];
 
 // Insecure deserialization
@@ -1042,7 +1097,7 @@ const INSECURE_DESERIAL_RE = [
   /pickle\.loads?\s*\(\s*(?!b["'])/,
   /yaml\.load\s*\([^,)]+\)(?!\s*,\s*Loader\s*=\s*yaml\.(?:Safe|Full)Loader)/,
   /jsonpickle\.decode\s*\(/,
-  /unserialize\s*\(\s*\$_(?:POST|GET|REQUEST|COOKIE)/,
+  /unserialize\s*\(\s*\$_(?:POST|GET|REQUEST|COOKIE)/i,
   /Marshal\.load\s*\(\s*(?:params|request|body)/,
   /ObjectInputStream\s*\(\s*(?:request|socket)\.getInputStream/,
   /node-serialize\b.*\.unserialize/,
@@ -1328,6 +1383,84 @@ function findInsecureDeserializationCSharpJsonNet(lines: string[]): ScanIndicato
   return found;
 }
 
+// PHP named-taint unserialize(): $data = $_COOKIE['data']; $obj =
+// unserialize($data); -- INSECURE_DESERIAL_RE's entry only matches the
+// tainted superglobal literally inline. PHP Object Injection (POI) via a
+// class's __wakeup()/__destruct() gadget chain (CWE-502) was PHP's most
+// RCE-relevant sink with the weakest coverage of any area in this phase --
+// brought in line with the depth given to Go's gob decoder / C#'s
+// BinaryFormatter work above.
+const PHP_UNSERIALIZE_SINK_RE = /\bunserialize\s*\(\s*\$(\w+)\s*\)/i;
+
+function findNamedTaintDeserializationPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = PHP_UNSERIALIZE_SINK_RE.exec(line);
+    if (!m || !tainted.has(m[1])) continue;
+    if (INSECURE_DESERIAL_RE.some(r => r.test(line))) continue;
+    found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${m[1]}' passed to unserialize() — a crafted payload can instantiate arbitrary classes and trigger __wakeup()/__destruct() gadget chains (PHP Object Injection); use json_decode() instead, or unserialize()'s 'allowed_classes' option` });
+  }
+  return found;
+}
+
+// PHP unserialize() fed by a wrapped/decoded value -- unserialize(
+// base64_decode($_COOKIE['data'])) is an extremely common real-world
+// idiom for cookie/session-embedded serialized data (raw serialized bytes
+// don't survive a cookie/URL round-trip unencoded). Neither the inline
+// entry above nor PHP_UNSERIALIZE_SINK_RE (requires a bare $var) can see
+// this. Handles both direct-superglobal-inline and named-var-inside-the-
+// wrapper in one regex via an alternation.
+const PHP_UNSERIALIZE_WRAPPED_RE =
+  /\bunserialize\s*\(\s*(?:base64_decode|gzuncompress|gzinflate|gzdecode)\s*\(\s*(?:\$_(?:GET|POST|REQUEST|COOKIE)\s*\[|\$(\w+)\b)/i;
+
+function findDeserializationPHPWrapped(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = PHP_UNSERIALIZE_WRAPPED_RE.exec(lines[i]);
+    if (!m) continue;
+    if (m[1] && !tainted.has(m[1])) continue; // named-var branch requires it be tainted; direct-superglobal branch (m[1] undefined) always hits
+    found.push({ id:"insecure-deserialization", label:"Insecure Deserialization", severity:"critical", line:i+1,
+      detail:"Tainted, decoded/decompressed value passed to unserialize() — a crafted payload can instantiate arbitrary classes and trigger __wakeup()/__destruct() gadget chains (PHP Object Injection); use json_decode() instead" });
+  }
+  return found;
+}
+
+// PHP phar:// stream-wrapper deserialization (CWE-502, "phar
+// deserialization" gadget-chain class) -- a genuinely different attack
+// shape from unserialize() above: PHP implicitly deserializes a phar
+// archive's metadata when ANY of a wide set of ordinary-looking file
+// functions touches a phar:// path, including read-only-looking ones
+// (file_exists(), is_file(), getimagesize()) -- no unserialize() call
+// appears anywhere in the vulnerable code. Confirmed zero prior coverage.
+// A small, literal-substring-only regex rather than deferred -- the
+// "phar://" scheme string essentially never appears by accident, so
+// false-positive risk is very low, and this is a real, well-known,
+// zero-existing-coverage RCE-adjacent risk class. NOT attempting named-
+// taint tracing of the scheme itself (would require tracking string-
+// concatenation into a URI-scheme position) -- deliberately narrow for
+// phase 1. Severity capped at "high" (not "critical"), same reasoning as
+// findPHPFileInclusion: real trigger depends on a gadget class existing in
+// the app, unobservable by a text scan.
+const PHP_PHAR_SINK_RE = /\b(?:file_exists|is_file|is_dir|file_get_contents|file_put_contents|fopen|getimagesize|filemtime|filesize|unlink|copy|md5_file|hash_file)\s*\(\s*[^)]*phar:\/\//i;
+
+function findPHPPharDeserialization(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!PHP_PHAR_SINK_RE.test(lines[i])) continue;
+    found.push({ id:"insecure-deserialization", label:"PHP Object Injection via phar:// Stream Wrapper", severity:"high", line:i+1,
+      detail:"An ordinary file operation on a phar:// URI triggers implicit deserialization of the archive's metadata — even read-only-looking calls (file_exists, getimagesize, etc.) can trigger PHP Object Injection if the path is attacker-influenced; validate/reject the phar:// scheme before any file operation on a user-supplied path" });
+  }
+  return found;
+}
+
 function findWeakCrypto(lines: string[]): ScanIndicator[] {
   return runDetector(lines, WEAK_CRYPTO_RE, "weak-crypto", "Weak Cryptography", "high",
     "MD5/SHA1/DES/ECB — broken algorithms or insufficient bcrypt rounds; use SHA-256+/AES-CBC/bcrypt≥12");
@@ -1368,6 +1501,55 @@ function findSQLInjectionPHPInterpolated(lines: string[]): ScanIndicator[] {
     if (!hit) continue;
     found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
       detail:`Tainted variable '$${hit[1]}' interpolated directly into a SQL string — use parameterised queries (mysqli_prepare/PDO)` });
+  }
+  return found;
+}
+
+// PHP multi-line SQL query building: $query = "SELECT ..."; $query .= $id;
+// mysqli_query($conn, $query); -- none of these three lines individually
+// has BOTH a SQL-clause pair AND a tainted $var (the shape
+// findSQLInjectionPHPInterpolated requires), because PHP's idiomatic `.=`
+// operator builds the query across multiple statements. Not caught by
+// extractTaintedVars' generic second-hop propagation fallback either --
+// that fallback's `^(\w+)\s*:?=\s*` anchor can never match a PHP line
+// ($-prefixed variables, and `.=` isn't a recognized operator). Two-phase,
+// mirroring findSQLInjectionJavaTainted/CSharpTainted's sink-list+window
+// shape: (1) track which $vars are "SQL query builders" (assigned a
+// literal with a real clause pair, or later `.=`-concatenated with an
+// already-tainted variable); (2) flag when a tainted query-builder
+// variable reaches a query-execution sink.
+const PHP_QUERY_LITERAL_ASSIGN_RE = /^\$(\w+)\s*=\s*["']/;
+const PHP_QUERY_CONCAT_RE = /^\$(\w+)\s*\.=\s*.*\$(\w+)/;
+const PHP_QUERY_EXEC_SINK_RE = /\b(?:mysqli_query|mysql_query|pg_query)\s*\(\s*\$\w+\s*,\s*\$(\w+)\s*\)|->\s*(?:query|exec)\s*\(\s*\$(\w+)\s*\)/;
+
+function findSQLInjectionPHPMultilineBuild(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const queryVars = new Set<string>();
+  const taintedQueryVars = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i].trim();
+    const lit = PHP_QUERY_LITERAL_ASSIGN_RE.exec(line);
+    if (lit && SQL_CLAUSE_PAIR_RE.test(line)) { queryVars.add(lit[1]); continue; }
+    const cat = PHP_QUERY_CONCAT_RE.exec(line);
+    if (cat && queryVars.has(cat[1])) {
+      const rhsVars = [...line.matchAll(/\$(\w+)/g)].map(m => m[1]).filter(v => v !== cat[1]);
+      if (rhsVars.some(v => tainted.has(v))) taintedQueryVars.add(cat[1]);
+    }
+  }
+  if (taintedQueryVars.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (SQL_INJECTION_RE.some(r => r.test(line))) continue;
+    if (SQL_CLAUSE_PAIR_RE.test(line) && [...line.matchAll(/\{?\$(\w+)\}?/g)].some(m => tainted.has(m[1]))) continue; // already caught by findSQLInjectionPHPInterpolated
+    const m = PHP_QUERY_EXEC_SINK_RE.exec(line);
+    const varName = m?.[1] ?? m?.[2];
+    if (!varName || !taintedQueryVars.has(varName)) continue;
+    found.push({ id:"sql-injection", label:"SQL Injection", severity:"critical", line:i+1,
+      detail:`Query variable '$${varName}' built via multi-line concatenation ('.=') with tainted input then executed — use a parameterised query (mysqli_prepare/PDO) instead` });
   }
   return found;
 }
@@ -1458,7 +1640,20 @@ function findNamedTaintCommandInjectionPython(lines: string[]): ScanIndicator[] 
 // unless it's a real PHP shell_exec-style call (i.e. not preceded by "."),
 // so this doesn't collide with the extremely common regex.exec()/array.exec()
 // method-call idiom in JS/TS.
-const PHP_CMD_SINK_RE = /\b(?:shell_exec|system|passthru|popen)\s*\(|(?<!\.)\bexec\s*\(/i;
+// Deliberately does NOT include a bare backtick-pair alternative here (the
+// way the fully-inline CMD_INJECTION_RE entry above does, scoped to
+// requiring $_GET/$_POST/$_REQUEST literally inside the backticks) -- an
+// UNSCOPED `` `[^`]*` `` pattern would match any JS/TS template literal,
+// a real cross-language false-positive risk (e.g. Angular's `$scope`/
+// jQuery's `$el` naming convention combined with an unrelated backtick
+// string elsewhere in the same file could coincidentally satisfy the
+// tainted-$var extraction below). The named-taint backtick case (a
+// PHP variable pre-assigned, then used inside backticks) is a rarer
+// real-world pattern than the fully-inline superglobal case CMD_INJECTION_RE
+// already covers, so this is a deliberate, bounded recall trade-off, not
+// an oversight.
+const PHP_CMD_SINK_RE = /\b(?:shell_exec|system|passthru|popen|proc_open)\s*\(|(?<!\.)\bexec\s*\(/i;
+const PHP_ESCAPESHELL_GUARD_RE = /\bescapeshell(?:arg|cmd)\s*\(/i;
 
 function findNamedTaintCommandInjectionPHP(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -1468,6 +1663,7 @@ function findNamedTaintCommandInjectionPHP(lines: string[]): ScanIndicator[] {
     if (isNonExecutableLine(lines[i])) continue;
     const line = lines[i];
     if (!PHP_CMD_SINK_RE.test(line)) continue;
+    if (PHP_ESCAPESHELL_GUARD_RE.test(line)) continue; // escapeshellarg()/escapeshellcmd() -- safe
     if (CMD_INJECTION_RE.some(r => r.test(line))) continue; // already caught inline
     const hit = [...line.matchAll(/\$(\w+)/g)].find(m => tainted.has(m[1]));
     if (!hit) continue;
@@ -1712,6 +1908,37 @@ function findNamedTaintPathTraversalCSharp(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// PHP named-taint path traversal: $file = $_GET['file']; fopen($file, 'r');
+// -- PATH_TRAVERSAL_RE's PHP entry only matches the superglobal literally
+// inline. Mirrors findNamedTaintPathTraversalGo/CSharp's shape.
+//
+// OVERLAP DECISION (deliberate): this sink list intentionally includes
+// include/include_once/require/require_once, which ALSO fire under
+// findPHPFileInclusion's named-taint tier (id "file-inclusion") for the
+// exact same line/variable. Kept as-is: "file-inclusion" communicates the
+// LFI/RFI code-execution framing (allow_url_include), "path-traversal"
+// communicates the broader arbitrary-file-read/write framing -- both are
+// independently actionable classifications of the same call, matching how
+// this codebase already treats the pre-existing include()/require()
+// dual-finding as legitimate rather than a bug. Not de-duplicated.
+const PHP_PATH_SINK_RE = /\b(?:fopen|file_get_contents|readfile|include|include_once|require|require_once)\s*\(?\s*\$(\w+)\b/i;
+
+function findNamedTaintPathTraversalPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (PATH_TRAVERSAL_RE.some(r => r.test(line))) continue;
+    const m = PHP_PATH_SINK_RE.exec(line);
+    if (!m || !tainted.has(m[1])) continue;
+    found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${m[1]}' passed to a filesystem call — resolve and validate the result stays within the intended base directory` });
+  }
+  return found;
+}
+
 // Zip Slip — a distinct path-traversal taint source (CWE-22) from the
 // request-parameter cases above: the tainted value is a ZIP archive entry's
 // own name, which the archive's creator fully controls, so a crafted entry
@@ -1834,6 +2061,55 @@ function findNamedTaintSSRF(lines: string[]): ScanIndicator[] {
     seen.add(i);
     found.push({ id:"ssrf", label:"SSRF via Named Variable", severity:"critical", line:i+1,
       detail:`Tainted variable '${m[1]}' flows into HTTP request — validate against allowlist` });
+  }
+  return found;
+}
+
+// PHP named-taint SSRF: $url = $_GET['url']; curl_setopt($ch,
+// CURLOPT_URL, $url); -- SSRF_RE's inline PHP entry only matches the
+// superglobal literally inline as curl_setopt's 3rd arg. Also adds two
+// sink families SSRF_RE has zero PHP coverage for: file_get_contents()/
+// fopen() given a tainted URL (PHP's stream wrappers make these legitimate
+// HTTP fetchers -- file_get_contents('http://...') is valid, working PHP),
+// and Guzzle's HTTP client, the dominant modern PHP HTTP library. Guzzle's
+// ->get()/->post()/->request() are scoped to a client-name-looking
+// receiver ($client/$http/$httpClient/$guzzle) -- a bare ->get($var)
+// collides with an extremely common non-HTTP getter method name across
+// PHP OOP code (collections, DI containers, ArrayAccess wrappers); this
+// trades recall (misses Guzzle clients stored in unusually named
+// variables) for not flooding every PHP codebase with false positives on
+// unrelated ->get() calls.
+//
+// OVERLAP NOTE (deliberate): file_get_contents()/fopen() with a tainted
+// variable is ALSO flagged by findNamedTaintPathTraversalPHP -- the two
+// are genuinely ambiguous from a text scan (the value could be a local
+// path or a remote URL). Mirrors the pre-existing, deliberately-accepted
+// include()/require() dual-classification under both "file-inclusion" and
+// "path-traversal" -- both ids are legitimate simultaneous classifications
+// of the same risky call. Not de-duplicated.
+const PHP_SSRF_SINK_RE = [
+  /curl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*\$(\w+)\s*\)/i,
+  /\b(?:file_get_contents|fopen)\s*\(\s*\$(\w+)\b/i,
+  /\$(?:client|http|httpClient|guzzle)\w*\s*->\s*(?:get|post|put|delete|head|patch)\s*\(\s*\$(\w+)\b/i,
+  /\$(?:client|http|httpClient|guzzle)\w*\s*->\s*request\s*\(\s*["']\w+["']\s*,\s*\$(\w+)\b/i,
+];
+
+function findNamedTaintSSRFPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (SSRF_RE.some(r => r.test(line))) continue;
+    let hit: string | undefined;
+    for (const re of PHP_SSRF_SINK_RE) {
+      const m = re.exec(line);
+      if (m && tainted.has(m[1])) { hit = m[1]; break; }
+    }
+    if (!hit) continue;
+    found.push({ id:"ssrf", label:"Server-Side Request Forgery", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${hit}' used as an outbound request URL — validate the target host against an allowlist before fetching` });
   }
   return found;
 }
@@ -1981,6 +2257,31 @@ function findNamedTaintXSSCSharp(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// PHP named-taint XSS: $name = $_GET['name']; ... echo $name; -- named-
+// variable equivalent of the inline XSS_RE entry above, same
+// htmlspecialchars()/htmlentities() same-statement guard.
+const PHP_ECHO_SINK_RE = /\b(?:echo|print)\b\s*(\$\w+)\b/i;
+const PHP_XSS_SAFE_ESCAPE_RE = /\b(?:htmlspecialchars|htmlentities)\s*\(/i;
+
+function findNamedTaintXSSPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = PHP_ECHO_SINK_RE.exec(line);
+    if (!m) continue;
+    const varName = m[1].slice(1);
+    if (!tainted.has(varName)) continue;
+    if (PHP_XSS_SAFE_ESCAPE_RE.test(line)) continue;
+    if (XSS_RE.some(r => r.test(line))) continue;
+    found.push({ id:"xss", label:"Cross-Site Scripting (XSS)", severity:"critical", line:i+1,
+      detail:`Tainted variable '$${varName}' echoed without escaping — wrap in htmlspecialchars() before output` });
+  }
+  return found;
+}
+
 // Named-variable IDOR: const { userId } = req.body; someDAO.update(userId, ...)
 // with no ownership check anywhere nearby. IDOR_RE only catches the tainted
 // ID literally inline as `req.params`/`req.body` at the call site; once a
@@ -2000,7 +2301,8 @@ const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|
 // c.GetString("userID"/...)) -- safe, since this only ever suppresses more,
 // never adds new sink matching, and these tokens can't appear in non-Go code.
 // Extended again with C#'s [Authorize] attribute -- safe, suppression-only.
-const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)|\[Authorize\b/i;
+// Extended again with PHP/Laravel auth vocabulary -- safe, suppression-only.
+const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)|\[Authorize\b|Auth::\w+|Gate::authorize|->\s*can\s*\(|\$_SESSION\s*\[\s*['"]\w*(?:user_?id)['"]\s*\]/i;
 
 function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -2097,6 +2399,45 @@ function findNamedTaintIDORCSharp(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// PHP named-taint IDOR/BOLA: an $_GET/$_POST-derived id flows into an
+// Eloquent or PDO lookup with no ownership check nearby. IDOR_SINK_RE was
+// confirmed to match ZERO real PHP/Laravel/PDO shapes -- defeated twice
+// over by Eloquent's `::`-static-call syntax (that regex requires a
+// literal `.`) and PHP's `$`-prefixed variables (its capture group
+// requires a \w char immediately after `(`, which `$id` can never
+// satisfy). User::find($id), User::where('id', $id)->first(), and plain
+// PDO $stmt->execute(['id'=>$id]) all confirmed non-matching -- PHP had
+// ZERO IDOR detection of any kind before this. Mirrors
+// findNamedTaintIDORGo/CSharp exactly (reuses "idor" id, same 15-line
+// auth-check window, same "medium" severity for a loose keyword-proximity
+// heuristic, not real semantic ownership comparison).
+const PHP_IDOR_SINK_RE = [
+  /\b[A-Z]\w*::\s*find(?:OrFail)?\s*\(\s*\$(\w+)\s*\)/,                                              // Eloquent: User::find($id)
+  /\b[A-Z]\w*::\s*where\s*\(\s*['"]\w*id['"]\s*,\s*\$(\w+)\s*\)\s*->\s*(?:first|get|firstOrFail)\s*\(/, // Eloquent: User::where('id', $id)->first()
+  /->\s*execute\s*\(\s*\[[^\]]*['"]\w*id['"]\s*=>\s*\$(\w+)/i,                                        // PDO: $stmt->execute(['id' => $id])
+];
+
+function findNamedTaintIDORPHP(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    let hit: string | undefined;
+    for (const re of PHP_IDOR_SINK_RE) {
+      const m = re.exec(line);
+      if (m) { hit = m[1]; break; }
+    }
+    if (!hit || !tainted.has(hit)) continue;
+    const windowStart = Math.max(0, i - 15);
+    if (lines.slice(windowStart, i + 1).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l))) continue;
+    found.push({ id:"idor", label:"Insecure Direct Object Reference", severity:"medium", line:i+1,
+      detail:`Tainted variable '$${hit}' used as a lookup id with no ownership check nearby — verify caller owns the resource` });
+  }
+  return found;
+}
+
 // BOLA (OWASP API #1): a function authenticates the caller (decodes/
 // validates a token into an identity variable), then performs a write/
 // delete/update using a DIFFERENT identifier instead of that identity, with
@@ -2157,6 +2498,45 @@ function findAuthenticatedIdentityIgnored(lines: string[]): ScanIndicator[] {
         detail:`Caller identity established via '${authVar}' on line ${i+1}, but this write uses a different identifier ('${ident}') with no ownership check — verify the caller owns the target resource` });
       break; // one finding per auth-establishment site is enough
     }
+  }
+  return found;
+}
+
+// Legacy/plain PHP: a sensitive action (DB write, unserialize(), or file
+// write) with no session/auth guard anywhere in the preceding lines of the
+// SAME script. Scoped deliberately to legacy/plain PHP's self-contained,
+// no-central-router idiom -- NOT extended to Laravel-style code:
+// Route::middleware('auth') registration lives in routes/web.php, not the
+// controller file, so a per-controller "no guard found" signal there would
+// be structurally unreliable (a false positive on code that IS protected,
+// just not visibly in this file) -- identical reasoning to why this
+// session's C# phase deferred a "[Authorize] missing" check for ASP.NET
+// Core's global middleware model.
+// "Sensitive action" = a DB write (INSERT/UPDATE/DELETE), unserialize()
+// (PHP Object Injection risk), or a file write (fwrite/
+// file_put_contents/move_uploaded_file). "Guard" = a conditional READ of
+// $_SESSION (isset/empty/array_key_exists/??), or session_status(), in the
+// preceding 15 lines -- deliberately NOT a bare assignment INTO $_SESSION
+// (sets state, doesn't check it).
+// KNOWN, STATED LIMITATION: an include-based guard (require
+// 'auth_check.php'; at the top of the script -- a very common legacy
+// pattern) is invisible to this detector, since it doesn't inline the
+// included file's contents. Severity capped at "medium" given both this
+// gap and the general loose-keyword-proximity imprecision already accepted
+// elsewhere in this file (same rationale as IDOR's "medium").
+const PHP_SENSITIVE_ACTION_RE = /\b(?:insert\s+into|update\s+\w+\s+set|delete\s+from)\b|\bunserialize\s*\(|\b(?:fwrite|file_put_contents|move_uploaded_file)\s*\(/i;
+const PHP_SESSION_GUARD_RE = /\b(?:isset|empty|array_key_exists)\s*\(\s*\$_SESSION\b|\$_SESSION\s*\[[^\]]+\]\s*\?\?|session_status\s*\(\s*\)/i;
+
+function findPHPMissingSessionGuard(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!PHP_SENSITIVE_ACTION_RE.test(lines[i])) continue;
+    const windowStart = Math.max(0, i - 15);
+    const window = lines.slice(windowStart, i + 1);
+    if (window.some(l => PHP_SESSION_GUARD_RE.test(l))) continue;
+    found.push({ id:"php-missing-session-guard", label:"Sensitive Action Without Session/Auth Guard", severity:"medium", line:i+1,
+      detail:"No $_SESSION-based authentication check found in the preceding 15 lines before this sensitive action (database write / unserialize / file write) — verify this script is reachable only by an authenticated request, or add an explicit session guard" });
   }
   return found;
 }
@@ -4773,6 +5153,13 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  "repo.findById(id).filter(r -> r.getOwnerId().equals(currentUser.getId()))",
     cwe: "CWE-639", effort: "medium",
   },
+  "php-missing-session-guard": {
+    title: "Add a session/auth guard before this sensitive action",
+    description: "Check for an authenticated session before performing a database write, unserialize(), or file write.",
+    code_before: "mysqli_query($conn, \"DELETE FROM users WHERE id=$id\");",
+    code_after:  "if (!isset($_SESSION['user_id'])) { header('Location: /login'); exit; }\nmysqli_query($conn, \"DELETE FROM users WHERE id=$id\");",
+    cwe: "CWE-306", effort: "low",
+  },
   "bola-missing-ownership-check": {
     title: "Verify the caller owns the requested resource before this Spring endpoint reads/writes it",
     description: "A @PathVariable/@RequestParam-sourced identifier reaches a repository/map lookup with no @PreAuthorize/@Secured/@RolesAllowed annotation and no .equals()/==/!= comparison against the authenticated principal anywhere in the method body.",
@@ -5258,12 +5645,16 @@ export function analyzeFile(
     ...findInsecureDeserializationGoDecoder(lines),
     ...findInsecureDeserializationCSharp(lines),
     ...findInsecureDeserializationCSharpJsonNet(lines),
+    ...findNamedTaintDeserializationPHP(lines),
+    ...findDeserializationPHPWrapped(lines),
+    ...findPHPPharDeserialization(lines),
     ...findWeakCrypto(lines),
     ...findPIIInLogs(lines),
     ...findMassAssignment(lines),
     ...findSQLInjection(lines),
     ...findSQLInjectionTainted(lines),
     ...findSQLInjectionPHPInterpolated(lines),
+    ...findSQLInjectionPHPMultilineBuild(lines),
     ...findSQLInjectionJavaTainted(lines),
     ...findSQLInjectionGoSprintf(lines),
     ...findSQLInjectionCSharpTainted(lines),
@@ -5283,6 +5674,7 @@ export function analyzeFile(
     ...findNamedTaintPathTraversalJS(lines),
     ...findNamedTaintPathTraversalGo(lines),
     ...findNamedTaintPathTraversalCSharp(lines),
+    ...findNamedTaintPathTraversalPHP(lines),
     ...findPathTraversalTainted(lines),
     ...findZipSlip(lines),
     ...findPHPFileInclusion(lines),
@@ -5302,14 +5694,18 @@ export function analyzeFile(
     ...findNamedTaintIDOR(lines),
     ...findNamedTaintIDORGo(lines),
     ...findNamedTaintIDORCSharp(lines),
+    ...findNamedTaintIDORPHP(lines),
     ...findAuthenticatedIdentityIgnored(lines),
+    ...findPHPMissingSessionGuard(lines),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
+    ...findNamedTaintSSRFPHP(lines),
     ...findSSRFGoNewRequest(lines),
     ...findNamedTaintSSRFCSharp(lines),
     ...findSSRFCSharpNewRequest(lines),
     ...findNamedTaintXSS(lines),
     ...findNamedTaintXSSCSharp(lines),
+    ...findNamedTaintXSSPHP(lines),
     ...findNamedTaintReflectedXSS(lines),
     ...findReflectedXSSTainted(lines),
     ...findNoSQLInjection(lines),
