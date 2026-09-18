@@ -4905,6 +4905,13 @@ export const AI_SIGNAL_IDS = new Set([
   "identifier-length","blank-line-regularity","token-frequency",
   "prompt-leakage","style-drift","watermark-detection","backdoor-detection",
   "hallucinated-api","copy-paste-pattern",
+  // Added: these 3 were moved from CORE into SECONDARY (see the comment
+  // above SECONDARY_SIGNALS) without also being added here, so they were
+  // silently counted as security findings in total_security_findings/
+  // critical_count and the exploitability/reachability scorers.
+  // ai-blast-radius is injected post-analyzeFile at the batch level and was
+  // never a CWE finding either -- same gap, same fix.
+  "jsdoc-completeness","zero-debug-artifacts","import-exhaustiveness","ai-blast-radius",
 ]);
 
 export interface ScanSummary {
