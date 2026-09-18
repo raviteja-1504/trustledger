@@ -215,13 +215,35 @@ function paramNameOf(p: SyntaxNode): string | null {
   return first?.type === "identifier" ? first.text : null;
 }
 
-function paramNamesOf(fn: SyntaxNode): string[] {
+interface ParamShape { name: string; index: number; isRest: boolean }
+
+/** Which of `args` correspond to `shape`: exactly one arg for a fixed
+ * param, every arg from `shape.index` onward for a *args/**kwargs param
+ * (kwargs is a deliberate over-approximation -- real name-based keyword
+ * matching isn't tracked, this never under-taints, consistent with this
+ * engine's recall-biased philosophy elsewhere). */
+function argsForShape<A>(args: readonly A[], shape: ParamShape): A[] {
+  return shape.isRest ? args.slice(shape.index) : (args[shape.index] !== undefined ? [args[shape.index]] : []);
+}
+
+function paramShapesOfPy(fn: SyntaxNode): ParamShape[] {
   const params = fn.childForFieldName("parameters");
   if (!params) return [];
-  return params.namedChildren
-    .filter((n): n is SyntaxNode => !!n)
-    .map(paramNameOf)
-    .filter((n): n is string => !!n);
+  const shapes: ParamShape[] = [];
+  let index = 0;
+  for (const p of params.namedChildren) {
+    if (!p) continue;
+    const name = paramNameOf(p);
+    if (!name) continue;
+    const isRest = p.type === "list_splat_pattern" || p.type === "dictionary_splat_pattern";
+    shapes.push({ name, index, isRest });
+    index++;
+  }
+  return shapes;
+}
+
+function paramNamesOf(fn: SyntaxNode): string[] {
+  return paramShapesOfPy(fn).map(s => s.name);
 }
 
 /** Is this function_definition's own parameter list carrying a param literally named `request`? (Django view-function convention -- scopes the request.GET/.POST source so an unrelated local/import named `request` never false-positives.) */
@@ -385,9 +407,9 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>): SinkMatc
 // ── Taint environment / propagation ─────────────────────────────────────────
 
 type Env = Map<string, boolean>;
-interface LocalFn { paramNames: string[]; body: SyntaxNode }
+interface LocalFn { paramShapes: ParamShape[]; body: SyntaxNode }
 
-function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Set<string>, inDjangoRequestFn: boolean) {
+function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Map<string, Set<number>>, inDjangoRequestFn: boolean) {
   const isTainted = (node: SyntaxNode, env: Env): boolean => {
     if (isTaintSourceExprPy(node, inDjangoRequestFn)) return true;
     if (node.type === "identifier") return env.get(node.text) === true;
@@ -411,10 +433,21 @@ function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Set<string
       if (fn?.type === "attribute" && attributeParts(fn).attribute === "format") {
         return args.some(a => isTainted(a, env));
       }
-      // A call to a local function known to propagate taint from params to
-      // return value (see computeReturnTaintPropagatingPy below).
-      if (fn?.type === "identifier" && propagating.has(fn.text)) {
-        return args.some(a => isTainted(a, env));
+      // A call to a local function known to propagate taint from SPECIFIC
+      // params to return value (see computeReturnTaintPropagatingPy below).
+      // Only the arguments at the propagating indices are checked, not
+      // every argument.
+      if (fn?.type === "identifier") {
+        const propIdx = propagating.get(fn.text);
+        if (propIdx) {
+          const callee = localFns.get(fn.text);
+          const shapes = callee?.paramShapes ?? [];
+          const matched = [...propIdx].some(i => {
+            const shape = shapes[i];
+            return shape ? argsForShape(args, shape).some(a => isTainted(a, env)) : false;
+          });
+          if (matched) return true;
+        }
       }
       // Passthrough method call on an already-tainted receiver (.strip()/.lower()/etc).
       if (fn?.type === "attribute") {
@@ -440,27 +473,37 @@ function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Set<string
 }
 
 /**
- * Does `fn`'s return value end up tainted whenever ALL of its parameters are
- * tainted? Deliberately simple over-approximation, mirroring Phase 1's
- * computeReturnTaintPropagating -- genuinely simpler here since Python has
- * only function_definition (def/async def), no separate arrow/expression
- * function forms to special-case.
+ * For each of `fn`'s parameters INDEPENDENTLY (seed only that one param
+ * tainted, all others left untainted), does `fn`'s return value become
+ * tainted? Returns the set of parameter INDICES whose taint actually
+ * reaches the return -- not a single per-function boolean (which would mean
+ * a call like build_log(safe_id, tainted_message), where only user_id --
+ * not message -- flows into the return, incorrectly firing). Sound because
+ * makeIsTaintedPy is purely OR-shaped (every combinator is `||`/`.some()`,
+ * nothing de-taints), so seeding a superset of params can only ever taint a
+ * superset of what seeding a subset taints. Mirrors astTaint.ts's
+ * computeReturnTaintPropagating exactly, genuinely simpler here since
+ * Python has only function_definition (def/async def), no separate
+ * arrow/expression function forms to special-case.
  */
-function computeReturnTaintPropagatingPy(fn: LocalFn): boolean {
-  const env: Env = new Map();
-  fn.paramNames.forEach(p => env.set(p, true));
-  const isTaintedShallow = makeIsTaintedPy(new Map(), new Set(), false);
-  let found = false;
-  const visit = (n: SyntaxNode) => {
-    if (found) return;
+function computeReturnTaintPropagatingPy(fn: LocalFn): Set<number> {
+  const propagatingIdx = new Set<number>();
+  const isTaintedShallow = makeIsTaintedPy(new Map(), new Map(), false);
+  const returnValues: SyntaxNode[] = [];
+  const collect = (n: SyntaxNode) => {
     if (n.type === "return_statement") {
       const value = n.namedChildren[0];
-      if (value && isTaintedShallow(value, env)) { found = true; return; }
+      if (value) { returnValues.push(value); return; }
     }
-    for (const child of n.namedChildren) if (child) visit(child);
+    for (const child of n.namedChildren) if (child) collect(child);
   };
-  visit(fn.body);
-  return found;
+  collect(fn.body);
+  for (const shape of fn.paramShapes) {
+    const env: Env = new Map();
+    env.set(shape.name, true);
+    if (returnValues.some(v => isTaintedShallow(v, env))) propagatingIdx.add(shape.index);
+  }
+  return propagatingIdx;
 }
 
 function sourceLabelPy(node: SyntaxNode): string {
@@ -474,7 +517,7 @@ function collectLocalFunctionsPy(root: SyntaxNode): Map<string, LocalFn> {
     if (node.type === "function_definition") {
       const name = node.childForFieldName("name")?.text;
       const body = node.childForFieldName("body");
-      if (name && body) fns.set(name, { paramNames: paramNamesOf(node), body });
+      if (name && body) fns.set(name, { paramShapes: paramShapesOfPy(node), body });
     }
     for (const child of node.namedChildren) if (child) visit(child);
   };
@@ -510,8 +553,11 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
 
     const importMap = buildImportMapPy(root);
     const localFns = collectLocalFunctionsPy(root);
-    const propagating = new Set<string>();
-    for (const [name, fn] of localFns) if (computeReturnTaintPropagatingPy(fn)) propagating.add(name);
+    const propagating = new Map<string, Set<number>>();
+    for (const [name, fn] of localFns) {
+      const idx = computeReturnTaintPropagatingPy(fn);
+      if (idx.size > 0) propagating.set(name, idx);
+    }
 
     const findings: AstTaintPyFinding[] = [];
     const seen = new Set<string>();
@@ -528,7 +574,7 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
       });
     };
 
-    const seededParams = new Map<string, Set<string>>();
+    const seededParams = new Map<string, Set<number>>();
 
     const walk = (node: SyntaxNode, env: Env, inDjangoRequestFn: boolean, isTainted: ReturnType<typeof makeIsTaintedPy>) => {
       if (node.type === "assignment") {
@@ -555,13 +601,15 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
           const fnName = fnNode.text;
           const fn = localFns.get(fnName)!;
           const args = argListOf(node);
-          const taintedNames = new Set<string>();
+          const taintedIdx = new Set<number>();
           args.forEach((arg, i) => {
-            if (isTainted(arg, env) && fn.paramNames[i]) taintedNames.add(fn.paramNames[i]);
+            if (!isTainted(arg, env)) return;
+            const shape = fn.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
+            if (shape) taintedIdx.add(shape.index);
           });
-          if (taintedNames.size > 0) {
-            const existing = seededParams.get(fnName) ?? new Set<string>();
-            taintedNames.forEach(p => existing.add(p));
+          if (taintedIdx.size > 0) {
+            const existing = seededParams.get(fnName) ?? new Set<number>();
+            taintedIdx.forEach(i => existing.add(i));
             seededParams.set(fnName, existing);
           }
         }
@@ -596,11 +644,14 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
 
     // Second pass: re-walk any local function whose params were seeded as
     // tainted by a call site above, so sinks inside the callee are reachable.
-    for (const [fnName, params] of seededParams) {
+    for (const [fnName, idxSet] of seededParams) {
       const fn = localFns.get(fnName);
       if (!fn) continue;
       const env: Env = new Map();
-      params.forEach(p => env.set(p, true));
+      for (const idx of idxSet) {
+        const shape = fn.paramShapes[idx];
+        if (shape) env.set(shape.name, true);
+      }
       const seededIsTainted = makeIsTaintedPy(localFns, propagating, false);
       for (const child of fn.body.namedChildren) if (child) walk(child, env, false, seededIsTainted);
     }

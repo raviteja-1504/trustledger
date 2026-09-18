@@ -113,6 +113,54 @@ def handler():
   });
 });
 
+describe("Real AST-based taint engine — per-parameter return-taint precision (multi-param helper)", () => {
+  // build_log's return only ever depends on user_id -- message is never
+  // referenced in it at all. A per-FUNCTION propagating boolean (the old
+  // design) can't tell the two params apart, so it would fire on
+  // build_log(safe_id, tainted_message) even though message never flows
+  // anywhere. Per-parameter tracking must not.
+  const helper = `
+def build_log(user_id, message):
+    return f"User {user_id} did something"
+`;
+
+  it("does NOT flag when only the unused parameter is tainted", () => {
+    const content = `${helper}
+def handler():
+    safe_id = "static-id"
+    tainted_message = request.args.get("msg")
+    os.system(build_log(safe_id, tainted_message))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("still flags when the parameter that actually reaches the return IS tainted", () => {
+    const content = `${helper}
+def handler():
+    tainted_id = request.args.get("id")
+    os.system(build_log(tainted_id, "static message"))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("flags when EITHER of two independently-propagating params is tainted", () => {
+    const combine = `
+def combine(a, b):
+    return a + b
+`;
+    const aTainted = `${combine}
+def handler():
+    os.system(combine(request.args.get("a"), "safe"))
+`;
+    const bTainted = `${combine}
+def handler():
+    os.system(combine("safe", request.args.get("b")))
+`;
+    expect(scanAstTaintPython(aTainted, "app.py").some(f => f.id === "command-injection")).toBe(true);
+    expect(scanAstTaintPython(bTainted, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
 describe("Real AST-based taint engine — FastAPI parameter-injection source style", () => {
   itIfExists(FASTAPI_FIXTURE)("finds the real AST-only catches in the hand-written FastAPI fixture", () => {
     const content = fs.readFileSync(FASTAPI_FIXTURE, "utf8");

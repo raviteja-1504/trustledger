@@ -194,15 +194,17 @@ type Env = Map<string, boolean>;
  * Builds the core taint predicate as a closure over `localFns`/`propagating`
  * so every call site (there are several, scattered through the statement
  * walk below) doesn't need to thread two extra parameters through by hand.
- * `propagating` is the set of local function names whose return value is
- * known (from computeReturnTaintPropagating below) to be tainted whenever a
- * tainted argument is passed in -- this is what makes
- * `exec(buildCommand(host))` resolve correctly: `buildCommand` never calls a
- * sink itself, it just returns a tainted template literal, so without this
- * the call expression `buildCommand(host)` would look untainted from the
- * outside.
+ * `propagating` maps a local function name to the set of its parameter
+ * INDICES whose taint is known (from computeReturnTaintPropagating below) to
+ * reach its return value -- this is what makes `exec(buildCommand(host))`
+ * resolve correctly: `buildCommand` never calls a sink itself, it just
+ * returns a tainted template literal, so without this the call expression
+ * `buildCommand(host)` would look untainted from the outside. Per-parameter
+ * (not per-function) so a call like `buildLog(safeId, taintedMessage)` where
+ * only `userId` -- not `message` -- flows into buildLog's return does NOT
+ * fire, even though buildLog is "propagating" for its userId parameter.
  */
-function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Set<string>) {
+function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Map<string, Set<number>>) {
   const isTainted = (expr: ts.Expression, env: Env): boolean => {
     if (ts.isParenthesizedExpression(expr)) return isTainted(expr.expression, env);
     if (isTaintSourceExpr(expr)) return true;
@@ -217,11 +219,21 @@ function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Set<string>)
       return expr.properties.some(p => ts.isPropertyAssignment(p) && isTainted(p.initializer, env));
     }
     if (ts.isCallExpression(expr)) {
-      // A call to a local function known to propagate taint from its
+      // A call to a local function known to propagate taint from SPECIFIC
       // params to its return value -- e.g. buildCommand(host) where
-      // buildCommand(h) { return `ping -c1 ${h}`; }.
-      if (ts.isIdentifier(expr.expression) && propagating.has(expr.expression.text)) {
-        return expr.arguments.some(a => isTainted(a, env));
+      // buildCommand(h) { return `ping -c1 ${h}`; }. Only the arguments at
+      // the propagating indices are checked, not every argument.
+      if (ts.isIdentifier(expr.expression)) {
+        const propIdx = propagating.get(expr.expression.text);
+        if (propIdx) {
+          const callee = localFns.get(expr.expression.text);
+          const shapes = callee ? paramShapesOf(callee) : [];
+          const matched = [...propIdx].some(i => {
+            const shape = shapes[i];
+            return shape ? argsForShape(expr.arguments, shape).some(a => isTainted(a, env)) : false;
+          });
+          if (matched) return true;
+        }
       }
       // Passthrough for a method call on an already-tainted receiver
       // (.trim()/.toLowerCase()/.toString()/etc.) -- same "propagate through
@@ -236,38 +248,70 @@ function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Set<string>)
   return isTainted;
 }
 
+interface LocalFn { params: ts.NodeArray<ts.ParameterDeclaration>; body: ts.Node }
+
+interface ParamShape { name: string; index: number; isRest: boolean }
+
+/** Which of `args` correspond to `shape`: exactly one arg for a fixed
+ * param, every arg from `shape.index` onward for a rest param. */
+function argsForShape<A>(args: readonly A[], shape: ParamShape): A[] {
+  return shape.isRest ? args.slice(shape.index) : (args[shape.index] !== undefined ? [args[shape.index]] : []);
+}
+
+function paramShapesOf(fn: LocalFn): ParamShape[] {
+  return fn.params
+    .map((p, index) => ts.isIdentifier(p.name) ? { name: p.name.text, index, isRest: !!p.dotDotDotToken } : null)
+    .filter((s): s is ParamShape => s !== null);
+}
+
 /**
- * Does `fn`'s return value end up tainted whenever ALL of its parameters
- * are tainted? A deliberately simple over-approximation (real per-param
- * dependency isn't tracked) -- if the return only actually depends on a
- * subset of params, seeding all of them still correctly detects it as
- * propagating; it just can't say *which* params matter, so a call site is
- * treated as tainted if ANY argument is tainted (see makeIsTainted above).
+ * For each of `fn`'s parameters INDEPENDENTLY (seed only that one param
+ * tainted, all others left untainted), does `fn`'s return value become
+ * tainted? Returns the set of parameter INDICES whose taint actually
+ * reaches the return -- not a single per-function boolean. This replaces an
+ * earlier design that seeded ALL params tainted at once and recorded only
+ * "this function propagates taint somehow," which meant a call site with
+ * ANY tainted argument was treated as tainted regardless of which parameter
+ * it bound to -- a real false-positive source (e.g. buildLog(userId,
+ * message) only using userId in its return still fired on
+ * buildLog(safeId, taintedMessage)).
+ *
+ * Testing each parameter independently is sound because the taint predicate
+ * (makeIsTainted) is purely OR-shaped -- every combinator is `||`/`.some()`,
+ * nothing ever de-taints -- so seeding a superset of params can only ever
+ * taint a superset of what seeding a subset taints. No parameter whose own
+ * taint is independently sufficient is missed, and no parameter is falsely
+ * required to co-occur with another.
+ *
  * Nested calls inside `fn`'s own body are deliberately treated as opaque
  * here (empty localFns/propagating) to keep this a bounded, non-recursive
- * single pass rather than a mutual-recursion risk between functions that
- * call each other.
+ * pass rather than a mutual-recursion risk between functions that call
+ * each other.
  */
-function computeReturnTaintPropagating(fn: LocalFn): boolean {
-  const env: Env = new Map();
-  fn.params.forEach(p => { if (ts.isIdentifier(p.name)) env.set(p.name.text, true); });
-  const isTaintedShallow = makeIsTainted(new Map(), new Set());
-  if (!ts.isBlock(fn.body)) return isTaintedShallow(fn.body as ts.Expression, env); // arrow expression body
-  let found = false;
-  const visit = (n: ts.Node) => {
-    if (found) return;
-    if (ts.isReturnStatement(n) && n.expression && isTaintedShallow(n.expression, env)) { found = true; return; }
-    ts.forEachChild(n, visit);
-  };
-  visit(fn.body);
-  return found;
+function computeReturnTaintPropagating(fn: LocalFn): Set<number> {
+  const propagatingIdx = new Set<number>();
+  const isTaintedShallow = makeIsTainted(new Map(), new Map());
+  const returnExprs: ts.Expression[] = [];
+  if (!ts.isBlock(fn.body)) {
+    returnExprs.push(fn.body as ts.Expression); // arrow expression body
+  } else {
+    const collect = (n: ts.Node) => {
+      if (ts.isReturnStatement(n) && n.expression) { returnExprs.push(n.expression); return; }
+      ts.forEachChild(n, collect);
+    };
+    collect(fn.body);
+  }
+  for (const shape of paramShapesOf(fn)) {
+    const env: Env = new Map();
+    env.set(shape.name, true);
+    if (returnExprs.some(expr => isTaintedShallow(expr, env))) propagatingIdx.add(shape.index);
+  }
+  return propagatingIdx;
 }
 
 function sourceLabel(expr: ts.Expression): string {
   return expr.getText().replace(/\s+/g, " ").slice(0, 60);
 }
-
-interface LocalFn { params: ts.NodeArray<ts.ParameterDeclaration>; body: ts.Node }
 
 function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
@@ -308,10 +352,13 @@ export function scanAstTaint(content: string, filePath: string, presparsed?: ts.
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
     const importMap = buildImportMap(sourceFile);
     const localFns = collectLocalFunctions(sourceFile);
-    const propagating = new Set<string>();
-    for (const [name, fn] of localFns) if (computeReturnTaintPropagating(fn)) propagating.add(name);
+    const propagating = new Map<string, Set<number>>();
+    for (const [name, fn] of localFns) {
+      const idx = computeReturnTaintPropagating(fn);
+      if (idx.size > 0) propagating.set(name, idx);
+    }
     const isTainted = makeIsTainted(localFns, propagating);
-    const seededParams = new Map<string, Set<string>>(); // fn name -> tainted param names
+    const seededParams = new Map<string, Set<number>>(); // fn name -> tainted param indices
     const findings: AstTaintFinding[] = [];
     const seen = new Set<string>();
 
@@ -386,19 +433,22 @@ export function scanAstTaint(content: string, filePath: string, presparsed?: ts.
       const visitExpr = (n: ts.Node) => {
         if (ts.isCallExpression(n)) {
           checkCallForSink(n, env);
-          // Same-file call binding: seed callee params for tainted args, one hop
+          // Same-file call binding: seed callee params for tainted args, one hop.
+          // Matched by INDEX (via paramShapesOf, including rest-param
+          // overflow), not by re-deriving positions ad hoc here.
           if (ts.isIdentifier(n.expression) && localFns.has(n.expression.text)) {
             const fnName = n.expression.text;
             const fn = localFns.get(fnName)!;
-            const taintedIdx = new Set<string>();
+            const shapes = paramShapesOf(fn);
+            const taintedIdx = new Set<number>();
             n.arguments.forEach((arg, i) => {
-              if (isTainted(arg, env) && fn.params[i] && ts.isIdentifier(fn.params[i].name)) {
-                taintedIdx.add((fn.params[i].name as ts.Identifier).text);
-              }
+              if (!isTainted(arg, env)) return;
+              const shape = shapes.find(s => s.isRest ? i >= s.index : s.index === i);
+              if (shape) taintedIdx.add(shape.index);
             });
             if (taintedIdx.size > 0) {
-              const existing = seededParams.get(fnName) ?? new Set<string>();
-              taintedIdx.forEach(p => existing.add(p));
+              const existing = seededParams.get(fnName) ?? new Set<number>();
+              taintedIdx.forEach(i => existing.add(i));
               seededParams.set(fnName, existing);
             }
           }
@@ -416,11 +466,15 @@ export function scanAstTaint(content: string, filePath: string, presparsed?: ts.
 
     // Second pass: re-walk any local function whose parameters were seeded
     // as tainted by a call site above, so sinks inside the callee are reachable.
-    for (const [fnName, params] of seededParams) {
+    for (const [fnName, idxSet] of seededParams) {
       const fn = localFns.get(fnName);
       if (!fn) continue;
       const env: Env = new Map();
-      params.forEach(p => env.set(p, true));
+      const shapes = paramShapesOf(fn);
+      for (const idx of idxSet) {
+        const shape = shapes[idx];
+        if (shape) env.set(shape.name, true);
+      }
       walkStatements(fn.body, env);
     }
 

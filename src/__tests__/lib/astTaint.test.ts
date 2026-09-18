@@ -132,6 +132,48 @@ app.get("/ping", (req, res) => {
   });
 });
 
+describe("Real AST-based taint engine — per-parameter return-taint precision (multi-param helper)", () => {
+  // buildLog's return only ever depends on `userId` -- `message` is never
+  // referenced in it at all. A per-FUNCTION propagating boolean (the old
+  // design) can't tell the two params apart, so it would fire on
+  // buildLog(safeId, taintedMessage) even though `message` never flows
+  // anywhere. Per-parameter tracking must not.
+  const helper = `
+function buildLog(userId, message) {
+  return \`User \${userId} did something\`;
+}`;
+
+  it("does NOT flag when only the unused parameter is tainted", () => {
+    const content = `${helper}
+app.get("/x", (req, res) => {
+  const safeId = "static-id";
+  const taintedMessage = req.query.msg;
+  exec(buildLog(safeId, taintedMessage));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("still flags when the parameter that actually reaches the return IS tainted", () => {
+    const content = `${helper}
+app.get("/x", (req, res) => {
+  const taintedId = req.query.id;
+  exec(buildLog(taintedId, "static message"));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("flags when EITHER of two independently-propagating params is tainted (doesn't over-correct to requiring both)", () => {
+    const combine = `
+function combine(a, b) { return a + b; }`;
+    const aTainted = `${combine}
+app.get("/x", (req, res) => { exec(combine(req.query.a, "safe")); });`;
+    const bTainted = `${combine}
+app.get("/y", (req, res) => { exec(combine("safe", req.query.b)); });`;
+    expect(scanAstTaint(aTainted, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+    expect(scanAstTaint(bTainted, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
 describe("Real AST-based taint engine — negative cases", () => {
   it("does not flag a call with no taint anywhere in scope", () => {
     const content = `

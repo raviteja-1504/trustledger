@@ -152,27 +152,24 @@ const SERVLET_SOURCE_CALLS = new Set(["getParameter", "getHeader", "getParameter
 type Env = Map<string, boolean>;
 type VarTypes = Map<string, string>; // local var name -> declared type's simple name (e.g. "ObjectInputStream")
 
+interface ParamShape { name: string; index: number; isRest: boolean }
+
+/** Which of `args` correspond to `shape`: exactly one arg for a fixed
+ * param, every arg from `shape.index` onward for a varargs param. */
+function argsForShape<A>(args: readonly A[], shape: ParamShape): A[] {
+  return shape.isRest ? args.slice(shape.index) : (args[shape.index] !== undefined ? [args[shape.index]] : []);
+}
+
 interface LocalMethod {
   name: string;
-  paramNames: string[];
+  paramShapes: ParamShape[];
   springParamNames: Set<string>;
   body: CstNode | null; // methodBody
 }
 
-/**
- * Extracts a formal parameter's own declared name, threading through the
- * grammar's `variableParaRegularParameter` wrapper (varargs/receiver-param
- * forms are skipped -- a deliberate simplification, matching the
- * "over-approximation over precision" posture already established).
- */
-function paramInfo(fp: CstNode): { name: string; annotations: string[] } | null {
-  const vp = firstNode(fp, "variableParaRegularParameter");
-  if (!vp) return null;
-  const declId = firstNode(vp, "variableDeclaratorId");
-  const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
-  if (!nameTok) return null;
+function annotationsFromModifiers(node: CstNode): string[] {
   const annotations: string[] = [];
-  for (const vm of allNodes(vp, "variableModifier")) {
+  for (const vm of allNodes(node, "variableModifier")) {
     for (const ann of allNodes(vm, "annotation")) {
       const typeName = firstNode(ann, "typeName");
       if (!typeName) continue;
@@ -181,7 +178,32 @@ function paramInfo(fp: CstNode): { name: string; annotations: string[] } | null 
       if (last) annotations.push(last.image);
     }
   }
-  return { name: nameTok.image, annotations };
+  return annotations;
+}
+
+/**
+ * Extracts a formal parameter's declared name/annotations/rest-ness across
+ * BOTH shapes the grammar produces: `variableParaRegularParameter` (the
+ * normal case, name reached through `variableDeclaratorId`) and
+ * `variableArityParameter` (`String... args` -- a genuinely SEPARATE
+ * production, confirmed directly against a real parse, with its own
+ * `Identifier` token reached directly, not through `variableDeclaratorId`).
+ * Previously only the regular case was handled, so a varargs parameter was
+ * silently dropped from a method's param list entirely.
+ */
+function paramInfo(fp: CstNode): { name: string; annotations: string[]; isRest: boolean } | null {
+  const vp = firstNode(fp, "variableParaRegularParameter");
+  if (vp) {
+    const declId = firstNode(vp, "variableDeclaratorId");
+    const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+    return nameTok ? { name: nameTok.image, annotations: annotationsFromModifiers(vp), isRest: false } : null;
+  }
+  const va = firstNode(fp, "variableArityParameter");
+  if (va) {
+    const nameTok = firstTok(va, "Identifier");
+    return nameTok ? { name: nameTok.image, annotations: annotationsFromModifiers(va), isRest: true } : null;
+  }
+  return null;
 }
 
 function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
@@ -191,19 +213,21 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
   if (!declarator) return null;
   const nameTok = firstTok(declarator, "Identifier");
   if (!nameTok) return null;
-  const paramNames: string[] = [];
+  const paramShapes: ParamShape[] = [];
   const springParamNames = new Set<string>();
   const fpl = firstNode(declarator, "formalParameterList");
   if (fpl) {
+    let index = 0;
     for (const fp of allNodes(fpl, "formalParameter")) {
       const info = paramInfo(fp);
       if (!info) continue;
-      paramNames.push(info.name);
+      paramShapes.push({ name: info.name, index, isRest: info.isRest });
       if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
+      index++;
     }
   }
   const body = firstNode(methodDecl, "methodBody") ?? null;
-  return { name: nameTok.image, paramNames, springParamNames, body };
+  return { name: nameTok.image, paramShapes, springParamNames, body };
 }
 
 /**
@@ -256,7 +280,17 @@ interface EngineCtx {
   content: string;
   lines: string[];
   localMethods: Map<string, LocalMethod>;
-  propagating: Set<string>;
+  // Which of a local method's parameter INDICES have taint that reaches its
+  // return value -- see computeReturnTaintPropagatingJava.
+  propagatingParams: Map<string, Set<number>>;
+  // Which of a local method's parameter INDICES were tainted at some call
+  // site to it -- consumed by a second pass in scanAstTaintJava that
+  // re-walks the method's own body with those params seeded, so a sink call
+  // INSIDE the callee (not just in its return) becomes reachable. Java had
+  // no equivalent of this mechanism at all before -- astTaint.ts's/
+  // astTaintPython.ts's own versions of it were already correct and are
+  // mirrored here, not just fixed.
+  seededParams: Map<string, Set<number>>;
   varTypes: VarTypes;
   findings: AstTaintJavaFinding[];
   seen: Set<string>;
@@ -384,12 +418,20 @@ function walkPrimaryChain(
         chainTaint = chainTaint || anyArgTainted;
       }
       // Same-file interprocedural, one hop: a call to a local method whose
-      // return value is known (computeReturnTaintPropagatingJava) to be
-      // tainted whenever a tainted argument is passed in -- e.g.
-      // executeQuery(buildQuery(uid)) where buildQuery merely returns a
-      // tainted concatenation and never calls a sink itself.
-      if (ctx.propagating.has(tail) && anyArgTainted) {
-        chainTaint = true;
+      // return value is known (computeReturnTaintPropagatingJava) to depend
+      // on SPECIFIC parameters -- e.g. executeQuery(buildQuery(uid)) where
+      // buildQuery merely returns a tainted concatenation of uid and never
+      // calls a sink itself. Only the arguments at the propagating indices
+      // are checked, not every argument.
+      const propIdx = ctx.propagatingParams.get(tail);
+      if (propIdx) {
+        const callee = ctx.localMethods.get(tail);
+        const shapes = callee?.paramShapes ?? [];
+        const matched = [...propIdx].some(i => {
+          const shape = shapes[i];
+          return shape ? argsForShape(args, shape).some(a => isTainted(a, env, ctx)) : false;
+        });
+        if (matched) chainTaint = true;
       }
 
       onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
@@ -511,18 +553,58 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   }
 }
 
-/** Same-file interprocedural: does `method`'s return value end up tainted whenever ALL of its params are tainted? Mirrors computeReturnTaintPropagating(Py) exactly. */
-function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx): boolean {
-  if (!method.body) return false;
-  const env: Env = new Map();
-  method.paramNames.forEach(p => env.set(p, true));
-  const shallowCtx: EngineCtx = { ...ctx, localMethods: new Map(), propagating: new Set() };
-  let found = false;
-  for (const ret of findAllNodes(method.body, "returnStatement")) {
-    const expr = firstNode(ret, "expression");
-    if (expr && isTainted(expr, env, shallowCtx)) { found = true; break; }
+/**
+ * For each of `method`'s parameters INDEPENDENTLY (seed only that one param
+ * tainted, all others left untainted), does `method`'s return value become
+ * tainted? Returns the set of parameter INDICES whose taint actually
+ * reaches the return -- not a single per-method boolean (which would mean a
+ * call like buildLog(safeId, taintedMessage), where only userId -- not
+ * message -- flows into the return, incorrectly firing). Sound because
+ * isTainted is purely OR-shaped (every combinator is `||`/`.some()`,
+ * nothing de-taints), so seeding a superset of params can only ever taint a
+ * superset of what seeding a subset taints. Mirrors astTaint.ts's
+ * computeReturnTaintPropagating / astTaintPython.ts's
+ * computeReturnTaintPropagatingPy exactly.
+ */
+function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx): Set<number> {
+  const propagatingIdx = new Set<number>();
+  if (!method.body) return propagatingIdx;
+  const shallowCtx: EngineCtx = { ...ctx, localMethods: new Map(), propagatingParams: new Map() };
+  const returnExprs = findAllNodes(method.body, "returnStatement")
+    .map(ret => firstNode(ret, "expression"))
+    .filter((e): e is CstNode => !!e);
+  for (const shape of method.paramShapes) {
+    const env: Env = new Map();
+    env.set(shape.name, true);
+    if (returnExprs.some(expr => isTainted(expr, env, shallowCtx))) propagatingIdx.add(shape.index);
   }
-  return found;
+  return propagatingIdx;
+}
+
+/**
+ * NEW mechanism, closing a real gap: astTaint.ts/astTaintPython.ts both
+ * already have a positionally-correct "seed a callee's tainted params from
+ * a call site, then re-walk its body" pass so a sink call INSIDE a local
+ * function/method (not just in its return expression) is reachable when
+ * called with tainted arguments -- astTaintJava.ts never had this at all.
+ * Records which parameter INDICES were tainted at this call site into
+ * ctx.seededParams; a second full pass in scanAstTaintJava consumes it.
+ */
+function seedLocalMethodParams(
+  info: { tail: string; args: CstNode[] }, env: Env, ctx: EngineCtx,
+) {
+  const callee = ctx.localMethods.get(info.tail);
+  if (!callee) return;
+  const taintedIdx = new Set<number>();
+  info.args.forEach((arg, i) => {
+    if (!isTainted(arg, env, ctx)) return;
+    const shape = callee.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
+    if (shape) taintedIdx.add(shape.index);
+  });
+  if (taintedIdx.size === 0) return;
+  const existing = ctx.seededParams.get(info.tail) ?? new Set<number>();
+  taintedIdx.forEach(i => existing.add(i));
+  ctx.seededParams.set(info.tail, existing);
 }
 
 // ── Statement-level walk (declarations + generic sink-visiting descent) ───
@@ -556,7 +638,7 @@ function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
   if (node.name === "primary") {
     const prefix = firstNode(node, "primaryPrefix");
     if (prefix) checkNewExpressionSink(prefix, env, ctx, node);
-    walkPrimaryChain(node, env, ctx, (info) => checkCallSink(info, env, ctx));
+    walkPrimaryChain(node, env, ctx, (info) => { checkCallSink(info, env, ctx); seedLocalMethodParams(info, env, ctx); });
   }
 
   for (const key of Object.keys(node.children)) {
@@ -573,11 +655,12 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
     const lines = content.split("\n");
     const localMethods = collectLocalMethods(cst);
     const ctx: EngineCtx = {
-      content, lines, localMethods, propagating: new Set(), varTypes: new Map(),
-      findings: [], seen: new Set(),
+      content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+      varTypes: new Map(), findings: [], seen: new Set(),
     };
     for (const [name, method] of localMethods) {
-      if (computeReturnTaintPropagatingJava(method, ctx)) ctx.propagating.add(name);
+      const idx = computeReturnTaintPropagatingJava(method, ctx);
+      if (idx.size > 0) ctx.propagatingParams.set(name, idx);
     }
 
     for (const [, method] of localMethods) {
@@ -585,11 +668,33 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       const env: Env = new Map();
       // Only Spring-annotated params are true sources at method entry --
       // an un-annotated parameter is not automatically tainted (unlike the
-      // interprocedural pre-pass above, which deliberately seeds ALL params
-      // to answer a different, broader question).
+      // interprocedural pre-pass above, which deliberately seeds each param
+      // independently to answer a different, broader question).
       method.springParamNames.forEach(p => env.set(p, true));
       walkForDeclarationsAndSinks(method.body, env, ctx);
     }
+
+    // Second pass: re-walk any local method whose params were seeded
+    // tainted by a call site above, so a sink inside the callee's own body
+    // is reachable -- Java parity with astTaint.ts's/astTaintPython.ts's
+    // own second pass (see seedLocalMethodParams's docblock). ctx.seededParams
+    // can gain new entries during this loop if a seeded method itself calls
+    // another local method with newly-tainted data; a live Map iterator
+    // picks those up automatically, and convergence is guaranteed since
+    // each method's index set is bounded by its own parameter count and
+    // Set.add is idempotent -- the same property JS/Python's own second
+    // passes already rely on.
+    for (const [methodName, idxSet] of ctx.seededParams) {
+      const method = localMethods.get(methodName);
+      if (!method?.body) continue;
+      const env: Env = new Map();
+      for (const idx of idxSet) {
+        const shape = method.paramShapes[idx];
+        if (shape) env.set(shape.name, true);
+      }
+      walkForDeclarationsAndSinks(method.body, env, ctx);
+    }
+
     void filePath;
     return ctx.findings;
   } catch (err) {

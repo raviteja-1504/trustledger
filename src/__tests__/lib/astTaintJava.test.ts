@@ -207,6 +207,90 @@ public class A {
   });
 });
 
+describe("Real AST-based taint engine — per-parameter return-taint precision (multi-param helper)", () => {
+  // buildLog's return only ever depends on userId -- message is never
+  // referenced in it at all. A per-METHOD propagating boolean (the old
+  // design) can't tell the two params apart, so it would fire on
+  // buildLog("static-id", message) even though message never flows
+  // anywhere. Per-parameter tracking must not.
+  const helper = `
+public class A {
+  private String buildLog(String userId, String message) {
+    return "User " + userId + " did something";
+  }`;
+
+  it("does NOT flag when only the unused parameter is tainted", () => {
+    const content = `${helper}
+  public void handler(@RequestParam String message) {
+    Runtime.getRuntime().exec(buildLog("static-id", message));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("still flags when the parameter that actually reaches the return IS tainted", () => {
+    const content = `${helper}
+  public void handler(@RequestParam String userId) {
+    Runtime.getRuntime().exec(buildLog(userId, "static message"));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("flags when EITHER of two independently-propagating params is tainted", () => {
+    const combine = `
+public class A {
+  private String combine(String a, String b) { return a + b; }`;
+    const aTainted = `${combine}
+  public void h(@RequestParam String a) { Runtime.getRuntime().exec(combine(a, "safe")); }
+}`;
+    const bTainted = `${combine}
+  public void h(@RequestParam String b) { Runtime.getRuntime().exec(combine("safe", b)); }
+}`;
+    expect(scan(aTainted).some(f => f.id === "command-injection")).toBe(true);
+    expect(scan(bTainted).some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
+describe("Real AST-based taint engine — Java parity: sink inside a callee's own body (new capability)", () => {
+  it("catches a sink call inside a local method's body (not its return) when called with a tainted argument", () => {
+    const content = `
+public class A {
+  private void logAndRun(String cmd) {
+    Runtime.getRuntime().exec(cmd);
+  }
+  public void handler(@RequestParam String userCmd) {
+    logAndRun(userCmd);
+  }
+}`;
+    // Before this fix, astTaintJava.ts had no seededParams-equivalent
+    // mechanism at all -- logAndRun's own body was only ever walked with
+    // its (non-existent) Spring-annotated params seeded, never with a
+    // caller's tainted argument, so this returned [] regardless.
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
+describe("Real AST-based taint engine — varargs parameters are no longer silently dropped", () => {
+  it("recognizes a varargs parameter and taints call sites that pass an argument into its absorbed range", () => {
+    const content = `
+public class A {
+  private void runAll(String prefix, String... cmds) {
+    Runtime.getRuntime().exec(prefix + cmds);
+  }
+  public void handler(@RequestParam String userCmd) {
+    runAll("safe-prefix", userCmd);
+  }
+}`;
+    // Before the varargs extraction fix, paramInfo() returned null for the
+    // "String... cmds" parameter entirely, so it never appeared in
+    // paramShapes at all -- seedLocalMethodParams could never match any
+    // call-site argument to it (here, the 2nd call argument, index 1),
+    // regardless of position, and this would have returned [] instead.
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
 describe("Real AST-based taint engine — annotation scoping and negative cases", () => {
   it("does not treat a plain non-Spring parameter as tainted just because it's named like a common source", () => {
     const content = `
