@@ -163,7 +163,7 @@ export function buildSemanticGraph(
 
 // ── Import path resolver ──────────────────────────────────────────────────────
 
-function resolveImportPath(fromFile: string, importSpec: string, allFiles: string[]): string | null {
+export function resolveImportPath(fromFile: string, importSpec: string, allFiles: string[]): string | null {
   if (!importSpec.startsWith(".")) return null; // external package — not in our graph
 
   const fromDir  = fromFile.replace(/[\\/][^\\/]+$/, "");

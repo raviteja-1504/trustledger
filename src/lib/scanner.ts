@@ -28,7 +28,12 @@ import { aggregateComplianceReports, evaluateCompliance } from "./compliance";
 import type { ComplianceReport }  from "./compliance";
 import { scoreExploitability }   from "./reachability";
 import type { ReachabilityReport } from "./reachability";
-import { parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel } from "./astTaint";
+import {
+  parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
+  computeExportTaintSummary, buildImportBindings,
+} from "./astTaint";
+import type { ParamShape } from "./astTaint";
+import { resolveImportPath } from "./semanticGraph";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
@@ -4474,14 +4479,36 @@ function buildExplainedSignals(fired: SignalResult[], totalScore: number): Expla
     .sort((a, b) => b.contribution - a.contribution);
 }
 
+// JS/TS AST-eligibility gate, shared by analyzeFile's own tsSourceFile
+// parse AND runScan()'s cross-file Pass 1 pre-loop (which parses files
+// before analyzeFile ever runs on them) -- a single source of truth so the
+// two can never silently disagree on which files are eligible. Mirrors
+// analyzeFile's own inline looksMinified/AST_TAINT_LINE_CAP logic exactly
+// (see the comment at that call site for why: vendored/minified files give
+// false signal, and a hard line cap bounds worst-case parse cost).
+const AST_TAINT_LINE_CAP = 5000;
+function shouldAstParse(content: string, filePath: string): boolean {
+  const lang = detectLanguage(filePath);
+  if (lang !== "javascript" && lang !== "typescript") return false;
+  const lineCount = content.split("\n").length;
+  if (lineCount > AST_TAINT_LINE_CAP) return false;
+  const fileMeta = getFileTypeMeta(filePath);
+  const avgLineLen = content.length / Math.max(1, lineCount);
+  const looksMinified = fileMeta.isGenerated || (lineCount < 30 && avgLineLen > 400);
+  return !looksMinified;
+}
+
 // Wraps astTaint.ts's real AST-based data-flow findings into the same
 // ScanIndicator shape every regex detector produces. Runs ADDITIVELY
 // alongside the existing JS/TS named-taint regex functions, not as a
 // replacement -- see astTaint.ts's own docblock for why. Confidence fixed
 // at 95: this is real structural evidence (an actual parsed source-to-sink
 // path), not a proximity guess.
-function findAstTaintFindings(content: string, filePath: string, sourceFile: ts.SourceFile): ScanIndicator[] {
-  return scanAstTaint(content, filePath, sourceFile).map(f => ({
+function findAstTaintFindings(
+  content: string, filePath: string, sourceFile: ts.SourceFile,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+): ScanIndicator[] {
+  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating).map(f => ({
     id: f.id, label: astTaintLabel(f.id), severity: astTaintSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -4509,7 +4536,20 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
 
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
-export function analyzeFile(file_path: string, content: string, prPriorBias = 0): FileAnalysis {
+export function analyzeFile(
+  file_path: string, content: string, prPriorBias = 0,
+  // Cross-file taint analysis (JS/TS only, Pass 2) -- both optional and
+  // batch-scoped, computed by runScan() BEFORE this call, never persisted
+  // as part of FileAnalysis's own return shape (see runScan() for why: it's
+  // a batch-scoped intermediate, not a fact about this one file in
+  // isolation). presparsedTs lets runScan() reuse the SAME ts.SourceFile it
+  // already built during its own Pass-1 pre-loop, so a file with cross-file
+  // imports still gets only ONE parse (shared) and TWO walks (Pass 1's
+  // lightweight export-summary walk, this function's real walk), not two
+  // parses.
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  presparsedTs?: ts.SourceFile,
+): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
 
@@ -4557,13 +4597,13 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   // effort -- see astTaint.ts). Skips vendored/generated files (already
   // excluded from risk_score) and a line-count cap, matching the "fall back
   // silently to regex-only, no regression" safeguard used elsewhere in this
-  // function. Parsed exactly once and reused below for both the taint scan
-  // and the exploitability reachability resolver.
-  const AST_TAINT_LINE_CAP = 5000;
+  // function -- shouldAstParse is the single source of truth for that gate,
+  // shared with runScan()'s cross-file Pass 1 pre-loop. presparsedTs (from
+  // runScan(), when this file had cross-file imports to resolve) is reused
+  // here rather than parsing again. Parsed at most once and reused below for
+  // both the taint scan and the exploitability reachability resolver.
   const tsSourceFile: ts.SourceFile | null =
-    (lang === "javascript" || lang === "typescript") && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
-      ? parseSourceFile(content, file_path)
-      : null;
+    presparsedTs ?? (shouldAstParse(content, file_path) ? parseSourceFile(content, file_path) : null);
   // Python AST parse (Phase 2 -- see astTaintPython.ts). isPythonParserReady()
   // gates on the WASM parser's async warm-up having completed already --
   // if not, this silently falls back to regex-only for this one file, same
@@ -4648,7 +4688,7 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
-    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile) : []),
+    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
   ];
@@ -5149,7 +5189,54 @@ export function runScan(input: ScanInput): ScanOutput {
     return Number.isFinite(val) ? Math.min(0.08, val) : 0;
   })();
 
-  const files = filesToScan.map(f => analyzeFile(f.path, f.content, prPriorBias));
+  // ── Cross-file taint analysis, Pass 1: per-file export summaries (JS/TS) ──
+  // Runs BEFORE the main analyzeFile() loop below so Pass 2 (inside
+  // analyzeFile, via scanAstTaint) can see cross-file-propagating calls
+  // while it walks each file for real. Parses each eligible file once here;
+  // the same ts.SourceFile is threaded into analyzeFile below via
+  // presparsedTs, so a file with cross-file imports still gets only ONE
+  // parse (shared) and TWO walks (this lightweight summary walk, then
+  // analyzeFile's real one) -- not two parses. JS/TS only; Python and Java
+  // cross-file analysis are separate, later phases -- this block is named
+  // and scoped accordingly rather than made generic, so those phases add
+  // their own parallel blocks instead of overloading this one.
+  const jsSourceFiles = new Map<string, ts.SourceFile>();
+  const exportSummaries = new Map<string, Map<string, ParamShape[]>>();
+  for (const f of filesToScan) {
+    if (!shouldAstParse(f.content, f.path)) continue;
+    const sf = parseSourceFile(f.content, f.path);
+    jsSourceFiles.set(f.path, sf);
+    exportSummaries.set(f.path, computeExportTaintSummary(f.content, f.path, sf));
+  }
+
+  // ── Bridge: resolve each file's own relative imports to a per-file
+  // crossFilePropagating map, using astTaint.ts's real-AST import-binding
+  // extraction (NOT ast.ts's regex-based import parsing below -- that keys
+  // by the pre-alias exported name, not the local call-site identifier, so
+  // `import { buildQuery as bq } from "./db"` would fail to match `bq(...)`
+  // call sites). resolveImportPath only resolves `.`-relative specifiers;
+  // bare/package specifiers return null and are silently skipped -- the
+  // same "external package = out of graph" boundary semanticGraph.ts's own
+  // cross-file mechanism already has, not a new limitation.
+  const allScanPaths = filesToScan.map(f => f.path);
+  const crossFilePropagatingByFile = new Map<string, Map<string, { shapes: ParamShape[]; fromModule: string }>>();
+  for (const f of filesToScan) {
+    const sf = jsSourceFiles.get(f.path);
+    if (!sf) continue;
+    const bindings = buildImportBindings(sf);
+    const local = new Map<string, { shapes: ParamShape[]; fromModule: string }>();
+    for (const b of bindings) {
+      const calleePath = resolveImportPath(f.path, b.moduleSpecifier, allScanPaths);
+      if (!calleePath) continue; // external package or unresolvable -- skip, never throw
+      const shapes = exportSummaries.get(calleePath)?.get(b.importedName);
+      if (shapes && shapes.length > 0) local.set(b.localName, { shapes, fromModule: b.moduleSpecifier });
+    }
+    if (local.size > 0) crossFilePropagatingByFile.set(f.path, local);
+  }
+
+  const files = filesToScan.map(f =>
+    analyzeFile(f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path)),
+  );
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────
   // Built early so cross-file taint propagation can inject indicators into

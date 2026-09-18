@@ -1,6 +1,6 @@
 import fs from "fs";
 import { analyzeFile } from "@/lib/scanner";
-import { scanAstTaint } from "@/lib/astTaint";
+import { scanAstTaint, computeExportTaintSummary } from "@/lib/astTaint";
 
 const FIXTURE_PATH =
   "C:/Users/ADMIN/AppData/Local/Temp/claude/d--trustledger/dd894828-e726-4544-b53b-93aca10d3d41/scratchpad/owasp_test_app.ts";
@@ -171,6 +171,66 @@ app.get("/x", (req, res) => { exec(combine(req.query.a, "safe")); });`;
 app.get("/y", (req, res) => { exec(combine("safe", req.query.b)); });`;
     expect(scanAstTaint(aTainted, "app.ts").some(f => f.id === "command-injection")).toBe(true);
     expect(scanAstTaint(bTainted, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  // Real, pre-existing gap found and fixed while building cross-file taint
+  // analysis: computeReturnTaintPropagating used to seed only the tested
+  // parameter itself, never any local variable assigned from it -- so a
+  // function that assigns to a local before returning it ("const q = ...;
+  // return q;", an extremely common pattern: query builders, sanitizer
+  // wrappers) was never detected as propagating at all. Same-file, not
+  // cross-file, but Pass 1's export summary would have inherited this
+  // blind spot wholesale if left unfixed.
+  it("propagates taint through a local var assigned before return (assign-then-return)", () => {
+    const content = `
+function buildQuery(input) {
+  const q = \`SELECT * FROM t WHERE id=\${input}\`;
+  return q;
+}
+app.get("/x", (req, res) => {
+  const id = req.query.id;
+  db.query(buildQuery(id));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "sql-injection")).toBe(true);
+  });
+});
+
+describe("computeExportTaintSummary — cross-file Pass 1, exported-function detection", () => {
+  it("includes export function and export const arrow functions with their propagating param shapes", () => {
+    const content = `
+export function buildLog(userId, message) {
+  return \`User \${userId}\`;
+}
+export const buildQuery = (input) => \`SELECT * FROM t WHERE id=\${input}\`;
+`;
+    const summary = computeExportTaintSummary(content, "app.ts");
+    expect(summary.get("buildLog")?.map(s => s.index)).toEqual([0]);
+    expect(summary.get("buildQuery")?.map(s => s.index)).toEqual([0]);
+  });
+
+  it("includes a function exposed via an `export { local as public }` list", () => {
+    const content = `
+function buildLog(userId) {
+  return \`User \${userId}\`;
+}
+export { buildLog as publicBuildLog };
+`;
+    const summary = computeExportTaintSummary(content, "app.ts");
+    expect(summary.has("buildLog")).toBe(false);
+    expect(summary.get("publicBuildLog")?.map(s => s.index)).toEqual([0]);
+  });
+
+  it("excludes export default and non-exported functions", () => {
+    const content = `
+export default function buildLog(userId) {
+  return \`User \${userId}\`;
+}
+function privateHelper(userId) {
+  return \`User \${userId}\`;
+}
+`;
+    const summary = computeExportTaintSummary(content, "app.ts");
+    expect(summary.size).toBe(0);
   });
 });
 

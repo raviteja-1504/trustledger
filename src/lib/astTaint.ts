@@ -136,6 +136,43 @@ function buildImportMap(sourceFile: ts.SourceFile): Map<string, string> {
   return map;
 }
 
+export interface ImportBinding { localName: string; importedName: string; moduleSpecifier: string }
+
+/**
+ * Like buildImportMap, but keeps the (local name, original exported name)
+ * pair instead of collapsing straight to just the module specifier --
+ * needed for cross-file resolution to correctly handle
+ * `import { buildQuery as bq } from "./db"`: the callee file's export-taint
+ * summary is keyed by the ORIGINAL exported name ("buildQuery"), but this
+ * file's own code calls it as `bq(...)` -- the local binding. buildImportMap
+ * alone can't answer both "what module is this from" and "what was its
+ * original exported name" at once, which is why this is a separate
+ * function rather than a change to that one (which stays as-is for its own
+ * existing sink-module-recognition purpose).
+ *
+ * Deliberately does not resolve `import * as ns from "./mod"` (a namespace
+ * import) -- calls through it (`ns.foo(...)`) are property-access
+ * expressions, which makeIsTainted's call-resolution branch (bare
+ * identifiers only) doesn't match anyway; scoped out consistently with
+ * that existing limitation, not a new one.
+ */
+export function buildImportBindings(sourceFile: ts.SourceFile): ImportBinding[] {
+  const out: ImportBinding[] = [];
+  ts.forEachChild(sourceFile, node => {
+    if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return;
+    const moduleSpecifier = node.moduleSpecifier.text;
+    const clause = node.importClause;
+    if (!clause) return;
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const spec of clause.namedBindings.elements) {
+        out.push({ localName: spec.name.text, importedName: (spec.propertyName ?? spec.name).text, moduleSpecifier });
+      }
+    }
+    if (clause.name) out.push({ localName: clause.name.text, importedName: "default", moduleSpecifier });
+  });
+  return out;
+}
+
 function calleeText(expr: ts.Expression): string | null {
   if (ts.isIdentifier(expr)) return expr.text;
   if (ts.isPropertyAccessExpression(expr)) {
@@ -191,20 +228,28 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
 type Env = Map<string, boolean>;
 
 /**
- * Builds the core taint predicate as a closure over `localFns`/`propagating`
- * so every call site (there are several, scattered through the statement
- * walk below) doesn't need to thread two extra parameters through by hand.
- * `propagating` maps a local function name to the set of its parameter
- * INDICES whose taint is known (from computeReturnTaintPropagating below) to
- * reach its return value -- this is what makes `exec(buildCommand(host))`
- * resolve correctly: `buildCommand` never calls a sink itself, it just
- * returns a tainted template literal, so without this the call expression
+ * Builds the core taint predicate as a closure over `propagating` so every
+ * call site (there are several, scattered through the statement walk below)
+ * doesn't need to thread an extra parameter through by hand. `propagating`
+ * maps a function's CALL-SITE NAME (a local function's bare name, OR --
+ * since this same map also carries cross-file entries, see
+ * computeExportTaintSummary/scanAstTaint's crossFilePropagating merge --
+ * the local name a cross-file import is bound to) directly to its
+ * propagating ParamShape[] (not just indices -- storing the shapes
+ * themselves, rather than indices that would need a second `localFns`
+ * lookup to resolve, is what lets a cross-file entry work through this
+ * exact map with zero special-casing: a cross-file imported name has no
+ * LocalFn entry to look shapes up from at all). This is what makes
+ * `exec(buildCommand(host))` resolve correctly whether buildCommand is
+ * declared in this same file or imported from another one in the same scan
+ * batch: buildCommand never calls a sink itself, it just returns a tainted
+ * template literal, so without this the call expression
  * `buildCommand(host)` would look untainted from the outside. Per-parameter
  * (not per-function) so a call like `buildLog(safeId, taintedMessage)` where
  * only `userId` -- not `message` -- flows into buildLog's return does NOT
  * fire, even though buildLog is "propagating" for its userId parameter.
  */
-function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Map<string, Set<number>>) {
+function makeIsTainted(propagating: Map<string, ParamShape[]>) {
   const isTainted = (expr: ts.Expression, env: Env): boolean => {
     if (ts.isParenthesizedExpression(expr)) return isTainted(expr.expression, env);
     if (isTaintSourceExpr(expr)) return true;
@@ -219,20 +264,15 @@ function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Map<string, 
       return expr.properties.some(p => ts.isPropertyAssignment(p) && isTainted(p.initializer, env));
     }
     if (ts.isCallExpression(expr)) {
-      // A call to a local function known to propagate taint from SPECIFIC
-      // params to its return value -- e.g. buildCommand(host) where
-      // buildCommand(h) { return `ping -c1 ${h}`; }. Only the arguments at
-      // the propagating indices are checked, not every argument.
+      // A call to a local (or cross-file-imported) function known to
+      // propagate taint from SPECIFIC params to its return value -- e.g.
+      // buildCommand(host) where buildCommand(h) { return `ping -c1 ${h}`; }.
+      // Only the arguments at the propagating indices are checked, not
+      // every argument.
       if (ts.isIdentifier(expr.expression)) {
-        const propIdx = propagating.get(expr.expression.text);
-        if (propIdx) {
-          const callee = localFns.get(expr.expression.text);
-          const shapes = callee ? paramShapesOf(callee) : [];
-          const matched = [...propIdx].some(i => {
-            const shape = shapes[i];
-            return shape ? argsForShape(expr.arguments, shape).some(a => isTainted(a, env)) : false;
-          });
-          if (matched) return true;
+        const shapes = propagating.get(expr.expression.text);
+        if (shapes && shapes.some(shape => argsForShape(expr.arguments, shape).some(a => isTainted(a, env)))) {
+          return true;
         }
       }
       // Passthrough for a method call on an already-tainted receiver
@@ -248,9 +288,18 @@ function makeIsTainted(localFns: Map<string, LocalFn>, propagating: Map<string, 
   return isTainted;
 }
 
-interface LocalFn { params: ts.NodeArray<ts.ParameterDeclaration>; body: ts.Node }
+interface LocalFn {
+  params: ts.NodeArray<ts.ParameterDeclaration>;
+  body: ts.Node;
+  // Public names this function is exposed under (export function/const, or
+  // an `export { local as public }` list entry) -- may be more than one
+  // name, may be empty for a non-exported function. Used to build the
+  // cross-file export-taint summary (computeExportTaintSummary below);
+  // has no effect on same-file analysis.
+  exportedNames: string[];
+}
 
-interface ParamShape { name: string; index: number; isRest: boolean }
+export interface ParamShape { name: string; index: number; isRest: boolean }
 
 /** Which of `args` correspond to `shape`: exactly one arg for a fixed
  * param, every arg from `shape.index` onward for a rest param. */
@@ -262,6 +311,58 @@ function paramShapesOf(fn: LocalFn): ParamShape[] {
   return fn.params
     .map((p, index) => ts.isIdentifier(p.name) ? { name: p.name.text, index, isRest: !!p.dotDotDotToken } : null)
     .filter((s): s is ParamShape => s !== null);
+}
+
+/**
+ * Mutates `env` for the taint effect of ONE statement node's own local
+ * variable declarations / simple reassignments (`x = expr`) -- does not do
+ * sink checks, does not recurse into children (callers own that). Shared by
+ * the main file walk (scanAstTaint's walkStatements, unchanged observable
+ * behavior -- this is a pure extraction) and by envAfterBody below, which
+ * needed the SAME logic to fix a real gap: computeReturnTaintPropagating
+ * used to seed `env` with only the tested parameter, so a function that
+ * assigns to a local before returning it (`const q = ...; return q;`, an
+ * extremely common pattern -- query builders, sanitizer wrappers) was never
+ * detected as propagating at all, since the return expression is a bare
+ * identifier the old env never had a value for. Confirmed by direct trace
+ * of the pre-fix code, not a hypothetical.
+ */
+function applyDeclAndAssign(node: ts.Node, env: Env, isTaintedFn: (e: ts.Expression, env: Env) => boolean): void {
+  if (ts.isVariableStatement(node)) {
+    for (const decl of node.declarationList.declarations) {
+      if (!decl.initializer) continue;
+      const tainted = isTaintedFn(decl.initializer, env);
+      if (ts.isIdentifier(decl.name)) {
+        env.set(decl.name.text, tainted);
+      } else if (ts.isObjectBindingPattern(decl.name) && tainted) {
+        for (const el of decl.name.elements) {
+          if (ts.isIdentifier(el.name)) env.set(el.name.text, true);
+        }
+      }
+    }
+  } else if (
+    ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) &&
+    node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    ts.isIdentifier(node.expression.left)
+  ) {
+    env.set(node.expression.left.text, isTaintedFn(node.expression.right, env));
+  }
+}
+
+/**
+ * Builds the env a function body would have right before its return(s),
+ * given one seeded parameter -- a flat, non-lexically-scoped traversal (does
+ * not stop at nested function/arrow boundaries; a pre-existing imprecision
+ * shared with the rest of this engine, not a new one introduced here).
+ * Calls inside the body stay opaque (isTaintedFn is the shallow,
+ * empty-propagating evaluator), preserving computeReturnTaintPropagating's
+ * documented non-recursive bound.
+ */
+function envAfterBody(body: ts.Node, seed: Env, isTaintedFn: (e: ts.Expression, env: Env) => boolean): Env {
+  const env = new Map(seed);
+  const visit = (n: ts.Node) => { applyDeclAndAssign(n, env, isTaintedFn); ts.forEachChild(n, visit); };
+  visit(body);
+  return env;
 }
 
 /**
@@ -284,13 +385,13 @@ function paramShapesOf(fn: LocalFn): ParamShape[] {
  * required to co-occur with another.
  *
  * Nested calls inside `fn`'s own body are deliberately treated as opaque
- * here (empty localFns/propagating) to keep this a bounded, non-recursive
+ * here (empty propagating map) to keep this a bounded, non-recursive
  * pass rather than a mutual-recursion risk between functions that call
  * each other.
  */
 function computeReturnTaintPropagating(fn: LocalFn): Set<number> {
   const propagatingIdx = new Set<number>();
-  const isTaintedShallow = makeIsTainted(new Map(), new Map());
+  const isTaintedShallow = makeIsTainted(new Map());
   const returnExprs: ts.Expression[] = [];
   if (!ts.isBlock(fn.body)) {
     returnExprs.push(fn.body as ts.Expression); // arrow expression body
@@ -302,8 +403,9 @@ function computeReturnTaintPropagating(fn: LocalFn): Set<number> {
     collect(fn.body);
   }
   for (const shape of paramShapesOf(fn)) {
-    const env: Env = new Map();
-    env.set(shape.name, true);
+    const seed: Env = new Map();
+    seed.set(shape.name, true);
+    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, isTaintedShallow) : seed;
     if (returnExprs.some(expr => isTaintedShallow(expr, env))) propagatingIdx.add(shape.index);
   }
   return propagatingIdx;
@@ -313,22 +415,97 @@ function sourceLabel(expr: ts.Expression): string {
   return expr.getText().replace(/\s+/g, " ").slice(0, 60);
 }
 
+/**
+ * Real `export` detection, needed for the cross-file export-taint summary
+ * (computeExportTaintSummary) -- has no bearing on same-file analysis.
+ * Explicitly excludes `export default` (mods includes DefaultKeyword) since
+ * a default export has no stable name a cross-file import binds to the same
+ * way a named export does; that form is a deliberate, documented gap (see
+ * computeExportTaintSummary's docblock), not a bug.
+ */
+function hasExportModifier(node: ts.Node): boolean {
+  if (!ts.canHaveModifiers(node)) return false;
+  const mods = ts.getModifiers(node);
+  return !!mods?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)
+      && !mods?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword);
+}
+
 function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: ts.Node) => {
     if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      fns.set(node.name.text, { params: node.parameters, body: node.body });
+      const exportedNames = hasExportModifier(node) ? [node.name.text] : [];
+      fns.set(node.name.text, { params: node.parameters, body: node.body, exportedNames });
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
       const init = node.initializer;
       if ((ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && init.body) {
-        fns.set(node.name.text, { params: init.parameters, body: init.body });
+        // The export modifier for `const x = () => {}` lives on the
+        // enclosing VariableStatement (node.parent = VariableDeclarationList,
+        // node.parent.parent = VariableStatement), NOT on this
+        // VariableDeclaration node itself -- confirmed directly, not assumed.
+        const stmt = node.parent?.parent;
+        const exportedNames = stmt && ts.isVariableStatement(stmt) && hasExportModifier(stmt) ? [node.name.text] : [];
+        fns.set(node.name.text, { params: init.parameters, body: init.body, exportedNames });
       }
     }
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(sourceFile, visit);
+
+  // `export { localName as publicName }` -- a named-export list for an
+  // already-declared local function (common barrel-file style). Explicitly
+  // scoped OUT: `export { x } from "./y"` (has a moduleSpecifier -- a
+  // re-export, not a local declaration) and `export *`.
+  ts.forEachChild(sourceFile, node => {
+    if (!ts.isExportDeclaration(node) || node.moduleSpecifier || !node.exportClause) return;
+    if (!ts.isNamedExports(node.exportClause)) return;
+    for (const spec of node.exportClause.elements) {
+      const localName = (spec.propertyName ?? spec.name).text;
+      const publicName = spec.name.text;
+      const fn = fns.get(localName);
+      if (fn && !fn.exportedNames.includes(publicName)) fn.exportedNames.push(publicName);
+    }
+  });
+
   return fns;
+}
+
+/**
+ * Cross-file taint analysis, Pass 1: a cheap sibling of scanAstTaint's full
+ * walk, computed once per file in the scan batch BEFORE any file's real
+ * (Pass 2) scan runs. Parses (or reuses a presparsed SourceFile), collects
+ * local functions, and for each EXPORTED one computes its propagating
+ * ParamShape[] via computeReturnTaintPropagating -- then stops. Skips
+ * buildImportMap/matchSink/the full sink-walk/the seeded-param re-walk
+ * entirely, since none of that is needed for a per-file summary; this is
+ * intentionally much cheaper than a full scanAstTaint call.
+ *
+ * Explicitly deferred, not silently mishandled (see collectLocalFunctions'
+ * export detection): `export default`, `export { x } from "./y"`
+ * re-exports, `export *`, CommonJS (`module.exports.x = ...`). None of
+ * these are ever added to a LocalFn's exportedNames, so they're simply
+ * absent from this summary -- a false negative (a missed cross-file
+ * detection), never a false positive.
+ */
+export function computeExportTaintSummary(
+  content: string, filePath: string, presparsed?: ts.SourceFile,
+): Map<string, ParamShape[]> {
+  const summary = new Map<string, ParamShape[]>();
+  try {
+    const sourceFile = presparsed ?? parseSourceFile(content, filePath);
+    const localFns = collectLocalFunctions(sourceFile);
+    for (const fn of localFns.values()) {
+      if (fn.exportedNames.length === 0) continue;
+      const idx = computeReturnTaintPropagating(fn);
+      if (idx.size === 0) continue;
+      const shapes = paramShapesOf(fn).filter(s => idx.has(s.index));
+      for (const name of fn.exportedNames) summary.set(name, shapes);
+    }
+  } catch (err) {
+    console.error(`[astTaint] threw computing export summary for ${filePath}:`, err);
+  }
+  return summary;
 }
 
 const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
@@ -346,45 +523,90 @@ const LABEL: Record<AstTaintId, string> = {
  * parameters into same-file callees on tainted call sites (capped at one
  * hop -- not a full fixed-point interprocedural solver), and matches sink
  * call expressions / innerHTML-style assignments against a tainted argument.
+ *
+ * `crossFilePropagating` (optional, cross-file taint analysis Pass 2): for
+ * each of THIS file's own locally-imported names that resolve to an
+ * exported function elsewhere in the same scan batch with known-propagating
+ * parameters, the shapes to treat it as tainted through -- merged into the
+ * same local `propagating` map so an imported call is handled by the exact
+ * same machinery as a local propagating-function call, no separate code
+ * path. `fromModule` is carried only for finding-message attribution, never
+ * consulted by the taint predicate itself. See scanner.ts's runScan() for
+ * how this map is built (resolves relative imports via
+ * semanticGraph.ts's resolveImportPath against the batch's own file list).
  */
-export function scanAstTaint(content: string, filePath: string, presparsed?: ts.SourceFile): AstTaintFinding[] {
+export function scanAstTaint(
+  content: string, filePath: string, presparsed?: ts.SourceFile,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+): AstTaintFinding[] {
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
     const importMap = buildImportMap(sourceFile);
     const localFns = collectLocalFunctions(sourceFile);
-    const propagating = new Map<string, Set<number>>();
+    const propagating = new Map<string, ParamShape[]>();
     for (const [name, fn] of localFns) {
       const idx = computeReturnTaintPropagating(fn);
-      if (idx.size > 0) propagating.set(name, idx);
+      if (idx.size === 0) continue;
+      propagating.set(name, paramShapesOf(fn).filter(s => idx.has(s.index)));
     }
-    const isTainted = makeIsTainted(localFns, propagating);
+    if (crossFilePropagating) {
+      for (const [name, info] of crossFilePropagating) propagating.set(name, info.shapes);
+    }
+    const isTainted = makeIsTainted(propagating);
     const seededParams = new Map<string, Set<number>>(); // fn name -> tainted param indices
+    // Message-attribution only (Tier 2, "assign then use downstream"): the
+    // initializer expression a bare identifier was last assigned from, kept
+    // in lockstep with `env` wherever a VariableStatement sets it. NOT
+    // consulted by isTainted/the taint predicate at all -- purely so a
+    // finding whose tainted arg is `q` (from `const q = buildQuery(x);`)
+    // can note that the taint crosses a file boundary via `buildQuery`,
+    // without needing a general expression-provenance system. One hop only:
+    // deeper chains (`const a = crossFn(x); const b = a; sink(b)`) still
+    // fire correctly (env-driven) but won't get an attribution note.
+    const initializerOf = new Map<string, ts.Expression>();
     const findings: AstTaintFinding[] = [];
     const seen = new Set<string>();
 
     const lineOf = (node: ts.Node): number =>
       sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 
-    const emit = (id: AstTaintId, node: ts.Node, sourceExpr: string, sinkExpr: string) => {
+    /** If `text` mentions a cross-file-propagating call, a note for `detail` identifying the import; else "". */
+    const crossFileNote = (text: string): string => {
+      if (!crossFilePropagating) return "";
+      for (const [name, info] of crossFilePropagating) {
+        if (new RegExp(`\\b${name}\\s*\\(`).test(text)) return ` [crosses file boundary via "${name}" imported from ${info.fromModule}]`;
+      }
+      return "";
+    };
+
+    const emit = (id: AstTaintId, node: ts.Node, sourceExpr: string, sinkExpr: string, taintedArgExpr?: ts.Expression) => {
       const line = lineOf(node);
       const key = `${id}:${line}`;
       if (seen.has(key)) return;
       seen.add(key);
+      // Tier 1: the tainted arg's own text mentions a cross-file call
+      // directly (e.g. exec(buildCommand(host))). Tier 2: the tainted arg
+      // is a bare identifier whose last-seen initializer mentions one
+      // (e.g. const q = buildQuery(host); exec(q)).
+      const note = crossFileNote(sourceExpr) ||
+        (taintedArgExpr && ts.isIdentifier(taintedArgExpr)
+          ? crossFileNote(initializerOf.get(taintedArgExpr.text)?.getText() ?? "")
+          : "");
       findings.push({
         id, line, sinkExpr, sourceExpr,
-        detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+        detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess${note}`,
       });
     };
 
     const checkCallForSink = (call: ts.CallExpression, env: Env) => {
       if (ts.isIdentifier(call.expression) && call.expression.text === "eval") {
-        emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", "eval");
+        emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", "eval", call.arguments[0]);
         return;
       }
       const match = matchSink(call, importMap);
       if (!match) return;
       const taintedArg = match.args.find(a => isTainted(a, env));
-      if (taintedArg) emit(match.id, call, sourceLabel(taintedArg), match.sinkExpr);
+      if (taintedArg) emit(match.id, call, sourceLabel(taintedArg), match.sinkExpr, taintedArg);
     };
 
     const checkNewExprForSink = (node: ts.NewExpression) => {
@@ -398,35 +620,28 @@ export function scanAstTaint(content: string, filePath: string, presparsed?: ts.
       if (!ts.isPropertyAccessExpression(node.left)) return;
       const prop = node.left.name.text;
       if ((prop === "innerHTML" || prop === "outerHTML") && isTainted(node.right, env)) {
-        emit("xss", node, sourceLabel(node.right), `.${prop}`);
+        emit("xss", node, sourceLabel(node.right), `.${prop}`, node.right);
       }
     };
 
     const walkStatements = (node: ts.Node, env: Env) => {
-      // Variable declarations / destructuring
+      // Variable declarations / destructuring / simple reassignment (x =
+      // expr) -- shared with computeReturnTaintPropagating's envAfterBody
+      // via applyDeclAndAssign, see that function's docblock. The
+      // XSS-assignment check itself (obj.prop = expr) is handled uniformly
+      // by the generic visitExpr traversal below, which visits this same
+      // binary expression as a child of `node` -- no need to special-case
+      // it here too.
+      applyDeclAndAssign(node, env, isTainted);
+      // Tier-2 message-attribution bookkeeping only (see initializerOf's
+      // declaration) -- kept as a separate pass over the same statement
+      // rather than folded into applyDeclAndAssign, since
+      // computeReturnTaintPropagating's envAfterBody reuses that function
+      // and has no use for (or access to) this file-scoped map.
       if (ts.isVariableStatement(node)) {
         for (const decl of node.declarationList.declarations) {
-          if (!decl.initializer) continue;
-          const tainted = isTainted(decl.initializer, env);
-          if (ts.isIdentifier(decl.name)) {
-            env.set(decl.name.text, tainted);
-          } else if (ts.isObjectBindingPattern(decl.name) && tainted) {
-            for (const el of decl.name.elements) {
-              if (ts.isIdentifier(el.name)) env.set(el.name.text, true);
-            }
-          }
+          if (decl.initializer && ts.isIdentifier(decl.name)) initializerOf.set(decl.name.text, decl.initializer);
         }
-      } else if (
-        ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) &&
-        node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isIdentifier(node.expression.left)
-      ) {
-        // Simple reassignment (x = expr) updates env before any nested sink
-        // check below reads it. The XSS-assignment check itself (obj.prop =
-        // expr) is handled uniformly by the generic visitExpr traversal
-        // below, which visits this same binary expression as a child of
-        // `node` -- no need to special-case it here too.
-        env.set(node.expression.left.text, isTainted(node.expression.right, env));
       }
 
       // Sink checks: any call/new expression anywhere in this node
