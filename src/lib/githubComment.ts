@@ -20,6 +20,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "weak-signing-secret": "Hardcoded signing secret",
   "graphql-introspection-enabled": "GraphQL introspection enabled",
   "bola-identity-mismatch": "Broken Object Level Authorization",
+  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "plaintext-password-storage": "Plaintext password storage",
   "debug-mode-enabled": "Debug mode enabled",
 };

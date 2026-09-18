@@ -46,7 +46,8 @@ import type { CstNode, IToken, CstElement } from "java-parser";
 
 export type AstTaintJavaId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
-  | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection";
+  | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
+  | "bola-missing-ownership-check";
 
 export interface AstTaintJavaFinding {
   id:         AstTaintJavaId;
@@ -54,6 +55,9 @@ export interface AstTaintJavaFinding {
   detail:     string;
   sourceExpr: string;
   sinkExpr:   string;
+  // Only set for bola-missing-ownership-check (read vs write endpoint
+  // severity) -- every other id keeps using the constant SEVERITY table.
+  severityOverride?: "critical" | "high" | "medium";
 }
 
 export function parseJavaSource(content: string): CstNode | null {
@@ -147,6 +151,45 @@ function stringLiteralValue(node: CstNode): string | null {
 const SPRING_SOURCE_ANNOTATIONS = new Set(["PathVariable", "RequestParam", "RequestBody", "RequestHeader"]);
 const SERVLET_SOURCE_CALLS = new Set(["getParameter", "getHeader", "getParameterValues", "getQueryString"]);
 
+// ── BOLA: Spring resource-identifier / authorization-annotation classification ──
+
+// Only PathVariable/RequestParam identify "which resource" -- RequestBody is
+// the write payload (a different role: the thing being written, not the key
+// selecting what's written to) and RequestHeader is rarely a resource id.
+// Deliberately NOT the same set as SPRING_SOURCE_ANNOTATIONS above, which
+// stays untouched to avoid touching the other 9 detectors' taint semantics.
+const RESOURCE_ID_ANNOTATIONS = new Set(["PathVariable", "RequestParam"]);
+const WRITE_VERB_ANNOTATIONS = new Set(["PostMapping", "PutMapping", "PatchMapping", "DeleteMapping"]);
+const READ_VERB_ANNOTATIONS = new Set(["GetMapping"]);
+const MAPPING_ANNOTATIONS = new Set([...WRITE_VERB_ANNOTATIONS, ...READ_VERB_ANNOTATIONS, "RequestMapping"]);
+// Presence alone suppresses -- the SpEL expression inside @PreAuthorize(...)
+// is never parsed. This means @PreAuthorize("hasRole('ADMIN')") (a real but
+// differently-flavored access control) and @PreAuthorize("#id ==
+// authentication.principal.id") (an actual ownership check) suppress
+// identically. Deliberate: distinguishing them needs a SpEL parser this
+// codebase doesn't have, and the annotation's mere presence is still a
+// syntactically real, high-confidence fact -- a method decorated with any of
+// these three really is under SOME framework-level access control, which the
+// existing regex heuristics could only ever guess at via keyword proximity.
+const AUTH_SUPPRESSION_ANNOTATIONS = new Set(["PreAuthorize", "Secured", "RolesAllowed"]);
+
+type HttpVerbTier = "read" | "write" | "unknown";
+interface MethodAuthMeta {
+  isEndpoint: boolean;
+  verbTier: HttpVerbTier;
+  suppressedByAuthAnnotation: boolean;
+}
+
+function extractMethodAuthMeta(methodDecl: CstNode): MethodAuthMeta {
+  const anns = annotationsFrom(methodDecl, "methodModifier");
+  const isEndpoint = anns.some(a => MAPPING_ANNOTATIONS.has(a));
+  const verbTier: HttpVerbTier =
+    anns.some(a => WRITE_VERB_ANNOTATIONS.has(a)) ? "write" :
+    anns.some(a => READ_VERB_ANNOTATIONS.has(a)) ? "read" : "unknown";
+  const suppressedByAuthAnnotation = anns.some(a => AUTH_SUPPRESSION_ANNOTATIONS.has(a));
+  return { isEndpoint, verbTier, suppressedByAuthAnnotation };
+}
+
 // ── Environment ──────────────────────────────────────────────────────────
 
 type Env = Map<string, boolean>;
@@ -164,13 +207,23 @@ interface LocalMethod {
   name: string;
   paramShapes: ParamShape[];
   springParamNames: Set<string>;
+  // BOLA-specific, additive -- neither touches springParamNames' existing
+  // taint-seeding semantics for the other 9 sink categories.
+  resourceIdParamNames: Set<string>;  // @PathVariable/@RequestParam subset -- "which resource"
+  principalParamNames: Set<string>;   // @AuthenticationPrincipal params -- the authenticated identity, NEVER tainted
+  authMeta: MethodAuthMeta;
   body: CstNode | null; // methodBody
 }
 
-function annotationsFromModifiers(node: CstNode): string[] {
+/** Generalized over the modifier production name -- `variableModifier` for
+ * parameters/locals, `methodModifier` for a method declaration itself
+ * (confirmed identical `annotation` child shape in both, via a direct parse
+ * of a two-annotation method: methodHeader carries no annotation of its
+ * own in the common case, both land in methodDeclaration.methodModifier). */
+function annotationsFrom(node: CstNode, modifierKey: string): string[] {
   const annotations: string[] = [];
-  for (const vm of allNodes(node, "variableModifier")) {
-    for (const ann of allNodes(vm, "annotation")) {
+  for (const mod of allNodes(node, modifierKey)) {
+    for (const ann of allNodes(mod, "annotation")) {
       const typeName = firstNode(ann, "typeName");
       if (!typeName) continue;
       const idToks = tokenKids(typeName, "Identifier");
@@ -196,12 +249,12 @@ function paramInfo(fp: CstNode): { name: string; annotations: string[]; isRest: 
   if (vp) {
     const declId = firstNode(vp, "variableDeclaratorId");
     const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
-    return nameTok ? { name: nameTok.image, annotations: annotationsFromModifiers(vp), isRest: false } : null;
+    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(vp, "variableModifier"), isRest: false } : null;
   }
   const va = firstNode(fp, "variableArityParameter");
   if (va) {
     const nameTok = firstTok(va, "Identifier");
-    return nameTok ? { name: nameTok.image, annotations: annotationsFromModifiers(va), isRest: true } : null;
+    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(va, "variableModifier"), isRest: true } : null;
   }
   return null;
 }
@@ -215,6 +268,8 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
   if (!nameTok) return null;
   const paramShapes: ParamShape[] = [];
   const springParamNames = new Set<string>();
+  const resourceIdParamNames = new Set<string>();
+  const principalParamNames = new Set<string>();
   const fpl = firstNode(declarator, "formalParameterList");
   if (fpl) {
     let index = 0;
@@ -223,11 +278,14 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
       if (!info) continue;
       paramShapes.push({ name: info.name, index, isRest: info.isRest });
       if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
+      if (info.annotations.some(a => RESOURCE_ID_ANNOTATIONS.has(a))) resourceIdParamNames.add(info.name);
+      if (info.annotations.includes("AuthenticationPrincipal")) principalParamNames.add(info.name);
       index++;
     }
   }
   const body = firstNode(methodDecl, "methodBody") ?? null;
-  return { name: nameTok.image, paramShapes, springParamNames, body };
+  const authMeta = extractMethodAuthMeta(methodDecl);
+  return { name: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, body };
 }
 
 /**
@@ -255,12 +313,16 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "critical",
   "ssrf": "critical", "path-traversal": "critical", "insecure-deserialization": "critical",
   "ldap-injection": "critical", "xpath-injection": "critical", "open-redirect": "medium",
+  // Fallback only -- collectBolaFindings always passes a severityOverride
+  // (medium for read endpoints, high for write/unknown).
+  "bola-missing-ownership-check": "high",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
   "ssrf": "Server-Side Request Forgery", "path-traversal": "Path Traversal",
   "insecure-deserialization": "Insecure Deserialization", "ldap-injection": "LDAP Injection",
   "xpath-injection": "XPath Injection", "open-redirect": "Open Redirect",
+  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
 const HTML_TAG_RE = /<[a-z][\s\S]*?>/i;
@@ -292,18 +354,27 @@ interface EngineCtx {
   // mirrored here, not just fixed.
   seededParams: Map<string, Set<number>>;
   varTypes: VarTypes;
+  // Class field names, collected once per file -- used by the BOLA
+  // Map-field pseudo-repository sink shape to distinguish a class-level
+  // "repository" field from an unrelated local Map used inside one method.
+  classFieldNames: Set<string>;
   findings: AstTaintJavaFinding[];
   seen: Set<string>;
 }
 
-function emit(ctx: EngineCtx, id: AstTaintJavaId, node: CstNode, sourceExpr: string, sinkExpr: string) {
+function emit(
+  ctx: EngineCtx, id: AstTaintJavaId, node: CstNode, sourceExpr: string, sinkExpr: string,
+  severityOverride?: "critical" | "high" | "medium",
+) {
   const line = lineOf(node);
   const key = `${id}:${line}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
   ctx.findings.push({
-    id, line, sinkExpr, sourceExpr,
-    detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+    id, line, sinkExpr, sourceExpr, severityOverride,
+    detail: id === "bola-missing-ownership-check"
+      ? `Resource identifier '${sourceExpr}' reaches ${sinkExpr}(...) with no @PreAuthorize/@Secured/@RolesAllowed annotation and no ownership comparison (.equals()/==/!=) against the authenticated principal anywhere in the method — real per-parameter AST evidence, not a keyword-proximity guess`
+      : `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
   });
 }
 
@@ -648,6 +719,236 @@ function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
   }
 }
 
+// ── BOLA: sink shapes, ownership-comparison detection, per-method emission ──
+
+function collectClassFieldNames(root: CstNode): Set<string> {
+  const fields = new Set<string>();
+  for (const fd of findAllNodes(root, "fieldDeclaration")) {
+    const vdl = firstNode(fd, "variableDeclaratorList");
+    for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+      const declId = firstNode(vd, "variableDeclaratorId");
+      const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+      if (nameTok) fields.add(nameTok.image);
+    }
+  }
+  return fields;
+}
+
+/** Method-scoped declared-type / initializer index -- deliberately NOT
+ * ctx.varTypes, which is a single flat map populated across the ENTIRE file
+ * with no per-method clearing (an accepted imprecision for the existing
+ * deserialization check that must not be extended to this new feature). */
+function collectLocalDeclInfo(body: CstNode): { types: Map<string, string>; inits: Map<string, CstNode> } {
+  const types = new Map<string, string>();
+  const inits = new Map<string, CstNode>();
+  for (const decl of findAllNodes(body, "localVariableDeclaration")) {
+    const typeNode = firstNode(decl, "localVariableType");
+    const unannType = typeNode ? firstNode(typeNode, "unannType") : undefined;
+    const unannClassType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
+    const simpleName = unannClassType ? tokenKids(unannClassType, "Identifier").pop()?.image : undefined;
+    const vdl = firstNode(decl, "variableDeclaratorList");
+    for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+      const declId = firstNode(vd, "variableDeclaratorId");
+      const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+      if (!nameTok) continue;
+      if (simpleName) types.set(nameTok.image, simpleName);
+      const init = firstNode(vd, "variableInitializer");
+      const initExpr = init ? firstNode(init, "expression") : undefined;
+      if (initExpr) inits.set(nameTok.image, initExpr);
+    }
+  }
+  return { types, inits };
+}
+
+function collectTokenText(node: CstNode, out: string[]): void {
+  for (const key of Object.keys(node.children)) {
+    for (const el of node.children[key]) {
+      if (isToken(el)) out.push(el.image); else collectTokenText(el, out);
+    }
+  }
+}
+function allTokenText(node: CstNode): string {
+  const out: string[] = [];
+  collectTokenText(node, out);
+  // No separator -- tokens concatenate back to (whitespace-insensitive) real
+  // source layout, e.g. "authentication" + "." + "getName" + "(" + ")" ->
+  // "authentication.getName()", so PRINCIPAL_CALL_RE's tight patterns like
+  // \.getName\s*\( actually match. A space separator would insert " " between
+  // every token (including around "." and "("), breaking that match.
+  return out.join("");
+}
+function collectIdentifiers(node: CstNode, acc: Set<string> = new Set()): Set<string> {
+  for (const key of Object.keys(node.children)) {
+    for (const el of node.children[key]) {
+      if (isToken(el)) { if (key === "Identifier") acc.add(el.image); }
+      else collectIdentifiers(el, acc);
+    }
+  }
+  return acc;
+}
+
+const PRINCIPAL_CALL_RE = /getPrincipal|getAuthentication|SecurityContextHolder|getCurrentUser|\.getName\s*\(/;
+
+function isResourceIdOperand(ids: Set<string>, resourceIdParamNames: Set<string>): boolean {
+  return [...ids].some(id => resourceIdParamNames.has(id));
+}
+function isPrincipalOperand(ids: Set<string>, text: string, principalNames: Set<string>): boolean {
+  return [...ids].some(id => principalNames.has(id)) || PRINCIPAL_CALL_RE.test(text);
+}
+
+/** `==`/`!=` binaryExpression operands -- both sides are real CST nodes. */
+function comparisonSuppresses(
+  leftNode: CstNode, rightNode: CstNode,
+  resourceIdParamNames: Set<string>, principalNames: Set<string>,
+): boolean {
+  const lIds = collectIdentifiers(leftNode), rIds = collectIdentifiers(rightNode);
+  const lTxt = allTokenText(leftNode), rTxt = allTokenText(rightNode);
+  const lIsRes = isResourceIdOperand(lIds, resourceIdParamNames), lIsPrin = isPrincipalOperand(lIds, lTxt, principalNames);
+  const rIsRes = isResourceIdOperand(rIds, resourceIdParamNames), rIsPrin = isPrincipalOperand(rIds, rTxt, principalNames);
+  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+}
+
+/** `.equals(...)` -- walkPrimaryChain's onCall side-channel only exposes the
+ * receiver as a bare `rootVar` string (no full CST node for the receiver
+ * side), so the receiver is tested as a single-identifier/bare-text operand
+ * rather than via collectIdentifiers/allTokenText. Slightly weakens
+ * receiver-side call-chain detection (e.g. a chained
+ * `SecurityContextHolder.getContext().getAuthentication()` receiver reduces
+ * to just its root "SecurityContextHolder", which PRINCIPAL_CALL_RE still
+ * matches) -- an accepted, minor simplification, not a redesign. */
+function comparisonSuppressesEquals(
+  rootVar: string | null, argNode: CstNode,
+  resourceIdParamNames: Set<string>, principalNames: Set<string>,
+): boolean {
+  if (!rootVar) return false;
+  const rIds = collectIdentifiers(argNode), rTxt = allTokenText(argNode);
+  const lIsRes = resourceIdParamNames.has(rootVar);
+  const lIsPrin = principalNames.has(rootVar) || PRINCIPAL_CALL_RE.test(rootVar);
+  const rIsRes = isResourceIdOperand(rIds, resourceIdParamNames), rIsPrin = isPrincipalOperand(rIds, rTxt, principalNames);
+  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+}
+
+/** Reduces an argument expression to its single bare identifier IFF it's
+ * exactly that -- one unqualified name, zero primarySuffix entries (no
+ * method call, no field access, no array index). Used only for the one-hop
+ * backward check below (`.save(entity)` -> was `entity` built from the
+ * resource id). */
+function bareIdentifierOf(arg: CstNode): string | null {
+  const primaries = findAllNodes(arg, "primary");
+  if (primaries.length !== 1) return null;
+  const primary = primaries[0];
+  if (allNodes(primary, "primarySuffix").length !== 0) return null;
+  const prefix = firstNode(primary, "primaryPrefix");
+  const fqn = prefix ? firstNode(prefix, "fqnOrRefType") : undefined;
+  if (!fqn) return null;
+  if (allNodes(fqn, "fqnOrRefTypePartRest").length !== 0) return null; // qualified name, not bare
+  const first = firstNode(fqn, "fqnOrRefTypePartFirst");
+  const firstCommon = first ? firstNode(first, "fqnOrRefTypePartCommon") : undefined;
+  const firstId = firstCommon ? firstTok(firstCommon, "Identifier") : undefined;
+  return firstId?.image ?? null;
+}
+
+/** Does `arg` reference a resource-id param, directly or one hop back
+ * through a local variable's own initializer (covers `.save(entity)` where
+ * `entity` was built from the tainted id earlier in the method)? */
+function argReferencesResourceId(arg: CstNode, resourceIdParamNames: Set<string>, localInits: Map<string, CstNode>): boolean {
+  if ([...collectIdentifiers(arg)].some(id => resourceIdParamNames.has(id))) return true;
+  const bare = bareIdentifierOf(arg);
+  if (bare && localInits.has(bare)) {
+    return [...collectIdentifiers(localInits.get(bare)!)].some(id => resourceIdParamNames.has(id));
+  }
+  return false;
+}
+
+interface BolaSinkCandidate { node: CstNode; sourceExpr: string; sinkExpr: string }
+
+const BOLA_REPO_LOOKUP_METHODS = new Set(["findById", "getOne", "getById"]);
+// deleteById/delete/save -- standard Spring Data CRUD method names. `.update(...)`
+// is deliberately NOT included: ambiguous with JDBC's own unrelated
+// jdbcTemplate.update SQL-injection sink, not a standard Spring Data method
+// name, and no confirmed fixture to validate a bare `.update(...)` match
+// against (a high false-positive-risk pattern without one).
+const BOLA_REPO_WRITE_METHODS = new Set(["deleteById", "delete", "save"]);
+// Map-shaped field-backed pseudo-repository access -- putAll excluded, it
+// never itself carries a resource-id-shaped key argument (owasp_test_app.java's
+// updateUser is still caught via its own .getOrDefault(userId,...)/.put(userId,...)
+// calls on the same field, independently).
+const BOLA_MAP_ACCESS_METHODS = new Set(["get", "getOrDefault", "put", "remove"]);
+
+function checkBolaSinkCandidate(
+  info: { calleeName: string; tail: string; rootVar: string | null; args: CstNode[]; node: CstNode },
+  resourceIdParamNames: Set<string>, classFieldNames: Set<string>, localInits: Map<string, CstNode>,
+  candidates: BolaSinkCandidate[],
+) {
+  const { tail, rootVar, args, node, calleeName } = info;
+  if (args.length === 0) return;
+  if (BOLA_REPO_LOOKUP_METHODS.has(tail) || BOLA_REPO_WRITE_METHODS.has(tail)) {
+    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
+      candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName });
+    }
+    return;
+  }
+  if (BOLA_MAP_ACCESS_METHODS.has(tail) && rootVar !== null && classFieldNames.has(rootVar)) {
+    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
+      candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName });
+    }
+  }
+}
+
+/**
+ * Per-method post-check, not per-call-site: BOLA's "is there an ownership
+ * comparison ANYWHERE in this method" question needs the whole body
+ * evaluated once, so candidate sinks are collected but not emitted until
+ * after a full walk confirms no suppressing comparison exists. Mirrors how
+ * computeReturnTaintPropagatingJava is already its own separate
+ * whole-method-body pass, distinct from the per-call-site sink walk in
+ * walkForDeclarationsAndSinks -- same architectural pattern, not a new one.
+ * Deliberately does NOT use isTainted/env -- this is a purely structural
+ * check (which annotation sourced this parameter, is it compared against a
+ * principal-shaped expression), independent of the taint-propagation
+ * machinery the rest of the engine uses.
+ */
+function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
+  if (!method.body) return;
+  if (!method.authMeta.isEndpoint) return;
+  if (method.authMeta.suppressedByAuthAnnotation) return;
+  if (method.resourceIdParamNames.size === 0) return;
+
+  const { types: localTypes, inits: localInits } = collectLocalDeclInfo(method.body);
+  const principalNames = new Set<string>([
+    ...method.principalParamNames,
+    ...[...localTypes].filter(([, t]) => /Principal|Authentication|UserDetails/i.test(t)).map(([n]) => n),
+  ]);
+
+  const candidates: BolaSinkCandidate[] = [];
+  let hasOwnershipComparison = false;
+
+  for (const primary of findAllNodes(method.body, "primary")) {
+    walkPrimaryChain(primary, new Map(), ctx, (info) => {
+      checkBolaSinkCandidate(info, method.resourceIdParamNames, ctx.classFieldNames, localInits, candidates);
+      if (info.tail === "equals" && info.args[0] &&
+          comparisonSuppressesEquals(info.rootVar, info.args[0], method.resourceIdParamNames, principalNames)) {
+        hasOwnershipComparison = true;
+      }
+    });
+  }
+  for (const bin of findAllNodes(method.body, "binaryExpression")) {
+    const ops = tokenKids(bin, "BinaryOperator");
+    if (!ops.some(t => t.image === "==" || t.image === "!=")) continue;
+    const operands = allNodes(bin, "unaryExpression");
+    for (let i = 0; i < operands.length - 1; i++) {
+      if (comparisonSuppresses(operands[i], operands[i + 1], method.resourceIdParamNames, principalNames)) {
+        hasOwnershipComparison = true;
+      }
+    }
+  }
+
+  if (!hasOwnershipComparison) {
+    const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
+    for (const c of candidates) emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
 export function scanAstTaintJava(content: string, filePath: string, cst: CstNode): AstTaintJavaFinding[] {
@@ -656,7 +957,7 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
     const localMethods = collectLocalMethods(cst);
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), findings: [], seen: new Set(),
+      varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), findings: [], seen: new Set(),
     };
     for (const [name, method] of localMethods) {
       const idx = computeReturnTaintPropagatingJava(method, ctx);
@@ -672,6 +973,7 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       // independently to answer a different, broader question).
       method.springParamNames.forEach(p => env.set(p, true));
       walkForDeclarationsAndSinks(method.body, env, ctx);
+      collectBolaFindings(method, ctx);
     }
 
     // Second pass: re-walk any local method whose params were seeded

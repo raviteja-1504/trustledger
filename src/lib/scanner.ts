@@ -4158,6 +4158,13 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  "repo.findById(id).filter(r -> r.getOwnerId().equals(currentUser.getId()))",
     cwe: "CWE-639", effort: "medium",
   },
+  "bola-missing-ownership-check": {
+    title: "Verify the caller owns the requested resource before this Spring endpoint reads/writes it",
+    description: "A @PathVariable/@RequestParam-sourced identifier reaches a repository/map lookup with no @PreAuthorize/@Secured/@RolesAllowed annotation and no .equals()/==/!= comparison against the authenticated principal anywhere in the method body.",
+    code_before: "users.get(userId)",
+    code_after:  "if (!userId.equals(authentication.getName())) return ResponseEntity.status(403).build();\nusers.get(userId)",
+    cwe: "CWE-639", effort: "medium",
+  },
   "nosql-injection": {
     title: "Validate query shape with a schema before passing to the driver",
     description: "Never pass a raw request body/params object as a MongoDB query — validate it against an expected schema first.",
@@ -4529,7 +4536,7 @@ function findAstTaintPythonFindings(content: string, filePath: string, rootNode:
 // astTaintPython.ts's).
 function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode): ScanIndicator[] {
   return scanAstTaintJava(content, filePath, cst).map(f => ({
-    id: f.id, label: astTaintJavaLabel(f.id), severity: astTaintJavaSeverity(f.id),
+    id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
 }

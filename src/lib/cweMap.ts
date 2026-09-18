@@ -46,6 +46,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "xxe":                        { id: "CWE-611",  title: "XML External Entity Reference" },
   "ldap-injection":             { id: "CWE-90",   title: "LDAP Injection" },
   "idor":                       { id: "CWE-639",  title: "Authorization Bypass Through User-Controlled Key" },
+  "bola-missing-ownership-check": { id: "CWE-639", title: "Authorization Bypass Through User-Controlled Key" },
   "nosql-injection":            { id: "CWE-943",  title: "Data Query Logic Injection" },
   "graphql-injection":          { id: "CWE-943",  title: "Data Query Logic Injection" },
   "ssti":                       { id: "CWE-1336", title: "Template Engine Injection" },

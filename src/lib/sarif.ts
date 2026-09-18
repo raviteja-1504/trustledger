@@ -54,6 +54,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "weak-signing-secret":      { title: "Hardcoded Signing Secret",      description: "JWT/session signing key is a literal committed to source control.", cwe: "CWE-321" },
   "graphql-introspection-enabled": { title: "GraphQL Introspection Enabled", description: "GraphiQL/Playground/introspection is explicitly enabled, exposing the complete schema for attacker reconnaissance.", cwe: "CWE-200" },
   "bola-identity-mismatch":  { title: "Broken Object Level Authorization",  description: "Caller identity was established via a token/session check, then a write used a different identifier with no ownership comparison.", cwe: "CWE-639" },
+  "bola-missing-ownership-check": { title: "Broken Object Level Authorization (AST-verified)", description: "A Spring @PathVariable/@RequestParam-sourced identifier reaches a repository or map-backed lookup with no authorization annotation and no identity comparison in the method body.", cwe: "CWE-639" },
   "plaintext-password-storage": { title: "Plaintext Password Storage",     description: "Password assigned directly from request input with no hashing function anywhere on the line.", cwe: "CWE-256" },
   "debug-mode-enabled":       { title: "Debug Mode Enabled",              description: "Framework debug mode is explicitly enabled, exposing stack traces, source code, and (Werkzeug) an interactive RCE console.", cwe: "CWE-489" },
 };

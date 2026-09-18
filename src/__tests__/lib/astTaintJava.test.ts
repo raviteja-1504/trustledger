@@ -335,6 +335,148 @@ public class A {
   });
 });
 
+describe("BOLA (Broken Object Level Authorization) — Spring resource-identifier ownership check", () => {
+  itIfExists(JAVA_FIXTURE)("flags all 4 owasp_test_app.java BOLA endpoints, read vs write severity distinguished", () => {
+    const content = fs.readFileSync(JAVA_FIXTURE, "utf8");
+    const findings = scan(content);
+    const bola = findings.filter(f => f.id === "bola-missing-ownership-check");
+    // getUser (line 87, @GetMapping) -> read -> medium
+    expect(bola.some(f => f.line === 87 && f.severityOverride === "medium")).toBe(true);
+    // deleteUser (line 100, @DeleteMapping) -> write -> high
+    expect(bola.some(f => f.line === 100 && f.severityOverride === "high")).toBe(true);
+    // updateUser (@PutMapping): users.getOrDefault(userId, ...) at line 113
+    // and users.put(userId, user) at line 117 -- both write -> high.
+    expect(bola.some(f => f.line === 113 && f.severityOverride === "high")).toBe(true);
+    expect(bola.some(f => f.line === 117 && f.severityOverride === "high")).toBe(true);
+    // updateRole (@PatchMapping, privilege-escalation write): users.get(userId)
+    // appears at line 129 (the .put("role", role) receiver) and again at
+    // line 131 (the return statement's read) -- both write -> high.
+    expect(bola.some(f => f.line === 129 && f.severityOverride === "high")).toBe(true);
+    expect(bola.some(f => f.line === 131 && f.severityOverride === "high")).toBe(true);
+  });
+
+  it("does not flag when a real .equals() ownership check is present in the method body", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @GetMapping("/api/users/{userId}")
+  public Object get(@PathVariable String userId, Authentication authentication) {
+    if (!userId.equals(authentication.getName())) {
+      return ResponseEntity.status(403).build();
+    }
+    return ResponseEntity.ok(users.get(userId));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("still flags when .equals() is present but compares unrelated values, not an ownership check", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @GetMapping("/api/users/{userId}")
+  public Object get(@PathVariable String userId) {
+    if ("tom".equals("jerry")) {
+      return ResponseEntity.status(400).build();
+    }
+    return ResponseEntity.ok(users.get(userId));
+  }
+}`;
+    // Proves this isn't pure keyword-presence the way the regex heuristics
+    // are -- a .equals() call exists in the method, but neither operand
+    // references the resource-id param or anything principal-shaped.
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("suppresses when @PreAuthorize is present, regardless of method body", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("hasRole('ADMIN')")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("recognizes @AuthenticationPrincipal as principal-looking, and never as a tainted resource-id source", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @GetMapping("/api/users/{userId}")
+  public Object get(@PathVariable String userId, @AuthenticationPrincipal String currentUserId) {
+    if (!userId.equals(currentUserId)) {
+      return ResponseEntity.status(403).build();
+    }
+    return ResponseEntity.ok(users.get(userId));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+    // @AuthenticationPrincipal must never itself be treated as a taint
+    // source for the other 9 sink categories -- confirm it doesn't light up
+    // e.g. sql-injection if misused directly in a query.
+    const misuse = `
+public class A {
+  public void handle(@AuthenticationPrincipal String currentUserId) {
+    executeQuery("SELECT * FROM x WHERE y = " + currentUserId);
+  }
+}`;
+    expect(scan(misuse).some(f => f.id === "sql-injection")).toBe(false);
+  });
+
+  it("does not flag a non-endpoint method (no Spring mapping annotation) even with a bare Map lookup", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  public Object internalHelper(String userId) {
+    return users.get(userId);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("does not flag a Map lookup on a local variable (not a class field)", () => {
+    const content = `
+public class A {
+  @GetMapping("/api/users/{userId}")
+  public Object get(@PathVariable String userId) {
+    Map<String, Object> localCache = new HashMap<>();
+    return localCache.get(userId);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("never throws on a malformed-annotation Java snippet", () => {
+    const content = `
+public class A {
+  @GetMapping(
+  public Object get(@PathVariable String userId) {
+    return null;
+`;
+    expect(() => parseJavaSource(content)).not.toThrow();
+    const cst = parseJavaSource(content);
+    if (cst) expect(() => scanAstTaintJava(content, "A.java", cst)).not.toThrow();
+  });
+
+  // WebGoat's IDOREditOtherProfile.java / IDORViewOtherProfile.java were
+  // evaluated as candidate real-world regression fixtures and found out of
+  // scope for this phase, by direct read: neither builds on a repository or
+  // Map-field lookup -- both construct `new UserProfile(userId)` directly,
+  // a shape outside every sink category this engine recognizes (findById/
+  // getOne/getById, field-backed Map get/getOrDefault/put/remove,
+  // deleteById/delete/save). IDOREditOtherProfile.java is also the concrete
+  // real-world example motivating this phase's "no branch/control-flow
+  // awareness" limitation: its vulnerable branch is gated by an INVERTED
+  // comparison (`!userSubmittedProfile.getUserId().equals(authUserId)`),
+  // which a real CFG-aware ownership check would need to recognize as
+  // gating the DANGEROUS path, not the safe one -- deliberately not
+  // attempted here (see astTaintJava.ts's collectBolaFindings docblock).
+});
+
 describe("Real AST-based taint engine — malformed-input guards", () => {
   it("returns null from parseJavaSource on broken source, and never throws from scanAstTaintJava", () => {
     expect(parseJavaSource("public class {{{ broken")).toBeNull();

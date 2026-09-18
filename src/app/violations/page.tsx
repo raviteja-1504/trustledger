@@ -38,6 +38,7 @@ const SIGNAL_DESC: Record<string, string> = {
   "weak-signing-secret": "JWT/session signing key is a hardcoded literal — anyone with repo access can forge valid tokens",
   "graphql-introspection-enabled": "GraphQL introspection/IDE (GraphiQL/Playground) is explicitly enabled — exposes the complete schema for attacker reconnaissance",
   "bola-identity-mismatch": "Caller identity was established via a token/session check, then a write used a different identifier with no ownership comparison nearby",
+  "bola-missing-ownership-check": "A Spring @PathVariable/@RequestParam-sourced identifier reaches a repository/map lookup with no @PreAuthorize/@Secured/@RolesAllowed and no identity comparison anywhere in the method",
   "plaintext-password-storage": "Password assigned directly from request input with no hashing function anywhere on the line",
   "debug-mode-enabled": "Framework debug mode is explicitly enabled — exposes stack traces, source code, and (Werkzeug) an interactive RCE console",
 
@@ -54,7 +55,7 @@ const SEV_SIGNAL: Record<string, string> = {
   "jwt-none-alg":"#f97316","ai-comment-pattern":"#94a3b8",
   "structural-uniformity":"#f59e0b","comment-density":"#94a3b8","identifier-entropy":"#f59e0b",
   "hallucinated-method-call":"#f59e0b","license-header-contamination":"#f59e0b","ai-blast-radius":"#f59e0b",
-  "file-inclusion":"#f97316","weak-signing-secret":"#7c3aed","graphql-introspection-enabled":"#f59e0b","bola-identity-mismatch":"#f97316","plaintext-password-storage":"#f97316","debug-mode-enabled":"#f97316",
+  "file-inclusion":"#f97316","weak-signing-secret":"#7c3aed","graphql-introspection-enabled":"#f59e0b","bola-identity-mismatch":"#f97316","bola-missing-ownership-check":"#f97316","plaintext-password-storage":"#f97316","debug-mode-enabled":"#f97316",
 };
 
 interface InlineCodeReviewProps {
