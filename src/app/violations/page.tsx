@@ -15,6 +15,7 @@ import { authedFetch } from "@/lib/useRealData";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
+import { realReachability, REACH_COLORS, REACH_LABEL } from "@/lib/signalClassification";
 
 
 
@@ -179,13 +180,22 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
         <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-gray-100"
           style={{ background:"rgba(248,250,252,0.8)" }}>
           <span className="text-[9px] font-black uppercase tracking-wider text-gray-400 self-center">Detected signals:</span>
-          {indicators.map(sig => (
-            <span key={sig} className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
-              style={{ background:`${SEV_SIGNAL[sig] ?? "#94a3b8"}15`, color: SEV_SIGNAL[sig] ?? "#94a3b8", border:`1px solid ${SEV_SIGNAL[sig] ?? "#94a3b8"}30` }}>
-              <span className="w-1.5 h-1.5 rounded-full" style={{ background: SEV_SIGNAL[sig] ?? "#94a3b8" }} />
-              {sig} — {SIGNAL_DESC[sig] ?? sig}
-            </span>
-          ))}
+          {indicators.map(sig => {
+            const instances = (file?.indicators ?? []).filter(i => i.id === sig);
+            const reach = realReachability(instances);
+            return (
+              <span key={sig} className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
+                style={{ background:`${SEV_SIGNAL[sig] ?? "#94a3b8"}15`, color: SEV_SIGNAL[sig] ?? "#94a3b8", border:`1px solid ${SEV_SIGNAL[sig] ?? "#94a3b8"}30` }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: SEV_SIGNAL[sig] ?? "#94a3b8" }} />
+                {sig} — {SIGNAL_DESC[sig] ?? sig}
+                {reach !== "unknown" && (
+                  <span className={`ml-1 px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
+                    {REACH_LABEL[reach]}
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       )}
 

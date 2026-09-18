@@ -21,7 +21,13 @@ export const maxDuration = 60;
 const MAX_LIVE_REANALYSIS_FILES = 60;
 
 interface ReanalysisResult {
-  indicators: { id: string; label: string; severity: string; line?: number; detail?: string }[];
+  indicators: {
+    id: string; label: string; severity: string; line?: number; detail?: string;
+    codeCategory?: "application" | "third_party" | "test_code"; cwe?: string;
+    reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
+    exploitability_score?: number;
+    remediation_urgency?: "immediate" | "sprint" | "backlog" | "monitor";
+  }[];
   attribution: AttributionResult;
 }
 
@@ -43,7 +49,7 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
     return {
       indicators: analysis.indicators
         .filter(i2 => i2.line != null)
-        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail, codeCategory: i2.codeCategory, cwe: i2.cwe })),
+        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail, codeCategory: i2.codeCategory, cwe: i2.cwe, reachability: i2.reachability, exploitability_score: i2.exploitability_score, remediation_urgency: i2.remediation_urgency })),
       attribution: analysis.attribution,
     };
   });

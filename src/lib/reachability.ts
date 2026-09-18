@@ -52,6 +52,13 @@ export interface CVSSVector {
 export interface ExploitabilityScore {
   vuln_id:              string;
   label:                string;
+  // The indicator's own line -- needed by callers to match a score back to a
+  // specific ScanIndicator instance. scores[] is sorted by
+  // exploitability_score before this function returns (see below), and the
+  // same vuln_id can legitimately appear at multiple lines in one file with
+  // different reachability outcomes, so (vuln_id, line) is the only
+  // unambiguous join key back to the original indicators array.
+  line?:                number;
   base_score:           number;  // 0–10 CVSS-equivalent
   exploitability_score: number;  // 0–10 after reachability
   reachability:         "unreachable" | "reachable" | "tainted-path" | "entry-point";
@@ -276,6 +283,7 @@ export function scoreExploitability(
     return {
       vuln_id:              ind.id,
       label:                ind.label,
+      line:                 ind.line,
       base_score:           base,
       exploitability_score: Math.min(10, Math.round(adjScore * 10) / 10),
       reachability:         reach,

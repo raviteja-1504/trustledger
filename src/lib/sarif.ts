@@ -15,6 +15,7 @@ export interface SarifIndicator {
   severity: "critical" | "high" | "medium" | "low" | "info";
   line?:    number;
   detail?:  string;
+  reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
 }
 
 export interface SarifSourceFile {
@@ -98,7 +99,10 @@ export function buildSarifReport(
           region: { startLine: Math.max(1, ind.line ?? 1) },
         },
       }],
-      properties: { "security-severity": severityScore(ind.severity) },
+      properties: {
+        "security-severity": severityScore(ind.severity),
+        ...(ind.reachability ? { "trustledger/reachability": ind.reachability } : {}),
+      },
     })),
   );
 

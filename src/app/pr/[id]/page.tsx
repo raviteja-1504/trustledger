@@ -17,7 +17,8 @@ import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
-import { isSecuritySignal, realSeverity } from "@/lib/signalClassification";
+import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC } from "@/lib/signalClassification";
+import InfoTooltip from "@/components/InfoTooltip";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -416,7 +417,14 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
 
           {/* Signals — split into security vulnerabilities and AI detection */}
           {file.risk_indicators.length > 0 && (() => {
-            const securitySigs = file.risk_indicators.filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security));
+            // Sorted by worst-case exploitability_score descending so a
+            // reviewer sees the findings that are actually reachable from an
+            // entry point first, instead of scanning every row to find them.
+            const exploitabilityOf = (sig: string) =>
+              Math.max(0, ...(file.indicators ?? []).filter(i => i.id === sig).map(i => i.exploitability_score ?? 0));
+            const securitySigs = file.risk_indicators
+              .filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security))
+              .sort((a, b) => exploitabilityOf(b) - exploitabilityOf(a));
             const aiSigs       = file.risk_indicators.filter(s => !isSecuritySignal(s, file, SIGNAL_META[s]?.security));
 
             const renderSignal = (sig: string) => {
@@ -427,6 +435,7 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
               const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
               const detail = instances[0]?.detail;
               const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
+              const reach = realReachability(instances);
               // Every instance of this signal in this file must share the
               // category for the card to be muted -- if even one instance is
               // real application code, this still reflects the file's real
@@ -447,6 +456,12 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
                     <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                       <p className="text-xs font-bold text-gray-900">{meta.label}</p>
                       <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{sev}</span>
+                      {isSec && reach !== "unknown" && (
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
+                          {REACH_LABEL[reach]}
+                          <InfoTooltip title={REACH_LABEL[reach]} description={REACH_DESC[reach]} size="sm" />
+                        </span>
+                      )}
                       {isMuted && (
                         <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
                           {allThirdParty ? "Third-party code" : "Test code"}
@@ -689,7 +704,11 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
 
               {/* Signals — security vulnerabilities + AI detection */}
               {file.risk_indicators.length > 0 && (() => {
-                const secSigs = file.risk_indicators.filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security));
+                const exploitabilityOfRow = (sig: string) =>
+                  Math.max(0, ...(file.indicators ?? []).filter(i => i.id === sig).map(i => i.exploitability_score ?? 0));
+                const secSigs = file.risk_indicators
+                  .filter(s => isSecuritySignal(s, file, SIGNAL_META[s]?.security))
+                  .sort((a, b) => exploitabilityOfRow(b) - exploitabilityOfRow(a));
                 const aiSigs  = file.risk_indicators.filter(s => !isSecuritySignal(s, file, SIGNAL_META[s]?.security));
                 const renderRowSignal = (sig: string) => {
                   const instances = (file.indicators ?? []).filter(i => i.id === sig);
@@ -699,6 +718,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                   const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
                   const detail = instances[0]?.detail;
                   const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
+                  const reach = realReachability(instances);
                   const allThirdParty = instances.length > 0 && instances.every(i => i.codeCategory === "third_party");
                   const allTestCode   = instances.length > 0 && instances.every(i => i.codeCategory === "test_code");
                   const isMuted = allThirdParty || allTestCode;
@@ -713,6 +733,12 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                         <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                           <p className="text-xs font-bold text-gray-900">{meta.label}</p>
                           <span className={`text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${badge}`}>{sev}</span>
+                          {isSec && reach !== "unknown" && (
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
+                              {REACH_LABEL[reach]}
+                              <InfoTooltip title={REACH_LABEL[reach]} description={REACH_DESC[reach]} size="sm" />
+                            </span>
+                          )}
                           {isMuted && (
                             <span className="text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase bg-gray-100 text-gray-500 ring-gray-300">
                               {allThirdParty ? "Third-party code" : "Test code"}

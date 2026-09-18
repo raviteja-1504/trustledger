@@ -49,7 +49,16 @@ export function buildPRCommentDirect(scan: {
   pr_number:            number;
   overall_risk:         string;
   total_ai_percentage:  number;
-  files: Array<{ file_path:string; risk_score:string; ai_percentage:number; risk_indicators:string[]; attested:boolean }>;
+  files: Array<{
+    file_path:string; risk_score:string; ai_percentage:number; risk_indicators:string[]; attested:boolean;
+    // Labels of findings in this file confirmed "entry-point" or
+    // "tainted-path" by the call-graph reachability engine, pre-filtered by
+    // the caller. Undefined for inherited/unchanged files carried over from
+    // a prior scan (they weren't re-analyzed, so there's nothing new to
+    // flag) -- distinct from an empty array, which means re-analyzed but
+    // nothing confirmed reachable.
+    reachable_indicator_labels?: string[];
+  }>;
   appUrl:               string;
   evidence_breakdown?:  EvidenceBreakdown;
 }): string {
@@ -110,7 +119,14 @@ export function buildPRCommentDirect(scan: {
     lines.push("","**Files requiring attestation:**","");
     highRisk.forEach(f => {
       const secInds = f.risk_indicators.filter(i => INDICATOR_LABEL[i]).slice(0,2).map(i => INDICATOR_LABEL[i]).join(", ");
-      lines.push(`- ${f.attested?"✅":"⏳"} \`${f.file_path.split("/").slice(-2).join("/")}\` — ${RISK_EMOJI[f.risk_score]} ${f.risk_score}${secInds ? ` · ${secInds}` : ""}`);
+      // Only ever flag confirmed-reachable findings here, never
+      // "unreachable"/"unknown" -- this line is already dense (emoji + risk
+      // level + up to 2 signal names), and a reviewer only needs the
+      // confirmed-dangerous ones called out inline.
+      const reachSuffix = f.reachable_indicator_labels?.length
+        ? ` · 🎯 reachable: ${f.reachable_indicator_labels.slice(0,2).join(", ")}`
+        : "";
+      lines.push(`- ${f.attested?"✅":"⏳"} \`${f.file_path.split("/").slice(-2).join("/")}\` — ${RISK_EMOJI[f.risk_score]} ${f.risk_score}${secInds ? ` · ${secInds}` : ""}${reachSuffix}`);
     });
   }
 

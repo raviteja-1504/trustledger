@@ -18,6 +18,18 @@ export interface FileIndicator {
   // security finding apart from an AI-heuristic signal when SIGNAL_META has
   // no curated entry for this id -- see isSecuritySignal() in pr/[id]/page.tsx.
   cwe?: string;
+  // Per-instance call-graph reachability from src/lib/reachability.ts's
+  // scoreExploitability(), merged onto the indicator in analyzeFile() and
+  // persisted through the existing scan_files.indicators jsonb column -- no
+  // separate DB column. Undefined means "unknown" (either this scan predates
+  // the feature, or the finding wasn't a scored security indicator), not
+  // "unreachable" -- see realReachability() in signalClassification.ts,
+  // which is how the UI should always read this (never a static per-id
+  // table, since the same rule id can be reachable at one line and dead code
+  // at another within the same file).
+  reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
+  exploitability_score?: number;
+  remediation_urgency?: "immediate" | "sprint" | "backlog" | "monitor";
 }
 
 // An explicit AI-tooling artifact (a repo config file or a commit/content

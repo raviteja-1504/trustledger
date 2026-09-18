@@ -366,7 +366,7 @@ export async function POST(req: NextRequest) {
             indicators: f.indicators
               ? f.indicators
                   .filter(i => i.line)
-                  .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe }))
+                  .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe, reachability: i.reachability, exploitability_score: i.exploitability_score, remediation_urgency: i.remediation_urgency }))
               : [],
             attribution: f.attribution,
           })));
@@ -734,6 +734,17 @@ export async function POST(req: NextRequest) {
             ai_percentage: f.ai_percentage, risk_indicators: f.risk_indicators,
             attested: autoAttestedPaths.has(f.file_path) ||
               (("attested" in f) ? !!(f as { attested?: boolean }).attested : false),
+            // `f` is a union of freshly re-analyzed FileAnalysis (has
+            // .indicators) and inherited/unchanged-file entries carried over
+            // from a prior scan (no .indicators at all) -- the "indicators"
+            // in f narrowing is required for both, not just style.
+            reachable_indicator_labels: "indicators" in f
+              ? Array.from(new Set(
+                  (f.indicators ?? [])
+                    .filter(i => i.reachability === "entry-point" || i.reachability === "tainted-path")
+                    .map(i => i.label),
+                ))
+              : undefined,
           })),
           appUrl,
         });

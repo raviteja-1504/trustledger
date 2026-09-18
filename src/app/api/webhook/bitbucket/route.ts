@@ -209,7 +209,7 @@ export async function POST(req: NextRequest) {
           indicators: f.indicators
             ? f.indicators
                 .filter(i => i.line)
-                .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe }))
+                .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe, reachability: i.reachability, exploitability_score: i.exploitability_score, remediation_urgency: i.remediation_urgency }))
             : [],
           attribution: f.attribution,
         })));

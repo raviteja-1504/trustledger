@@ -89,6 +89,15 @@ export interface ScanIndicator {
   // Which detector(s) independently flagged this same id+line -- populated
   // when analyzeFile's dedup pass collapses multiple hits into one finding.
   supportingDetectors?: string[];
+  // Per-instance call-graph reachability, merged in from the file-level
+  // ReachabilityReport (see the scoreExploitability() call below) after it
+  // runs. Lives on the individual finding rather than only on the file-level
+  // aggregate because the same rule id can be reachable at one line and dead
+  // code at another within the same file -- see signalClassification.ts's
+  // realReachability() for how the UI is meant to read this.
+  reachability?:         "unreachable" | "reachable" | "tainted-path" | "entry-point";
+  exploitability_score?: number;
+  remediation_urgency?:  "immediate" | "sprint" | "backlog" | "monitor";
 }
 
 export interface FixSuggestion {
@@ -4775,6 +4784,27 @@ export function analyzeFile(file_path: string, content: string, prPriorBias = 0)
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
     ? scoreExploitability(indicators, content, callGraph, resolveContainingFunction)
     : null;
+
+  // Merge per-instance reachability back onto `indicators` -- the same array
+  // object returned below as FileAnalysis.indicators, which every downstream
+  // consumer (the persistence sites, SARIF, the PR page) reads. Matched by
+  // the same `${id}:${line ?? ""}` key the dedup pass above already uses,
+  // NOT by array position or vuln_id alone: scoreExploitability() internally
+  // filters out AI-signal ids and then sorts its output by
+  // exploitability_score descending before returning, so `scores[]` has
+  // neither the same length nor the same order as `indicators`, and the same
+  // rule id can legitimately fire at two different lines with two different
+  // reachability outcomes.
+  if (exploitability) {
+    const scoreByKey = new Map(exploitability.scores.map(s => [`${s.vuln_id}:${s.line ?? ""}`, s]));
+    for (const ind of indicators) {
+      const score = scoreByKey.get(`${ind.id}:${ind.line ?? ""}`);
+      if (!score) continue; // AI-signal ids are never scored -- expected, leave untouched
+      ind.reachability = score.reachability;
+      ind.exploitability_score = score.exploitability_score;
+      ind.remediation_urgency = score.remediation_urgency;
+    }
+  }
 
   // Compliance evaluation
   const compliance = evaluateCompliance(content, file_path);
