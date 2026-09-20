@@ -33,6 +33,19 @@ const INDICATOR_LABEL: Record<string, string> = {
   "iac-host-namespace-access": "Host namespace access",
   "iac-dangerous-capability": "Dangerous Linux capability",
   "iac-unpinned-image-tag": "Unpinned container image tag",
+  "container-runs-as-root": "Container runs as root",
+  "container-unpinned-base-image": "Unpinned base image",
+  "container-add-remote-url": "ADD from remote URL",
+  "container-piped-shell-exec": "Unverified remote script execution",
+  "container-hardcoded-secret": "Hardcoded secret in Dockerfile",
+  "container-sensitive-file-copy": "Sensitive file copied into image",
+  "container-exposed-sensitive-port": "Sensitive port exposed",
+  "container-compose-privileged": "Privileged container (compose)",
+  "container-compose-docker-socket-mount": "Docker socket mounted into container",
+  "container-compose-host-namespace": "Host namespace access (compose)",
+  "container-compose-dangerous-capability": "Dangerous Linux capability (compose)",
+  "container-compose-hardcoded-secret": "Hardcoded secret in compose file",
+  "container-compose-unpinned-image": "Unpinned container image (compose)",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

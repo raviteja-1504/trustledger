@@ -61,9 +61,15 @@ import { detectorRegistry }      from "./detectorRegistry";
 // some other module to import it first) guarantees registration has
 // happened before any scan runs, regardless of import ordering elsewhere.
 import "./iacDetectors";
+// Side-effecting import: registers the Container security phase detectors
+// (Dockerfile + docker-compose.yml) through detectorRegistry above -- see
+// containerDetectors.ts's own docblock. Same reasoning as iacDetectors.ts
+// above: import here, not left to another module's import order.
+import "./containerDetectors";
 import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination } from "./licenseContamination";
+import { isDockerfilePath } from "./scannableFiles";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -215,6 +221,12 @@ const LANG_MAP: Record<string, string> = {
 };
 
 export function detectLanguage(path: string): string {
+  // Dockerfile has no extension at all -- LANG_MAP above is purely
+  // extension-keyed, so a basename check has to run first (isDockerfilePath
+  // also matches Dockerfile.<env> variants like Dockerfile.prod, which
+  // `"Dockerfile.prod".split(".").pop()` alone would resolve to "prod", not
+  // "dockerfile").
+  if (isDockerfilePath(path)) return "dockerfile";
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return LANG_MAP[ext] ?? "text";
 }
@@ -234,7 +246,10 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
   const ext     = base.split(".").pop() ?? "";
 
   const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle","tf","tfvars"]);
-  if (SKIP_EXTS.has(ext)) return { skipAI:true, isGenerated:false, isTestFile:false, aiPriorBias:0 };
+  // Dockerfile is extensionless (base.split(".").pop() only resolves to
+  // "dockerfile" for the bare filename, not Dockerfile.prod-style variants)
+  // -- docker-compose.yml already skips via the "yaml" entry above.
+  if (SKIP_EXTS.has(ext) || isDockerfilePath(filePath)) return { skipAI:true, isGenerated:false, isTestFile:false, aiPriorBias:0 };
 
   const isGenerated =
     /[.-](?:d\.ts|min\.js|min\.css|bundle\.js)$/.test(lower) ||
@@ -5377,6 +5392,99 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     description: "Replace the mutable :latest tag (or missing tag) with a specific version tag or, better, a content digest.",
     code_before: "image: nginx:latest",
     code_after:  "image: nginx:1.25.3@sha256:2ab30d...",
+    cwe: "CWE-1104", effort: "low",
+  },
+
+  // ── Container security (Dockerfile + docker-compose.yml) ──────────────────
+  "container-runs-as-root": {
+    title: "Add a non-root USER instruction",
+    description: "Set a USER instruction before the final CMD/ENTRYPOINT so the container doesn't run as root (UID 0) by default.",
+    code_before: "FROM node:20-alpine\n# no USER instruction",
+    code_after:  "FROM node:20-alpine\nRUN addgroup -S app && adduser -S app -G app\nUSER app",
+    cwe: "CWE-250", effort: "low",
+  },
+  "container-unpinned-base-image": {
+    title: "Pin the base image to a specific version or digest",
+    description: "Replace the mutable :latest tag (or missing tag) with a specific version tag or, better, a content digest.",
+    code_before: "FROM node:latest",
+    code_after:  "FROM node:20.11.1-alpine@sha256:2ab30d...",
+    cwe: "CWE-1104", effort: "low",
+  },
+  "container-add-remote-url": {
+    title: "Replace ADD-from-URL with a verified download",
+    description: "Use COPY with a locally-verified file, or fetch and checksum-verify the file in a RUN step, instead of ADD pulling directly from a remote URL with no integrity check.",
+    code_before: "ADD https://example.com/install.sh /install.sh",
+    code_after:  "RUN curl -fsSL https://example.com/install.sh -o /install.sh \\\n  && echo \"<expected-sha256>  /install.sh\" | sha256sum -c -",
+    cwe: "CWE-494", effort: "low",
+  },
+  "container-piped-shell-exec": {
+    title: "Verify remote scripts before executing them",
+    description: "Download the script to a file, verify its checksum or signature, then execute it — don't pipe curl/wget output directly into a shell.",
+    code_before: "RUN curl -fsSL https://example.com/install.sh | sh",
+    code_after:  "RUN curl -fsSL https://example.com/install.sh -o install.sh \\\n  && echo \"<expected-sha256>  install.sh\" | sha256sum -c - \\\n  && sh install.sh",
+    cwe: "CWE-494", effort: "medium",
+  },
+  "container-hardcoded-secret": {
+    title: "Move the secret out of the Dockerfile",
+    description: "Pass secrets via BuildKit's --secret mount (build time) or a runtime environment variable/orchestrator secret (run time) — never bake a credential into an ENV/ARG value, which persists in the image/build history.",
+    code_before: "ENV API_KEY=sk_live_abc123",
+    code_after:  "# docker build --secret id=api_key,src=./api_key.txt\nRUN --mount=type=secret,id=api_key cat /run/secrets/api_key",
+    cwe: "CWE-798", effort: "medium",
+  },
+  "container-sensitive-file-copy": {
+    title: "Don't copy credential/key files into the image",
+    description: "Add the file to .dockerignore and pass its contents at runtime (an orchestrator secret, a mounted volume, or an environment variable) instead of baking it into a layer.",
+    code_before: "COPY .env /app/.env",
+    code_after:  "# .env added to .dockerignore; passed at runtime via --env-file or a secret",
+    cwe: "CWE-538", effort: "low",
+  },
+  "container-exposed-sensitive-port": {
+    title: "Remove the sensitive EXPOSE if unintentional",
+    description: "Confirm this management port is meant to be reachable from outside the container before shipping it; if not, drop the EXPOSE instruction.",
+    code_before: "EXPOSE 22",
+    code_after:  "# SSH not exposed from the container",
+    cwe: "CWE-668", effort: "low",
+  },
+  "container-compose-privileged": {
+    title: "Remove privileged mode",
+    description: "Grant only the specific Linux capabilities the service actually needs instead of full privileged access.",
+    code_before: "services:\n  app:\n    privileged: true",
+    code_after:  "services:\n  app:\n    cap_add: [\"NET_BIND_SERVICE\"]",
+    cwe: "CWE-250", effort: "medium",
+  },
+  "container-compose-docker-socket-mount": {
+    title: "Remove the Docker socket mount",
+    description: "Avoid mounting /var/run/docker.sock into a container — it grants root-equivalent host control. If a service genuinely needs to manage containers, use a scoped Docker API proxy instead.",
+    code_before: "volumes:\n  - /var/run/docker.sock:/var/run/docker.sock",
+    code_after:  "# docker.sock not mounted; use a scoped Docker API proxy if container management is required",
+    cwe: "CWE-269", effort: "high",
+  },
+  "container-compose-host-namespace": {
+    title: "Remove host namespace sharing",
+    description: "Set network_mode/pid/ipc to a non-host value (or omit them) unless the service has a specific, reviewed need for host-level access.",
+    code_before: "network_mode: host",
+    code_after:  "# default (bridge) network mode",
+    cwe: "CWE-668", effort: "medium",
+  },
+  "container-compose-dangerous-capability": {
+    title: "Drop the dangerous capability",
+    description: "Remove ALL/SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_MODULE from the service's added capabilities unless specifically required and reviewed.",
+    code_before: "cap_add:\n  - SYS_ADMIN",
+    code_after:  "cap_drop:\n  - ALL",
+    cwe: "CWE-250", effort: "medium",
+  },
+  "container-compose-hardcoded-secret": {
+    title: "Move the secret out of the compose file",
+    description: "Use env_file, Docker Compose secrets, or an external secret manager instead of a literal credential value under environment:.",
+    code_before: "environment:\n  - DB_PASSWORD=hunter2",
+    code_after:  "environment:\n  - DB_PASSWORD_FILE=/run/secrets/db_password\nsecrets:\n  - db_password",
+    cwe: "CWE-798", effort: "low",
+  },
+  "container-compose-unpinned-image": {
+    title: "Pin the image to a specific version or digest",
+    description: "Replace the mutable :latest tag (or missing tag) with a specific version tag or, better, a content digest.",
+    code_before: "image: postgres:latest",
+    code_after:  "image: postgres:16.2@sha256:2ab30d...",
     cwe: "CWE-1104", effort: "low",
   },
 };

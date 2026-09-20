@@ -55,10 +55,33 @@ export function isLikelyK8sManifestPath(path: string): boolean {
   return IAC_YAML_PATH_HINTS.test(path) || IAC_YAML_NAME_HINTS.test(basename);
 }
 
+// Dockerfile/docker-compose.yml -- Container security phase. `Dockerfile`
+// has no extension at all (LANG_MAP in scanner.ts is purely extension-keyed,
+// so this also backs detectLanguage()'s basename branch, not just ingestion
+// here), and `docker-compose.yml` is YAML -- same ambiguity problem
+// isLikelyK8sManifestPath above solves for Kubernetes manifests, but
+// Compose's conventional basenames are unambiguous enough for a direct
+// name-pattern match rather than needing a directory-hint regex too.
+const DOCKERFILE_NAME_RE = /^dockerfile(\.[\w.-]+)?$/i;
+const DOCKERFILE_EXT_RE = /\.dockerfile$/i;
+const DOCKER_COMPOSE_NAME_RE = /^(?:docker-)?compose(\.[\w.-]+)?\.ya?ml$/i;
+
+export function isDockerfilePath(path: string): boolean {
+  const basename = path.split("/").pop() ?? "";
+  return DOCKERFILE_NAME_RE.test(basename) || DOCKERFILE_EXT_RE.test(basename);
+}
+
+export function isDockerComposePath(path: string): boolean {
+  const basename = path.split("/").pop() ?? "";
+  return DOCKER_COMPOSE_NAME_RE.test(basename);
+}
+
 export function isScannablePath(path: string): boolean {
   const basename = path.split("/").pop() ?? "";
   if (MANIFEST_BASENAMES.has(basename)) return true;
   if (isLikelyK8sManifestPath(path)) return true;
+  if (isDockerfilePath(path)) return true;
+  if (isDockerComposePath(path)) return true;
   const ext = basename.split(".").pop()?.toLowerCase() ?? "";
   return SCANNABLE_EXTS.has(ext);
 }

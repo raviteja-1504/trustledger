@@ -69,6 +69,19 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "iac-host-namespace-access": { title: "Host Namespace Access",         description: "Pod shares the host's network, PID, or IPC namespace.", cwe: "CWE-668" },
   "iac-dangerous-capability": { title: "Dangerous Linux Capability",      description: "Container adds a capability (ALL/SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_MODULE) beyond the default set.", cwe: "CWE-250" },
   "iac-unpinned-image-tag":   { title: "Unpinned Container Image Tag",   description: "Container image has no tag/digest or is pinned to the mutable ':latest' tag.", cwe: "CWE-1104" },
+  "container-runs-as-root":                 { title: "Container Runs As Root",              description: "Dockerfile has no USER instruction (or explicitly sets USER root) in its final build stage.", cwe: "CWE-250" },
+  "container-unpinned-base-image":          { title: "Unpinned Base Image",                 description: "Dockerfile FROM has no tag/digest or is pinned to the mutable ':latest' tag.", cwe: "CWE-1104" },
+  "container-add-remote-url":               { title: "ADD From Remote URL",                 description: "Dockerfile ADD fetches directly from a URL with no integrity check.", cwe: "CWE-494" },
+  "container-piped-shell-exec":             { title: "Unverified Remote Script Execution",  description: "Dockerfile RUN pipes a remote script directly into a shell with no integrity verification.", cwe: "CWE-494" },
+  "container-hardcoded-secret":             { title: "Hardcoded Secret in Dockerfile",      description: "Dockerfile ENV/ARG bakes a credential-shaped value into the image/build history.", cwe: "CWE-798" },
+  "container-sensitive-file-copy":          { title: "Sensitive File Copied Into Image",    description: "Dockerfile COPY/ADD bakes a credential/key file into an image layer.", cwe: "CWE-538" },
+  "container-exposed-sensitive-port":       { title: "Sensitive Port Exposed",              description: "Dockerfile EXPOSE advertises a management port (SSH/Telnet/RDP) from the container.", cwe: "CWE-668" },
+  "container-compose-privileged":           { title: "Privileged Container",                description: "docker-compose service runs in privileged mode, granting near-full host access.", cwe: "CWE-250" },
+  "container-compose-docker-socket-mount":  { title: "Docker Socket Mounted Into Container", description: "docker-compose service mounts /var/run/docker.sock, granting root-equivalent host control.", cwe: "CWE-269" },
+  "container-compose-host-namespace":       { title: "Host Namespace Access",               description: "docker-compose service shares the host's network, PID, or IPC namespace.", cwe: "CWE-668" },
+  "container-compose-dangerous-capability": { title: "Dangerous Linux Capability",          description: "docker-compose service adds a capability (ALL/SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_MODULE) beyond the default set.", cwe: "CWE-250" },
+  "container-compose-hardcoded-secret":     { title: "Hardcoded Secret in Compose File",    description: "docker-compose environment: sets a credential-shaped value directly in the file.", cwe: "CWE-798" },
+  "container-compose-unpinned-image":       { title: "Unpinned Container Image",            description: "docker-compose image has no tag/digest or is pinned to the mutable ':latest' tag.", cwe: "CWE-1104" },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

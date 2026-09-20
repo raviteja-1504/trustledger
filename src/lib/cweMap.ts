@@ -66,6 +66,23 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "toctou":                       { id: "CWE-367",  title: "Time-of-Check Time-of-Use Race Condition" },
   "cookie-no-httponly":          { id: "CWE-1004", title: "Sensitive Cookie Without 'HttpOnly' Flag" },
   "cookie-no-secure":            { id: "CWE-614",  title: "Sensitive Cookie Without 'Secure' Attribute" },
+
+  // Container security (Dockerfile + docker-compose.yml) -- unlike the
+  // iac-* ids, added here from the start rather than left as a gap for
+  // cweFor()'s FIX_MAP-first fallback to always carry alone.
+  "container-runs-as-root":                 { id: "CWE-250",  title: "Execution with Unnecessary Privileges" },
+  "container-unpinned-base-image":          { id: "CWE-1104", title: "Use of Unmaintained Third Party Components" },
+  "container-add-remote-url":               { id: "CWE-494",  title: "Download of Code Without Integrity Check" },
+  "container-piped-shell-exec":             { id: "CWE-494",  title: "Download of Code Without Integrity Check" },
+  "container-hardcoded-secret":             { id: "CWE-798",  title: "Use of Hard-coded Credentials" },
+  "container-sensitive-file-copy":          { id: "CWE-538",  title: "Insertion of Sensitive Information into Externally-Accessible File" },
+  "container-exposed-sensitive-port":       { id: "CWE-668",  title: "Exposure of Resource to Wrong Sphere" },
+  "container-compose-privileged":           { id: "CWE-250",  title: "Execution with Unnecessary Privileges" },
+  "container-compose-docker-socket-mount":  { id: "CWE-269",  title: "Improper Privilege Management" },
+  "container-compose-host-namespace":       { id: "CWE-668",  title: "Exposure of Resource to Wrong Sphere" },
+  "container-compose-dangerous-capability": { id: "CWE-250",  title: "Execution with Unnecessary Privileges" },
+  "container-compose-hardcoded-secret":     { id: "CWE-798",  title: "Use of Hard-coded Credentials" },
+  "container-compose-unpinned-image":       { id: "CWE-1104", title: "Use of Unmaintained Third Party Components" },
 };
 
 export function cweFor(indicatorId: string): CweEntry | undefined {

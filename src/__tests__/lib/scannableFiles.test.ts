@@ -1,4 +1,4 @@
-import { isScannablePath, isLikelyK8sManifestPath } from "@/lib/scannableFiles";
+import { isScannablePath, isLikelyK8sManifestPath, isDockerfilePath, isDockerComposePath } from "@/lib/scannableFiles";
 
 describe("scannableFiles.isScannablePath", () => {
   it("scans a .tf file by extension", () => {
@@ -27,6 +27,66 @@ describe("scannableFiles.isScannablePath", () => {
 
   it("does not scan an unrelated file type", () => {
     expect(isScannablePath("README.md")).toBe(false);
+  });
+
+  it("scans a bare Dockerfile despite having no extension", () => {
+    expect(isScannablePath("Dockerfile")).toBe(true);
+  });
+
+  it("scans a Dockerfile.prod variant", () => {
+    expect(isScannablePath("docker/Dockerfile.prod")).toBe(true);
+  });
+
+  it("scans docker-compose.yml", () => {
+    expect(isScannablePath("docker-compose.yml")).toBe(true);
+  });
+
+  it("scans a docker-compose.override.yaml variant", () => {
+    expect(isScannablePath("docker-compose.override.yaml")).toBe(true);
+  });
+});
+
+describe("scannableFiles.isDockerfilePath", () => {
+  it("matches a bare Dockerfile", () => {
+    expect(isDockerfilePath("Dockerfile")).toBe(true);
+  });
+
+  it("matches Dockerfile under a subdirectory", () => {
+    expect(isDockerfilePath("services/api/Dockerfile")).toBe(true);
+  });
+
+  it("matches Dockerfile.dev", () => {
+    expect(isDockerfilePath("Dockerfile.dev")).toBe(true);
+  });
+
+  it("matches a *.dockerfile extension variant", () => {
+    expect(isDockerfilePath("backend.dockerfile")).toBe(true);
+  });
+
+  it("does not match an unrelated file", () => {
+    expect(isDockerfilePath("README.md")).toBe(false);
+  });
+});
+
+describe("scannableFiles.isDockerComposePath", () => {
+  it("matches docker-compose.yml", () => {
+    expect(isDockerComposePath("docker-compose.yml")).toBe(true);
+  });
+
+  it("matches docker-compose.yaml", () => {
+    expect(isDockerComposePath("docker-compose.yaml")).toBe(true);
+  });
+
+  it("matches an environment-suffixed variant (docker-compose.prod.yml)", () => {
+    expect(isDockerComposePath("docker-compose.prod.yml")).toBe(true);
+  });
+
+  it("matches the Compose V2 canonical name (compose.yaml)", () => {
+    expect(isDockerComposePath("compose.yaml")).toBe(true);
+  });
+
+  it("does not match an arbitrary YAML file", () => {
+    expect(isDockerComposePath("config/settings.yaml")).toBe(false);
   });
 });
 
