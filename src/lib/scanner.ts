@@ -39,6 +39,11 @@ import {
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
+import {
+  parseGoSourceSync, isGoParserReady, scanAstTaintGo,
+  findEnclosingFunctionNameGo, findNodeAtRowGo, astTaintGoSeverity, astTaintGoLabel,
+} from "./astTaintGo";
+import type { Node as GoSyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -5652,6 +5657,23 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
   }));
 }
 
+// Same wrapper for astTaintGo.ts's Phase 4 engine -- see its own docblock
+// for the tree-sitter/WASM warm-cache design (same contract as Python's).
+// The idorAuthCheckNearby callback reuses IDOR_AUTH_CHECK_NEARBY_RE against
+// this file's raw lines -- "is there an ownership check nearby" is a
+// line-window-context fact, not something the parser alone can answer, the
+// same AST-taint + regex-context hybrid astTaintJava.ts's own BOLA detector uses.
+function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[]): ScanIndicator[] {
+  const idorAuthCheckNearby = (line: number) => {
+    const windowStart = Math.max(0, line - 1 - 15);
+    return lines.slice(windowStart, line).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
+  };
+  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby).map(f => ({
+    id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -5736,6 +5758,13 @@ export function analyzeFile(
   const javaCst: JavaCstNode | null =
     lang === "java" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
       ? parseJavaSource(content)
+      : null;
+  // Go AST parse (Phase 4 -- see astTaintGo.ts). isGoParserReady() gates on
+  // the WASM parser's async warm-up having completed already -- same
+  // "no regression, fall back to regex-only" contract as pyTree above.
+  const goTree: GoSyntaxNode | null =
+    lang === "golang" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isGoParserReady()
+      ? parseGoSourceSync(content, file_path)
       : null;
 
   const secretIndicators: ScanIndicator[] = [
@@ -5836,6 +5865,7 @@ export function analyzeFile(
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
+    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
@@ -5963,6 +5993,9 @@ export function analyzeFile(
     }
     if (pyTree) {
       return findEnclosingFunctionNamePy(findNodeAtRowPy(pyTree, Math.max(0, line - 1)));
+    }
+    if (goTree) {
+      return findEnclosingFunctionNameGo(findNodeAtRowGo(goTree, Math.max(0, line - 1)));
     }
     return "unknown";
   };

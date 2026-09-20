@@ -42,6 +42,7 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
+import { ensureTreeSitterInit } from "./treeSitterRuntime";
 
 // webpack provides this global on Node.js targets specifically to escape its
 // own require() interception. Needed here because require.resolve(...) from
@@ -77,7 +78,13 @@ let parserPool: ParserT | null = null;
 function initPythonParser(): Promise<LanguageT> {
   if (!langPromise) {
     langPromise = (async () => {
-      await Parser.init();
+      // Never call Parser.init() directly here -- see treeSitterRuntime.ts's
+      // docblock for the concurrent-init race this sidesteps (this file
+      // used to call Parser.init() itself; that was safe only as long as it
+      // was the sole tree-sitter-based engine in the codebase -- adding
+      // astTaintGo.ts's own independent Parser.init() call made the two
+      // race, confirmed directly).
+      await ensureTreeSitterInit();
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const fs = require("fs") as typeof import("fs");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
