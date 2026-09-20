@@ -59,6 +59,16 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "bola-missing-ownership-check": { title: "Broken Object Level Authorization (AST-verified)", description: "A Spring @PathVariable/@RequestParam-sourced identifier reaches a repository or map-backed lookup with no authorization annotation and no identity comparison in the method body.", cwe: "CWE-639" },
   "plaintext-password-storage": { title: "Plaintext Password Storage",     description: "Password assigned directly from request input with no hashing function anywhere on the line.", cwe: "CWE-256" },
   "debug-mode-enabled":       { title: "Debug Mode Enabled",              description: "Framework debug mode is explicitly enabled, exposing stack traces, source code, and (Werkzeug) an interactive RCE console.", cwe: "CWE-489" },
+  "iac-s3-public-acl":        { title: "Public S3 Bucket ACL",            description: "Terraform S3 bucket ACL grants public read access.", cwe: "CWE-284" },
+  "iac-open-ingress":         { title: "Open Ingress Rule",               description: "Security group ingress rule allows traffic from 0.0.0.0/0 (or ::/0).", cwe: "CWE-284" },
+  "iac-unencrypted-storage":  { title: "Unencrypted Storage",             description: "S3 bucket or RDS instance has no server-side encryption configured.", cwe: "CWE-311" },
+  "iac-iam-wildcard":         { title: "Overly Permissive IAM Policy",    description: "IAM statement grants a wildcard Action or Resource.", cwe: "CWE-732" },
+  "iac-public-db":            { title: "Publicly Accessible Database",   description: "RDS instance is publicly accessible from the internet.", cwe: "CWE-284" },
+  "iac-privileged-container": { title: "Privileged Container",           description: "Kubernetes container runs in privileged mode, granting near-full host access.", cwe: "CWE-250" },
+  "iac-container-run-as-root": { title: "Container Runs As Root",        description: "Kubernetes container security context explicitly allows running as root (UID 0).", cwe: "CWE-250" },
+  "iac-host-namespace-access": { title: "Host Namespace Access",         description: "Pod shares the host's network, PID, or IPC namespace.", cwe: "CWE-668" },
+  "iac-dangerous-capability": { title: "Dangerous Linux Capability",      description: "Container adds a capability (ALL/SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_MODULE) beyond the default set.", cwe: "CWE-250" },
+  "iac-unpinned-image-tag":   { title: "Unpinned Container Image Tag",   description: "Container image has no tag/digest or is pinned to the mutable ':latest' tag.", cwe: "CWE-1104" },
 };
 
 function severityToLevel(sev: SarifIndicator["severity"]): "error" | "warning" | "note" {

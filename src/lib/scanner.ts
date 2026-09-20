@@ -55,6 +55,12 @@ import type { ProvenanceSummary as GitProvenanceSummary } from "./gitProvenance"
 import { classifyCode }          from "./mlClassifier";
 import type { MLScoreResult }    from "./mlClassifier";
 import { detectorRegistry }      from "./detectorRegistry";
+// Side-effecting import: registers the IaC security Phase 3 detectors
+// (Terraform + Kubernetes) through detectorRegistry above -- see
+// iacDetectors.ts's own docblock. Importing here (rather than relying on
+// some other module to import it first) guarantees registration has
+// happened before any scan runs, regardless of import ordering elsewhere.
+import "./iacDetectors";
 import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination } from "./licenseContamination";
@@ -205,6 +211,7 @@ const LANG_MAP: Record<string, string> = {
   json: "json",   sh: "shell",      sql: "sql",
   md: "markdown", tf: "terraform",  ex: "elixir",
   xml: "xml",     properties: "properties", gradle: "gradle",
+  tfvars: "terraform",
 };
 
 export function detectLanguage(path: string): string {
@@ -226,7 +233,7 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
   const base    = lower.split(/[\\/]/).pop() ?? lower;
   const ext     = base.split(".").pop() ?? "";
 
-  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle"]);
+  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle","tf","tfvars"]);
   if (SKIP_EXTS.has(ext)) return { skipAI:true, isGenerated:false, isTestFile:false, aiPriorBias:0 };
 
   const isGenerated =
@@ -5300,6 +5307,77 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     title: "Re-enable framework CSRF protection",
     description: "Remove the explicit disable and add per-request CSRF tokens for state-changing endpoints, exempting only true API-key-authenticated routes.",
     cwe: "CWE-352", effort: "medium",
+  },
+  // ── IaC security (Terraform + Kubernetes) ──────────────────────────────────
+  "iac-s3-public-acl": {
+    title: "Remove the public-read ACL",
+    description: "Use a bucket policy with least privilege instead of a bucket-wide public ACL.",
+    code_before: 'resource "aws_s3_bucket_acl" "x" {\n  acl = "public-read"\n}',
+    code_after:  'resource "aws_s3_bucket_acl" "x" {\n  acl = "private"\n}',
+    cwe: "CWE-284", effort: "low",
+  },
+  "iac-open-ingress": {
+    title: "Restrict the ingress CIDR block",
+    description: "Scope cidr_blocks to the specific IP ranges that need access instead of 0.0.0.0/0, or put the resource behind a load balancer/VPN.",
+    code_before: 'ingress {\n  cidr_blocks = ["0.0.0.0/0"]\n}',
+    code_after:  'ingress {\n  cidr_blocks = ["10.0.0.0/16"]\n}',
+    cwe: "CWE-284", effort: "medium",
+  },
+  "iac-unencrypted-storage": {
+    title: "Enable server-side encryption",
+    description: "Add an aws_s3_bucket_server_side_encryption_configuration resource, or set storage_encrypted = true for a database instance.",
+    code_before: 'resource "aws_db_instance" "x" {\n  # storage_encrypted not set\n}',
+    code_after:  'resource "aws_db_instance" "x" {\n  storage_encrypted = true\n}',
+    cwe: "CWE-311", effort: "low",
+  },
+  "iac-iam-wildcard": {
+    title: "Scope the IAM policy to specific actions/resources",
+    description: "Replace the wildcard Action/Resource with the exact set your workload needs (least privilege).",
+    code_before: '{ "Effect": "Allow", "Action": "*", "Resource": "*" }',
+    code_after:  '{ "Effect": "Allow", "Action": ["s3:GetObject"], "Resource": "arn:aws:s3:::my-bucket/*" }',
+    cwe: "CWE-732", effort: "medium",
+  },
+  "iac-public-db": {
+    title: "Disable public accessibility on the database instance",
+    description: "Set publicly_accessible = false and reach the database through a VPN/bastion/private subnet instead.",
+    code_before: "publicly_accessible = true",
+    code_after:  "publicly_accessible = false",
+    cwe: "CWE-284", effort: "low",
+  },
+  "iac-privileged-container": {
+    title: "Remove privileged mode",
+    description: "Grant only the specific Linux capabilities the container actually needs instead of full privileged access.",
+    code_before: "securityContext:\n  privileged: true",
+    code_after:  "securityContext:\n  privileged: false\n  capabilities:\n    add: [\"NET_BIND_SERVICE\"]",
+    cwe: "CWE-250", effort: "medium",
+  },
+  "iac-container-run-as-root": {
+    title: "Run the container as a non-root user",
+    description: "Set runAsNonRoot: true and a non-zero runAsUser in the pod/container security context.",
+    code_before: "securityContext:\n  runAsUser: 0",
+    code_after:  "securityContext:\n  runAsNonRoot: true\n  runAsUser: 1000",
+    cwe: "CWE-250", effort: "low",
+  },
+  "iac-host-namespace-access": {
+    title: "Remove host namespace sharing",
+    description: "Set hostNetwork/hostPID/hostIPC to false (or omit them) unless the workload has a specific, reviewed need for host-level access.",
+    code_before: "hostNetwork: true",
+    code_after:  "hostNetwork: false",
+    cwe: "CWE-668", effort: "medium",
+  },
+  "iac-dangerous-capability": {
+    title: "Drop the dangerous capability",
+    description: "Remove ALL/SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYS_MODULE from the container's added capabilities unless specifically required and reviewed.",
+    code_before: "capabilities:\n  add: [\"SYS_ADMIN\"]",
+    code_after:  "capabilities:\n  drop: [\"ALL\"]",
+    cwe: "CWE-250", effort: "medium",
+  },
+  "iac-unpinned-image-tag": {
+    title: "Pin the image to a specific version or digest",
+    description: "Replace the mutable :latest tag (or missing tag) with a specific version tag or, better, a content digest.",
+    code_before: "image: nginx:latest",
+    code_after:  "image: nginx:1.25.3@sha256:2ab30d...",
+    cwe: "CWE-1104", effort: "low",
   },
 };
 

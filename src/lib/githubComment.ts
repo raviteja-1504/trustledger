@@ -23,6 +23,16 @@ const INDICATOR_LABEL: Record<string, string> = {
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "plaintext-password-storage": "Plaintext password storage",
   "debug-mode-enabled": "Debug mode enabled",
+  "iac-s3-public-acl": "Public S3 bucket ACL",
+  "iac-open-ingress": "Open ingress rule (0.0.0.0/0)",
+  "iac-unencrypted-storage": "Unencrypted storage",
+  "iac-iam-wildcard": "Overly permissive IAM policy",
+  "iac-public-db": "Publicly accessible database",
+  "iac-privileged-container": "Privileged container",
+  "iac-container-run-as-root": "Container runs as root",
+  "iac-host-namespace-access": "Host namespace access",
+  "iac-dangerous-capability": "Dangerous Linux capability",
+  "iac-unpinned-image-tag": "Unpinned container image tag",
 };
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {

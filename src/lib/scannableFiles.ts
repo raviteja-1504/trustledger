@@ -21,6 +21,12 @@ export const SCANNABLE_EXTS = new Set([
   // hatches predominantly live, not in .cs code-behind. Without this, the
   // C# XSS detector would rarely see real code.
   "cshtml",
+  // Terraform -- unambiguous extension, safe to blanket-allow (see
+  // iacTerraform.ts). .yaml/.yml are deliberately NOT here: that extension
+  // is also CI config, Helm values, app config, etc. across every existing
+  // scanned repo -- isLikelyK8sManifestPath() below is the narrower gate
+  // for those, so this doesn't newly flood every repo's next scan.
+  "tf", "tfvars",
 ]);
 
 const MANIFEST_BASENAMES = new Set([
@@ -30,9 +36,29 @@ const MANIFEST_BASENAMES = new Set([
   "pom.xml", "build.gradle", "build.gradle.kts",
 ]);
 
+// Kubernetes manifests are plain .yaml/.yml -- indistinguishable by
+// extension alone from CI config, Helm values, app config, etc. Rather than
+// blanket-allow every YAML file in every scanned repo (a real behavior
+// change with real cost/noise consequences for existing customers), this
+// scopes intake to common IaC conventions: a hinting directory name, or a
+// manifest basename that matches a well-known Kubernetes kind. A real
+// manifest that follows neither convention is a documented, accepted miss
+// (see iacKubernetes.ts's docblock) -- the same recall-for-blast-radius
+// tradeoff this codebase already makes elsewhere.
+const IAC_YAML_PATH_HINTS = /(^|\/)(k8s|kubernetes|manifests?|deploy(ments?)?|charts?|helm|kustomize|overlays|base)\//i;
+const IAC_YAML_NAME_HINTS = /^(deployment|service|ingress|configmap|secret|statefulset|daemonset|cronjob|job|namespace|role|rolebinding|clusterrole|clusterrolebinding|networkpolicy|pvc|persistentvolume|hpa|kustomization|values)[-._a-z0-9]*\.ya?ml$/i;
+
+export function isLikelyK8sManifestPath(path: string): boolean {
+  const basename = path.split("/").pop() ?? "";
+  const ext = basename.split(".").pop()?.toLowerCase() ?? "";
+  if (ext !== "yaml" && ext !== "yml") return false;
+  return IAC_YAML_PATH_HINTS.test(path) || IAC_YAML_NAME_HINTS.test(basename);
+}
+
 export function isScannablePath(path: string): boolean {
   const basename = path.split("/").pop() ?? "";
   if (MANIFEST_BASENAMES.has(basename)) return true;
+  if (isLikelyK8sManifestPath(path)) return true;
   const ext = basename.split(".").pop()?.toLowerCase() ?? "";
   return SCANNABLE_EXTS.has(ext);
 }
