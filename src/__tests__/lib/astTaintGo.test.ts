@@ -269,4 +269,139 @@ func handler(w http.ResponseWriter, r *http.Request) {
     const result = analyzeFile("handler.go", content);
     expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
   });
+
+  describe("field-sensitive taint tracking (Decision 1, new capability)", () => {
+    it("flags a sink using a field that was itself assigned a tainted value", () => {
+      const content = wrap(`
+	var user User
+	name := r.URL.Query().Get("file")
+	user.Name = name
+	os.ReadFile(user.Name)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "path-traversal")).toBe(true);
+    });
+
+    it("does NOT flag a sibling field on the same object that was never assigned taint", () => {
+      // Before this phase, Go's isTainted had no selector_expression case at
+      // all -- a bare `user.Email` read always resolved to false regardless
+      // of anything, so this already passed for the wrong reason (no field
+      // tracking whatsoever). The positive test above now proves the engine
+      // is actually field-sensitive, not just silent.
+      const content = wrap(`
+	var user User
+	name := r.URL.Query().Get("file")
+	user.Name = name
+	os.ReadFile(user.Email)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "path-traversal")).toBe(false);
+    });
+  });
+
+  describe("sanitizer/de-taint recognition (Decision 2, new capability)", () => {
+    it("does not flag a value sanitized via html.EscapeString before reaching a sink", () => {
+      const content = wrap(`
+	q := r.URL.Query().Get("host")
+	clean := html.EscapeString(q)
+	exec.Command("ping", clean)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "command-injection")).toBe(false);
+    });
+
+    it("still flags the same shape unsanitized (baseline)", () => {
+      const content = wrap(`
+	q := r.URL.Query().Get("host")
+	exec.Command("ping", q)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "command-injection")).toBe(true);
+    });
+  });
+
+  describe("bounded interprocedural propagation (Decision 3, MAX_PROPAGATION_ROUNDS = 3)", () => {
+    // Caller-declared-first chain (levelA declared before the levelB it
+    // calls, and so on) -- mirrors the exact same proven pattern already
+    // used for astTaint.ts/astTaintPython.ts/astTaintJava.ts: the
+    // fixed-point pre-pass processes functions in declaration order each
+    // round, so levelD resolves round 0, levelC round 1, levelB round 2, and
+    // levelA would only resolve in a would-be round 3 -- one past the cap.
+    const chain = `
+func levelA(x string) string { return levelB(x) }
+func levelB(x string) string { return levelC(x) }
+func levelC(x string) string { return levelD(x) }
+func levelD(x string) string { return x }
+`;
+
+    it("resolves a chain called at its base case (0 hops from a param reference)", () => {
+      const content = `${HANDLER_PREFIX}${chain}
+func handler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("host")
+	exec.Command("ping", levelD(q))
+}
+`;
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
+    });
+
+    it("resolves levelB, 2 hops deep, within the 3-round cap", () => {
+      const content = `${HANDLER_PREFIX}${chain}
+func handler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("host")
+	exec.Command("ping", levelB(q))
+}
+`;
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
+    });
+
+    it("does NOT resolve levelA, the outermost 3-hop caller, proving the round cap is real (not accidentally unbounded)", () => {
+      const content = `${HANDLER_PREFIX}${chain}
+func handler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("host")
+	exec.Command("ping", levelA(q))
+}
+`;
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(false);
+    });
+  });
+
+  describe("idor — structural ownership-check suppression (Decision 4, new capability alongside the existing regex callback)", () => {
+    it("suppresses when the resource id is compared inline against a Gin-style principal lookup (c.GetString), with no idorAuthCheckNearby callback passed at all", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if id == c.GetString("userId") {
+		db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+	}
+`);
+      // No idorAuthCheckNearby argument -- proves the NEW structural check
+      // alone is doing the suppression, not the pre-existing regex hook.
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "idor")).toBe(false);
+    });
+
+    it("suppresses via a c.MustGet(\"user\") comparison", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if id == c.MustGet("user") {
+		db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+	}
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "idor")).toBe(false);
+    });
+
+    it("still flags when a comparison is present but neither operand is principal-shaped", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if id == "test" {
+		db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+	}
+`);
+      // Proves this isn't pure comparison-presence, the way the regex
+      // heuristic is keyword-presence -- a comparison exists, but neither
+      // side is resource-id-vs-principal shaped.
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "idor")).toBe(true);
+    });
+  });
 });

@@ -234,6 +234,112 @@ function privateHelper(userId) {
   });
 });
 
+describe("Real AST-based taint engine — field-sensitive taint tracking", () => {
+  it("flags a sink using a specific tainted field, not just any property of the object", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const user = {};
+  user.name = req.query.name;
+  exec(user.name);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does not flag a sink using a sibling field that was never assigned taint (the concrete new capability this phase adds)", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const user = {};
+  user.name = req.query.name;
+  user.age = 5;
+  exec(user.age);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("still collapses to root-object taint for an object-literal blob (pre-existing behavior preserved, not regressed)", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const user = { name: req.query.name, age: 5 };
+  exec(user.age);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+});
+
+describe("Real AST-based taint engine — sanitizer recognition", () => {
+  it("does not flag a sink whose argument was assigned from a recognized sanitizer call", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const dirty = req.query.html;
+  const clean = DOMPurify.sanitize(dirty);
+  res.send(clean);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "xss")).toBe(false);
+  });
+
+  it("still flags an unsanitized sink with the same shape", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const dirty = req.query.html;
+  res.send(dirty);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "xss")).toBe(true);
+  });
+
+  it("does not flag a sanitizer call wrapping the tainted value inline at the sink", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  res.send(escapeHtml(req.query.html));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "xss")).toBe(false);
+  });
+});
+
+describe("Real AST-based taint engine — bounded interprocedural propagation", () => {
+  // Every chain here is declared CALLER-FIRST (levelA before levelB before
+  // ...) deliberately: a callee-first declaration order resolves an
+  // arbitrarily long chain in a single fixed-point round via favorable Map-
+  // iteration ordering (each callee's summary is already known by the time
+  // its caller is processed in the SAME round), which would never actually
+  // exercise MAX_PROPAGATION_ROUNDS. Caller-first forces each hop to need
+  // its own round, which is what makes the "still bounded" test below
+  // meaningful rather than trivially true.
+  it("resolves a short caller-declared-first chain (levelB calls levelC)", () => {
+    const content = `
+function levelA(x) { return levelB(x); }
+function levelB(x) { return levelC(x); }
+function levelC(x) { return x; }
+app.get("/x", (req, res) => {
+  exec(levelB(req.query.cmd));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("resolves levelB in a 4-function caller-declared-first chain, within the round cap", () => {
+    const content = `
+function levelA(x) { return levelB(x); }
+function levelB(x) { return levelC(x); }
+function levelC(x) { return levelD(x); }
+function levelD(x) { return x; }
+app.get("/x", (req, res) => {
+  exec(levelB(req.query.cmd));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does NOT resolve levelA (the outermost caller) in that same chain — the round cap is real, not accidentally unbounded", () => {
+    const content = `
+function levelA(x) { return levelB(x); }
+function levelB(x) { return levelC(x); }
+function levelC(x) { return levelD(x); }
+function levelD(x) { return x; }
+app.get("/x", (req, res) => {
+  exec(levelA(req.query.cmd));
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
 describe("Real AST-based taint engine — negative cases", () => {
   it("does not flag a call with no taint anywhere in scope", () => {
     const content = `

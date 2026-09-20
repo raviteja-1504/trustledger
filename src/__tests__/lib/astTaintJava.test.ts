@@ -488,3 +488,182 @@ describe("Real AST-based taint engine — malformed-input guards", () => {
     if (cst) expect(() => scanAstTaintJava("", "A.java", cst)).not.toThrow();
   });
 });
+
+describe("Real AST-based taint engine — field-sensitive taint tracking (Decision 1, new capability)", () => {
+  it("flags a sink using a field that was itself assigned a tainted value", () => {
+    const content = `
+public class A {
+  @GetMapping("/x")
+  public Object get(@RequestParam String name) {
+    User user = new User();
+    user.name = name;
+    executeQuery("SELECT * FROM t WHERE x = " + user.name);
+    return null;
+  }
+}`;
+    expect(scan(content).some(f => f.id === "sql-injection")).toBe(true);
+  });
+
+  it("does NOT flag a sibling field on the same object that was never assigned taint", () => {
+    // Before this phase, Java's env lookup collapsed any field read to its
+    // root variable's own taint (rootVar = parts[0] only) -- `user` itself
+    // was never marked tainted here (its constructor took no args), so this
+    // already passed for the wrong reason (object-level under-approximation
+    // masking the question). The field-taint pair above now proves the
+    // engine is actually field-sensitive, not just accidentally silent.
+    const content = `
+public class A {
+  public void handle(@RequestParam String name) {
+    User user = new User();
+    user.name = name;
+    executeQuery("SELECT * FROM t WHERE x = " + user.email);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "sql-injection")).toBe(false);
+  });
+
+  it("also newly tracks plain-identifier reassignment (not just field writes) -- assignment of any kind was previously untracked entirely", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    String x = "safe";
+    x = input;
+    executeQuery("SELECT * FROM t WHERE y = " + x);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "sql-injection")).toBe(true);
+  });
+});
+
+describe("Real AST-based taint engine — sanitizer/de-taint recognition (Decision 2, new capability)", () => {
+  it("still flags an unsanitized tainted argument reaching a sink (baseline)", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    Runtime.getRuntime().exec(input);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does not flag a value sanitized via the OWASP Java Encoder (Encode.forHtml) before reaching a sink", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    String clean = Encode.forHtml(input);
+    Runtime.getRuntime().exec(clean);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("does not flag a value sanitized via Commons Text (StringEscapeUtils.escapeHtml4) before reaching a sink", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    String clean = StringEscapeUtils.escapeHtml4(input);
+    Runtime.getRuntime().exec(clean);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
+describe("Real AST-based taint engine — bounded interprocedural propagation (Decision 3, MAX_PROPAGATION_ROUNDS = 3)", () => {
+  // Caller-declared-first chain (levelA declared before the levelB it calls,
+  // and so on): the fixed-point pre-pass processes methods in declaration
+  // order each round, so a method can only see a callee's propagating status
+  // from an EARLIER point in the SAME or a PRIOR round, never one declared
+  // later in the same round. Traced by hand (and confirmed by running this
+  // suite) that levelD resolves round 0, levelC round 1, levelB round 2, and
+  // levelA would only resolve in a would-be round 3 -- one past the cap.
+  const chain = `
+public class A {
+  private String levelA(String x) { return levelB(x); }
+  private String levelB(String x) { return levelC(x); }
+  private String levelC(String x) { return levelD(x); }
+  private String levelD(String x) { return x; }`;
+
+  it("resolves a chain called at its base case (0 hops from a param reference)", () => {
+    const content = `${chain}
+  public void handler(@RequestParam String input) {
+    Runtime.getRuntime().exec(levelD(input));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("resolves levelB, 2 hops deep, within the 3-round cap", () => {
+    const content = `${chain}
+  public void handler(@RequestParam String input) {
+    Runtime.getRuntime().exec(levelB(input));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does NOT resolve levelA, the outermost 3-hop caller, proving the round cap is real (not accidentally unbounded)", () => {
+    const content = `${chain}
+  public void handler(@RequestParam String input) {
+    Runtime.getRuntime().exec(levelA(input));
+  }
+}`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
+describe("BOLA — constructor-sink vocabulary fix (Decision 4, closes the WebGoat IDOREditOtherProfile.java gap)", () => {
+  it("flags `new ClassName(id)` fed a resource-id param with no auth annotation or ownership comparison in scope", () => {
+    const content = `
+public class A {
+  @GetMapping("/api/profile/{userId}")
+  public Object get(@PathVariable String userId) {
+    UserProfile profile = new UserProfile(userId);
+    return profile;
+  }
+}`;
+    // Before this fix, checkBolaSinkCandidate's vocabulary (findById/save/
+    // Map get-put/etc) had no notion of a constructor call at all -- this
+    // returned [] regardless of how directly userId flowed into `new
+    // UserProfile(...)`.
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("does not flag a constructor call whose argument doesn't reference the resource-id param", () => {
+    const content = `
+public class A {
+  @GetMapping("/api/profile/{userId}")
+  public Object get(@PathVariable String userId) {
+    UserProfile profile = new UserProfile("anonymous");
+    return profile;
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  // Documents the accepted, still-open gap (see astTaintJava.ts's
+  // collectBolaFindings docblock and this phase's plan's "Explicitly out of
+  // scope" section): the engine asks "is there ANY ownership comparison
+  // anywhere in this method", not "does that comparison correctly GATE this
+  // specific sink". An inverted condition -- the exact WebGoat
+  // IDOREditOtherProfile.java shape, `!id.equals(principal)` guarding the
+  // code that SHOULD be safe while the vulnerable branch runs when the check
+  // fails -- still incorrectly suppresses here. Real branch/CFG-aware
+  // analysis (out of scope this phase) would be needed to fix this; this
+  // test exists so a future fix has a regression target, not to assert
+  // current behavior is correct.
+  it("[known gap, not fixed] still suppresses when an ownership comparison is present but gates the wrong branch", () => {
+    const content = `
+public class A {
+  @GetMapping("/api/profile/{userId}")
+  public Object get(@PathVariable String userId, Authentication authentication) {
+    if (!userId.equals(authentication.getName())) {
+      UserProfile profile = new UserProfile(userId);
+      return profile;
+    }
+    return ResponseEntity.status(403).build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+});

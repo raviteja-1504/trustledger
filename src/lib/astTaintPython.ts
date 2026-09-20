@@ -359,6 +359,14 @@ function hasShellTrue(args: SyntaxNode[]): boolean {
     a.childForFieldName("value")?.text === "True");
 }
 
+// Known sanitizer/escaping calls -- see astTaint.ts's SANITIZER_NAMES for
+// the shared design/limitations (handles the common `clean = sanitize(x)`
+// assignment pattern for free, doesn't retroactively clean through a
+// sticky in-place mutation site -- documented, accepted gap).
+const SANITIZER_NAMES_PY = new Set([
+  "markupsafe.escape", "Markup.escape", "bleach.clean", "html.escape", "shlex.quote",
+]);
+
 function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -420,6 +428,17 @@ function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Map<string
   const isTainted = (node: SyntaxNode, env: Env): boolean => {
     if (isTaintSourceExprPy(node, inDjangoRequestFn)) return true;
     if (node.type === "identifier") return env.get(node.text) === true;
+    if (node.type === "attribute") {
+      // Field-sensitive read: check the composite "root.field" key first
+      // (set by the assignment-handling branch in scanAstTaintPython's walk
+      // below); fall back to the existing root-object-taint check when no
+      // field-specific entry exists -- pure recall gain, same reasoning as
+      // astTaint.ts's identical addition.
+      const path = calleeTextPy(node);
+      if (path && env.get(path) === true) return true;
+      const object = attributeParts(node).object;
+      return object ? isTainted(object, env) : false;
+    }
     if (node.type === "binary_operator") {
       const op = node.childForFieldName("operator")?.text;
       const left = node.childForFieldName("left");
@@ -436,6 +455,8 @@ function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Map<string
     if (node.type === "call") {
       const fn = node.childForFieldName("function");
       const args = argListOf(node);
+      const sanitizerName = fn ? calleeTextPy(fn) : null;
+      if (sanitizerName && SANITIZER_NAMES_PY.has(sanitizerName)) return false;
       // "...{}...".format(x) -- closes the confirmed .format() gap.
       if (fn?.type === "attribute" && attributeParts(fn).attribute === "format") {
         return args.some(a => isTainted(a, env));
@@ -491,11 +512,13 @@ function makeIsTaintedPy(localFns: Map<string, LocalFn>, propagating: Map<string
  * superset of what seeding a subset taints. Mirrors astTaint.ts's
  * computeReturnTaintPropagating exactly, genuinely simpler here since
  * Python has only function_definition (def/async def), no separate
- * arrow/expression function forms to special-case.
+ * arrow/expression function forms to special-case. `isTaintedFn` is
+ * threaded in by the caller (see buildPropagatingMapPy below) rather than
+ * hardcoded to an always-empty-map evaluator here, so the same function
+ * serves the bounded same-file fixed-point iteration.
  */
-function computeReturnTaintPropagatingPy(fn: LocalFn): Set<number> {
+function computeReturnTaintPropagatingPy(fn: LocalFn, isTaintedFn: ReturnType<typeof makeIsTaintedPy>): Set<number> {
   const propagatingIdx = new Set<number>();
-  const isTaintedShallow = makeIsTaintedPy(new Map(), new Map(), false);
   const returnValues: SyntaxNode[] = [];
   const collect = (n: SyntaxNode) => {
     if (n.type === "return_statement") {
@@ -508,9 +531,32 @@ function computeReturnTaintPropagatingPy(fn: LocalFn): Set<number> {
   for (const shape of fn.paramShapes) {
     const env: Env = new Map();
     env.set(shape.name, true);
-    if (returnValues.some(v => isTaintedShallow(v, env))) propagatingIdx.add(shape.index);
+    if (returnValues.some(v => isTaintedFn(v, env))) propagatingIdx.add(shape.index);
   }
   return propagatingIdx;
+}
+
+// See astTaint.ts's identical constant/function for the full rationale --
+// mirrored here rather than shared, matching this codebase's existing
+// per-engine-file convention (no shared taint-engine base module).
+const MAX_PROPAGATION_ROUNDS_PY = 3;
+
+function buildPropagatingMapPy(localFns: Map<string, LocalFn>): Map<string, Set<number>> {
+  const propagating = new Map<string, Set<number>>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
+    let changed = false;
+    const isTaintedRound = makeIsTaintedPy(localFns, propagating, false);
+    for (const [name, fn] of localFns) {
+      const idx = computeReturnTaintPropagatingPy(fn, isTaintedRound);
+      const existingSize = propagating.get(name)?.size ?? 0;
+      if (idx.size > existingSize) {
+        propagating.set(name, idx);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return propagating;
 }
 
 function sourceLabelPy(node: SyntaxNode): string {
@@ -560,11 +606,7 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
 
     const importMap = buildImportMapPy(root);
     const localFns = collectLocalFunctionsPy(root);
-    const propagating = new Map<string, Set<number>>();
-    for (const [name, fn] of localFns) {
-      const idx = computeReturnTaintPropagatingPy(fn);
-      if (idx.size > 0) propagating.set(name, idx);
-    }
+    const propagating = buildPropagatingMapPy(localFns);
 
     const findings: AstTaintPyFinding[] = [];
     const seen = new Set<string>();
@@ -593,6 +635,13 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
             env.set(left.text, tainted);
           } else if ((left.type === "pattern_list" || left.type === "tuple_pattern") && tainted) {
             for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, true);
+          } else if (left.type === "attribute") {
+            // Field-sensitive write: `obj.field = expr` -- stores under the
+            // same composite "root.field" key the read side (isTainted,
+            // above) checks. Additive only: obj's own bare-identifier env
+            // entry (if any) is left untouched.
+            const path = calleeTextPy(left);
+            if (path) env.set(path, tainted);
           }
         }
       }
@@ -649,18 +698,31 @@ export function scanAstTaintPython(content: string, filePath: string, presparsed
     const rootIsTainted = makeIsTaintedPy(localFns, propagating, false);
     walk(root, new Map(), false, rootIsTainted);
 
-    // Second pass: re-walk any local function whose params were seeded as
-    // tainted by a call site above, so sinks inside the callee are reachable.
-    for (const [fnName, idxSet] of seededParams) {
-      const fn = localFns.get(fnName);
-      if (!fn) continue;
-      const env: Env = new Map();
-      for (const idx of idxSet) {
-        const shape = fn.paramShapes[idx];
-        if (shape) env.set(shape.name, true);
+    // Second pass, bounded worklist (see astTaint.ts's identical structure
+    // for the full rationale): re-walking a seeded function can itself seed
+    // FURTHER functions via the same call-site logic above, discovering a
+    // second/third hop -- bounded by MAX_PROPAGATION_ROUNDS_PY rather than
+    // left as an unbounded/accidental side effect of Map iteration order.
+    const walkedSignaturesPy = new Set<string>();
+    for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
+      const toWalk = Array.from(seededParams.entries());
+      let changed = false;
+      for (const [fnName, idxSet] of toWalk) {
+        const fn = localFns.get(fnName);
+        if (!fn) continue;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        if (walkedSignaturesPy.has(signature)) continue;
+        walkedSignaturesPy.add(signature);
+        changed = true;
+        const env: Env = new Map();
+        for (const idx of idxSet) {
+          const shape = fn.paramShapes[idx];
+          if (shape) env.set(shape.name, true);
+        }
+        const seededIsTainted = makeIsTaintedPy(localFns, propagating, false);
+        for (const child of fn.body.namedChildren) if (child) walk(child, env, false, seededIsTainted);
       }
-      const seededIsTainted = makeIsTaintedPy(localFns, propagating, false);
-      for (const child of fn.body.namedChildren) if (child) walk(child, env, false, seededIsTainted);
+      if (!changed) break;
     }
 
     return findings;

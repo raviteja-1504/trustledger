@@ -309,6 +309,93 @@ function matchIdorGo(call: SyntaxNode): SinkMatch | null {
   return last ? { id: "idor", sinkExpr: text, args: [last] } : null;
 }
 
+// ── Authorization analysis (Decision 4) ─────────────────────────────────
+// Real structural check mirroring astTaintJava.ts's collectBolaFindings,
+// ADDED alongside (not replacing) the existing idorAuthCheckNearby regex
+// callback below -- both must fail to suppress for an idor finding to fire,
+// so this can only ever REDUCE false positives further, never introduce
+// new ones, and needs zero scanner.ts wiring changes (the callback stays
+// exactly as-is). Same scope and same documented non-goal as Java's own
+// check (no branch/CFG awareness): "is there a real ownership comparison
+// ANYWHERE in the enclosing function", not "does it correctly gate this
+// specific sink".
+
+/** Gin/Echo/Fiber principal-lookup vocabulary -- the same specific tokens
+ * IDOR_AUTH_CHECK_NEARBY_RE (scanner.ts) already matches as line text
+ * (`c.MustGet(...)`, `c.GetString("user"/"userId"/"userID"/"uid")`), now
+ * matched structurally against a real call_expression instead. */
+function isPrincipalShapedGo(node: SyntaxNode): boolean {
+  if (node.type !== "call_expression") return false;
+  const fn = node.childForFieldName("function");
+  const text = fn ? calleeTextGo(fn) : null;
+  if (!text) return false;
+  if (text.endsWith(".MustGet")) return true;
+  if (text.endsWith(".GetString")) {
+    const raw = argListOfGo(node)[0]?.text ?? "";
+    return /^["'](?:user|userId|userID|user_id|uid)["']$/i.test(raw);
+  }
+  return false;
+}
+
+function findEnclosingFunctionNodeGo(node: SyntaxNode): SyntaxNode | null {
+  let cur: SyntaxNode | null = node;
+  while (cur) {
+    if (cur.type === "function_declaration" || cur.type === "method_declaration") return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+/** Does `fnBody` contain a `==`/`!=` binary_expression, or a `.Equal(...)`
+ * call, comparing the bare identifier `resourceIdName` against a
+ * principal-shaped expression (isPrincipalShapedGo above)? Purely
+ * structural, independent of env/taint -- same posture as Java's
+ * comparisonSuppresses/comparisonSuppressesEquals, which this mirrors. */
+function hasStructuralOwnershipComparisonGo(resourceIdName: string, fnBody: SyntaxNode): boolean {
+  let found = false;
+  const isResourceId = (n: SyntaxNode | null) => !!n && n.type === "identifier" && n.text === resourceIdName;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "binary_expression") {
+      const op = n.childForFieldName("operator")?.type;
+      if (op === "==" || op === "!=") {
+        const left = n.childForFieldName("left");
+        const right = n.childForFieldName("right");
+        if ((isResourceId(left) && right && isPrincipalShapedGo(right)) ||
+            (isResourceId(right) && left && isPrincipalShapedGo(left))) {
+          found = true;
+        }
+      }
+    } else if (n.type === "call_expression") {
+      const fn = n.childForFieldName("function");
+      if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Equal") {
+        const operand = fn.childForFieldName("operand");
+        const arg0 = argListOfGo(n)[0] ?? null;
+        if ((isResourceId(operand) && arg0 && isPrincipalShapedGo(arg0)) ||
+            (isResourceId(arg0) && operand && isPrincipalShapedGo(operand))) {
+          found = true;
+        }
+      }
+    }
+    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(fnBody);
+  return found;
+}
+
+/** Only meaningful when the tainted resource-id expression fed to the sink
+ * is itself a bare identifier -- a compound expression (a selector, a call)
+ * has no single name a separate comparison elsewhere could reference by,
+ * same "bare identifier only" scoping astTaintJava.ts's bareIdentifierOf
+ * uses for its own one-hop backward check. */
+function structuralOwnershipCheckSuppressesGo(sinkNode: SyntaxNode, resourceIdExpr: SyntaxNode): boolean {
+  if (resourceIdExpr.type !== "identifier") return false;
+  const enclosingFn = findEnclosingFunctionNodeGo(sinkNode);
+  const fnBody = enclosingFn?.childForFieldName("body");
+  if (!fnBody) return false;
+  return hasStructuralOwnershipComparisonGo(resourceIdExpr.text, fnBody);
+}
+
 // ── Taint environment / propagation ─────────────────────────────────────────
 // Flat, OR-shaped, no de-tainting -- same explicit design as astTaint.ts /
 // astTaintPython.ts / astTaintJava.ts. Nothing in makeIsTaintedGo ever
@@ -351,6 +438,14 @@ function isTaintPreservingConversion(text: string): boolean {
          text === "strconv.ParseFloat" || text === "strconv.ParseBool";
 }
 
+// ── Sanitizer/de-taint recognition (Decision 2) ─────────────────────────
+// The deferred item from this file's own original phase, now delivered --
+// see astTaint.ts's SANITIZER_NAMES for the JS/TS equivalent this mirrors.
+// Matched by full dotted call text, same as every other table in this file.
+const GO_SANITIZER_NAMES = new Set([
+  "html.EscapeString", "template.HTMLEscapeString", "template.JSEscapeString",
+]);
+
 function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string, Set<number>>) {
   const isTainted = (node: SyntaxNode, env: Env): boolean => {
     if (isTaintSourceExprGo(node)) return true;
@@ -366,6 +461,11 @@ function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string
       const fn = node.childForFieldName("function");
       const args = argListOfGo(node);
       const text = fn ? calleeTextGo(fn) : null;
+      // Sanitizer calls de-taint at this point, checked BEFORE the
+      // format-call/conversion passthrough and every other taint-increasing
+      // branch below, so a sanitized value can't be re-tainted by one of
+      // them in this same call.
+      if (text && GO_SANITIZER_NAMES.has(text)) return false;
       if (text && (isFormatCall(text) || isTaintPreservingConversion(text))) return args.some(a => isTainted(a, env));
       // A call to a local function known to propagate taint from SPECIFIC
       // params to its return value (see computeReturnTaintPropagatingGo).
@@ -387,6 +487,19 @@ function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string
       return false;
     }
     if (node.type === "index_expression") {
+      const operand = node.childForFieldName("operand");
+      return operand ? isTainted(operand, env) : false;
+    }
+    // Field-sensitive read (Decision 1): a bare selector like `user.Name`
+    // checks the full dotted-path composite key FIRST (set by the new
+    // selector-expression assignment handling in `walk`'s short_var_decl/
+    // assignment_statement branch below), falling back to the operand's own
+    // taint -- pure recall gain, never removes a `true` result the operand
+    // check alone would already find. Unlike Java, no one-level scoping
+    // needed here: calleeTextGo already resolves the full chain generically.
+    if (node.type === "selector_expression") {
+      const path = calleeTextGo(node);
+      if (path && env.get(path) === true) return true;
       const operand = node.childForFieldName("operand");
       return operand ? isTainted(operand, env) : false;
     }
@@ -422,10 +535,15 @@ function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string
  * Go's multi-value returns (`return a, b`) are checked as "any returned
  * expression tainted" -- conservative, matches this engine's recall-biased
  * philosophy elsewhere.
+ *
+ * Nested calls inside `fn`'s own body are resolved using whatever
+ * `isTaintedFn` the caller passes in (Decision 3) -- no longer hardcoded to
+ * a fresh empty-map evaluator internally. See buildPropagatingMapGo below,
+ * which threads a bounded, round-capped view of the file's own in-progress
+ * propagating map instead.
  */
-function computeReturnTaintPropagatingGo(fn: LocalFn): Set<number> {
+function computeReturnTaintPropagatingGo(fn: LocalFn, isTaintedFn: ReturnType<typeof makeIsTaintedGo>): Set<number> {
   const propagatingIdx = new Set<number>();
-  const isTaintedShallow = makeIsTaintedGo(new Map(), new Map());
   const returnValues: SyntaxNode[] = [];
   const collect = (n: SyntaxNode) => {
     if (n.type === "return_statement") {
@@ -443,9 +561,43 @@ function computeReturnTaintPropagatingGo(fn: LocalFn): Set<number> {
   for (const shape of fn.paramShapes) {
     const env: Env = new Map();
     env.set(shape.name, true);
-    if (returnValues.some(v => isTaintedShallow(v, env))) propagatingIdx.add(shape.index);
+    if (returnValues.some(v => isTaintedFn(v, env))) propagatingIdx.add(shape.index);
   }
   return propagatingIdx;
+}
+
+// Caps every bounded fixed-point loop below (same-file propagating-map
+// convergence and the call-site-seeding worklist) -- named and shared for
+// the same reason astTaint.ts's own MAX_PROPAGATION_ROUNDS is, and matching
+// its value exactly.
+const MAX_PROPAGATION_ROUNDS = 3;
+
+/**
+ * Builds the same-file propagating-param map via a bounded fixed-point
+ * iteration instead of one pass with every nested call opaque (Decision 3),
+ * mirroring astTaint.ts's/astTaintPython.ts's/astTaintJava.ts's own
+ * buildPropagatingMap. Sound without extra cycle-breaking machinery because
+ * propagation is monotonic (each round only ever ADDS indices, never
+ * removes one, and every function's index set is bounded by its own
+ * parameter count) -- convergence is never in doubt, the round cap only
+ * bounds worst-case cost on a large file's call graph.
+ */
+function buildPropagatingMapGo(localFns: Map<string, LocalFn>): Map<string, Set<number>> {
+  const propagating = new Map<string, Set<number>>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    const isTaintedRound = makeIsTaintedGo(localFns, propagating);
+    for (const [name, fn] of localFns) {
+      const idx = computeReturnTaintPropagatingGo(fn, isTaintedRound);
+      const existingSize = propagating.get(name)?.size ?? 0;
+      if (idx.size > existingSize) {
+        propagating.set(name, idx);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return propagating;
 }
 
 function sourceLabelGo(node: SyntaxNode): string {
@@ -486,6 +638,25 @@ function identifiersOf(exprList: SyntaxNode): SyntaxNode[] {
   return exprList.namedChildren.filter((n): n is SyntaxNode => !!n && n.type === "identifier");
 }
 
+/** Assignment LHS targets (Decision 1, write side): identifier OR
+ * selector_expression (`obj.field`, confirmed directly: `user.Name = x`
+ * parses as `left: (expression_list (selector_expression ...))`, not an
+ * identifier -- previously entirely invisible to identifiersOf, so
+ * `user.Name = x` silently updated no env entry at all). Any other LHS
+ * shape (index_expression, etc.) stays unrecognized/untracked, same as
+ * before -- scoped to static dotted-property access only. */
+function assignmentTargetsOfGo(exprList: SyntaxNode): SyntaxNode[] {
+  return exprList.namedChildren.filter((n): n is SyntaxNode =>
+    !!n && (n.type === "identifier" || n.type === "selector_expression"));
+}
+
+/** Env lookup key for an assignment target: plain text for an identifier,
+ * the full dotted path (calleeTextGo) for a selector_expression -- the same
+ * key shape the new field-sensitive read case in makeIsTaintedGo checks. */
+function assignmentKeyOfGo(target: SyntaxNode): string | null {
+  return target.type === "identifier" ? target.text : calleeTextGo(target);
+}
+
 /**
  * Walks the whole tree once: tracks taint through env, seeds tainted
  * parameters into same-file callees on tainted call sites (one hop, mirrors
@@ -501,11 +672,7 @@ export function scanAstTaintGo(
     if (!root) return [];
 
     const localFns = collectLocalFunctionsGo(root);
-    const propagating = new Map<string, Set<number>>();
-    for (const [name, fn] of localFns) {
-      const idx = computeReturnTaintPropagatingGo(fn);
-      if (idx.size > 0) propagating.set(name, idx);
-    }
+    const propagating = buildPropagatingMapGo(localFns);
 
     const findings: AstTaintGoFinding[] = [];
     const seen = new Set<string>();
@@ -529,24 +696,30 @@ export function scanAstTaintGo(
         const left = node.childForFieldName("left");
         const right = node.childForFieldName("right");
         if (left && right) {
-          const leftIds = identifiersOf(left);
+          const leftTargets = assignmentTargetsOfGo(left);
           const rightVals = right.namedChildren.filter((n): n is SyntaxNode => !!n);
-          if (leftIds.length > 0 && rightVals.length === 1) {
+          if (leftTargets.length > 0 && rightVals.length === 1) {
             // Single RHS value (possibly Go's multi-return form binding N
-            // LHS identifiers to one call's multiple return values) -- per
-            // the approved plan's Decision 6, only the FIRST LHS identifier
-            // is ever marked tainted, never trailing ones (by strong Go
-            // convention those are typically `err`/`ok`, not real data).
-            // Deliberately conservative: avoids "the error variable is
-            // attacker-controlled" false positives.
+            // LHS targets to one call's multiple return values) -- per the
+            // approved plan's Decision 6, only the FIRST LHS target is ever
+            // marked tainted, never trailing ones (by strong Go convention
+            // those are typically `err`/`ok`, not real data). Deliberately
+            // conservative: avoids "the error variable is attacker-
+            // controlled" false positives. Also now the single-target case
+            // for a plain field write (`user.Name = input`), where
+            // leftTargets.length is already 1 -- assignmentKeyOfGo resolves
+            // both shapes uniformly.
             const tainted = isTainted(rightVals[0], env);
-            env.set(leftIds[0].text, tainted);
+            const key = assignmentKeyOfGo(leftTargets[0]);
+            if (key) env.set(key, tainted);
           } else {
-            // Positional 1:1 multi-assignment (`a, b = x, y`) -- each side
-            // has the same count; assign independently.
-            leftIds.forEach((idNode, i) => {
+            // Positional 1:1 multi-assignment (`a, b = x, y`, including a
+            // field target: `user.Name, user.Email = a, b`) -- each side has
+            // the same count; assign independently.
+            leftTargets.forEach((target, i) => {
               const rhs = rightVals[i];
-              if (rhs) env.set(idNode.text, isTainted(rhs, env));
+              const key = assignmentKeyOfGo(target);
+              if (rhs && key) env.set(key, isTainted(rhs, env));
             });
           }
         }
@@ -568,8 +741,10 @@ export function scanAstTaintGo(
         }
 
         const idorMatch = matchIdorGo(node);
-        if (idorMatch && isTainted(idorMatch.args[0], env) && !(idorAuthCheckNearby?.(lineOf(node)) ?? false)) {
-          emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
+        if (idorMatch && isTainted(idorMatch.args[0], env)) {
+          const suppressed = (idorAuthCheckNearby?.(lineOf(node)) ?? false) ||
+            structuralOwnershipCheckSuppressesGo(node, idorMatch.args[0]);
+          if (!suppressed) emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
         }
 
         // dec.Decode(...) -- receiver-tainted, not arg-tainted: fires if
@@ -660,18 +835,38 @@ export function scanAstTaintGo(
     const rootIsTainted = makeIsTaintedGo(localFns, propagating);
     walk(root, new Map(), rootIsTainted);
 
-    // Second pass: re-walk any local function whose params were seeded
-    // tainted by a call site above, so sinks inside the callee are reachable.
-    for (const [fnName, idxSet] of seededParams) {
-      const fn = localFns.get(fnName);
-      if (!fn) continue;
-      const env: Env = new Map();
-      for (const idx of idxSet) {
-        const shape = fn.paramShapes.find(s => s.index === idx);
-        if (shape) env.set(shape.name, true);
+    // Second pass, bounded worklist (Decision 3): re-walk any local function
+    // whose params were seeded tainted by a call site above, so sinks inside
+    // the callee are reachable. Re-walking can itself seed FURTHER functions
+    // (or grow an already-seeded function's own index set) via the same
+    // seeding logic above, which is exactly how a second/third hop (A calls
+    // B calls C) gets discovered -- explicitly capped at
+    // MAX_PROPAGATION_ROUNDS instead of relying on live-Map-iteration order
+    // for its multi-hop convergence, mirroring astTaint.ts's/
+    // astTaintPython.ts's/astTaintJava.ts's own bounded worklists.
+    // `walkedSignatures` skips re-walking a function with a seed set
+    // identical to one already walked, while still allowing a re-walk once
+    // that function's seed set has genuinely grown.
+    const walkedSignatures = new Set<string>();
+    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+      const toWalk = Array.from(seededParams.entries());
+      let changed = false;
+      for (const [fnName, idxSet] of toWalk) {
+        const fn = localFns.get(fnName);
+        if (!fn) continue;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        if (walkedSignatures.has(signature)) continue;
+        walkedSignatures.add(signature);
+        changed = true;
+        const env: Env = new Map();
+        for (const idx of idxSet) {
+          const shape = fn.paramShapes.find(s => s.index === idx);
+          if (shape) env.set(shape.name, true);
+        }
+        const seededIsTainted = makeIsTaintedGo(localFns, propagating);
+        for (const c of fn.body.namedChildren) if (c) walk(c, env, seededIsTainted);
       }
-      const seededIsTainted = makeIsTaintedGo(localFns, propagating);
-      for (const c of fn.body.namedChildren) if (c) walk(c, env, seededIsTainted);
+      if (!changed) break;
     }
 
     return findings;

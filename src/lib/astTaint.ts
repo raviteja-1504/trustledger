@@ -110,6 +110,18 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
 
 // ── Sink dispatch table ──────────────────────────────────────────────────────
 
+// Known sanitizer/escaping calls -- a match makes isTainted return false for
+// that CallExpression regardless of its argument's own taint. Correctly
+// handles the common `const clean = sanitize(dirty); sink(clean)` pattern
+// for free (assignment always re-evaluates isTainted(initializer, env)
+// fresh), but does NOT retroactively clean a variable through a sticky
+// in-place mutation site (e.g. the tainted-receiver method passthrough just
+// below) -- a documented, accepted narrower gap, not attempted here.
+const SANITIZER_NAMES = new Set([
+  "DOMPurify.sanitize", "sanitizeHtml", "he.encode", "he.escape",
+  "escapeHtml", "xss", "validator.escape",
+]);
+
 const CMD_SINK_NAMES = new Set(["exec", "execSync", "spawn", "spawnSync"]);
 const FS_SINK_NAMES = new Set([
   "readFile", "readFileSync", "writeFile", "writeFileSync",
@@ -254,6 +266,17 @@ function makeIsTainted(propagating: Map<string, ParamShape[]>) {
     if (ts.isParenthesizedExpression(expr)) return isTainted(expr.expression, env);
     if (isTaintSourceExpr(expr)) return true;
     if (ts.isIdentifier(expr)) return env.get(expr.text) === true;
+    if (ts.isPropertyAccessExpression(expr)) {
+      // Field-sensitive read: check the composite "root.field" key first
+      // (set by applyDeclAndAssign's field-write branch below); fall back
+      // to the existing root-object-taint check when no field-specific
+      // entry exists -- pure recall gain, this can only ever ADD a `true`
+      // result the old root-collapse behavior would have missed, never
+      // remove one already found that way.
+      const path = calleeText(expr);
+      if (path && env.get(path) === true) return true;
+      return isTainted(expr.expression, env);
+    }
     if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
       return isTainted(expr.left, env) || isTainted(expr.right, env);
     }
@@ -264,6 +287,8 @@ function makeIsTainted(propagating: Map<string, ParamShape[]>) {
       return expr.properties.some(p => ts.isPropertyAssignment(p) && isTainted(p.initializer, env));
     }
     if (ts.isCallExpression(expr)) {
+      const sanitizerName = calleeText(expr.expression);
+      if (sanitizerName && SANITIZER_NAMES.has(sanitizerName)) return false;
       // A call to a local (or cross-file-imported) function known to
       // propagate taint from SPECIFIC params to its return value -- e.g.
       // buildCommand(host) where buildCommand(h) { return `ping -c1 ${h}`; }.
@@ -342,10 +367,20 @@ function applyDeclAndAssign(node: ts.Node, env: Env, isTaintedFn: (e: ts.Express
     }
   } else if (
     ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) &&
-    node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-    ts.isIdentifier(node.expression.left)
+    node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
   ) {
-    env.set(node.expression.left.text, isTaintedFn(node.expression.right, env));
+    const { left, right } = node.expression;
+    if (ts.isIdentifier(left)) {
+      env.set(left.text, isTaintedFn(right, env));
+    } else if (ts.isPropertyAccessExpression(left)) {
+      // Field-sensitive write: `obj.field = expr` -- stores under the same
+      // composite "root.field" key the read side (isTainted, above) checks.
+      // Additive only: obj's own bare-identifier env entry (if any) is left
+      // untouched, so a consumer that only ever checked isTainted(obj)
+      // before this change sees exactly what it saw before.
+      const path = calleeText(left);
+      if (path) env.set(path, isTaintedFn(right, env));
+    }
   }
 }
 
@@ -384,14 +419,18 @@ function envAfterBody(body: ts.Node, seed: Env, isTaintedFn: (e: ts.Expression, 
  * taint is independently sufficient is missed, and no parameter is falsely
  * required to co-occur with another.
  *
- * Nested calls inside `fn`'s own body are deliberately treated as opaque
- * here (empty propagating map) to keep this a bounded, non-recursive
- * pass rather than a mutual-recursion risk between functions that call
- * each other.
+ * Nested calls inside `fn`'s own body are resolved using whatever
+ * `isTaintedFn` the caller passes in -- see buildPropagatingMap below,
+ * which threads a bounded, round-capped view of the file's OWN in-progress
+ * propagating map (never fully opaque, but never unbounded/recursive
+ * either) rather than the always-empty map this function used to build
+ * internally. Kept as an explicit parameter (not hardcoded here) so the
+ * same function serves both the cheap cross-file Pass-1 summary (still
+ * genuinely shallow, one file at a time) and the bounded same-file
+ * fixed-point below.
  */
-function computeReturnTaintPropagating(fn: LocalFn): Set<number> {
+function computeReturnTaintPropagating(fn: LocalFn, isTaintedFn: (e: ts.Expression, env: Env) => boolean): Set<number> {
   const propagatingIdx = new Set<number>();
-  const isTaintedShallow = makeIsTainted(new Map());
   const returnExprs: ts.Expression[] = [];
   if (!ts.isBlock(fn.body)) {
     returnExprs.push(fn.body as ts.Expression); // arrow expression body
@@ -405,10 +444,47 @@ function computeReturnTaintPropagating(fn: LocalFn): Set<number> {
   for (const shape of paramShapesOf(fn)) {
     const seed: Env = new Map();
     seed.set(shape.name, true);
-    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, isTaintedShallow) : seed;
-    if (returnExprs.some(expr => isTaintedShallow(expr, env))) propagatingIdx.add(shape.index);
+    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, isTaintedFn) : seed;
+    if (returnExprs.some(expr => isTaintedFn(expr, env))) propagatingIdx.add(shape.index);
   }
   return propagatingIdx;
+}
+
+// Caps every bounded fixed-point loop below (same-file propagating-map
+// convergence and the call-site-seeding worklist) -- named and shared for
+// the same reason AST_TAINT_LINE_CAP is a named constant in scanner.ts:
+// one clear knob, not a magic number repeated at each call site.
+const MAX_PROPAGATION_ROUNDS = 3;
+
+/**
+ * Builds a same-file `propagating` map via a bounded fixed-point iteration
+ * instead of one pass with every nested call opaque -- generalizes Java's
+ * own already-accidental multi-hop convergence (via live Map iteration in
+ * its call-site-seeding second pass) into an explicit, documented, capped
+ * algorithm here too. Sound without extra cycle-breaking machinery because
+ * propagation is monotonic: each round only ever ADDS propagating indices
+ * (isTainted is purely OR-shaped, per computeReturnTaintPropagating's own
+ * docblock), never removes one, and every function's index set is bounded
+ * by its own parameter count -- so this always converges. The round cap
+ * exists purely to bound worst-case cost on a large file's call graph, not
+ * because convergence itself is ever in doubt.
+ */
+function buildPropagatingMap(localFns: Map<string, LocalFn>): Map<string, ParamShape[]> {
+  const propagating = new Map<string, ParamShape[]>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    const isTaintedRound = makeIsTainted(propagating);
+    for (const [name, fn] of localFns) {
+      const idx = computeReturnTaintPropagating(fn, isTaintedRound);
+      const existingSize = propagating.get(name)?.length ?? 0;
+      if (idx.size > existingSize) {
+        propagating.set(name, paramShapesOf(fn).filter(s => idx.has(s.index)));
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return propagating;
 }
 
 function sourceLabel(expr: ts.Expression): string {
@@ -495,11 +571,11 @@ export function computeExportTaintSummary(
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
     const localFns = collectLocalFunctions(sourceFile);
-    for (const fn of localFns.values()) {
+    const propagating = buildPropagatingMap(localFns);
+    for (const [fnName, fn] of localFns) {
       if (fn.exportedNames.length === 0) continue;
-      const idx = computeReturnTaintPropagating(fn);
-      if (idx.size === 0) continue;
-      const shapes = paramShapesOf(fn).filter(s => idx.has(s.index));
+      const shapes = propagating.get(fnName);
+      if (!shapes || shapes.length === 0) continue;
       for (const name of fn.exportedNames) summary.set(name, shapes);
     }
   } catch (err) {
@@ -543,12 +619,7 @@ export function scanAstTaint(
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
     const importMap = buildImportMap(sourceFile);
     const localFns = collectLocalFunctions(sourceFile);
-    const propagating = new Map<string, ParamShape[]>();
-    for (const [name, fn] of localFns) {
-      const idx = computeReturnTaintPropagating(fn);
-      if (idx.size === 0) continue;
-      propagating.set(name, paramShapesOf(fn).filter(s => idx.has(s.index)));
-    }
+    const propagating = buildPropagatingMap(localFns);
     if (crossFilePropagating) {
       for (const [name, info] of crossFilePropagating) propagating.set(name, info.shapes);
     }
@@ -679,18 +750,37 @@ export function scanAstTaint(
 
     walkStatements(sourceFile, new Map());
 
-    // Second pass: re-walk any local function whose parameters were seeded
-    // as tainted by a call site above, so sinks inside the callee are reachable.
-    for (const [fnName, idxSet] of seededParams) {
-      const fn = localFns.get(fnName);
-      if (!fn) continue;
-      const env: Env = new Map();
-      const shapes = paramShapesOf(fn);
-      for (const idx of idxSet) {
-        const shape = shapes[idx];
-        if (shape) env.set(shape.name, true);
+    // Second pass, bounded worklist: re-walk any local function whose
+    // parameters were seeded as tainted by a call site above, so a sink
+    // inside the callee's own body is reachable. Re-walking can itself seed
+    // FURTHER functions (or grow an already-seeded function's own index
+    // set) via the same visitExpr logic above, which is exactly how a
+    // second/third hop (A calls B calls C) gets discovered -- bounded by
+    // MAX_PROPAGATION_ROUNDS rather than left as an unbounded/accidental
+    // side effect of Map iteration order. `walkedSignatures` skips re-
+    // walking a function with a seed set identical to one already walked
+    // (wasted, redundant work), while still allowing a re-walk once that
+    // function's seed set has genuinely grown.
+    const walkedSignatures = new Set<string>();
+    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+      const toWalk = Array.from(seededParams.entries());
+      let changed = false;
+      for (const [fnName, idxSet] of toWalk) {
+        const fn = localFns.get(fnName);
+        if (!fn) continue;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        if (walkedSignatures.has(signature)) continue;
+        walkedSignatures.add(signature);
+        changed = true;
+        const env: Env = new Map();
+        const shapes = paramShapesOf(fn);
+        for (const idx of idxSet) {
+          const shape = shapes[idx];
+          if (shape) env.set(shape.name, true);
+        }
+        walkStatements(fn.body, env);
       }
-      walkStatements(fn.body, env);
+      if (!changed) break;
     }
 
     return findings;

@@ -223,6 +223,126 @@ def view():
   });
 });
 
+describe("Real AST-based taint engine — field-sensitive taint tracking", () => {
+  it("flags a sink using a specific tainted attribute, not just any attribute of the object", () => {
+    const content = `
+class User:
+    pass
+
+def handler():
+    user = User()
+    user.name = request.args.get("name")
+    os.system(user.name)
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does not flag a sink using a sibling attribute that was never assigned taint (the concrete new capability this phase adds)", () => {
+    const content = `
+class User:
+    pass
+
+def handler():
+    user = User()
+    user.name = request.args.get("name")
+    user.age = 5
+    os.system(user.age)
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
+describe("Real AST-based taint engine — sanitizer recognition", () => {
+  it("does not flag a sink whose argument was assigned from a recognized sanitizer call", () => {
+    const content = `
+def handler():
+    dirty = request.args.get("cmd")
+    clean = shlex.quote(dirty)
+    os.system(clean)
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("still flags an unsanitized sink with the same shape", () => {
+    const content = `
+def handler():
+    dirty = request.args.get("cmd")
+    os.system(dirty)
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does not flag a sanitizer call wrapping the tainted value inline at the sink", () => {
+    const content = `
+def handler():
+    os.system(shlex.quote(request.args.get("cmd")))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
+describe("Real AST-based taint engine — bounded interprocedural propagation", () => {
+  // Declared caller-first (level_a before level_b before ...), same reason
+  // as astTaint.ts's equivalent block: a callee-first order would resolve
+  // an arbitrarily long chain in a single fixed-point round.
+  it("resolves a short caller-declared-first chain (level_b calls level_c)", () => {
+    const content = `
+def level_a(x):
+    return level_b(x)
+
+def level_b(x):
+    return level_c(x)
+
+def level_c(x):
+    return x
+
+def handler():
+    os.system(level_b(request.args.get("cmd")))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("resolves level_b in a 4-function caller-declared-first chain, within the round cap", () => {
+    const content = `
+def level_a(x):
+    return level_b(x)
+
+def level_b(x):
+    return level_c(x)
+
+def level_c(x):
+    return level_d(x)
+
+def level_d(x):
+    return x
+
+def handler():
+    os.system(level_b(request.args.get("cmd")))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does NOT resolve level_a (the outermost caller) in that same chain — the round cap is real, not accidentally unbounded", () => {
+    const content = `
+def level_a(x):
+    return level_b(x)
+
+def level_b(x):
+    return level_c(x)
+
+def level_c(x):
+    return level_d(x)
+
+def level_d(x):
+    return x
+
+def handler():
+    os.system(level_a(request.args.get("cmd")))
+`;
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+  });
+});
+
 describe("Real AST-based taint engine — negative cases and malformed-input guards", () => {
   it("does not flag a call with no taint anywhere in scope", () => {
     const content = `

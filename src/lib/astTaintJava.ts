@@ -151,6 +151,20 @@ function stringLiteralValue(node: CstNode): string | null {
 const SPRING_SOURCE_ANNOTATIONS = new Set(["PathVariable", "RequestParam", "RequestBody", "RequestHeader"]);
 const SERVLET_SOURCE_CALLS = new Set(["getParameter", "getHeader", "getParameterValues", "getQueryString"]);
 
+// ── Sanitizer/de-taint recognition ──────────────────────────────────────
+// Matched by method-name TAIL alone, same permissive-by-design posture as
+// the existing `tail === "format"` check below -- any receiver. Covers the
+// three real Java escaping libraries: OWASP Java Encoder (Encode.forHtml/
+// forHtmlAttribute/forHtmlContent/forJavaScript/forUriComponent), ESAPI
+// (encodeForHTML/encodeForJavaScript), and Commons Text/Lang
+// (escapeHtml4/escapeHtml3). See astTaint.ts's SANITIZER_NAMES for the
+// JS/TS equivalent this mirrors.
+const JAVA_SANITIZER_TAILS = new Set([
+  "forHtml", "forHtmlAttribute", "forHtmlContent", "forJavaScript", "forUriComponent",
+  "encodeForHTML", "encodeForJavaScript",
+  "escapeHtml4", "escapeHtml3",
+]);
+
 // ── BOLA: Spring resource-identifier / authorization-annotation classification ──
 
 // Only PathVariable/RequestParam identify "which resource" -- RequestBody is
@@ -417,7 +431,16 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
       if (restId) parts.push(restId.image);
     }
     const rootVar = parts[0] ?? null;
-    const taint = rootVar !== null && env.get(rootVar) === true;
+    // Field-sensitive read (Decision 1): a bare dotted reference like
+    // `user.name` checks the composite "root.field" key FIRST (set by the
+    // new field-assignment handling in walkForDeclarationsAndSinks), falling
+    // back to the existing root-object-taint check -- pure recall gain,
+    // never removes a `true` result the old root-only check already found.
+    // Deliberately scoped to exactly one field level (parts[0]+parts[1]),
+    // not the full dotted chain, matching the same one-level scope used on
+    // the write side below.
+    let taint = rootVar !== null && env.get(rootVar) === true;
+    if (!taint && parts.length >= 2 && env.get(`${parts[0]}.${parts[1]}`) === true) taint = true;
     return { parts, taint, rootVar, isNewExprOf: null };
   }
   const newExpr = firstNode(prefix, "newExpression");
@@ -435,6 +458,25 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     return { parts: [], taint: inner ? isTainted(inner, env, ctx) : false, rootVar: null, isNewExprOf: null };
   }
   return { parts: [], taint: false, rootVar: null, isNewExprOf: null };
+}
+
+/**
+ * Resolves an assignment LHS (`unaryExpression` operand of a `binaryExpression`
+ * carrying an `AssignmentOperator` -- see walkForDeclarationsAndSinks) to its
+ * env lookup key: a plain identifier for `x = ...`, or the one-level
+ * composite "root.field" key for `obj.field = ...`, reusing the same
+ * fqnOrRefType-chain parsing primaryPrefixInfo already does for reads.
+ * Returns null for any other LHS shape (array index, parenthesized, etc.) --
+ * scoped to static dotted-property access only, matching the read side.
+ */
+function assignmentTargetKey(lhsUnary: CstNode | undefined, env: Env, ctx: EngineCtx): string | null {
+  const primary = lhsUnary ? firstNode(lhsUnary, "primary") : undefined;
+  const prefix = primary ? firstNode(primary, "primaryPrefix") : undefined;
+  if (!prefix || allNodes(primary!, "primarySuffix").length !== 0) return null;
+  const { parts } = primaryPrefixInfo(prefix, env, ctx);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  return `${parts[0]}.${parts[1]}`;
 }
 
 /**
@@ -474,6 +516,18 @@ function walkPrimaryChain(
       const calleeName = nameParts.join(".");
       const chainTaintBefore = chainTaint;
       const anyArgTainted = args.some(a => isTainted(a, env, ctx));
+
+      // Sanitizer/escaping calls (Decision 2) -- de-taint at this point in
+      // the chain, checked BEFORE source/append/format/propagating-param
+      // checks so a sanitized value can't be re-tainted by one of those in
+      // this same call. Still reports the call (onCall) for sink-matching/
+      // seeding consistency, but skips every taint-increasing branch below.
+      if (JAVA_SANITIZER_TAILS.has(tail)) {
+        chainTaint = false;
+        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
+        nameParts = [];
+        continue;
+      }
 
       // Servlet API source: request.getParameter/getHeader/getParameterValues/getQueryString.
       if (rootVar === "request" && SERVLET_SOURCE_CALLS.has(tail)) {
@@ -636,20 +690,63 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
  * superset of what seeding a subset taints. Mirrors astTaint.ts's
  * computeReturnTaintPropagating / astTaintPython.ts's
  * computeReturnTaintPropagatingPy exactly.
+ *
+ * Nested calls inside `method`'s own body are resolved using `ctx` AS GIVEN
+ * -- no longer forced to an empty-map "shallowCtx" internally. Boundedness
+ * now comes entirely from the caller (buildPropagatingMapJava's round cap),
+ * matching JS/Python's own `isTaintedFn`-parameter refactor (Decision 3):
+ * the same function now serves both a genuinely-shallow one-shot call (pass
+ * a ctx with empty propagatingParams/localMethods) and the bounded
+ * fixed-point below (pass ctx with the in-progress round map).
  */
 function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx): Set<number> {
   const propagatingIdx = new Set<number>();
   if (!method.body) return propagatingIdx;
-  const shallowCtx: EngineCtx = { ...ctx, localMethods: new Map(), propagatingParams: new Map() };
   const returnExprs = findAllNodes(method.body, "returnStatement")
     .map(ret => firstNode(ret, "expression"))
     .filter((e): e is CstNode => !!e);
   for (const shape of method.paramShapes) {
     const env: Env = new Map();
     env.set(shape.name, true);
-    if (returnExprs.some(expr => isTainted(expr, env, shallowCtx))) propagatingIdx.add(shape.index);
+    if (returnExprs.some(expr => isTainted(expr, env, ctx))) propagatingIdx.add(shape.index);
   }
   return propagatingIdx;
+}
+
+// Caps every bounded fixed-point loop below (same-file propagating-map
+// convergence and the call-site-seeding worklist) -- named and shared for
+// the same reason astTaint.ts's own MAX_PROPAGATION_ROUNDS is, and matching
+// its value exactly.
+const MAX_PROPAGATION_ROUNDS = 3;
+
+/**
+ * Builds the same-file `propagatingParams` map via a bounded fixed-point
+ * iteration instead of one pass with every nested call opaque -- Decision 3,
+ * generalizing what was already an ACCIDENTAL multi-hop guarantee in this
+ * file's call-site-seeding second pass (live Map iteration) into an
+ * explicit, documented, capped algorithm here too, mirroring astTaint.ts's/
+ * astTaintPython.ts's own buildPropagatingMap. Sound without extra
+ * cycle-breaking machinery because propagation is monotonic (each round only
+ * ever ADDS indices, never removes one, and every method's index set is
+ * bounded by its own parameter count) -- convergence is never in doubt, the
+ * round cap only bounds worst-case cost on a large file's call graph.
+ */
+function buildPropagatingMapJava(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): Map<string, Set<number>> {
+  const propagating = new Map<string, Set<number>>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    const roundCtx: EngineCtx = { ...baseCtx, propagatingParams: propagating };
+    for (const [name, method] of localMethods) {
+      const idx = computeReturnTaintPropagatingJava(method, roundCtx);
+      const existingSize = propagating.get(name)?.size ?? 0;
+      if (idx.size > existingSize) {
+        propagating.set(name, idx);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return propagating;
 }
 
 /**
@@ -702,6 +799,30 @@ function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
       const tainted = initExpr ? isTainted(initExpr, env, ctx) : false;
       env.set(nameTok.image, tainted);
       if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
+    }
+  }
+
+  // Assignment (Decision 1, write side): `x = expr;` or `obj.field = expr;`.
+  // Chevrotain flattens a plain reference AND an assignment into the SAME
+  // `binaryExpression` production (see the module's other binaryExpression
+  // handling) -- an assignment is the one with a present `AssignmentOperator`
+  // child. Restricted to the plain `=` operator only (not `+=`/`-=`/etc,
+  // confirmed as a distinct sub-alternative of the same production): a
+  // compound assignment would need `env.get(key)` OR'd into the new value to
+  // stay additive-only, which isn't implemented here, so recognizing it
+  // would risk INCORRECTLY de-tainting an already-tainted target -- left
+  // unhandled (falls through to the generic recursion below, same as
+  // before) rather than risk that regression. Java had no assignment
+  // handling of any kind before this (only localVariableDeclaration's own
+  // initializer was tracked), so this also newly covers plain-identifier
+  // reassignment, not just the field case Decision 1 targets.
+  if (node.name === "binaryExpression") {
+    const assignTok = tokenKids(node, "AssignmentOperator")[0];
+    if (assignTok && assignTok.image === "=") {
+      const lhsUnary = firstNode(node, "unaryExpression");
+      const rhsExpr = firstNode(node, "expression");
+      const key = assignmentTargetKey(lhsUnary, env, ctx);
+      if (key) env.set(key, rhsExpr ? isTainted(rhsExpr, env, ctx) : false);
     }
   }
 
@@ -896,6 +1017,48 @@ function checkBolaSinkCandidate(
 }
 
 /**
+ * BOLA constructor-sink candidates (Decision 4 gap-fix): `new ClassName(id)`
+ * where `id` is a resource-id-sourced argument -- the confirmed WebGoat
+ * IDOREditOtherProfile.java/IDORViewOtherProfile.java shape
+ * (`new UserProfile(userId)`), which checkBolaSinkCandidate's method-name
+ * vocabulary (findById/save/Map get-put/etc) never recognized since it's
+ * not a method call at all. Not reachable via walkPrimaryChain's `onCall`
+ * (which only fires on `methodInvocationSuffix`, never `newExpression`), so
+ * this walks `primary` nodes directly, mirroring checkNewExpressionSink's
+ * existing constructor-argument pattern instead of onCall.
+ *
+ * Deliberately NOT restricted to a specific class-name vocabulary -- any
+ * constructor receiving a resource id, inside an endpoint method that (per
+ * collectBolaFindings' existing gates, unchanged here) has no
+ * @PreAuthorize/@Secured/@RolesAllowed annotation and no ownership
+ * comparison anywhere in its body, is exactly the shape this phase's plan
+ * approved flagging. Accepts some imprecision for recall, same posture as
+ * every other check in this file (e.g. `tail === "format"` matching any
+ * receiver by name alone).
+ */
+function checkBolaConstructorSinkCandidates(
+  method: LocalMethod, resourceIdParamNames: Set<string>, localInits: Map<string, CstNode>,
+  candidates: BolaSinkCandidate[],
+) {
+  if (!method.body) return;
+  for (const primary of findAllNodes(method.body, "primary")) {
+    const prefix = firstNode(primary, "primaryPrefix");
+    const newExpr = prefix ? firstNode(prefix, "newExpression") : undefined;
+    if (!newExpr) continue;
+    const uc = firstNode(newExpr, "unqualifiedClassInstanceCreationExpression");
+    if (!uc) continue;
+    const className = extractInstantiatedClassName(uc);
+    if (!className) continue;
+    const argList = firstNode(uc, "argumentList");
+    const args = argList ? allNodes(argList, "expression") : [];
+    if (args.length === 0) continue;
+    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
+      candidates.push({ node: primary, sourceExpr: nodeText(args[0]), sinkExpr: `new ${className}` });
+    }
+  }
+}
+
+/**
  * Per-method post-check, not per-call-site: BOLA's "is there an ownership
  * comparison ANYWHERE in this method" question needs the whole body
  * evaluated once, so candidate sinks are collected but not emitted until
@@ -932,6 +1095,7 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
       }
     });
   }
+  checkBolaConstructorSinkCandidates(method, method.resourceIdParamNames, localInits, candidates);
   for (const bin of findAllNodes(method.body, "binaryExpression")) {
     const ops = tokenKids(bin, "BinaryOperator");
     if (!ops.some(t => t.image === "==" || t.image === "!=")) continue;
@@ -959,10 +1123,8 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), findings: [], seen: new Set(),
     };
-    for (const [name, method] of localMethods) {
-      const idx = computeReturnTaintPropagatingJava(method, ctx);
-      if (idx.size > 0) ctx.propagatingParams.set(name, idx);
-    }
+    const propagating = buildPropagatingMapJava(localMethods, ctx);
+    for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
 
     for (const [, method] of localMethods) {
       if (!method.body) continue;
@@ -976,25 +1138,38 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       collectBolaFindings(method, ctx);
     }
 
-    // Second pass: re-walk any local method whose params were seeded
-    // tainted by a call site above, so a sink inside the callee's own body
-    // is reachable -- Java parity with astTaint.ts's/astTaintPython.ts's
-    // own second pass (see seedLocalMethodParams's docblock). ctx.seededParams
-    // can gain new entries during this loop if a seeded method itself calls
-    // another local method with newly-tainted data; a live Map iterator
-    // picks those up automatically, and convergence is guaranteed since
-    // each method's index set is bounded by its own parameter count and
-    // Set.add is idempotent -- the same property JS/Python's own second
-    // passes already rely on.
-    for (const [methodName, idxSet] of ctx.seededParams) {
-      const method = localMethods.get(methodName);
-      if (!method?.body) continue;
-      const env: Env = new Map();
-      for (const idx of idxSet) {
-        const shape = method.paramShapes[idx];
-        if (shape) env.set(shape.name, true);
+    // Second pass, bounded worklist (Decision 3): re-walk any local method
+    // whose params were seeded tainted by a call site above, so a sink
+    // inside the callee's own body is reachable -- Java parity with
+    // astTaint.ts's/astTaintPython.ts's own second pass (see
+    // seedLocalMethodParams's docblock). Re-walking can itself seed FURTHER
+    // methods (or grow an already-seeded method's own index set), which is
+    // how a second/third hop (A calls B calls C) gets discovered -- now
+    // explicitly capped at MAX_PROPAGATION_ROUNDS instead of relying on
+    // live-Map-iteration order for its multi-hop convergence (previously
+    // documented here as "guaranteed" as a side effect, not as a bound).
+    // `walkedSignatures` skips re-walking a method with a seed set identical
+    // to one already walked, while still allowing a re-walk once that
+    // method's seed set has genuinely grown.
+    const walkedSignatures = new Set<string>();
+    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+      const toWalk = Array.from(ctx.seededParams.entries());
+      let changed = false;
+      for (const [methodName, idxSet] of toWalk) {
+        const method = localMethods.get(methodName);
+        if (!method?.body) continue;
+        const signature = `${methodName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        if (walkedSignatures.has(signature)) continue;
+        walkedSignatures.add(signature);
+        changed = true;
+        const env: Env = new Map();
+        for (const idx of idxSet) {
+          const shape = method.paramShapes[idx];
+          if (shape) env.set(shape.name, true);
+        }
+        walkForDeclarationsAndSinks(method.body, env, ctx);
       }
-      walkForDeclarationsAndSinks(method.body, env, ctx);
+      if (!changed) break;
     }
 
     void filePath;
