@@ -113,7 +113,7 @@ async function computeFindings(orgId: string): Promise<DependencyResult> {
   }));
 
   return {
-    findings: deriveFindings(scansForDeps),
+    findings: await deriveFindings(scansForDeps),
     manifestPackages: collectManifestPackages(scansForDeps),
   };
 }

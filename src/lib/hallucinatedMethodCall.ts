@@ -19,7 +19,7 @@
  * method really exist" can never be proven via type inference -- only via
  * hand-curated allowlists of real methods on a small set of stable
  * built-ins (same hand-curated-table convention as dependencyScan.ts's
- * VULN_DB / depAnalysis.ts's WELL_KNOWN).
+ * NON_CVE_RISK_DB).
  *
  * Two tiers:
  *   Tier A -- allowlist check, but ONLY on unambiguous receivers (an array/

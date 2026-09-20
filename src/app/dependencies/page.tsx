@@ -8,7 +8,7 @@ import { isSeedMode, authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import type { ManifestPackage } from "@/lib/manifestPackages";
 import {
-  VULN_DB, buildFinding,
+  NON_CVE_RISK_DB, buildFinding,
   type DepFinding, type DepRisk, type DepType, type LangEcosystem, type LicenseRisk,
 } from "@/lib/dependencyScan";
 
@@ -38,26 +38,23 @@ const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
 // ── Offline fallback ───────────────────────────────────────────────────────────
 
+// Offline demo can only show NON_CVE_RISK_DB entries (hallucinated/typosquat/
+// unmaintained/outdated-with-no-CVE) -- it has no network path to reach the
+// live OSV.dev lookup the real /dependencies data goes through.
 function makeOffline(): DepFinding[] {
   const o = ORG;
   const spec = [
-    { pkg:"requests",     eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/processors/card_validator.py",  pr:482, sid:"sc_mock_001", ai:0.91 },
-    { pkg:"PyJWT",        eco:"python"     as LangEcosystem, repo:`${o}/auth-service`,    fp:"src/auth/token_service.py",         pr:341, sid:"sc_mock_002", ai:0.68 },
-    { pkg:"ml-utils-fast",eco:"python"     as LangEcosystem, repo:`${o}/fraud-detection`, fp:"models/risk_scorer.ts",             pr:219, sid:"sc_mock_003", ai:0.83 },
-    { pkg:"stripe-client",eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/gateway/stripe_client.py",      pr:479, sid:"sc_mock_001", ai:0.76 },
-    { pkg:"lodash",       eco:"typescript" as LangEcosystem, repo:`${o}/data-platform`,   fp:"src/pipelines/etl_runner.py",       pr:103, sid:"sc_mock_005", ai:0.65 },
-    { pkg:"axios",        eco:"typescript" as LangEcosystem, repo:`${o}/auth-service`,    fp:"src/notifications/email_client.ts", pr:338, sid:"sc_mock_002", ai:0.49 },
-    { pkg:"follow-redirects", eco:"typescript" as LangEcosystem, repo:`${o}/auth-service`, fp:"src/notifications/email_client.ts", pr:338, sid:"sc_mock_002", ai:0.49 },
-    { pkg:"cryptography", eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/crypto/signing.py",             pr:477, sid:"sc_mock_001", ai:0.55 },
-    { pkg:"moment",       eco:"javascript" as LangEcosystem, repo:`${o}/data-platform`,   fp:"src/utils/date_helper.js",          pr:102, sid:"sc_mock_005", ai:0.60 },
-    { pkg:"paramiko",     eco:"python"     as LangEcosystem, repo:`${o}/risk-engine`,     fp:"src/ssh/connection.py",             pr:90,  sid:"sc_mock_004", ai:0.45 },
-    { pkg:"numpy",        eco:"python"     as LangEcosystem, repo:`${o}/fraud-detection`, fp:"src/utils/feature_extractor.py",    pr:218, sid:"sc_mock_003", ai:0.38 },
-    { pkg:"django",       eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/api/views.py",                  pr:476, sid:"sc_mock_001", ai:0.52 },
+    { pkg:"ml-utils-fast",  eco:"python"     as LangEcosystem, repo:`${o}/fraud-detection`, fp:"models/risk_scorer.py",             pr:219, sid:"sc_mock_003", ai:0.83 },
+    { pkg:"stripe-client",  eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/gateway/stripe_client.py",      pr:479, sid:"sc_mock_001", ai:0.76 },
+    { pkg:"moment",         eco:"javascript" as LangEcosystem, repo:`${o}/data-platform`,   fp:"src/utils/date_helper.js",          pr:102, sid:"sc_mock_005", ai:0.60 },
+    { pkg:"colors",         eco:"javascript" as LangEcosystem, repo:`${o}/auth-service`,    fp:"src/notifications/email_client.js", pr:338, sid:"sc_mock_002", ai:0.49 },
+    { pkg:"numpy",          eco:"python"     as LangEcosystem, repo:`${o}/fraud-detection`, fp:"src/utils/feature_extractor.py",    pr:218, sid:"sc_mock_003", ai:0.38 },
+    { pkg:"psycopg2",       eco:"python"     as LangEcosystem, repo:`${o}/payments-api`,    fp:"src/db/connection.py",              pr:477, sid:"sc_mock_001", ai:0.55 },
+    { pkg:"Newtonsoft.Json",eco:"csharp"     as LangEcosystem, repo:`${o}/risk-engine`,     fp:"src/Serialization/JsonHelper.cs",   pr:90,  sid:"sc_mock_004", ai:0.45 },
   ];
   const seen = new Set<string>();
   return spec.flatMap(s => {
-    const isT = s.pkg === "follow-redirects";
-    const f = buildFinding(s.pkg, s.eco, s.repo, s.fp, s.pr, s.sid, s.ai, isT, isT ? "axios" : undefined);
+    const f = buildFinding(s.pkg, s.eco, s.repo, s.fp, s.pr, s.sid, s.ai);
     if (!f || seen.has(f.id)) return [];
     seen.add(f.id);
     return [f];
@@ -293,7 +290,7 @@ export default function DependenciesPage() {
               {exploits > 0 && <span className="text-[10px] font-black text-white bg-rose-600 px-2 py-0.5 rounded-full animate-pulse">⚡ {exploits} exploits public</span>}
             </div>
             <p className="text-sm text-gray-400">
-              Parses real imports across {ecosystems.length} ecosystems · {Object.keys(VULN_DB).length}-entry vuln DB · license + health checks · transitive deps
+              Parses real imports across {ecosystems.length} ecosystems · live OSV.dev vulnerability lookup · license + health checks · transitive deps
             </p>
           </div>
           <div className="flex flex-col items-end gap-0.5">
@@ -683,7 +680,7 @@ export default function DependenciesPage() {
           </svg>
           <p className="text-xs text-violet-800 leading-relaxed">
             <span className="font-bold">How it works:</span> Imports are parsed from real scanned file content across Python, TypeScript, JS, Go, Java, Rust, Ruby, C# and PHP.
-            Each import is cross-referenced against a {Object.keys(VULN_DB).length}-entry vulnerability database with CVE scores, license compliance, package health metrics, exploit availability, and transitive dependency tracking.
+            Each import is cross-referenced live against OSV.dev (CVE/GHSA vulnerability data) and the npm registry (license data), plus a curated list of hallucinated/typosquatted/unmaintained packages OSV can't know about.
             SBOM exports are generated in SPDX 2.3 and CycloneDX 1.5 format.
           </p>
         </div>

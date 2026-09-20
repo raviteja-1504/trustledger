@@ -117,6 +117,9 @@ export const cacheKeys = {
   billing:    (orgId: string)              => `bill:${orgId}`,
   dependencies:(orgId: string)             => `deps:${orgId}`,
   autoIncidentState: (orgId: string)       => `aincsync:${orgId}`,
+  osvPackage: (ecosystem: string, name: string, version: string) => `osvpkg:${ecosystem}:${name}:${version}`,
+  osvVulnId:  (id: string)                 => `osvvuln:${id}`,
+  npmLicense: (name: string, version: string) => `npmlic:${name}:${version}`,
 };
 
 // Every status value each of the above list endpoints can be filtered to,
@@ -149,4 +152,5 @@ export const TTL = {
   ORG_SETTINGS:600,  // 10 minutes
   BILLING:     300,  //  5 minutes
   DEPENDENCIES:300,  //  5 minutes (parsing every repo's file content is expensive)
+  VULN_INTEL:  86400,// 24 hours (CVE data changes slowly — day-scale, not request-scale)
 };

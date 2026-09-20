@@ -197,7 +197,6 @@ export async function POST(req: NextRequest) {
       cicd_trust:  null,
       trust_chain: { genesis_hash:"", file_hashes:[], chain_hash:"", scan_seal:"", timestamp: new Date().toISOString() },
       cross_file_consistency: { dominant_model:"unknown", style_agreement:1, outlier_files:[], mixed_languages:false },
-      dep_report:  null,
       compliance:  { frameworks:[], overall_score:1, top_findings:[] },
       skipped_unchanged: 0,
       semantic_graph: null,

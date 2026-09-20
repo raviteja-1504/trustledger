@@ -11,6 +11,9 @@
  */
 
 import { parsePackageJson, parseRequirementsTxt, parseGoMod } from "@/lib/depAnalysis";
+import { lookupVulnerabilities, OSV_ECOSYSTEM, type OsvLookup, type OsvVulnerability } from "@/lib/osvClient";
+import { lookupNpmLicense } from "@/lib/npmLicense";
+import { mapWithConcurrency } from "@/lib/github";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -82,68 +85,28 @@ interface VulnEntry {
   health_score?: number;
 }
 
-// ── Vulnerability + metadata database ─────────────────────────────────────────
-
-export const VULN_DB: Record<string, VulnEntry> = {
+// ── Non-CVE risk database ──────────────────────────────────────────────────────
+// Everything CVE-shaped used to be hand-typed and stale here too -- that's
+// now replaced by a live OSV.dev lookup in deriveFindings() below. What's
+// left is risk OSV structurally cannot know about: a package that doesn't
+// exist (hallucinated), a real package's malicious impostor (typosquat), or
+// "no CVE was ever filed, but this is still a bad idea" opinions
+// (unmaintained/outdated). buildFinding() below still reads this DB
+// synchronously for the offline/demo-data path (dependencies/page.tsx's
+// no-backend fallback) -- it has no live network path to fall back to.
+export const NON_CVE_RISK_DB: Record<string, VulnEntry> = {
   // ── Python ────────────────────────────────────────────────────────────────
-  "requests":     { risk:"CRITICAL", type:"vulnerable",   cve:"CVE-2023-32681", cvss:6.1, safeVersion:"2.31.0", description:"Open redirect in requests < 2.31.0 allows attackers to redirect to arbitrary URLs via crafted Host headers.", fix:"pip install 'requests>=2.31.0'", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"85M", last_publish:"2024-05-20", health_score:95, exploit_public:false },
-  "PyJWT":        { risk:"CRITICAL", type:"vulnerable",   cve:"CVE-2022-29217", cvss:7.5, safeVersion:"2.8.0",  description:"RSA signature verification bypass via HMAC key substitution. AI routinely generates jwt.decode() with 'none' algorithm accepted.", fix:"pip install 'PyJWT>=2.8.0'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"12M", last_publish:"2024-04-10", health_score:88, exploit_public:true, exploit_detail:"PoC published — token forgery trivial" },
-  "pyjwt":        { risk:"CRITICAL", type:"vulnerable",   cve:"CVE-2022-29217", cvss:7.5, safeVersion:"2.8.0",  description:"Same as PyJWT (case-insensitive alias). JWT signature bypass.", fix:"pip install 'PyJWT>=2.8.0'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"12M", last_publish:"2024-04-10", health_score:88, exploit_public:true, exploit_detail:"PoC published — token forgery trivial" },
-  "cryptography": { risk:"MEDIUM",   type:"vulnerable",   cve:"CVE-2023-49083", cvss:4.0, safeVersion:"41.0.6", description:"Memory corruption in certain OpenSSL calls in cryptography < 41.0.6. Upgrade recommended.", fix:"pip install 'cryptography>=41.0.6'", license_spdx:"Apache-2.0 OR BSD-3-Clause", license_risk:"safe", weekly_downloads:"8M", last_publish:"2024-06-10", health_score:90, exploit_public:false },
-  "django":       { risk:"HIGH",     type:"vulnerable",   cve:"CVE-2023-36053", cvss:7.5, safeVersion:"4.2.4",  description:"ReDoS vulnerability in EmailValidator in Django < 4.2.4. AI frequently generates Django apps with pinned old versions.", fix:"pip install 'django>=4.2.4'", license_spdx:"BSD-3-Clause", license_risk:"safe", weekly_downloads:"7M", last_publish:"2024-04-03", health_score:92, exploit_public:false },
-  "flask":        { risk:"MEDIUM",   type:"vulnerable",   cve:"CVE-2023-30861", cvss:7.5, safeVersion:"2.3.2",  description:"Cookie SameSite attribute not respected in Flask < 2.3.2, enabling CSRF attacks.", fix:"pip install 'flask>=2.3.2'", license_spdx:"BSD-3-Clause", license_risk:"safe", weekly_downloads:"5M", last_publish:"2024-03-28", health_score:88, exploit_public:false },
-  "paramiko":     { risk:"HIGH",     type:"vulnerable",   cve:"CVE-2023-48795", cvss:5.9, safeVersion:"3.4.0",  description:"Terrapin attack — SSH handshake prefix truncation. AI SSH code commonly imports paramiko without pinning.", fix:"pip install 'paramiko>=3.4.0'", license_spdx:"LGPL-2.1", license_risk:"review", license_note:"LGPL — static linking requires open-sourcing. Dynamic linking is fine.", weekly_downloads:"2M", last_publish:"2024-02-14", health_score:82, exploit_public:true, exploit_detail:"Terrapin PoC widely available (2023)" },
   "psycopg2":     { risk:"LOW",      type:"outdated",     safeVersion:"2.9.9",  description:"Older psycopg2 misses performance and security backports.", fix:"pip install 'psycopg2>=2.9.9'", license_spdx:"LGPL-3.0", license_risk:"review", license_note:"LGPL — dynamic linking is fine for most deployments.", weekly_downloads:"4M", last_publish:"2024-01-20", health_score:78, exploit_public:false },
   "numpy":        { risk:"LOW",      type:"outdated",     safeVersion:"1.26.4", description:"Older numpy release misses security backports and performance improvements.", fix:"pip install 'numpy>=1.26.4'", license_spdx:"BSD-3-Clause", license_risk:"safe", weekly_downloads:"40M", last_publish:"2024-02-25", health_score:96, exploit_public:false },
-  "pydantic":     { risk:"SAFE",     type:"safe",         description:"Up to date, actively maintained, no known vulnerabilities.", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"20M", last_publish:"2024-06-01", health_score:97, exploit_public:false },
-  "sqlalchemy":   { risk:"LOW",      type:"safe",         description:"SQLAlchemy is safe — ensure parameterised queries via ORM, not raw SQL.", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"10M", last_publish:"2024-05-12", health_score:93, exploit_public:false },
   "ml-utils-fast":{ risk:"CRITICAL", type:"hallucinated", description:"Does NOT exist on PyPI. AI hallucinated this name — any published version executes arbitrary code on install.", fix:"Remove import. Use scikit-learn or numpy instead.", license_spdx:undefined, license_risk:"block", license_note:"Non-existent package — legal status unknown", is_archived:false, health_score:0, exploit_public:true, exploit_detail:"Zero-day supply chain risk — name squatting trivial" },
   "stripe-client":{ risk:"CRITICAL", type:"typosquatting", description:"Typosquatting the official 'stripe' library. Known malicious package containing a credential harvester.", fix:"Use official 'stripe' package: pip install stripe>=7.0.0", license_spdx:undefined, license_risk:"block", license_note:"Malicious — do not use", health_score:0, exploit_public:true, exploit_detail:"Active credential harvester confirmed in PyPI reports" },
 
   // ── JavaScript / TypeScript ───────────────────────────────────────────────
-  "lodash":       { risk:"HIGH",    type:"vulnerable",   cve:"CVE-2021-23337", cvss:7.2, safeVersion:"4.17.21", description:"Command injection via template() in lodash < 4.17.21. AI consistently recommends this version.", fix:"npm install 'lodash@>=4.17.21'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"45M", last_publish:"2021-02-20", is_archived:false, is_deprecated:false, health_score:65, exploit_public:false, cvss_vector:"CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H" },
-  "axios":        { risk:"HIGH",    type:"vulnerable",   cve:"CVE-2021-3749",  cvss:7.5, safeVersion:"1.6.2",   description:"ReDoS in axios normaliseHeaders(). AI commonly suggests axios 0.x, which is outdated and vulnerable.", fix:"npm install 'axios@>=1.6.2'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"35M", last_publish:"2024-03-21", health_score:88, exploit_public:false },
-  "jsonwebtoken": { risk:"CRITICAL", type:"vulnerable",  cve:"CVE-2022-23529", cvss:7.6, safeVersion:"9.0.0",   description:"Remote code execution via secretOrPublicKey misconfiguration. AI JWT code regularly misuses this library.", fix:"npm install 'jsonwebtoken@>=9.0.0'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"12M", last_publish:"2023-09-14", health_score:79, exploit_public:true, exploit_detail:"PoC exists for crafted header attack" },
-  "express":      { risk:"MEDIUM",  type:"vulnerable",   cve:"CVE-2024-43796", cvss:5.0, safeVersion:"4.19.2",  description:"XSS via response.redirect() in express < 4.19.2.", fix:"npm install 'express@>=4.19.2'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"30M", last_publish:"2024-03-25", health_score:90, exploit_public:false },
   "moment":       { risk:"MEDIUM",  type:"unmaintained", description:"Moment.js is legacy and unmaintained since Sep 2022. AI still recommends it. Use date-fns or dayjs.", fix:"Replace with: npm install date-fns  OR  npm install dayjs", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"15M", last_publish:"2022-04-04", is_deprecated:true, health_score:30, exploit_public:false },
-  "node-fetch":   { risk:"HIGH",    type:"vulnerable",   cve:"CVE-2022-0235",  cvss:6.1, safeVersion:"3.3.2",   description:"Open redirect in node-fetch < 2.6.7. Use native fetch (Node 18+) instead.", fix:"npm install 'node-fetch@>=3.3.2'  OR  use globalThis.fetch", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"20M", last_publish:"2023-12-21", health_score:72, exploit_public:false },
-  "minimist":     { risk:"HIGH",    type:"vulnerable",   cve:"CVE-2021-44906", cvss:9.8, safeVersion:"1.2.6",   description:"Prototype pollution in minimist < 1.2.6. Common AI-introduced transitive dep.", fix:"npm install 'minimist@>=1.2.6'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"40M", last_publish:"2022-03-16", health_score:55, exploit_public:true, exploit_detail:"Widely exploited prototype pollution chain" },
   "colors":       { risk:"HIGH",    type:"unmaintained", description:"Maintainer intentionally published malicious versions (infinite loop). Blacklisted by many registries.", fix:"Replace with: npm install chalk  OR  npm install picocolors", license_spdx:"MIT", license_risk:"review", license_note:"Intentional sabotage history — avoid in production", is_deprecated:true, health_score:10, exploit_public:true, exploit_detail:"v1.4.44-liberty-2 is intentionally malicious" },
-  "follow-redirects": { risk:"HIGH", type:"transitive",  cve:"CVE-2022-0536",  cvss:6.1, safeVersion:"1.15.4",  description:"Sensitive data exposure via HTTP redirect in follow-redirects (common axios transitive dep).", fix:"npm install 'follow-redirects@>=1.15.4'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"35M", last_publish:"2023-11-09", health_score:75, exploit_public:false },
-
-  // ── Go ────────────────────────────────────────────────────────────────────
-  "github.com/dgrijalva/jwt-go": { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2020-26160", cvss:7.7, safeVersion:"github.com/golang-jwt/jwt/v5", description:"JWT audience claim not validated. This module is archived — AI still imports it.", fix:"Replace with: go get github.com/golang-jwt/jwt/v5", license_spdx:"MIT", license_risk:"safe", is_archived:true, health_score:0, exploit_public:true, exploit_detail:"Widely exploited for privilege escalation" },
-  "github.com/gogo/protobuf":    { risk:"HIGH",     type:"vulnerable", cve:"CVE-2021-3121",  cvss:8.6, safeVersion:"1.3.2",  description:"Panic/RCE via malformed protobuf message in gogo/protobuf.", fix:"Update to v1.3.2+", license_spdx:"BSD-3-Clause", license_risk:"safe", weekly_downloads:"500K", last_publish:"2021-09-02", health_score:70, exploit_public:false },
-  "gopkg.in/yaml.v2":            { risk:"MEDIUM",   type:"vulnerable", cve:"CVE-2022-28948", cvss:7.5, safeVersion:"v3",     description:"Denial of service via crafted YAML. Upgrade to gopkg.in/yaml.v3.", fix:"go get gopkg.in/yaml.v3", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"2M", last_publish:"2022-05-14", health_score:60, exploit_public:false },
-
-  // ── Java ──────────────────────────────────────────────────────────────────
-  // Keyed by full Maven coordinate ("groupId:artifactId"), not bare
-  // artifactId -- see parsePomXml/parseBuildGradle below. Java import
-  // statements (org.springframework.*) never reliably map to an exact
-  // artifact id, so manifest-based coordinates are the only correct source
-  // of truth for these entries; keying by artifactId alone silently
-  // matched nothing, since nothing ever produced a bare "spring-webmvc"
-  // string to look up.
-  "org.apache.logging.log4j:log4j-core": { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2021-44228", cvss:10.0, exploit_public:true, exploit_detail:"Log4Shell — remotely exploitable worldwide. Patch within hours.", safeVersion:"2.17.1", description:"Log4Shell: RCE via JNDI lookup in log4j-core < 2.16.0. CVSS 10.0. Actively exploited globally.", fix:"Update to log4j-core >= 2.17.1 in pom.xml or build.gradle", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"5M", last_publish:"2022-02-01", health_score:85, cvss_vector:"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H" },
-  "org.apache.commons:commons-text":      { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-42889", cvss:9.8, exploit_public:true, exploit_detail:"Text4Shell PoC widely available", safeVersion:"1.10.0", description:"Text4Shell: RCE via StringLookup interpolation in commons-text < 1.10.0.", fix:"Update commons-text to >= 1.10.0", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"3M", last_publish:"2023-08-14", health_score:82 },
-  "org.springframework:spring-webmvc":    { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Spring4Shell — mass exploitation observed", safeVersion:"5.3.18",  description:"Spring4Shell: RCE via DataBinder in Spring Framework < 5.3.18.", fix:"Update Spring Framework to >= 5.3.18", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
-  "org.springframework:spring-core":      { risk:"CRITICAL", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Spring4Shell — mass exploitation observed", safeVersion:"5.3.18",  description:"Spring4Shell: RCE via DataBinder in Spring Framework < 5.3.18.", fix:"Update Spring Framework to >= 5.3.18", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
-  "org.springframework.boot:spring-boot-starter-web": { risk:"HIGH", type:"vulnerable", cve:"CVE-2022-22965", cvss:9.8, exploit_public:true, exploit_detail:"Bundles vulnerable spring-webmvc transitively", safeVersion:"2.6.6", description:"Bundles a vulnerable Spring Framework version affected by Spring4Shell unless overridden.", fix:"Update spring-boot-starter-web to >= 2.6.6, or override spring-core/spring-webmvc directly", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"4M", last_publish:"2024-04-12", health_score:88 },
-
-  // ── Rust ──────────────────────────────────────────────────────────────────
-  "openssl":     { risk:"HIGH",   type:"vulnerable", cve:"CVE-2023-0286", cvss:7.4, safeVersion:"0.10.55", description:"Type confusion in X.400 address processing in openssl crate.", fix:"openssl = \"0.10.55\" in Cargo.toml", license_spdx:"Apache-2.0", license_risk:"safe", weekly_downloads:"1M", last_publish:"2024-03-20", health_score:85, exploit_public:false },
-  "serde_json":  { risk:"SAFE",  type:"safe",        description:"Well-maintained, no known vulnerabilities.", license_spdx:"MIT OR Apache-2.0", license_risk:"safe", weekly_downloads:"5M", last_publish:"2024-06-01", health_score:98, exploit_public:false },
-
-  // ── Ruby ──────────────────────────────────────────────────────────────────
-  "rails":       { risk:"HIGH",   type:"vulnerable", cve:"CVE-2024-26143", cvss:7.5, safeVersion:"7.1.3.2", description:"XSS via response headers in Rails < 7.1.3.2.", fix:"gem 'rails', '>= 7.1.3.2'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"500K", last_publish:"2024-05-01", health_score:88, exploit_public:false },
-  "nokogiri":    { risk:"HIGH",   type:"vulnerable", cve:"CVE-2022-29181", cvss:7.5, safeVersion:"1.14.3",  description:"Inefficient regex in Nokogiri < 1.14.3 enables ReDoS.", fix:"gem 'nokogiri', '>= 1.14.3'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"300K", last_publish:"2024-03-15", health_score:82, exploit_public:false },
 
   // ── C# ────────────────────────────────────────────────────────────────────
   "Newtonsoft.Json": { risk:"MEDIUM", type:"outdated", safeVersion:"13.0.3", description:"Older Newtonsoft.Json misses deserialization security hardening.", fix:"<PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"300M", last_publish:"2023-10-19", health_score:78, exploit_public:false },
-
-  // ── PHP ───────────────────────────────────────────────────────────────────
-  "guzzlehttp/guzzle": { risk:"HIGH",   type:"vulnerable", cve:"CVE-2023-29197", cvss:7.5, safeVersion:"7.8.1", description:"Header injection vulnerability in Guzzle < 7.8.1.", fix:"composer require 'guzzlehttp/guzzle:>=7.8.1'", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"700K", last_publish:"2024-02-08", health_score:85, exploit_public:false },
-  "laravel/framework": { risk:"MEDIUM", type:"vulnerable", cve:"CVE-2024-29291", cvss:5.4, safeVersion:"10.48.14", description:"Auth bypass in certain middleware configurations in Laravel.", fix:"composer update laravel/framework", license_spdx:"MIT", license_risk:"safe", weekly_downloads:"500K", last_publish:"2024-04-10", health_score:90, exploit_public:false },
 };
 
 // ── Transitive dependency map ──────────────────────────────────────────────────
@@ -236,11 +199,10 @@ export function parseImports(content: string, eco: LangEcosystem): string[] {
   return Array.from(pkgs).filter(Boolean);
 }
 
-export function buildFinding(pkg: string, eco: LangEcosystem, repo: string, filePath: string, prNumber: number, scanId: string, aiPct: number, isTransitive = false, pulledBy?: string): DepFinding | null {
-  const entry = VULN_DB[pkg];
-  if (!entry) return null;
-  if (entry.type === "safe") return null;
-
+// Shared between the offline/demo path (buildFinding, sync) and the live
+// OSV-backed path (deriveFindings, async) below -- a NON_CVE_RISK_DB hit
+// means the same thing regardless of which path produced it.
+function nonCveEntryToFinding(pkg: string, entry: VulnEntry, eco: LangEcosystem, repo: string, filePath: string, prNumber: number, scanId: string, aiPct: number, isTransitive: boolean, pulledBy?: string): DepFinding {
   const licClass = classifyLicense(entry.license_spdx);
   return {
     id:              `${scanId}::${filePath}::${pkg}${isTransitive?"-t":""}`,
@@ -271,6 +233,17 @@ export function buildFinding(pkg: string, eco: LangEcosystem, repo: string, file
     is_deprecated:   entry.is_deprecated ?? false,
     health_score:    entry.health_score ?? 70,
   };
+}
+
+/** Offline/demo-data path ONLY (dependencies/page.tsx's no-backend
+ *  fallback) -- synchronous, so it can run in the browser with zero network
+ *  calls. The live path (every real request) is deriveFindings() below,
+ *  which additionally cross-references OSV.dev and the npm registry. */
+export function buildFinding(pkg: string, eco: LangEcosystem, repo: string, filePath: string, prNumber: number, scanId: string, aiPct: number, isTransitive = false, pulledBy?: string): DepFinding | null {
+  const entry = NON_CVE_RISK_DB[pkg];
+  if (!entry) return null;
+  if (entry.type === "safe") return null;
+  return nonCveEntryToFinding(pkg, entry, eco, repo, filePath, prNumber, scanId, aiPct, isTransitive, pulledBy);
 }
 
 // Maven's <dependency> blocks — matches both direct dependencies and
@@ -306,39 +279,169 @@ export function parseBuildGradle(content: string): string[] {
   return coords;
 }
 
-// Manifest files declare dependencies directly — parse the declared package
-// identifiers instead of scanning for import statements (which a
-// JSON/XML/Gradle manifest won't contain in the same shape as source code).
-function manifestPackages(filePath: string, content: string): string[] | null {
+interface DeclaredPackage { name: string; version: string }
+
+// Manifest files declare dependencies (and, unlike a source import
+// statement, an actual version spec) directly — parse those instead of
+// scanning for import statements. pom.xml/build.gradle coordinates carry no
+// parseable version today, so those report "" (package-wide OSV lookup).
+function manifestPackages(filePath: string, content: string): DeclaredPackage[] | null {
   const name = filePath.toLowerCase();
-  if (name.endsWith("package.json"))     return parsePackageJson(content).map(p => p.name);
-  if (name.endsWith("requirements.txt")) return parseRequirementsTxt(content).map(p => p.name);
-  if (name.endsWith("go.mod"))           return parseGoMod(content).map(p => p.name);
-  if (name.endsWith("pom.xml"))          return parsePomXml(content);
-  if (name.endsWith("build.gradle") || name.endsWith("build.gradle.kts")) return parseBuildGradle(content);
+  if (name.endsWith("package.json"))     return parsePackageJson(content).map(p => ({ name: p.name, version: p.version }));
+  if (name.endsWith("requirements.txt")) return parseRequirementsTxt(content).map(p => ({ name: p.name, version: p.version }));
+  if (name.endsWith("go.mod"))           return parseGoMod(content).map(p => ({ name: p.name, version: p.version }));
+  if (name.endsWith("pom.xml"))          return parsePomXml(content).map(coord => ({ name: coord, version: "" }));
+  if (name.endsWith("build.gradle") || name.endsWith("build.gradle.kts")) return parseBuildGradle(content).map(coord => ({ name: coord, version: "" }));
   return null;
 }
 
-export function deriveFindings(scans: ScanForDeps[]): DepFinding[] {
-  const findings: DepFinding[] = [];
-  const seen = new Set<string>();
+/** Strips range operators (npm's ^/~/>=/etc., Python's ==/>=/~=/etc.) down
+ *  to a bare version OSV can query against. "*"/"" query package-wide.
+ *  Using the lower bound of a range (rather than resolving the actual
+ *  installed version, which would need lockfile parsing -- deferred) biases
+ *  toward over-reporting older, more heavily-CVE'd versions -- the correct
+ *  direction to err for a security tool, not the incorrect one. */
+function versionForOsvQuery(raw: string): string {
+  if (!raw || raw === "*") return "";
+  const firstToken = raw.trim().split(/\s+/)[0];
+  return firstToken.replace(/^[\^~=<>!]+/, "");
+}
+
+interface PackageOccurrence {
+  pkg: string; version: string; eco: LangEcosystem;
+  repo: string; filePath: string; prNumber: number; scanId: string; aiPct: number;
+  isTransitive: boolean; pulledBy?: string;
+}
+
+const SEVERITY_ORDER: Record<OsvVulnerability["severity"], number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3 };
+
+function pickWorstVuln(vulns: OsvVulnerability[]): OsvVulnerability | undefined {
+  return vulns.reduce<OsvVulnerability | undefined>(
+    (worst, v) => (!worst || SEVERITY_ORDER[v.severity] > SEVERITY_ORDER[worst.severity]) ? v : worst,
+    undefined,
+  );
+}
+
+function liveFindingFor(
+  occ: PackageOccurrence,
+  osvResults: Map<string, OsvVulnerability[]>,
+  licenses: Map<string, string | null>,
+): DepFinding {
+  const nonCve = NON_CVE_RISK_DB[occ.pkg];
+  if (nonCve && nonCve.type !== "safe") {
+    return nonCveEntryToFinding(occ.pkg, nonCve, occ.eco, occ.repo, occ.filePath, occ.prNumber, occ.scanId, occ.aiPct, occ.isTransitive, occ.pulledBy);
+  }
+
+  const osvEco  = OSV_ECOSYSTEM[occ.eco];
+  const version = versionForOsvQuery(occ.version);
+  const vulns   = osvEco ? osvResults.get(`${osvEco}|${occ.pkg}|${version}`) ?? [] : [];
+  const worst   = pickWorstVuln(vulns);
+
+  const license = licenses.get(occ.pkg) ?? undefined;
+  const licClass = classifyLicense(license);
+  const id = `${occ.scanId}::${occ.filePath}::${occ.pkg}${occ.isTransitive?"-t":""}`;
+  const base = {
+    id, package_name: occ.pkg, ecosystem: occ.eco, manager: ECO_MANAGER[occ.eco],
+    repo: occ.repo, file_path: occ.filePath, pr_number: occ.prNumber, scan_id: occ.scanId,
+    ai_introduced: occ.aiPct > 0.4, is_transitive: occ.isTransitive, pulled_by: occ.pulledBy,
+    license_spdx: license ?? licClass.label, license_risk: licClass.risk, license_note: licClass.note,
+    is_archived: false, is_deprecated: false,
+  };
+
+  if (worst) {
+    return {
+      ...base,
+      version_used:   occ.version || "unknown",
+      latest_version: worst.fixedIn,
+      risk:           worst.severity,
+      type:           occ.isTransitive ? "transitive" : "vulnerable",
+      description:    worst.summary || `${worst.id} affects this package version.`,
+      fix:            worst.fixedIn ? `Update ${occ.pkg} to ${worst.fixedIn} or later` : undefined,
+      cve:            worst.aliases.find(a => a.startsWith("CVE-")) ?? worst.id,
+      exploit_public: false,
+      health_score:   50,
+    };
+  }
+
+  // Clean package -- synthesize a `safe` finding so SBOM export lists every
+  // declared package, not just the flagged ones (a free side effect of this
+  // restructuring, not extra work -- generateSPDX/generateCycloneDX already
+  // just serialize whatever's in the findings array).
+  return {
+    ...base,
+    version_used:   occ.version || "unknown",
+    risk:           "SAFE",
+    type:           occ.isTransitive ? "transitive" : "safe",
+    description:    "No known vulnerabilities found via OSV.dev.",
+    exploit_public: false,
+    health_score:   85,
+  };
+}
+
+/**
+ * The live, server-side findings pipeline (api/dependencies/route.ts) --
+ * cross-references every declared/imported package against NON_CVE_RISK_DB
+ * (hallucinated/typosquat/unmaintained-with-no-CVE) and, for everything
+ * else, a live OSV.dev vulnerability lookup + npm registry license lookup.
+ * NON_CVE_RISK_DB takes precedence: OSV can't know about a package that
+ * doesn't exist or a real package's abandonment status.
+ */
+export async function deriveFindings(scans: ScanForDeps[]): Promise<DepFinding[]> {
+  const occurrences: PackageOccurrence[] = [];
   for (const scan of scans) {
     for (const file of scan.files) {
       if (!file.content) continue;
       const eco = detectEcosystem(file.file_path);
       if (eco === "unknown") continue;
       const declared = manifestPackages(file.file_path, file.content);
-      const imports = declared ?? parseImports(file.content, eco);
-      for (const pkg of imports) {
-        const f = buildFinding(pkg, eco, scan.repo, file.file_path, scan.pr_number, scan.scan_id, file.ai_percentage);
-        if (f && !seen.has(f.id)) { seen.add(f.id); findings.push(f); }
-        // Transitive deps
-        for (const transitive of TRANSITIVE_MAP[pkg] ?? []) {
-          const tf = buildFinding(transitive, eco, scan.repo, file.file_path, scan.pr_number, scan.scan_id, file.ai_percentage, true, pkg);
-          if (tf && !seen.has(tf.id)) { seen.add(tf.id); findings.push(tf); }
+      const refs: DeclaredPackage[] = declared ?? parseImports(file.content, eco).map(name => ({ name, version: "" }));
+      for (const ref of refs) {
+        occurrences.push({ pkg: ref.name, version: ref.version, eco, repo: scan.repo, filePath: file.file_path, prNumber: scan.pr_number, scanId: scan.scan_id, aiPct: file.ai_percentage, isTransitive: false });
+        for (const transitive of TRANSITIVE_MAP[ref.name] ?? []) {
+          occurrences.push({ pkg: transitive, version: "", eco, repo: scan.repo, filePath: file.file_path, prNumber: scan.pr_number, scanId: scan.scan_id, aiPct: file.ai_percentage, isTransitive: true, pulledBy: ref.name });
         }
       }
     }
+  }
+
+  const lookups = new Map<string, OsvLookup>();
+  for (const occ of occurrences) {
+    if (NON_CVE_RISK_DB[occ.pkg]) continue;
+    const osvEco = OSV_ECOSYSTEM[occ.eco];
+    if (!osvEco) continue;
+    const version = versionForOsvQuery(occ.version);
+    lookups.set(`${osvEco}|${occ.pkg}|${version}`, { ecosystem: osvEco, name: occ.pkg, version });
+  }
+  // osvClient/npmLicense already fail open internally (never throw, per
+  // their own contract) -- this second layer guards against a regression
+  // there taking down the whole dependency report instead of just degrading
+  // it, matching this codebase's established fail-open philosophy.
+  let osvResults = new Map<string, OsvVulnerability[]>();
+  if (lookups.size > 0) {
+    try {
+      osvResults = await lookupVulnerabilities(Array.from(lookups.values()));
+    } catch { /* degrade: every package below falls through to a "safe" finding */ }
+  }
+
+  // License: npm only this phase (OSV has no license data regardless).
+  const licenseTargets = new Map<string, string>();
+  for (const occ of occurrences) {
+    if (NON_CVE_RISK_DB[occ.pkg]) continue;
+    if (occ.eco !== "javascript" && occ.eco !== "typescript") continue;
+    if (!licenseTargets.has(occ.pkg)) licenseTargets.set(occ.pkg, versionForOsvQuery(occ.version));
+  }
+  const licenses = new Map<string, string | null>();
+  try {
+    await mapWithConcurrency(Array.from(licenseTargets.entries()), 8, async ([pkg, version]) => {
+      licenses.set(pkg, await lookupNpmLicense(pkg, version || undefined));
+    });
+  } catch { /* degrade: findings render with an unknown license instead of failing */ }
+
+  const findings: DepFinding[] = [];
+  const seen = new Set<string>();
+  for (const occ of occurrences) {
+    const f = liveFindingFor(occ, osvResults, licenses);
+    if (!seen.has(f.id)) { seen.add(f.id); findings.push(f); }
   }
   return findings;
 }

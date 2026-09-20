@@ -2,9 +2,10 @@
 //
 // Source files (by extension) get AI/secrets/vuln analysis. Dependency
 // manifests (matched by full filename, regardless of extension) carry no AI
-// content but are parsed by depAnalysis (see src/lib/scanner.ts) to populate
-// the phantom-dependency and risky-package checks — so they must also be
-// fetched, or dep_report stays null and those pages show 0.
+// content but are parsed (via depAnalysis.ts's manifest parsers) by both
+// /dependencies (CVE/OSV + non-CVE risk matching, see dependencyScan.ts)
+// and /phantom-deps (live npm/PyPI existence check) — so they must also be
+// fetched, or those pages have nothing to parse and show 0.
 
 export const SCANNABLE_EXTS = new Set([
   "py", "ts", "tsx", "js", "jsx", "rb", "go", "rs",
@@ -25,7 +26,7 @@ export const SCANNABLE_EXTS = new Set([
 const MANIFEST_BASENAMES = new Set([
   "package.json", "requirements.txt", "go.mod",
   // Java/Kotlin dependency manifests -- previously never fetched, so
-  // dep_report was always null for Maven/Gradle projects.
+  // Maven/Gradle projects never had their dependencies parsed at all.
   "pom.xml", "build.gradle", "build.gradle.kts",
 ]);
 

@@ -12,18 +12,15 @@
  *   +6 AI signals: prompt leakage, style drift, watermark detection, backdoor detection,
  *     hallucinated API, copy-paste / StackOverflow pattern detection
  *   +5 engine integrations: call graph + interprocedural taint (callGraph.ts),
- *     dependency vulnerability analysis (depAnalysis.ts), compliance engine
- *     (compliance.ts), exploitability scoring (reachability.ts),
- *     precision/recall evaluation framework (benchmark.ts)
- *   +3 ScanOutput fields: cross_file_consistency, repository_trust_score, dep_report
+ *     compliance engine (compliance.ts), exploitability scoring
+ *     (reachability.ts), precision/recall evaluation framework (benchmark.ts)
+ *   +2 ScanOutput fields: cross_file_consistency, repository_trust_score
  *   +1 incremental scanning: changedFiles in ScanInput skips unchanged hashes
  */
 
 import crypto from "crypto";
 import { attributeCode, type AttributionResult } from "./aiAttribution";
 import { buildCallGraph }        from "./callGraph";
-import { analyzePackages, parsePackageJson, parseRequirementsTxt, parseGoMod, extractImportedPackages } from "./depAnalysis";
-import type { DependencyReport } from "./depAnalysis";
 import { aggregateComplianceReports, evaluateCompliance } from "./compliance";
 import type { ComplianceReport }  from "./compliance";
 import { scoreExploitability }   from "./reachability";
@@ -6300,7 +6297,6 @@ export interface ScanOutput {
   cicd_trust:           CICDTrustScore | null;
   trust_chain:          TrustChain;
   cross_file_consistency: CrossFileConsistency;
-  dep_report:           DependencyReport | null;
   compliance:           ComplianceReport;
   skipped_unchanged:    number;  // incremental scan: files skipped because hash unchanged
   semantic_graph:       SemanticGraph | null;
@@ -6570,26 +6566,6 @@ export function runScan(input: ScanInput): ScanOutput {
     mixed_languages: languages.size > 1,
   };
 
-  // ── Dependency analysis ───────────────────────────────────────────────────
-  // Parse any manifest files included in the PR; also collect imported package names
-  let dep_report: DependencyReport | null = null;
-  const pkgJsonFile = input.files.find(f => /(?:^|\/)package\.json$/.test(f.path));
-  const reqTxtFile  = input.files.find(f => /requirements\.txt$/.test(f.path));
-  const goModFile   = input.files.find(f => /go\.mod$/.test(f.path));
-  if (pkgJsonFile || reqTxtFile || goModFile) {
-    const pkgs = pkgJsonFile ? parsePackageJson(pkgJsonFile.content)
-               : reqTxtFile  ? parseRequirementsTxt(reqTxtFile.content)
-               : goModFile   ? parseGoMod(goModFile.content)
-               : [];
-    dep_report = analyzePackages(pkgs);
-  } else {
-    // Fall back: infer packages from import statements across all source files
-    const allImports = Array.from(new Set(
-      input.files.flatMap(f => extractImportedPackages(f.content))
-    )).map(name => ({ name, version: "*", dev: false }));
-    if (allImports.length > 0) dep_report = analyzePackages(allImports);
-  }
-
   // ── Aggregated compliance report ──────────────────────────────────────────
   const compliance = aggregateComplianceReports(files.map(f => f.compliance).filter((c): c is ComplianceReport => c !== null));
 
@@ -6691,7 +6667,6 @@ export function runScan(input: ScanInput): ScanOutput {
     cicd_trust,
     trust_chain,
     cross_file_consistency,
-    dep_report,
     compliance,
     skipped_unchanged,
     semantic_graph,
