@@ -1,7 +1,7 @@
 import {
   isDockerfileContent, findDockerfileRunsAsRoot, findDockerfileUnpinnedBaseImage,
   findDockerfileRemoteAdd, findDockerfilePipedShellExec, findDockerfileHardcodedSecret,
-  findDockerfileSensitiveCopy, findDockerfileExposedSensitivePort,
+  findDockerfileSensitiveCopy, findDockerfileExposedSensitivePort, extractFromImageRefs,
 } from "@/lib/containerDockerfile";
 
 describe("containerDockerfile.isDockerfileContent", () => {
@@ -184,5 +184,33 @@ describe("containerDockerfile.findDockerfileExposedSensitivePort", () => {
   it("does not flag an ordinary application port", () => {
     const content = "FROM node:20\nEXPOSE 3000\n";
     expect(findDockerfileExposedSensitivePort(content)).toHaveLength(0);
+  });
+});
+
+describe("containerDockerfile.extractFromImageRefs (shared with dependencyScan.ts's base-image CVE lookup, Decision 2)", () => {
+  it("returns every stage's base image in a multi-stage build, not just the final one", () => {
+    const content = [
+      "FROM node:20-alpine AS build",
+      "RUN npm run build",
+      "FROM nginx:1.25-alpine",
+      "COPY --from=build /app/dist /usr/share/nginx/html",
+    ].join("\n");
+    const refs = extractFromImageRefs(content).map(r => r.ref);
+    expect(refs).toEqual(["node:20-alpine", "nginx:1.25-alpine"]);
+  });
+
+  it("excludes FROM scratch", () => {
+    const refs = extractFromImageRefs("FROM scratch\nCOPY app /app\n");
+    expect(refs).toHaveLength(0);
+  });
+
+  it("excludes a later stage referencing an earlier AS-aliased stage by name", () => {
+    const content = "FROM node:20-alpine AS build\nFROM build\nCMD [\"node\"]\n";
+    const refs = extractFromImageRefs(content).map(r => r.ref);
+    expect(refs).toEqual(["node:20-alpine"]);
+  });
+
+  it("returns an empty array for a file with no FROM instruction", () => {
+    expect(extractFromImageRefs("echo hello\n")).toHaveLength(0);
   });
 });

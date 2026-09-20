@@ -102,3 +102,52 @@ describe("dependencyScan.deriveFindings", () => {
     expect(f!.type).toBe("safe");
   });
 });
+
+describe("dependencyScan.deriveFindings -- base-image CVE lookup (Decision 2, new capability)", () => {
+  beforeEach(() => {
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map());
+    mockLookupNpmLicense.mockReset().mockResolvedValue(null);
+  });
+
+  function scanWithDockerfile(content: string): ScanForDeps {
+    return {
+      repo: "acme/demo", pr_number: 1, scan_id: "scan_1",
+      files: [{ file_path: "Dockerfile", content, ai_percentage: 0.2 }],
+    };
+  }
+
+  it("queries OSV's Alpine ecosystem, release-qualified, for a curated base image", async () => {
+    await deriveFindings([scanWithDockerfile("FROM node:20-alpine\nCMD [\"node\", \"app.js\"]\n")]);
+
+    expect(mockLookupVulnerabilities).toHaveBeenCalled();
+    const lookups = mockLookupVulnerabilities.mock.calls[0][0];
+    expect(lookups.some(l => l.ecosystem === "Alpine:v3.19" && l.name === "openssl")).toBe(true);
+    // Package-wide query (no fabricated version), per this module's own
+    // established convention for unparseable/unknown exact versions.
+    expect(lookups.every(l => l.ecosystem !== "Alpine:v3.19" || l.version === "")).toBe(true);
+  });
+
+  it("returns a real vulnerable finding, ecosystem 'docker', from a mocked OSV base-image OS package result", async () => {
+    mockLookupVulnerabilities.mockResolvedValue(new Map([
+      ["Alpine:v3.19|openssl|", [{ id: "CVE-2024-0001", aliases: ["CVE-2024-0001"], severity: "HIGH" as const, summary: "test OS package vuln", fixedIn: "3.1.5-r0" }]],
+    ]));
+
+    const findings = await deriveFindings([scanWithDockerfile("FROM node:20-alpine\n")]);
+
+    const f = findings.find(f => f.package_name === "openssl");
+    expect(f).toBeDefined();
+    expect(f).toMatchObject({ ecosystem: "docker", type: "vulnerable", risk: "HIGH", cve: "CVE-2024-0001" });
+  });
+
+  it("silently skips a base image not in the curated table -- no findings, no OSV call for it", async () => {
+    const findings = await deriveFindings([scanWithDockerfile("FROM my-private-registry.internal/custom-app:v3\n")]);
+    expect(findings).toHaveLength(0);
+    expect(mockLookupVulnerabilities).not.toHaveBeenCalled();
+  });
+
+  it("resolves a Debian-based curated image to the Debian ecosystem, not Alpine", async () => {
+    await deriveFindings([scanWithDockerfile("FROM postgres:16\n")]);
+    const lookups = mockLookupVulnerabilities.mock.calls[0][0];
+    expect(lookups.some(l => l.ecosystem === "Debian:12" && l.name === "openssl")).toBe(true);
+  });
+});

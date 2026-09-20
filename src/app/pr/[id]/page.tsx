@@ -17,7 +17,7 @@ import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
-import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC } from "@/lib/signalClassification";
+import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL, URGENCY_DESC } from "@/lib/signalClassification";
 import InfoTooltip from "@/components/InfoTooltip";
 
 // ── Signal library ────────────────────────────────────────────────────────────
@@ -439,6 +439,7 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
               const detail = instances[0]?.detail;
               const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
               const reach = realReachability(instances);
+              const urgency = realRemediationUrgency(instances);
               // Every instance of this signal in this file must share the
               // category for the card to be muted -- if even one instance is
               // real application code, this still reflects the file's real
@@ -463,6 +464,12 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
                         <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
                           {REACH_LABEL[reach]}
                           <InfoTooltip title={REACH_LABEL[reach]} description={REACH_DESC[reach]} size="sm" />
+                        </span>
+                      )}
+                      {isSec && urgency !== null && (
+                        <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${URGENCY_COLORS[urgency].badge}`}>
+                          {URGENCY_LABEL[urgency]}
+                          <InfoTooltip title={URGENCY_LABEL[urgency]} description={URGENCY_DESC[urgency]} size="sm" />
                         </span>
                       )}
                       {isMuted && (
@@ -722,6 +729,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                   const detail = instances[0]?.detail;
                   const isSec = isSecuritySignal(sig, file, SIGNAL_META[sig]?.security);
                   const reach = realReachability(instances);
+                  const urgency = realRemediationUrgency(instances);
                   const allThirdParty = instances.length > 0 && instances.every(i => i.codeCategory === "third_party");
                   const allTestCode   = instances.length > 0 && instances.every(i => i.codeCategory === "test_code");
                   const isMuted = allThirdParty || allTestCode;
@@ -740,6 +748,12 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
                               {REACH_LABEL[reach]}
                               <InfoTooltip title={REACH_LABEL[reach]} description={REACH_DESC[reach]} size="sm" />
+                            </span>
+                          )}
+                          {isSec && urgency !== null && (
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded-md ring-1 uppercase ${URGENCY_COLORS[urgency].badge}`}>
+                              {URGENCY_LABEL[urgency]}
+                              <InfoTooltip title={URGENCY_LABEL[urgency]} description={URGENCY_DESC[urgency]} size="sm" />
                             </span>
                           )}
                           {isMuted && (

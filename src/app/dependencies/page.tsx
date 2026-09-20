@@ -31,6 +31,7 @@ const ECO_COLOR: Record<LangEcosystem, { bg:string; text:string }> = {
   ruby:       { bg:"#fee2e2", text:"#991b1b" },
   csharp:     { bg:"#ede9fe", text:"#5b21b6" },
   php:        { bg:"#f0fdf4", text:"#15803d" },
+  docker:     { bg:"#e0f2fe", text:"#0369a1" },
   unknown:    { bg:"#f8fafc", text:"#475569" },
 };
 

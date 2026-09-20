@@ -5875,6 +5875,15 @@ export function analyzeFile(
   // parses.
   crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
   presparsedTs?: ts.SourceFile,
+  // Cross-file REACHABILITY (JS/TS only, one hop) -- same batch-scoped,
+  // runScan()-computed, not-persisted-on-FileAnalysis shape as
+  // crossFilePropagating above, just for a different question: names in
+  // THIS file that are called from an already-reachable function in
+  // ANOTHER file that imports them (see runScan()'s own comment for the
+  // exact bridge logic). Union'd into buildCallGraph()'s own `reachable`
+  // set below, never `entry_points` -- being called from elsewhere doesn't
+  // make a function a network-facing entry point itself, just reachable.
+  crossFileReachable?: Set<string>,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6172,6 +6181,14 @@ export function analyzeFile(
   // for why a single containingFunction string could never have been
   // correct even with a real (non-"unknown") value plugged in.
   const callGraph   = !fileMeta.skipAI ? buildCallGraph(content) : null;
+  // Cross-file reachability bridge (Decision 1): union in names this file
+  // exports that runScan() already determined are called from a reachable
+  // function in another JS/TS file -- see this function's own
+  // crossFileReachable param docblock for why `.reachable` only, never
+  // `.entry_points`.
+  if (callGraph && crossFileReachable) {
+    for (const name of crossFileReachable) callGraph.reachable.add(name);
+  }
   const resolveContainingFunction = (line: number): string => {
     if (tsSourceFile) {
       const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
@@ -6593,22 +6610,48 @@ export function runScan(input: ScanInput): ScanOutput {
   // cross-file mechanism already has, not a new limitation.
   const allScanPaths = filesToScan.map(f => f.path);
   const crossFilePropagatingByFile = new Map<string, Map<string, { shapes: ParamShape[]; fromModule: string }>>();
+  // Cross-file REACHABILITY bridge (Decision 1, one hop, JS/TS only) --
+  // file path -> names IN THAT FILE that are reachable because some OTHER
+  // file imports and calls them from a function already known-reachable
+  // there. Built in the SAME loop as crossFilePropagating above (same
+  // import bindings, same resolveImportPath boundary), but answers a
+  // different question: not "does taint flow through this call", just
+  // "is this imported function actually called from reachable code".
+  // buildCallGraph(f.content) here is a second, isolated computation
+  // purely for this check -- analyzeFile() below still computes its own
+  // callGraph internally per file; threading a pre-built one through would
+  // have meant a THIRD optional analyzeFile param for a cheap, regex-based
+  // computation that's fine to run twice.
+  const crossFileReachableByFile = new Map<string, Set<string>>();
   for (const f of filesToScan) {
     const sf = jsSourceFiles.get(f.path);
     if (!sf) continue;
     const bindings = buildImportBindings(sf);
     const local = new Map<string, { shapes: ParamShape[]; fromModule: string }>();
+    const callerGraph = buildCallGraph(f.content);
     for (const b of bindings) {
       const calleePath = resolveImportPath(f.path, b.moduleSpecifier, allScanPaths);
       if (!calleePath) continue; // external package or unresolvable -- skip, never throw
       const shapes = exportSummaries.get(calleePath)?.get(b.importedName);
       if (shapes && shapes.length > 0) local.set(b.localName, { shapes, fromModule: b.moduleSpecifier });
+
+      const calledFromReachable = callerGraph.edges.some(
+        e => e.callee === b.localName && callerGraph.reachable.has(e.caller),
+      );
+      if (calledFromReachable) {
+        const set = crossFileReachableByFile.get(calleePath) ?? new Set<string>();
+        set.add(b.importedName);
+        crossFileReachableByFile.set(calleePath, set);
+      }
     }
     if (local.size > 0) crossFilePropagatingByFile.set(f.path, local);
   }
 
   const files = filesToScan.map(f =>
-    analyzeFile(f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path)),
+    analyzeFile(
+      f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
+      crossFileReachableByFile.get(f.path),
+    ),
   );
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────

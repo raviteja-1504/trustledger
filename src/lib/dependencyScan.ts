@@ -14,12 +14,20 @@ import { parsePackageJson, parseRequirementsTxt, parseGoMod } from "@/lib/depAna
 import { lookupVulnerabilities, OSV_ECOSYSTEM, type OsvLookup, type OsvVulnerability } from "@/lib/osvClient";
 import { lookupNpmLicense } from "@/lib/npmLicense";
 import { mapWithConcurrency } from "@/lib/github";
+import { isDockerfilePath } from "@/lib/scannableFiles";
+import { extractFromImageRefs } from "@/lib/containerDockerfile";
+import { matchBaseImageProfile, packagesForProfile } from "@/lib/baseImageProfiles";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export type DepRisk       = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "SAFE";
 export type DepType       = "vulnerable" | "unmaintained" | "hallucinated" | "typosquatting" | "outdated" | "transitive" | "safe";
-export type LangEcosystem = "python" | "javascript" | "typescript" | "go" | "java" | "rust" | "ruby" | "csharp" | "php" | "unknown";
+// "docker" -- Decision 2, base-image OS packages -- is deliberately its own
+// ecosystem, not folded into an existing one: its OSV query ecosystem
+// (Alpine:v3.19/Debian:12/etc, carried per-occurrence via
+// PackageOccurrence.osvEcosystemOverride) is release-qualified and doesn't
+// fit OSV_ECOSYSTEM's flat LangEcosystem-keyed table below.
+export type LangEcosystem = "python" | "javascript" | "typescript" | "go" | "java" | "rust" | "ruby" | "csharp" | "php" | "docker" | "unknown";
 export type LicenseRisk   = "safe" | "review" | "block" | "unknown";
 
 export interface DepFinding {
@@ -160,7 +168,8 @@ export function detectEcosystem(filePath: string): LangEcosystem {
 
 export const ECO_MANAGER: Record<LangEcosystem, string> = {
   python:"pip", javascript:"npm", typescript:"npm", go:"go mod",
-  java:"maven", rust:"cargo", ruby:"bundler", csharp:"NuGet", php:"composer", unknown:"unknown",
+  java:"maven", rust:"cargo", ruby:"bundler", csharp:"NuGet", php:"composer",
+  docker:"OS package", unknown:"unknown",
 };
 
 export function parseImports(content: string, eco: LangEcosystem): string[] {
@@ -311,6 +320,12 @@ interface PackageOccurrence {
   pkg: string; version: string; eco: LangEcosystem;
   repo: string; filePath: string; prNumber: number; scanId: string; aiPct: number;
   isTransitive: boolean; pulledBy?: string;
+  // Decision 2: the exact, release-qualified OSV ecosystem string
+  // (e.g. "Alpine:v3.19") for a base-image OS package occurrence --
+  // bypasses OSV_ECOSYSTEM's flat LangEcosystem-keyed lookup below, since
+  // baseImageProfiles.ts's curated profile already carries the precise
+  // string OSV needs. Unset for every other ecosystem.
+  osvEcosystemOverride?: string;
 }
 
 const SEVERITY_ORDER: Record<OsvVulnerability["severity"], number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3 };
@@ -332,7 +347,7 @@ function liveFindingFor(
     return nonCveEntryToFinding(occ.pkg, nonCve, occ.eco, occ.repo, occ.filePath, occ.prNumber, occ.scanId, occ.aiPct, occ.isTransitive, occ.pulledBy);
   }
 
-  const osvEco  = OSV_ECOSYSTEM[occ.eco];
+  const osvEco  = occ.osvEcosystemOverride ?? OSV_ECOSYSTEM[occ.eco];
   const version = versionForOsvQuery(occ.version);
   const vulns   = osvEco ? osvResults.get(`${osvEco}|${occ.pkg}|${version}`) ?? [] : [];
   const worst   = pickWorstVuln(vulns);
@@ -391,6 +406,30 @@ export async function deriveFindings(scans: ScanForDeps[]): Promise<DepFinding[]
   for (const scan of scans) {
     for (const file of scan.files) {
       if (!file.content) continue;
+
+      // Decision 2: base-image OS packages -- a structurally different
+      // source shape from every other ecosystem here (not a dependency
+      // manifest or import statement, a Dockerfile FROM line resolved
+      // through baseImageProfiles.ts's curated OS-release mapping).
+      // Handled as its own branch ahead of detectEcosystem's normal
+      // dispatch, since "docker" isn't a real source detectEcosystem/
+      // manifestPackages/parseImports know how to route on their own.
+      if (isDockerfilePath(file.file_path)) {
+        for (const { ref } of extractFromImageRefs(file.content)) {
+          const profile = matchBaseImageProfile(ref);
+          if (!profile) continue; // not in the curated table -- silently skip, never guess
+          for (const pkg of packagesForProfile(profile)) {
+            occurrences.push({
+              pkg, version: "", eco: "docker",
+              repo: scan.repo, filePath: file.file_path, prNumber: scan.pr_number, scanId: scan.scan_id,
+              aiPct: file.ai_percentage, isTransitive: false,
+              osvEcosystemOverride: profile.osvEcosystem,
+            });
+          }
+        }
+        continue;
+      }
+
       const eco = detectEcosystem(file.file_path);
       if (eco === "unknown") continue;
       const declared = manifestPackages(file.file_path, file.content);
@@ -407,7 +446,7 @@ export async function deriveFindings(scans: ScanForDeps[]): Promise<DepFinding[]
   const lookups = new Map<string, OsvLookup>();
   for (const occ of occurrences) {
     if (NON_CVE_RISK_DB[occ.pkg]) continue;
-    const osvEco = OSV_ECOSYSTEM[occ.eco];
+    const osvEco = occ.osvEcosystemOverride ?? OSV_ECOSYSTEM[occ.eco];
     if (!osvEco) continue;
     const version = versionForOsvQuery(occ.version);
     lookups.set(`${osvEco}|${occ.pkg}|${version}`, { ecosystem: osvEco, name: occ.pkg, version });

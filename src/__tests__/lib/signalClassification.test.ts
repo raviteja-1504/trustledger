@@ -1,4 +1,4 @@
-import { isSecuritySignal, realSeverity } from "@/lib/signalClassification";
+import { isSecuritySignal, realSeverity, realRemediationUrgency } from "@/lib/signalClassification";
 import type { FileResult } from "@/types";
 
 function makeFile(indicators: FileResult["indicators"]): FileResult {
@@ -45,5 +45,33 @@ describe("PR page signal classification (found via real-world scanner testing)",
 
   it("falls back to the static SIGNAL_META severity only when no real instance is present", () => {
     expect(realSeverity([], "critical")).toBe("critical");
+  });
+});
+
+describe("realRemediationUrgency — new UI surfacing (mirrors realReachability's worst-case shape)", () => {
+  it("returns null when no instance has remediation_urgency set", () => {
+    const file = makeFile([{ id: "sql-injection", label: "SQL Injection", severity: "critical", line: 1 }]);
+    expect(realRemediationUrgency(file.indicators)).toBeNull();
+  });
+
+  it("returns null for an empty/undefined instance array", () => {
+    expect(realRemediationUrgency([])).toBeNull();
+    expect(realRemediationUrgency(undefined)).toBeNull();
+  });
+
+  it("returns the single instance's urgency when there is exactly one", () => {
+    const file = makeFile([
+      { id: "idor", label: "IDOR", severity: "high", line: 1, remediation_urgency: "sprint" },
+    ]);
+    expect(realRemediationUrgency(file.indicators)).toBe("sprint");
+  });
+
+  it("takes the WORST (highest-priority) urgency across multiple instances of the same signal", () => {
+    const file = makeFile([
+      { id: "sql-injection", label: "SQL Injection", severity: "critical", line: 1, remediation_urgency: "monitor" },
+      { id: "sql-injection", label: "SQL Injection", severity: "critical", line: 40, remediation_urgency: "immediate" },
+      { id: "sql-injection", label: "SQL Injection", severity: "critical", line: 80, remediation_urgency: "backlog" },
+    ]);
+    expect(realRemediationUrgency(file.indicators)).toBe("immediate");
   });
 });

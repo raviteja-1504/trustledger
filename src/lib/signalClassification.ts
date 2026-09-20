@@ -88,3 +88,54 @@ export const REACH_DESC: Record<Reachability, string> = {
   "unreachable":  "No path found from any entry point in this file's call graph — likely dead code, or the call graph couldn't trace it (e.g. dynamic dispatch, or a language without call-graph support).",
   "unknown":      "This scan predates reachability analysis, or this finding wasn't a scored security indicator.",
 };
+
+// ── Remediation urgency ─────────────────────────────────────────────────────
+//
+// Computed alongside reachability by the same scoreExploitability() pass
+// (src/lib/reachability.ts) and persisted on every ScanIndicator since that
+// phase shipped, but never rendered anywhere in the UI until now -- confirmed
+// via a direct grep across every .tsx file. Same per-instance reasoning as
+// reachability above (the same rule id can score differently at different
+// lines), so this mirrors realReachability()'s worst-case-across-instances
+// shape exactly. Unlike Reachability, ScanIndicator.remediation_urgency has
+// no "unknown" tier in its own type -- an indicator either has a real,
+// scored value or the field is simply absent (never scored, e.g. an
+// AI-signal id) -- so "no data" is represented as `null`, the caller's
+// signal to skip rendering the badge entirely, rather than a synthetic
+// "unknown" member.
+
+export type Urgency = "immediate" | "sprint" | "backlog" | "monitor";
+
+const URGENCY_RANK: Record<Urgency, number> = {
+  immediate: 3, sprint: 2, backlog: 1, monitor: 0,
+};
+
+export function realRemediationUrgency(instances: FileResult["indicators"]): Urgency | null {
+  let worst: Urgency | null = null;
+  for (const i of instances ?? []) {
+    const u = i.remediation_urgency;
+    if (u && (!worst || URGENCY_RANK[u] > URGENCY_RANK[worst])) worst = u;
+  }
+  return worst;
+}
+
+export const URGENCY_COLORS: Record<Urgency, { badge: string; dot: string }> = {
+  immediate: { badge: "bg-rose-100 text-rose-800 ring-rose-300",       dot: "bg-rose-500"   },
+  sprint:    { badge: "bg-orange-100 text-orange-800 ring-orange-300", dot: "bg-orange-500" },
+  backlog:   { badge: "bg-amber-100 text-amber-800 ring-amber-300",    dot: "bg-amber-400"  },
+  monitor:   { badge: "bg-gray-100 text-gray-500 ring-gray-300",       dot: "bg-gray-400"   },
+};
+
+export const URGENCY_LABEL: Record<Urgency, string> = {
+  immediate: "Fix immediately",
+  sprint:    "Fix this sprint",
+  backlog:   "Backlog",
+  monitor:   "Monitor",
+};
+
+export const URGENCY_DESC: Record<Urgency, string> = {
+  immediate: "Exploitability score ≥ 8.0 — reachable (often from an entry point) with high real-world impact. Prioritize over other open findings.",
+  sprint:    "Exploitability score ≥ 6.0 — meaningful real-world risk; plan a fix within the current sprint.",
+  backlog:   "Exploitability score ≥ 4.0 — lower reachability/impact right now; track and fix without urgent priority.",
+  monitor:   "Exploitability score below 4.0 — low real-world risk today (often unreachable); revisit if reachability changes.",
+};

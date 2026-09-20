@@ -15,7 +15,7 @@ import { authedFetch } from "@/lib/useRealData";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
-import { realReachability, REACH_COLORS, REACH_LABEL } from "@/lib/signalClassification";
+import { realReachability, REACH_COLORS, REACH_LABEL, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL } from "@/lib/signalClassification";
 
 
 
@@ -184,6 +184,7 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
           {indicators.map(sig => {
             const instances = (file?.indicators ?? []).filter(i => i.id === sig);
             const reach = realReachability(instances);
+            const urgency = realRemediationUrgency(instances);
             return (
               <span key={sig} className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full"
                 style={{ background:`${SEV_SIGNAL[sig] ?? "#94a3b8"}15`, color: SEV_SIGNAL[sig] ?? "#94a3b8", border:`1px solid ${SEV_SIGNAL[sig] ?? "#94a3b8"}30` }}>
@@ -192,6 +193,11 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
                 {reach !== "unknown" && (
                   <span className={`ml-1 px-1.5 py-px rounded-md ring-1 uppercase ${REACH_COLORS[reach].badge}`}>
                     {REACH_LABEL[reach]}
+                  </span>
+                )}
+                {urgency !== null && (
+                  <span className={`ml-1 px-1.5 py-px rounded-md ring-1 uppercase ${URGENCY_COLORS[urgency].badge}`}>
+                    {URGENCY_LABEL[urgency]}
                   </span>
                 )}
               </span>

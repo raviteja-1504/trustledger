@@ -75,36 +75,51 @@ export function findDockerfileRunsAsRoot(content: string): ScanIndicator[] {
 const FROM_IMAGE_RE = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+\S+)?/i;
 const AS_RE = /\s+AS\s+(\S+)/i;
 
-export function findDockerfileUnpinnedBaseImage(content: string): ScanIndicator[] {
+/** Real registry image references from every FROM line -- `scratch` and
+ * references to an earlier AS-aliased build stage (not a real registry
+ * image) are excluded. Shared with dependencyScan.ts's base-image CVE
+ * lookup (Decision 2) so both features agree on what counts as "a base
+ * image this Dockerfile actually pulls," not two independently-maintained
+ * extraction regexes. One entry per FROM line, in file order (a
+ * multi-stage build's several base images are ALL returned, not just the
+ * final stage's -- unlike findDockerfileRunsAsRoot, which deliberately
+ * scopes to the final stage only, every stage's base image is equally
+ * real and equally worth a CVE lookup). */
+export function extractFromImageRefs(content: string): Array<{ ref: string; line: number }> {
   const lines = content.split("\n");
   if (!lines.some(l => FROM_RE.test(l))) return [];
 
-  // Collect AS-aliased stage names first -- `FROM buildstage` in a later
-  // stage references an earlier build stage, not a registry image, and
-  // must not be flagged as an "unpinned image".
   const stageNames = new Set<string>();
   lines.forEach(line => {
     const m = AS_RE.exec(line);
     if (m) { const stageName = m[1]; stageNames.add(stageName.toLowerCase()); }
   });
 
-  const found: ScanIndicator[] = [];
+  const refs: Array<{ ref: string; line: number }> = [];
   lines.forEach((line, i) => {
     const m = FROM_IMAGE_RE.exec(line);
     if (!m) return;
     const ref = m[1];
     if (ref.toLowerCase() === "scratch") return;
     if (stageNames.has(ref.toLowerCase())) return;
+    refs.push({ ref, line: i + 1 });
+  });
+  return refs;
+}
+
+export function findDockerfileUnpinnedBaseImage(content: string): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  extractFromImageRefs(content).forEach(({ ref, line: i }) => {
     const afterLastSlash = ref.split("/").pop() ?? ref;
     const hasPin = afterLastSlash.includes(":") || afterLastSlash.includes("@");
     if (!hasPin) {
       found.push({
-        id: "container-unpinned-base-image", label: "Unpinned Base Image", severity: "low", line: i + 1, confidence: 65,
+        id: "container-unpinned-base-image", label: "Unpinned Base Image", severity: "low", line: i, confidence: 65,
         detail: `Base image '${ref}' has no tag or digest — defaults to ':latest', a mutable reference that can silently change what gets built.`,
       });
     } else if (ref.endsWith(":latest")) {
       found.push({
-        id: "container-unpinned-base-image", label: "Unpinned Base Image", severity: "low", line: i + 1, confidence: 65,
+        id: "container-unpinned-base-image", label: "Unpinned Base Image", severity: "low", line: i, confidence: 65,
         detail: `Base image '${ref}' is pinned to the mutable ':latest' tag — pin to a specific version or digest instead.`,
       });
     }
