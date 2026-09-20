@@ -203,6 +203,72 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0,    I:0,   A:0.56, cwe:"CWE-1333",
   },
+
+  // The following 14 ids previously fell through to the generic,
+  // understating DEFAULT_PROFILE below -- confirmed via direct grep that
+  // none had an entry here, several (idor/bola-*) exactly the kind of
+  // high-impact finding that should score HIGH exploitability, not a
+  // generic low default. Vectors reasoned from each id's existing
+  // INDICATOR_CWE_MAP (cweMap.ts) CWE class and consistency with sibling
+  // profiles already in this table.
+  "idor": {
+    AV:"NETWORK", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-639",
+  },
+  "bola-identity-mismatch": {
+    AV:"NETWORK", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-639",
+  },
+  "bola-missing-ownership-check": {
+    AV:"NETWORK", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-639",
+  },
+  "csrf-protection-disabled": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"REQUIRED", S:"CHANGED",
+    C:0.22, I:0.56, A:0.22, cwe:"CWE-352",
+  },
+  "debug-mode-enabled": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.22, A:0, cwe:"CWE-489",
+  },
+  "graphql-injection": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-943",
+  },
+  "insecure-file-upload": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.56, A:0.56, cwe:"CWE-434",
+  },
+  // Same class of flaw (a forgeable/absent signature check on a JWT) as
+  // the existing jwt-bypass profile above -- deliberately identical vector.
+  "jwt-none-alg": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-347",
+  },
+  "php-missing-session-guard": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.56, A:0.22, cwe:"CWE-306",
+  },
+  "plaintext-password-storage": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.22, A:0, cwe:"CWE-256",
+  },
+  "sensitive-url-data": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0, A:0, cwe:"CWE-598",
+  },
+  "verbose-error": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0, A:0, cwe:"CWE-209",
+  },
+  "toctou": {
+    AV:"LOCAL", AC:"HIGH", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0.22, cwe:"CWE-367",
+  },
+  "xpath-injection": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.22, A:0, cwe:"CWE-643",
+  },
 };
 
 const DEFAULT_PROFILE: CVSSVector = {

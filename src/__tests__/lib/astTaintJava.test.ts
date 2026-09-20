@@ -1,6 +1,6 @@
 import fs from "fs";
 import { analyzeFile } from "@/lib/scanner";
-import { scanAstTaintJava, parseJavaSource } from "@/lib/astTaintJava";
+import { scanAstTaintJava, parseJavaSource, findEnclosingFunctionNameJava } from "@/lib/astTaintJava";
 
 const SCRATCHPAD = "C:/Users/ADMIN/AppData/Local/Temp/claude/d--trustledger/dd894828-e726-4544-b53b-93aca10d3d41/scratchpad";
 const JAVA_FIXTURE = `${SCRATCHPAD}/owasp_test_app.java`;
@@ -665,5 +665,45 @@ public class A {
   }
 }`;
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+});
+
+describe("findEnclosingFunctionNameJava — reachability resolver parity (Decision 2, new capability)", () => {
+  const content = `
+public class A {
+  public Object getUser(String id) {
+    Object user = Database.find(id);
+    return user;
+  }
+
+  public Object deleteUser(String id) {
+    Database.delete(id);
+    return null;
+  }
+}`;
+  const cst = parseJavaSource(content);
+  const lines = content.split("\n");
+
+  it("resolves a row inside the first method's body to that method's name", () => {
+    if (!cst) throw new Error("parse failed");
+    const row = lines.findIndex(l => l.includes("Database.find"));
+    expect(findEnclosingFunctionNameJava(cst, row)).toBe("getUser");
+  });
+
+  it("resolves a row inside the second method's body to that method's name, not the first", () => {
+    if (!cst) throw new Error("parse failed");
+    const row = lines.findIndex(l => l.includes("Database.delete"));
+    expect(findEnclosingFunctionNameJava(cst, row)).toBe("deleteUser");
+  });
+
+  it("returns \"unknown\" for a row outside any method body", () => {
+    if (!cst) throw new Error("parse failed");
+    const row = lines.findIndex(l => l.includes("public class A"));
+    expect(findEnclosingFunctionNameJava(cst, row)).toBe("unknown");
+  });
+
+  it("never throws on a malformed Java snippet", () => {
+    const broken = parseJavaSource("public class {{{ broken");
+    expect(broken).toBeNull();
   });
 });

@@ -37,7 +37,7 @@ import {
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
 } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
-import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel } from "./astTaintJava";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
   parseGoSourceSync, isGoParserReady, scanAstTaintGo,
@@ -6182,6 +6182,9 @@ export function analyzeFile(
     }
     if (goTree) {
       return findEnclosingFunctionNameGo(findNodeAtRowGo(goTree, Math.max(0, line - 1)));
+    }
+    if (javaCst) {
+      return findEnclosingFunctionNameJava(javaCst, Math.max(0, line - 1));
     }
     return "unknown";
   };

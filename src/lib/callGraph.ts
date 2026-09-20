@@ -90,9 +90,29 @@ function tryMatchFunc(line: string): FuncMatch | null {
   m = line.match(/^\s+(async\s+)?(\w+)\s*\(([^)]*)\)\s*\{/);
   if (m && m[2] !== "if" && m[2] !== "for" && m[2] !== "while" && m[2] !== "switch")
     return { isExported: false, isAsync: !!m[1], name: m[2], params: m[3] };
-  // def foo(a, b):  (Python)
-  m = line.match(/^(async\s+)?def\s+(\w+)\s*\(([^)]*)\)/);
+  // def foo(a, b):  (Python) -- leading whitespace allowed (unlike the JS
+  // patterns above) since Python class methods are ALWAYS indented under
+  // their class; a bare `^` anchor here would silently never match any
+  // class method, module-level functions being the only Python shape ever
+  // recognized. Confirmed as a real, separate gap from extractFunctions'
+  // own indent-mode fix (Decision 1) -- this widens WHICH lines are
+  // recognized as a def at all; extractFunctions' indent mode is what
+  // correctly closes the body once one is.
+  m = line.match(/^\s*(async\s+)?def\s+(\w+)\s*\(([^)]*)\)/);
   if (m) return { isExported: false, isAsync: !!m[1], name: m[2], params: m[3] };
+  // public ResponseEntity<X> getUser(String id) {  (Java) -- anchored on an
+  // explicit public/private/protected modifier (constructors and
+  // package-private methods with no modifier are a documented, accepted
+  // miss) since a return type is an arbitrary generic token sequence with
+  // no reliable way to distinguish it from a control-flow keyword
+  // otherwise -- the same "explicit anchor" precedent the JS class-method
+  // pattern above uses its if/for/while/switch exclusion list for, just
+  // via a positive anchor instead of a negative one. Once this recognizes
+  // the signature line, the existing brace-depth body-consuming loop below
+  // needs no Java-specific changes at all -- Java is brace-delimited
+  // exactly like JS/Go.
+  m = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s+)*(public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:abstract\s+)?[\w<>[\],.\s]+?\s+(\w+)\s*\(([^)]*)\)/);
+  if (m) return { isExported: m[1] === "public", isAsync: false, name: m[2], params: m[3] };
   // func foo(a int) {  (Go)
   m = line.match(/^func\s+(\w+)\s*\(([^)]*)\)/);
   if (m) return { isExported: /^[A-Z]/.test(m[1]), isAsync: false, name: m[1], params: m[2] };
@@ -103,52 +123,124 @@ function parseParams(raw: string): string[] {
   return raw.split(",").map(p => p.trim().split(/[\s:=]/)[0].replace(/^\.\.\./, "")).filter(Boolean);
 }
 
+const PY_DEF_RE = /^\s*(?:async\s+)?def\s+\w+\s*\(/;
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+interface Pending extends FunctionNode { mode: "brace" | "indent"; baseIndent: number }
+
+/**
+ * Python has no braces at all, so the ORIGINAL brace-depth closing rule
+ * (`depth <= 0` closes the function) never left 0 for a `def` match --
+ * the function closed on the SAME line it opened, before any body was
+ * consumed, and was silently dropped by the `end_line > start_line` guard
+ * below. A prior comment here claimed "Python handled by indent heuristic
+ * below" -- confirmed by direct reading to be dead/aspirational, no such
+ * heuristic existed. Net effect: graph.entry_points/graph.reachable were
+ * effectively always empty for Python, so every Python finding fell
+ * through to "unreachable" regardless of the real, correctly-resolved
+ * enclosing function name from resolveContainingFunction's tree-sitter
+ * branch (scanner.ts) -- the same visible bug as Java's missing resolver,
+ * from a completely different root cause.
+ *
+ * Fixed by giving each pending function an explicit mode, decided at match
+ * time: "indent" for a `def` line, "brace" (the original, unchanged logic)
+ * for everything else. Indent mode's body continues while a non-blank
+ * line's indentation stays strictly greater than the `def` line's own
+ * indentation; the moment a non-blank line dedents to <= that baseline,
+ * the function closes and that line is REPROCESSED (not consumed) as a
+ * potential new function start -- standard, well-established line-based
+ * Python function-boundary heuristic. Doesn't handle a multi-line string
+ * literal containing a dedented-looking line -- an accepted, documented
+ * imprecision, the same "no external parser" posture this whole file's
+ * docblock commits to, and the same kind of accepted gap
+ * iacTerraform.ts's brace-depth block extractor documents for braces
+ * inside string literals/comments.
+ */
 export function extractFunctions(content: string): FunctionNode[] {
-  const lines   = content.split("\n");
+  const lines = content.split("\n");
   const funcs: FunctionNode[] = [];
-  let current: FunctionNode | null = null;
+  let current: Pending | null = null;
   let depth = 0;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Try to match function definition start
-    if (!current || depth === 0) {
+    if (!current) {
       const fm = tryMatchFunc(line);
       if (fm) {
-          current = {
-            name:        fm.name,
-            start_line:  i + 1,
-            end_line:    i + 1,
-            params:      parseParams(fm.params ?? ""),
-            is_exported: fm.isExported,
-            is_async:    fm.isAsync,
-            body:        "",
-          };
-          depth = 0;
-        }
+        current = {
+          name:        fm.name,
+          start_line:  i + 1,
+          end_line:    i + 1,
+          params:      parseParams(fm.params ?? ""),
+          is_exported: fm.isExported,
+          is_async:    fm.isAsync,
+          body:        "",
+          mode:        PY_DEF_RE.test(line) ? "indent" : "brace",
+          baseIndent:  indentOf(line),
+        };
+        depth = 0;
+      }
     }
 
-    if (current) {
-      current.body += line + "\n";
-      for (const ch of line) {
-        if (ch === "{") depth++;
-        if (ch === "}") depth--;
+    if (!current) continue;
+
+    if (current.mode === "indent") {
+      // The `def` line itself is always consumed regardless of its own
+      // indentation (it IS the baseline) -- only lines AFTER it are
+      // subject to the dedent check below.
+      const isSignatureLine = current.body === "";
+      const trimmed = line.trim();
+      if (isSignatureLine || trimmed === "" || indentOf(line) > current.baseIndent) {
+        current.body += line + "\n";
+        // Blank lines are consumed (so trailing blanks between two
+        // functions don't break the dedent scan) but don't advance
+        // end_line -- otherwise a function immediately followed by a
+        // blank line (or, for the file's last function, the trailing ""
+        // element content.split("\n") always produces for a
+        // newline-terminated file) would report an end_line one past its
+        // real last line of code.
+        if (isSignatureLine || trimmed !== "") current.end_line = i + 1;
+        continue;
       }
-      // Python / Go: track by indent instead of braces
-      if (!line.includes("{") && !line.includes("}") && current.body.split("\n").length > 1) {
-        // noop — brace counting handles JS/TS; Python handled by indent heuristic below
-      }
-      if (depth <= 0 && current.body.trim().length > 0 && current.body.includes("\n")) {
-        current.end_line = i + 1;
-        // Only register if body has at least 2 lines (avoid false single-line matches)
-        if (current.end_line > current.start_line) {
-          funcs.push({ ...current });
-        }
-        current = null;
-        depth   = 0;
-      }
+      // Dedented back to <= baseIndent: the function ends BEFORE this
+      // line. Reprocess it (i--) since it may itself be the next def.
+      if (current.end_line > current.start_line) funcs.push({ ...current });
+      current = null;
+      i--;
+      continue;
     }
+
+    // Brace mode -- original, unchanged logic (JS/TS/Go/Java). Runs in the
+    // SAME iteration a function is matched (not deferred to the next loop
+    // pass), so a true single-line function (`function foo() {}`) closes
+    // and is correctly excluded (end_line === start_line, per the guard
+    // below) without bleeding the following line into its body.
+    current.body += line + "\n";
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      if (ch === "}") depth--;
+    }
+    if (depth <= 0 && current.body.trim().length > 0 && current.body.includes("\n")) {
+      current.end_line = i + 1;
+      // Only register if body has at least 2 lines (avoid false single-line matches)
+      if (current.end_line > current.start_line) {
+        funcs.push({ ...current });
+      }
+      current = null;
+      depth   = 0;
+    }
+  }
+
+  // Flush a trailing indent-mode function still open at EOF (brace mode
+  // never leaves an unclosed `current` dangling in well-formed source --
+  // an unclosed brace is itself a real syntax error, not a boundary case
+  // worth silently completing).
+  if (current && current.mode === "indent" && current.end_line > current.start_line) {
+    funcs.push({ ...current });
   }
 
   return funcs;
@@ -203,6 +295,32 @@ const ENTRY_PATTERNS: RegExp[] = [
   /handler\s*=\s*(?:async\s+)?function/,
 ];
 
+// Java: @GetMapping/@PostMapping/etc sit on a line ABOVE the method
+// signature, not inside fn.body's first line (which IS the signature line
+// itself) -- ENTRY_PATTERNS' "check fn.body.split('\n')[0]" approach
+// structurally can't see them, so a genuinely new lookup against the raw
+// source lines preceding start_line is needed (hasEntryMarkerAbove below).
+// Same vocabulary astTaintJava.ts's MAPPING_ANNOTATIONS already uses for
+// the same purpose (there, seeding BOLA taint sources; here, entry-point
+// classification).
+const JAVA_ENTRY_ANNOTATION_RE = /^\s*@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b/;
+// Python: Flask/FastAPI route decorators -- same structural "line above
+// the def" placement. Mirrors astTaintPython.ts's FASTAPI_DECORATOR_RE
+// vocabulary plus Flask's @app.route(...).
+const PY_ENTRY_DECORATOR_RE = /^\s*@(?:\w+\.)?(?:app|router)\.(?:route|get|post|put|delete|patch|options|head)\s*\(/;
+
+/** Checks the few raw source lines immediately above a matched function's
+ * start_line for a Java annotation or Python decorator marking it an HTTP
+ * entry point. */
+function hasEntryMarkerAbove(content: string, startLine: number): boolean {
+  const lines = content.split("\n");
+  const windowStart = Math.max(0, startLine - 1 - 5);
+  for (let i = windowStart; i < startLine - 1; i++) {
+    if (JAVA_ENTRY_ANNOTATION_RE.test(lines[i]) || PY_ENTRY_DECORATOR_RE.test(lines[i])) return true;
+  }
+  return false;
+}
+
 export function detectEntryPoints(funcs: FunctionNode[], content: string): string[] {
   const entries = new Set<string>();
   for (const fn of funcs) {
@@ -210,6 +328,7 @@ export function detectEntryPoints(funcs: FunctionNode[], content: string): strin
     for (const re of ENTRY_PATTERNS) {
       if (re.test(fn.body.split("\n")[0])) { entries.add(fn.name); break; }
     }
+    if (hasEntryMarkerAbove(content, fn.start_line)) entries.add(fn.name);
     // Main / top-level handler names
     if (/^(?:main|handler|index|server|app|init|start|bootstrap|run)$/i.test(fn.name)) {
       entries.add(fn.name);
@@ -221,6 +340,22 @@ export function detectEntryPoints(funcs: FunctionNode[], content: string): strin
   let gm: RegExpExecArray | null;
   while ((gm = globalExportRe.exec(content)) !== null) {
     if (funcNames.has(gm[2])) entries.add(gm[2]);
+  }
+  // Go: no decorator/annotation syntax exists -- an HTTP handler is
+  // identified by NAME at a separate route-registration call site
+  // elsewhere in the file (Gin/Echo/chi/net-http-mux idioms), not by
+  // anything on or above its own signature. Mirrors globalExportRe's own
+  // "scan the whole file for a registration site referencing a known
+  // function name" shape immediately above, just for a different
+  // framework family. A fresh regex literal per call (not a shared
+  // module-level /g one) -- same reason globalExportRe is declared here
+  // and not at module scope: a global-flagged regex carries lastIndex
+  // state across .exec() calls, which would go stale across repeated
+  // detectEntryPoints() calls on different files if shared.
+  const goRouteRe = /\b(?:router|r|e|app|mux)\.(?:GET|POST|PUT|DELETE|PATCH|Handle(?:Func)?)\s*\(\s*(?:"[^"]*"|`[^`]*`)\s*,\s*(\w+)/g;
+  let rm: RegExpExecArray | null;
+  while ((rm = goRouteRe.exec(content)) !== null) {
+    if (funcNames.has(rm[1])) entries.add(rm[1]);
   }
   return Array.from(entries);
 }

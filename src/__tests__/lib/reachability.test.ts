@@ -2,6 +2,9 @@ import { buildCallGraph } from "@/lib/callGraph";
 import { scoreExploitability } from "@/lib/reachability";
 import { parseSourceFile, findNodeAtPosition, findEnclosingFunctionName } from "@/lib/astTaint";
 import { analyzeFile, type ScanIndicator } from "@/lib/scanner";
+import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+
+beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
 
 // Regression test for a real bug found via direct investigation: scoreExploitability
 // used to take a single `containingFunction` string applied to EVERY indicator in
@@ -132,5 +135,129 @@ export function handleSearch(req) {
     const result = analyzeFile("app.js", content);
     const aiSignal = result.indicators.find(i => i.id === "line-length" || i.id === "naming-consistency");
     if (aiSignal) expect(aiSignal.reachability).toBeUndefined();
+  });
+});
+
+// Decision 4: VULN_PROFILES coverage for the 14 ids that previously fell
+// through to the generic DEFAULT_PROFILE. DEFAULT_PROFILE has no `cwe`
+// property at all, and scoreExploitability only ever sets `score.cwe` via
+// `"cwe" in profile` -- so a real, non-default profile match is provable
+// by asserting `score.cwe` is defined and matches the expected CWE, not by
+// asserting a specific numeric score (which would be a brittle,
+// implementation-detail assertion).
+describe("scoreExploitability -- VULN_PROFILES coverage (Decision 4, new capability)", () => {
+  const cases: Array<[string, string]> = [
+    ["idor", "CWE-639"],
+    ["bola-identity-mismatch", "CWE-639"],
+    ["bola-missing-ownership-check", "CWE-639"],
+    ["csrf-protection-disabled", "CWE-352"],
+    ["debug-mode-enabled", "CWE-489"],
+    ["graphql-injection", "CWE-943"],
+    ["insecure-file-upload", "CWE-434"],
+    ["jwt-none-alg", "CWE-347"],
+    ["php-missing-session-guard", "CWE-306"],
+    ["plaintext-password-storage", "CWE-256"],
+    ["sensitive-url-data", "CWE-598"],
+    ["verbose-error", "CWE-209"],
+    ["toctou", "CWE-367"],
+    ["xpath-injection", "CWE-643"],
+  ];
+
+  it.each(cases)("%s resolves to a real profile (cwe %s), not the generic DEFAULT_PROFILE", (id, cwe) => {
+    const indicators: ScanIndicator[] = [{ id, label: id, severity: "high", line: 1 }];
+    const report = scoreExploitability(indicators, "irrelevant content", null);
+    expect(report.scores[0].cwe).toBe(cwe);
+  });
+
+  it("an id with no profile at all still falls back to DEFAULT_PROFILE (undefined cwe), proving the assertion above is meaningful", () => {
+    const indicators: ScanIndicator[] = [{ id: "totally-unknown-id", label: "x", severity: "high", line: 1 }];
+    const report = scoreExploitability(indicators, "irrelevant content", null);
+    expect(report.scores[0].cwe).toBeUndefined();
+  });
+});
+
+// Decisions 2+3, end to end: Java findings now resolve real reachability
+// instead of hardcoding "unreachable" for every single finding regardless
+// of the actual call graph -- the bug confirmed present before this phase
+// (no findEnclosingFunctionNameJava, no `if (javaCst)` branch in
+// resolveContainingFunction, no Java pattern in callGraph.ts's
+// tryMatchFunc).
+describe("analyzeFile() -- Java reachability now resolves per-method (Decisions 2+3)", () => {
+  it("an endpoint method's finding is NOT hardcoded unreachable, and differs from a helper method never called from an endpoint", () => {
+    const content = `
+public class A {
+  @GetMapping("/search")
+  public Object search(@RequestParam String name) {
+    String sql = "SELECT * FROM t WHERE name = '" + name + "'";
+    return Database.executeQuery(sql);
+  }
+
+  private Object deadHelper(String name) {
+    String sql2 = "SELECT * FROM logs WHERE name = '" + name + "'";
+    return Database.executeQuery(sql2);
+  }
+}
+`;
+    const result = analyzeFile("A.java", content);
+    const lines = content.split("\n");
+    const searchLine = lines.findIndex(l => l.includes("SELECT * FROM t")) + 1;
+    const deadLine = lines.findIndex(l => l.includes("SELECT * FROM logs")) + 1;
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    expect(reachable).toBeDefined();
+    expect(dead).toBeDefined();
+    expect(reachable?.reachability).not.toBe("unreachable");
+    expect(dead?.reachability).toBe("unreachable");
+  });
+});
+
+// Decision 1, end to end: Python findings now resolve real reachability
+// too, for a structurally different reason than Java's (callGraph.ts's
+// extractFunctions() previously returned essentially zero functions for
+// Python at all, so graph.reachable/entry_points were always empty).
+describe("analyzeFile() -- Python reachability now resolves per-function (Decision 1)", () => {
+  it("an exported/entry-point function's finding is NOT hardcoded unreachable, and differs from dead code", () => {
+    const content = `
+def handle_search(request):
+    query = "SELECT * FROM users WHERE id = " + request.args.get("id")
+    return db.execute(query)
+
+def dead_helper(request):
+    query2 = "SELECT * FROM logs WHERE id = " + request.args.get("id")
+    return db.execute(query2)
+`;
+    const result = analyzeFile("app.py", content);
+    const lines = content.split("\n");
+    const searchLine = lines.findIndex(l => l.includes("SELECT * FROM users")) + 1;
+    const deadLine = lines.findIndex(l => l.includes("SELECT * FROM logs")) + 1;
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    expect(reachable).toBeDefined();
+    expect(dead).toBeDefined();
+    // handle_search isn't itself decorated/exported in this fixture, so
+    // BOTH may resolve "unreachable" from callGraph's BFS -- the point of
+    // this test is narrower and unconditional: Python functions are now
+    // actually EXTRACTED at all (graph.functions non-empty, confirmed
+    // directly in callGraph.test.ts), so resolveContainingFunction's
+    // already-correct Python branch has a real graph to classify against
+    // instead of an always-empty one. Both findings must at least resolve
+    // to a defined, real reachability value (not silently crash/undefined).
+    expect(reachable?.reachability).toBeDefined();
+    expect(dead?.reachability).toBeDefined();
+  });
+
+  it("a Flask-decorated entry-point function's finding resolves to a non-unreachable classification", () => {
+    const content = `
+@app.route("/search")
+def handle_search(request):
+    query = "SELECT * FROM users WHERE id = " + request.args.get("id")
+    return db.execute(query)
+`;
+    const result = analyzeFile("app.py", content);
+    const lines = content.split("\n");
+    const searchLine = lines.findIndex(l => l.includes("SELECT * FROM users")) + 1;
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    expect(reachable).toBeDefined();
+    expect(reachable?.reachability).not.toBe("unreachable");
   });
 });

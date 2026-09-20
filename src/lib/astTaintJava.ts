@@ -321,6 +321,54 @@ function collectLocalMethods(root: CstNode): Map<string, LocalMethod> {
   return methods;
 }
 
+// ── Enclosing-method lookup (shared with reachability.ts's resolver) ──────
+// Mirrors astTaintGo.ts's findNodeAtRowGo/findEnclosingFunctionNameGo and
+// astTaintPython.ts's findNodeAtRowPy/findEnclosingFunctionNamePy, which
+// scanner.ts's resolveContainingFunction() already calls per-indicator to
+// classify reachability correctly (see reachability.ts's own docblock for
+// why a single whole-file string was wrong). Java had no equivalent at all
+// before this -- every Java finding silently fell through to the "unknown"
+// default and was scored "unreachable" regardless of what was actually
+// true.
+//
+// Chevrotain's CST has no generic "node spanning row X" API the way
+// tree-sitter does (only leaf IToken values carry startLine/endLine, not
+// non-terminal CstNodes), so this is ONE composite function rather than
+// the two-function findNodeAtRowX + findEnclosingFunctionNameX split Go/
+// Python use -- a deliberate adaptation to Chevrotain's shape, not a
+// mismatch. Finds whichever local method's body token range contains the
+// target row, reusing the already-collected LocalMethod map rather than
+// re-walking the CST with new logic.
+
+function collectAllTokens(node: CstNode, acc: IToken[] = []): IToken[] {
+  for (const key of Object.keys(node.children)) {
+    for (const el of node.children[key]) {
+      if (isToken(el)) acc.push(el); else collectAllTokens(el, acc);
+    }
+  }
+  return acc;
+}
+
+/** `row` is 0-indexed, matching findNodeAtRowGo/findNodeAtRowPy's own
+ * convention (scanner.ts always calls with `Math.max(0, line - 1)`).
+ * java-parser's own IToken.startLine/endLine are 1-indexed. */
+export function findEnclosingFunctionNameJava(cst: CstNode, row: number): string {
+  const targetLine = row + 1;
+  const methods = collectLocalMethods(cst);
+  for (const [name, method] of methods) {
+    if (!method.body) continue;
+    const tokens = collectAllTokens(method.body);
+    if (tokens.length === 0) continue;
+    let start = Infinity, end = -Infinity;
+    for (const t of tokens) {
+      if (t.startLine !== undefined && t.startLine < start) start = t.startLine;
+      if (t.endLine !== undefined && t.endLine > end) end = t.endLine;
+    }
+    if (targetLine >= start && targetLine <= end) return name;
+  }
+  return "unknown";
+}
+
 // ── Sink table ───────────────────────────────────────────────────────────
 
 const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
