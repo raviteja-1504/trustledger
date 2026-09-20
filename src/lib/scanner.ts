@@ -302,6 +302,7 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /(?:private_key|private_key_id)\s*:\s*["'][-\w /+]+["']/i,            label: "Service account key",         severity: "critical" },
   { re: /postgresql:\/\/[^@\s]+:[^@\s]+@/,                                     label: "Postgres credentials",        severity: "critical" },
   { re: /mongodb(?:\+srv)?:\/\/[^@\s]+:[^@\s]+@/,                              label: "MongoDB credentials",         severity: "critical" },
+  { re: /mysql:\/\/[^@\s]+:[^@\s]+@/,                                          label: "MySQL credentials",           severity: "critical" },
   { re: /jdbc:[a-z]+:\/\/[^\s"']+password=[^\s&"']+/i,                         label: "DB connection string",        severity: "critical" },
   // Generic word-keyed patterns — value captured in group 1, checked by
   // looksLikeRealSecret() in findSecrets() before being reported. Variable
@@ -357,7 +358,16 @@ const QUOTED_VALUE_RE = /["']([^"']{4,})["']/g;
 // A quoted value containing one of these markers is a synthetic/demo
 // placeholder, not a real credential: "..." truncation, "xxxx" filler, or
 // words that only appear in sample/demo/test data.
-const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|password|demo|sample|fake|dummy|placeholder|example|exmp|\btest\w*|\bmock\w*|\bstub\b|\bfixture\b|changeme|change[-_]me|changeit|\btbd\b|\bn\/?a\b|\bfoo\b|\bbar\b|\bbaz\b|\byour[-_]?\w*(?:key|token|secret|password)\w*|insert[-_]?your|<[^<>]+>|\{\{[^{}]+\}\}|redacted|masked|undefined|^null$|_here$|^enter[-_]/i;
+// `password` is word-bounded (\bpassword\b), unlike the other bare markers
+// here -- without the boundary, a real, specific secret value that merely
+// CONTAINS "password" as part of a compound word (e.g. a MySQL connection
+// string literally embedding "SuperSecretPassword" as the actual password)
+// was being treated as placeholder text and silently suppressed entirely,
+// defeating every branded SECRET_PATTERNS entry on that line (confirmed via
+// a real benchmark). The already-existing `\byour[-_]?\w*password\w*`
+// alternative below still catches the legitimate placeholder shapes this
+// word-boundary version would otherwise miss (your_password_here, etc.).
+const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|\bpassword\b|demo|sample|fake|dummy|placeholder|example|exmp|\btest\w*|\bmock\w*|\bstub\b|\bfixture\b|changeme|change[-_]me|changeit|\btbd\b|\bn\/?a\b|\bfoo\b|\bbar\b|\bbaz\b|\byour[-_]?\w*(?:key|token|secret|password)\w*|insert[-_]?your|<[^<>]+>|\{\{[^{}]+\}\}|redacted|masked|undefined|^null$|_here$|^enter[-_]/i;
 
 // A quoted value that is purely a human-readable label (letters/spaces only)
 // is a UI string, not a credential — e.g. private_key: "Private Key".
@@ -808,8 +818,18 @@ const INSECURE_RANDOM_RE = [
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bnew\s+Random\s*\(\s*\)/i,
   // Python
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\brandom\.random\s*\(\s*\)/i,
-  // Go — math/rand instead of crypto/rand
-  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bmath\/rand\b/i,
+  // Go — math/rand instead of crypto/rand. Matches real rand.<Func>() usage,
+  // not the literal import-path string "math/rand" (the previous version of
+  // this entry required that exact substring, which only appears in an
+  // import statement and never in actual call sites -- confirmed dead code
+  // via a real benchmark). Only the zero-arg rand.Int() form is matched
+  // (not bare "rand.Int(" with arguments) because crypto/rand.Int(reader,
+  // max) shares the same call syntax under the same package name "rand" but
+  // always takes 2 arguments -- requiring empty parens specifically avoids
+  // flagging the secure package. The other function names (Intn/Int31/
+  // Int63/Float32/Float64/Perm/Shuffle) don't exist in crypto/rand at all,
+  // so they're unambiguous on their own.
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*(?::=|=).*\brand\.(?:Int\(\)|Intn|Int31\b|Int63\b|Int31n|Int63n|Float32|Float64|Perm|Shuffle)\s*\(?/i,
   // PHP
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\b(?:rand|mt_rand)\s*\(/i,
   // Ruby
@@ -837,6 +857,9 @@ const OPEN_REDIRECT_RE = [
   /header\s*\(\s*["']Location:\s*["']\s*\.\s*\$_(?:GET|POST|REQUEST)\b/i,
   // Ruby on Rails
   /redirect_to\s+params\[/i,
+  // Go — http.Redirect(w, r, target, ...) with a request-derived target
+  // inline as the 3rd argument.
+  /http\.Redirect\s*\([^,]+,[^,]+,\s*(?:r\.(?:URL\.Query\(\)|FormValue\b|PostFormValue\b)|c\.(?:Param|Params|Query|QueryParam|PostForm)\s*\(|chi\.URLParam\s*\(\s*r\s*,)/i,
 ];
 
 // Require one side of the comparison to be clearly request-derived
@@ -1156,6 +1179,13 @@ const PII_LOG_RE = [
   /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.phone(?:Number)?\b[^)]*\)/i,
   /(?:console|logger|log)\.\w+\s*\([^)]*\$\{[^}]*\b(?:email|password|token|secret|ssn|phone|creditCard|cvv)\b[^}]*\}[^)]*\)/i,
   /logging\.(?:info|debug|warning|error)\s*\([^)]*[\w\])]\.(?:password|email|token|ssn)\b[^)]*\)/i,
+  // Go — log.Printf("... password=%s ...", password): sensitive data
+  // appears as a labeled %verb in the format string, not a .propertyName
+  // access the way every entry above requires. Matches a log.* call whose
+  // format-string literal contains a sensitive field name immediately
+  // followed by = or : (a labeled field), the idiomatic Go structured-ish
+  // logging shape.
+  /\blog\.(?:Printf|Println|Print|Fatalf|Panicf)\s*\(\s*["'][^"']*\b(?:password|passwd|token|secret|api[_]?key|ssn|credit.?card)\b\s*[=:]/i,
 ];
 
 // Mass assignment
@@ -1828,6 +1858,29 @@ function findNamedTaintOpenRedirectJS(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Go named-taint open redirect: target := r.URL.Query().Get("next");
+// http.Redirect(w, r, target, http.StatusFound) -- the dominant real-world
+// shape (target assigned on an earlier line, not inline as the 3rd
+// argument), which the inline OPEN_REDIRECT_RE entry can't see. Mirrors
+// findNamedTaintOpenRedirectJS exactly.
+const GO_REDIRECT_SINK_RE = /\bhttp\.Redirect\s*\([^,]+,[^,]+,\s*(\w+)\s*,/;
+
+function findNamedTaintOpenRedirectGo(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  if (tainted.size === 0) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    const m = GO_REDIRECT_SINK_RE.exec(line);
+    if (!m || !tainted.has(m[1])) continue;
+    if (OPEN_REDIRECT_RE.some(r => r.test(line))) continue; // already caught inline
+    found.push({ id:"open-redirect", label:"Open Redirect", severity:"medium", line:i+1,
+      detail:`Tainted variable '${m[1]}' used as a redirect target — validate against an allowlist of known paths/origins` });
+  }
+  return found;
+}
+
 function findSSRF(lines: string[]): ScanIndicator[] {
   return runDetector(lines, SSRF_RE, "ssrf", "Server-Side Request Forgery", "critical",
     "User-controlled URL in HTTP request — validate against allowlist or use SSRF-safe library");
@@ -2016,6 +2069,42 @@ function findPrototypePollution(lines: string[]): ScanIndicator[] {
 function findInsecureRandomness(lines: string[]): ScanIndicator[] {
   return runDetector(lines, INSECURE_RANDOM_RE, "insecure-randomness", "Insecure Randomness", "high",
     "Math.random() is not cryptographically secure — use crypto.randomBytes()");
+}
+
+// Go: a math/rand call inside a function whose NAME is security-sounding
+// (createSessionToken(), weakRandomID(), etc.) but the rand.<Func>() call
+// itself has no security keyword on its own line -- the shape
+// INSECURE_RANDOM_RE's flat entry can't see, since every entry in that
+// array requires the keyword and the call on the SAME line. Tracks the
+// current enclosing `func Name(...)` line; if Name contains a security
+// keyword, flags any insecure rand call found before the next `func` line.
+// A simple, bounded approximation (no real function-boundary/brace
+// tracking) consistent with this file's established precision posture
+// elsewhere -- doesn't handle nested closures reassigning the "current
+// function" context, which is an accepted, minor gap.
+const GO_INSECURE_RANDOM_CALL_RE = /\brand\.(?:Int\(\)|Intn|Int31\b|Int63\b|Int31n|Int63n|Float32|Float64|Perm|Shuffle)\s*\(?/;
+const GO_FUNC_DECL_RE = /^func\s+(?:\([^)]*\)\s*)?(\w+)\s*\(/;
+const GO_SECURITY_FUNC_NAME_RE = /token|secret|session|password|auth|csrf|nonce|key/i;
+
+function findInsecureRandomnessGoFunc(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  let inSecurityFunc = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const funcMatch = GO_FUNC_DECL_RE.exec(line.trim());
+    if (funcMatch) {
+      inSecurityFunc = GO_SECURITY_FUNC_NAME_RE.test(funcMatch[1]);
+      continue;
+    }
+    if (!inSecurityFunc) continue;
+    if (isNonExecutableLine(line)) continue;
+    if (INSECURE_RANDOM_RE.some(r => r.test(line))) continue; // already caught inline
+    if (GO_INSECURE_RANDOM_CALL_RE.test(line)) {
+      found.push({ id:"insecure-randomness", label:"Insecure Randomness", severity:"high", line:i+1,
+        detail:"math/rand used inside a security-sounding function — use crypto/rand for tokens, session ids, or anything security-sensitive" });
+    }
+  }
+  return found;
 }
 
 function findReDoS(lines: string[]): ScanIndicator[] {
@@ -2812,6 +2901,29 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
       if (AUTH_COOKIE_RE.test(cookieName) && !/httponly\s*=\s*True/i.test(block)) {
         found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
           line:i+1, detail:`Session/auth cookie "${cookieName}" set without httponly=True — XSS can steal it via document.cookie` });
+      }
+      continue;
+    }
+
+    // Go: http.SetCookie(w, &http.Cookie{Name: "session", Value: ..., ...})
+    // -- a struct-literal shape structurally different from both the JS
+    // options-object and the Java setter-call/Python kwarg shapes above, so
+    // it needs its own branch. The struct literal is commonly multi-line
+    // (an omitted HttpOnly/Secure/SameSite field, not an explicit false, is
+    // the actual vulnerable shape), so this expands a forward window rather
+    // than checking the single line the call starts on.
+    if (/http\.SetCookie\s*\(/.test(lines[i])) {
+      const block = lines.slice(i, Math.min(lines.length, i + 10)).join(" ");
+      const nameMatch  = block.match(/Name\s*:\s*["']([^"']+)["']/);
+      const cookieName = nameMatch?.[1] ?? "";
+      if (AUTH_COOKIE_RE.test(cookieName)) {
+        if (!/HttpOnly\s*:\s*true/i.test(block)) {
+          found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without HttpOnly: true — XSS can steal it via document.cookie` });
+        } else if (!/Secure\s*:\s*true/i.test(block)) {
+          found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without Secure: true — transmitted over unencrypted HTTP` });
+        }
       }
     }
   }
@@ -5680,9 +5792,11 @@ export function analyzeFile(
     ...findPHPFileInclusion(lines),
     ...findPrototypePollution(lines),
     ...findInsecureRandomness(lines),
+    ...findInsecureRandomnessGoFunc(lines),
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
     ...findNamedTaintOpenRedirectJS(lines),
+    ...findNamedTaintOpenRedirectGo(lines),
     ...findTimingAttack(lines),
     ...findPlaintextPasswordStorage(lines),
     ...findSSTI(lines),

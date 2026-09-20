@@ -326,3 +326,224 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
     expect(result.indicators.some(i => i.id === "idor")).toBe(true);
   });
 });
+
+describe("Go hardcoded secrets — MySQL connection string", () => {
+  it("flags a MySQL connection string with embedded credentials", () => {
+    const content = `
+package main
+const databaseURL = "mysql://admin:SuperSecretPassword@db.internal:3306/app"
+func main() {}
+`;
+    const result = analyzeFile("config.go", content);
+    expect(result.indicators.some(i => i.id === "hardcoded-secret")).toBe(true);
+  });
+
+  it("does not suppress a real branded secret whose value happens to contain the word 'password'", () => {
+    // Regression for the actual root-cause bug found while adding the MySQL
+    // pattern above: PLACEHOLDER_VALUE_RE's old bare "password" marker (no
+    // word boundary) matched "SuperSecretPassword" as a substring, silently
+    // treating the whole line as placeholder text and suppressing every
+    // SECRET_PATTERNS check on it -- not just the new MySQL pattern.
+    // Uses a Postgres connection string (not a Stripe-shaped key) so this
+    // fixture doesn't resemble a real, scannable secret format on its own.
+    const content = `
+package main
+const dbURL = "postgresql://admin:SuperSecretPassword@db.internal:5432/app"
+func main() {}
+`;
+    const result = analyzeFile("config2.go", content);
+    expect(result.indicators.some(i => i.id === "hardcoded-secret")).toBe(true);
+  });
+
+  it("still suppresses a genuine your_password_here-style placeholder", () => {
+    const content = `
+package main
+const apiKey = "your_password_here"
+func main() {}
+`;
+    const result = analyzeFile("config3.go", content);
+    expect(result.indicators.some(i => i.id === "hardcoded-secret")).toBe(false);
+  });
+});
+
+describe("Go insecure randomness — math/rand inside a security-sounding function", () => {
+  it("flags rand.Int() used inside a function named createSessionToken", () => {
+    const content = `
+package main
+func createSessionToken() string {
+	return fmt.Sprintf("%d-%d", time.Now().Unix(), rand.Int())
+}
+`;
+    const result = analyzeFile("session.go", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(true);
+  });
+
+  it("flags a keyword+rand call on the same line (the previously-broken flat entry)", () => {
+    const content = `
+package main
+func build() {
+	token := fmt.Sprintf("%d", rand.Intn(1000000))
+}
+`;
+    const result = analyzeFile("build.go", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(true);
+  });
+
+  it("does not flag rand.Int() inside a function with no security-sounding name", () => {
+    const content = `
+package main
+func randomJitter() int {
+	return rand.Int()
+}
+`;
+    const result = analyzeFile("jitter.go", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(false);
+  });
+
+  it("does not flag crypto/rand.Int(reader, max) even inside a security-sounding function", () => {
+    const content = `
+package main
+func createSecureToken() (*big.Int, error) {
+	return rand.Int(rand.Reader, max)
+}
+`;
+    const result = analyzeFile("secure_session.go", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(false);
+  });
+});
+
+describe("Go open redirect", () => {
+  it("flags a named-taint redirect target assigned on an earlier line", () => {
+    const content = `
+package main
+func openRedirect(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("next")
+	http.Redirect(w, r, target, http.StatusFound)
+}
+`;
+    const result = analyzeFile("handlers/redirect.go", content);
+    expect(result.indicators.some(i => i.id === "open-redirect")).toBe(true);
+  });
+
+  it("flags a request-derived target passed inline to http.Redirect", () => {
+    const content = `
+package main
+func redirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, r.URL.Query().Get("next"), http.StatusFound)
+}
+`;
+    const result = analyzeFile("handlers/redirect2.go", content);
+    expect(result.indicators.some(i => i.id === "open-redirect")).toBe(true);
+  });
+
+  it("does not flag a redirect to a hardcoded path", () => {
+    const content = `
+package main
+func redirectHome(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/home", http.StatusFound)
+}
+`;
+    const result = analyzeFile("handlers/redirect_safe.go", content);
+    expect(result.indicators.some(i => i.id === "open-redirect")).toBe(false);
+  });
+});
+
+describe("Go cookie security — http.SetCookie struct-literal shape", () => {
+  it("flags a session cookie with no HttpOnly flag", () => {
+    const content = `
+package main
+func insecureSession(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:  "session",
+		Value: createSessionToken(),
+	})
+}
+`;
+    const result = analyzeFile("handlers/session.go", content);
+    const finding = result.indicators.find(i => i.id === "cookie-no-httponly");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("medium");
+  });
+
+  it("flags an auth cookie whose value is set directly from form input", () => {
+    const content = `
+package main
+func weakCookie(w http.ResponseWriter, r *http.Request) {
+	value := r.FormValue("value")
+	http.SetCookie(w, &http.Cookie{Name: "auth", Value: value})
+}
+`;
+    const result = analyzeFile("handlers/weak_cookie.go", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(true);
+  });
+
+  it("flags cookie-no-secure when HttpOnly is set but Secure is missing", () => {
+    const content = `
+package main
+func setCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "x",
+		HttpOnly: true,
+	})
+}
+`;
+    const result = analyzeFile("handlers/partial.go", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-secure")).toBe(true);
+  });
+
+  it("does not flag a fully-hardened cookie", () => {
+    const content = `
+package main
+func setCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "x",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+`;
+    const result = analyzeFile("handlers/hardened.go", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(false);
+    expect(result.indicators.some(i => i.id === "cookie-no-secure")).toBe(false);
+  });
+
+  it("does not flag a non-auth cookie missing HttpOnly", () => {
+    const content = `
+package main
+func setPreference(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "theme", Value: "dark"})
+}
+`;
+    const result = analyzeFile("handlers/prefs.go", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(false);
+  });
+});
+
+describe("Go PII in logs — log.Printf with a labeled sensitive field", () => {
+  it("flags log.Printf with password=%s in the format string", () => {
+    const content = `
+package main
+func logSensitiveData(r *http.Request) {
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+	log.Printf("login username=%s password=%s", username, password)
+}
+`;
+    const result = analyzeFile("handlers/logging.go", content);
+    expect(result.indicators.some(i => i.id === "pii-in-logs")).toBe(true);
+  });
+
+  it("does not flag an ordinary log.Printf with no sensitive field label", () => {
+    const content = `
+package main
+func logRequest(r *http.Request) {
+	log.Printf("handled request method=%s path=%s", r.Method, r.URL.Path)
+}
+`;
+    const result = analyzeFile("handlers/logging_safe.go", content);
+    expect(result.indicators.some(i => i.id === "pii-in-logs")).toBe(false);
+  });
+});

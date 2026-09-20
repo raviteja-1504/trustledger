@@ -348,4 +348,11 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content (a Python cursor.execute() SQL string) -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
   { file: "src/lib/scanner.ts", id: "hallucinated-method-call", lineHash: "36d30faeac0f", line: 1532, severity: "medium",
     reason: "False positive: the detector cannot infer an array-index expression's (e.g. arr[i], match[1]) element type and defaults to flagging real built-in String/Array/Object methods (.trim(), .split(), .toLowerCase(), .sort(), .charCodeAt(), etc.) as hallucinated. Confirmed a genuine built-in at this call site (lines[i].trim(), added by the PHP OWASP hardening phase's multi-line SQL-injection detector)." },
+  // Added while fixing a Go detector-gap report: PLACEHOLDER_VALUE_RE's
+  // bare "password" marker (no word boundary) was silently suppressing any
+  // secret value that merely CONTAINED "password" as a substring --
+  // tightening it to \bpassword\b surfaced this real, previously-hidden
+  // demo-content finding.
+  { file: "src/components/NewScanPanel.tsx", id: "hardcoded-secret", lineHash: "713d0879d184", line: 32, severity: "critical",
+    reason: "This line is inside an intentionally-vulnerable code SAMPLE embedded as product demo content in NewScanPanel.tsx (shown to users to illustrate what the scanner detects) -- never executed." },
 ];
