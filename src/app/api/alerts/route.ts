@@ -174,11 +174,14 @@ export async function POST(req: NextRequest) {
   if (body.deliver && (body.severity === "P1" || body.severity === "P2")) {
     const { data: org } = await db
       .from("organizations")
-      .select("name, slug")
+      .select("name, slug, slack_webhook, teams_webhook")
       .eq("id", org_id)
-      .single() as { data: { name: string; slug: string } | null };
+      .single() as { data: { name: string; slug: string; slack_webhook: string | null; teams_webhook: string | null } | null };
 
-    const slackWebhook  = process.env.SLACK_WEBHOOK_URL ?? "";
+    // Org-configured webhooks (now persisted to organizations.slack_webhook/
+    // teams_webhook) take precedence over the global env var fallback.
+    const slackWebhook  = org?.slack_webhook || process.env.SLACK_WEBHOOK_URL || "";
+    const teamsWebhook  = org?.teams_webhook || "";
     const sendgridKey   = process.env.SENDGRID_API_KEY ?? "";
     const pagerdutyKey  = process.env.PAGERDUTY_KEY ?? "";
     const fromEmail     = process.env.ALERT_FROM_EMAIL ?? "alerts@trustledger.dev";
@@ -199,6 +202,7 @@ export async function POST(req: NextRequest) {
     deliveryResult = await deliverAlert(
       {
         slack_webhook:    slackWebhook || undefined,
+        teams_webhook:    teamsWebhook || undefined,
         sendgrid_api_key: sendgridKey || undefined,
         alert_from_email: fromEmail,
         pagerduty_key:    pagerdutyKey || undefined,

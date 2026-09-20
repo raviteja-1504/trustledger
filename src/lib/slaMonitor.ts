@@ -45,9 +45,9 @@ export async function checkSLABreaches(
     // Get org config
     const { data: org } = await db
       .from("organizations")
-      .select("name, slug")
+      .select("name, slug, slack_webhook, teams_webhook")
       .eq("id", org_id)
-      .single() as { data: { name: string; slug: string } | null };
+      .single() as { data: { name: string; slug: string; slack_webhook: string | null; teams_webhook: string | null } | null };
 
     // Group by scan (1 alert per scan, not per file)
     const byScan: Record<string, typeof violations> = {};
@@ -104,10 +104,14 @@ export async function checkSLABreaches(
 
       if (!alert) continue;
 
-      // Deliver alert
+      // Deliver alert. Org-configured webhooks take precedence over the
+      // global env var fallback -- see the Settings page's Slack/Teams
+      // integration cards, now persisted to organizations.slack_webhook/
+      // teams_webhook instead of only browser localStorage.
       await deliverAlert(
         {
-          slack_webhook:    process.env.SLACK_WEBHOOK_URL,
+          slack_webhook:    org?.slack_webhook || process.env.SLACK_WEBHOOK_URL,
+          teams_webhook:    org?.teams_webhook || undefined,
           sendgrid_api_key: process.env.SENDGRID_API_KEY,
           alert_from_email: process.env.ALERT_FROM_EMAIL ?? "alerts@trustledger.dev",
           alert_emails:     [],

@@ -14,10 +14,19 @@
  *   Request URL: https://app.trustledger.dev/api/slack/commands
  *   Short Description: TrustLedger AI governance
  *   Signing Secret: set SLACK_SIGNING_SECRET env var
+ *
+ * `attest` additionally needs a Bot Token (SLACK_BOT_TOKEN env var) with the
+ * users:read.email OAuth scope, used to resolve the calling Slack user's
+ * real email address via users.info -- Slack's slash-command payload only
+ * ever gives a user_id/user_name, and attestation requires a real email
+ * (AttestSchema). Without this token configured, `attest` fails open into
+ * a message pointing back to the dashboard rather than pretending to
+ * succeed -- every other command works with no bot token at all.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { handleAttest } from "@/lib/slackAttest";
 import crypto from "crypto";
 
 const RISK_EMOJI: Record<string, string> = {
@@ -170,6 +179,7 @@ function handleHelp(appUrl: string) {
     { type:"section", text:{ type:"mrkdwn", text:[
       "`/trustledger status [repo]` — show recent scan status",
       "`/trustledger violations` — list open CRITICAL/HIGH violations",
+      "`/trustledger attest <scan_id> <file_path>` — attest a file",
       "`/trustledger dashboard` — open the TrustLedger dashboard",
       "`/trustledger help` — show this help",
     ].join("\n") } },
@@ -195,6 +205,7 @@ export async function POST(req: NextRequest) {
   // Parse URL-encoded Slack body
   const params   = new URLSearchParams(rawBody);
   const teamId   = params.get("team_id")    ?? "";
+  const slackUserId = params.get("user_id") ?? "";
   const text     = (params.get("text")      ?? "").trim();
   const [cmd, ...args] = text.split(/\s+/);
   const command  = (cmd || "help").toLowerCase();
@@ -215,6 +226,9 @@ export async function POST(req: NextRequest) {
       break;
     case "violations":
       response = await handleViolations(db, orgId, appUrl);
+      break;
+    case "attest":
+      response = await handleAttest(db, orgId, args, slackUserId);
       break;
     case "dashboard":
       response = slackText(`📊 Open TrustLedger dashboard: ${appUrl}/dashboard`);

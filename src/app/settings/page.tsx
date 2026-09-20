@@ -675,7 +675,7 @@ function IntegrationsTab({ policy, setPolicy }: {
 const TEAMS_KEY = "tl_teams_webhook";
 
 function TeamsIntegration({ policy, setPolicy }: { policy: OrgPolicy; setPolicy: React.Dispatch<React.SetStateAction<OrgPolicy>> }) {
-  const teamsWebhook = (policy as OrgPolicy & { teams_webhook?: string }).teams_webhook ?? "";
+  const teamsWebhook = policy.teams_webhook ?? "";
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"ok"|"error"|null>(null);
 
@@ -715,7 +715,7 @@ function TeamsIntegration({ policy, setPolicy }: { policy: OrgPolicy; setPolicy:
           <div className="mt-3 flex gap-2">
             <input type="url" placeholder="https://outlook.office.com/webhook/..."
               value={teamsWebhook}
-              onChange={e => setPolicy(p => ({ ...p, teams_webhook: e.target.value } as OrgPolicy))}
+              onChange={e => setPolicy(p => ({ ...p, teams_webhook: e.target.value }))}
               className="flex-1 text-xs border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono" />
             <button onClick={test} disabled={!teamsWebhook || testing}
               className="shrink-0 text-xs font-bold px-3 py-1.5 rounded-lg border border-gray-200 hover:border-indigo-300 text-gray-600 disabled:opacity-50 transition-colors">
@@ -2292,7 +2292,7 @@ export default function SettingsPage() {
     setPolicy(loadPolicy());
     // Sync real org settings into policy if authenticated
     if (profile?.org_id) {
-      authedFetch<{ org: { ai_threshold: number; attest_sla_hours: number; block_on_critical: boolean; block_on_high: boolean; require_two_reviewers: boolean } }>("/api/settings")
+      authedFetch<{ org: { ai_threshold: number; attest_sla_hours: number; block_on_critical: boolean; block_on_high: boolean; require_two_reviewers: boolean; slack_webhook?: string; teams_webhook?: string } }>("/api/settings")
         .then(res => {
           if (!res.org) return;
           const realPolicy: OrgPolicy = {
@@ -2302,6 +2302,13 @@ export default function SettingsPage() {
             block_on_critical:      res.org.block_on_critical,
             block_on_high:          res.org.block_on_high,
             require_two_reviewers:  res.org.require_two_reviewers,
+            // Real DB values take precedence over whatever's in localStorage
+            // (e.g. a stale/empty webhook saved from another browser) --
+            // these two fields are the ones that actually reach the
+            // server-side alert senders now, so the UI must reflect the
+            // server's copy, not a possibly-stale local one.
+            slack_webhook:           res.org.slack_webhook ?? "",
+            teams_webhook:           res.org.teams_webhook ?? "",
           };
           setPolicy(realPolicy);
           savePolicy(realPolicy);
@@ -2323,6 +2330,8 @@ export default function SettingsPage() {
           block_on_critical:     policy.block_on_critical,
           block_on_high:         policy.block_on_high,
           require_two_reviewers: policy.require_two_reviewers,
+          slack_webhook:         policy.slack_webhook,
+          teams_webhook:         policy.teams_webhook,
         }),
       }).catch(() => {});
     }

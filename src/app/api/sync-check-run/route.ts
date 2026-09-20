@@ -203,6 +203,17 @@ export async function POST(req: NextRequest) {
       .neq("status", "resolved")
       .in("risk_score", ["CRITICAL", "HIGH"]);
 
+    // Clear any previously-recorded sync failure now that this manual
+    // retry succeeded — see attestation.ts's syncCheckRunToSuccess for
+    // where this gets set. Isolated in its own try/catch: this is a
+    // best-effort diagnostic write, and must never turn an otherwise-
+    // successful manual sync into a reported failure.
+    try {
+      await db.from("scans").update({ check_run_sync_error: null }).eq("id", scan.id);
+    } catch (err) {
+      console.error("Failed to clear check_run_sync_error (non-fatal, diagnostic only):", err);
+    }
+
     return NextResponse.json({
       synced:     true,
       conclusion,

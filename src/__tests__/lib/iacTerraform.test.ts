@@ -102,7 +102,7 @@ resource "aws_s3_bucket" "x" {
 }
 `;
     const findings = findUnencryptedStorage(content);
-    expect(findings.some(f => f.id === "iac-unencrypted-storage" && f.detail.includes("x"))).toBe(true);
+    expect(findings.some(f => f.id === "iac-unencrypted-storage" && f.detail?.includes("x"))).toBe(true);
   });
 
   it("does not flag a bucket with an inline encryption block (pre-v4 provider style)", () => {
@@ -136,7 +136,7 @@ resource "aws_db_instance" "x" {
   engine = "postgres"
 }
 `;
-    expect(findUnencryptedStorage(content).some(f => f.detail.includes("RDS"))).toBe(true);
+    expect(findUnencryptedStorage(content).some(f => f.detail?.includes("RDS"))).toBe(true);
   });
 
   it("does not flag an RDS instance with storage_encrypted = true", () => {

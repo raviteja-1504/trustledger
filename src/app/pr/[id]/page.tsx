@@ -942,6 +942,24 @@ function PRDetailContent() {
 
   const [scan,    setScan]    = useState<ScanResult | null>(null);
   const [error,   setError]   = useState<string | null>(null);
+  const [syncRetrying, setSyncRetrying] = useState(false);
+
+  // Retries the GitHub check-run flip-to-success after it failed following
+  // an attestation (see src/lib/attestation.ts's syncCheckRunToSuccess) --
+  // reuses the existing /api/sync-check-run recovery endpoint rather than a
+  // new mechanism.
+  async function retrySyncCheckRun() {
+    if (!scan || syncRetrying) return;
+    setSyncRetrying(true);
+    try {
+      await authedFetch("/api/sync-check-run", {
+        method: "POST",
+        body:   JSON.stringify({ scan_id: scan.scan_id }),
+      });
+      setScan(s => s ? { ...s, check_run_sync_error: null } : s);
+    } catch { /* banner stays visible, user can retry again */ }
+    setSyncRetrying(false);
+  }
 
   // Realtime presence — show who else is reviewing this scan
   const { reviewers } = usePresence(scan?.scan_id ?? null);
@@ -1536,6 +1554,30 @@ function PRDetailContent() {
                   ))}
                 </div>
               </div>
+
+              {/* GitHub sync failure banner — shown when attestation's automatic
+                  check-run flip-to-success failed after a retry (see
+                  src/lib/attestation.ts). Reuses the existing
+                  /api/sync-check-run recovery endpoint. */}
+              {scan.check_run_sync_error && (
+                <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-rose-800/50 bg-rose-950/40 px-4 py-2.5">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <svg className="shrink-0 text-rose-400" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <span className="text-xs text-rose-300 truncate">
+                      GitHub status update failed — the PR may still show as blocked even though this is attested.
+                    </span>
+                  </div>
+                  <button
+                    onClick={retrySyncCheckRun}
+                    disabled={syncRetrying}
+                    className="shrink-0 text-xs font-bold text-rose-200 bg-rose-900/60 hover:bg-rose-900 border border-rose-700/50 rounded-lg px-3 py-1.5 disabled:opacity-50 transition-colors"
+                  >
+                    {syncRetrying ? "Retrying…" : "Retry"}
+                  </button>
+                </div>
+              )}
 
               {/* Attestation progress bar */}
               {highCount > 0 && (

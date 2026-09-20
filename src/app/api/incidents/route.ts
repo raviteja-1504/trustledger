@@ -80,13 +80,14 @@ export async function POST(req: NextRequest) {
   if (body.severity === "P1" || body.severity === "P2") {
     const { data: org } = await db
       .from("organizations")
-      .select("name")
+      .select("name, slack_webhook, teams_webhook")
       .eq("id", org_id)
-      .single() as { data: { name: string } | null };
+      .single() as { data: { name: string; slack_webhook: string | null; teams_webhook: string | null } | null };
 
     await deliverAlert(
       {
-        slack_webhook:    process.env.SLACK_WEBHOOK_URL,
+        slack_webhook:    org?.slack_webhook || process.env.SLACK_WEBHOOK_URL,
+        teams_webhook:    org?.teams_webhook || undefined,
         sendgrid_api_key: process.env.SENDGRID_API_KEY,
         alert_from_email: process.env.ALERT_FROM_EMAIL ?? "alerts@trustledger.dev",
         alert_emails:     body.stakeholders ?? [],

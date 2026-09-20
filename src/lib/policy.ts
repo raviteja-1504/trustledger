@@ -25,6 +25,7 @@ export interface OrgPolicy {
 
   // Notifications
   slack_webhook: string;
+  teams_webhook?: string;
   alert_email: string;
   notify_critical: boolean;
   notify_scan_complete: boolean;

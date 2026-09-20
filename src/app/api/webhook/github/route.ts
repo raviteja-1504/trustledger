@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { createServiceClient } from "@/lib/supabase";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
-import { verifyWebhookSignature, getInstallationToken, createCheckRun } from "@/lib/github";
+import { verifyWebhookSignature, getInstallationToken, createCheckRun, updateCheckRun } from "@/lib/github";
 import { enqueueScan } from "@/lib/queue";
 
 export async function POST(req: NextRequest) {
@@ -140,6 +140,73 @@ export async function POST(req: NextRequest) {
         pr_changed_files: prChangedFiles,
         pr_created_at:    prCreatedAt,
       }).catch(err => console.error("[webhook] enqueueScan failed:", err)),
+    );
+
+    return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });
+  }
+
+  // ── Handle a developer clicking GitHub's native "Re-run" button ───────────
+  // GitHub sends check_run/rerequested for this -- previously unhandled, so
+  // the button was a dead click. Looks up the scan this check run belongs
+  // to (check_run_id is globally unique) and re-enqueues a scan the same
+  // way a fresh pull_request event does.
+  if (event === "check_run") {
+    const action = payload.action as string;
+    if (action !== "rerequested") {
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    const checkRun     = payload.check_run as Record<string, unknown>;
+    const checkRunId   = checkRun.id as number;
+    const headSha      = checkRun.head_sha as string;
+    const checkSuite   = checkRun.check_suite as Record<string, unknown> | undefined;
+    const branch       = (checkSuite?.head_branch as string | undefined) ?? "";
+    const repo         = payload.repository as Record<string, unknown>;
+    const repoFullName = repo.full_name as string;
+
+    const db = createServiceClient();
+    const { data: scan } = await db
+      .from("scans")
+      .select("org_id, pr_number, installation_id, repo_full_name")
+      .eq("check_run_id", checkRunId)
+      .eq("repo_full_name", repoFullName)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!scan || !scan.installation_id) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "scan_not_found" });
+    }
+
+    const [owner, repoName] = repoFullName.split("/");
+    try {
+      const { token } = await getInstallationToken(scan.installation_id);
+      await updateCheckRun(token, owner, repoName, checkRunId, {
+        name:   "TrustLedger AI Governance",
+        status: "in_progress",
+        output: {
+          title:   "Re-scanning for AI-generated code…",
+          summary: "TrustLedger is re-analysing files in this pull request.",
+        },
+      });
+    } catch (err) {
+      console.error("[webhook] check run re-run update failed:", err);
+    }
+
+    waitUntil(
+      enqueueScan({
+        org_id:           scan.org_id,
+        installation_id:  scan.installation_id,
+        repo_full_name:   repoFullName,
+        pr_number:        scan.pr_number,
+        head_sha:         headSha,
+        branch,
+        pr_author:        null,
+        before_sha:       null,
+        action:           "rerequested",
+        check_run_id:     checkRunId,
+        delivery_id:      null,
+      }).catch(err => console.error("[webhook] enqueueScan (rerequested) failed:", err)),
     );
 
     return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });

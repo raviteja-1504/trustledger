@@ -85,6 +85,10 @@ export interface ScanResult {
   timestamp: string;
   evidence_breakdown?: EvidenceBreakdown;
   ai_tooling?: AIToolingArtifact[];
+  // Set when attestation's automatic GitHub check-run flip-to-success
+  // failed after a retry (see src/lib/attestation.ts) -- the PR page shows
+  // a "GitHub status update failed — Retry" banner when this is non-null.
+  check_run_sync_error?: string | null;
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

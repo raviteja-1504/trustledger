@@ -66,7 +66,7 @@ export async function GET(
 
   const { data: scan } = await db
     .from("scans")
-    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, ai_tooling")
+    .select("id, repo_full_name, pr_number, commit_sha, branch, overall_risk, total_ai_percentage, created_at, evidence_breakdown, ai_tooling, check_run_sync_error")
     .eq("id", params.id)
     .eq("org_id", org_id)
     .single();
@@ -118,6 +118,7 @@ export async function GET(
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
     ai_tooling:          scan.ai_tooling ?? [],
+    check_run_sync_error: scan.check_run_sync_error ?? null,
     files: await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
       // the snapshot written at scan time — if detection patterns improve
