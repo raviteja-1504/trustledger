@@ -347,4 +347,7 @@ export const FP_BASELINE: FpBaselineEntry[] = [
   // demo-content finding.
   { file: "src/components/NewScanPanel.tsx", id: "hardcoded-secret", lineHash: "713d0879d184", line: 32, severity: "critical",
     reason: "This line is inside an intentionally-vulnerable code SAMPLE embedded as product demo content in NewScanPanel.tsx (shown to users to illustrate what the scanner detects) -- never executed." },
+  // Added with the JS/TS recall phase: the structural JWT check flags hand-rolled payload decoding.
+  { file: "src/lib/jwt.ts", id: "jwt-none-alg", lineHash: "ba3a2f2a74f7", line: 14, severity: "critical",
+    reason: "Reviewed: decodeJwtPayload is a documented decode-only helper (its header comment says it does NOT verify the signature and must only be used on tokens already verified via supabase.auth.getUser(), to read extra claims such as session_id). It is never used as an authorization decision on its own." },
 ];

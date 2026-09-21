@@ -36,6 +36,8 @@ const TABLES: Record<SanitizerLang, Table> = {
       "encodeURIComponent": URL_SAFE, "encodeURI": C.REDIRECT | C.HEADER,
       "path.basename": C.PATH,
       "parseInt": NUMERIC, "parseFloat": NUMERIC, "Number": NUMERIC, "Boolean": NUMERIC, "BigInt": NUMERIC,
+      // String(x) keeps every string-injection class but defeats operator-object (NoSQL) injection
+      "String": C.NOSQL,
     },
     tail: {},
   },

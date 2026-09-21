@@ -23,6 +23,7 @@ import {
   buildCheckSummary,
 } from "@/lib/github";
 import { runScan } from "@/lib/scanner";
+import { safeEqual } from "@/lib/safeEqual";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
@@ -44,7 +45,7 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
   // Internal secret always accepted (webhook fallback when QStash isn't used)
   // Strip BOM (﻿) that Windows CLI piping adds to env vars in Vercel
   const expectedSecret = (process.env.INTERNAL_SECRET ?? "dev").replace(/^﻿/, "").trim();
-  if (req.headers.get("x-internal-secret") === expectedSecret) {
+  if (safeEqual(req.headers.get("x-internal-secret") ?? "", expectedSecret)) {
     return true;
   }
   // QStash signature verification

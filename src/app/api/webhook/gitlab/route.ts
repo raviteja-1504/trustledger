@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
+import { safeEqual } from "@/lib/safeEqual";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
@@ -103,7 +104,7 @@ export async function POST(req: NextRequest) {
   const secret   = process.env.GITLAB_WEBHOOK_TOKEN ?? "";
 
   // ── 1. Verify token ───────────────────────────────────────────────────────
-  if (secret && token !== secret) {
+  if (secret && !safeEqual(token, secret)) {
     return NextResponse.json({ error: "invalid_token" }, { status: 401 });
   }
 

@@ -28,12 +28,14 @@
 import * as ts from "typescript";
 import {
   ALL, applyClears, applyGuards, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
-  wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv,
+  SHADOW, wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
 export type AstTaintId =
-  | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec";
+  | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
+  | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack"
+  | "prototype-pollution" | "jwt-none-alg";
 
 export interface AstTaintFinding {
   id:         AstTaintId;
@@ -123,7 +125,7 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
 // makeTaintMask) is still not retroactively cleaned -- a documented,
 // accepted narrower gap.
 
-const CMD_SINK_NAMES = new Set(["exec", "execSync", "spawn", "spawnSync"]);
+const CMD_SINK_NAMES = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
 const FS_SINK_NAMES = new Set([
   "readFile", "readFileSync", "writeFile", "writeFileSync",
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
@@ -132,6 +134,41 @@ const HTTP_SINK_NAMES = new Set(["get", "post", "put", "delete", "patch", "reque
 const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare"]);
 
 interface SinkMatch { id: AstTaintId; sinkExpr: string; args: readonly ts.Expression[] }
+
+// Express/Fastify fluent response helpers that return `res` itself, so
+// `res.status(200).type("html").send(x)` is still the `res.send` sink.
+const FLUENT_RESPONSE_METHODS = new Set([
+  "status", "type", "set", "header", "contentType", "append", "links", "vary", "attachment", "code", "cookie",
+]);
+const RESPONSE_ROOTS = new Set(["res", "response", "reply", "resp"]);
+const NOSQL_TAILS = new Set([
+  "find", "findOne", "findOneAndUpdate", "findOneAndDelete", "findOneAndReplace", "updateOne", "updateMany",
+  "deleteOne", "deleteMany", "replaceOne", "aggregate", "countDocuments",
+]);
+const NOSQL_RECEIVER_RE = /mongo|collection|coll\b|nosql|couch|dynamo|cosmos|\bdb\b|model|users?\b|orders?\b|accounts?\b/i;
+const GLOBAL_OBJECTS = new Set(["globalThis", "window", "global", "self"]);
+
+const isFunctionExpr = (e: ts.Node): e is ts.ArrowFunction | ts.FunctionExpression =>
+  ts.isArrowFunction(e) || ts.isFunctionExpression(e);
+
+function unwrapExpr(e: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) ||
+         ts.isTypeAssertionExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression;
+  return e;
+}
+
+/** `res.type("html").send` -> "res.send" (root must be a response-shaped identifier, every hop a fluent helper). */
+function fluentResponseText(callee: ts.Expression): string | null {
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  let base: ts.Expression = callee.expression;
+  let hops = 0;
+  while (ts.isCallExpression(base) && ts.isPropertyAccessExpression(base.expression) &&
+         FLUENT_RESPONSE_METHODS.has(base.expression.name.text)) {
+    base = base.expression.expression;
+    hops++;
+  }
+  return hops > 0 && ts.isIdentifier(base) && RESPONSE_ROOTS.has(base.text) ? `res.${callee.name.text}` : null;
+}
 
 /** Resolves bare identifiers imported via `import { exec } from "child_process"` etc. */
 function buildImportMap(sourceFile: ts.SourceFile): Map<string, string> {
@@ -197,7 +234,7 @@ function calleeText(expr: ts.Expression): string | null {
 
 function matchSink(call: ts.CallExpression, importMap: Map<string, string>): SinkMatch | null {
   const callee = call.expression;
-  const text = calleeText(callee);
+  const text = calleeText(callee) ?? fluentResponseText(callee);
   if (!text) return null;
   const parts = text.split(".");
   const head = parts[0];
@@ -227,8 +264,25 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (parts[0] === "path" && (tail === "join" || tail === "resolve")) {
     return { id: "path-traversal", sinkExpr: text, args: call.arguments };
   }
-  if (text === "res.redirect") {
+  if (text === "res.redirect" || text === "res.location") {
     return { id: "open-redirect", sinkExpr: text, args: call.arguments };
+  }
+  if (text === "res.setHeader" || text === "res.set" || text === "res.header" || text === "res.append") {
+    return { id: "header-injection", sinkExpr: text, args: call.arguments };
+  }
+  if (text === "res.sendFile" || text === "res.sendfile" || text === "res.download") {
+    // sendFile(name, { root }) confines the path -- only the un-rooted form is a traversal sink
+    const opts = call.arguments[1];
+    if (opts && ts.isObjectLiteralExpression(opts) &&
+        opts.properties.some(p => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && p.name.getText() === "root")) return null;
+    return call.arguments[0] ? { id: "path-traversal", sinkExpr: text, args: [call.arguments[0]] } : null;
+  }
+  if (text === "RegExp" && call.arguments[0]) {
+    return { id: "redos", sinkExpr: text, args: [call.arguments[0]] };
+  }
+  if (parts.length > 1 && NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) &&
+      !ts.isStringLiteral(call.arguments[0]) && NOSQL_RECEIVER_RE.test(parts.slice(0, -1).join("."))) {
+    return { id: "nosql-injection", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && DB_SINK_METHODS.has(tail)) {
     return { id: "sql-injection", sinkExpr: text, args: call.arguments };
@@ -240,6 +294,74 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
 
 type Env = TaintEnv;
 
+// Builtins whose RESULT carries the taint of their arguments (string/JSON/URL/path plumbing that
+// neither validates nor neutralizes anything). Opaque calls stay untainted -- these are the curated
+// exceptions, not a default flip. Decoders additionally RESTORE classes an earlier encoder cleared.
+const PASSTHROUGH_CALLS = new Set([
+  "String", "JSON.parse", "JSON.stringify", "Buffer.from", "Buffer.concat", "path.join", "path.resolve",
+  "path.normalize", "path.format", "path.relative", "path.dirname", "Object.assign", "Object.values",
+  "Object.entries", "Object.keys", "Object.fromEntries", "Array.from", "Array.of", "Promise.resolve",
+  "Promise.all", "Promise.race", "Promise.allSettled", "String.raw", "structuredClone", "url.format",
+  "querystring.stringify", "querystring.parse", "decodeURIComponent", "decodeURI", "unescape", "atob", "btoa",
+]);
+const DECODERS = new Set(["decodeURIComponent", "decodeURI", "unescape", "atob"]);
+const PASSTHROUGH_NEW = new Set(["URL", "URLSearchParams", "Buffer", "String", "Array", "Set", "Map", "Error"]);
+// Methods whose result also includes their ARGUMENTS (replacement text, appended strings).
+const ARG_CARRYING_METHODS = new Set(["replace", "replaceAll", "concat", "padStart", "padEnd"]);
+const CALLBACK_RESULT_METHODS = new Set(["then", "map", "flatMap"]);
+// A local class method sharing one of these names is indistinguishable from the builtin -- not resolved by name.
+const BUILTIN_METHOD_NAMES = new Set([
+  "get", "set", "has", "delete", "add", "push", "pop", "shift", "unshift", "map", "filter", "reduce", "forEach", "join",
+  "split", "slice", "splice", "concat", "replace", "then", "catch", "find", "includes", "indexOf", "trim", "toString",
+  "send", "json", "end", "write", "next", "call", "apply", "bind",
+]);
+const MUTATING_METHODS = new Set(["push", "unshift", "add", "set", "append", "splice"]);
+
+const declaredNamesCache = new WeakMap<ts.Node, Set<string>>();
+/** Parameter and local-declaration names of a function-like (nested functions excluded). */
+function declaredNames(fn: ts.Node): Set<string> {
+  const cached = declaredNamesCache.get(fn);
+  if (cached) return cached;
+  const names = new Set<string>();
+  const addBinding = (n: ts.BindingName) => {
+    if (ts.isIdentifier(n)) names.add(n.text);
+    else for (const el of n.elements) if (!ts.isOmittedExpression(el)) addBinding(el.name);
+  };
+  const f = fn as ts.FunctionLikeDeclaration;
+  for (const p of f.parameters ?? []) addBinding(p.name);
+  const visit = (n: ts.Node) => {
+    if (n !== f.body && isFunctionLike(n)) { if ((ts.isFunctionDeclaration(n)) && n.name) names.add(n.name.text); return; }
+    if (ts.isVariableDeclaration(n)) addBinding(n.name);
+    ts.forEachChild(n, visit);
+  };
+  if (f.body) ts.forEachChild(f.body, visit);
+  declaredNamesCache.set(fn, names);
+  return names;
+}
+
+/** Is identifier `id` bound by an enclosing function's parameter/local (i.e. NOT the module-scope binding)? */
+function isShadowed(id: ts.Identifier): boolean {
+  for (let cur: ts.Node | undefined = id.parent; cur; cur = cur.parent) {
+    if (isFunctionLike(cur) && declaredNames(cur).has(id.text)) return true;
+  }
+  return false;
+}
+
+/** Is `id` a PARAMETER of an enclosing function (a callback the caller supplied)? */
+function isParamOfEnclosingFn(id: ts.Identifier): boolean {
+  for (let cur: ts.Node | undefined = id.parent; cur; cur = cur.parent) {
+    if (isFunctionLike(cur) && (cur as ts.FunctionLikeDeclaration).parameters.some(p => ts.isIdentifier(p.name) && p.name.text === id.text)) return true;
+  }
+  return false;
+}
+
+function rootIdentifier(e: ts.Expression): ts.Identifier | null {
+  let cur: ts.Expression = e;
+  while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur) || ts.isParenthesizedExpression(cur) ||
+         ts.isNonNullExpression(cur) || ts.isAsExpression(cur)) cur = cur.expression;
+  return ts.isIdentifier(cur) ? cur : null;
+}
+
 /**
  * Builds the core taint evaluator as a closure over `propagating` so every
  * call site (there are several, scattered through the statement walk below)
@@ -250,8 +372,6 @@ type Env = TaintEnv;
  * the local name a cross-file import is bound to) directly to its
  * propagating ParamShape[] (not just indices -- storing the shapes
  * themselves, rather than indices that would need a second `localFns`
- * lookup to resolve, is what lets a cross-file entry work through this
- * exact map with zero special-casing: a cross-file imported name has no
  * LocalFn entry to look shapes up from at all). This is what makes
  * `exec(buildCommand(host))` resolve correctly whether buildCommand is
  * declared in this same file or imported from another one in the same scan
@@ -261,21 +381,47 @@ type Env = TaintEnv;
  * (not per-function) so a call like `buildLog(safeId, taintedMessage)` where
  * only `userId` -- not `message` -- flows into buildLog's return does NOT
  * fire, even though buildLog is "propagating" for its userId parameter.
+ *
+ * `sticky` (main scan only) is module-scope container memory: taint written
+ * into a module-level array/Map/object from one handler is visible when any
+ * handler reads it back (stored XSS, second-order SQL).
  */
-function makeTaintMask(propagating: Map<string, ParamShape[]>) {
+function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>) {
+  let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
     if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
     if (isTaintSourceExpr(expr)) return ALL;
-    if (ts.isIdentifier(expr)) return env.get(expr.text) ?? 0;
+    if (ts.isIdentifier(expr)) {
+      let m = env.get(expr.text) ?? 0;
+      const st = sticky?.get(expr.text);
+      if (st && !isShadowed(expr)) m |= st;
+      // a bare object also carries the fields written onto it (`u.hostname = h; u`)
+      const prefix = expr.text + ".";
+      for (const [k, v] of env) if (v && k.startsWith(prefix)) m |= v;
+      return m;
+    }
     if (ts.isPropertyAccessExpression(expr)) {
       // Field-sensitive read: OR the composite "root.field" key (set by
       // applyDeclAndAssign's field-write branch below) with the root-object
       // mask -- pure recall gain, this can only ever ADD classes the old
       // root-collapse behavior would have missed, never remove one already
-      // found that way.
+      // found that way. The ROOT identifier contributes only its own mask,
+      // not its other fields (that would defeat field sensitivity).
       const path = calleeText(expr);
-      return (path ? (env.get(path) ?? 0) : 0) | taintMask(expr.expression, env);
+      const base = expr.expression;
+      const baseMask = ts.isIdentifier(base)
+        ? (env.get(base.text) ?? 0) | (sticky && !isShadowed(base) ? (sticky.get(base.text) ?? 0) : 0)
+        : taintMask(base, env);
+      return (path ? (env.get(path) ?? 0) : 0) | baseMask;
     }
+    // arr[i] / obj[key]: an element of a tainted container is tainted; a lookup on a global object
+    // with an attacker-chosen key selects an attacker-chosen member.
+    if (ts.isElementAccessExpression(expr)) {
+      const obj = unwrapExpr(expr.expression);
+      const viaGlobal = ts.isIdentifier(obj) && GLOBAL_OBJECTS.has(obj.text);
+      return taintMask(expr.expression, env) | (viaGlobal ? taintMask(expr.argumentExpression, env) : 0);
+    }
+    if (ts.isAwaitExpression(expr)) return taintMask(expr.expression, env);
     if (ts.isBinaryExpression(expr)) {
       const k = expr.operatorToken.kind;
       // +, and the value-producing logical operators: `a || b` / `a ?? b` /
@@ -295,40 +441,113 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>) {
     if (ts.isSpreadElement(expr)) return taintMask(expr.expression, env);
     if (ts.isArrayLiteralExpression(expr)) return expr.elements.reduce((m, e) => m | taintMask(e, env), 0);
     if (ts.isObjectLiteralExpression(expr)) {
-      return expr.properties.reduce((m, p) => (ts.isPropertyAssignment(p) ? m | taintMask(p.initializer, env) : m), 0);
+      return expr.properties.reduce((m, p) => {
+        if (ts.isPropertyAssignment(p)) return m | taintMask(p.initializer, env);
+        if (ts.isShorthandPropertyAssignment(p)) return m | (env.get(p.name.text) ?? 0);
+        if (ts.isSpreadAssignment(p)) return m | taintMask(p.expression, env);
+        return m;
+      }, 0);
     }
-    if (ts.isCallExpression(expr)) {
-      // Known sanitizer: the argument's taint passes THROUGH minus only the
-      // classes this sanitizer actually neutralizes (an HTML escaper leaves
-      // SQL/command/path taint intact). Opaque calls stay untainted below.
-      const calleeName = calleeText(expr.expression);
-      if (calleeName) {
-        const clears = sanitizerClears("js", calleeName);
-        if (clears !== null) return expr.arguments[0] ? applyClears(taintMask(expr.arguments[0], env), clears) : 0;
+    // A function VALUE carries whatever it captured: `() => x` returns x when called, so `delayed(x)()`
+    // and `makeRenderer(v)()` resolve. Bounded (small bodies, shallow) so route-handler arrows stay cheap.
+    if (isFunctionExpr(expr)) {
+      if (fnValueDepth >= 2) return 0;
+      if (ts.isBlock(expr.body) && expr.body.statements.length > 8) return 0;
+      fnValueDepth++;
+      try { return functionResultMask(expr, [], env); } finally { fnValueDepth--; }
+    }
+    if (ts.isNewExpression(expr)) {
+      if (ts.isIdentifier(expr.expression) && PASSTHROUGH_NEW.has(expr.expression.text) && expr.arguments) {
+        return expr.arguments.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
       }
-      // A call to a local (or cross-file-imported) function known to
-      // propagate taint from SPECIFIC params to its return value -- e.g.
-      // buildCommand(host) where buildCommand(h) { return `ping -c1 ${h}`; }.
-      // Only the arguments at the propagating indices are checked, and only
-      // the classes that survive the callee's own body (shape.mask) count.
-      if (ts.isIdentifier(expr.expression)) {
-        const shapes = propagating.get(expr.expression.text);
-        if (shapes) {
-          let m = 0;
-          for (const shape of shapes) {
-            for (const a of argsForShape(expr.arguments, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
-          }
-          if (m) return m;
+      return 0;
+    }
+    if (ts.isCallExpression(expr)) return callMask(expr, env);
+    if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr) || ts.isTypeAssertionExpression(expr) || ts.isSatisfiesExpression(expr)) {
+      return taintMask(expr.expression, env);
+    }
+    return 0;
+  };
+
+  /** Result of calling function-like `fn` when its leading parameters hold `argMasks` (captured variables come from `env`). */
+  const functionResultMask = (fn: ts.ArrowFunction | ts.FunctionExpression, argMasks: readonly number[], env: Env): number => {
+    const fenv = cloneEnv(env);
+    fn.parameters.forEach((p, i) => { if (ts.isIdentifier(p.name)) fenv.set(p.name.text, argMasks[i] ?? 0); });
+    if (!ts.isBlock(fn.body)) return taintMask(fn.body, fenv);
+    let m = 0;
+    createWalker({
+      taintMask, sf: fn.getSourceFile(), descendFunctions: false,
+      onReturn: (e, en) => { m |= taintMask(e, en); },
+    }).walkNode(fn.body, fenv);
+    return m;
+  };
+
+  const argsMask = (args: readonly ts.Expression[], env: Env): number =>
+    args.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
+
+  const callMask = (expr: ts.CallExpression, env: Env): number => {
+    // Known sanitizer: the argument's taint passes THROUGH minus only the
+    // classes this sanitizer actually neutralizes (an HTML escaper leaves
+    // SQL/command/path taint intact). Opaque calls stay untainted below.
+    const calleeName = calleeText(expr.expression);
+    if (calleeName) {
+      const clears = sanitizerClears("js", calleeName);
+      if (clears !== null) return expr.arguments[0] ? applyClears(taintMask(expr.arguments[0], env), clears) : 0;
+    }
+    // Curated passthrough builtins (String, JSON.*, Buffer.from, path.*, Object.assign, ...): the result
+    // is as tainted as the arguments. A decoder re-taints what an earlier encoder cleared.
+    if (calleeName && PASSTHROUGH_CALLS.has(calleeName)) {
+      const m = argsMask(expr.arguments, env);
+      return DECODERS.has(calleeName) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
+    }
+    // A call to a local (or cross-file-imported) function known to
+    // propagate taint from SPECIFIC params to its return value -- e.g.
+    // buildCommand(host) where buildCommand(h) { return `ping -c1 ${h}`; }.
+    // Only the arguments at the propagating indices are checked, and only
+    // the classes that survive the callee's own body (shape.mask) count.
+    // Also resolves `obj.method(x)` / `this.method(x)` to a local class method by name.
+    const callee = expr.expression;
+    const fnName = ts.isIdentifier(callee)
+      ? callee.text
+      : ts.isPropertyAccessExpression(callee) &&
+        (callee.expression.kind === ts.SyntaxKind.ThisKeyword || !BUILTIN_METHOD_NAMES.has(callee.name.text))
+        ? callee.name.text : null;
+    if (fnName) {
+      const shapes = propagating.get(fnName);
+      if (shapes) {
+        let m = 0;
+        for (const shape of shapes) {
+          for (const a of argsForShape(expr.arguments, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
         }
+        if (m) return m;
+      }
+    }
+    // Calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured.
+    const inner = unwrapExpr(callee);
+    if (ts.isCallExpression(inner) || isFunctionExpr(inner)) return taintMask(inner, env);
+    if (ts.isIdentifier(inner)) {
+      // calling a callback PARAMETER: the result is (recall-biased) as tainted as what it is called with
+      if (isParamOfEnclosingFn(inner) && !propagating.has(inner.text)) return argsMask(expr.arguments, env);
+      const held = env.get(inner.text) ?? 0;
+      if (held) return held;
+    }
+    if (ts.isPropertyAccessExpression(callee)) {
+      const recv = taintMask(callee.expression, env);
+      const name = callee.name.text;
+      // promise / array plumbing with a callback: the result is what the callback makes of the element
+      const cb = expr.arguments[0];
+      if (CALLBACK_RESULT_METHODS.has(name) && cb && isFunctionExpr(cb)) {
+        return functionResultMask(cb, [recv], env);
       }
       // Passthrough for a method call on an already-tainted receiver
       // (.trim()/.toLowerCase()/.toString()/etc.) -- same "propagate through
       // anything referencing a tainted value" recall bias already
       // established in extractTaintedVars' second-hop rule (scanner.ts),
       // not a claim that every such method is unsafe on its own.
-      if (ts.isPropertyAccessExpression(expr.expression)) return taintMask(expr.expression.expression, env);
+      const withArgs = ARG_CARRYING_METHODS.has(name) ? argsMask(expr.arguments, env) : 0;
+      // `Promise.resolve(x)`-style receivers are namespaces, not values: their args are handled above.
+      return recv | withArgs;
     }
-    if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) return taintMask(expr.expression, env);
     return 0;
   };
   return taintMask;
@@ -337,6 +556,8 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>) {
 type TaintMaskFn = (e: ts.Expression, env: Env) => number;
 
 interface LocalFn {
+  // Declared as a class/object METHOD (resolved by bare name at `obj.method(...)` call sites).
+  isMethod?: boolean;
   params: ts.NodeArray<ts.ParameterDeclaration>;
   body: ts.Node;
   // Public names this function is exposed under (export function/const, or
@@ -385,9 +606,9 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
       const mask = maskFn(decl.initializer, env);
       if (ts.isIdentifier(decl.name)) {
         env.set(decl.name.text, mask);
-      } else if (ts.isObjectBindingPattern(decl.name) && isTaintedMask(mask)) {
+      } else if ((ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) && isTaintedMask(mask)) {
         for (const el of decl.name.elements) {
-          if (ts.isIdentifier(el.name)) env.set(el.name.text, mask);
+          if (!ts.isOmittedExpression(el) && ts.isIdentifier(el.name)) env.set(el.name.text, mask);
         }
       }
     }
@@ -409,6 +630,19 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
       // this change sees exactly what it saw before.
       const path = calleeText(left);
       if (path) env.set(path, maskFn(right, env) | (compound ? (env.get(path) ?? 0) : 0));
+    } else if (ts.isElementAccessExpression(left)) {
+      // `target[key] = value` -- the container now holds the value (additive: a write never de-taints)
+      const root = rootIdentifier(left.expression);
+      if (root) env.set(root.text, (env.get(root.text) ?? 0) | maskFn(right, env));
+    }
+  } else if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+             ts.isPropertyAccessExpression(node.expression.expression) &&
+             MUTATING_METHODS.has(node.expression.expression.name.text)) {
+    // `list.push(x)` / `map.set(k, v)` / `set.add(x)`: the receiver container now holds the arguments
+    const root = rootIdentifier(node.expression.expression.expression);
+    if (root) {
+      const m = node.expression.arguments.reduce((acc, a) => (isFunctionExpr(a) ? acc : acc | maskFn(a, env)), 0);
+      env.set(root.text, (env.get(root.text) ?? 0) | m);
     }
   }
 }
@@ -837,6 +1071,9 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
       const exportedNames = hasExportModifier(node) ? [node.name.text] : [];
       fns.set(node.name.text, { params: node.parameters, body: node.body, exportedNames });
     }
+    if (ts.isMethodDeclaration(node) && node.body && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && !fns.has(node.name.text)) {
+      fns.set(node.name.text, { params: node.parameters, body: node.body, exportedNames: [], isMethod: true });
+    }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
       const init = node.initializer;
       if ((ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && init.body) {
@@ -911,12 +1148,78 @@ export function computeExportTaintSummary(
 const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "critical",
   "ssrf": "critical", "path-traversal": "critical", "eval-exec": "critical", "open-redirect": "medium",
+  "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
+  "timing-attack": "medium", "prototype-pollution": "high", "jwt-none-alg": "critical",
 };
 const LABEL: Record<AstTaintId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
   "ssrf": "Server-Side Request Forgery", "path-traversal": "Path Traversal",
   "eval-exec": "Arbitrary Code Execution", "open-redirect": "Open Redirect",
+  "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection",
+  "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
+  "prototype-pollution": "Prototype Pollution", "jwt-none-alg": "JWT Signature Not Verified",
 };
+
+/**
+ * Function-level weaknesses that are properties of the code shape, not of a tainted flow:
+ * a hand-rolled JWT payload decode that never verifies the signature, and a dotted-path
+ * setter (`cursor[parts[i]] = ...`) with no __proto__/constructor guard.
+ */
+function structuralChecks(
+  sf: ts.SourceFile, content: string,
+  report: (id: AstTaintId, node: ts.Node, detail: string, sink: string) => void,
+): void {
+  const fileHasVerify = /\.verify\s*\(|jwtVerify|jsonwebtoken|jose\b|passport/i.test(content);
+  const visit = (n: ts.Node) => {
+    if (isFunctionLike(n) && (n as ts.FunctionLikeDeclaration).body) {
+      const fn = n as ts.FunctionLikeDeclaration;
+      const text = fn.body!.getText(sf);
+      // JWT: split(".") + base64 decode + JSON.parse in one function, with no verification anywhere in the file
+      if (!fileHasVerify && /\.split\(\s*["']\.["']\s*\)/.test(text) && /base64/i.test(text) && /JSON\.parse/.test(text)) {
+        const nameNode = (fn as ts.FunctionDeclaration).name ?? (ts.isVariableDeclaration(fn.parent) ? fn.parent.name : undefined);
+        report("jwt-none-alg", nameNode ?? fn,
+          "JWT payload is base64-decoded and JSON-parsed by hand and the file never verifies a signature — claims (role, sub, ...) are attacker-controlled; use jwt.verify()/jose",
+          "manual JWT decode");
+      }
+      // dotted-path setter without a prototype guard
+      if (!/__proto__|constructor|prototype|hasOwn|Object\.create\(null\)/.test(text)) {
+        const splitVars = new Set<string>();
+        const collect = (m: ts.Node) => {
+          if (m !== fn.body && isFunctionLike(m)) return;
+          if (ts.isVariableDeclaration(m) && ts.isIdentifier(m.name) && m.initializer && ts.isCallExpression(m.initializer) &&
+              ts.isPropertyAccessExpression(m.initializer.expression) && m.initializer.expression.name.text === "split" &&
+              m.initializer.arguments[0] && ts.isStringLiteral(m.initializer.arguments[0]) && m.initializer.arguments[0].text === ".") {
+            splitVars.add(m.name.text);
+          }
+          ts.forEachChild(m, collect);
+        };
+        collect(fn.body!);
+        if (splitVars.size > 0) {
+          let hit: ts.Node | null = null;
+          const find = (m: ts.Node) => {
+            if (hit || (m !== fn.body && isFunctionLike(m))) return;
+            if (ts.isBinaryExpression(m) && ts.isElementAccessExpression(m.left) &&
+                (m.operatorToken.kind === ts.SyntaxKind.EqualsToken || isCompoundAssign(m.operatorToken.kind))) {
+              const ids: string[] = [];
+              const grab = (x: ts.Node) => { if (ts.isIdentifier(x)) ids.push(x.text); ts.forEachChild(x, grab); };
+              grab(m.left.argumentExpression);
+              if (ids.some(id => splitVars.has(id))) hit = m;
+            }
+            ts.forEachChild(m, find);
+          };
+          find(fn.body!);
+          if (hit) {
+            report("prototype-pollution", hit,
+              "Dotted-path setter walks user-supplied path segments ('a.b.c') into an object with no __proto__/constructor/prototype guard — a path like '__proto__.isAdmin' pollutes Object.prototype",
+              "dotted-path assignment");
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+}
 
 /**
  * Walks the whole file once: tracks taint through `env`, seeds tainted
@@ -952,7 +1255,34 @@ export function scanAstTaint(
     if (crossFilePropagating) {
       for (const [name, info] of crossFilePropagating) propagating.set(name, info.shapes);
     }
-    const taintMask = makeTaintMask(propagating);
+    // Module-scope container memory (stored XSS / second-order SQL): taint pushed into a module-level
+    // array/Map/object by one handler is visible to every handler that reads it back.
+    const sticky = new Map<string, number>();
+    let stickyDirty = false;
+    const moduleScopeNames = new Set<string>();
+    for (const st of sourceFile.statements) {
+      if (!ts.isVariableStatement(st)) continue;
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) moduleScopeNames.add(d.name.text);
+      }
+    }
+    // `const run = eval;` / `const fn = globalThis[name];` -- aliases of dangerous callees
+    const evalAliases = new Set<string>();
+    const dynCallAliases = new Map<string, ts.Expression>();
+    const collectAliases = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+        const init = unwrapExpr(n.initializer);
+        if (ts.isIdentifier(init) && init.text === "eval") evalAliases.add(n.name.text);
+        else if (ts.isPropertyAccessExpression(init) && init.name.text === "eval" && ts.isIdentifier(init.expression) && GLOBAL_OBJECTS.has(init.expression.text)) evalAliases.add(n.name.text);
+        else if (ts.isElementAccessExpression(init)) {
+          const obj = unwrapExpr(init.expression);
+          if (ts.isIdentifier(obj) && GLOBAL_OBJECTS.has(obj.text)) dynCallAliases.set(n.name.text, init.argumentExpression);
+        }
+      }
+      ts.forEachChild(n, collectAliases);
+    };
+    collectAliases(sourceFile);
+    const taintMask = makeTaintMask(propagating, sticky);
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
     // Message-attribution only (Tier 2, "assign then use downstream"): the
@@ -980,7 +1310,7 @@ export function scanAstTaint(
       return "";
     };
 
-    const emit = (id: AstTaintId, node: ts.Node, sourceExpr: string, sinkExpr: string, taintedArgExpr?: ts.Expression) => {
+    const emit = (id: AstTaintId, node: ts.Node, sourceExpr: string, sinkExpr: string, taintedArgExpr?: ts.Expression, detailOverride?: string) => {
       const line = lineOf(node);
       const key = `${id}:${line}`;
       if (seen.has(key)) return;
@@ -995,14 +1325,48 @@ export function scanAstTaint(
           : "");
       findings.push({
         id, line, sinkExpr, sourceExpr,
-        detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess${note}`,
+        detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess${note}`,
       });
     };
 
+    /** `\`<script>const x = '${escaped}'\``: an HTML-escaped value inside a <script> block is still injectable. */
+    const escapedInScriptContext = (arg: ts.Expression, env: Env): boolean => {
+      if (!ts.isTemplateExpression(arg)) return false;
+      let text = arg.head.text;
+      for (const span of arg.templateSpans) {
+        const m = taintMask(span.expression, env);
+        if (wasCleared(m, classOf("xss")) && /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i.test(text)) return true;
+        text += "\u0000" + span.literal.text;
+      }
+      return false;
+    };
+
     const checkCallForSink = (call: ts.CallExpression, env: Env) => {
-      if (ts.isIdentifier(call.expression) && call.expression.text === "eval") {
-        emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", "eval", call.arguments[0]);
+      if (ts.isIdentifier(call.expression) && (call.expression.text === "eval" || evalAliases.has(call.expression.text))) {
+        emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", call.expression.text, call.arguments[0]);
         return;
+      }
+      // import(x): loading an attacker-chosen module is code execution
+      if (call.expression.kind === ts.SyntaxKind.ImportKeyword && call.arguments[0]) {
+        if (taintMask(call.arguments[0], env) & classOf("eval-exec")) {
+          emit("eval-exec", call, sourceLabel(call.arguments[0]), "import()", call.arguments[0]);
+        }
+        return;
+      }
+      // globalThis[name](...) / const fn = globalThis[name]; fn(...): an attacker-chosen function is invoked
+      {
+        const callee = unwrapExpr(call.expression);
+        let keyExpr: ts.Expression | undefined;
+        if (ts.isElementAccessExpression(callee)) {
+          const obj = unwrapExpr(callee.expression);
+          if (ts.isIdentifier(obj) && GLOBAL_OBJECTS.has(obj.text)) keyExpr = callee.argumentExpression;
+        } else if (ts.isIdentifier(callee)) {
+          keyExpr = dynCallAliases.get(callee.text);
+        }
+        if (keyExpr && taintMask(keyExpr, env) & classOf("eval-exec")) {
+          emit("eval-exec", call, sourceLabel(keyExpr), "dynamic global function call", keyExpr);
+          return;
+        }
       }
       const match = matchSink(call, importMap);
       if (!match) return;
@@ -1010,18 +1374,88 @@ export function scanAstTaint(
       let taintedArg: ts.Expression | undefined;
       let cleared = false;
       for (const a of match.args) {
+        if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
         const m = taintMask(a, env);
         if (m & cls) { taintedArg = a; break; }
         if (wasCleared(m, cls)) cleared = true;
       }
       if (taintedArg) emit(match.id, call, sourceLabel(taintedArg), match.sinkExpr, taintedArg);
-      else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(call) });
+      else if (match.id === "xss" && match.args.some(a => escapedInScriptContext(a, env))) {
+        const a = match.args.find(x => escapedInScriptContext(x, env))!;
+        emit("xss", call, sourceLabel(a), match.sinkExpr, a,
+          `HTML-escaped value '${sourceLabel(a)}' is interpolated inside a <script> block — HTML escaping does not neutralize JavaScript string context (a backslash still breaks out)`);
+      } else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(call) });
     };
 
-    const checkNewExprForSink = (node: ts.NewExpression) => {
+    const checkNewExprForSink = (node: ts.NewExpression, env: Env) => {
       if (ts.isIdentifier(node.expression) && node.expression.text === "Function") {
         emit("eval-exec", node, "Function(...)", "new Function");
       }
+      // new RegExp(userInput): regex injection / ReDoS
+      if (ts.isIdentifier(node.expression) && node.expression.text === "RegExp" && node.arguments?.[0]) {
+        const a = node.arguments[0];
+        if (taintMask(a, env) & ALL) emit("redos", node, sourceLabel(a), "new RegExp", a);
+      }
+    };
+
+    // Object.assign(new Account(), req.body): the request body decides which fields the object gets
+    const checkMassAssignment = (call: ts.CallExpression) => {
+      if (calleeText(call.expression) !== "Object.assign" || call.arguments.length < 2) return;
+      const target = unwrapExpr(call.arguments[0]);
+      if (!ts.isNewExpression(target) && !ts.isIdentifier(target)) return;
+      for (const a of call.arguments.slice(1)) {
+        const src = unwrapExpr(a);
+        if (ts.isPropertyAccessExpression(src) && ts.isIdentifier(src.expression) && SOURCE_ROOTS.has(src.expression.text) &&
+            (src.name.text === "body" || src.name.text === "query")) {
+          emit("mass-assignment", call, sourceLabel(a), "Object.assign", a,
+            `Request object '${sourceLabel(a)}' is copied wholesale onto '${sourceLabel(call.arguments[0])}' via Object.assign — the client decides which properties (role, isAdmin, ...) get set; copy an explicit allowlist of fields`);
+          return;
+        }
+      }
+    };
+
+    // secret === untrusted: a non-constant-time comparison is a timing oracle
+    const SECRET_NAME_RE = /^(?:secret|token|password|passwd|apikey|api_key|hmac|signature|digest|csrf\w*|\w*_?secret|\w*_?token|\w*_?password|\w*api_?key)$/i;
+    const nameOfOperand = (e: ts.Expression): string | null => {
+      const u = unwrapExpr(e);
+      if (ts.isIdentifier(u)) return u.text;
+      if (ts.isPropertyAccessExpression(u)) return u.name.text;
+      return null;
+    };
+    const checkTimingCompare = (node: ts.BinaryExpression, env: Env) => {
+      const k = node.operatorToken.kind;
+      if (k !== ts.SyntaxKind.EqualsEqualsEqualsToken && k !== ts.SyntaxKind.ExclamationEqualsEqualsToken &&
+          k !== ts.SyntaxKind.EqualsEqualsToken && k !== ts.SyntaxKind.ExclamationEqualsToken) return;
+      for (const [secretSide, otherSide] of [[node.left, node.right], [node.right, node.left]] as const) {
+        const name = nameOfOperand(secretSide);
+        if (!name || !SECRET_NAME_RE.test(name)) continue;
+        if (isLiteralNode(unwrapExpr(otherSide))) continue;
+        if (taintMask(otherSide, env) & ALL) {
+          emit("timing-attack", node, sourceLabel(otherSide), "===", otherSide,
+            `Secret '${sourceLabel(secretSide)}' is compared to attacker-supplied '${sourceLabel(otherSide)}' with an ordinary equality operator — use crypto.timingSafeEqual`);
+          return;
+        }
+      }
+    };
+
+    // Taint written into module-scope containers/variables survives past the handler that wrote it
+    const recordSticky = (node: ts.Node, env: Env) => {
+      let target: ts.Identifier | null = null;
+      let mask = 0;
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && MUTATING_METHODS.has(node.expression.name.text)) {
+        target = rootIdentifier(node.expression.expression);
+        mask = node.arguments.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
+      } else if (ts.isBinaryExpression(node) && (node.operatorToken.kind === ts.SyntaxKind.EqualsToken || isCompoundAssign(node.operatorToken.kind))) {
+        target = rootIdentifier(node.left);
+        mask = taintMask(node.right, env);
+      }
+      if (!target || !(mask & ALL) || !moduleScopeNames.has(target.text) || isShadowed(target)) return;
+      // only writes made INSIDE a function are cross-request state; top-level init is ordinary flow
+      let inFn = false;
+      for (let cur: ts.Node | undefined = node.parent; cur; cur = cur.parent) if (isFunctionLike(cur)) { inFn = true; break; }
+      if (!inFn) return;
+      const next = (sticky.get(target.text) ?? 0) | (mask & ALL);
+      if (next !== (sticky.get(target.text) ?? 0)) { sticky.set(target.text, next); stickyDirty = true; }
     };
 
     const checkAssignmentForXSS = (node: ts.BinaryExpression, env: Env) => {
@@ -1043,8 +1477,12 @@ export function scanAstTaint(
         // Same-file call binding: seed callee params for tainted args, one hop.
         // Matched by INDEX (via paramShapesOf, including rest-param
         // overflow), not by re-deriving positions ad hoc here.
-        if (ts.isIdentifier(n.expression) && localFns.has(n.expression.text)) {
-          const fnName = n.expression.text;
+        const seedName = ts.isIdentifier(n.expression) ? n.expression.text
+          : ts.isPropertyAccessExpression(n.expression) && localFns.get(n.expression.name.text)?.isMethod &&
+            (n.expression.expression.kind === ts.SyntaxKind.ThisKeyword || !BUILTIN_METHOD_NAMES.has(n.expression.name.text))
+            ? n.expression.name.text : null;
+        if (seedName && localFns.has(seedName)) {
+          const fnName = seedName;
           const fn = localFns.get(fnName)!;
           const shapes = paramShapesOf(fn);
           // param index -> classes tainted at THIS call site (the callee's
@@ -1063,8 +1501,9 @@ export function scanAstTaint(
           }
         }
       }
-      if (ts.isNewExpression(n)) checkNewExprForSink(n);
-      if (ts.isBinaryExpression(n)) checkAssignmentForXSS(n, env);
+      if (ts.isCallExpression(n)) { checkMassAssignment(n); recordSticky(n, env); }
+      if (ts.isNewExpression(n)) checkNewExprForSink(n, env);
+      if (ts.isBinaryExpression(n)) { checkAssignmentForXSS(n, env); checkTimingCompare(n, env); recordSticky(n, env); }
     };
 
     const walker = createWalker({
@@ -1086,6 +1525,15 @@ export function scanAstTaint(
     };
 
     walkStatements(sourceFile, new Map());
+    // Module-scope containers can be written by a handler declared AFTER the one that reads them:
+    // walk again with what the first pass learned (findings dedupe by id+line).
+    for (let i = 0; i < 2 && stickyDirty; i++) {
+      stickyDirty = false;
+      walkStatements(sourceFile, new Map());
+    }
+
+    // Function-level patterns that are not source-to-sink flows.
+    structuralChecks(sourceFile, content, (id, node, detail, sink) => emit(id, node, sink, sink, undefined, detail));
 
     // Second pass, bounded worklist: re-walk any local function whose
     // parameters were seeded as tainted by a call site above, so a sink

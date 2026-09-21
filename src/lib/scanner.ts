@@ -915,6 +915,8 @@ const PROTO_POLLUTION_RE = [
 const INSECURE_RANDOM_RE = [
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\s*=.*Math\.random\(\)/i,
   /Math\.random\(\).*(?:token|secret|key|auth|session|cookie)/i,
+  // object-literal / property form: { token: Math.random().toString(36) }
+  /\b(?:token|secret|key|password|salt|nonce|csrf|session|otp)\w*["']?\s*:\s*.*Math\.random\(\)/i,
   // Java/Kotlin/C# — java.util.Random / System.Random are not CSPRNGs
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bnew\s+Random\s*\(\s*\)/i,
   // Python
