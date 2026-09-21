@@ -325,6 +325,172 @@ public class A {
       expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
     });
   });
+
+  describe("implicit ASP.NET Core model binding (unattributed simple-type param of an entry-point method)", () => {
+    it("flags path-traversal for a Path.Combine arg with NO [FromQuery]/[FromRoute] attribute", () => {
+      const content = `
+public class A {
+  [HttpGet("download")]
+  public IActionResult Download(string file) {
+    var path = Path.Combine("/var/app/files", file);
+    return PhysicalFile(path, "application/octet-stream");
+  }
+}`;
+      expect(scan(content).some(f => f.id === "path-traversal")).toBe(true);
+    });
+
+    it("flags open-redirect for a Redirect(url) arg with no attribute", () => {
+      const content = `
+public class A {
+  [HttpGet("redirect")]
+  public IActionResult RedirectUser(string url) {
+    return Redirect(url);
+  }
+}`;
+      expect(scan(content).some(f => f.id === "open-redirect")).toBe(true);
+    });
+
+    it("does NOT taint an unattributed simple-type param of a plain (non-entry-point) private helper method", () => {
+      const content = `
+public class A {
+  private string BuildUrl(string url) {
+    return Redirect(url).ToString();
+  }
+}`;
+      expect(scan(content).some(f => f.id === "open-redirect")).toBe(false);
+    });
+  });
+
+  describe("XSS via ControllerBase.Content(...)", () => {
+    it("flags a tainted, concatenated HTML string passed to Content(...)", () => {
+      const content = `
+public class A {
+  [HttpGet("hello")]
+  public IActionResult Hello(string name) {
+    return Content("<html><body>Hello " + name + "</body></html>", "text/html");
+  }
+}`;
+      expect(scan(content).some(f => f.id === "xss")).toBe(true);
+    });
+  });
+
+  describe("SSRF via HttpClient shorthand methods", () => {
+    it("flags GetStringAsync with a tainted url", () => {
+      const content = `
+public class A {
+  [HttpGet("fetch")]
+  public async Task<IActionResult> Fetch(string url) {
+    using var client = new HttpClient();
+    return Ok(await client.GetStringAsync(url));
+  }
+}`;
+      expect(scan(content).some(f => f.id === "ssrf")).toBe(true);
+    });
+
+    it("flags GetByteArrayAsync with a tainted url", () => {
+      const content = `
+public class A {
+  [HttpPost("plugin")]
+  public async Task<IActionResult> DownloadPlugin(string url) {
+    using var client = new HttpClient();
+    var content = await client.GetByteArrayAsync(url);
+    return Ok(content);
+  }
+}`;
+      expect(scan(content).some(f => f.id === "ssrf")).toBe(true);
+    });
+  });
+
+  describe("path-traversal via ControllerBase.PhysicalFile(...)", () => {
+    it("flags a tainted path passed to PhysicalFile(...)", () => {
+      const content = `
+public class A {
+  [HttpGet("download")]
+  public IActionResult Download(string file) {
+    return PhysicalFile(file, "application/octet-stream");
+  }
+}`;
+      expect(scan(content).some(f => f.id === "path-traversal")).toBe(true);
+    });
+  });
+
+  describe("LDAP injection via a custom call-shaped sink (not just DirectorySearcher.Filter)", () => {
+    it("flags a tainted filter passed to a custom Ldap.Search(...) call", () => {
+      const content = `
+public class A {
+  [HttpGet("directory")]
+  public IActionResult Directory(string username) {
+    var filter = "(&(objectClass=person)(uid=" + username + "))";
+    return Ok(Ldap.Search(filter));
+  }
+}`;
+      expect(scan(content).some(f => f.id === "ldap-injection")).toBe(true);
+    });
+
+    it("still flags the existing DirectorySearcher.Filter property-assignment shape", () => {
+      const content = `
+public class A {
+  [HttpGet("directory")]
+  public IActionResult Directory(string username) {
+    var searcher = new DirectorySearcher();
+    searcher.Filter = "(&(objectClass=person)(uid=" + username + "))";
+    return Ok();
+  }
+}`;
+      expect(scan(content).some(f => f.id === "ldap-injection")).toBe(true);
+    });
+  });
+
+  describe("insecure-deserialization via a custom call-shaped sink (regression -- already worked before this phase)", () => {
+    it("flags a tainted [FromBody] byte[] passed to a custom Deserialize(...) call", () => {
+      const content = `
+public class A {
+  [HttpPost("deserialize")]
+  public IActionResult Deserialize([FromBody] byte[] data) {
+    return Ok(BinaryHelper.Deserialize(data));
+  }
+}`;
+      expect(scan(content).some(f => f.id === "insecure-deserialization")).toBe(true);
+    });
+  });
+
+  describe("collectLocalMethods -- same-named method in a different class no longer silently overwrites the real entry-point method's body", () => {
+    it("still flags a controller action whose name collides with an unrelated static helper of the SAME name declared later in the file", () => {
+      // Real bug found via a full-file re-scan of a real OWASP benchmark:
+      // BinaryHelper's own expression-bodied `Deserialize` stub (no real
+      // body, declared textually AFTER the controller in the file) used
+      // to overwrite the controller action's map entry entirely, since
+      // collectLocalMethods keyed its Map by bare name with a flat
+      // last-write-wins overwrite -- silently losing the finding with no
+      // error.
+      const content = `
+public class A {
+  [HttpPost("deserialize")]
+  public IActionResult Deserialize([FromBody] byte[] data) {
+    return Ok(BinaryHelper.Deserialize(data));
+  }
+}
+public static class BinaryHelper {
+  public static object Deserialize(byte[] data) => null;
+}`;
+      expect(scan(content).some(f => f.id === "insecure-deserialization")).toBe(true);
+    });
+
+    it("still flags a BOLA-shaped controller action whose name collides with an unrelated static helper of the SAME name", () => {
+      const content = `
+public class A {
+  [HttpDelete("admin/users/{id}")]
+  public IActionResult DeleteUser(int id) {
+    Database.DeleteUser(id);
+    return Ok();
+  }
+}
+public static class Database {
+  public static void DeleteUser(int id) { }
+}`;
+      expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+    });
+  });
 });
 
 describe("BOLA (Broken Object Level Authorization) — ASP.NET Core resource-identifier ownership check", () => {
@@ -345,6 +511,32 @@ public class A {
 }`;
     const bola = scan(content).filter(f => f.id === "bola-missing-ownership-check");
     expect(bola.some(f => f.severityOverride === "medium")).toBe(true);
+  });
+
+  it("flags GetUser(int id) -- implicit binding, no attribute -- reaching a custom Database.GetUserById(...) lookup", () => {
+    const content = `
+public class A {
+  [HttpGet("users/{id}")]
+  public IActionResult GetUser(int id) {
+    var user = Database.GetUserById(id);
+    return Ok(user);
+  }
+}`;
+    const bola = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(bola.length).toBeGreaterThan(0);
+  });
+
+  it("flags DeleteUser(int id) -- implicit binding -- reaching a custom Database.DeleteUser(...) write", () => {
+    const content = `
+public class A {
+  [HttpDelete("admin/users/{id}")]
+  public IActionResult DeleteUser(int id) {
+    Database.DeleteUser(id);
+    return Ok();
+  }
+}`;
+    const bola = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(bola.some(f => f.severityOverride === "high")).toBe(true);
   });
 
   it("flags a DELETE endpoint (write) at high severity", () => {

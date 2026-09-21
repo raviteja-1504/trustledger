@@ -502,9 +502,26 @@ function toLogicalLines(lines: string[]): string[] {
   return out;
 }
 
+const CSHARP_ENTRY_ATTR_LINE_RE = /^\s*\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\b/;
+const CSHARP_SIG_PARAMS_RE = /\b(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?[\w<>[\],.\s]+?\s+\w+\s*\(([^)]*)\)/;
+const CSHARP_SIMPLE_TYPE_PARAM_RE = /^(?:string|int|long|short|byte|bool|double|float|decimal|char|Guid|DateTime|byte\[\])\??\s+(\w+)/;
+
 function extractTaintedVars(rawLines: string[]): Set<string> {
   const tainted = new Set<string>();
   const lines = toLogicalLines(rawLines);
+  // C#: [HttpGet("users/{id}")] on its own line (Allman-brace convention
+  // puts the entry-point attribute directly above the signature, not on
+  // it), tracked via one line of lookback state -- same shape as
+  // phpExtractTripped below. Mirrors astTaintCSharp.ts's own
+  // extractMethodInfo fix: a simple-type parameter with NO [From*]
+  // attribute at all, on an entry-point method, is still bound from the
+  // route/query string by ASP.NET Core's implicit convention --
+  // GetUser(int id) is exactly as attacker-controlled as
+  // GetUser([FromRoute] int id). Best-effort like the rest of this
+  // function: only recognizes the attribute on the IMMEDIATELY preceding
+  // line (a second attribute, e.g. [Authorize], between the entry marker
+  // and the signature is an accepted, undetected edge case here).
+  let pendingCSharpEntryMethod = false;
   // PHP: extract($_GET)/extract($_POST)/... bulk-taints an UNBOUNDED,
   // UNNAMED set of local variables from array keys -- genuinely different
   // from every other source pattern here (all of which bind one specific,
@@ -599,7 +616,26 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // here: two different C# methods reusing a parameter name (e.g. both
     // taking `id`) share taint state -- an accepted, pre-existing tradeoff.
     const csParams = [...line.matchAll(/\[From(?:Route|Query|Body|Header)\]\s+[\w.]+(?:<[^>]+>)?\??\s+(\w+)/g)];
-    if (csParams.length > 0) { csParams.forEach(m => tainted.add(m[1])); continue; }
+    if (csParams.length > 0) { csParams.forEach(m => tainted.add(m[1])); }
+    // C# implicit-binding param source -- consumed regardless of whether
+    // csParams also matched on this same line (a signature can mix
+    // attributed and unattributed params, e.g. `([FromBody] Dto dto, int
+    // id)`), so this deliberately does NOT `continue` inside the csParams
+    // branch above.
+    if (pendingCSharpEntryMethod) {
+      pendingCSharpEntryMethod = false;
+      const sigMatch = CSHARP_SIG_PARAMS_RE.exec(line);
+      if (sigMatch) {
+        for (const rawParam of sigMatch[1].split(",")) {
+          const p = rawParam.trim();
+          if (!p || p.startsWith("[")) continue; // already-attributed param, handled above
+          const m = CSHARP_SIMPLE_TYPE_PARAM_RE.exec(p);
+          if (m) tainted.add(m[1]);
+        }
+      }
+    }
+    if (CSHARP_ENTRY_ATTR_LINE_RE.test(line)) { pendingCSharpEntryMethod = true; continue; }
+    if (csParams.length > 0) continue;
     // Second-hop taint propagation -- var2 = <expr referencing var1>, where
     // var1 is already tainted, covers the single most common real-world
     // shape across every sink this file cares about: a command string built
@@ -719,6 +755,13 @@ const WEAK_SIGNING_SECRET_RE = [
   /^\s*(?:(?:const|let|var)\s+)?(?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)\s*=\s*["'][^"']+["']/,
   // Node/Express (jsonwebtoken): jwt.sign(payload, 'literal', ...) / jwt.verify(token, 'literal', ...)
   /jwt\.(?:sign|verify)\s*\(\s*[^,]+,\s*["'][^"']+["']/,
+  // C#: private const string JwtSecret = "literal" -- same "name+literal
+  // is a finding either way" philosophy as the bare-constant pattern
+  // above, just with C#'s modifier-chain prefix (public/private/internal/
+  // protected, static, readonly) allowed before `const string`, and a
+  // broader secret-shaped name (\w*Secret\w*/\w*SigningKey\w*) rather
+  // than the exact Django/Node constant names above.
+  /^\s*(?:(?:private|public|internal|protected)\s+)*(?:static\s+)?(?:readonly\s+)?const\s+string\s+\w*(?:Secret|SigningKey)\w*\s*=\s*"[^"]+"/i,
 ];
 
 function findWeakSigningSecret(lines: string[]): ScanIndicator[] {
@@ -939,6 +982,28 @@ function findPlaintextPasswordStorage(lines: string[]): ScanIndicator[] {
     if (!inlineTaint && !namedTaint) continue;
     found.push({ id:"plaintext-password-storage", label:"Plaintext Password Storage", severity:"high", line:i+1,
       detail:"Password assigned directly from request input with no hashing — store only a salted hash (bcrypt/argon2/pbkdf2), never the plaintext value" });
+  }
+  return found;
+}
+
+// C#: a call-shaped variant of the plaintext-password check above --
+// Database.SavePassword(username, password) rather than a field
+// assignment (.password = value). Different shape, same id/severity and
+// the same HASH_FUNCTION_NEARBY_RE-absence gate.
+const CSHARP_PASSWORD_CALL_SINK_RE = /\.(?:Save|Set|Store|Update)\w*Password\w*\s*\(/i;
+
+function findPlaintextPasswordStorageCSharpCall(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const line = lines[i];
+    if (!CSHARP_PASSWORD_CALL_SINK_RE.test(line)) continue;
+    if (HASH_FUNCTION_NEARBY_RE.test(line)) continue;
+    const namedTaint = tainted.size > 0 && [...line.matchAll(/\b(\w+)\b/g)].some(m => tainted.has(m[1]));
+    if (!namedTaint) continue;
+    found.push({ id:"plaintext-password-storage", label:"Plaintext Password Storage", severity:"high", line:i+1,
+      detail:"Password passed directly from request input into a storage call with no hashing — store only a salted hash (bcrypt/argon2/pbkdf2), never the plaintext value" });
   }
   return found;
 }
@@ -1197,6 +1262,14 @@ const WEAK_CRYPTO_RE = [
   /\bsha1\.(?:New|Sum)\s*\(/,
   /\bdes\.(?:NewCipher|NewTripleDESCipher)\s*\(/,
   /\brc4\.NewCipher\s*\(/,
+  // C# — System.Security.Cryptography's MD5/SHA1 factory methods and weak
+  // cipher-mode/provider shapes. Flat match, no password-context gate,
+  // same posture as the Go entries above.
+  /\bMD5\.Create\s*\(\s*\)/,
+  /\bSHA1\.Create\s*\(\s*\)/,
+  /\bDES\.Create\s*\(\s*\)/,
+  /CipherMode\.ECB\b/,
+  /new\s+(?:MD5|SHA1|TripleDES)CryptoServiceProvider\s*\(/,
 ];
 
 // PII in logs — requires the keyword to appear as a property/variable access
@@ -1538,6 +1611,33 @@ function findPIIInLogs(lines: string[]): ScanIndicator[] {
 function findMassAssignment(lines: string[]): ScanIndicator[] {
   return runDetector(lines, MASS_ASSIGN_RE, "mass-assignment", "Mass Assignment", "high",
     "Raw request body passed to model constructor — allow-list fields explicitly");
+}
+
+// C#: a [FromBody]-bound complex-type parameter passed WHOLE (a bare
+// identifier, not a specific property) into a write-shaped call --
+// Database.UpdateProfile(profile) where `profile` is `[FromBody]
+// UserProfile profile`, binding every field (including ones like IsAdmin/
+// Role the caller was never meant to set) with no allow-listing. A
+// different shape from MASS_ASSIGN_RE's array above (those all key on a
+// literal req.body/request.body token appearing directly at the call
+// site; C#'s bound object is just a plain variable name, which needs
+// extractTaintedVars' existing [FromBody]-attribute recognition to
+// resolve instead).
+const CSHARP_MASS_ASSIGN_SINK_RE = /\.(?:Add|Update|Create|Save|Insert)\w*\s*\(\s*(\w+)\s*\)/;
+
+function findMassAssignmentCSharp(lines: string[]): ScanIndicator[] {
+  const tainted = extractTaintedVars(lines);
+  const found: ScanIndicator[] = [];
+  if (tainted.size === 0) return found;
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = CSHARP_MASS_ASSIGN_SINK_RE.exec(lines[i]);
+    if (!m) continue;
+    if (!tainted.has(m[1])) continue;
+    found.push({ id:"mass-assignment", label:"Mass Assignment", severity:"high", line:i+1,
+      detail:`"${m[1]}" is bound whole from the request body and passed directly into a persistence call — allow-list fields explicitly instead of binding the entire object` });
+  }
+  return found;
 }
 
 function findSQLInjection(lines: string[]): ScanIndicator[] {
@@ -1965,7 +2065,7 @@ function findNamedTaintPathTraversalGo(lines: string[]): ScanIndicator[] {
 // passed directly to a filesystem call, on a different line than the
 // inline PATH_TRAVERSAL_RE C# entries can see.
 const CSHARP_PATH_COMBINE_RE = /\bPath\.Combine\s*\(([^)]+)\)/;
-const CSHARP_FS_SINK_RE = /\b(?:File\.(?:ReadAllText|ReadAllBytes|OpenRead|OpenWrite|Delete|WriteAllText|WriteAllBytes)|Directory\.(?:GetFiles|Delete))\s*\(\s*(\w+)\b/;
+const CSHARP_FS_SINK_RE = /\b(?:File\.(?:ReadAllText|ReadAllBytes|OpenRead|OpenWrite|Delete|WriteAllText|WriteAllBytes)|Directory\.(?:GetFiles|Delete)|PhysicalFile)\s*\(\s*(\w+)\b/;
 
 function findNamedTaintPathTraversalCSharp(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -2141,6 +2241,38 @@ function findInsecureRandomnessGoFunc(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// C#: same shape as findInsecureRandomnessGoFunc above -- `new Random()`
+// and its `.Next(...)`/`.NextDouble()`/`.NextBytes(...)` call are typically
+// on separate lines (`var random = new Random(); return
+// random.Next(100000, 999999);`), invisible to INSECURE_RANDOM_RE's
+// same-line co-occurrence check, exactly like Go's rand.Intn() idiom.
+// Method-name extraction only (no full param/modifier capture needed --
+// unlike callGraph.ts's tryMatchFunc, this doesn't need is_exported/params)
+// so this stays a lighter-weight regex than that one.
+const CSHARP_INSECURE_RANDOM_CALL_RE = /\.Next\s*\(|\.NextDouble\s*\(|\.NextBytes\s*\(/;
+const CSHARP_METHOD_DECL_RE = /^\s*(?:\[\w+(?:\([^)]*\))?\]\s*)*(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:override\s+)?(?:virtual\s+)?(?:sealed\s+)?[\w<>[\],.\s]+?\s+(\w+)\s*\(/;
+
+function findInsecureRandomnessCSharpFunc(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  let inSecurityFunc = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const funcMatch = CSHARP_METHOD_DECL_RE.exec(line);
+    if (funcMatch) {
+      inSecurityFunc = GO_SECURITY_FUNC_NAME_RE.test(funcMatch[1]);
+      continue;
+    }
+    if (!inSecurityFunc) continue;
+    if (isNonExecutableLine(line)) continue;
+    if (INSECURE_RANDOM_RE.some(r => r.test(line))) continue; // already caught inline
+    if (CSHARP_INSECURE_RANDOM_CALL_RE.test(line)) {
+      found.push({ id:"insecure-randomness", label:"Insecure Randomness", severity:"high", line:i+1,
+        detail:"System.Random used inside a security-sounding method — use RandomNumberGenerator (System.Security.Cryptography) for tokens, session ids, or anything security-sensitive" });
+    }
+  }
+  return found;
+}
+
 function findReDoS(lines: string[]): ScanIndicator[] {
   return runDetector(lines, REDOS_RE, "redos", "ReDoS — Regex DoS", "high",
     "Catastrophic backtracking risk or user-controlled regex");
@@ -2284,7 +2416,7 @@ function findSSRFGoNewRequest(lines: string[]): ScanIndicator[] {
 
 // C# named-taint SSRF: an HttpClient call with a tainted URL argument, on a
 // different line than where the URL was assigned.
-const CSHARP_HTTP_SINK_RE = /\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync)\s*\(\s*(\w+)\s*[,)]/;
+const CSHARP_HTTP_SINK_RE = /\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync|PostAsJsonAsync|PutAsJsonAsync)\s*\(\s*(\w+)\s*[,)]/;
 
 function findNamedTaintSSRFCSharp(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -2363,7 +2495,7 @@ function findNamedTaintXSS(lines: string[]): ScanIndicator[] {
 // shape, scoped to the same two named escape hatches as the inline XSS_RE
 // entry above (see its comment for why this stays narrow rather than a
 // broad interpolation pattern).
-const CSHARP_XSS_SINK_RE = /(?:@?Html\.Raw|Response\.Write)\s*\(\s*(\w+)\s*\)/;
+const CSHARP_XSS_SINK_RE = /(?:@?Html\.Raw|Response\.Write|\bContent)\s*\(\s*(\w+)\s*[,)]/;
 
 function findNamedTaintXSSCSharp(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
@@ -2679,6 +2811,22 @@ function findWeakCORS(lines: string[]): ScanIndicator[] {
     "Wildcard Access-Control-Allow-Origin — use explicit origin allowlist");
 }
 
+// Missing security headers -- scoped strictly to the one unambiguous,
+// AFFIRMATIVE signal available to a text scan: explicit removal of a
+// known security header (Response.Headers.Remove("X-Frame-Options"),
+// etc.). No "detect an absence" precedent exists anywhere in this
+// codebase (weak-cors above detects the PRESENCE of a wildcard, not the
+// absence of a CORS policy) and this deliberately doesn't try to be the
+// first -- claiming "you forgot header X" globally would require knowing
+// every header-setting mechanism (middleware, reverse proxy, CDN config)
+// a real app might use, none of which this scanner can see.
+const MISSING_SECURITY_HEADERS_RE = /Response\.Headers\.Remove\s*\(\s*["'](?:X-Content-Type-Options|Content-Security-Policy|X-Frame-Options|Strict-Transport-Security|X-XSS-Protection)["']\s*\)/;
+
+function findMissingSecurityHeaders(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, [MISSING_SECURITY_HEADERS_RE], "missing-security-headers", "Security Header Explicitly Removed", "medium",
+    "A known security response header is explicitly removed — X-Content-Type-Options/Content-Security-Policy/X-Frame-Options/Strict-Transport-Security/X-XSS-Protection all defend against real, common attacks and should not be stripped");
+}
+
 // Debug mode left enabled -- exposes the interactive debugger (arbitrary
 // code execution via Werkzeug's PIN-protected console, or Django's DEBUG=True
 // leaking full stack traces, settings, and environment variables on every
@@ -2957,6 +3105,27 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
         } else if (!/Secure\s*:\s*true/i.test(block)) {
           found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
             line:i+1, detail:`Session/auth cookie "${cookieName}" set without Secure: true — transmitted over unencrypted HTTP` });
+        }
+      }
+      continue;
+    }
+
+    // C#: Response.Cookies.Append("session", value, new CookieOptions {
+    // HttpOnly = false, Secure = false, ... }) -- an object-initializer
+    // shape, mirroring the Go struct-literal branch above exactly (same
+    // forward-window-join technique), just with C#'s `=` instead of Go's
+    // `:` inside the block.
+    if (/\.Cookies\.Append\s*\(/.test(lines[i])) {
+      const block = lines.slice(i, Math.min(lines.length, i + 10)).join(" ");
+      const nameMatch  = block.match(/\.Cookies\.Append\s*\(\s*["']([^"']+)["']/);
+      const cookieName = nameMatch?.[1] ?? "";
+      if (AUTH_COOKIE_RE.test(cookieName)) {
+        if (!/HttpOnly\s*=\s*true/i.test(block)) {
+          found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without HttpOnly = true — XSS can steal it via document.cookie` });
+        } else if (!/Secure\s*=\s*true/i.test(block)) {
+          found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without Secure = true — transmitted over unencrypted HTTP` });
         }
       }
     }
@@ -6033,6 +6202,7 @@ export function analyzeFile(
     ...findWeakCrypto(lines),
     ...findPIIInLogs(lines),
     ...findMassAssignment(lines),
+    ...findMassAssignmentCSharp(lines),
     ...findSQLInjection(lines),
     ...findSQLInjectionTainted(lines),
     ...findSQLInjectionPHPInterpolated(lines),
@@ -6063,15 +6233,18 @@ export function analyzeFile(
     ...findPrototypePollution(lines),
     ...findInsecureRandomness(lines),
     ...findInsecureRandomnessGoFunc(lines),
+    ...findInsecureRandomnessCSharpFunc(lines),
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
     ...findNamedTaintOpenRedirectJS(lines),
     ...findNamedTaintOpenRedirectGo(lines),
     ...findTimingAttack(lines),
     ...findPlaintextPasswordStorage(lines),
+    ...findPlaintextPasswordStorageCSharpCall(lines),
     ...findSSTI(lines),
     ...findHeaderInjection(lines),
     ...findWeakCORS(lines),
+    ...findMissingSecurityHeaders(lines),
     ...findDebugModeEnabled(lines),
     ...findIDOR(lines),
     ...findIDORJava(lines),

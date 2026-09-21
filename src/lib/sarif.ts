@@ -41,6 +41,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "prototype-pollution":      { title: "Prototype Pollution",            description: "Object merge without guarding __proto__/constructor/prototype keys.", cwe: "CWE-1321" },
   "open-redirect":            { title: "Open Redirect",                  description: "Redirect target built from unvalidated input.", cwe: "CWE-601" },
   "weak-cors":                { title: "Permissive CORS Policy",         description: "Access-Control-Allow-Origin set to a wildcard.", cwe: "CWE-942" },
+  "missing-security-headers": { title: "Security Header Explicitly Removed", description: "A known security response header (X-Frame-Options, CSP, etc.) is explicitly removed.", cwe: "CWE-693" },
   "jwt-none-alg":             { title: "JWT Algorithm Confusion",        description: "JWT verification accepts the 'none' algorithm.", cwe: "CWE-347" },
   "timing-attack":            { title: "Timing Side-Channel",            description: "Non-constant-time comparison of a secret value." },
   "toctou":                   { title: "Time-of-Check to Time-of-Use",   description: "Race condition between a check and its corresponding use." },

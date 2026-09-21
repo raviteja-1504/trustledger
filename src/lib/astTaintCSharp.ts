@@ -242,6 +242,15 @@ function lineOf(node: SyntaxNode): number {
 // ── Taint sources ────────────────────────────────────────────────────────
 
 const ASP_SOURCE_ATTRIBUTES = new Set(["FromRoute", "FromQuery", "FromBody", "FromHeader", "FromForm"]);
+// ASP.NET Core binds a simple-type action-method parameter from the route
+// template or query string IMPLICITLY, by convention, with no [From*]
+// attribute at all -- `GetUser(int id)` is exactly as attacker-controlled
+// as `GetUser([FromRoute] int id)`. Used only to gate implicit-binding
+// taint seeding (extractMethodInfo below), never as a general "is this
+// type safe" check -- a complex type with no attribute is NOT covered by
+// this convention and is deliberately left untainted (out of scope, see
+// astTaintCSharp.ts's own docblock).
+const CSHARP_SIMPLE_TYPE_RE = /^(?:string|int|long|short|byte|bool|double|float|decimal|char|Guid|DateTime|byte\[\])\??$/;
 // Raw HttpContext/HttpRequest access -- the ASP.NET Core Servlet-API analog.
 const RAW_SOURCE_MEMBER_TAILS = new Set(["Query", "Form", "Headers", "Cookies", "QueryString"]);
 
@@ -503,6 +512,11 @@ function extractMethodAuthMeta(attrNames: string[]): MethodAuthMeta {
 function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   const nameNode = methodDecl.childForFieldName("name");
   if (!nameNode) return null;
+  // Computed BEFORE the param loop (moved up from its original position
+  // after it) so implicit-binding seeding below can gate on
+  // authMeta.isEndpoint -- authMeta itself never depended on the params.
+  const attrNames = attributeNamesOf(methodDecl);
+  const authMeta = extractMethodAuthMeta(attrNames);
   const paramList = methodDecl.childForFieldName("parameters");
   const paramShapes: ParamShape[] = [];
   const sourceParamNames = new Set<string>();
@@ -515,13 +529,24 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       if (!pName) { index++; continue; }
       paramShapes.push({ name: pName.text, index });
       const attrs = attributeNamesOf(param);
-      if (attrs.some(a => ASP_SOURCE_ATTRIBUTES.has(a))) sourceParamNames.add(pName.text);
+      const hasExplicitSource = attrs.some(a => ASP_SOURCE_ATTRIBUTES.has(a));
+      if (hasExplicitSource) sourceParamNames.add(pName.text);
       if (attrs.includes("FromRoute") || attrs.includes("FromQuery")) resourceIdParamNames.add(pName.text);
+      // Implicit ASP.NET Core model binding (see CSHARP_SIMPLE_TYPE_RE's
+      // docblock): only applies to a genuinely unattributed simple-type
+      // param of a real controller action (authMeta.isEndpoint) -- a
+      // private helper method's params are never HTTP-bound at all, so
+      // this deliberately does NOT apply file-wide.
+      if (!hasExplicitSource && attrs.length === 0 && authMeta.isEndpoint) {
+        const typeText = param.childForFieldName("type")?.text;
+        if (typeText && CSHARP_SIMPLE_TYPE_RE.test(typeText)) {
+          sourceParamNames.add(pName.text);
+          resourceIdParamNames.add(pName.text);
+        }
+      }
       index++;
     }
   }
-  const attrNames = attributeNamesOf(methodDecl);
-  const authMeta = extractMethodAuthMeta(attrNames);
   const body = methodDecl.childForFieldName("body");
   return { name: nameNode.text, paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null };
 }
@@ -530,7 +555,30 @@ function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
   const methods = new Map<string, LocalMethod>();
   for (const decl of findAllNodes(root, "method_declaration")) {
     const info = extractMethodInfo(decl);
-    if (info) methods.set(info.name, info);
+    if (!info) continue;
+    // Two different classes in the same file can legitimately declare a
+    // method with the same bare name -- e.g. a controller action colliding
+    // with an unrelated static helper's method of the same name
+    // (ChangeEmail/Transfer/DisableMfa/Deserialize/DeleteUser all collide
+    // with a same-named Database.*/BinaryHelper.* stub in a real OWASP
+    // benchmark file this phase was built against). Since interprocedural
+    // resolution elsewhere in this engine keys callees by bare name (the
+    // same same-file-scope precedent every other engine here uses), a
+    // flat overwrite silently lost the REAL entry-point method's body to
+    // whichever same-named declaration happened to appear LATER in the
+    // file, regardless of which one actually mattered -- confirmed via a
+    // real re-scan (BinaryHelper.Deserialize's own empty/null-bodied stub
+    // overwrote the controller's Deserialize action, silently dropping
+    // its insecure-deserialization finding). Prefer an already-recorded
+    // entry-point method over a later non-entry-point same-named one;
+    // only let a later declaration replace an earlier one when the later
+    // one is itself an endpoint and the earlier one wasn't. Two
+    // same-named ENDPOINT methods in different classes (not present in
+    // that benchmark) is an accepted, undetected residual edge case, same
+    // "flat file-wide namespace" tradeoff already documented elsewhere.
+    const existing = methods.get(info.name);
+    if (existing && existing.authMeta.isEndpoint && !info.authMeta.isEndpoint) continue;
+    methods.set(info.name, info);
   }
   return methods;
 }
@@ -565,11 +613,26 @@ function checkCallSink(
     emit(ctx, "xss", node, sourceExpr, text);
   } else if (tail === "Write" && rootVar === "Response" && taintedArg) {
     emit(ctx, "xss", node, sourceExpr, text);
-  } else if ((tail === "GetAsync" || tail === "PostAsync" || tail === "PutAsync" || tail === "DeleteAsync" || tail === "SendAsync") && taintedArg) {
+  } else if (tail === "Content" && taintedArg) {
+    // ControllerBase.Content(html, contentType) -- ASP.NET Core's
+    // return-raw-HTML helper. Bare call (no rootVar prefix beyond
+    // "Content" itself), tainted-arg-gated like every sink here; the
+    // common real shape is a concatenated HTML string, already resolved
+    // by isTainted's recursive binary_expression walk.
+    emit(ctx, "xss", node, sourceExpr, text);
+  } else if ((tail === "GetAsync" || tail === "PostAsync" || tail === "PutAsync" || tail === "DeleteAsync" || tail === "SendAsync"
+              || tail === "GetStringAsync" || tail === "GetByteArrayAsync" || tail === "GetStreamAsync"
+              || tail === "PostAsJsonAsync" || tail === "PutAsJsonAsync") && taintedArg) {
     emit(ctx, "ssrf", node, sourceExpr, text);
   } else if (tail === "Combine" && rootVar === "Path" && taintedArg) {
     emit(ctx, "path-traversal", node, sourceExpr, text);
   } else if (FS_PATH_ROOTS.has(rootVar) && ["ReadAllText", "WriteAllText", "Open", "Create", "Delete", "ReadAllBytes", "WriteAllBytes"].includes(tail) && taintedArg) {
+    emit(ctx, "path-traversal", node, sourceExpr, text);
+  } else if (tail === "PhysicalFile" && taintedArg) {
+    // ControllerBase.PhysicalFile(path, contentType) -- ASP.NET Core's
+    // file-serving helper, a distinct sink shape from the System.IO.File/
+    // Path static-class checks above (this is an instance-method call
+    // with no meaningful rootVar of its own).
     emit(ctx, "path-traversal", node, sourceExpr, text);
   } else if (tail === "Deserialize" && taintedArg) {
     emit(ctx, "insecure-deserialization", node, sourceExpr, text);
@@ -577,6 +640,15 @@ function checkCallSink(
     emit(ctx, "open-redirect", node, sourceExpr, text);
   } else if ((tail === "Compile" && rootVar === "XPathExpression") || (tail === "SelectNodes" || tail === "SelectSingleNode")) {
     if (taintedArg) emit(ctx, "xpath-injection", node, sourceExpr, text);
+  } else if (/ldap/i.test(rootVar) && /^(?:Search|FindOne|FindAll)$/i.test(tail) && taintedArg) {
+    // Call-shaped LDAP sink -- a custom helper (LdapHelper.Search(filter),
+    // Ldap.FindOne(...)), distinct from the DirectorySearcher.Filter
+    // property-assignment shape handled structurally in
+    // walkForDeclarationsAndSinks below. Real System.DirectoryServices
+    // code has no fixed "Search" method name to allowlist exactly, so
+    // this is a rootVar-name heuristic (same reasoning as the BOLA
+    // lookup-name broadening below) rather than a class allowlist.
+    emit(ctx, "ldap-injection", node, sourceExpr, text);
   }
 }
 
@@ -670,6 +742,14 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
 
 const BOLA_LOOKUP_METHODS = new Set(["Find", "FirstOrDefault", "SingleOrDefault", "First", "Single", "QueryFirstOrDefault", "QuerySingleOrDefault"]);
 const BOLA_WRITE_METHODS = new Set(["Remove", "Delete", "Update"]);
+// Real-world repo/service classes (Database.GetUserById, UserRepo.FindById,
+// ...) vary far more than EF/Dapper's fixed vocabulary above -- same
+// reasoning already used for PHP's BOLA detector (name-convention
+// heuristic, since a fixed allowlist can't cover every custom data-access
+// class). Kept SEPARATE from the exact sets above (not merged in) so the
+// exact-match sets stay the higher-precision, always-checked-first path.
+const BOLA_LOOKUP_NAME_RE = /^Get\w*By(?:Id|Guid)?$/i;
+const BOLA_WRITE_NAME_RE = /^(?:Delete|Remove|Update)\w*$/i;
 const PRINCIPAL_NAME_RE = /^(?:User|HttpContext\.User)(?:\.|$)/;
 
 interface BolaSinkCandidate { node: SyntaxNode; sourceExpr: string; sinkExpr: string }
@@ -684,7 +764,9 @@ function checkBolaSinkCandidate(
   const text = calleeTextCSharp(fn);
   if (!text || args.length === 0) return;
   const tail = text.split(".").pop() ?? text;
-  if (!BOLA_LOOKUP_METHODS.has(tail) && !BOLA_WRITE_METHODS.has(tail)) return;
+  const isKnownLookup = BOLA_LOOKUP_METHODS.has(tail) || BOLA_WRITE_METHODS.has(tail);
+  const isNamedLookup = BOLA_LOOKUP_NAME_RE.test(tail) || BOLA_WRITE_NAME_RE.test(tail);
+  if (!isKnownLookup && !isNamedLookup) return;
   const arg0 = args[0];
   const argIds = findAllNodes(arg0, "identifier").map(n => n.text);
   if (argIds.some(id => resourceIdParamNames.has(id))) {

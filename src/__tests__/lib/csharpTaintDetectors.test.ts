@@ -1,319 +1,216 @@
 import { analyzeFile } from "@/lib/scanner";
 
-describe("C# extractTaintedVars: [FromRoute]/[FromQuery] attribute-parameter taint", () => {
-  it("propagates a [FromRoute]-bound parameter into a real detector end-to-end", () => {
+// Regex-layer (scanner.ts) detectors added while closing C#-detector gaps
+// surfaced by a real ASP.NET Core OWASP benchmark file -- mirrors
+// goTaintDetectors.test.ts's own analyzeFile()-based, end-to-end style.
+// The AST-layer (astTaintCSharp.ts) counterparts of the sink-broadening
+// decisions (BOLA, LDAP, SSRF, XSS, path-traversal) are already covered
+// in astTaintCSharp.test.ts -- this file covers the categories that are
+// regex-only (weak-crypto, insecure-randomness, weak-signing-secret,
+// cookie security, missing-security-headers) plus the regex-layer mirrors
+// of the AST-layer decisions.
+
+describe("C# weak-crypto (regex-only, no AST engine equivalent anywhere)", () => {
+  it("flags MD5.Create()", () => {
     const content = `
-public class UsersController : ControllerBase {
-    public IActionResult GetUser([FromRoute] int id) {
-        var user = _db.Users.Find(id);
-        return Ok(user);
-    }
-}
-`;
-    const result = analyzeFile("Controllers/UsersController.cs", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(true);
+public class A {
+  [HttpPost("hash-md5")]
+  public IActionResult WeakMd5([FromBody] string password) {
+    using var md5 = MD5.Create();
+    var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(password));
+    return Ok(Convert.ToHexString(hash));
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "weak-crypto")).toBe(true);
   });
 
-  it("propagates a [FromQuery]-bound parameter too", () => {
+  it("flags SHA1.Create()", () => {
     const content = `
-public class OrdersController : ControllerBase {
-    public IActionResult GetOrder([FromQuery] int orderId) {
-        var order = _db.Orders.Find(orderId);
-        return Ok(order);
-    }
-}
-`;
-    const result = analyzeFile("Controllers/OrdersController.cs", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(true);
-  });
-});
-
-describe("C# SQL injection", () => {
-  it("flags SqlCommand built with string concatenation", () => {
-    const content = `
-public IActionResult GetUser([FromQuery] string id) {
-    var cmd = new SqlCommand("SELECT * FROM Users WHERE Id = " + id, conn);
-    return Ok(cmd.ExecuteReader());
-}
-`;
-    const result = analyzeFile("Controllers/UsersController.cs", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(true);
+public class A {
+  [HttpPost("hash-sha1")]
+  public IActionResult WeakSha1([FromBody] string password) {
+    using var sha1 = SHA1.Create();
+    return Ok(sha1.ComputeHash(Encoding.UTF8.GetBytes(password)));
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "weak-crypto")).toBe(true);
   });
 
-  it("flags EF FromSqlRaw with an interpolated string", () => {
+  it("flags CipherMode.ECB", () => {
     const content = `
-public IActionResult GetUser([FromQuery] string id) {
-    var user = _context.Users.FromSqlRaw($"SELECT * FROM Users WHERE Id = {id}").First();
-    return Ok(user);
-}
-`;
-    const result = analyzeFile("Controllers/UsersController.cs", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(true);
-  });
-
-  it("does not flag EF's safe FromSqlInterpolated", () => {
-    const content = `
-public IActionResult GetUser([FromQuery] string id) {
-    var user = _context.Users.FromSqlInterpolated($"SELECT * FROM Users WHERE Id = {id}").First();
-    return Ok(user);
-}
-`;
-    const result = analyzeFile("Controllers/UsersController_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(false);
-  });
-
-  it("does not flag a parameterized ADO.NET query even with a tainted value nearby", () => {
-    const content = `
-public IActionResult GetUser([FromQuery] string id) {
-    var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT * FROM Users WHERE Id = @id";
-    cmd.Parameters.AddWithValue("@id", id);
-    return Ok(cmd.ExecuteReader());
-}
-`;
-    const result = analyzeFile("Controllers/UsersController_param.cs", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(false);
+public class A {
+  [HttpPost("encrypt")]
+  public IActionResult WeakEncryption([FromBody] string input) {
+    using var aes = Aes.Create();
+    aes.Mode = CipherMode.ECB;
+    return Ok();
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "weak-crypto")).toBe(true);
   });
 });
 
-describe("C# XSS", () => {
-  it("flags Html.Raw with a tainted parameter", () => {
+describe("C# insecure-randomness (System.Random inside a security-named method, two-line idiom)", () => {
+  it("flags Random().Next(...) used inside a method whose name is security-sounding", () => {
     const content = `
-public IActionResult Comment([FromQuery] string comment) {
-    return Content(Html.Raw(comment).ToString());
-}
-`;
-    const result = analyzeFile("Controllers/CommentController.cs", content);
-    expect(result.indicators.some(i => i.id === "xss")).toBe(true);
+public class A {
+  [HttpGet("weak-token")]
+  public IActionResult WeakToken() {
+    var random = new Random();
+    return Ok(random.Next(100000, 999999));
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(true);
   });
 
-  it("does not flag Razor's default auto-encoded output (no Html.Raw call)", () => {
+  it("does not flag System.Random used inside an unrelated, non-security-named method", () => {
     const content = `
-@model UserViewModel
-<h1>Welcome, @Model.Name</h1>
-`;
-    const result = analyzeFile("Views/Home/Index.cshtml", content);
-    expect(result.indicators.some(i => i.id === "xss")).toBe(false);
-  });
-});
-
-describe("C# SSRF", () => {
-  it("flags a tainted URL passed to HttpClient.GetAsync", () => {
-    const content = `
-public async Task<IActionResult> Fetch([FromQuery] string url) {
-    var client = new HttpClient();
-    var response = await client.GetAsync(url);
-    return Ok(response);
-}
-`;
-    const result = analyzeFile("Controllers/FetchController.cs", content);
-    expect(result.indicators.some(i => i.id === "ssrf")).toBe(true);
-  });
-
-  it("flags the HttpRequestMessage/SendAsync two-step idiom", () => {
-    const content = `
-public async Task<IActionResult> Fetch([FromQuery] string url) {
-    var request = new HttpRequestMessage(HttpMethod.Get, url);
-    var response = await client.SendAsync(request);
-    return Ok(response);
-}
-`;
-    const result = analyzeFile("Controllers/FetchController2.cs", content);
-    expect(result.indicators.some(i => i.id === "ssrf")).toBe(true);
-  });
-
-  it("does not flag a hardcoded destination", () => {
-    const content = `
-public async Task<IActionResult> Health() {
-    var client = new HttpClient();
-    var response = await client.GetAsync("https://internal-health-check.example.com");
-    return Ok(response);
-}
-`;
-    const result = analyzeFile("Controllers/HealthController.cs", content);
-    expect(result.indicators.some(i => i.id === "ssrf")).toBe(false);
+public class A {
+  [HttpGet("shuffle")]
+  public IActionResult ShuffleDeck() {
+    var random = new Random();
+    return Ok(random.Next(0, 52));
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "insecure-randomness")).toBe(false);
   });
 });
 
-describe("C# insecure deserialization", () => {
-  it("flags BinaryFormatter.Deserialize on a stream", () => {
+describe("C# weak-signing-secret (private const string modifier chain)", () => {
+  it("flags a hardcoded JWT secret declared as a private const string", () => {
     const content = `
-public object Load(Stream s) {
-    var bf = new BinaryFormatter();
-    return bf.Deserialize(s);
-}
-`;
-    const result = analyzeFile("Services/CacheService.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(true);
-  });
-
-  it("flags JsonConvert.DeserializeObject with TypeNameHandling.All set nearby", () => {
-    const content = `
-public object Load(string json) {
-    var settings = new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All };
-    return JsonConvert.DeserializeObject(json, settings);
-}
-`;
-    const result = analyzeFile("Services/JsonService.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(true);
-  });
-
-  it("does not flag plain JsonConvert.DeserializeObject<T> with no TypeNameHandling", () => {
-    const content = `
-public UserDto Load(string json) {
-    return JsonConvert.DeserializeObject<UserDto>(json);
-}
-`;
-    const result = analyzeFile("Services/JsonService_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(false);
-  });
-
-  it("does not flag System.Text.Json's safe JsonSerializer.Deserialize<T>", () => {
-    const content = `
-public UserDto Load(string json) {
-    return JsonSerializer.Deserialize<UserDto>(json);
-}
-`;
-    const result = analyzeFile("Services/SystemTextJsonService_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(false);
+public class A {
+  private const string JwtSecret = "super-secret-jwt-key-123456";
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "weak-signing-secret")).toBe(true);
   });
 });
 
-describe("C# IDOR/BOLA", () => {
-  it("flags EF .Find(id) with a tainted route param and no ownership check", () => {
+describe("C# insecure session cookie (Response.Cookies.Append + CookieOptions object initializer)", () => {
+  it("flags an auth cookie set with HttpOnly = false", () => {
     const content = `
-public IActionResult GetUser([FromRoute] int id) {
-    var user = _db.Users.Find(id);
-    return Ok(user);
-}
-`;
-    const result = analyzeFile("Controllers/UsersController.cs", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(true);
+public class A {
+  [HttpPost("session")]
+  public IActionResult CreateSession(string userId) {
+    Response.Cookies.Append("session", userId, new CookieOptions {
+      HttpOnly = false,
+      Secure = false,
+      SameSite = SameSiteMode.None
+    });
+    return Ok();
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(true);
   });
 
-  it("does not flag when an ownership check is present before the lookup", () => {
+  it("does not flag a non-auth-named cookie", () => {
     const content = `
-public IActionResult GetUser([FromRoute] int id) {
-    if (!isOwner(currentUserId, id)) return Forbid();
-    var user = _db.Users.Find(id);
-    return Ok(user);
-}
-`;
-    const result = analyzeFile("Controllers/UsersController_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(false);
-  });
-
-  it("does not flag when [Authorize] is present nearby", () => {
-    const content = `
-[Authorize]
-public IActionResult GetUser([FromRoute] int id) {
-    var user = _db.Users.Find(id);
-    return Ok(user);
-}
-`;
-    const result = analyzeFile("Controllers/UsersController_authorized.cs", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(false);
+public class A {
+  [HttpGet("theme")]
+  public IActionResult SetTheme(string theme) {
+    Response.Cookies.Append("theme", theme, new CookieOptions { HttpOnly = false });
+    return Ok();
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(false);
   });
 });
 
-describe("C# path traversal", () => {
-  it("flags a tainted filename joined via Path.Combine", () => {
+describe("C# plaintext password storage (call-shaped, not field-assignment)", () => {
+  it("flags a tainted password passed straight into a SavePassword(...) call", () => {
     const content = `
-public IActionResult Download([FromQuery] string filename) {
-    var path = Path.Combine(_basePath, filename);
+public class A {
+  [HttpPost("password")]
+  public IActionResult StorePassword([FromBody] LoginRequest request) {
+    Database.SavePassword(request.Username, request.Password);
+    return Ok();
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "plaintext-password-storage")).toBe(true);
+  });
+});
+
+describe("C# mass assignment (whole [FromBody] object passed into a write-shaped call)", () => {
+  it("flags a [FromBody]-bound profile object passed whole into UpdateProfile(...)", () => {
+    const content = `
+public class A {
+  [HttpPut("profile")]
+  public IActionResult UpdateProfile([FromBody] UserProfile profile) {
+    Database.UpdateProfile(profile);
+    return Ok(profile);
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "mass-assignment")).toBe(true);
+  });
+});
+
+describe("C# missing security headers (explicit Response.Headers.Remove of a known security header)", () => {
+  it("flags removal of X-Frame-Options/CSP/X-Content-Type-Options", () => {
+    const content = `
+public class A {
+  [HttpGet("headers")]
+  public IActionResult MissingHeaders() {
+    Response.Headers.Remove("X-Content-Type-Options");
+    Response.Headers.Remove("Content-Security-Policy");
+    Response.Headers.Remove("X-Frame-Options");
+    return Ok("unsafe headers");
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    const findings = result.indicators.filter(i => i.id === "missing-security-headers");
+    expect(findings.length).toBe(3);
+  });
+
+  it("does not flag removal of an unrelated, non-security header", () => {
+    const content = `
+public class A {
+  [HttpGet("headers")]
+  public IActionResult RemoveServerHeader() {
+    Response.Headers.Remove("Server");
+    return Ok();
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "missing-security-headers")).toBe(false);
+  });
+});
+
+describe("C# implicit ASP.NET Core model binding -- regex layer (extractTaintedVars mirror of the AST fix)", () => {
+  it("flags path-traversal for Path.Combine(..., file) where `file` has no [FromQuery] attribute", () => {
+    const content = `
+public class A {
+  [HttpGet("download")]
+  public IActionResult Download(string file) {
+    var path = Path.Combine("/var/app/files", file);
     return PhysicalFile(path, "application/octet-stream");
-}
-`;
-    const result = analyzeFile("Controllers/FilesController.cs", content);
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
     expect(result.indicators.some(i => i.id === "path-traversal")).toBe(true);
   });
-
-  it("does not flag a Path.Combine with only fixed, non-tainted segments", () => {
-    const content = `
-public IActionResult Download() {
-    var path = Path.Combine(_basePath, "report.pdf");
-    return PhysicalFile(path, "application/pdf");
-}
-`;
-    const result = analyzeFile("Controllers/FilesController_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "path-traversal")).toBe(false);
-  });
 });
 
-describe("C# XXE", () => {
-  it("flags XmlDocument with no XmlResolver = null", () => {
+describe("C# SSRF via HttpClient shorthand methods (regex layer)", () => {
+  it("flags GetStringAsync(url) where url is a tainted bare identifier", () => {
     const content = `
-public void Load(string xml) {
-    var doc = new XmlDocument();
-    doc.LoadXml(xml);
-}
-`;
-    const result = analyzeFile("Services/XmlService.cs", content);
-    expect(result.indicators.some(i => i.id === "xxe")).toBe(true);
-  });
-
-  it("does not flag XmlDocument with XmlResolver explicitly nulled", () => {
-    const content = `
-public void Load(string xml) {
-    var doc = new XmlDocument();
-    doc.XmlResolver = null;
-    doc.LoadXml(xml);
-}
-`;
-    const result = analyzeFile("Services/XmlService_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "xxe")).toBe(false);
-  });
-
-  it("does not flag a bare XmlReaderSettings with no DtdProcessing override", () => {
-    const content = `
-public void Load(string xml) {
-    var settings = new XmlReaderSettings();
-    using var reader = XmlReader.Create(new StringReader(xml), settings);
-}
-`;
-    const result = analyzeFile("Services/XmlReaderService_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "xxe")).toBe(false);
-  });
-
-  it("flags DtdProcessing explicitly set to Parse", () => {
-    const content = `
-public void Load(string xml) {
-    var settings = new XmlReaderSettings();
-    settings.DtdProcessing = DtdProcessing.Parse;
-    using var reader = XmlReader.Create(new StringReader(xml), settings);
-}
-`;
-    const result = analyzeFile("Services/XmlReaderService.cs", content);
-    expect(result.indicators.some(i => i.id === "xxe")).toBe(true);
-  });
-});
-
-describe("C# insecure file upload", () => {
-  it("flags IFormFile saved with no extension validation", () => {
-    const content = `
-public async Task<IActionResult> Upload(IFormFile file) {
-    var path = Path.Combine(_uploadDir, file.FileName);
-    using var stream = new FileStream(path, FileMode.Create);
-    await file.CopyToAsync(stream);
-    return Ok();
-}
-`;
-    const result = analyzeFile("Controllers/UploadController.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-file-upload")).toBe(true);
-  });
-
-  it("does not flag a validated upload path", () => {
-    const content = `
-public async Task<IActionResult> Upload(IFormFile file) {
-    var ext = Path.GetExtension(file.FileName);
-    if (!allowedExtensions.Contains(ext)) return BadRequest();
-    var path = Path.Combine(_uploadDir, Guid.NewGuid() + ext);
-    using var stream = new FileStream(path, FileMode.Create);
-    await file.CopyToAsync(stream);
-    return Ok();
-}
-`;
-    const result = analyzeFile("Controllers/UploadController_safe.cs", content);
-    expect(result.indicators.some(i => i.id === "insecure-file-upload")).toBe(false);
+public class A {
+  [HttpGet("fetch")]
+  public async Task<IActionResult> Fetch([FromQuery] string url) {
+    using var client = new HttpClient();
+    return Ok(await client.GetStringAsync(url));
+  }
+}`;
+    const result = analyzeFile("A.cs", content);
+    expect(result.indicators.some(i => i.id === "ssrf")).toBe(true);
   });
 });

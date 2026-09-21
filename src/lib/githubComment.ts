@@ -23,6 +23,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "plaintext-password-storage": "Plaintext password storage",
   "debug-mode-enabled": "Debug mode enabled",
+  "missing-security-headers": "Security header explicitly removed",
   "iac-s3-public-acl": "Public S3 bucket ACL",
   "iac-open-ingress": "Open ingress rule (0.0.0.0/0)",
   "iac-unencrypted-storage": "Unencrypted storage",

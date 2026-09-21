@@ -42,6 +42,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "prototype-pollution":        { id: "CWE-1321", title: "Prototype Pollution" },
   "open-redirect":              { id: "CWE-601",  title: "URL Redirection to Untrusted Site" },
   "weak-cors":                  { id: "CWE-942",  title: "Permissive Cross-domain Policy" },
+  "missing-security-headers":   { id: "CWE-693",  title: "Protection Mechanism Failure" },
   "backdoor-detection":         { id: "CWE-506",  title: "Embedded Malicious Code" },
   "xxe":                        { id: "CWE-611",  title: "XML External Entity Reference" },
   "ldap-injection":             { id: "CWE-90",   title: "LDAP Injection" },
