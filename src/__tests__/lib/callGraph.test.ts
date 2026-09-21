@@ -402,3 +402,32 @@ describe("callGraph.detectEntryPoints — PHP Laravel/WordPress registration-sit
     expect(entries).not.toContain("helper");
   });
 });
+
+describe("callGraph.extractFunctions — Allman-brace (opening `{` on its own line) regression", () => {
+  it("does not silently drop a C# method whose opening brace is on the line after its signature", () => {
+    const content = [
+      "public class A",
+      "{",
+      "    public IActionResult GetUser(int id)",
+      "    {",
+      "        var user = Database.GetUserById(id);",
+      "        return Ok(user);",
+      "    }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    expect(funcs.some(f => f.name === "GetUser")).toBe(true);
+  });
+
+  it("still correctly rejects a genuine single-line K&R function", () => {
+    const content = "function foo() {}\n";
+    const funcs = extractFunctions(content);
+    expect(funcs.some(f => f.name === "foo")).toBe(false);
+  });
+
+  it("still handles ordinary same-line K&R-brace functions unaffected", () => {
+    const content = "function foo() {\n  return 1;\n}\n";
+    const funcs = extractFunctions(content);
+    expect(funcs.some(f => f.name === "foo")).toBe(true);
+  });
+});

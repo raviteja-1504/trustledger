@@ -156,7 +156,7 @@ function indentOf(line: string): number {
   return line.length - line.trimStart().length;
 }
 
-interface Pending extends FunctionNode { mode: "brace" | "indent"; baseIndent: number }
+interface Pending extends FunctionNode { mode: "brace" | "indent"; baseIndent: number; seenOpenBrace: boolean }
 
 /**
  * Python has no braces at all, so the ORIGINAL brace-depth closing rule
@@ -208,6 +208,7 @@ export function extractFunctions(content: string): FunctionNode[] {
           body:        "",
           mode:        PY_DEF_RE.test(line) ? "indent" : "brace",
           baseIndent:  indentOf(line),
+          seenOpenBrace: false,
         };
         depth = 0;
       }
@@ -241,17 +242,33 @@ export function extractFunctions(content: string): FunctionNode[] {
       continue;
     }
 
-    // Brace mode -- original, unchanged logic (JS/TS/Go/Java). Runs in the
-    // SAME iteration a function is matched (not deferred to the next loop
+    // Brace mode -- original logic (JS/TS/Go/Java), extended with a
+    // seenOpenBrace gate (Allman-brace fix, see below). Runs in the SAME
+    // iteration a function is matched (not deferred to the next loop
     // pass), so a true single-line function (`function foo() {}`) closes
     // and is correctly excluded (end_line === start_line, per the guard
     // below) without bleeding the following line into its body.
     current.body += line + "\n";
     for (const ch of line) {
-      if (ch === "{") depth++;
+      if (ch === "{") { depth++; current.seenOpenBrace = true; }
       if (ch === "}") depth--;
     }
-    if (depth <= 0 && current.body.trim().length > 0 && current.body.includes("\n")) {
+    // C#'s dominant real-world convention (Microsoft's own style guide)
+    // puts the opening `{` on its OWN line below the signature (Allman
+    // style), not on the signature line itself (K&R, which JS/Go/Java
+    // conventionally use). Without seenOpenBrace, the original
+    // `depth <= 0` check closed the function on the signature line
+    // itself -- depth is still 0 there since no brace has been seen yet
+    // -- discarding the function via the same "body has at least 2 lines"
+    // guard that exists to reject genuine single-line functions, then
+    // permanently losing the real body/closing-brace lines that follow
+    // (they're scanned with no `current` pending until the next
+    // signature match). Confirmed via a minimal repro: extractFunctions
+    // returned zero functions for an Allman-brace C# class. Requiring at
+    // least one real `{` before depth<=0 is allowed to close fixes this
+    // without affecting K&R-style code (which sees its `{` on the same
+    // line the match fires, same iteration, before this check runs).
+    if (depth <= 0 && current.seenOpenBrace && current.body.trim().length > 0 && current.body.includes("\n")) {
       current.end_line = i + 1;
       // Only register if body has at least 2 lines (avoid false single-line matches)
       if (current.end_line > current.start_line) {
