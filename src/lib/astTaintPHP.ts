@@ -91,7 +91,8 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintPHPId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "file-inclusion"
-  | "bola-missing-ownership-check";
+  | "bola-missing-ownership-check" | "header-injection" | "ldap-injection"
+  | "nosql-injection" | "xpath-injection";
 
 export interface AstTaintPHPFinding {
   id:         AstTaintPHPId;
@@ -261,6 +262,8 @@ const SEVERITY: Record<AstTaintPHPId, "critical" | "high" | "medium"> = {
   "ssrf": "critical", "path-traversal": "critical", "insecure-deserialization": "critical",
   "file-inclusion": "critical", "open-redirect": "medium",
   "bola-missing-ownership-check": "high",
+  "header-injection": "critical", "ldap-injection": "critical",
+  "nosql-injection": "critical", "xpath-injection": "critical",
 };
 const LABEL: Record<AstTaintPHPId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -268,6 +271,8 @@ const LABEL: Record<AstTaintPHPId, string> = {
   "insecure-deserialization": "Insecure Deserialization", "file-inclusion": "PHP File Inclusion",
   "open-redirect": "Open Redirect",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
+  "header-injection": "HTTP Header Injection", "ldap-injection": "LDAP Injection",
+  "nosql-injection": "NoSQL Injection", "xpath-injection": "XPath Injection",
 };
 
 // ── Taint environment / propagation ─────────────────────────────────────
@@ -290,6 +295,12 @@ interface EngineCtx {
   seededParams: Map<string, Set<number>>;
   findings: AstTaintPHPFinding[];
   seen: Set<string>;
+  // $var = new ClassName(...) -- variable-to-class-name tracking, mirroring
+  // astTaintCSharp.ts's ctx.varTypes exactly. Used only to disambiguate a
+  // same-named method call between an unrelated receiver type and a real
+  // SQL driver (e.g. DOMXPath::query() vs a DB driver's ->query()) -- see
+  // checkMemberCallSink's SQL_CALL_TAILS branch.
+  varTypes: Map<string, string>;
 }
 
 function emit(
@@ -439,7 +450,13 @@ function seedLocalFunctionParams(calleeName: string, args: SyntaxNode[], env: En
 
 // ── Function/method collection ───────────────────────────────────────────
 
-const RESOURCE_ID_PARAM_RE = /^(?:id|userId|user_id|Id|ID)$/;
+// Broadened from an exact 5-name set to also catch any snake_case "_id" or
+// camelCase "Id" suffix (accountId, order_id, ...) -- the exact set missed
+// real, common resource-id param names entirely. No `/i` flag: a
+// case-insensitive `.*id` would also match ordinary words ending in those
+// two letters (valid, avoid, grid); requiring either the underscore or the
+// capital "I" keeps those safely excluded.
+const RESOURCE_ID_PARAM_RE = /^(?:id|ID|.*_id|.*Id)$/;
 const READ_NAME_RE = /^(?:get|show|index|view|find|list|search)/i;
 const AUTH_SUPPRESS_CALL_RE = /^(?:Auth\.check|Auth\.user|auth\.check|auth\.user)$/;
 
@@ -490,7 +507,15 @@ function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
   const functions = new Map<string, LocalFunction>();
   for (const decl of [...findAllNodes(root, "function_definition"), ...findAllNodes(root, "method_declaration")]) {
     const info = extractFuncInfo(decl);
-    if (info) functions.set(info.name, info);
+    if (!info) continue;
+    // Same bug class as astTaintCSharp.ts's collectLocalMethods (already
+    // fixed there): two different classes/functions in the same file can
+    // share a bare name, and a flat overwrite would silently lose whichever
+    // one was declared first to whichever is declared last, regardless of
+    // which one actually matters. PHP has no C#-style isEndpoint signal to
+    // arbitrate by, so the simplest safe policy is first-declared-wins.
+    if (functions.has(info.name)) continue;
+    functions.set(info.name, info);
   }
   return functions;
 }
@@ -500,6 +525,12 @@ function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
 const SQL_CALL_TAILS = new Set(["query", "exec", "prepare"]);
 const SQL_FUNCTIONS = new Set(["mysqli_query", "mysql_query", "pg_query"]);
 const CMD_FUNCTIONS = new Set(["shell_exec", "system", "passthru", "popen", "proc_open", "exec"]);
+// MongoDB-driver-shaped array-query calls. Deliberately overlaps with
+// BOLA_LOOKUP_TAILS's own "find"/"get" entries below -- the two checks run
+// independently per call site, so a single call can legitimately produce
+// both a bola-missing-ownership-check AND a nosql-injection finding; not a
+// conflict.
+const NOSQL_CALL_TAILS = new Set(["find", "findOne", "findMany", "updateOne", "deleteOne", "remove"]);
 
 function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean, env: Env) {
   const fnNode = node.childForFieldName("function");
@@ -524,6 +555,25 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: 
     emit(ctx, "file-inclusion", node, sourceExpr, fnName);
   } else if (fnName === "fopen" || fnName === "file_get_contents" || fnName === "readfile") {
     emit(ctx, "path-traversal", node, sourceExpr, fnName);
+  } else if (fnName === "header") {
+    // header("Location: " . $tainted) is open-redirect; header("X-Anything:
+    // " . $tainted) for any other header name is header-injection -- same
+    // call, discriminated purely by the literal string prefix (read
+    // directly off the tainted arg's raw .text, since that's the whole
+    // concatenation expression here, e.g. `"Location: " . $next`).
+    if (/^["']?\s*Location\s*:/i.test(sourceExpr)) {
+      emit(ctx, "open-redirect", node, sourceExpr, fnName);
+    } else {
+      emit(ctx, "header-injection", node, sourceExpr, fnName);
+    }
+  } else if (fnName === "ldap_search") {
+    // ldap_search($link, $base_dn, $filter) -- confirmed 3-arg positional
+    // signature; the filter is args[2], not just "any tainted arg" (the
+    // $link/$base_dn args could themselves be tainted in a contrived case
+    // without that being the real vulnerability).
+    if (args.length >= 3 && isTainted(args[2], env)) {
+      emit(ctx, "ldap-injection", node, args[2].text, fnName);
+    }
   } else if (fnName === "curl_setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- always a bare function
     // call in PHP, never a method call (confirmed: no OOP cURL wrapper in
@@ -554,7 +604,19 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: Sy
   if (!taintedArg) return;
   const sourceExpr = taintedArg.text;
   if (SQL_CALL_TAILS.has(methodName)) {
-    emit(ctx, "sql-injection", node, sourceExpr, methodName);
+    // Receiver-type-aware discrimination (mirrors astTaintCSharp.ts's
+    // ctx.varTypes-based checkCallSink) -- ->query()/->exec()/->prepare()
+    // is only really SQL injection when the receiver isn't something else
+    // entirely that happens to share the method name, e.g. DOMXPath::query().
+    const receiver = node.namedChildren[0];
+    const receiverName = receiver?.type === "variable_name" ? variableBareName(receiver) : null;
+    if (methodName === "query" && receiverName && ctx.varTypes.get(receiverName) === "DOMXPath") {
+      emit(ctx, "xpath-injection", node, sourceExpr, methodName);
+    } else {
+      emit(ctx, "sql-injection", node, sourceExpr, methodName);
+    }
+  } else if (NOSQL_CALL_TAILS.has(methodName)) {
+    emit(ctx, "nosql-injection", node, sourceExpr, methodName);
   } else if (methodName === "setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- args[0] is the handle,
     // args[1] the CURLOPT_* constant, args[2] the value; a tainted MATCH
@@ -579,7 +641,17 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
     const tainted = right ? isTainted(right, env) : false;
     if (left?.type === "variable_name") {
       const varName = variableBareName(left);
-      if (varName) env.set(varName, tainted);
+      if (varName) {
+        env.set(varName, tainted);
+        // $var = new ClassName(...) -- class-name tracking (see
+        // EngineCtx.varTypes's own docblock). className extraction reuses
+        // the exact same technique collectBolaFindings' own
+        // object_creation_expression loop already uses below.
+        if (right?.type === "object_creation_expression") {
+          const classNameNode = right.namedChildren.find(c => c && c.type === "name");
+          if (classNameNode) ctx.varTypes.set(varName, classNameNode.text);
+        }
+      }
     } else if (left?.type === "member_access_expression") {
       const key = calleeTextPHP(left);
       if (key) env.set(key, tainted);
@@ -640,15 +712,53 @@ function isPrincipalShaped(text: string): boolean {
   return PRINCIPAL_NAME_RE.test(text);
 }
 
-function collectBolaFindings(fn: LocalFunction, ctx: EngineCtx) {
-  if (!fn.body) return;
-  if (!fn.authMeta.hasResourceIdParam) return;
-  if (fn.authMeta.suppressedByAuthCheck) return;
+// Resolves the most recent assignment (source-order-last among those
+// preceding `beforeNode`) right-hand side for a bare variable name -- a small,
+// bounded ONE-HOP lookback (not general taint propagation), used only to
+// let the SQL_CALL_TAILS BOLA branch below see through an opaque
+// intermediate variable like `$sql` back to whatever built it. Consistent
+// with this engine's existing "second-hop" precision philosophy elsewhere
+// (extractTaintedVars' own documented one-hop propagation in scanner.ts).
+function resolveRecentAssignmentRHS(bodyNodes: SyntaxNode[], varName: string, beforeNode: SyntaxNode): SyntaxNode | null {
+  let found: SyntaxNode | null = null;
+  let foundIndex = -1;
+  for (const body of bodyNodes) {
+    for (const assign of findAllNodes(body, "assignment_expression")) {
+      // Only assignments that PRECEDE the call being resolved -- a variable
+      // like $sql is routinely reassigned many times in one script, and the
+      // last assignment in the whole file is not the one this call sees.
+      if (assign.startIndex >= beforeNode.startIndex) continue;
+      const left = assign.childForFieldName("left");
+      if (left?.type === "variable_name" && variableBareName(left) === varName && assign.startIndex > foundIndex) {
+        found = assign.childForFieldName("right") ?? found;
+        foundIndex = assign.startIndex;
+      }
+    }
+  }
+  return found;
+}
+
+// Takes an array of body-ish nodes (a single function/method body, OR the
+// scattered top-level statement siblings of a framework-less PHP script --
+// see this function's two call sites in scanAstTaintPHP) rather than a
+// single LocalFunction, so the same logic covers both without duplicating
+// it. Top-level script code has no LocalFunction wrapper to hang a body
+// off of at all -- collectBolaFindings used to be structurally uncallable
+// for it for that reason alone, confirmed directly, not any other gating
+// logic inside this function.
+function collectBolaFindings(
+  bodyNodes: SyntaxNode[], resourceIdParamNames: Set<string>, authMeta: FuncAuthMeta, ctx: EngineCtx,
+) {
+  if (bodyNodes.length === 0) return;
+  if (!authMeta.hasResourceIdParam) return;
+  if (authMeta.suppressedByAuthCheck) return;
 
   const candidates: BolaSinkCandidate[] = [];
   let hasOwnershipComparison = false;
 
-  for (const shape of [...findAllNodes(fn.body, "member_call_expression"), ...findAllNodes(fn.body, "scoped_call_expression")]) {
+  const memberAndScopedCalls = bodyNodes.flatMap(b =>
+    [...findAllNodes(b, "member_call_expression"), ...findAllNodes(b, "scoped_call_expression")]);
+  for (const shape of memberAndScopedCalls) {
     const methodName = shape.childForFieldName("name")?.text;
     if (!methodName) continue;
     const args = argListOfPHP(shape);
@@ -659,28 +769,47 @@ function collectBolaFindings(fn: LocalFunction, ctx: EngineCtx) {
       // chain ends with -- that final call isn't where the resource id
       // actually appears.
       const argIds = findAllNodes(args[1], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-      if (argIds.some(id => fn.resourceIdParamNames.has(id))) {
+      if (argIds.some(id => resourceIdParamNames.has(id))) {
         candidates.push({ node: shape, sourceExpr: args[1].text, sinkExpr: calleeTextPHP(shape) ?? methodName });
       }
       continue;
     }
+    if (SQL_CALL_TAILS.has(methodName) && args.length > 0) {
+      // Raw-SQL-string sink (->query()/->exec()/->prepare()) -- a
+      // materially different real-world shape from Laravel's ORM lookup
+      // verbs above (`$sql = "SELECT ... '$accountId'"; $conn->query($sql);`
+      // -- the resource id never appears as the call's own argument, only
+      // inside whatever built the $sql string on an earlier line).
+      const directIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
+      let sourceExprText = args[0].text;
+      let matched = directIds.some(id => resourceIdParamNames.has(id));
+      if (!matched && directIds.length === 1) {
+        const rhs = resolveRecentAssignmentRHS(bodyNodes, directIds[0], shape);
+        if (rhs) {
+          const rhsIds = findAllNodes(rhs, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
+          if (rhsIds.some(id => resourceIdParamNames.has(id))) { matched = true; sourceExprText = rhs.text; }
+        }
+      }
+      if (matched) candidates.push({ node: shape, sourceExpr: sourceExprText, sinkExpr: calleeTextPHP(shape) ?? methodName });
+      continue;
+    }
     if (!BOLA_LOOKUP_TAILS.has(methodName) || args.length === 0) continue;
     const argIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-    if (argIds.some(id => fn.resourceIdParamNames.has(id))) {
+    if (argIds.some(id => resourceIdParamNames.has(id))) {
       candidates.push({ node: shape, sourceExpr: args[0].text, sinkExpr: calleeTextPHP(shape) ?? methodName });
     }
   }
-  for (const oc of findAllNodes(fn.body, "object_creation_expression")) {
+  for (const oc of bodyNodes.flatMap(b => findAllNodes(b, "object_creation_expression"))) {
     const classNameNode = oc.namedChildren.find(c => c && c.type === "name");
     if (!classNameNode) continue;
     const args = argListOfPHP(oc);
     if (args.length === 0) continue;
     const argIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-    if (argIds.some(id => fn.resourceIdParamNames.has(id))) {
+    if (argIds.some(id => resourceIdParamNames.has(id))) {
       candidates.push({ node: oc, sourceExpr: args[0].text, sinkExpr: `new ${classNameNode.text}` });
     }
   }
-  for (const bin of findAllNodes(fn.body, "binary_expression")) {
+  for (const bin of bodyNodes.flatMap(b => findAllNodes(b, "binary_expression"))) {
     const op = bin.childForFieldName("operator")?.type;
     if (op !== "==" && op !== "===" && op !== "!=" && op !== "!==") continue;
     const left = bin.childForFieldName("left");
@@ -688,15 +817,15 @@ function collectBolaFindings(fn: LocalFunction, ctx: EngineCtx) {
     if (!left || !right) continue;
     const lIds = new Set(findAllNodes(left, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n));
     const rIds = new Set(findAllNodes(right, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n));
-    const lIsRes = [...lIds].some(id => fn.resourceIdParamNames.has(id));
-    const rIsRes = [...rIds].some(id => fn.resourceIdParamNames.has(id));
+    const lIsRes = [...lIds].some(id => resourceIdParamNames.has(id));
+    const rIsRes = [...rIds].some(id => resourceIdParamNames.has(id));
     const lIsPrin = isPrincipalShaped(left.text);
     const rIsPrin = isPrincipalShaped(right.text);
     if ((lIsRes && rIsPrin) || (lIsPrin && rIsRes)) hasOwnershipComparison = true;
   }
 
   if (!hasOwnershipComparison) {
-    const severity: "medium" | "high" = fn.authMeta.verbTier === "read" ? "medium" : "high";
+    const severity: "medium" | "high" = authMeta.verbTier === "read" ? "medium" : "high";
     for (const c of candidates) emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
   }
 }
@@ -709,7 +838,7 @@ export function scanAstTaintPHP(content: string, filePath: string, root: SyntaxN
     const localFunctions = collectLocalFunctions(root);
     const ctx: EngineCtx = {
       content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
-      findings: [], seen: new Set(),
+      findings: [], seen: new Set(), varTypes: new Map(),
     };
 
     const propagating = buildPropagatingMapPHP(localFunctions, ctx);
@@ -719,7 +848,7 @@ export function scanAstTaintPHP(content: string, filePath: string, root: SyntaxN
       if (!fn.body) continue;
       const env: Env = new Map();
       walkForDeclarationsAndSinks(fn.body, env, ctx);
-      collectBolaFindings(fn, ctx);
+      collectBolaFindings([fn.body], fn.resourceIdParamNames, fn.authMeta, ctx);
     }
 
     // Also walk top-level (non-function) statements once, so a superglobal
@@ -729,11 +858,50 @@ export function scanAstTaintPHP(content: string, filePath: string, root: SyntaxN
     // this module's own docblock), but the FINDING itself isn't silently
     // dropped just because it's not inside a named function.
     const topLevelEnv: Env = new Map();
+    const topLevelChildren: SyntaxNode[] = [];
     for (const child of root.namedChildren) {
       if (child && child.type !== "function_definition" && child.type !== "class_declaration") {
         walkForDeclarationsAndSinks(child, topLevelEnv, ctx);
+        topLevelChildren.push(child);
       }
     }
+
+    // BOLA for top-level script code -- same rationale as the sink-check
+    // walk above (framework-less script code shouldn't be silently
+    // excluded just because it has no enclosing function). resourceIdParamNames
+    // here comes from a top-level variable assigned DIRECTLY from a
+    // superglobal whose name matches RESOURCE_ID_PARAM_RE, the closest
+    // top-level analog to a function's own resource-id-shaped parameter.
+    // verbTier defaults to "read" (medium severity) -- there's no function
+    // name here to signal read/write intent from, and a conservative
+    // default avoids over-alarming on top-level code. suppressedByAuthCheck
+    // reuses the exact same AUTH_SUPPRESS_CALL_RE scan extractFuncInfo
+    // already does for a real function body.
+    const topLevelResourceIdParamNames = new Set<string>();
+    for (const child of topLevelChildren) {
+      for (const assign of findAllNodes(child, "assignment_expression")) {
+        const left = assign.childForFieldName("left");
+        const right = assign.childForFieldName("right");
+        if (left?.type !== "variable_name" || !right) continue;
+        const varName = variableBareName(left);
+        if (varName && RESOURCE_ID_PARAM_RE.test(varName) && isTaintSourceExprPHP(right)) {
+          topLevelResourceIdParamNames.add(varName);
+        }
+      }
+    }
+    const topLevelSuppressedByAuthCheck = topLevelChildren.some(child =>
+      findAllNodes(child, "member_call_expression").some(mc => {
+        const text = calleeTextPHP(mc);
+        return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
+      }) || findAllNodes(child, "scoped_call_expression").some(sc => {
+        const text = calleeTextPHP(sc);
+        return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
+      }));
+    collectBolaFindings(topLevelChildren, topLevelResourceIdParamNames, {
+      hasResourceIdParam: topLevelResourceIdParamNames.size > 0,
+      verbTier: "read",
+      suppressedByAuthCheck: topLevelSuppressedByAuthCheck,
+    }, ctx);
 
     // Second pass, bounded worklist -- see astTaintCSharp.ts's/astTaintJava.ts's
     // own identical worklist for the full reasoning.

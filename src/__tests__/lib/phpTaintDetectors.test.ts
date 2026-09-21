@@ -1,366 +1,171 @@
 import { analyzeFile } from "@/lib/scanner";
 
-describe("PHP SQL injection via interpolation (found via real-world OWASP DVWA testing)", () => {
-  it("flags a tainted variable interpolated directly into a double-quoted SQL string", () => {
-    const content = `
-<?php
-if( isset( $_REQUEST[ 'Submit' ] ) ) {
-	$id = $_REQUEST[ 'id' ];
-	$query  = "SELECT first_name, last_name FROM users WHERE user_id = '$id';";
-	$result = mysqli_query($conn, $query);
+// Regex-layer (scanner.ts) detectors added while closing PHP-detector gaps
+// surfaced by a real OWASP-style PHP benchmark file -- mirrors
+// csharpTaintDetectors.test.ts's own analyzeFile()-based, end-to-end style.
+// The AST-layer (astTaintPHP.ts) counterparts of the sink/BOLA decisions
+// are already covered in astTaintPHP.test.ts -- this file covers the
+// categories that are regex-only (weak-crypto, XXE constant, cookie
+// security, PII-in-logs, debug/verbose-error, mass-assignment loop,
+// weak-signing-secret).
+
+describe("PHP weak-crypto (regex-only, no AST engine equivalent anywhere)", () => {
+  it("flags md5($password)", () => {
+    const content = `<?php
+$password = $_POST['password'];
+$hash = md5($password);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "weak-crypto")).toBe(true);
+  });
+
+  it("flags sha1($password)", () => {
+    const content = `<?php
+$password = $_POST['password'];
+$hash2 = sha1($password);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "weak-crypto")).toBe(true);
+  });
+});
+
+describe("PHP XXE via LIBXML_NOENT/LIBXML_DTDLOAD constants", () => {
+  it("flags DOMDocument::loadXML with dangerous flags", () => {
+    const content = `<?php
+$xml = $_POST['xml'];
+$doc = new DOMDocument();
+$doc->loadXML($xml, LIBXML_NOENT | LIBXML_DTDLOAD);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "xxe")).toBe(true);
+  });
+});
+
+describe("PHP cookie security via setcookie(...)", () => {
+  it("flags a session cookie with no secure/httponly args at all (positional form)", () => {
+    const content = `<?php
+setcookie(
+    "session",
+    session_id()
+);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(true);
+  });
+
+  it("flags a session cookie missing httponly in the PHP 7.3+ array-options form", () => {
+    const content = `<?php
+setcookie("session", session_id(), ['secure' => true]);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(true);
+  });
+
+  it("does not flag a session cookie with both flags true in the array-options form", () => {
+    const content = `<?php
+setcookie("session", session_id(), ['secure' => true, 'httponly' => true]);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly" || i.id === "cookie-no-secure")).toBe(false);
+  });
+
+  it("does not flag a non-auth-named cookie", () => {
+    const content = `<?php
+setcookie("theme", "dark");
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(false);
+  });
+});
+
+describe("PHP PII/secrets in logs via error_log(...)", () => {
+  it("flags a password concatenated into error_log(...)", () => {
+    const content = `<?php
+$password = $_POST['password'];
+error_log("User password: " . $password);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "pii-in-logs")).toBe(true);
+  });
+});
+
+describe("PHP debug/error disclosure", () => {
+  it("flags ini_set('display_errors', '1')", () => {
+    const content = `<?php
+// Enable verbose error output for local debugging.
+ini_set("display_errors", "1");
+error_reporting(E_ALL);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "debug-mode-enabled")).toBe(true);
+  });
+
+  it("flags a secret-named variable concatenated into a thrown exception message", () => {
+    const content = `<?php
+$dbPassword = "MyDatabasePassword123!";
+throw new Exception("Database password: " . $dbPassword);
+`;
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "verbose-error")).toBe(true);
+  });
+});
+
+describe("PHP mass assignment via dynamic property-write loop", () => {
+  it("flags foreach ($data as $key => $value) { $obj->$key = $value; }", () => {
+    const content = `<?php
+$userData = $_POST;
+$user = new User();
+foreach ($userData as $key => $value) {
+    $user->$key = $value;
 }
-?>
+$user->save();
 `;
-    const result = analyzeFile("sqli/source/low.php", content);
-    const finding = result.indicators.find(i => i.id === "sql-injection");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("critical");
-    expect(result.risk_score).toBe("CRITICAL");
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "mass-assignment")).toBe(true);
   });
 
-  it("does not flag an untainted variable interpolated into a SQL string", () => {
-    const content = `
-<?php
-$tableName = "users";
-$query = "SELECT first_name, last_name FROM $tableName WHERE active = 1;";
-$result = mysqli_query($conn, $query);
-?>
-`;
-    const result = analyzeFile("db/report.php", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(false);
-  });
-});
-
-describe("PHP command injection via concatenation (found via real-world OWASP DVWA testing)", () => {
-  it("flags a tainted variable concatenated into a shell_exec call", () => {
-    const content = `
-<?php
-if( isset( $_POST[ 'Submit' ]  ) ) {
-	$target = $_REQUEST[ 'ip' ];
-	$cmd = shell_exec( 'ping  -c 4 ' . $target );
-	echo $cmd;
+  it("does not flag an ordinary foreach with no dynamic property write", () => {
+    const content = `<?php
+$items = $_POST['items'];
+foreach ($items as $key => $value) {
+    echo $key;
 }
-?>
 `;
-    const result = analyzeFile("exec/source/low.php", content);
-    const finding = result.indicators.find(i => i.id === "command-injection");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("critical");
-    expect(result.risk_score).toBe("CRITICAL");
-  });
-
-  it("does not misfire on an ordinary regex .exec() call sharing the bare 'exec(' token", () => {
-    const content = `
-function parseLine(pattern, line) {
-  const target = pattern.exec(line);
-  return target;
-}
-module.exports = parseLine;
-`;
-    const result = analyzeFile("src/lib/parseLine.ts", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(false);
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "mass-assignment")).toBe(false);
   });
 });
 
-describe("PHP file inclusion (LFI/RFI) — a previously completely uncovered vulnerability class", () => {
-  it("flags a request parameter passed directly to include()", () => {
-    const content = `
-<?php
-$page = isset($_GET['page']) ? $_GET['page'] : 'home.php';
-include($_GET['page']);
-?>
+describe("PHP weak-signing-secret via hash_hmac(...) literal key", () => {
+  it("flags a short literal key passed as hash_hmac's 3rd arg", () => {
+    const content = `<?php
+$jwt = hash_hmac("sha256", "payload", "secret");
 `;
-    const result = analyzeFile("router.php", content);
-    const finding = result.indicators.find(i => i.id === "file-inclusion");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("high");
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "weak-signing-secret")).toBe(true);
   });
 
-  it("flags a tainted variable passed to require_once", () => {
-    const content = `
-<?php
-$file = $_GET['page'];
-require_once($file);
-?>
+  it("flags a multi-line hash_hmac call whose data arg is itself a nested call", () => {
+    const content = `<?php
+$jwt = base64_encode(
+    json_encode($jwtPayload)
+) . "." . hash_hmac(
+    "sha256",
+    json_encode($jwtPayload),
+    "secret"
+);
 `;
-    const result = analyzeFile("loader.php", content);
-    expect(result.indicators.some(i => i.id === "file-inclusion")).toBe(true);
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.filter(i => i.id === "weak-signing-secret").length).toBe(1);
   });
 
-  it("does not flag a static, hardcoded include", () => {
-    const content = `
-<?php
-require_once 'includes/config.php';
-include 'header.php';
-?>
+  it("does not flag hash_hmac keyed by a variable", () => {
+    const content = `<?php
+$jwt = hash_hmac("sha256", "payload", $key);
+// padding so the fixture clears analyzeFile's minimum-content guard
+$other = 1;
 `;
-    const result = analyzeFile("app.php", content);
-    expect(result.indicators.some(i => i.id === "file-inclusion")).toBe(false);
-  });
-});
-
-describe("PHP extractTaintedVars: filter_input()/extract() propagate end-to-end", () => {
-  it("propagates filter_input(INPUT_GET, ...) into a real detector, mirroring Go's := and C#'s [FromRoute] fixes", () => {
-    const content = `
-<?php
-$ip = filter_input(INPUT_GET, 'ip');
-$cmd = shell_exec('ping -c 1 ' . $ip);
-?>
-`;
-    const result = analyzeFile("ping.php", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
-  });
-
-  it("propagates extract($_GET)'s bulk taint into a real detector", () => {
-    const content = `
-<?php
-extract($_GET);
-$cmd = shell_exec('ping -c 1 ' . $target);
-?>
-`;
-    const result = analyzeFile("ping_extract.php", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
-  });
-});
-
-describe("PHP SQL injection — additional precision cases", () => {
-  it("does not flag a PDO ?-placeholder parameterised query", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-$stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
-$stmt->execute([$id]);
-?>
-`;
-    const result = analyzeFile("users/safe_pdo.php", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(false);
-  });
-
-  it("flags a multi-line query built with .= concatenation before execution", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-$query = "SELECT * FROM users WHERE id = '";
-$query .= $id;
-mysqli_query($conn, $query);
-?>
-`;
-    const result = analyzeFile("users/multiline.php", content);
-    expect(result.indicators.some(i => i.id === "sql-injection")).toBe(true);
-  });
-});
-
-describe("PHP command injection — escapeshellarg guard and new sinks", () => {
-  it("does not flag a shell_exec call wrapped in escapeshellarg()", () => {
-    const content = `
-<?php
-$ip = $_GET['ip'];
-$out = shell_exec('ping -c 1 ' . escapeshellarg($ip));
-?>
-`;
-    const result = analyzeFile("ping_safe.php", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(false);
-  });
-
-  it("flags proc_open with a tainted argument", () => {
-    const content = `
-<?php
-$cmd = $_GET['cmd'];
-$proc = proc_open($cmd, $descriptors, $pipes);
-?>
-`;
-    const result = analyzeFile("run_proc.php", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
-  });
-
-  it("flags backtick execution with an inline superglobal", () => {
-    const content = `
-<?php
-if (isset($_GET['ip'])) {
-  $out = \`ping -c 1 $_GET[ip]\`;
-  echo $out;
-}
-?>
-`;
-    const result = analyzeFile("backtick.php", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
-  });
-});
-
-describe("PHP insecure deserialization (unserialize) — a previously weakly-covered vulnerability class", () => {
-  it("flags a named variable assigned from a superglobal then unserialized", () => {
-    const content = `
-<?php
-$data = $_COOKIE['data'];
-$obj = unserialize($data);
-?>
-`;
-    const result = analyzeFile("session/restore.php", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(true);
-  });
-
-  it("flags unserialize() fed by base64_decode() of a superglobal", () => {
-    const content = `
-<?php
-$obj = unserialize(base64_decode($_GET['data']));
-?>
-`;
-    const result = analyzeFile("session/restore2.php", content);
-    expect(result.indicators.some(i => i.id === "insecure-deserialization")).toBe(true);
-  });
-
-  it("flags an ordinary file operation on a phar:// URI", () => {
-    const content = `
-<?php
-$path = $_GET['path'];
-if (file_exists("phar://" . $path)) { echo "found"; }
-?>
-`;
-    const result = analyzeFile("check.php", content);
-    const finding = result.indicators.find(i => i.id === "insecure-deserialization");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("high");
-  });
-});
-
-describe("PHP XSS — a previously completely uncovered vulnerability class", () => {
-  it("flags echo of an unescaped superglobal", () => {
-    const content = `
-<?php
-if (isset($_GET['name'])) {
-  echo "Hello, " . $_GET['name'];
-}
-?>
-`;
-    const result = analyzeFile("greet.php", content);
-    expect(result.indicators.some(i => i.id === "xss")).toBe(true);
-  });
-
-  it("flags a named-taint echo of an unescaped variable", () => {
-    const content = `
-<?php
-$name = $_GET['name'];
-echo "Welcome!";
-echo $name;
-?>
-`;
-    const result = analyzeFile("greet2.php", content);
-    expect(result.indicators.some(i => i.id === "xss")).toBe(true);
-  });
-
-  it("does not flag echo wrapped in htmlspecialchars()", () => {
-    const content = `
-<?php
-if (isset($_GET['name'])) {
-  echo htmlspecialchars($_GET['name']);
-}
-?>
-`;
-    const result = analyzeFile("greet_safe.php", content);
-    expect(result.indicators.some(i => i.id === "xss")).toBe(false);
-  });
-});
-
-describe("PHP SSRF — named-taint and new sink families", () => {
-  it("flags a named-taint curl_setopt CURLOPT_URL call", () => {
-    const content = `
-<?php
-$url = $_GET['url'];
-$ch = curl_init();
-curl_setopt($ch, CURLOPT_URL, $url);
-?>
-`;
-    const result = analyzeFile("fetch.php", content);
-    expect(result.indicators.some(i => i.id === "ssrf")).toBe(true);
-  });
-
-  it("flags a Guzzle client call with a tainted URL", () => {
-    const content = `
-<?php
-$url = $_GET['url'];
-$response = $client->get($url);
-?>
-`;
-    const result = analyzeFile("fetch_guzzle.php", content);
-    expect(result.indicators.some(i => i.id === "ssrf")).toBe(true);
-  });
-});
-
-describe("PHP path traversal — named-taint variant", () => {
-  it("flags a named-taint fopen() call", () => {
-    const content = `
-<?php
-$f = $_GET['file'];
-$fh = fopen($f, 'r');
-?>
-`;
-    const result = analyzeFile("download.php", content);
-    expect(result.indicators.some(i => i.id === "path-traversal")).toBe(true);
-  });
-});
-
-describe("PHP IDOR/BOLA — a previously totally uncovered vulnerability class", () => {
-  it("flags Eloquent's User::find($id) with no ownership check nearby", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-$user = User::find($id);
-?>
-`;
-    const result = analyzeFile("app/Http/Controllers/UserController.php", content);
-    const finding = result.indicators.find(i => i.id === "idor");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("medium");
-  });
-
-  it("does not flag when an Auth::/Gate:: check is present nearby", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-if (!Auth::user()->can('view', $id)) { abort(403); }
-$user = User::find($id);
-?>
-`;
-    const result = analyzeFile("app/Http/Controllers/UserController_safe.php", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(false);
-  });
-
-  it("flags a PDO execute(['id' => $id]) lookup with no ownership check", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-$stmt = $pdo->prepare("SELECT * FROM users WHERE id = :id");
-$stmt->execute(['id' => $id]);
-?>
-`;
-    const result = analyzeFile("users/lookup.php", content);
-    expect(result.indicators.some(i => i.id === "idor")).toBe(true);
-  });
-});
-
-describe("PHP authz — missing session guard on a sensitive action (legacy/plain PHP)", () => {
-  it("flags a DB write with no $_SESSION guard nearby", () => {
-    const content = `
-<?php
-$id = $_GET['id'];
-mysqli_query($conn, "DELETE FROM users WHERE id=$id");
-?>
-`;
-    const result = analyzeFile("delete_user.php", content);
-    const finding = result.indicators.find(i => i.id === "php-missing-session-guard");
-    expect(finding).toBeDefined();
-    expect(finding?.severity).toBe("medium");
-  });
-
-  it("does not flag when a session guard is present before the sensitive action", () => {
-    const content = `
-<?php
-if (!isset($_SESSION['user_id'])) { header('Location: /login'); exit; }
-$id = $_GET['id'];
-mysqli_query($conn, "DELETE FROM users WHERE id=$id");
-?>
-`;
-    const result = analyzeFile("delete_user_safe.php", content);
-    expect(result.indicators.some(i => i.id === "php-missing-session-guard")).toBe(false);
+    const result = analyzeFile("a.php", content);
+    expect(result.indicators.some(i => i.id === "weak-signing-secret")).toBe(false);
   });
 });

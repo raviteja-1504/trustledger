@@ -764,6 +764,29 @@ const WEAK_SIGNING_SECRET_RE = [
   /^\s*(?:(?:private|public|internal|protected)\s+)*(?:static\s+)?(?:readonly\s+)?const\s+string\s+\w*(?:Secret|SigningKey)\w*\s*=\s*"[^"]+"/i,
 ];
 
+// PHP: hash_hmac($algo, $data, 'literal') -- same "skip an arg, require a
+// bare literal at the target position" idea as the jwt.sign/verify branch
+// above, just at position 3 (hash_hmac's key arg is last), length-capped so
+// a long/random-looking literal doesn't also match. Its own function rather
+// than an array entry because real calls routinely span several lines (one
+// argument per line, the $data arg often itself a nested call) -- a
+// single-line regex can't see those; same forward-window-join technique the
+// cookie-insecurity branches use.
+const PHP_HASH_HMAC_LITERAL_KEY_RE = /hash_hmac\s*\(\s*["'][^"']+["']\s*,[\s\S]*?,\s*["']([^"']{1,20})["']\s*\)/i;
+
+function findWeakSigningSecretPHPHmac(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (!/hash_hmac\s*\(/i.test(lines[i])) continue;
+    const block = lines.slice(i, Math.min(lines.length, i + 8)).join(" ");
+    if (!PHP_HASH_HMAC_LITERAL_KEY_RE.test(block)) continue;
+    found.push({ id:"weak-signing-secret", label:"Hardcoded JWT/Session Signing Secret", severity:"critical", line:i+1,
+      detail:"Signing key is a short literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager" });
+  }
+  return found;
+}
+
 function findWeakSigningSecret(lines: string[]): ScanIndicator[] {
   return runDetector(lines, WEAK_SIGNING_SECRET_RE, "weak-signing-secret", "Hardcoded JWT/Session Signing Secret", "critical",
     "Signing key is a literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager");
@@ -1109,6 +1132,14 @@ const VERBOSE_ERROR_RE = [
   /response\.getWriter\s*\(\s*\)\.print\s*\([^)]*(?:e|ex|exception)\.getMessage\s*\(\s*\)/i,
   // Python Flask — exception message returned in a JSON response
   /jsonify\s*\(\s*\{[^}]*(?:error|message)\s*:\s*str\s*\(\s*e\s*\)/i,
+  // PHP — a secret-named variable concatenated directly into a thrown
+  // exception's own message (throw new Exception("Database password: " .
+  // $dbPassword)). A different shape from every entry above (those are all
+  // about a CAUGHT exception's .stack/.message being sent back in an HTTP
+  // response); this is about the sensitive value being baked into the
+  // message itself at construction time -- confirmed no existing pattern
+  // in any language did this.
+  /throw\s+new\s+\w*Exception\s*\([^)]*\.\s*\$(?:password|passwd|pwd|secret|token|api[_]?key|dbPassword)\b/i,
 ];
 
 // GraphQL injection (user input in query template)
@@ -1159,6 +1190,10 @@ const XXE_RE = [
   // sets both flags for its XXE challenges).
   /XML_PARSE_NOENT|XML_PARSE_DTDLOAD/,
   /\b(?:noent|dtdload|resolveExternalEntities|loadExternalEntities)\s*:\s*true\b/i,
+  // PHP — DOMDocument::loadXML($xml, LIBXML_NOENT | LIBXML_DTDLOAD). PHP's
+  // own libxml constant spelling, distinct from the generic XML_PARSE_*
+  // names above.
+  /LIBXML_NOENT|LIBXML_DTDLOAD/,
 ];
 
 // LDAP injection (filter construction with user input)
@@ -1248,6 +1283,9 @@ const INSECURE_DESERIAL_RE = [
 const WEAK_CRYPTO_RE = [
   /createHash\s*\(\s*["'](?:md5|sha1)["']\s*\)/i,
   /hashlib\.(?:md5|sha1)\s*\(\s*(?:password|passwd|pwd)/i,
+  // PHP — bare global md5()/sha1() functions, same password-context gate
+  // as the Python hashlib entry above (PHP variables carry a $ sigil).
+  /\b(?:md5|sha1)\s*\(\s*\$(?:password|passwd|pwd)/i,
   /(?:MD5|SHA1|SHA128)\.new\s*\(/,
   /createCipheriv\s*\(\s*["'](?:des|rc4|rc2|bf|blowfish|idea)[-\w]*["']/i,
   /createCipheriv\s*\(\s*["']aes-\d+-ecb["']/i,
@@ -1293,6 +1331,12 @@ const PII_LOG_RE = [
   // followed by = or : (a labeled field), the idiomatic Go structured-ish
   // logging shape.
   /\blog\.(?:Printf|Println|Print|Fatalf|Panicf)\s*\(\s*["'][^"']*\b(?:password|passwd|token|secret|api[_]?key|ssn|credit.?card)\b\s*[=:]/i,
+  // PHP — error_log("... " . $password): PHP has no `.` property-access
+  // operator, so the sensitive-named token here is a bare $-sigil
+  // variable string-concatenated into the message, not a .propertyName
+  // access -- same precision bar as every entry above (must be
+  // concatenated in, not merely present anywhere in the call).
+  /\berror_log\s*\(\s*[^)]*\.\s*\$(?:password|passwd|pwd|token|secret|ssn|api[_]?key)\b/i,
 ];
 
 // Mass assignment
@@ -1611,6 +1655,38 @@ function findPIIInLogs(lines: string[]): ScanIndicator[] {
 function findMassAssignment(lines: string[]): ScanIndicator[] {
   return runDetector(lines, MASS_ASSIGN_RE, "mass-assignment", "Mass Assignment", "high",
     "Raw request body passed to model constructor — allow-list fields explicitly");
+}
+
+// PHP: foreach ($data as $key => $value) { $obj->$key = $value; } -- a
+// dynamic property-write LOOP, structurally unlike every entry in
+// MASS_ASSIGN_RE above (all single-line call/constructor regexes). No
+// existing loop-aware detector anywhere in this file to reuse wholesale,
+// but three precedents establish the right shape -- a trigger line plus a
+// bounded forward scan (TOCTOU's source->sink scan, C#'s XXE ctor->
+// hardening-window check, the cookie branches' window-join): trigger on
+// the foreach header (capturing its key/value loop variable names), then
+// scan forward a few lines for a dynamic property write using that exact
+// captured key variable.
+const PHP_MASS_ASSIGN_FOREACH_RE = /foreach\s*\(\s*\$\w+\s+as\s+\$(\w+)\s*=>\s*\$(\w+)\s*\)/;
+
+function findMassAssignmentPHPLoop(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = PHP_MASS_ASSIGN_FOREACH_RE.exec(lines[i]);
+    if (!m) continue;
+    const keyVar = m[1];
+    const dynamicWriteRe = new RegExp(`\\$\\w+\\s*->\\s*\\$${keyVar}\\b`);
+    for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+      if (isNonExecutableLine(lines[j])) continue;
+      if (dynamicWriteRe.test(lines[j])) {
+        found.push({ id:"mass-assignment", label:"Mass Assignment", severity:"high", line:i+1,
+          detail:`Loop writes every key from "$${keyVar}" directly onto an object property (\`->$${keyVar}\`) with no allow-list — a request-derived array can set any property, including ones the caller was never meant to control` });
+        break;
+      }
+    }
+  }
+  return found;
 }
 
 // C#: a [FromBody]-bound complex-type parameter passed WHOLE (a bare
@@ -2838,6 +2914,11 @@ const DEBUG_MODE_RE = [
   /\.run\s*\([^)]*\bdebug\s*=\s*True\b/,
   /^\s*DEBUG\s*=\s*True\b/,
   /app\.debug\s*=\s*True\b/,
+  // PHP: ini_set("display_errors", "1") -- explicit enable is the
+  // affirmative, unambiguous signal this array's other entries all rely
+  // on too (never absence-of-a-safe-value, which single-line regex can't
+  // see).
+  /ini_set\s*\(\s*["']display_errors["']\s*,\s*["']?1["']?\s*\)/i,
 ];
 
 function findDebugModeEnabled(lines: string[]): ScanIndicator[] {
@@ -3054,6 +3135,30 @@ function findCookieInsecurity(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Splits a call's raw argument-list text on top-level commas only (depth-
+// tracked across (), [], {} so a nested call/array/object argument's own
+// internal commas aren't mistaken for argument separators) -- needed for
+// PHP's positional setcookie($name, $value, $expire, $path, $domain,
+// $secure, $httponly) below, where argument POSITION (not a named
+// property) carries the meaning.
+function splitTopLevelArgs(argsStr: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of argsStr) {
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    if (ch === ")" || ch === "]" || ch === "}") depth--;
+    if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim().length > 0 || parts.length > 0) parts.push(current);
+  return parts;
+}
+
 // Cookie security for Java (servlet Cookie built then mutated via setters,
 // rather than an options-object literal) and Python Flask (set_cookie kwargs)
 // — structurally different enough from res.cookie(name, val, {opts}) that
@@ -3126,6 +3231,45 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
         } else if (!/Secure\s*=\s*true/i.test(block)) {
           found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
             line:i+1, detail:`Session/auth cookie "${cookieName}" set without Secure = true — transmitted over unencrypted HTTP` });
+        }
+      }
+      continue;
+    }
+
+    // PHP: setcookie($name, $value, $expire, $path, $domain, $secure,
+    // $httponly) -- POSITIONAL args (6th/7th are secure/httponly), a
+    // structurally different shape from every branch above (all keyed off
+    // a named property/kwarg) -- needs its own arg-position parsing rather
+    // than a keyword scan. PHP 7.3+'s array-options 3rd-arg form
+    // (setcookie($name, $value, ['secure' => true, 'httponly' => true]))
+    // IS keyword-scannable like the branches above, handled as its own
+    // case. Same "absence is itself flagged, not just explicit false" gate
+    // the Go/C# branches above already use (`!/HttpOnly\s*:\s*true/`
+    // matches both "explicitly false" and "not present at all").
+    if (/\bsetcookie\s*\(/i.test(lines[i])) {
+      const block = lines.slice(i, Math.min(lines.length, i + 6)).join(" ");
+      const callMatch = /setcookie\s*\(([\s\S]*?)\);/i.exec(block);
+      if (!callMatch) continue;
+      const rawArgs = splitTopLevelArgs(callMatch[1]);
+      const cookieName = (rawArgs[0] ?? "").trim().replace(/^["']|["']$/g, "");
+      if (!AUTH_COOKIE_RE.test(cookieName)) continue;
+      const arrayOptions = rawArgs.length === 3 ? rawArgs[2].trim() : null;
+      if (arrayOptions?.startsWith("[")) {
+        if (!/['"]httponly['"]\s*=>\s*true/i.test(arrayOptions)) {
+          found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without 'httponly' => true — XSS can steal it via document.cookie` });
+        } else if (!/['"]secure['"]\s*=>\s*true/i.test(arrayOptions)) {
+          found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without 'secure' => true — transmitted over unencrypted HTTP` });
+        }
+      } else {
+        const isTruthy = (s: string | undefined) => !!s && /^(?:true|1)$/i.test(s.trim());
+        if (!isTruthy(rawArgs[6])) {
+          found.push({ id:"cookie-no-httponly", label:"Auth Cookie Missing HttpOnly", severity:"medium",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without the httponly positional arg (7th) set to true — XSS can steal it via document.cookie` });
+        } else if (!isTruthy(rawArgs[5])) {
+          found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
+            line:i+1, detail:`Session/auth cookie "${cookieName}" set without the secure positional arg (6th) set to true — transmitted over unencrypted HTTP` });
         }
       }
     }
@@ -6203,6 +6347,7 @@ export function analyzeFile(
     ...findPIIInLogs(lines),
     ...findMassAssignment(lines),
     ...findMassAssignmentCSharp(lines),
+    ...findMassAssignmentPHPLoop(lines),
     ...findSQLInjection(lines),
     ...findSQLInjectionTainted(lines),
     ...findSQLInjectionPHPInterpolated(lines),
@@ -6213,6 +6358,7 @@ export function analyzeFile(
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
+    ...findWeakSigningSecretPHPHmac(lines),
     ...findWeakSigningSecretSplitLine(lines),
     ...findCommandInjection(lines),
     ...findNamedTaintCommandInjectionPHP(lines),

@@ -323,3 +323,130 @@ function getUser($id) {
     if (root) expect(() => scanAstTaintPHP(content, "a.php", root)).not.toThrow();
   });
 });
+
+describe("open redirect + header injection via header(...)", () => {
+  it("flags header('Location: ' . $tainted) as open-redirect", () => {
+    const content = `<?php
+$next = $_GET['next'];
+header("Location: " . $next);
+exit;`;
+    expect(scan(content).some(f => f.id === "open-redirect")).toBe(true);
+  });
+
+  it("flags header('X-Anything: ' . $tainted) as header-injection, not open-redirect", () => {
+    const content = `<?php
+$email = $_GET['email'];
+header("X-User-Email: " . $email);`;
+    const findings = scan(content);
+    expect(findings.some(f => f.id === "header-injection")).toBe(true);
+    expect(findings.some(f => f.id === "open-redirect")).toBe(false);
+  });
+});
+
+describe("LDAP injection via ldap_search(...)", () => {
+  it("flags a tainted filter (3rd positional arg)", () => {
+    const content = `<?php
+$ldapUser = $_GET['username'];
+$filter = "(uid=" . $ldapUser . ")";
+$ldap = ldap_connect("ldap://localhost");
+ldap_search($ldap, "dc=example,dc=com", $filter);`;
+    expect(scan(content).some(f => f.id === "ldap-injection")).toBe(true);
+  });
+});
+
+describe("NoSQL injection via array-driver-style calls", () => {
+  it("flags a tainted array literal passed to ->findOne(...)", () => {
+    const content = `<?php
+$mongoUser = $_POST['username'];
+$mongoQuery = [
+    "username" => $mongoUser,
+    "password" => $_POST['password']
+];
+$collection->findOne($mongoQuery);`;
+    expect(scan(content).some(f => f.id === "nosql-injection")).toBe(true);
+  });
+});
+
+describe("XPath vs SQL injection discrimination", () => {
+  it("flags $xpath->query(...) as xpath-injection when $xpath is a real DOMXPath", () => {
+    const content = `<?php
+$xpathUser = $_GET['user'];
+$xpathQuery = "//user[name='" . $xpathUser . "']";
+$xmlDoc = new DOMDocument();
+$xmlDoc->load("users.xml");
+$xpath = new DOMXPath($xmlDoc);
+$result = $xpath->query($xpathQuery);`;
+    const findings = scan(content);
+    expect(findings.some(f => f.id === "xpath-injection")).toBe(true);
+    expect(findings.some(f => f.id === "sql-injection")).toBe(false);
+  });
+
+  it("still flags a real DB driver's ->query(...) as sql-injection", () => {
+    const content = `<?php
+$id = $_GET['id'];
+$conn = new mysqli("localhost", "root", "pw", "db");
+$sql = "SELECT * FROM users WHERE id = '$id'";
+$result = $conn->query($sql);`;
+    expect(scan(content).some(f => f.id === "sql-injection")).toBe(true);
+  });
+});
+
+describe("BOLA -- top-level script code, broadened resource-id names, and SQL-sink one-hop resolution", () => {
+  it("flags an unguarded top-level raw-SQL lookup keyed on a superglobal-sourced *Id-suffixed variable", () => {
+    const content = `<?php
+$accountId = $_GET['account_id'];
+$sql = "SELECT * FROM accounts WHERE id = '$accountId'";
+$account = $conn->query($sql);`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("one-hop lookback uses the assignment PRECEDING the call, not the file's last assignment to the same variable", () => {
+    // $sql is reassigned later using $accountId; the earlier query() call
+    // sees only the first assignment, which uses no resource-id variable.
+    const content = `<?php
+$accountId = $_GET['account_id'];
+$sql = "SELECT 1 FROM config";
+$conn->query($sql);
+$sql = "SELECT * FROM accounts WHERE id = '$accountId'";
+$conn->query($sql);`;
+    const bola = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(bola.length).toBe(1);
+    expect(bola[0].line).toBe(6);
+  });
+
+  it("does not flag top-level code with no resource-id-shaped superglobal variable", () => {
+    const content = `<?php
+$name = $_GET['name'];
+echo "<h1>Hello " . $name . "</h1>";`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("still flags a function-scoped BOLA case using a camelCase *Id param name (accountId, not just id)", () => {
+    const content = `<?php
+function getAccount($accountId) {
+  $sql = "SELECT * FROM accounts WHERE id = '$accountId'";
+  return $conn->query($sql);
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+});
+
+describe("collectLocalFunctions -- same-named function in a different scope no longer silently overwrites the real one", () => {
+  it("first-declared-wins: a same-named class method declared later doesn't erase the real top-level function's BOLA finding", () => {
+    const content = `<?php
+function getUser($id) {
+  $sql = "SELECT * FROM users WHERE id = '$id'";
+  return $conn->query($sql);
+}
+class Database {
+  public function getUser($x) {
+    return null;
+  }
+}`;
+    // Without the fix, collectLocalFunctions' flat overwrite would leave
+    // the map's "getUser" entry pointing at Database::getUser's real-but-
+    // empty body (declared later in the file), silently losing the top-
+    // level getUser()'s own body -- and with it, this finding.
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+});
