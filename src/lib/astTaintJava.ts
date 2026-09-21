@@ -44,7 +44,7 @@
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
-  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type SuppressedSink, type TaintEnv,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
@@ -52,7 +52,9 @@ import { sanitizerClears } from "./taint/sanitizers";
 export type AstTaintJavaId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
-  | "bola-missing-ownership-check";
+  | "bola-missing-ownership-check"
+  | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg"
+  | "weak-crypto" | "eval-exec" | "nosql-injection";
 
 export interface AstTaintJavaFinding {
   id:         AstTaintJavaId;
@@ -60,6 +62,8 @@ export interface AstTaintJavaFinding {
   detail:     string;
   sourceExpr: string;
   sinkExpr:   string;
+  // True when the finding exists only because an un-annotated entry-point parameter was treated as untrusted input.
+  entryPointSeeded?: boolean;
   // Only set for bola-missing-ownership-check (read vs write endpoint
   // severity) -- every other id keeps using the constant SEVERITY table.
   severityOverride?: "critical" | "high" | "medium";
@@ -153,8 +157,15 @@ function stringLiteralValue(node: CstNode): string | null {
 
 // ── Taint sources ─────────────────────────────────────────────────────────
 
-const SPRING_SOURCE_ANNOTATIONS = new Set(["PathVariable", "RequestParam", "RequestBody", "RequestHeader"]);
-const SERVLET_SOURCE_CALLS = new Set(["getParameter", "getHeader", "getParameterValues", "getQueryString"]);
+const SPRING_SOURCE_ANNOTATIONS = new Set([
+  "PathVariable", "RequestParam", "RequestBody", "RequestHeader", "ModelAttribute", "CookieValue", "MatrixVariable", "RequestPart",
+  // JAX-RS
+  "QueryParam", "PathParam", "FormParam", "HeaderParam", "CookieParam", "BeanParam", "MatrixParam",
+]);
+const SERVLET_SOURCE_CALLS = new Set([
+  "getParameter", "getHeader", "getParameterValues", "getQueryString", "getParameterMap", "getParameterNames",
+  "getHeaders", "getCookies", "getRequestURI", "getRequestURL", "getPathInfo", "getReader", "getInputStream", "getPart",
+]);
 
 // ── Sanitizer/de-taint recognition ──────────────────────────────────────
 // Matched by method-name TAIL alone, same permissive-by-design posture as
@@ -212,7 +223,7 @@ type Env = TaintEnv;
 type PropagatingJava = Map<string, Map<number, number>>;
 type VarTypes = Map<string, string>; // local var name -> declared type's simple name (e.g. "ObjectInputStream")
 
-interface ParamShape { name: string; index: number; isRest: boolean }
+interface ParamShape { name: string; index: number; isRest: boolean; type: string; annotated: boolean }
 
 /** Which of `args` correspond to `shape`: exactly one arg for a fixed
  * param, every arg from `shape.index` onward for a varargs param. */
@@ -229,6 +240,7 @@ interface LocalMethod {
   resourceIdParamNames: Set<string>;  // @PathVariable/@RequestParam subset -- "which resource"
   principalParamNames: Set<string>;   // @AuthenticationPrincipal params -- the authenticated identity, NEVER tainted
   authMeta: MethodAuthMeta;
+  isPrivate: boolean;
   body: CstNode | null; // methodBody
 }
 
@@ -261,17 +273,19 @@ function annotationsFrom(node: CstNode, modifierKey: string): string[] {
  * Previously only the regular case was handled, so a varargs parameter was
  * silently dropped from a method's param list entirely.
  */
-function paramInfo(fp: CstNode): { name: string; annotations: string[]; isRest: boolean } | null {
+function paramInfo(fp: CstNode): { name: string; annotations: string[]; isRest: boolean; type: string } | null {
   const vp = firstNode(fp, "variableParaRegularParameter");
   if (vp) {
     const declId = firstNode(vp, "variableDeclaratorId");
     const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
-    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(vp, "variableModifier"), isRest: false } : null;
+    const ut = firstNode(vp, "unannType");
+    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(vp, "variableModifier"), isRest: false, type: ut ? tokensText(ut) : "" } : null;
   }
   const va = firstNode(fp, "variableArityParameter");
   if (va) {
     const nameTok = firstTok(va, "Identifier");
-    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(va, "variableModifier"), isRest: true } : null;
+    const ut = firstNode(va, "unannType");
+    return nameTok ? { name: nameTok.image, annotations: annotationsFrom(va, "variableModifier"), isRest: true, type: (ut ? tokensText(ut) : "") + "[]" } : null;
   }
   return null;
 }
@@ -293,7 +307,7 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
     for (const fp of allNodes(fpl, "formalParameter")) {
       const info = paramInfo(fp);
       if (!info) continue;
-      paramShapes.push({ name: info.name, index, isRest: info.isRest });
+      paramShapes.push({ name: info.name, index, isRest: info.isRest, type: info.type, annotated: info.annotations.length > 0 });
       if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
       if (info.annotations.some(a => RESOURCE_ID_ANNOTATIONS.has(a))) resourceIdParamNames.add(info.name);
       if (info.annotations.includes("AuthenticationPrincipal")) principalParamNames.add(info.name);
@@ -302,7 +316,8 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
   }
   const body = firstNode(methodDecl, "methodBody") ?? null;
   const authMeta = extractMethodAuthMeta(methodDecl);
-  return { name: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, body };
+  const isPrivate = allNodes(methodDecl, "methodModifier").some(m => tokenKids(m, "Private").length > 0);
+  return { name: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, isPrivate, body };
 }
 
 /**
@@ -381,6 +396,8 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   // Fallback only -- collectBolaFindings always passes a severityOverride
   // (medium for read endpoints, high for write/unknown).
   "bola-missing-ownership-check": "high",
+  "header-injection": "high", "redos": "high", "ssti": "critical", "mass-assignment": "high", "timing-attack": "medium",
+  "jwt-none-alg": "critical", "weak-crypto": "high", "eval-exec": "critical", "nosql-injection": "critical",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -388,9 +405,13 @@ const LABEL: Record<AstTaintJavaId, string> = {
   "insecure-deserialization": "Insecure Deserialization", "ldap-injection": "LDAP Injection",
   "xpath-injection": "XPath Injection", "open-redirect": "Open Redirect",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
+  "header-injection": "HTTP Header Injection", "redos": "ReDoS — Regex DoS", "ssti": "Server-Side Template Injection",
+  "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
+  "weak-crypto": "Weak Cryptography", "eval-exec": "Arbitrary Code Execution", "nosql-injection": "NoSQL Injection",
 };
 
-const HTML_TAG_RE = /<[a-z][\s\S]*?>/i;
+// lowercase tag names only, and not glued to an identifier: `Map<String, Object>` is a generic, not markup
+const HTML_TAG_RE = /(?<![\w\]>])<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?\/?>/;
 
 /** Mirrors findReflectedXSSTainted's own corroboration requirement (scanner.ts) -- a bare `.body(x)` returning JSON is not itself dangerous. */
 function hasHtmlTagNearby(lines: string[], line: number, window = 8): boolean {
@@ -429,13 +450,28 @@ interface EngineCtx {
   classFieldNames: Set<string>;
   // File root -- lets guards resolve a literal-collection field/local declared elsewhere in the file.
   root?: CstNode;
+  // Class-field container memory: taint written into a field by one method is visible to every method
+  // that reads it (stored XSS, second-order SQL). Recorded by the main scan only (recordSticky).
+  sticky: Map<string, number>;
+  stickyDirty: boolean;
+  recordSticky: boolean;
+  // Per-method scope facts, set by the caller before it walks a body.
+  localNames?: Set<string>;
+  currentParams?: Set<string>;
+  currentBody?: CstNode;
+  // lambda variable name -> its lambda (so `f.apply(x)` resolves to the lambda's body)
+  lambdas: Map<string, CstNode>;
+  // iteration variables of enclosing `for (var e : tainted.entrySet())` loops
+  entryLoopVars: string[];
+  // local methods that are structurally HTML escapers (their body replaces "<" with an entity)
+  htmlEscapers: Set<string>;
   findings: AstTaintJavaFinding[];
   seen: Set<string>;
 }
 
 function emit(
   ctx: EngineCtx, id: AstTaintJavaId, node: CstNode, sourceExpr: string, sinkExpr: string,
-  severityOverride?: "critical" | "high" | "medium",
+  severityOverride?: "critical" | "high" | "medium", detailOverride?: string,
 ) {
   const line = lineOf(node);
   const key = `${id}:${line}`;
@@ -443,10 +479,156 @@ function emit(
   ctx.seen.add(key);
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
-    detail: id === "bola-missing-ownership-check"
+    detail: detailOverride ?? (id === "bola-missing-ownership-check"
       ? `Resource identifier '${sourceExpr}' reaches ${sinkExpr}(...) with no @PreAuthorize/@Secured/@RolesAllowed annotation and no ownership comparison (.equals()/==/!=) against the authenticated principal anywhere in the method — real per-parameter AST evidence, not a keyword-proximity guess`
-      : `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+      : `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`),
   });
+}
+
+// ── Java recall helpers (sources, carriers, string shapes) ───────────────────
+
+const REQUEST_VAR_RE = /^(?:request|req|httpRequest|servletRequest|httpServletRequest)$/i;
+const REQUEST_TYPE_RE = /^(?:Http)?ServletRequest(?:Wrapper)?$|^WebRequest$|^ServerHttpRequest$/;
+/** A variable that holds the servlet request: named like one, or declared with a request type. */
+function isRequestVar(v: string | null, ctx: { varTypes: Map<string, string> }): boolean {
+  return !!v && (REQUEST_VAR_RE.test(v) || REQUEST_TYPE_RE.test(ctx.varTypes.get(v) ?? ""));
+}
+
+/** Source-order text of every token under `node`, joined with no separators (`Map<String,String>`). */
+function tokensText(node: CstNode): string {
+  const toks: IToken[] = [];
+  const visit = (n: CstNode) => {
+    for (const key of Object.keys(n.children)) for (const el of n.children[key]) { if (isToken(el)) toks.push(el); else visit(el as unknown as CstNode); }
+  };
+  visit(node);
+  return toks.sort((a, b) => a.startOffset - b.startOffset).map(t => t.image).join("");
+}
+
+const STRINGY_PARAM_TYPE_RE = /^(?:String|CharSequence|StringBuilder|StringBuffer|String\[\]|List<String>|Set<String>|Collection<String>|Map<String,(?:String|Object|\?)>|byte\[\]|char\[\]|InputStream|Reader|Object\[\])$/;
+const NON_ENTRY_METHOD_RE = /^(?:main|equals|hashCode|toString|compareTo|run|call|get\w*|set\w*|is\w*|close|clone|finalize|apply|accept|test)$/;
+
+// Static/utility calls whose RESULT carries the taint of their arguments (string, path, URL, collection
+// plumbing that neither validates nor neutralizes anything). Opaque calls stay untainted.
+const ARG_CARRYING_TAILS = new Set([
+  "replace", "replaceAll", "replaceFirst", "concat", "join", "valueOf", "copyValueOf", "of", "ofNullable", "asList",
+  "resolve", "resolveSibling", "decode", "encode", "encodeToString", "decodeToString", "requireNonNull",
+  "requireNonNullElse", "copyOf", "singletonList", "unmodifiableList", "unmodifiableSet", "unmodifiableMap",
+  "orElse", "getOrDefault", "create", "toURI", "normalize", "strip", "trim",
+]);
+// Calls that store their arguments in the receiver container.
+const MUTATOR_TAILS = new Set(["put", "add", "addAll", "putAll", "push", "offer", "addFirst", "addLast", "putIfAbsent", "set", "insert"]);
+// Functional-interface invocations and the fluent methods that hand a value to a callback.
+const FUNCTIONAL_TAILS = new Set(["apply", "accept", "test", "call", "applyAsInt", "applyAsLong", "applyAsDouble", "applyAsBoolean"]);
+const CALLBACK_TAILS = new Set(["thenApply", "thenApplyAsync", "thenCompose", "thenComposeAsync", "thenAccept", "map", "flatMap", "supplyAsync", "orElseGet", "ifPresent"]);
+const HTTP_HEADER_NAME_RE = /^(?:X-[\w-]+|Content-[\w-]+|Location|Set-Cookie|Refresh|Link|Cache-Control|Access-Control-[\w-]+|Authorization|Cookie|Retry-After|WWW-Authenticate|Referer|Origin|Host)$/i;
+const SECRET_NAME_JAVA_RE = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
+const TEMPLATE_PLACEHOLDER_RE = /\$\{[^}]*\}|\{\{[^}]*\}\}|%\{[^}]*\}|#\{[^}]*\}|<%/;
+
+const SQL_START_RE = /^\s*(?:select|insert|update|delete|with|call|exec(?:ute)?|merge|replace)\b/i;
+const HTML_TAG_SHAPE_RE = /<\/?[a-zA-Z][\w-]*(?:\s[^<>]*)?(?:>|$)/;
+const LDAP_SHAPE_RE = /\(\s*[&|!]?\s*(?:\(\s*)?[\w.-]+\s*(?:=|~=|>=|<=)\s*$/;
+const XPATH_SHAPE_RE = /\/\/?[\w*@.:-]+(?:\/[\w*@.:()-]+)*\[[^\]]*=\s*['"]?$/;
+const LDAP_URL_RE = /^ldaps?:\/\//i;
+const SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+
+/** The lambda an argument/initializer expression IS, if any. */
+function soleLambda(node: CstNode | undefined): CstNode | undefined {
+  if (!node) return undefined;
+  if (node.name === "lambdaExpression") return node;
+  return firstNode(node, "lambdaExpression");
+}
+
+/** Result of calling `lambda` with its leading parameters bound to `argMasks` (captured variables come from `env`). */
+function lambdaResultMask(lambda: CstNode, argMasks: readonly number[], env: Env, ctx: EngineCtx): number {
+  const lenv = cloneEnv(env);
+  lambdaParamNames(lambda).forEach((p, i) => lenv.set(p, argMasks[i] ?? 0));
+  const body = firstNode(lambda, "lambdaBody");
+  if (!body) return 0;
+  const block = firstNode(body, "block");
+  if (!block) return taintMask(body, lenv, ctx);
+  let m = 0;
+  for (const r of findAllNodes(block, "returnStatement")) {
+    const e = firstNode(r, "expression");
+    if (e) m |= taintMask(e, lenv, ctx);
+  }
+  return m;
+}
+
+/** A string literal expression's unquoted value, or null when the operand is not just a string literal. */
+function literalStringOf(node: CstNode): string | null {
+  const p = soleUnaryPrimary(node);
+  if (!p || allNodes(p, "primarySuffix").length > 0) return null;
+  const lit = firstNode(firstNode(p, "primaryPrefix") ?? p, "literal");
+  const tok = lit ? firstTok(lit, "StringLiteral") : undefined;
+  return tok ? tok.image.slice(1, -1) : null;
+}
+
+const htmlEvidenceCache = new WeakMap<CstNode, boolean>();
+/** Does this method contain an HTML-tag-shaped string literal (so its returned string is an HTML body)? */
+function methodHasHtmlEvidence(body: CstNode): boolean {
+  const cached = htmlEvidenceCache.get(body);
+  if (cached !== undefined) return cached;
+  const hit = collectAllTokens(body).some(t => (t as IToken).tokenType?.name === "StringLiteral" && HTML_TAG_SHAPE_RE.test(t.image));
+  htmlEvidenceCache.set(body, hit);
+  return hit;
+}
+
+/** A local method whose body replaces "<" with an HTML entity is an HTML escaper (recognised structurally). */
+function isHtmlEscaperBody(body: CstNode): boolean {
+  const images = new Set(collectAllTokens(body).map(t => t.image));
+  return images.has('"<"') && (images.has('"&lt;"') || images.has('"&#60;"') || images.has('"&#x3C;"'));
+}
+
+function localNamesOfMethod(method: { paramShapes: { name: string }[]; body: CstNode | null }): Set<string> {
+  const names = new Set<string>(method.paramShapes.map(p => p.name));
+  if (!method.body) return names;
+  for (const id of findAllNodes(method.body, "variableDeclaratorId")) {
+    const t = firstTok(id, "Identifier");
+    if (t) names.add(t.image);
+  }
+  for (const lam of findAllNodes(method.body, "lambdaExpression")) for (const p of lambdaParamNames(lam)) names.add(p);
+  return names;
+}
+
+/** Record taint written into a class field (visible to other methods). Main scan only. */
+function recordFieldSticky(name: string | null, mask: number, ctx: EngineCtx): void {
+  if (!name || !ctx.recordSticky || !(mask & ALL) || !ctx.classFieldNames.has(name) || ctx.localNames?.has(name)) return;
+  const next = (ctx.sticky.get(name) ?? 0) | (mask & ALL);
+  if (next !== (ctx.sticky.get(name) ?? 0)) { ctx.sticky.set(name, next); ctx.stickyDirty = true; }
+}
+
+/**
+ * A `+` chain that builds a SQL / LDAP / XPath / URL string around an untrusted operand, or drops an
+ * HTML-escaped value into a <script> block. Sinks-by-shape: methods that build such strings and RETURN
+ * them (instead of calling an execute API in the same method) are still where the injection happens.
+ */
+function checkConcatShapes(bin: CstNode, env: Env, ctx: EngineCtx): void {
+  const ops = tokenKids(bin, "BinaryOperator");
+  if (ops.length === 0 || !ops.every(t => t.image === "+") || tokenKids(bin, "AssignmentOperator").length > 0) return;
+  let prefix = "";
+  for (const operand of allNodes(bin, "unaryExpression")) {
+    const lit = literalStringOf(operand);
+    if (lit !== null) { prefix += lit; continue; }
+    const m = taintMask(operand, env, ctx);
+    const src = nodeText(operand);
+    if (m & classOf("sql-injection") && SQL_START_RE.test(prefix)) {
+      emit(ctx, "sql-injection", bin, src, "SQL string concatenation", undefined,
+        `Untrusted '${src}' is concatenated into a SQL statement — use a PreparedStatement with bind parameters`);
+    }
+    if (m & classOf("ldap-injection") && (LDAP_SHAPE_RE.test(prefix) || LDAP_URL_RE.test(prefix))) {
+      emit(ctx, "ldap-injection", bin, src, "LDAP filter concatenation", undefined,
+        `Untrusted '${src}' is concatenated into an LDAP filter/URL — escape it (encodeForLDAP) or use parameterized filters`);
+    }
+    if (m & classOf("xpath-injection") && XPATH_SHAPE_RE.test(prefix)) {
+      emit(ctx, "xpath-injection", bin, src, "XPath expression concatenation", undefined,
+        `Untrusted '${src}' is concatenated into an XPath expression — use XPath variables/parameters`);
+    }
+    if (wasCleared(m, classOf("xss")) && SCRIPT_CONTEXT_RE.test(prefix)) {
+      emit(ctx, "xss", bin, src, "HTML string", undefined,
+        `HTML-escaped value '${src}' is placed inside a <script> block — HTML escaping does not neutralize JavaScript string context`);
+    }
+    prefix += "\u0000";
+  }
 }
 
 /**
@@ -497,6 +679,7 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     // not the full dotted chain, matching the same one-level scope used on
     // the write side below.
     let taint = rootVar !== null ? (env.get(rootVar) ?? 0) : 0;
+    if (rootVar !== null && ctx.sticky.size > 0 && !ctx.localNames?.has(rootVar)) taint |= ctx.sticky.get(rootVar) ?? 0;
     if (parts.length >= 2) taint |= env.get(`${parts[0]}.${parts[1]}`) ?? 0;
     return { parts, taint, rootVar, isNewExprOf: null };
   }
@@ -506,7 +689,9 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     const className = uc ? extractInstantiatedClassName(uc) : null;
     const argList = uc ? firstNode(uc, "argumentList") : undefined;
     const args = argList ? allNodes(argList, "expression") : [];
-    const taint = args.reduce((m, a) => m | taintMask(a, env, ctx), 0);
+    let taint = args.reduce((m, a) => m | taintMask(a, env, ctx), 0);
+    // `new String[] { a, b }` / `new byte[n]`: no class-instance-creation node; the array initializer's elements carry the taint
+    if (!uc) taint = findAllNodes(newExpr, "expression").reduce((m, e) => m | taintMask(e, env, ctx), 0);
     return { parts: className ? [className] : [], taint, rootVar: null, isNewExprOf: className };
   }
   const paren = firstNode(prefix, "parenthesisExpression");
@@ -585,17 +770,45 @@ function walkPrimaryChain(
       // re-tainted by one of those in this same call. Still reports the call
       // (onCall) for sink-matching/seeding consistency, but skips every
       // taint-increasing branch below.
-      const clears = sanitizerClears("java", calleeName || tail);
+      const clears = sanitizerClears("java", calleeName || tail) ?? (ctx.htmlEscapers.has(tail) ? classOf("xss") : null);
       if (clears !== null) {
         chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
-        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
+        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf });
         nameParts = [];
         continue;
       }
 
       // Servlet API source: request.getParameter/getHeader/getParameterValues/getQueryString.
-      if (rootVar === "request" && SERVLET_SOURCE_CALLS.has(tail)) {
+      if (isRequestVar(rootVar, ctx) && SERVLET_SOURCE_CALLS.has(tail)) {
         chainTaint = ALL;
+      }
+      // Static/utility carriers (Path.of, String.join, URLDecoder.decode, Base64...decode, URI.create, ...)
+      if (ARG_CARRYING_TAILS.has(tail) || ((tail === "get") && (rootVar === "Paths" || rootVar === "Path"))) {
+        chainTaint |= anyArgMask;
+        // a decoder RESTORES what an earlier encoder/sanitizer cleared
+        if (tail === "decode" && /URLDecoder|Base64|Decoder/.test(calleeName || (rootVar ?? ""))) {
+          chainTaint |= (anyArgMask >>> SHADOW) & ALL;
+        }
+      }
+      // Container stores: `map.put(k, v)`, `list.add(x)` -- the receiver now holds the arguments
+      if (MUTATOR_TAILS.has(tail) && rootVar) {
+        const nextMask = (env.get(rootVar) ?? 0) | anyArgMask;
+        env.set(rootVar, nextMask);
+        recordFieldSticky(rootVar, anyArgMask, ctx);
+      }
+      // `f.apply(x)` on a local lambda variable: the lambda's body with its parameters bound to the arguments
+      if (rootVar && FUNCTIONAL_TAILS.has(tail)) {
+        const lam = ctx.lambdas.get(rootVar);
+        if (lam) chainTaint |= lambdaResultMask(lam, argMasks, env, ctx);
+        // calling a callback PARAMETER: (recall-biased) as tainted as what it is called with
+        else if (ctx.currentParams?.has(rootVar)) chainTaint |= anyArgMask;
+      }
+      // fluent callbacks (thenApply / supplyAsync / map ...): the lambda sees the receiver value
+      if (CALLBACK_TAILS.has(tail)) {
+        for (const a of args) {
+          const lam = soleLambda(a);
+          if (lam) chainTaint |= lambdaResultMask(lam, [chainTaintBefore], env, ctx);
+        }
       }
       // StringBuilder/StringBuffer .append() -- sticky, and propagate back onto the receiver variable.
       if (tail === "append") {
@@ -625,7 +838,7 @@ function walkPrimaryChain(
         if (m) chainTaint |= m;
       }
 
-      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
+      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf });
 
       // Generic passthrough: any other call keeps existing chain taint sticky
       // (a normal method's return isn't assumed tainted just because some
@@ -639,7 +852,7 @@ function walkPrimaryChain(
 
 interface CallInfo {
   calleeName: string; tail: string; rootVar: string | null; args: CstNode[];
-  chainTaintBefore: number; node: CstNode; isNewURL: boolean;
+  chainTaintBefore: number; node: CstNode; isNewURL: boolean; isNewOf: string | null;
 }
 
 function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
@@ -758,6 +971,76 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fire("xss");
   }
 
+  // ── Additional sinks (independent of the else-if chain above) ─────────────────
+  const arg0 = args[0];
+  // SQL: statement/query factories and String.format around SQL text
+  if (["prepareStatement", "prepareCall", "createQuery", "createNativeQuery", "queryForObject", "queryForList", "queryForMap", "batchUpdate", "addBatch"].includes(tail) && arg0) {
+    fire("sql-injection", argMasks[0], nodeText(arg0));
+  }
+  if (tail === "format" && rootVar === "String" && args.length >= 2 && SQL_START_RE.test(literalStringOf(arg0) ?? "")) {
+    fire("sql-injection", argMasks.slice(1).reduce((m, x) => m | x, 0), nodeText(args[1]), "String.format");
+  }
+  // HTTP header injection: response.setHeader(name, value) and header-shaped map puts
+  if (["setHeader", "addHeader", "setIntHeader", "setDateHeader", "addDateHeader"].includes(tail) && args.length >= 2) {
+    fire("header-injection", argMasks[0] | argMasks[1], nodeText(args[1]));
+  } else if ((tail === "put" || tail === "add" || tail === "set" || tail === "header") && args.length >= 2) {
+    const key = literalStringOf(arg0);
+    if (key && HTTP_HEADER_NAME_RE.test(key)) fire("header-injection", argMasks[1], nodeText(args[1]));
+  }
+  // path traversal: Path.of / Paths.get and the wider java.nio.file.Files surface
+  if ((rootVar === "Path" || rootVar === "Paths") && (tail === "of" || tail === "get")) fire("path-traversal");
+  if (rootVar === "Files" && ["writeString", "readAllLines", "lines", "copy", "move", "createFile", "createDirectories", "newBufferedReader", "newBufferedWriter", "list", "walk", "deleteIfExists", "exists"].includes(tail)) {
+    fire("path-traversal");
+  }
+  // SSRF: java.net.http, raw sockets / name resolution
+  if ((rootVar === "HttpRequest" && (tail === "uri" || tail === "newBuilder")) || (rootVar === "InetAddress" && tail === "getByName")) {
+    fire("ssrf");
+  }
+  // deserialization: new ObjectInputStream(<tainted>).readObject(), XStream, SnakeYAML
+  if ((tail === "readObject" || tail === "readUnshared") && (chainTaintBefore & ALL)) fire("insecure-deserialization", chainTaintBefore, "ObjectInputStream", tail);
+  if (tail === "fromXML" && arg0) fire("insecure-deserialization", argMasks[0], nodeText(arg0));
+  if ((tail === "load" || tail === "loadAs") && arg0 && (info.isNewOf === "Yaml" || ctx.varTypes.get(rootVar ?? "") === "Yaml")) {
+    fire("insecure-deserialization", argMasks[0], nodeText(arg0));
+  }
+  // code execution: script engines, SpEL, reflection-selected classes/methods
+  if ((tail === "eval" || tail === "parseExpression") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
+  if (((tail === "forName" && rootVar === "Class") || tail === "loadClass") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
+  if ((tail === "getMethod" || tail === "getDeclaredMethod") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
+  if ((tail === "getField" || tail === "getDeclaredField") && arg0) fire("mass-assignment", argMasks[0], nodeText(arg0));
+  // regex built from user input
+  if (arg0 && ((rootVar === "Pattern" && (tail === "compile" || tail === "matches")) ||
+               (rootVar !== "Pattern" && (tail === "matches" || tail === "replaceAll" || tail === "replaceFirst" || tail === "split")))) {
+    fire("redos", argMasks[0], nodeText(arg0));
+  }
+  // template with attacker-controlled TEXT: template.replace("${user}", user)
+  if ((tail === "replace" || tail === "replaceAll") && arg0 && TEMPLATE_PLACEHOLDER_RE.test(literalStringOf(arg0) ?? "")) {
+    fire("ssti", chainTaintBefore, rootVar ?? "template", tail);
+  }
+  // secret compared with equals(): a timing oracle
+  if ((tail === "equals" || tail === "equalsIgnoreCase") && args.length === 1) {
+    const argName = tokensText(arg0).split(".").pop()!.replace(/\(\)$/, "");
+    const rootIsSecret = !!rootVar && SECRET_NAME_JAVA_RE.test(rootVar);
+    if (((chainTaintBefore & ALL) && SECRET_NAME_JAVA_RE.test(argName)) || (rootIsSecret && (argMasks[0] & ALL))) {
+      emit(ctx, "timing-attack", node, (chainTaintBefore & ALL) ? (rootVar ?? "value") : nodeText(arg0), "equals", undefined,
+        "A secret is compared to attacker-supplied input with equals() — use MessageDigest.isEqual (constant time)");
+    }
+  }
+  // weak digest
+  if (tail === "getInstance" && (rootVar === "MessageDigest" || /MessageDigest\.getInstance$/.test(calleeName)) &&
+      /^(?:MD5|MD2|MD4|SHA-?1)$/i.test(literalStringOf(arg0) ?? "")) {
+    emit(ctx, "weak-crypto", node, literalStringOf(arg0) ?? "", "MessageDigest.getInstance", undefined,
+      `MessageDigest.getInstance("${literalStringOf(arg0)}") is a broken/weak hash — use SHA-256+ (and a slow KDF such as bcrypt/Argon2 for passwords)`);
+  }
+  // servlet writer / print stream
+  if (["println", "print", "write", "append", "printf"].includes(tail) && /^(?:response|resp|res|out|writer|pw|printWriter)$/i.test(rootVar ?? "") && arg0) {
+    fire("xss", argMasks[0], nodeText(arg0));
+  }
+  // for (var e : tainted.entrySet()) t.put(e.getKey(), e.getValue()): the request decides which keys are set
+  if (tail === "put" && args.length === 2 && ctx.entryLoopVars.some(v => tokensText(arg0) === `${v}.getKey()` && tokensText(args[1]) === `${v}.getValue()`)) {
+    emit(ctx, "mass-assignment", node, nodeText(arg0), "Map.put", undefined,
+      "Every entry of an attacker-controlled map is copied onto the target — the client decides which keys (role, admin, ...) get set; copy an explicit allowlist");
+  }
+
   // Insecure deserialization: <var>.readObject() where <var> was declared
   // ObjectInputStream-typed and its OWN construction was built from tainted
   // data (tracked via env at the localVariableDeclaration site below).
@@ -789,9 +1072,12 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
     else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id, line: lineOf(primaryNode) });
   };
   if (className === "ProcessBuilder") fire("command-injection", "new ProcessBuilder");
-  if (className === "File" || className === "FileInputStream" || className === "FileOutputStream") {
+  if (className === "File" || className === "FileInputStream" || className === "FileOutputStream" ||
+      className === "FileReader" || className === "FileWriter" || className === "RandomAccessFile") {
     fire("path-traversal", `new ${className}`);
   }
+  if (className === "Socket") fire("ssrf", "new Socket");
+  if (className === "BasicDBObject") fire("nosql-injection", "new BasicDBObject");
 }
 
 /**
@@ -824,7 +1110,11 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
     // Path-sensitive: the mask is taken at EACH return with the env on that
     // path; a return inside a lambda is not this method's. Sink checks run
     // against a throwaway ctx copy.
-    const walker = createWalkerJava({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+    const walker = createWalkerJava({
+      ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
+      localNames: localNamesOfMethod(method), currentParams: new Set(method.paramShapes.map(p => p.name)),
+      currentBody: method.body ?? undefined, entryLoopVars: [],
+    },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     env.set(shape.name, ALL);
@@ -1298,9 +1588,13 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
           const id = firstNode(vd, "variableDeclaratorId");
           const nameTok = id ? firstTok(id, "Identifier") : undefined;
           if (nameTok) env.set(nameTok.image, rmask);
+          // for (var e : tainted.entrySet()): remember the entry variable so e.getKey()/e.getValue() copies are recognised
+          if (nameTok && iter && rmask & ALL && /entrySet\(\)$/.test(tokensText(iter))) ctx.entryLoopVars.push(nameTok.image);
         }
         const body = firstNode(node, "statement");
-        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+        const term = walkLoop(env, (e) => (body ? walk(body, e) : false));
+        ctx.entryLoopVars.length = 0;
+        return term;
       }
 
       case "tryStatement": {
@@ -1355,7 +1649,15 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
 
       case "returnStatement": {
         const expr = firstNode(node, "expression");
-        if (expr) { walk(expr, env); opts.onReturn?.(expr, env, mask); }
+        if (expr) {
+          walk(expr, env);
+          opts.onReturn?.(expr, env, mask);
+          // a method that builds HTML and returns it hands attacker markup to whoever renders the string
+          if (ctx.currentBody && methodHasHtmlEvidence(ctx.currentBody) && (mask(expr, env) & classOf("xss"))) {
+            emit(ctx, "xss", node, nodeText(expr), "returned HTML string", undefined,
+              `Untrusted '${nodeText(expr)}' is returned inside an HTML string built by this method — encode it (OWASP Java Encoder) before it is rendered`);
+          }
+        }
         return true;
       }
 
@@ -1390,6 +1692,9 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
         const initExpr = init ? firstNode(init, "expression") : undefined;
         env.set(nameTok.image, initExpr ? taintMask(initExpr, env, ctx) : 0);
         if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
+        // FunctionLike f = x -> ...;  remember the lambda so f.apply(v) resolves to its body
+        const lam = soleLambda(init) ?? soleLambda(initExpr);
+        if (lam) ctx.lambdas.set(nameTok.image, lam); else ctx.lambdas.delete(nameTok.image);
       }
     }
 
@@ -1407,9 +1712,15 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
         if (key) {
           const m = rhsExpr ? taintMask(rhsExpr, env, ctx) : 0;
           env.set(key, assignTok.image === "=" ? m : m | (env.get(key) ?? 0));
+          // a write to a class field is visible to every method that reads it
+          const parts = key.split(".");
+          recordFieldSticky(parts[0] === "this" ? parts[1] ?? null : parts[0], m, ctx);
         }
       }
     }
+
+    // a + chain that builds SQL / LDAP / XPath / URL text around an untrusted operand
+    if (node.name === "binaryExpression") checkConcatShapes(node, env, ctx);
 
     // Sink-visiting: every `primary` anywhere is a candidate call-chain root.
     if (node.name === "primary") {
@@ -1790,11 +2101,32 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
+export interface JavaScanOptions {
+  /**
+   * Also treat the un-annotated String/collection/byte[] parameters of public methods that nothing in the
+   * file calls as untrusted input (library/handler code without framework annotations). Findings that exist
+   * ONLY because of this are returned with `entryPointSeeded: true` so callers can lower their confidence.
+   * Default false: only annotated parameters and request.getParameter()-style calls are sources.
+   */
+  entryPoints?: boolean;
+}
+
 export function scanAstTaintJava(
   content: string, filePath: string, cst: CstNode,
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer -- see EngineCtx.suppressed.
   suppressedOut?: SuppressedSink[],
+  opts?: JavaScanOptions,
+): AstTaintJavaFinding[] {
+  const strict = runJavaScan(content, filePath, cst, suppressedOut, false);
+  if (!opts?.entryPoints) return strict;
+  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true);
+  const have = new Set(strict.map(f => `${f.id}:${f.line}`));
+  return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
+}
+
+function runJavaScan(
+  content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined, withEntryPoints: boolean,
 ): AstTaintJavaFinding[] {
   try {
     const lines = content.split("\n");
@@ -1803,20 +2135,58 @@ export function scanAstTaintJava(
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
       suppressed: suppressedOut,
+      sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),
     };
+    // structural HTML escapers, and parameter types (so a `HttpServletRequest r` parameter is recognised as the request)
+    for (const [name, m] of localMethods) {
+      if (m.body && isHtmlEscaperBody(m.body)) ctx.htmlEscapers.add(name);
+      for (const p of m.paramShapes) if (!ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, p.type);
+    }
     const propagating = buildPropagatingMapJava(localMethods, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
 
-    for (const [, method] of localMethods) {
-      if (!method.body) continue;
-      const env: Env = new Map();
-      // Only Spring-annotated params are true sources at method entry --
-      // an un-annotated parameter is not automatically tainted (unlike the
-      // interprocedural pre-pass above, which deliberately seeds each param
-      // independently to answer a different, broader question).
-      method.springParamNames.forEach(p => env.set(p, ALL));
-      walkForDeclarationsAndSinks(method.body, env, ctx);
-      collectBolaFindings(method, ctx);
+    // Which local methods are called from elsewhere in the file? The rest are ENTRY POINTS: their
+    // String/collection/byte[] parameters are the untrusted input (library/handler code without framework annotations).
+    const calledNames = new Set<string>();
+    for (const [, m] of localMethods) {
+      if (!m.body) continue;
+      for (const p of findAllNodes(m.body, "primary")) {
+        walkPrimaryChain(p, new Map(), ctx, (info) => { if (info.tail !== m.name) calledNames.add(info.tail); });
+      }
+    }
+    const isEntryPoint = (m: LocalMethod): boolean =>
+      !!m.body && !m.isPrivate && m.springParamNames.size === 0 && !calledNames.has(m.name) &&
+      !NON_ENTRY_METHOD_RE.test(m.name) && m.paramShapes.some(p => !p.annotated && STRINGY_PARAM_TYPE_RE.test(p.type));
+
+    const enter = (m: LocalMethod) => {
+      ctx.localNames = localNamesOfMethod(m);
+      ctx.currentParams = new Set(m.paramShapes.map(p => p.name));
+      ctx.currentBody = m.body ?? undefined;
+      ctx.entryLoopVars.length = 0;
+    };
+
+    ctx.recordSticky = true;
+    const walkAll = (withBola: boolean) => {
+      for (const [, method] of localMethods) {
+        if (!method.body) continue;
+        enter(method);
+        const env: Env = new Map();
+        // Only Spring-annotated params are true sources at method entry -- an un-annotated parameter is not
+        // automatically tainted (unlike the interprocedural pre-pass above, which deliberately seeds each param
+        // independently to answer a different, broader question) -- EXCEPT the parameters of entry points.
+        method.springParamNames.forEach(p => env.set(p, ALL));
+        if (withEntryPoints && isEntryPoint(method)) {
+          for (const p of method.paramShapes) if (!p.annotated && STRINGY_PARAM_TYPE_RE.test(p.type)) env.set(p.name, ALL);
+        }
+        walkForDeclarationsAndSinks(method.body, env, ctx);
+        if (withBola) collectBolaFindings(method, ctx);
+      }
+    };
+    walkAll(true);
+    // A field written by a method declared AFTER the one that reads it: walk again with what the first pass learned.
+    for (let i = 0; i < 2 && ctx.stickyDirty; i++) {
+      ctx.stickyDirty = false;
+      walkAll(false);
     }
 
     // Second pass, bounded worklist (Decision 3): re-walk any local method
@@ -1843,6 +2213,7 @@ export function scanAstTaintJava(
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
+        enter(method);
         const env: Env = new Map();
         for (const [idx, m] of idxSet) {
           const shape = method.paramShapes[idx];
@@ -1851,6 +2222,18 @@ export function scanAstTaintJava(
         walkForDeclarationsAndSinks(method.body, env, ctx);
       }
       if (!changed) break;
+    }
+
+    // A hand-rolled JWT payload decode in a file that never verifies a signature
+    if (!/\bJwts\b|SignedJWT|JWSVerifier|io\.jsonwebtoken|com\.auth0|nimbusds|\.verify\(/.test(content)) {
+      for (const [, method] of localMethods) {
+        if (!method.body) continue;
+        const text = content.slice(startOf(method.body), endOf(method.body) + 1);
+        if (/\.split\(\s*"(?:\\\\\.|\.)"\s*\)/.test(text) && /Base64/.test(text)) {
+          emit(ctx, "jwt-none-alg", method.body, "token", "manual JWT decode", undefined,
+            "JWT payload is base64-decoded by hand and the file never verifies a signature — claims (role, sub, ...) are attacker-controlled; use a JWT library's verify()");
+        }
+      }
     }
 
     void filePath;

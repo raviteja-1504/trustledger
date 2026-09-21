@@ -6164,9 +6164,13 @@ function findAstTaintPythonFindings(content: string, filePath: string, rootNode:
 // synchronous, no WASM -- this mirrors astTaint.ts's simplicity, not
 // astTaintPython.ts's).
 function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed).map(f => ({
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
-    line: f.line, detail: f.detail, confidence: 95,
+    line: f.line,
+    detail: f.entryPointSeeded
+      ? `${f.detail} [input assumed untrusted: parameter of a public method with no in-file caller and no framework annotation]`
+      : f.detail,
+    confidence: f.entryPointSeeded ? 70 : 95,
   }));
 }
 
