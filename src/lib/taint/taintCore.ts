@@ -108,3 +108,167 @@ export function joinEnvs(envs: readonly TaintEnv[]): TaintEnv {
   }
   return out;
 }
+
+// ── Path sensitivity helpers (shared by every engine's branch handling) ─────
+
+/** Every injection class -- everything except CONTROL ("attacker-controlled"). */
+export const INJECTION = ALL & ~SinkClass.CONTROL;
+
+/** Replace `target`'s contents with `src`'s (envs are mutated in place because callers hold references). */
+export function assignEnv(target: TaintEnv, src: TaintEnv): void {
+  target.clear();
+  for (const [k, v] of src) target.set(k, v);
+}
+
+export interface Arm { env: TaintEnv; terminated: boolean }
+
+/**
+ * Join the environments of the arms that can actually reach the join point.
+ * An arm that ends in return/throw (or break/continue where relevant) never
+ * gets there, so it must not contribute its taint -- that is what makes
+ * `if (!valid(x)) return; sink(x)` come out clean. If EVERY arm terminates,
+ * so does the construct, and the returned env is irrelevant (dead code).
+ */
+export function joinArms(arms: readonly Arm[]): Arm {
+  const live = arms.filter(a => !a.terminated);
+  if (live.length === 0) return { env: joinEnvs(arms.map(a => a.env)), terminated: true };
+  return { env: joinEnvs(live.map(a => a.env)), terminated: false };
+}
+
+/**
+ * A narrow, recognized validation guard: variable `name` is proven safe for
+ * every injection class in the arm where the guarded condition evaluates to
+ * `holds`. Bare identifiers only, and deliberately only unambiguous guards
+ * (literal-collection membership, strict numeric/type checks, equality with
+ * a literal) -- a wrongly recognized guard silently hides a real finding.
+ */
+export interface Guard { name: string; holds: "true" | "false" }
+
+/** Mark `names` as validated in `env`: clears injection classes, remembers it in the shadow bits (regex-veto data). */
+export function applyGuards(env: TaintEnv, names: readonly string[]): void {
+  for (const name of names) {
+    const m = env.get(name);
+    if (m) env.set(name, applyClears(m, INJECTION));
+  }
+}
+
+/** Names guarded in the arm where the condition evaluates to `side`. */
+export function guardedNames(guards: readonly Guard[], side: "true" | "false"): string[] {
+  return guards.filter(g => g.holds === side).map(g => g.name);
+}
+
+// ── Shared control-flow combinators ─────────────────────────────────────────
+// Each engine keeps its own tree API and only tells these combinators how to
+// walk a body; the env cloning / may-taint join / terminated-arm dropping is
+// identical everywhere so it lives here once.
+
+export interface Branch {
+  /** Absent for a plain `else`. Visits the condition's sub-expressions (sink checks) with the env that reaches it. */
+  visitCond?: (env: TaintEnv) => void;
+  /** Validation guards this condition proves (only meaningful with visitCond). */
+  guards?: () => Guard[];
+  /** Walk the arm's body on the given (cloned) env; returns true if control cannot continue past it. */
+  body: (env: TaintEnv) => boolean;
+}
+
+/**
+ * if / elif / else chain. Each condition is evaluated with the env that
+ * reaches it (all earlier conditions false); each arm walks a clone with its
+ * own condition's true-side guards applied; the fallthrough carries the
+ * false-side guards forward. Terminated arms drop out of the join.
+ */
+export function walkIfChain(env: TaintEnv, branches: readonly Branch[]): boolean {
+  const arms: Arm[] = [];
+  let fall = cloneEnv(env);
+  let hasElse = false;
+  for (const br of branches) {
+    if (br.visitCond) {
+      br.visitCond(fall);
+      const guards = br.guards?.() ?? [];
+      const armEnv = cloneEnv(fall);
+      applyGuards(armEnv, guardedNames(guards, "true"));
+      arms.push({ env: armEnv, terminated: br.body(armEnv) });
+      fall = cloneEnv(fall);
+      applyGuards(fall, guardedNames(guards, "false"));
+    } else {
+      hasElse = true;
+      const armEnv = cloneEnv(fall);
+      arms.push({ env: armEnv, terminated: br.body(armEnv) });
+    }
+  }
+  if (!hasElse) arms.push({ env: fall, terminated: false });
+  const joined = joinArms(arms);
+  assignEnv(env, joined.env);
+  return joined.terminated;
+}
+
+/**
+ * Loop: body walked on a clone TWICE (so a value assigned late in iteration
+ * N reaches a sink early in N+1; findings dedupe by id+line), then joined
+ * with the pre-loop env (the body may run zero times). Always "continues".
+ */
+export function walkLoop(env: TaintEnv, body: (env: TaintEnv) => boolean): boolean {
+  const pre = cloneEnv(env);
+  const bodyEnv = cloneEnv(env);
+  let term = body(bodyEnv);
+  if (!term) term = body(bodyEnv);
+  assignEnv(env, joinArms([{ env: pre, terminated: false }, { env: bodyEnv, terminated: term }]).env);
+  return false;
+}
+
+export interface CatchArm {
+  /** Names bound by the handler (e.g. the exception variable) -- start untainted, shadowing outer names. */
+  bind: string[];
+  body: (env: TaintEnv) => boolean;
+}
+
+/**
+ * try / catch / finally. A handler can be entered from anywhere inside the
+ * try body, so its entry env is the join of the pre-try env and the try-end
+ * env. The construct terminates only if the try body and every handler do.
+ */
+export function walkTry(
+  env: TaintEnv, tryBody: (env: TaintEnv) => boolean, catches: readonly CatchArm[],
+  finallyBody?: (env: TaintEnv) => boolean,
+): boolean {
+  const pre = cloneEnv(env);
+  const tryEnv = cloneEnv(env);
+  const arms: Arm[] = [{ env: tryEnv, terminated: tryBody(tryEnv) }];
+  for (const c of catches) {
+    const catchEnv = joinEnvs([pre, tryEnv]);
+    for (const n of c.bind) catchEnv.set(n, 0);
+    arms.push({ env: catchEnv, terminated: c.body(catchEnv) });
+  }
+  const joined = joinArms(arms);
+  assignEnv(env, joined.env);
+  let term = joined.terminated;
+  if (finallyBody) term = finallyBody(env) || term;
+  return term;
+}
+
+export interface SwitchClause {
+  isDefault: boolean;
+  /** Runs on the clause's cloned env before its body (visit the case label, apply literal-subject guard). */
+  pre?: (env: TaintEnv) => void;
+  body: (env: TaintEnv) => boolean;
+}
+
+/**
+ * switch: every clause starts from the pre-switch env (fallthrough between
+ * clauses is not modeled), joined with the pre-switch env when there is no
+ * default. Terminates only if there is a default and every clause does.
+ */
+export function walkSwitch(env: TaintEnv, clauses: readonly SwitchClause[]): boolean {
+  const arms: Arm[] = [];
+  let hasDefault = false;
+  for (const cl of clauses) {
+    const cenv = cloneEnv(env);
+    cl.pre?.(cenv);
+    if (cl.isDefault) hasDefault = true;
+    arms.push({ env: cenv, terminated: cl.body(cenv) });
+  }
+  if (!hasDefault) arms.push({ env: cloneEnv(env), terminated: false });
+  const joined = joinArms(arms);
+  assignEnv(env, joined.env);
+  return joined.terminated;
+}

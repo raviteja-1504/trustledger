@@ -43,7 +43,10 @@
 
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
-import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import {
+  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
 export type AstTaintJavaId =
@@ -424,6 +427,8 @@ interface EngineCtx {
   // Map-field pseudo-repository sink shape to distinguish a class-level
   // "repository" field from an unrelated local Map used inside one method.
   classFieldNames: Set<string>;
+  // File root -- lets guards resolve a literal-collection field/local declared elsewhere in the file.
+  root?: CstNode;
   findings: AstTaintJavaFinding[];
   seen: Set<string>;
 }
@@ -509,6 +514,9 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     const inner = firstNode(paren, "expression");
     return { parts: [], taint: inner ? taintMask(inner, env, ctx) : 0, rootVar: null, isNewExprOf: null };
   }
+  // `switch (x) { case ... -> value; }` used as an expression
+  const switchExpr = firstNode(prefix, "switchStatement");
+  if (switchExpr) return { parts: [], taint: taintMask(switchExpr, env, ctx), rootVar: null, isNewExprOf: null };
   return { parts: [], taint: 0, rootVar: null, isNewExprOf: null };
 }
 
@@ -655,6 +663,32 @@ function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
     }
     case "literal":
       return 0;
+    case "conditionalExpression": {
+      // `c ? a : b` -- the condition steers control and is NOT part of the value
+      if (tokenKids(node, "QuestionMark").length === 0) {
+        let m = 0;
+        for (const key of Object.keys(node.children)) {
+          for (const el of node.children[key]) {
+            if (!isToken(el)) m |= taintMask(el as unknown as CstNode, env, ctx);
+          }
+        }
+        return m;
+      }
+      return allNodes(node, "expression").reduce((m, e) => m | taintMask(e, env, ctx), 0);
+    }
+    case "switchStatement": {
+      // A switch used as an EXPRESSION: value = union of the arm results, not the subject.
+      let m = 0;
+      const block = firstNode(node, "switchBlock");
+      for (const rule of block ? allNodes(block, "switchRule") : []) {
+        for (const c of allNodes(rule, "expression")) m |= taintMask(c, env, ctx);
+      }
+      for (const y of findAllNodes(node, "yieldStatement")) {
+        const e = firstNode(y, "expression");
+        if (e) m |= taintMask(e, env, ctx);
+      }
+      return m;
+    }
     default: {
       // Generic fallback for the many transparent wrapper productions
       // (expression, conditionalExpression, unaryExpression, argumentList's
@@ -785,14 +819,18 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  const returnExprs = findAllNodes(method.body, "returnStatement")
-    .map(ret => firstNode(ret, "expression"))
-    .filter((e): e is CstNode => !!e);
   for (const shape of method.paramShapes) {
+    let surviving = 0;
+    // Path-sensitive: the mask is taken at EACH return with the env on that
+    // path; a return inside a lambda is not this method's. Sink checks run
+    // against a throwaway ctx copy.
+    const walker = createWalkerJava({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+      { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     env.set(shape.name, ALL);
+    walker.walk(method.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
-    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env, ctx), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -865,68 +903,535 @@ function seedLocalMethodParams(
   ctx.seededParams.set(info.tail, existing);
 }
 
-// ── Statement-level walk (declarations + generic sink-visiting descent) ───
+// ── Location / ordering helpers (Chevrotain children are keyed by production, not source order) ──
 
+function startOf(n: CstNode): number {
+  return n.location?.startOffset ?? leftmostToken(n)?.startOffset ?? 0;
+}
+function endOf(n: CstNode): number {
+  return n.location?.endOffset ?? startOf(n);
+}
+/** Every CstNode child, in SOURCE order. */
+function orderedNodeKids(node: CstNode): CstNode[] {
+  const out: CstNode[] = [];
+  for (const key of Object.keys(node.children)) for (const el of node.children[key]) if (!isToken(el)) out.push(el as unknown as CstNode);
+  return out.sort((a, b) => startOf(a) - startOf(b));
+}
+
+/**
+ * Unwraps the transparent expression wrapper chain (expression ->
+ * conditionalExpression -> binaryExpression -> unaryExpression -> primary) to
+ * its single `primary`, or null when anything real is in the way (a ternary,
+ * a binary operator, a prefix/suffix operator, a second operand).
+ */
+function soleUnaryPrimary(node: CstNode): CstNode | null {
+  let cur: CstNode = node;
+  for (let guard = 0; guard < 12; guard++) {
+    if (cur.name === "primary") return cur;
+    if (cur.name === "conditionalExpression" && tokenKids(cur, "QuestionMark").length > 0) return null;
+    if (cur.name === "binaryExpression" && (tokenKids(cur, "BinaryOperator").length > 0 || tokenKids(cur, "Instanceof").length > 0)) return null;
+    if (cur.name === "unaryExpression" && (tokenKids(cur, "UnaryPrefixOperator").length > 0 || tokenKids(cur, "UnarySuffixOperator").length > 0)) return null;
+    const next = orderedNodeKids(cur);
+    if (next.length !== 1) return null;
+    cur = next[0];
+  }
+  return null;
+}
+
+/** `"a"`, `5`, `'c'`, `true` -- but never `null` (a null check proves nothing). */
+function isLiteralExprJava(node: CstNode): boolean {
+  const p = soleUnaryPrimary(node);
+  if (!p || allNodes(p, "primarySuffix").length > 0) return false;
+  const lit = firstNode(firstNode(p, "primaryPrefix") ?? p, "literal");
+  return !!lit && leftmostToken(lit)?.image !== "null";
+}
+
+interface ChainEl { name: string; args?: CstNode[]; literal?: boolean }
+/** A plain `a.b(x).c(y)` / `"lit".m(x)` chain as [{a},{b,args:[x]},{c,args:[y]}], or null for anything more exotic. */
+function chainOfPrimary(primary: CstNode): ChainEl[] | null {
+  const prefix = firstNode(primary, "primaryPrefix");
+  if (!prefix) return null;
+  const els: ChainEl[] = [];
+  const fqn = firstNode(prefix, "fqnOrRefType");
+  const lit = firstNode(prefix, "literal");
+  if (fqn) {
+    const first = firstNode(fqn, "fqnOrRefTypePartFirst");
+    const firstId = first ? firstTok(firstNode(first, "fqnOrRefTypePartCommon") ?? first, "Identifier") : undefined;
+    if (!firstId) return null;
+    els.push({ name: firstId.image });
+    for (const rest of allNodes(fqn, "fqnOrRefTypePartRest")) {
+      const id = firstTok(firstNode(rest, "fqnOrRefTypePartCommon") ?? rest, "Identifier");
+      if (id) els.push({ name: id.image });
+    }
+  } else if (lit) {
+    els.push({ name: leftmostToken(lit)?.image ?? "", literal: leftmostToken(lit)?.image !== "null" });
+  } else {
+    return null;
+  }
+  for (const suffix of allNodes(primary, "primarySuffix")) {
+    const inv = firstNode(suffix, "methodInvocationSuffix");
+    const id = firstTok(suffix, "Identifier");
+    if (inv) {
+      const last = els[els.length - 1];
+      if (!last || last.args) return null;
+      const argList = firstNode(inv, "argumentList");
+      last.args = argList ? allNodes(argList, "expression") : [];
+    } else if (tokenKids(suffix, "Dot").length > 0 && id) {
+      els.push({ name: id.image });
+    } else {
+      return null; // array index, method reference, ...
+    }
+  }
+  return els;
+}
+
+// ── Narrow validation guards ────────────────────────────────────────────────
+// Same policy as every other engine: only unambiguous proofs that a bare
+// variable is safe -- literal equality, membership in a literal collection
+// (`ALLOWED.contains(x)`, `Set.of("a","b").contains(x)`), strict numeric type
+// tests (`x instanceof Integer`), `StringUtils.isNumeric(x)`. NOT recognized:
+// regex matches, prefix checks, custom validators.
+
+const NUMERIC_INSTANCEOF_JAVA = new Set([
+  "Integer", "Long", "Short", "Byte", "Double", "Float", "Boolean", "BigDecimal", "BigInteger",
+]);
+const LITERAL_COLLECTION_FACTORIES = new Set(["List", "Set", "Arrays"]);
+const COLLECTION_MUTATORS = new Set(["add", "addAll", "put", "putAll", "remove", "removeAll", "retainAll", "clear", "set"]);
+const WRAPPING_COLLECTIONS = new Set(["HashSet", "LinkedHashSet", "TreeSet", "ArrayList", "LinkedList", "ImmutableSet", "ImmutableList"]);
+
+/** `List.of("a","b")` / `Set.of(...)` / `Arrays.asList(...)` (all literal args), or `new HashSet<>(<that>)`. */
+function isLiteralCollectionExprJava(expr: CstNode, depth = 0): boolean {
+  const p = soleUnaryPrimary(expr);
+  if (!p) return false;
+  const chain = chainOfPrimary(p);
+  if (chain && chain.length === 2 && LITERAL_COLLECTION_FACTORIES.has(chain[0].name) && (chain[1].name === "of" || chain[1].name === "asList")) {
+    const args = chain[1].args ?? [];
+    return args.length > 0 && args.every(isLiteralExprJava);
+  }
+  if (depth === 0) {
+    const newExpr = firstNode(firstNode(p, "primaryPrefix") ?? p, "newExpression");
+    const uc = newExpr ? firstNode(newExpr, "unqualifiedClassInstanceCreationExpression") : undefined;
+    const cls = uc ? extractInstantiatedClassName(uc) : null;
+    const argList = uc ? firstNode(uc, "argumentList") : undefined;
+    const args = argList ? allNodes(argList, "expression") : [];
+    return !!cls && WRAPPING_COLLECTIONS.has(cls) && args.length === 1 && isLiteralCollectionExprJava(args[0], 1);
+  }
+  return false;
+}
+
+/** A field/local EVERY declaration of which is a literal collection and which is never reassigned or mutated. */
+function isLiteralCollectionVarJava(name: string, root: CstNode): boolean {
+  const decls = findAllNodes(root, "variableDeclarator").filter(vd => {
+    const id = firstNode(vd, "variableDeclaratorId");
+    return (id ? firstTok(id, "Identifier")?.image : undefined) === name;
+  });
+  if (decls.length === 0) return false;
+  for (const vd of decls) {
+    const init = firstNode(vd, "variableInitializer");
+    const expr = init ? firstNode(init, "expression") : undefined;
+    if (!expr || !isLiteralCollectionExprJava(expr)) return false;
+  }
+  for (const bin of findAllNodes(root, "binaryExpression")) {
+    if (tokenKids(bin, "AssignmentOperator").length === 0) continue;
+    const lhs = firstNode(bin, "unaryExpression");
+    if (lhs && bareIdentifierOf(lhs) === name) return false;
+  }
+  for (const primary of findAllNodes(root, "primary")) {
+    const chain = chainOfPrimary(primary);
+    if (chain && chain[0].name === name && chain[1] && COLLECTION_MUTATORS.has(chain[1].name)) return false;
+  }
+  return true;
+}
+
+// Chevrotain flattens a whole precedence chain into ONE binaryExpression:
+// operands are `unaryExpression` children, operators are BinaryOperator /
+// Instanceof tokens (in different keys, so they must be re-interleaved by
+// offset). Conditions are decomposed here once, generically, for both the
+// validation guards and the BOLA ownership check.
+
+interface CondItem { off: number; key: string; node?: CstNode; tok?: IToken }
+interface CondHandlers<T extends { holds: "true" | "false" }> {
+  compare(l: CstNode, op: string, r: CstNode): T[];
+  instanceOf(l: CstNode, typeNode: CstNode | undefined): T[];
+  /** A bare method-call / identifier primary used as a condition. */
+  call(primary: CstNode): T[];
+}
+
+function flipHolds<T extends { holds: "true" | "false" }>(t: T): T {
+  return { ...t, holds: t.holds === "true" ? "false" : "true" };
+}
+
+function condItems(bin: CstNode): CondItem[] {
+  const out: CondItem[] = [];
+  for (const key of Object.keys(bin.children)) {
+    for (const el of bin.children[key]) {
+      if (isToken(el)) out.push({ off: el.startOffset, key, tok: el });
+      else out.push({ off: startOf(el as unknown as CstNode), key, node: el as unknown as CstNode });
+    }
+  }
+  return out.sort((a, b) => a.off - b.off);
+}
+
+function unarySides<T extends { holds: "true" | "false" }>(u: CstNode, h: CondHandlers<T>): T[] {
+  const prefix = tokenKids(u, "UnaryPrefixOperator");
+  if (prefix.some(t => t.image !== "!") || tokenKids(u, "UnarySuffixOperator").length > 0) return [];
+  const primary = firstNode(u, "primary");
+  if (!primary) return [];
+  const paren = firstNode(firstNode(primary, "primaryPrefix") ?? primary, "parenthesisExpression");
+  const inner = paren && allNodes(primary, "primarySuffix").length === 0 ? firstNode(paren, "expression") : undefined;
+  const base = inner ? condSidesJava(inner, h) : h.call(primary);
+  return prefix.length % 2 === 1 ? base.map(flipHolds) : base;
+}
+
+function segmentSides<T extends { holds: "true" | "false" }>(seg: CondItem[], h: CondHandlers<T>): T[] {
+  const ops = seg.filter(i => i.tok && i.key === "BinaryOperator");
+  const operands = seg.filter(i => i.node && i.key === "unaryExpression").map(i => i.node!);
+  const inst = seg.find(i => i.tok && i.key === "Instanceof");
+  if (inst) {
+    const typeNode = seg.find(i => i.node && i.off > inst.off && i.key !== "unaryExpression")?.node;
+    return operands.length === 1 && ops.length === 0 ? h.instanceOf(operands[0], typeNode) : [];
+  }
+  if (ops.length === 0 && operands.length === 1) return unarySides(operands[0], h);
+  if (ops.length === 1 && operands.length === 2 && (ops[0].tok!.image === "==" || ops[0].tok!.image === "!=")) {
+    return h.compare(operands[0], ops[0].tok!.image, operands[1]);
+  }
+  return [];
+}
+
+function binarySides<T extends { holds: "true" | "false" }>(bin: CstNode, h: CondHandlers<T>): T[] {
+  const segs: CondItem[][] = [[]];
+  const logical: string[] = [];
+  for (const it of condItems(bin)) {
+    if (it.tok && it.key === "BinaryOperator" && (it.tok.image === "&&" || it.tok.image === "||")) {
+      logical.push(it.tok.image);
+      segs.push([]);
+    } else {
+      segs[segs.length - 1].push(it);
+    }
+  }
+  const per = segs.map(s => segmentSides(s, h));
+  if (logical.length === 0) return per[0];
+  // `a && b`: both hold when true. `a || b`: both fail when false. Mixed: no claim.
+  if (logical.every(o => o === "&&")) return per.flat().filter(t => t.holds === "true");
+  if (logical.every(o => o === "||")) return per.flat().filter(t => t.holds === "false");
+  return [];
+}
+
+function condSidesJava<T extends { holds: "true" | "false" }>(expr: CstNode, h: CondHandlers<T>): T[] {
+  let node: CstNode | undefined = expr;
+  if (node.name === "expression") node = firstNode(node, "conditionalExpression");
+  if (node?.name === "conditionalExpression") {
+    if (tokenKids(node, "QuestionMark").length > 0) return [];
+    node = firstNode(node, "binaryExpression");
+  }
+  return node?.name === "binaryExpression" ? binarySides(node, h) : [];
+}
+
+function guardHandlersJava(root: CstNode): CondHandlers<Guard> {
+  return {
+    compare(l, op, r) {
+      const holds: "true" | "false" = op === "==" ? "true" : "false";
+      const lName = bareIdentifierOf(l), rName = bareIdentifierOf(r);
+      if (lName && isLiteralExprJava(r)) return [{ name: lName, holds }];
+      if (rName && isLiteralExprJava(l)) return [{ name: rName, holds }];
+      return [];
+    },
+    instanceOf(l, typeNode) {
+      const name = bareIdentifierOf(l);
+      const typeName = typeNode ? collectAllTokens(typeNode).filter(t => t.tokenType?.name === "Identifier").pop()?.image : undefined;
+      return name && typeName && NUMERIC_INSTANCEOF_JAVA.has(typeName) ? [{ name, holds: "true" }] : [];
+    },
+    call(primary) {
+      const chain = chainOfPrimary(primary);
+      const m = chain?.[chain.length - 1];
+      if (!chain || !m?.args) return [];
+      const recv = chain.slice(0, -1);
+      const arg0 = m.args[0];
+      // "lit".equals(x) / x.equals("lit") / equalsIgnoreCase
+      if ((m.name === "equals" || m.name === "equalsIgnoreCase") && m.args.length === 1 && recv.length === 1 && !recv[0].args) {
+        if (recv[0].literal) { const n = bareIdentifierOf(arg0); if (n) return [{ name: n, holds: "true" }]; }
+        else if (isLiteralExprJava(arg0)) return [{ name: recv[0].name, holds: "true" }];
+      }
+      // ALLOWED.contains(x) / Set.of("a","b").contains(x)
+      if (m.name === "contains" && m.args.length === 1) {
+        const n = bareIdentifierOf(arg0);
+        if (n) {
+          if (recv.length === 1 && !recv[0].args && isLiteralCollectionVarJava(recv[0].name, root)) return [{ name: n, holds: "true" }];
+          if (recv.length === 2 && LITERAL_COLLECTION_FACTORIES.has(recv[0].name) && (recv[1].name === "of" || recv[1].name === "asList")
+              && recv[1].args && recv[1].args.length > 0 && recv[1].args.every(isLiteralExprJava)) return [{ name: n, holds: "true" }];
+        }
+      }
+      // StringUtils.isNumeric(x) / NumberUtils.isDigits(x) -- all-digits checks
+      if (recv.length === 1 && !recv[0].args && ((recv[0].name === "StringUtils" && m.name === "isNumeric") || (recv[0].name === "NumberUtils" && m.name === "isDigits"))) {
+        const n = arg0 ? bareIdentifierOf(arg0) : null;
+        if (n) return [{ name: n, holds: "true" }];
+      }
+      return [];
+    },
+  };
+}
+
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves the interprocedural summary builder (no lambdas,
+// collects return masks) and the main scan (sink checks, lambdas walked on a
+// cloned env). Branches walk each arm on a CLONE of the env and join with
+// may-taint OR (shared combinators in taint/taintCore.ts); an arm ending in
+// return/throw is dropped from the join, and code after a terminating
+// statement is dead and not walked.
+
+interface WalkOptsJava {
+  /** Walk lambda bodies (main scan) or ignore them (summaries). */
+  descendFunctions: boolean;
+  /** Called for each `return expr`, with the env on that path. */
+  onReturn?: (expr: CstNode, env: Env, mask: (n: CstNode, e: Env) => number) => void;
+}
+
+const SEQ_WRAPPERS_JAVA = new Set([
+  "statement", "statementWithoutTrailingSubstatement", "blockStatement", "labeledStatement", "synchronizedStatement",
+]);
+
+/** True when control cannot fall out of the end of `n` (return / throw, a block containing one, or an if whose every arm does). */
+function statementTerminatesJava(n: CstNode | undefined): boolean {
+  if (!n) return false;
+  if (n.name === "returnStatement" || n.name === "throwStatement") return true;
+  if (n.name === "blockStatements") return nodeKids(n, "blockStatement").some(statementTerminatesJava);
+  if (n.name === "ifStatement") {
+    const stmts = nodeKids(n, "statement");
+    return stmts.length === 2 && statementTerminatesJava(stmts[0]) && statementTerminatesJava(stmts[1]);
+  }
+  return orderedNodeKids(n).some(statementTerminatesJava);
+}
+
+function lambdaParamNames(lambda: CstNode): string[] {
+  const lp = firstNode(lambda, "lambdaParameters");
+  if (!lp) return [];
+  const names: string[] = [];
+  const direct = firstTok(lp, "Identifier");
+  if (direct) names.push(direct.image);
+  for (const id of findAllNodes(lp, "variableDeclaratorId")) {
+    const t = firstTok(id, "Identifier");
+    if (t) names.push(t.image);
+  }
+  return names;
+}
+
+function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
+  const root = ctx.root;
+  const guardHandlers = root ? guardHandlersJava(root) : undefined;
+  const mask = (n: CstNode, e: Env) => taintMask(n, e, ctx);
+  const guardsOf = (cond: CstNode | undefined): Guard[] => (cond && guardHandlers ? condSidesJava(cond, guardHandlers) : []);
+
+  const walkStmts = (nodes: readonly CstNode[], env: Env): boolean => {
+    for (const n of nodes) if (walk(n, env)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walk = (node: CstNode, env: Env): boolean => {
+    switch (node.name) {
+      case "lambdaExpression": {
+        if (opts.descendFunctions) {
+          // A lambda sees captured outer variables (cloned env); its own
+          // parameters shadow same-named outer ones and start untainted.
+          const fenv = cloneEnv(env);
+          for (const p of lambdaParamNames(node)) fenv.set(p, 0);
+          const body = firstNode(node, "lambdaBody");
+          if (body) walk(body, fenv);
+        }
+        return false;
+      }
+
+      case "block": {
+        const bs = firstNode(node, "blockStatements");
+        return bs ? walk(bs, env) : false;
+      }
+      case "blockStatements":
+        return walkStmts(nodeKids(node, "blockStatement"), env);
+
+      case "ifStatement": {
+        const cond = firstNode(node, "expression");
+        const stmts = nodeKids(node, "statement");
+        const branches: Branch[] = [{
+          visitCond: (e) => { if (cond) walk(cond, e); },
+          guards: () => guardsOf(cond),
+          body: (e) => (stmts[0] ? walk(stmts[0], e) : false),
+        }];
+        if (stmts[1]) branches.push({ body: (e) => walk(stmts[1], e) });
+        return walkIfChain(env, branches);
+      }
+
+      case "whileStatement": {
+        const cond = firstNode(node, "expression");
+        if (cond) walk(cond, env);
+        const body = firstNode(node, "statement");
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "doStatement": {
+        const body = firstNode(node, "statement");
+        const cond = firstNode(node, "expression");
+        const term = walkLoop(env, (e) => (body ? walk(body, e) : false));
+        if (cond) walk(cond, env);
+        return term;
+      }
+
+      case "basicForStatement": {
+        const init = firstNode(node, "forInit");
+        if (init) walk(init, env);
+        const cond = firstNode(node, "expression");
+        if (cond) walk(cond, env);
+        const update = firstNode(node, "forUpdate");
+        const body = firstNode(node, "statement");
+        return walkLoop(env, (e) => {
+          const t = body ? walk(body, e) : false;
+          if (!t && update) walk(update, e);
+          return t;
+        });
+      }
+
+      case "enhancedForStatement": {
+        const iter = firstNode(node, "expression");
+        if (iter) walk(iter, env);
+        const rmask = iter ? mask(iter, env) : 0;
+        const decl = firstNode(node, "localVariableDeclaration");
+        const vdl = decl ? firstNode(decl, "variableDeclaratorList") : undefined;
+        for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+          const id = firstNode(vd, "variableDeclaratorId");
+          const nameTok = id ? firstTok(id, "Identifier") : undefined;
+          if (nameTok) env.set(nameTok.image, rmask);
+        }
+        const body = firstNode(node, "statement");
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "tryStatement": {
+        const t = firstNode(node, "tryWithResourcesStatement") ?? node;
+        const resources = firstNode(t, "resourceSpecification");
+        if (resources) walk(resources, env);
+        const body = firstNode(t, "block");
+        const catchesNode = firstNode(t, "catches");
+        const catches = (catchesNode ? nodeKids(catchesNode, "catchClause") : []).map(c => {
+          const param = firstNode(c, "catchFormalParameter");
+          const id = param ? firstNode(param, "variableDeclaratorId") : undefined;
+          const nameTok = id ? firstTok(id, "Identifier") : undefined;
+          const cbody = firstNode(c, "block");
+          return { bind: nameTok ? [nameTok.image] : [], body: (e: Env) => (cbody ? walk(cbody, e) : false) };
+        });
+        const fin = firstNode(t, "finally");
+        const finBody = fin ? firstNode(fin, "block") : undefined;
+        return walkTry(
+          env,
+          (e) => (body ? walk(body, e) : false),
+          catches,
+          finBody ? (e) => walk(finBody, e) : undefined,
+        );
+      }
+
+      case "switchStatement": {
+        const subject = firstNode(node, "expression");
+        if (subject) walk(subject, env);
+        const subjectName = subject ? bareIdentifierOf(subject) : null;
+        const block = firstNode(node, "switchBlock");
+        const clauses = block
+          ? [...nodeKids(block, "switchBlockStatementGroup"), ...nodeKids(block, "switchRule")].sort((a, b) => startOf(a) - startOf(b))
+          : [];
+        return walkSwitch(env, clauses.map(cl => {
+          const labels = nodeKids(cl, "switchLabel");
+          const isDefault = labels.some(l => tokenKids(l, "Default").length > 0);
+          const literalLabels = labels.length > 0 && labels.every(l => {
+            const consts = nodeKids(l, "caseConstant");
+            return consts.length > 0 && consts.every(isLiteralExprJava);
+          });
+          const bodyNodes = cl.name === "switchBlockStatementGroup"
+            ? nodeKids(cl, "blockStatements")
+            : orderedNodeKids(cl).filter(n => n.name !== "switchLabel");
+          return {
+            isDefault,
+            // `case "a": case "b":` -- inside, the subject IS one of the literals.
+            pre: (e: Env) => { if (subjectName && !isDefault && literalLabels) applyGuards(e, [subjectName]); },
+            body: (e: Env) => walkStmts(bodyNodes, e),
+          };
+        }));
+      }
+
+      case "returnStatement": {
+        const expr = firstNode(node, "expression");
+        if (expr) { walk(expr, env); opts.onReturn?.(expr, env, mask); }
+        return true;
+      }
+
+      case "throwStatement":
+        for (const c of orderedNodeKids(node)) walk(c, env);
+        return true;
+
+      default:
+        break;
+    }
+
+    // Statement wrappers: a sequence of one real child -- terminates when it does.
+    if (SEQ_WRAPPERS_JAVA.has(node.name)) return walkStmts(orderedNodeKids(node), env);
+
+    if (node.name === "localVariableDeclaration") {
+      // unannType -> unannReferenceType -> unannClassOrInterfaceType ->
+      // unannClassType -> Identifier[] -- the simple type name is several
+      // wrapper layers deep, not a direct child of unannType.
+      const typeNode = firstNode(node, "localVariableType");
+      const unannType = typeNode ? firstNode(typeNode, "unannType") : undefined;
+      const unannClassType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
+      const declaredTypeSimpleName = unannClassType
+        ? tokenKids(unannClassType, "Identifier").pop()?.image
+        : undefined;
+
+      const vdl = firstNode(node, "variableDeclaratorList");
+      for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+        const declId = firstNode(vd, "variableDeclaratorId");
+        const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+        if (!nameTok) continue;
+        const init = firstNode(vd, "variableInitializer");
+        const initExpr = init ? firstNode(init, "expression") : undefined;
+        env.set(nameTok.image, initExpr ? taintMask(initExpr, env, ctx) : 0);
+        if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
+      }
+    }
+
+    // Assignment: `x = expr;`, `x += expr;`, `obj.field = expr;`. Chevrotain
+    // flattens a plain reference AND an assignment into the SAME
+    // `binaryExpression` production -- an assignment is the one with a
+    // present `AssignmentOperator` child. A compound operator keeps whatever
+    // taint the target already had (OR), unlike plain `=`.
+    if (node.name === "binaryExpression") {
+      const assignTok = tokenKids(node, "AssignmentOperator")[0];
+      if (assignTok) {
+        const lhsUnary = firstNode(node, "unaryExpression");
+        const rhsExpr = firstNode(node, "expression");
+        const key = assignmentTargetKey(lhsUnary, env, ctx);
+        if (key) {
+          const m = rhsExpr ? taintMask(rhsExpr, env, ctx) : 0;
+          env.set(key, assignTok.image === "=" ? m : m | (env.get(key) ?? 0));
+        }
+      }
+    }
+
+    // Sink-visiting: every `primary` anywhere is a candidate call-chain root.
+    if (node.name === "primary") {
+      const prefix = firstNode(node, "primaryPrefix");
+      if (prefix) checkNewExpressionSink(prefix, env, ctx, node);
+      walkPrimaryChain(node, env, ctx, (info) => { checkCallSink(info, env, ctx); seedLocalMethodParams(info, env, ctx); });
+    }
+
+    for (const key of Object.keys(node.children)) {
+      for (const el of node.children[key]) {
+        if (!isToken(el)) walk(el as unknown as CstNode, env);
+      }
+    }
+    return false;
+  };
+
+  return { walk };
+}
+
+/** Main-scan entry: walks one method body (or a seeded re-walk) with sink checks and call-site seeding. */
 function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
-  if (node.name === "localVariableDeclaration") {
-    // unannType -> unannReferenceType -> unannClassOrInterfaceType ->
-    // unannClassType -> Identifier[] -- the simple type name is several
-    // wrapper layers deep, not a direct child of unannType.
-    const typeNode = firstNode(node, "localVariableType");
-    const unannType = typeNode ? firstNode(typeNode, "unannType") : undefined;
-    const unannClassType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
-    const declaredTypeSimpleName = unannClassType
-      ? tokenKids(unannClassType, "Identifier").pop()?.image
-      : undefined;
-
-    const vdl = firstNode(node, "variableDeclaratorList");
-    for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
-      const declId = firstNode(vd, "variableDeclaratorId");
-      const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
-      if (!nameTok) continue;
-      const init = firstNode(vd, "variableInitializer");
-      const initExpr = init ? firstNode(init, "expression") : undefined;
-      env.set(nameTok.image, initExpr ? taintMask(initExpr, env, ctx) : 0);
-      if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
-    }
-  }
-
-  // Assignment (Decision 1, write side): `x = expr;` or `obj.field = expr;`.
-  // Chevrotain flattens a plain reference AND an assignment into the SAME
-  // `binaryExpression` production (see the module's other binaryExpression
-  // handling) -- an assignment is the one with a present `AssignmentOperator`
-  // child. Restricted to the plain `=` operator only (not `+=`/`-=`/etc,
-  // confirmed as a distinct sub-alternative of the same production): a
-  // compound assignment would need `env.get(key)` OR'd into the new value to
-  // stay additive-only, which isn't implemented here, so recognizing it
-  // would risk INCORRECTLY de-tainting an already-tainted target -- left
-  // unhandled (falls through to the generic recursion below, same as
-  // before) rather than risk that regression. Java had no assignment
-  // handling of any kind before this (only localVariableDeclaration's own
-  // initializer was tracked), so this also newly covers plain-identifier
-  // reassignment, not just the field case Decision 1 targets.
-  if (node.name === "binaryExpression") {
-    const assignTok = tokenKids(node, "AssignmentOperator")[0];
-    if (assignTok && assignTok.image === "=") {
-      const lhsUnary = firstNode(node, "unaryExpression");
-      const rhsExpr = firstNode(node, "expression");
-      const key = assignmentTargetKey(lhsUnary, env, ctx);
-      if (key) env.set(key, rhsExpr ? taintMask(rhsExpr, env, ctx) : 0);
-    }
-  }
-
-  // Sink-visiting: every `primary` anywhere is a candidate call-chain root.
-  if (node.name === "primary") {
-    const prefix = firstNode(node, "primaryPrefix");
-    if (prefix) checkNewExpressionSink(prefix, env, ctx, node);
-    walkPrimaryChain(node, env, ctx, (info) => { checkCallSink(info, env, ctx); seedLocalMethodParams(info, env, ctx); });
-  }
-
-  for (const key of Object.keys(node.children)) {
-    for (const el of node.children[key]) {
-      if (!isToken(el)) walkForDeclarationsAndSinks(el, env, ctx);
-    }
-  }
+  createWalkerJava(ctx, { descendFunctions: true }).walk(node, env);
 }
 
 // ── BOLA: sink shapes, ownership-comparison detection, per-method emission ──
@@ -1058,19 +1563,20 @@ function bareIdentifierOf(arg: CstNode): string | null {
   return firstId?.image ?? null;
 }
 
-/** Does `arg` reference a resource-id param, directly or one hop back
- * through a local variable's own initializer (covers `.save(entity)` where
- * `entity` was built from the tainted id earlier in the method)? */
-function argReferencesResourceId(arg: CstNode, resourceIdParamNames: Set<string>, localInits: Map<string, CstNode>): boolean {
-  if ([...collectIdentifiers(arg)].some(id => resourceIdParamNames.has(id))) return true;
+/** The resource-id params `arg` references, directly or one hop back through a
+ * local variable's own initializer (covers `.save(entity)` where `entity` was
+ * built from the tainted id earlier in the method). */
+function resourceIdsIn(arg: CstNode, resourceIdParamNames: Set<string>, localInits: Map<string, CstNode>): Set<string> {
+  const direct = [...collectIdentifiers(arg)].filter(id => resourceIdParamNames.has(id));
+  if (direct.length > 0) return new Set(direct);
   const bare = bareIdentifierOf(arg);
   if (bare && localInits.has(bare)) {
-    return [...collectIdentifiers(localInits.get(bare)!)].some(id => resourceIdParamNames.has(id));
+    return new Set([...collectIdentifiers(localInits.get(bare)!)].filter(id => resourceIdParamNames.has(id)));
   }
-  return false;
+  return new Set();
 }
 
-interface BolaSinkCandidate { node: CstNode; sourceExpr: string; sinkExpr: string }
+interface BolaSinkCandidate { node: CstNode; sourceExpr: string; sinkExpr: string; idNames: Set<string> }
 
 const BOLA_REPO_LOOKUP_METHODS = new Set(["findById", "getOne", "getById"]);
 // deleteById/delete/save -- standard Spring Data CRUD method names. `.update(...)`
@@ -1093,15 +1599,13 @@ function checkBolaSinkCandidate(
   const { tail, rootVar, args, node, calleeName } = info;
   if (args.length === 0) return;
   if (BOLA_REPO_LOOKUP_METHODS.has(tail) || BOLA_REPO_WRITE_METHODS.has(tail)) {
-    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
-      candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName });
-    }
+    const idNames = resourceIdsIn(args[0], resourceIdParamNames, localInits);
+    if (idNames.size > 0) candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName, idNames });
     return;
   }
   if (BOLA_MAP_ACCESS_METHODS.has(tail) && rootVar !== null && classFieldNames.has(rootVar)) {
-    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
-      candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName });
-    }
+    const idNames = resourceIdsIn(args[0], resourceIdParamNames, localInits);
+    if (idNames.size > 0) candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName, idNames });
   }
 }
 
@@ -1141,20 +1645,117 @@ function checkBolaConstructorSinkCandidates(
     const argList = firstNode(uc, "argumentList");
     const args = argList ? allNodes(argList, "expression") : [];
     if (args.length === 0) continue;
-    if (argReferencesResourceId(args[0], resourceIdParamNames, localInits)) {
-      candidates.push({ node: primary, sourceExpr: nodeText(args[0]), sinkExpr: `new ${className}` });
-    }
+    const idNames = resourceIdsIn(args[0], resourceIdParamNames, localInits);
+    if (idNames.size > 0) candidates.push({ node: primary, sourceExpr: nodeText(args[0]), sinkExpr: `new ${className}`, idNames });
   }
 }
 
+/** Ancestors of `target` from `root` down to (excluding) `target`, found by source-offset containment. */
+function pathTo(root: CstNode, target: CstNode): CstNode[] {
+  const ts = startOf(target), te = endOf(target);
+  const path: CstNode[] = [];
+  let cur: CstNode = root;
+  for (let guard = 0; guard < 400; guard++) {
+    if (cur === target) break;
+    path.push(cur);
+    const next = orderedNodeKids(cur).find(c => c === target || (startOf(c) <= ts && endOf(c) >= te));
+    if (!next) break;
+    cur = next;
+  }
+  return path;
+}
+
+/** blockStatement -> statement -> ifStatement, or undefined. */
+function unwrapIfStatement(bs: CstNode): CstNode | undefined {
+  let cur: CstNode | undefined = bs;
+  for (let guard = 0; guard < 4 && cur; guard++) {
+    if (cur.name === "ifStatement") return cur;
+    const kidsOf = orderedNodeKids(cur);
+    cur = kidsOf.length === 1 ? kidsOf[0] : undefined;
+  }
+  return undefined;
+}
+
+interface OwnSide { holds: "true" | "false" }
+
 /**
- * Per-method post-check, not per-call-site: BOLA's "is there an ownership
- * comparison ANYWHERE in this method" question needs the whole body
- * evaluated once, so candidate sinks are collected but not emitted until
- * after a full walk confirms no suppressing comparison exists. Mirrors how
- * computeReturnTaintPropagatingJava is already its own separate
- * whole-method-body pass, distinct from the per-call-site sink walk in
- * walkForDeclarationsAndSinks -- same architectural pattern, not a new one.
+ * Does an ownership comparison for one of `idNames` DOMINATE `sink`? Walks the
+ * sink's ancestors: it must sit in the arm of an if (or ternary) whose
+ * condition establishes ownership on that side, or come after an earlier
+ * sibling if whose OTHER arm always terminates (return/throw). A comparison
+ * that is unused, follows the lookup, or guards a different branch no longer
+ * suppresses -- the old check was "a comparison exists anywhere in the method".
+ */
+function ownershipDominatesJava(
+  sink: CstNode, body: CstNode, idNames: Set<string>, principalNames: Set<string>,
+  localInits: Map<string, CstNode>, ctx: EngineCtx,
+): boolean {
+  const make = (resolve: boolean): CondHandlers<OwnSide> => ({
+    compare: (l, op, r) => (comparisonSuppresses(l, r, idNames, principalNames) ? [{ holds: op === "==" ? "true" : "false" }] : []),
+    instanceOf: () => [],
+    call: (primary) => {
+      let hit = false;
+      const chain = chainOfPrimary(primary);
+      // `isOwner` -- a boolean local resolved ONE hop to its initializer
+      if (resolve && chain && chain.length === 1 && !chain[0].args && localInits.has(chain[0].name)) {
+        return condSidesJava(localInits.get(chain[0].name)!, make(false));
+      }
+      walkPrimaryChain(primary, new Map(), ctx, (info) => {
+        if (info.tail !== "equals") return;
+        if (info.rootVar === "Objects" && info.args.length === 2) {
+          if (comparisonSuppresses(info.args[0], info.args[1], idNames, principalNames)) hit = true;
+        } else if (info.args[0] && comparisonSuppressesEquals(info.rootVar, info.args[0], idNames, principalNames)) {
+          hit = true;
+        }
+      });
+      return hit ? [{ holds: "true" }] : [];
+    },
+  });
+  const own = make(true);
+  const sidesOf = (cond: CstNode | undefined, isBinary = false): OwnSide[] =>
+    !cond ? [] : isBinary ? binarySides(cond, own) : condSidesJava(cond, own);
+
+  const path = pathTo(body, sink);
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i], child = path[i + 1];
+    if (a.name === "ifStatement") {
+      const cond = firstNode(a, "expression");
+      const stmts = nodeKids(a, "statement");
+      if (cond && child !== cond) {
+        const sides = sidesOf(cond);
+        if (child === stmts[0] && sides.some(s => s.holds === "true")) return true;
+        if (child === stmts[1] && sides.some(s => s.holds === "false")) return true;
+      }
+    } else if (a.name === "conditionalExpression" && tokenKids(a, "QuestionMark").length > 0) {
+      const condBin = firstNode(a, "binaryExpression");
+      const arms = nodeKids(a, "expression");
+      if (condBin && child !== condBin) {
+        const sides = sidesOf(condBin, true);
+        if (child === arms[0] && sides.some(s => s.holds === "true")) return true;
+        if (child === arms[1] && sides.some(s => s.holds === "false")) return true;
+      }
+    } else if (a.name === "blockStatements") {
+      const list = nodeKids(a, "blockStatement");
+      const idx = list.indexOf(child);
+      for (let j = 0; j < idx; j++) {
+        const ifN = unwrapIfStatement(list[j]);
+        if (!ifN) continue;
+        const cond = firstNode(ifN, "expression");
+        const stmts = nodeKids(ifN, "statement");
+        const sides = sidesOf(cond);
+        // the arm that does NOT establish ownership never reaches what follows
+        if (sides.some(s => s.holds === "false") && statementTerminatesJava(stmts[0])) return true;
+        if (sides.some(s => s.holds === "true") && stmts[1] && statementTerminatesJava(stmts[1])) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Per-method post-check, not per-call-site: candidate sinks are collected
+ * during a structural pass, and each is emitted unless an ownership
+ * comparison for ITS resource id dominates it (ownershipDominatesJava).
  * Deliberately does NOT use isTainted/env -- this is a purely structural
  * check (which annotation sourced this parameter, is it compared against a
  * principal-shaped expression), independent of the taint-propagation
@@ -1173,32 +1774,17 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   ]);
 
   const candidates: BolaSinkCandidate[] = [];
-  let hasOwnershipComparison = false;
-
   for (const primary of findAllNodes(method.body, "primary")) {
     walkPrimaryChain(primary, new Map(), ctx, (info) => {
       checkBolaSinkCandidate(info, method.resourceIdParamNames, ctx.classFieldNames, localInits, candidates);
-      if (info.tail === "equals" && info.args[0] &&
-          comparisonSuppressesEquals(info.rootVar, info.args[0], method.resourceIdParamNames, principalNames)) {
-        hasOwnershipComparison = true;
-      }
     });
   }
   checkBolaConstructorSinkCandidates(method, method.resourceIdParamNames, localInits, candidates);
-  for (const bin of findAllNodes(method.body, "binaryExpression")) {
-    const ops = tokenKids(bin, "BinaryOperator");
-    if (!ops.some(t => t.image === "==" || t.image === "!=")) continue;
-    const operands = allNodes(bin, "unaryExpression");
-    for (let i = 0; i < operands.length - 1; i++) {
-      if (comparisonSuppresses(operands[i], operands[i + 1], method.resourceIdParamNames, principalNames)) {
-        hasOwnershipComparison = true;
-      }
-    }
-  }
 
-  if (!hasOwnershipComparison) {
-    const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
-    for (const c of candidates) emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+  const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
+  for (const c of candidates) {
+    if (ownershipDominatesJava(c.node, method.body, c.idNames, principalNames, localInits, ctx)) continue;
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
   }
 }
 
@@ -1215,7 +1801,7 @@ export function scanAstTaintJava(
     const localMethods = collectLocalMethods(cst);
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), findings: [], seen: new Set(),
+      varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
       suppressed: suppressedOut,
     };
     const propagating = buildPropagatingMapJava(localMethods, ctx);

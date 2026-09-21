@@ -81,7 +81,10 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
-import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import {
+  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
 declare const __non_webpack_require__: NodeJS.Require | undefined;
@@ -313,6 +316,8 @@ interface EngineCtx {
   // SQL driver (e.g. DOMXPath::query() vs a DB driver's ->query()) -- see
   // checkMemberCallSink's SQL_CALL_TAILS branch.
   varTypes: Map<string, string>;
+  // File root -- lets guards resolve a literal-array variable/constant declared elsewhere in the file.
+  root?: SyntaxNode;
 }
 
 function emit(
@@ -336,6 +341,8 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
     if (isTaintSourceExprPHP(node)) return ALL;
     if (node.type === "variable_name") {
       const varName = variableBareName(node);
+      // a bare superglobal (`foreach ($_POST as $k => $v)`) is attacker-controlled as a whole
+      if (varName && SUPERGLOBAL_NAMES.has(varName)) return ALL;
       return varName ? (env.get(varName) ?? 0) : 0;
     }
     if (node.type === "name") return 0;
@@ -357,8 +364,26 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       const op = node.childForFieldName("operator")?.type;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if ((op === "." || op === "+") && left && right) return taintMask(left, env) | taintMask(right, env);
+      if ((op === "." || op === "+" || op === "??") && left && right) return taintMask(left, env) | taintMask(right, env);
       return 0;
+    }
+    if (node.type === "conditional_expression") {
+      // `c ? a : b` -- the condition steers control and is NOT part of the value;
+      // the short form `c ?: b` yields c itself when truthy, so it carries.
+      const cond = node.childForFieldName("condition");
+      const cons = node.childForFieldName("body");
+      const alt = node.childForFieldName("alternative");
+      return (cons ? taintMask(cons, env) : cond ? taintMask(cond, env) : 0) | (alt ? taintMask(alt, env) : 0);
+    }
+    if (node.type === "match_expression") {
+      // value = union of the arm results; the subject is not part of the value
+      let m = 0;
+      const block = node.childForFieldName("body");
+      for (const arm of block?.namedChildren ?? []) {
+        const result = arm?.childForFieldName("return_expression");
+        if (result) m |= taintMask(result, env);
+      }
+      return m;
     }
     if (node.type === "member_access_expression") {
       // Field-sensitive read: OR the full dotted path composite key (set by
@@ -434,15 +459,18 @@ function computeReturnTaintPropagatingPHP(fn: LocalFunction, ctx: EngineCtx): Ma
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!fn.body) return propagatingIdx;
-  const taintMask = makeTaintMaskPHP(ctx);
-  const returnExprs = findAllNodes(fn.body, "return_statement")
-    .map(ret => ret.namedChildren[0])
-    .filter((e): e is SyntaxNode => !!e);
   for (const shape of fn.paramShapes) {
+    let surviving = 0;
+    // Path-sensitive: the mask is taken at EACH return with the env on that
+    // path; a return inside a closure is not this function's. Sink checks run
+    // against a throwaway ctx copy.
+    const walker = createWalkerPHP({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+      { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     env.set(shape.name, ALL);
+    walker.walk(fn.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
-    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -681,75 +709,496 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
   }
 }
 
-// ── Statement-level walk ─────────────────────────────────────────────────
+// ── Narrow validation guards ────────────────────────────────────────────────
+// Same policy as every other engine: only unambiguous proofs that a bare
+// variable is safe -- literal equality, membership in a literal array
+// (`in_array`, `isset($allowed[$x])`), strict numeric checks (`is_numeric`,
+// `ctype_digit`, `is_int`). NOT recognized: regex matches (`preg_match`),
+// prefix checks, custom validators. PHP's LOOSE comparison (`==`, non-strict
+// `in_array`, `switch`) treats a non-numeric string as equal to 0 on PHP < 8,
+// so only STRING literals count for loose comparisons; strict comparisons
+// (`===`, `!==`, `in_array(..., true)`, `match`) accept any literal.
 
-function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx) {
-  const taintMask = makeTaintMaskPHP(ctx);
+const NUMERIC_CHECK_FUNCTIONS_PHP = new Set(["is_numeric", "ctype_digit", "is_int", "is_integer", "is_long", "is_float", "is_double", "is_bool"]);
+const TERMINATING_CALLS_PHP = new Set(["die", "exit", "abort", "wp_die"]);
 
-  // No separate declaration statement in PHP -- see this module's own
-  // docblock for why assignment_expression alone covers both first-use and
-  // re-assignment.
-  if (node.type === "assignment_expression") {
-    const left = node.childForFieldName("left");
-    const right = node.childForFieldName("right");
-    const mask = right ? taintMask(right, env) : 0;
-    if (left?.type === "variable_name") {
-      const varName = variableBareName(left);
-      if (varName) {
-        env.set(varName, mask);
-        // $var = new ClassName(...) -- class-name tracking (see
-        // EngineCtx.varTypes's own docblock). className extraction reuses
-        // the exact same technique collectBolaFindings' own
-        // object_creation_expression loop already uses below.
-        if (right?.type === "object_creation_expression") {
-          const classNameNode = right.namedChildren.find(c => c && c.type === "name");
-          if (classNameNode) ctx.varTypes.set(varName, classNameNode.text);
+function isStringLiteralPHP(n: SyntaxNode): boolean {
+  if (n.type === "string") return true;
+  // a double-quoted string with no interpolation
+  return n.type === "encapsed_string" && n.namedChildren.every(c => !!c && (c.type === "string_content" || c.type === "escape_sequence"));
+}
+
+function isLiteralPHP(n: SyntaxNode): boolean {
+  if (n.type === "parenthesized_expression") return !!n.namedChildren[0] && isLiteralPHP(n.namedChildren[0]);
+  return isStringLiteralPHP(n) || n.type === "integer" || n.type === "float" || n.type === "boolean";
+}
+
+/** Every element a literal (string-only when `stringsOnly`, for LOOSE membership); `keys` checks array keys instead of values. */
+function literalArrayPHP(n: SyntaxNode, opts: { keys?: boolean; stringsOnly?: boolean }): boolean {
+  if (n.type !== "array_creation_expression") return false;
+  const inits = n.namedChildren.filter((c): c is SyntaxNode => !!c && c.type === "array_element_initializer");
+  if (inits.length === 0 || inits.length !== n.namedChildren.length) return false;
+  const okLit = (x: SyntaxNode | null | undefined) => !!x && (opts.stringsOnly ? isStringLiteralPHP(x) : isLiteralPHP(x));
+  return inits.every(i => {
+    const parts = i.namedChildren.filter((c): c is SyntaxNode => !!c);
+    if (opts.keys) return parts.length === 2 && okLit(parts[0]);
+    return parts.length === 1 && okLit(parts[0]);
+  });
+}
+
+/** A literal array node, or a `$var` / CONSTANT EVERY binding of which, file-wide, is one. */
+function isLiteralArrayRefPHP(
+  n: SyntaxNode, root: SyntaxNode | undefined, opts: { keys?: boolean; stringsOnly?: boolean },
+): boolean {
+  if (n.type === "array_creation_expression") return literalArrayPHP(n, opts);
+  if (!root) return false;
+  const isVar = n.type === "variable_name";
+  const wanted = isVar ? variableBareName(n) : n.type === "name" ? n.text : null;
+  if (!wanted) return false;
+  const bindings: SyntaxNode[] = [];
+  let opaque = false;
+  const visit = (x: SyntaxNode) => {
+    if (isVar && x.type === "assignment_expression") {
+      const left = x.childForFieldName("left");
+      const right = x.childForFieldName("right");
+      if (left?.type === "variable_name" && variableBareName(left) === wanted) { if (right) bindings.push(right); else opaque = true; }
+      // `$allowed[] = $x` / `$allowed[k] = ...` mutates the array
+      if (left?.type === "subscript_expression") {
+        const base = left.namedChildren[0];
+        if (base?.type === "variable_name" && variableBareName(base) === wanted) opaque = true;
+      }
+    } else if (isVar && x.type === "augmented_assignment_expression") {
+      const left = x.childForFieldName("left");
+      if (left?.type === "variable_name" && variableBareName(left) === wanted) opaque = true;
+    } else if (!isVar && x.type === "const_element") {
+      const nm = x.namedChildren[0];
+      const val = x.namedChildren[1];
+      if (nm?.text === wanted) { if (val) bindings.push(val); else opaque = true; }
+    }
+    for (const c of x.namedChildren) if (c) visit(c);
+  };
+  visit(root);
+  return !opaque && bindings.length > 0 && bindings.every(b => b.type === "array_creation_expression" && literalArrayPHP(b, opts));
+}
+
+function invertPHP(g: Guard): Guard {
+  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+}
+
+function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): Guard[] {
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionPHP(inner, root) : [];
+    }
+    case "unary_op_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.childForFieldName("argument") ?? cond.namedChildren[0];
+      return inner ? guardsOfConditionPHP(inner, root).map(invertPHP) : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      if (op === "&&" || op === "and") return [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "true");
+      if (op === "||" || op === "or") return [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "false");
+      const strict = op === "===" || op === "!==";
+      const loose = op === "==" || op === "!=";
+      if (strict || loose) {
+        const holdsWhenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
+        const litOk = (n: SyntaxNode) => (strict ? isLiteralPHP(n) : isStringLiteralPHP(n));
+        const lName = l.type === "variable_name" ? variableBareName(l) : null;
+        const rName = r.type === "variable_name" ? variableBareName(r) : null;
+        if (lName && litOk(r)) return [{ name: lName, holds: holdsWhenEqual }];
+        if (rName && litOk(l)) return [{ name: rName, holds: holdsWhenEqual }];
+      }
+      return [];
+    }
+    case "function_call_expression": {
+      const fnNode = cond.childForFieldName("function");
+      const fnName = fnNode?.type === "name" ? fnNode.text.toLowerCase() : null;
+      const args = argListOfPHP(cond);
+      if (!fnName || args.length === 0) return [];
+      const a0 = args[0].type === "variable_name" ? variableBareName(args[0]) : null;
+      if (NUMERIC_CHECK_FUNCTIONS_PHP.has(fnName) && a0) return [{ name: a0, holds: "true" }];
+      // in_array($x, ["a","b"], true) -- loose (no/false 3rd arg) needs string-only elements
+      if (fnName === "in_array" && a0 && args.length >= 2) {
+        const strict = args[2]?.type === "boolean" && args[2].text.toLowerCase() === "true";
+        if (isLiteralArrayRefPHP(args[1], root, { stringsOnly: !strict })) return [{ name: a0, holds: "true" }];
+      }
+      // array_key_exists($x, $allowedMap) / isset($allowedMap[$x])
+      if (fnName === "array_key_exists" && a0 && args.length === 2 && isLiteralArrayRefPHP(args[1], root, { keys: true, stringsOnly: true })) {
+        return [{ name: a0, holds: "true" }];
+      }
+      if (fnName === "isset" && args.length === 1 && args[0].type === "subscript_expression") {
+        const [base, idx] = args[0].namedChildren;
+        if (base && idx?.type === "variable_name" && isLiteralArrayRefPHP(base, root, { keys: true, stringsOnly: true })) {
+          const idxName = variableBareName(idx);
+          if (idxName) return [{ name: idxName, holds: "true" }];
         }
       }
-    } else if (left?.type === "member_access_expression") {
-      const key = calleeTextPHP(left);
-      if (key) env.set(key, mask);
+      return [];
     }
+    default:
+      return [];
   }
+}
 
-  if (node.type === "echo_statement" || node.type === "print_statement") {
-    const cls = classOf("xss");
-    let cleared = false;
-    for (const child of node.namedChildren) {
-      if (!child) continue;
-      const m = taintMask(child, env);
-      if (m & cls) {
-        emit(ctx, "xss", node, child.text, node.type === "echo_statement" ? "echo" : "print");
-        cleared = false;
-        break;
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves the interprocedural summary builder (no closures,
+// collects return masks) and the main scan (sink checks, closures walked in
+// their own scope). Branches walk each arm on a CLONE of the env and join with
+// may-taint OR (shared combinators in taint/taintCore.ts); an arm ending in
+// return/throw/exit is dropped from the join, and code after a terminating
+// statement is dead and not walked.
+
+interface WalkOptsPHP {
+  /** Walk closure / arrow-function bodies (main scan) or ignore them (summaries). */
+  descendFunctions: boolean;
+  /** Called for each `return expr`, with the env on that path. */
+  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnPHP) => void;
+}
+
+function statementTerminatesPHP(n: SyntaxNode | null | undefined): boolean {
+  if (!n) return false;
+  if (n.type === "return_statement" || n.type === "exit_statement") return true;
+  if (n.type === "expression_statement") {
+    const e = n.namedChildren[0];
+    if (e?.type === "throw_expression") return true;
+    if (e?.type === "function_call_expression") {
+      const fnNode = e.childForFieldName("function");
+      return fnNode?.type === "name" && TERMINATING_CALLS_PHP.has(fnNode.text.toLowerCase());
+    }
+    return false;
+  }
+  if (n.type === "compound_statement" || n.type === "colon_block") return n.namedChildren.some(c => statementTerminatesPHP(c));
+  if (n.type === "if_statement") {
+    const body = n.childForFieldName("body");
+    const alts = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+    const hasElse = alts.some(a => a.type === "else_clause");
+    return hasElse && statementTerminatesPHP(body) && alts.every(a => statementTerminatesPHP(a.childForFieldName("body")));
+  }
+  return false;
+}
+
+function variableNamesIn(n: SyntaxNode | null | undefined): string[] {
+  if (!n) return [];
+  return findAllNodes(n, "variable_name").map(v => variableBareName(v)).filter((v): v is string => !!v);
+}
+
+function paramNamesOfPHP(fn: SyntaxNode): string[] {
+  const params = fn.childForFieldName("parameters");
+  if (!params) return [];
+  const names: string[] = [];
+  for (const p of params.namedChildren) {
+    const nm = p?.childForFieldName("name");
+    if (nm?.type === "variable_name") { const b = variableBareName(nm); if (b) names.push(b); }
+  }
+  return names;
+}
+
+const NAMED_FUNCTION_NODES_PHP = new Set(["function_definition", "method_declaration"]);
+
+function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
+  const taintMask = makeTaintMaskPHP(ctx);
+  const root = ctx.root;
+
+  const walkStmts = (nodes: readonly (SyntaxNode | null)[], env: Env): boolean => {
+    for (const c of nodes) if (c && walk(c, env)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walkClosure = (fn: SyntaxNode, env: Env) => {
+    const body = fn.childForFieldName("body");
+    if (!body) return;
+    let fenv: Env;
+    if (fn.type === "arrow_function") {
+      fenv = cloneEnv(env); // `fn` captures the enclosing scope by value
+    } else {
+      // A `function () use ($x)` closure sees ONLY its `use` variables.
+      fenv = new Map();
+      const use = fn.namedChildren.find(c => c?.type === "anonymous_function_use_clause");
+      for (const name of variableNamesIn(use)) if (env.has(name)) fenv.set(name, env.get(name)!);
+    }
+    for (const p of paramNamesOfPHP(fn)) fenv.set(p, 0);
+    walk(body, fenv);
+  };
+
+  /** Bind every variable in an assignment/foreach target from `mask`. */
+  const bindTargets = (target: SyntaxNode, mask: number, env: Env) => {
+    for (const name of variableNamesIn(target)) env.set(name, mask);
+  };
+
+  const walk = (node: SyntaxNode, env: Env): boolean => {
+    switch (node.type) {
+      // Named functions/methods are walked separately, each in a fresh scope.
+      case "function_definition":
+      case "method_declaration":
+      case "class_declaration":
+        return false;
+
+      case "anonymous_function_creation_expression":
+      case "arrow_function":
+        if (opts.descendFunctions) walkClosure(node, env);
+        return false;
+
+      case "program":
+      case "compound_statement":
+      case "colon_block":
+        return walkStmts(node.namedChildren, env);
+
+      case "if_statement": {
+        const branches: Branch[] = [];
+        const cond = node.childForFieldName("condition");
+        const body = node.childForFieldName("body");
+        branches.push({
+          visitCond: (e) => { if (cond) walk(cond, e); },
+          guards: () => (cond ? guardsOfConditionPHP(cond, root) : []),
+          body: (e) => (body ? walk(body, e) : false),
+        });
+        for (const alt of node.childrenForFieldName("alternative")) {
+          if (!alt) continue;
+          const abody = alt.childForFieldName("body");
+          if (alt.type === "else_if_clause") {
+            const acond = alt.childForFieldName("condition");
+            branches.push({
+              visitCond: (e) => { if (acond) walk(acond, e); },
+              guards: () => (acond ? guardsOfConditionPHP(acond, root) : []),
+              body: (e) => (abody ? walk(abody, e) : false),
+            });
+          } else if (alt.type === "else_clause") {
+            branches.push({ body: (e) => (abody ? walk(abody, e) : false) });
+          }
+        }
+        return walkIfChain(env, branches);
       }
-      if (wasCleared(m, cls)) cleared = true;
-    }
-    if (cleared) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
-  }
 
-  if (node.type === "function_call_expression") {
-    checkFunctionCallSink(node, ctx, taintMask, env);
-    const fnNode = node.childForFieldName("function");
-    if (fnNode?.type === "name" && ctx.localFunctions.has(fnNode.text)) {
-      seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
-    }
-  }
-  if (node.type === "member_call_expression") {
-    checkMemberCallSink(node, ctx, taintMask, env);
-    const methodName = node.childForFieldName("name")?.text;
-    if (methodName && ctx.localFunctions.has(methodName)) {
-      seedLocalFunctionParams(methodName, argListOfPHP(node), env, ctx);
-    }
-  }
-  if (node.type === "include_expression" || node.type === "require_expression"
-      || node.type === "include_once_expression" || node.type === "require_once_expression") {
-    checkIncludeExpressionSink(node, ctx, taintMask, env);
-  }
+      case "conditional_expression": {
+        // `c ? a : b` -- arms are walked on cloned envs with the condition's guards
+        const cond = node.childForFieldName("condition");
+        const cons = node.childForFieldName("body");
+        const alt = node.childForFieldName("alternative");
+        walkIfChain(env, [
+          {
+            visitCond: (e) => { if (cond) walk(cond, e); },
+            guards: () => (cond ? guardsOfConditionPHP(cond, root) : []),
+            body: (e) => { if (cons) walk(cons, e); return false; },
+          },
+          { body: (e) => { if (alt) walk(alt, e); return false; } },
+        ]);
+        return false;
+      }
 
-  for (const child of node.namedChildren) {
-    if (child) walkForDeclarationsAndSinks(child, env, ctx);
-  }
+      case "foreach_statement": {
+        const named = node.namedChildren.filter((c): c is SyntaxNode => !!c);
+        const subject = named[0];
+        const body = node.childForFieldName("body");
+        const target = named.find((c, i) => i > 0 && c.id !== body?.id) ?? null;
+        if (subject) walk(subject, env);
+        const rmask = subject ? taintMask(subject, env) : 0;
+        if (target) bindTargets(target, rmask, env);
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "for_statement": {
+        for (const f of ["initialize", "condition"]) for (const c of node.childrenForFieldName(f)) if (c) walk(c, env);
+        const body = node.childForFieldName("body");
+        const updates = node.childrenForFieldName("update");
+        return walkLoop(env, (e) => {
+          const t = body ? walk(body, e) : false;
+          if (!t) for (const u of updates) if (u) walk(u, e);
+          return t;
+        });
+      }
+
+      case "while_statement": {
+        const cond = node.childForFieldName("condition");
+        if (cond) walk(cond, env);
+        const body = node.childForFieldName("body");
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "do_statement": {
+        const body = node.childForFieldName("body");
+        const cond = node.childForFieldName("condition");
+        const term = walkLoop(env, (e) => (body ? walk(body, e) : false));
+        if (cond) walk(cond, env);
+        return term;
+      }
+
+      case "try_statement": {
+        const body = node.childForFieldName("body");
+        const finallyC = node.namedChildren.find(c => c?.type === "finally_clause");
+        const catches = node.namedChildren
+          .filter(c => c?.type === "catch_clause")
+          .map(c => {
+            const nm = c!.childForFieldName("name");
+            const bind = nm ? variableNamesIn(nm) : [];
+            const cbody = c!.childForFieldName("body");
+            return { bind, body: (e: Env) => (cbody ? walk(cbody, e) : false) };
+          });
+        return walkTry(
+          env,
+          (e) => (body ? walk(body, e) : false),
+          catches,
+          finallyC ? (e) => { const fb = finallyC.childForFieldName("body"); return fb ? walk(fb, e) : false; } : undefined,
+        );
+      }
+
+      case "switch_statement": {
+        const cond = node.childForFieldName("condition");
+        if (cond) walk(cond, env);
+        const inner = cond?.type === "parenthesized_expression" ? cond.namedChildren[0] : cond;
+        const subject = inner?.type === "variable_name" ? variableBareName(inner) : null;
+        const clauses = (node.childForFieldName("body") ?? node).namedChildren
+          .filter(c => c?.type === "case_statement" || c?.type === "default_statement");
+        return walkSwitch(env, clauses.map(cl => {
+          const value = cl!.childForFieldName("value");
+          const stmts = cl!.namedChildren.filter(c => !!c && c.id !== value?.id);
+          return {
+            isDefault: cl!.type === "default_statement",
+            // `case "a":` (loose comparison: string literals only) -- inside, the subject IS that literal.
+            pre: (e: Env) => { if (subject && value && isStringLiteralPHP(value)) applyGuards(e, [subject]); },
+            body: (e: Env) => walkStmts(stmts, e),
+          };
+        }));
+      }
+
+      case "match_expression": {
+        const cond = node.childForFieldName("condition");
+        if (cond) walk(cond, env);
+        const inner = cond?.type === "parenthesized_expression" ? cond.namedChildren[0] : cond;
+        const subject = inner?.type === "variable_name" ? variableBareName(inner) : null;
+        const arms = (node.childForFieldName("body") ?? node).namedChildren
+          .filter(c => c?.type === "match_conditional_expression" || c?.type === "match_default_expression");
+        walkSwitch(env, arms.map(arm => {
+          const conds = (arm!.childForFieldName("conditional_expressions")?.namedChildren ?? []).filter((c): c is SyntaxNode => !!c);
+          const result = arm!.childForFieldName("return_expression");
+          return {
+            isDefault: arm!.type === "match_default_expression",
+            // `match` uses strict identity: inside an arm of literals the subject IS one of them.
+            pre: (e: Env) => { if (subject && conds.length > 0 && conds.every(isLiteralPHP)) applyGuards(e, [subject]); },
+            body: (e: Env) => { if (result) walk(result, e); return false; },
+          };
+        }));
+        return false;
+      }
+
+      case "return_statement": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        const v = node.namedChildren[0];
+        if (v) opts.onReturn?.(v, env, taintMask);
+        return true;
+      }
+
+      case "exit_statement":
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        return true;
+
+      case "expression_statement": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        return statementTerminatesPHP(node);
+      }
+
+      default:
+        break;
+    }
+
+    if (node.type === "assignment_expression") {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      const mask = right ? taintMask(right, env) : 0;
+      if (left?.type === "variable_name") {
+        const varName = variableBareName(left);
+        if (varName) {
+          env.set(varName, mask);
+          // $var = new ClassName(...) -- class-name tracking (see
+          // EngineCtx.varTypes's own docblock). className extraction reuses
+          // the exact same technique collectBolaFindings' own
+          // object_creation_expression loop already uses below.
+          if (right?.type === "object_creation_expression") {
+            const classNameNode = right.namedChildren.find(c => c && c.type === "name");
+            if (classNameNode) ctx.varTypes.set(varName, classNameNode.text);
+          }
+        }
+      } else if (left?.type === "member_access_expression") {
+        const key = calleeTextPHP(left);
+        if (key) env.set(key, mask);
+      } else if (left?.type === "list_literal" || left?.type === "array_creation_expression") {
+        // [$a, $b] = f() / list($a, $b) = f() -- every target receives the value's taint
+        bindTargets(left, mask, env);
+      } else if (left?.type === "subscript_expression") {
+        // $arr['k'] = tainted -- the read side (`$arr['k']`) resolves to the base variable, so OR into it
+        const base = left.namedChildren[0];
+        const baseName = base?.type === "variable_name" ? variableBareName(base) : null;
+        if (baseName) env.set(baseName, (env.get(baseName) ?? 0) | mask);
+      }
+    }
+
+    // `$x .= y` / `$x += y` / `$x ??= y` keep whatever taint $x already had (OR), unlike plain `=`.
+    if (node.type === "augmented_assignment_expression") {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      const mask = right ? taintMask(right, env) : 0;
+      if (left?.type === "variable_name") {
+        const varName = variableBareName(left);
+        if (varName) env.set(varName, mask | (env.get(varName) ?? 0));
+      } else if (left?.type === "member_access_expression") {
+        const key = calleeTextPHP(left);
+        if (key) env.set(key, mask | (env.get(key) ?? 0));
+      } else if (left?.type === "subscript_expression") {
+        const base = left.namedChildren[0];
+        const baseName = base?.type === "variable_name" ? variableBareName(base) : null;
+        if (baseName) env.set(baseName, (env.get(baseName) ?? 0) | mask);
+      }
+    }
+
+    if (node.type === "echo_statement" || node.type === "print_statement") {
+      const cls = classOf("xss");
+      let cleared = false;
+      for (const child of node.namedChildren) {
+        if (!child) continue;
+        const m = taintMask(child, env);
+        if (m & cls) {
+          emit(ctx, "xss", node, child.text, node.type === "echo_statement" ? "echo" : "print");
+          cleared = false;
+          break;
+        }
+        if (wasCleared(m, cls)) cleared = true;
+      }
+      if (cleared) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+    }
+
+    if (node.type === "function_call_expression") {
+      checkFunctionCallSink(node, ctx, taintMask, env);
+      const fnNode = node.childForFieldName("function");
+      if (fnNode?.type === "name" && ctx.localFunctions.has(fnNode.text)) {
+        seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
+      }
+    }
+    if (node.type === "member_call_expression") {
+      checkMemberCallSink(node, ctx, taintMask, env);
+      const methodName = node.childForFieldName("name")?.text;
+      if (methodName && ctx.localFunctions.has(methodName)) {
+        seedLocalFunctionParams(methodName, argListOfPHP(node), env, ctx);
+      }
+    }
+    if (node.type === "include_expression" || node.type === "require_expression"
+        || node.type === "include_once_expression" || node.type === "require_once_expression") {
+      checkIncludeExpressionSink(node, ctx, taintMask, env);
+    }
+
+    for (const child of node.namedChildren) if (child) walk(child, env);
+    return false;
+  };
+
+  return { walk, taintMask };
+}
+
+/** Main-scan entry: walks one function body / top-level statement (or a seeded re-walk) with sink checks and call-site seeding. */
+function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx): boolean {
+  return createWalkerPHP(ctx, { descendFunctions: true }).walk(node, env);
 }
 
 // ── BOLA: sink shapes, ownership-comparison detection, per-function emission ──
@@ -767,7 +1216,7 @@ const BOLA_LOOKUP_TAILS = new Set(["find", "findOrFail", "first", "get"]);
 // failed against real parsed text before this was added).
 const PRINCIPAL_NAME_RE = /^(?:\$_SESSION\b|Auth::|auth\(\))/;
 
-interface BolaSinkCandidate { node: SyntaxNode; sourceExpr: string; sinkExpr: string }
+interface BolaSinkCandidate { node: SyntaxNode; sourceExpr: string; sinkExpr: string; idNames: Set<string> }
 
 function isPrincipalShaped(text: string): boolean {
   return PRINCIPAL_NAME_RE.test(text);
@@ -799,6 +1248,116 @@ function resolveRecentAssignmentRHS(bodyNodes: SyntaxNode[], varName: string, be
   return found;
 }
 
+/** Does `left`/`right` compare a resource id (one of `ids`) with the authenticated principal? */
+function ownershipComparisonPHP(left: SyntaxNode, right: SyntaxNode, ids: Set<string>): boolean {
+  const lIsRes = variableNamesIn(left).some(id => ids.has(id));
+  const rIsRes = variableNamesIn(right).some(id => ids.has(id));
+  return (lIsRes && isPrincipalShaped(right.text)) || (isPrincipalShaped(left.text) && rIsRes);
+}
+
+type SidePHP = "true" | "false";
+
+/** Which side(s) of `cond` establish that a resource id in `ids` equals the
+ * authenticated principal (`==`/`===` hold on the true side, `!=`/`!==` on
+ * the false side; `!`/`&&`/`||` compose like validation guards do). A bare
+ * `$isOwner` variable resolves ONE hop to its most recent assignment. */
+function ownershipSidesPHP(cond: SyntaxNode, ids: Set<string>, bodyNodes: SyntaxNode[], resolve = true): SidePHP[] {
+  const flip = (s: SidePHP): SidePHP => (s === "true" ? "false" : "true");
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? ownershipSidesPHP(inner, ids, bodyNodes, resolve) : [];
+    }
+    case "unary_op_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.childForFieldName("argument") ?? cond.namedChildren[0];
+      return inner ? ownershipSidesPHP(inner, ids, bodyNodes, resolve).map(flip) : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      if (op === "==" || op === "===") return ownershipComparisonPHP(l, r, ids) ? ["true"] : [];
+      if (op === "!=" || op === "!==") return ownershipComparisonPHP(l, r, ids) ? ["false"] : [];
+      if (op === "&&" || op === "and") return [...ownershipSidesPHP(l, ids, bodyNodes, resolve), ...ownershipSidesPHP(r, ids, bodyNodes, resolve)].filter(s => s === "true");
+      if (op === "||" || op === "or") return [...ownershipSidesPHP(l, ids, bodyNodes, resolve), ...ownershipSidesPHP(r, ids, bodyNodes, resolve)].filter(s => s === "false");
+      return [];
+    }
+    case "variable_name": {
+      if (!resolve) return [];
+      const name = variableBareName(cond);
+      const rhs = name ? resolveRecentAssignmentRHS(bodyNodes, name, cond) : null;
+      return rhs ? ownershipSidesPHP(rhs, ids, bodyNodes, false) : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Does an ownership comparison DOMINATE `sink`? It must (a) sit in an if
+ * condition (or ternary, or `abort_if`/`abort_unless`) that precedes the sink
+ * in source order and (b) put the sink on the continuing path: the sink is in
+ * the arm where the comparison establishes ownership, or the other arm always
+ * terminates (return/throw/exit/die/abort) and the sink comes after the whole
+ * if. A comparison that is unused, follows the lookup, or guards a different
+ * branch no longer suppresses.
+ */
+function ownershipDominatesPHP(sink: SyntaxNode, ids: Set<string>, bodyNodes: SyntaxNode[]): boolean {
+  const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
+    !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
+  let found = false;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "if_statement") {
+      const cond = n.childForFieldName("condition");
+      const body = n.childForFieldName("body");
+      const alts = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+      const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        const inAlts = alts.some(a => contains(a, sink));
+        const altsAllTerminate = alts.some(a => a.type === "else_clause") && alts.every(a => statementTerminatesPHP(a.childForFieldName("body")));
+        if (sides.includes("true") && (contains(body, sink) || (afterIf && altsAllTerminate))) found = true;
+        if (sides.includes("false") && (inAlts || (afterIf && statementTerminatesPHP(body)))) found = true;
+      }
+    } else if (n.type === "else_if_clause") {
+      const cond = n.childForFieldName("condition");
+      const body = n.childForFieldName("body");
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        if (sides.includes("true") && contains(body, sink)) found = true;
+      }
+    } else if (n.type === "conditional_expression") {
+      const cond = n.childForFieldName("condition");
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        if (sides.includes("true") && contains(n.childForFieldName("body"), sink)) found = true;
+        if (sides.includes("false") && contains(n.childForFieldName("alternative"), sink)) found = true;
+      }
+    } else if (n.type === "expression_statement") {
+      // abort_if($id != Auth::id(), 403); abort_unless($id == Auth::id(), 403);
+      const call = n.namedChildren[0];
+      const fnNode = call?.type === "function_call_expression" ? call.childForFieldName("function") : null;
+      const fnName = fnNode?.type === "name" ? fnNode.text.toLowerCase() : "";
+      const isIf = fnName === "abort_if" || fnName === "throw_if";
+      const isUnless = fnName === "abort_unless" || fnName === "throw_unless";
+      if ((isIf || isUnless) && call && n.endIndex <= sink.startIndex && contains(n.parent, sink)) {
+        const cond = argListOfPHP(call)[0];
+        if (cond) {
+          const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+          // abort_if(c) aborts when c is true, so what follows runs with c false
+          if (sides.includes(isIf ? "false" : "true")) found = true;
+        }
+      }
+    }
+    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+  };
+  for (const b of bodyNodes) visit(b);
+  return found;
+}
+
 // Takes an array of body-ish nodes (a single function/method body, OR the
 // scattered top-level statement siblings of a framework-less PHP script --
 // see this function's two call sites in scanAstTaintPHP) rather than a
@@ -807,6 +1366,10 @@ function resolveRecentAssignmentRHS(bodyNodes: SyntaxNode[], varName: string, be
 // off of at all -- collectBolaFindings used to be structurally uncallable
 // for it for that reason alone, confirmed directly, not any other gating
 // logic inside this function.
+//
+// Candidates are collected first, then each is emitted unless an ownership
+// comparison for ITS resource id dominates it (ownershipDominatesPHP) -- not
+// merely "a comparison exists somewhere in the function".
 function collectBolaFindings(
   bodyNodes: SyntaxNode[], resourceIdParamNames: Set<string>, authMeta: FuncAuthMeta, ctx: EngineCtx,
 ) {
@@ -815,7 +1378,8 @@ function collectBolaFindings(
   if (authMeta.suppressedByAuthCheck) return;
 
   const candidates: BolaSinkCandidate[] = [];
-  let hasOwnershipComparison = false;
+  const idsIn = (n: SyntaxNode | null | undefined): Set<string> =>
+    new Set(variableNamesIn(n).filter(id => resourceIdParamNames.has(id)));
 
   const memberAndScopedCalls = bodyNodes.flatMap(b =>
     [...findAllNodes(b, "member_call_expression"), ...findAllNodes(b, "scoped_call_expression")]);
@@ -829,9 +1393,9 @@ function collectBolaFindings(
       // query), regardless of whatever ->get()/->first()/->delete() the
       // chain ends with -- that final call isn't where the resource id
       // actually appears.
-      const argIds = findAllNodes(args[1], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-      if (argIds.some(id => resourceIdParamNames.has(id))) {
-        candidates.push({ node: shape, sourceExpr: args[1].text, sinkExpr: calleeTextPHP(shape) ?? methodName });
+      const idNames = idsIn(args[1]);
+      if (idNames.size > 0) {
+        candidates.push({ node: shape, sourceExpr: args[1].text, sinkExpr: calleeTextPHP(shape) ?? methodName, idNames });
       }
       continue;
     }
@@ -841,23 +1405,23 @@ function collectBolaFindings(
       // verbs above (`$sql = "SELECT ... '$accountId'"; $conn->query($sql);`
       // -- the resource id never appears as the call's own argument, only
       // inside whatever built the $sql string on an earlier line).
-      const directIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
+      const directNames = variableNamesIn(args[0]);
       let sourceExprText = args[0].text;
-      let matched = directIds.some(id => resourceIdParamNames.has(id));
-      if (!matched && directIds.length === 1) {
-        const rhs = resolveRecentAssignmentRHS(bodyNodes, directIds[0], shape);
+      let idNames = idsIn(args[0]);
+      if (idNames.size === 0 && directNames.length === 1) {
+        const rhs = resolveRecentAssignmentRHS(bodyNodes, directNames[0], shape);
         if (rhs) {
-          const rhsIds = findAllNodes(rhs, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-          if (rhsIds.some(id => resourceIdParamNames.has(id))) { matched = true; sourceExprText = rhs.text; }
+          const rhsIds = idsIn(rhs);
+          if (rhsIds.size > 0) { idNames = rhsIds; sourceExprText = rhs.text; }
         }
       }
-      if (matched) candidates.push({ node: shape, sourceExpr: sourceExprText, sinkExpr: calleeTextPHP(shape) ?? methodName });
+      if (idNames.size > 0) candidates.push({ node: shape, sourceExpr: sourceExprText, sinkExpr: calleeTextPHP(shape) ?? methodName, idNames });
       continue;
     }
     if (!BOLA_LOOKUP_TAILS.has(methodName) || args.length === 0) continue;
-    const argIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-    if (argIds.some(id => resourceIdParamNames.has(id))) {
-      candidates.push({ node: shape, sourceExpr: args[0].text, sinkExpr: calleeTextPHP(shape) ?? methodName });
+    const idNames = idsIn(args[0]);
+    if (idNames.size > 0) {
+      candidates.push({ node: shape, sourceExpr: args[0].text, sinkExpr: calleeTextPHP(shape) ?? methodName, idNames });
     }
   }
   for (const oc of bodyNodes.flatMap(b => findAllNodes(b, "object_creation_expression"))) {
@@ -865,29 +1429,16 @@ function collectBolaFindings(
     if (!classNameNode) continue;
     const args = argListOfPHP(oc);
     if (args.length === 0) continue;
-    const argIds = findAllNodes(args[0], "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n);
-    if (argIds.some(id => resourceIdParamNames.has(id))) {
-      candidates.push({ node: oc, sourceExpr: args[0].text, sinkExpr: `new ${classNameNode.text}` });
+    const idNames = idsIn(args[0]);
+    if (idNames.size > 0) {
+      candidates.push({ node: oc, sourceExpr: args[0].text, sinkExpr: `new ${classNameNode.text}`, idNames });
     }
   }
-  for (const bin of bodyNodes.flatMap(b => findAllNodes(b, "binary_expression"))) {
-    const op = bin.childForFieldName("operator")?.type;
-    if (op !== "==" && op !== "===" && op !== "!=" && op !== "!==") continue;
-    const left = bin.childForFieldName("left");
-    const right = bin.childForFieldName("right");
-    if (!left || !right) continue;
-    const lIds = new Set(findAllNodes(left, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n));
-    const rIds = new Set(findAllNodes(right, "variable_name").map(n => variableBareName(n)).filter((n): n is string => !!n));
-    const lIsRes = [...lIds].some(id => resourceIdParamNames.has(id));
-    const rIsRes = [...rIds].some(id => resourceIdParamNames.has(id));
-    const lIsPrin = isPrincipalShaped(left.text);
-    const rIsPrin = isPrincipalShaped(right.text);
-    if ((lIsRes && rIsPrin) || (lIsPrin && rIsRes)) hasOwnershipComparison = true;
-  }
 
-  if (!hasOwnershipComparison) {
-    const severity: "medium" | "high" = authMeta.verbTier === "read" ? "medium" : "high";
-    for (const c of candidates) emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+  const severity: "medium" | "high" = authMeta.verbTier === "read" ? "medium" : "high";
+  for (const c of candidates) {
+    if (ownershipDominatesPHP(c.node, c.idNames, bodyNodes)) continue;
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
   }
 }
 
@@ -904,7 +1455,7 @@ export function scanAstTaintPHP(
     const localFunctions = collectLocalFunctions(root);
     const ctx: EngineCtx = {
       content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
-      findings: [], seen: new Set(), varTypes: new Map(), suppressed: suppressedOut,
+      findings: [], seen: new Set(), varTypes: new Map(), root, suppressed: suppressedOut,
     };
 
     const propagating = buildPropagatingMapPHP(localFunctions, ctx);
@@ -925,6 +1476,11 @@ export function scanAstTaintPHP(
     // dropped just because it's not inside a named function.
     const topLevelEnv: Env = new Map();
     const topLevelChildren: SyntaxNode[] = [];
+    // Deliberately NOT pruning code after a top-level `exit;`/`die;`/`return;`:
+    // framework-less scripts (and vulnerable-by-design samples) routinely
+    // concatenate independent snippets, and treating everything after the
+    // first bare `exit;` as dead silently dropped six real findings on a
+    // benchmark file. Inside function bodies the pruning stays.
     for (const child of root.namedChildren) {
       if (child && child.type !== "function_definition" && child.type !== "class_declaration") {
         walkForDeclarationsAndSinks(child, topLevelEnv, ctx);

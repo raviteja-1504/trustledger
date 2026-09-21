@@ -51,7 +51,10 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
-import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import {
+  ALL, applyClears, applyGuards, classOf, cloneEnv, guardedNames, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
 // See astTaintPython.ts's identical helper for why: require.resolve(...)
@@ -317,10 +320,9 @@ function matchIdorGo(call: SyntaxNode): SinkMatch | null {
 // callback below -- both must fail to suppress for an idor finding to fire,
 // so this can only ever REDUCE false positives further, never introduce
 // new ones, and needs zero scanner.ts wiring changes (the callback stays
-// exactly as-is). Same scope and same documented non-goal as Java's own
-// check (no branch/CFG awareness): "is there a real ownership comparison
-// ANYWHERE in the enclosing function", not "does it correctly gate this
-// specific sink".
+// exactly as-is). Dominance-aware: the comparison must precede the sink and
+// put it on the continuing path (see ownershipDominatesGo), not merely exist
+// somewhere in the enclosing function.
 
 /** Gin/Echo/Fiber principal-lookup vocabulary -- the same specific tokens
  * IDOR_AUTH_CHECK_NEARBY_RE (scanner.ts) already matches as line text
@@ -339,44 +341,130 @@ function isPrincipalShapedGo(node: SyntaxNode): boolean {
   return false;
 }
 
+const GO_FUNCTION_NODES = new Set(["function_declaration", "method_declaration", "func_literal"]);
+
 function findEnclosingFunctionNodeGo(node: SyntaxNode): SyntaxNode | null {
   let cur: SyntaxNode | null = node;
   while (cur) {
-    if (cur.type === "function_declaration" || cur.type === "method_declaration") return cur;
+    if (GO_FUNCTION_NODES.has(cur.type)) return cur;
     cur = cur.parent;
   }
   return null;
 }
 
-/** Does `fnBody` contain a `==`/`!=` binary_expression, or a `.Equal(...)`
- * call, comparing the bare identifier `resourceIdName` against a
- * principal-shaped expression (isPrincipalShapedGo above)? Purely
- * structural, independent of env/taint -- same posture as Java's
- * comparisonSuppresses/comparisonSuppressesEquals, which this mirrors. */
-function hasStructuralOwnershipComparisonGo(resourceIdName: string, fnBody: SyntaxNode): boolean {
-  let found = false;
-  const isResourceId = (n: SyntaxNode | null) => !!n && n.type === "identifier" && n.text === resourceIdName;
-  const visit = (n: SyntaxNode) => {
-    if (found) return;
-    if (n.type === "binary_expression") {
-      const op = n.childForFieldName("operator")?.type;
+// Calls that never return -- an arm ending in one cannot continue.
+const TERMINATING_CALLS_GO = new Set([
+  "panic", "os.Exit", "log.Fatal", "log.Fatalf", "log.Fatalln", "log.Panic", "log.Panicf", "log.Panicln",
+]);
+
+/** True when control cannot fall out of the end of `n` (return / panic-like
+ * call, a block containing one, or an if whose every arm does). */
+function statementTerminatesGo(n: SyntaxNode | null): boolean {
+  if (!n) return false;
+  if (n.type === "return_statement") return true;
+  if (n.type === "expression_statement") {
+    const call = n.namedChildren[0];
+    if (call?.type === "call_expression") {
+      const fn = call.childForFieldName("function");
+      const text = fn ? calleeTextGo(fn) : null;
+      return !!text && TERMINATING_CALLS_GO.has(text);
+    }
+    return false;
+  }
+  if (n.type === "block") return n.namedChildren.some(c => statementTerminatesGo(c));
+  if (n.type === "if_statement") {
+    const alt = n.childForFieldName("alternative");
+    return !!alt && statementTerminatesGo(n.childForFieldName("consequence")) && statementTerminatesGo(alt);
+  }
+  return false;
+}
+
+type SideGo = "true" | "false";
+
+/** Which side(s) of `cond` establish that `id` is compared equal to the
+ * authenticated principal (`==` holds on the true side, `!=` on the false
+ * side; `!`/`&&`/`||` compose like validation guards do). An identifier
+ * condition (`isOwner`) resolves ONE hop to its last preceding assignment. */
+function ownershipSidesGo(cond: SyntaxNode, id: string, fnBody: SyntaxNode, resolve = true): SideGo[] {
+  const isId = (n: SyntaxNode | null) => !!n && n.type === "identifier" && n.text === id;
+  const flip = (s: SideGo): SideGo => (s === "true" ? "false" : "true");
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? ownershipSidesGo(inner, id, fnBody, resolve) : [];
+    }
+    case "unary_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.namedChildren[0];
+      return inner ? ownershipSidesGo(inner, id, fnBody, resolve).map(flip) : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
       if (op === "==" || op === "!=") {
-        const left = n.childForFieldName("left");
-        const right = n.childForFieldName("right");
-        if ((isResourceId(left) && right && isPrincipalShapedGo(right)) ||
-            (isResourceId(right) && left && isPrincipalShapedGo(left))) {
-          found = true;
-        }
+        const hit = (isId(l) && isPrincipalShapedGo(r)) || (isId(r) && isPrincipalShapedGo(l));
+        return hit ? [op === "==" ? "true" : "false"] : [];
       }
-    } else if (n.type === "call_expression") {
-      const fn = n.childForFieldName("function");
+      if (op === "&&") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s === "true");
+      if (op === "||") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s === "false");
+      return [];
+    }
+    case "call_expression": {
+      const fn = cond.childForFieldName("function");
       if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Equal") {
         const operand = fn.childForFieldName("operand");
-        const arg0 = argListOfGo(n)[0] ?? null;
-        if ((isResourceId(operand) && arg0 && isPrincipalShapedGo(arg0)) ||
-            (isResourceId(arg0) && operand && isPrincipalShapedGo(operand))) {
-          found = true;
+        const arg0 = argListOfGo(cond)[0] ?? null;
+        if ((isId(operand) && arg0 && isPrincipalShapedGo(arg0)) || (isId(arg0) && operand && isPrincipalShapedGo(operand))) return ["true"];
+      }
+      return [];
+    }
+    case "identifier": {
+      if (!resolve) return [];
+      let best: SyntaxNode | null = null;
+      const visit = (n: SyntaxNode) => {
+        if ((n.type === "short_var_declaration" || n.type === "assignment_statement") && n.endIndex <= cond.startIndex) {
+          const left = n.childForFieldName("left");
+          const right = n.childForFieldName("right");
+          const ids = left ? left.namedChildren.filter(c => !!c) : [];
+          if (ids.length === 1 && ids[0]!.text === cond.text && right?.namedChildren.length === 1) {
+            if (!best || n.endIndex > best.endIndex) best = right.namedChildren[0]!;
+          }
         }
+        for (const c of n.namedChildren) if (c) visit(c);
+      };
+      visit(fnBody);
+      return best ? ownershipSidesGo(best, id, fnBody, false) : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Does an ownership comparison for `id` DOMINATE `sink`? It must (a) sit in
+ * an if condition that precedes the sink in source order and (b) put the
+ * sink on the continuing path: the sink is in the arm where the comparison
+ * establishes ownership, or the arm where it does not always terminates and
+ * the sink comes after the whole if. A comparison that is unused, follows
+ * the lookup, or guards a different branch no longer suppresses.
+ */
+function ownershipDominatesGo(sink: SyntaxNode, id: string, fnBody: SyntaxNode): boolean {
+  const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
+    !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
+  let found = false;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "if_statement") {
+      const cond = n.childForFieldName("condition");
+      const cons = n.childForFieldName("consequence");
+      const alt = n.childForFieldName("alternative");
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = ownershipSidesGo(cond, id, fnBody);
+        const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
+        if (sides.includes("true") && (contains(cons, sink) || (afterIf && statementTerminatesGo(alt)))) found = true;
+        if (sides.includes("false") && (contains(alt, sink) || (afterIf && statementTerminatesGo(cons)))) found = true;
       }
     }
     if (!found) for (const c of n.namedChildren) if (c) visit(c);
@@ -395,7 +483,7 @@ function structuralOwnershipCheckSuppressesGo(sinkNode: SyntaxNode, resourceIdEx
   const enclosingFn = findEnclosingFunctionNodeGo(sinkNode);
   const fnBody = enclosingFn?.childForFieldName("body");
   if (!fnBody) return false;
-  return hasStructuralOwnershipComparisonGo(resourceIdExpr.text, fnBody);
+  return ownershipDominatesGo(sinkNode, resourceIdExpr.text, fnBody);
 }
 
 // ── Taint environment / propagation ─────────────────────────────────────────
@@ -415,10 +503,12 @@ function paramShapesOfGo(fn: SyntaxNode): ParamShape[] {
   const shapes: ParamShape[] = [];
   let index = 0;
   for (const p of params.namedChildren) {
-    if (!p || p.type !== "parameter_declaration") continue;
-    const name = p.childForFieldName("name")?.text;
-    if (name) shapes.push({ name, index });
-    index++;
+    if (!p || (p.type !== "parameter_declaration" && p.type !== "variadic_parameter_declaration")) continue;
+    // `a, b string` is ONE declaration binding two parameters; an unnamed
+    // parameter (`func(string)`) still occupies a position.
+    const names = p.childrenForFieldName("name").filter((n): n is SyntaxNode => !!n);
+    if (names.length === 0) { index++; continue; }
+    for (const nm of names) shapes.push({ name: nm.text, index: index++ });
   }
   return shapes;
 }
@@ -500,6 +590,10 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       const operand = node.childForFieldName("operand");
       return (path ? (env.get(path) ?? 0) : 0) | (operand ? taintMask(operand, env) : 0);
     }
+    if (node.type === "literal_element") {
+      const inner = node.namedChildren[0];
+      return inner ? taintMask(inner, env) : 0;
+    }
     if (node.type === "unary_expression") {
       const operand = node.namedChildren[0];
       return operand ? taintMask(operand, env) : 0;
@@ -541,28 +635,23 @@ type TaintMaskFnGo = ReturnType<typeof makeTaintMaskGo>;
  * which threads a bounded, round-capped view of the file's own in-progress
  * propagating map instead.
  */
-function computeReturnTaintPropagatingGo(fn: LocalFn, maskFn: TaintMaskFnGo): Map<number, number> {
+function computeReturnTaintPropagatingGo(
+  fn: LocalFn, localFns: Map<string, LocalFn>, propagating: PropagatingGo, root: SyntaxNode,
+): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
-  const returnValues: SyntaxNode[] = [];
-  const collect = (n: SyntaxNode) => {
-    if (n.type === "return_statement") {
-      const child = n.namedChildren[0];
-      if (child?.type === "expression_list") {
-        for (const v of child.namedChildren) if (v) returnValues.push(v);
-      } else if (child) {
-        returnValues.push(child);
-      }
-      return;
-    }
-    for (const c of n.namedChildren) if (c) collect(c);
-  };
-  collect(fn.body);
   for (const shape of fn.paramShapes) {
+    let surviving = 0;
+    const walker = createWalkerGo({
+      localFns, propagating, root, descendFunctions: false,
+      // Go's multi-value returns (`return a, b`): any returned expression counts.
+      onReturn: (expr, env, mask) => { surviving |= mask(expr, env); },
+    });
     const env: Env = new Map();
     env.set(shape.name, ALL);
+    walker.walk(fn.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
-    const surviving = returnValues.reduce((m, v) => m | maskFn(v, env), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -584,13 +673,12 @@ const MAX_PROPAGATION_ROUNDS = 3;
  * parameter count) -- convergence is never in doubt, the round cap only
  * bounds worst-case cost on a large file's call graph.
  */
-function buildPropagatingMapGo(localFns: Map<string, LocalFn>): PropagatingGo {
+function buildPropagatingMapGo(localFns: Map<string, LocalFn>, root: SyntaxNode): PropagatingGo {
   const propagating: PropagatingGo = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
-    const maskRound = makeTaintMaskGo(localFns, propagating);
     for (const [name, fn] of localFns) {
-      const found = computeReturnTaintPropagatingGo(fn, maskRound);
+      const found = computeReturnTaintPropagatingGo(fn, localFns, propagating, root);
       // Monotonic merge (only ever adds a parameter or adds surviving classes).
       const merged = new Map(propagating.get(name) ?? []);
       let grew = false;
@@ -662,6 +750,391 @@ function assignmentKeyOfGo(target: SyntaxNode): string | null {
   return target.type === "identifier" ? target.text : calleeTextGo(target);
 }
 
+// ── Narrow validation guards ────────────────────────────────────────────────
+// Same policy as the other engines: only unambiguous proofs that a bare
+// identifier is safe -- literal equality, literal-collection membership
+// (`slices.Contains`, or the `_, ok := allowed[x]` map idiom), strict numeric
+// parses (`_, err := strconv.Atoi(x)` then `err != nil`). NOT recognized:
+// regex matches, prefix checks, custom validators.
+
+/** A name bound by a validating statement, resolved when it shows up in a condition. */
+interface ValidationAliasGo { target: string; kind: "ok" | "err" }
+
+const STRICT_PARSE_CALLS_GO = new Set(["strconv.Atoi", "strconv.ParseInt", "strconv.ParseUint", "strconv.ParseFloat", "strconv.ParseBool"]);
+const NUMERIC_TYPES_GO = new Set([
+  "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
+  "float32", "float64", "bool",
+]);
+
+function isLiteralGo(n: SyntaxNode): boolean {
+  if (n.type === "literal_element") return !!n.namedChildren[0] && isLiteralGo(n.namedChildren[0]);
+  if (n.type === "parenthesized_expression") return !!n.namedChildren[0] && isLiteralGo(n.namedChildren[0]);
+  return ["interpreted_string_literal", "raw_string_literal", "int_literal", "float_literal", "rune_literal"].includes(n.type);
+}
+
+/** `[]string{"a","b"}` / `map[string]bool{"a": true}` (all keys/elements literal), or an
+ * identifier EVERY binding of which, file-wide, is such a literal (a name that is
+ * ever rebound to something else is not trusted). */
+function isLiteralCollectionGo(n: SyntaxNode, root: SyntaxNode, depth = 0): boolean {
+  if (n.type === "composite_literal") {
+    const body = n.childForFieldName("body");
+    if (!body) return false;
+    const els = body.namedChildren.filter((c): c is SyntaxNode => !!c);
+    return els.length > 0 && els.every(el => {
+      if (el.type === "keyed_element") return !!el.namedChildren[0] && isLiteralGo(el.namedChildren[0]);
+      return isLiteralGo(el);
+    });
+  }
+  if (n.type === "identifier" && depth === 0) {
+    const bindings: SyntaxNode[] = [];
+    let opaque = false;
+    const visit = (x: SyntaxNode) => {
+      if (x.type === "var_spec") {
+        const names = x.childrenForFieldName("name").filter(c => !!c);
+        const value = x.childForFieldName("value");
+        if (names.some(nm => nm!.text === n.text)) {
+          if (names.length === 1 && value?.namedChildren.length === 1) bindings.push(value.namedChildren[0]!);
+          else opaque = true;
+        }
+      } else if (x.type === "short_var_declaration" || x.type === "assignment_statement") {
+        const left = x.childForFieldName("left");
+        const right = x.childForFieldName("right");
+        const ids = left?.namedChildren.filter(c => !!c) ?? [];
+        if (ids.some(i => i!.type === "identifier" && i!.text === n.text)) {
+          if (ids.length === 1 && right?.namedChildren.length === 1) bindings.push(right.namedChildren[0]!);
+          else opaque = true;
+        }
+      }
+      for (const c of x.namedChildren) if (c) visit(c);
+    };
+    visit(root);
+    return !opaque && bindings.length > 0 && bindings.every(b => isLiteralCollectionGo(b, root, 1));
+  }
+  return false;
+}
+
+function invertGo(g: Guard): Guard {
+  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+}
+
+function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: ReadonlyMap<string, ValidationAliasGo>): Guard[] {
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionGo(inner, root, aliases) : [];
+    }
+    case "unary_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionGo(inner, root, aliases).map(invertGo) : [];
+    }
+    case "identifier": {
+      const a = aliases.get(cond.text);
+      // `_, ok := allowed[x]; if ok {` -- x is a member of a literal allowlist
+      return a?.kind === "ok" ? [{ name: a.target, holds: "true" }] : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      if (op === "&&") return [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "true");
+      if (op === "||") return [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "false");
+      if (op === "==" || op === "!=") {
+        const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
+        if (l.type === "identifier" && isLiteralGo(r)) return [{ name: l.text, holds: holdsWhenEqual }];
+        if (r.type === "identifier" && isLiteralGo(l)) return [{ name: r.text, holds: holdsWhenEqual }];
+        // `err == nil` / `err != nil` after `_, err := strconv.Atoi(x)`
+        if (l.type === "identifier" && r.type === "nil") {
+          const a = aliases.get(l.text);
+          if (a?.kind === "err") return [{ name: a.target, holds: op === "==" ? "true" : "false" }];
+        }
+      }
+      return [];
+    }
+    case "call_expression": {
+      const fn = cond.childForFieldName("function");
+      const text = fn ? calleeTextGo(fn) : null;
+      const args = argListOfGo(cond);
+      if (text === "slices.Contains" && args.length === 2 && args[1].type === "identifier" && isLiteralCollectionGo(args[0], root)) {
+        return [{ name: args[1].text, holds: "true" }];
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves the interprocedural summary builder (no sink checks, no
+// nested functions, collects return masks) and the main scan (sink checks,
+// nested functions walked on a cloned env). Branches walk each arm on a CLONE
+// of the env and join with may-taint OR (shared combinators in
+// taint/taintCore.ts); an arm ending in return/panic is dropped from the
+// join, and code after a terminating statement is dead and not walked.
+
+interface WalkHooksGo {
+  localFns: Map<string, LocalFn>;
+  propagating: PropagatingGo;
+  root: SyntaxNode;
+  /** Sink checks / call-site seeding for one call_expression, with the env at that point. */
+  onCall?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
+  /** Called for each returned value, with the env on that path. */
+  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
+  /** Walk nested function bodies (main scan) or ignore them (summaries). */
+  descendFunctions: boolean;
+}
+
+function paramNamesOfGo(fn: SyntaxNode): string[] {
+  const names: string[] = [];
+  for (const list of [fn.childForFieldName("receiver"), fn.childForFieldName("parameters")]) {
+    if (!list) continue;
+    for (const p of list.namedChildren) {
+      if (!p || (p.type !== "parameter_declaration" && p.type !== "variadic_parameter_declaration")) continue;
+      for (const nm of p.childrenForFieldName("name")) if (nm) names.push(nm.text);
+    }
+  }
+  return names;
+}
+
+function createWalkerGo(h: WalkHooksGo) {
+  const taintMask = makeTaintMaskGo(h.localFns, h.propagating);
+  // Names bound by a validating statement (`_, ok := allowed[x]`), per function.
+  let aliases = new Map<string, ValidationAliasGo>();
+
+  const walkStmts = (nodes: readonly (SyntaxNode | null)[], env: Env): boolean => {
+    for (const c of nodes) if (c && walk(c, env)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walkFunction = (fn: SyntaxNode, env: Env) => {
+    const body = fn.childForFieldName("body");
+    if (!body) return;
+    // A nested function sees captured outer variables (cloned env); its own
+    // parameters shadow same-named outer ones and start untainted.
+    const fenv = cloneEnv(env);
+    for (const p of paramNamesOfGo(fn)) fenv.set(p, 0);
+    const saved = aliases;
+    aliases = new Map();
+    walk(body, fenv);
+    aliases = saved;
+  };
+
+  const rememberAliases = (names: readonly SyntaxNode[], rightVals: readonly SyntaxNode[]) => {
+    for (const n of names) aliases.delete(n.text);
+    if (names.length !== 2 || rightVals.length !== 1) return;
+    const rhs = rightVals[0];
+    const okName = names[1].text;
+    if (rhs.type === "index_expression") {
+      const operand = rhs.childForFieldName("operand");
+      const index = rhs.childForFieldName("index");
+      if (operand && index?.type === "identifier" && isLiteralCollectionGo(operand, h.root)) {
+        aliases.set(okName, { target: index.text, kind: "ok" });
+      }
+    } else if (rhs.type === "call_expression") {
+      const fn = rhs.childForFieldName("function");
+      const text = fn ? calleeTextGo(fn) : null;
+      const arg0 = argListOfGo(rhs)[0];
+      if (text && STRICT_PARSE_CALLS_GO.has(text) && arg0?.type === "identifier") {
+        aliases.set(okName, { target: arg0.text, kind: "err" });
+      }
+    }
+  };
+
+  /** Bind `targets` (env keys, null = unrecognized/blank) from `rightVals`; `compound` ORs with the existing value. */
+  const bind = (targets: readonly (string | null)[], rightVals: readonly SyntaxNode[], env: Env, compound: boolean) => {
+    const put = (key: string | null, mask: number) => {
+      if (key) env.set(key, compound ? mask | (env.get(key) ?? 0) : mask);
+    };
+    if (targets.length > 0 && rightVals.length === 1) {
+      // Single RHS value (possibly Go's multi-return form binding N LHS
+      // targets to one call's multiple return values) -- only the FIRST
+      // target is marked tainted, never trailing ones (by strong Go
+      // convention those are `err`/`ok`, not real data).
+      put(targets[0], taintMask(rightVals[0], env));
+    } else {
+      // Positional 1:1 multi-assignment (`a, b = x, y`) -- assign independently.
+      targets.forEach((key, i) => { if (rightVals[i]) put(key, taintMask(rightVals[i], env)); });
+    }
+  };
+
+  const walk = (node: SyntaxNode, env: Env): boolean => {
+    switch (node.type) {
+      case "function_declaration":
+      case "method_declaration":
+      case "func_literal":
+        if (h.descendFunctions) walkFunction(node, env);
+        return false;
+
+      case "source_file":
+      case "block":
+        return walkStmts(node.namedChildren, env);
+
+      case "expression_statement": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        return statementTerminatesGo(node);
+      }
+
+      case "if_statement": {
+        const branches: Branch[] = [];
+        let cur: SyntaxNode | null = node;
+        while (cur && cur.type === "if_statement") {
+          const init = cur.childForFieldName("initializer");
+          const cond = cur.childForFieldName("condition");
+          const cons = cur.childForFieldName("consequence");
+          branches.push({
+            visitCond: (e) => { if (init) walk(init, e); if (cond) walk(cond, e); },
+            guards: () => (cond ? guardsOfConditionGo(cond, h.root, aliases) : []),
+            body: (e) => (cons ? walk(cons, e) : false),
+          });
+          const alt: SyntaxNode | null = cur.childForFieldName("alternative");
+          if (alt && alt.type !== "if_statement") {
+            branches.push({ body: (e) => walk(alt, e) });
+            cur = null;
+          } else {
+            cur = alt;
+          }
+        }
+        return walkIfChain(env, branches);
+      }
+
+      case "for_statement": {
+        const body = node.childForFieldName("body");
+        const head = node.namedChildren.find(c => !!c && c.id !== body?.id) ?? null;
+        if (head?.type === "range_clause") {
+          const right = head.childForFieldName("right");
+          if (right) walk(right, env);
+          const rmask = right ? taintMask(right, env) : 0;
+          const targets = (head.childForFieldName("left")?.namedChildren ?? []).filter((c): c is SyntaxNode => !!c && c.type === "identifier");
+          // Two targets = (index/key, value): the value carries the element's taint.
+          const carrier = targets.length === 2 ? [targets[1]] : targets;
+          for (const t of targets) env.set(t.text, 0);
+          for (const t of carrier) if (t.text !== "_") env.set(t.text, rmask);
+          return walkLoop(env, (e) => (body ? walk(body, e) : false));
+        }
+        let update: SyntaxNode | null = null;
+        if (head?.type === "for_clause") {
+          const init = head.childForFieldName("initializer");
+          const cond = head.childForFieldName("condition");
+          update = head.childForFieldName("update");
+          if (init) walk(init, env);
+          if (cond) walk(cond, env);
+        } else if (head) {
+          walk(head, env);
+        }
+        return walkLoop(env, (e) => {
+          const t = body ? walk(body, e) : false;
+          if (!t && update) walk(update, e);
+          return t;
+        });
+      }
+
+      case "expression_switch_statement": {
+        const init = node.childForFieldName("initializer");
+        if (init) walk(init, env);
+        const value = node.childForFieldName("value");
+        if (value) walk(value, env);
+        const subject = value?.type === "identifier" ? value.text : null;
+        const clauses = node.namedChildren.filter(c => c?.type === "expression_case" || c?.type === "default_case");
+        return walkSwitch(env, clauses.map(cl => {
+          const caseValue = cl!.childForFieldName("value");
+          const values = (caseValue?.namedChildren ?? []).filter((c): c is SyntaxNode => !!c);
+          const stmts = cl!.namedChildren.filter(c => !!c && c.id !== caseValue?.id);
+          return {
+            isDefault: cl!.type === "default_case",
+            pre: (e: Env) => {
+              // `switch x { case "a", "b": ... }` -- inside, x IS one of the literals.
+              if (subject && values.length > 0 && values.every(isLiteralGo)) applyGuards(e, [subject]);
+              // tagless `switch { case x == "a": ... }` -- each case is a condition.
+              if (!value) for (const v of values) applyGuards(e, guardedNames(guardsOfConditionGo(v, h.root, aliases), "true"));
+            },
+            body: (e: Env) => walkStmts(stmts, e),
+          };
+        }));
+      }
+
+      case "type_switch_statement": {
+        const init = node.childForFieldName("initializer");
+        if (init) walk(init, env);
+        const value = node.childForFieldName("value");
+        if (value) walk(value, env);
+        const subject = value?.type === "identifier" ? value.text : null;
+        const aliasNames = (node.childForFieldName("alias")?.namedChildren ?? []).filter((c): c is SyntaxNode => !!c).map(c => c.text);
+        const vmask = value ? taintMask(value, env) : 0;
+        for (const a of aliasNames) env.set(a, vmask);
+        const clauses = node.namedChildren.filter(c => c?.type === "type_case" || c?.type === "default_case");
+        return walkSwitch(env, clauses.map(cl => {
+          const types = cl!.childrenForFieldName("type").filter((c): c is SyntaxNode => !!c);
+          const typeIds = new Set(types.map(t => t.id));
+          const stmts = cl!.namedChildren.filter(c => !!c && !typeIds.has(c.id));
+          return {
+            isDefault: cl!.type === "default_case",
+            // `case int, float64:` -- a strict numeric/bool type check
+            pre: (e: Env) => {
+              if (types.length > 0 && types.every(t => NUMERIC_TYPES_GO.has(t.text))) applyGuards(e, subject ? [subject, ...aliasNames] : aliasNames);
+            },
+            body: (e: Env) => walkStmts(stmts, e),
+          };
+        }));
+      }
+
+      case "select_statement": {
+        const clauses = node.namedChildren.filter(c => c?.type === "communication_case" || c?.type === "default_case");
+        return walkSwitch(env, clauses.map(cl => {
+          const comm = cl!.childForFieldName("communication");
+          const stmts = cl!.namedChildren.filter(c => !!c && c.id !== comm?.id);
+          return {
+            isDefault: cl!.type === "default_case",
+            pre: (e: Env) => { if (comm) walk(comm, e); },
+            body: (e: Env) => walkStmts(stmts, e),
+          };
+        }));
+      }
+
+      case "return_statement": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        const child = node.namedChildren[0];
+        const values = child?.type === "expression_list" ? child.namedChildren : child ? [child] : [];
+        for (const v of values) if (v) h.onReturn?.(v, env, taintMask);
+        return true;
+      }
+
+      default:
+        break;
+    }
+
+    if (node.type === "short_var_declaration" || node.type === "assignment_statement") {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      if (left && right) {
+        const op = node.text.slice(left.endIndex - node.startIndex, right.startIndex - node.startIndex).trim();
+        const targets = assignmentTargetsOfGo(left);
+        rememberAliases(identifiersOf(left), right.namedChildren.filter((n): n is SyntaxNode => !!n));
+        bind(targets.map(assignmentKeyOfGo), right.namedChildren.filter((n): n is SyntaxNode => !!n), env,
+          op !== "=" && op !== ":=");
+      }
+    }
+
+    // `var q = "SELECT ... " + id`
+    if (node.type === "var_spec") {
+      const names = node.childrenForFieldName("name").filter((n): n is SyntaxNode => !!n);
+      const value = node.childForFieldName("value");
+      if (names.length > 0 && value) {
+        rememberAliases(names, value.namedChildren.filter((n): n is SyntaxNode => !!n));
+        bind(names.map(n => n.text), value.namedChildren.filter((n): n is SyntaxNode => !!n), env, false);
+      }
+    }
+
+    if (node.type === "call_expression") h.onCall?.(node, env, taintMask);
+
+    for (const c of node.namedChildren) if (c) walk(c, env);
+    return false;
+  };
+
+  return { walk, taintMask };
+}
+
 /**
  * Walks the whole tree once: tracks taint through env, seeds tainted
  * parameters into same-file callees on tainted call sites (one hop, mirrors
@@ -681,7 +1154,7 @@ export function scanAstTaintGo(
     if (!root) return [];
 
     const localFns = collectLocalFunctionsGo(root);
-    const propagating = buildPropagatingMapGo(localFns);
+    const propagating = buildPropagatingMapGo(localFns, root);
 
     const findings: AstTaintGoFinding[] = [];
     const seen = new Set<string>();
@@ -719,155 +1192,122 @@ export function scanAstTaintGo(
       return undefined;
     };
 
-    const walk = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => {
-      if (node.type === "short_var_declaration" || node.type === "assignment_statement") {
-        const left = node.childForFieldName("left");
-        const right = node.childForFieldName("right");
-        if (left && right) {
-          const leftTargets = assignmentTargetsOfGo(left);
-          const rightVals = right.namedChildren.filter((n): n is SyntaxNode => !!n);
-          if (leftTargets.length > 0 && rightVals.length === 1) {
-            // Single RHS value (possibly Go's multi-return form binding N
-            // LHS targets to one call's multiple return values) -- per the
-            // approved plan's Decision 6, only the FIRST LHS target is ever
-            // marked tainted, never trailing ones (by strong Go convention
-            // those are typically `err`/`ok`, not real data). Deliberately
-            // conservative: avoids "the error variable is attacker-
-            // controlled" false positives. Also now the single-target case
-            // for a plain field write (`user.Name = input`), where
-            // leftTargets.length is already 1 -- assignmentKeyOfGo resolves
-            // both shapes uniformly.
-            const mask = taintMask(rightVals[0], env);
-            const key = assignmentKeyOfGo(leftTargets[0]);
-            if (key) env.set(key, mask);
-          } else {
-            // Positional 1:1 multi-assignment (`a, b = x, y`, including a
-            // field target: `user.Name, user.Email = a, b`) -- each side has
-            // the same count; assign independently.
-            leftTargets.forEach((target, i) => {
-              const rhs = rightVals[i];
-              const key = assignmentKeyOfGo(target);
-              if (rhs && key) env.set(key, taintMask(rhs, env));
-            });
+    // Sink checks and same-file call-site seeding for one call_expression, with
+    // the env at that point. Statement structure, branching, assignments and
+    // nested functions are the shared walker's job (createWalkerGo).
+    const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => {
+      const fn = node.childForFieldName("function");
+      const args = argListOfGo(node);
+
+      const match = matchSinkGo(node);
+      if (match) {
+        const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
+        if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
+      }
+
+      const sqlMatch = matchSqlInjectionGo(node);
+      if (sqlMatch) {
+        const hit = sinkHit(node, [sqlMatch.args[0]], "sql-injection", env, taintMask);
+        if (hit) emit("sql-injection", node, sourceLabelGo(sqlMatch.args[0]), sqlMatch.sinkExpr);
+      }
+
+      // IDOR asks "is this id attacker-CONTROLLED", not "is it injectable":
+      // classOf("idor") is the CONTROL bit, which numeric coercion
+      // (strconv.Atoi(c.Param("id"))) deliberately does not clear.
+      const idorMatch = matchIdorGo(node);
+      if (idorMatch && sinkHit(node, [idorMatch.args[0]], "idor", env, taintMask)) {
+        const suppressed = (idorAuthCheckNearby?.(lineOf(node)) ?? false) ||
+          structuralOwnershipCheckSuppressesGo(node, idorMatch.args[0]);
+        if (!suppressed) emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
+      }
+
+      // dec.Decode(...) -- receiver-tainted, not arg-tainted: fires if
+      // `dec` itself is tainted (built from gob.NewDecoder(r.Body) or
+      // similar via the propagation rule right below), args are irrelevant.
+      if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Decode") {
+        const operand = fn.childForFieldName("operand");
+        if (operand && sinkHit(node, [operand], "insecure-deserialization", env, taintMask)) {
+          emit("insecure-deserialization", node, sourceLabelGo(operand), calleeTextGo(fn) ?? "Decode");
+        }
+      }
+
+      // gob.NewDecoder(EXPR) -- taints the assignment target if EXPR ends
+      // in .Body/.Conn (an untrusted stream). The enclosing
+      // short_var_declaration/assignment_statement's OWN top-level handling
+      // (above, in this same walk call) already ran and set this target
+      // to `false` via isTainted(gob.NewDecoder(...), env) -- which can
+      // never recognize this call as tainted, since gob.NewDecoder isn't a
+      // recognized source/format-call/local-propagating-fn/tainted-receiver
+      // shape. This deeper, later visit (recursing into the RHS) corrects
+      // that to `true` once we're structurally certain the source stream
+      // is untrusted -- runs after and intentionally overwrites the
+      // outer pass's `false`, not a race.
+      if (fn) {
+        const fnText = calleeTextGo(fn);
+        if (fnText === "gob.NewDecoder" && args[0]) {
+          const argText = calleeTextGo(args[0]) ?? "";
+          if (argText.endsWith(".Body") || argText.endsWith(".Conn")) {
+            const parent = node.parent?.type === "expression_list" ? node.parent.parent : node.parent;
+            if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
+              const left = parent.childForFieldName("left");
+              const ids = left ? identifiersOf(left) : [];
+              if (ids[0]) env.set(ids[0].text, ALL);
+            }
+          }
+        }
+        // http.NewRequest(method, url, body) / NewRequestWithContext(ctx,
+        // method, url, body) -- same "correct the outer pass's false"
+        // pattern as gob.NewDecoder above: taints the assignment target
+        // if the URL argument is tainted, so the later client.Do(req)
+        // sink (via matchSinkGo's passthrough-on-tainted-receiver, since
+        // .Do's own function selector's operand `client` isn't itself
+        // tainted -- `req`, its ARGUMENT, is) resolves correctly. client.Do
+        // is matched generically below via the same receiver-tainted
+        // shape as Decode, since neither is arg-tainted in the usual sense.
+        if ((fnText === "http.NewRequest" || fnText === "http.NewRequestWithContext") && args.length > 0) {
+          const urlArg = fnText === "http.NewRequestWithContext" ? args[2] : args[1];
+          const urlMask = urlArg ? taintMask(urlArg, env) : 0;
+          if (urlArg && (urlMask & ALL)) {
+            const parent = node.parent?.type === "expression_list" ? node.parent.parent : node.parent;
+            if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
+              const left = parent.childForFieldName("left");
+              const ids = left ? identifiersOf(left) : [];
+              if (ids[0]) env.set(ids[0].text, urlMask);
+            }
           }
         }
       }
 
-      if (node.type === "call_expression") {
-        const fn = node.childForFieldName("function");
-        const args = argListOfGo(node);
-
-        const match = matchSinkGo(node);
-        if (match) {
-          const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
-          if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
-        }
-
-        const sqlMatch = matchSqlInjectionGo(node);
-        if (sqlMatch) {
-          const hit = sinkHit(node, [sqlMatch.args[0]], "sql-injection", env, taintMask);
-          if (hit) emit("sql-injection", node, sourceLabelGo(sqlMatch.args[0]), sqlMatch.sinkExpr);
-        }
-
-        // IDOR asks "is this id attacker-CONTROLLED", not "is it injectable":
-        // classOf("idor") is the CONTROL bit, which numeric coercion
-        // (strconv.Atoi(c.Param("id"))) deliberately does not clear.
-        const idorMatch = matchIdorGo(node);
-        if (idorMatch && sinkHit(node, [idorMatch.args[0]], "idor", env, taintMask)) {
-          const suppressed = (idorAuthCheckNearby?.(lineOf(node)) ?? false) ||
-            structuralOwnershipCheckSuppressesGo(node, idorMatch.args[0]);
-          if (!suppressed) emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
-        }
-
-        // dec.Decode(...) -- receiver-tainted, not arg-tainted: fires if
-        // `dec` itself is tainted (built from gob.NewDecoder(r.Body) or
-        // similar via the propagation rule right below), args are irrelevant.
-        if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Decode") {
-          const operand = fn.childForFieldName("operand");
-          if (operand && sinkHit(node, [operand], "insecure-deserialization", env, taintMask)) {
-            emit("insecure-deserialization", node, sourceLabelGo(operand), calleeTextGo(fn) ?? "Decode");
-          }
-        }
-
-        // gob.NewDecoder(EXPR) -- taints the assignment target if EXPR ends
-        // in .Body/.Conn (an untrusted stream). The enclosing
-        // short_var_declaration/assignment_statement's OWN top-level handling
-        // (above, in this same walk call) already ran and set this target
-        // to `false` via isTainted(gob.NewDecoder(...), env) -- which can
-        // never recognize this call as tainted, since gob.NewDecoder isn't a
-        // recognized source/format-call/local-propagating-fn/tainted-receiver
-        // shape. This deeper, later visit (recursing into the RHS) corrects
-        // that to `true` once we're structurally certain the source stream
-        // is untrusted -- runs after and intentionally overwrites the
-        // outer pass's `false`, not a race.
-        if (fn) {
-          const fnText = calleeTextGo(fn);
-          if (fnText === "gob.NewDecoder" && args[0]) {
-            const argText = calleeTextGo(args[0]) ?? "";
-            if (argText.endsWith(".Body") || argText.endsWith(".Conn")) {
-              const parent = node.parent?.type === "expression_list" ? node.parent.parent : node.parent;
-              if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
-                const left = parent.childForFieldName("left");
-                const ids = left ? identifiersOf(left) : [];
-                if (ids[0]) env.set(ids[0].text, ALL);
-              }
-            }
-          }
-          // http.NewRequest(method, url, body) / NewRequestWithContext(ctx,
-          // method, url, body) -- same "correct the outer pass's false"
-          // pattern as gob.NewDecoder above: taints the assignment target
-          // if the URL argument is tainted, so the later client.Do(req)
-          // sink (via matchSinkGo's passthrough-on-tainted-receiver, since
-          // .Do's own function selector's operand `client` isn't itself
-          // tainted -- `req`, its ARGUMENT, is) resolves correctly. client.Do
-          // is matched generically below via the same receiver-tainted
-          // shape as Decode, since neither is arg-tainted in the usual sense.
-          if ((fnText === "http.NewRequest" || fnText === "http.NewRequestWithContext") && args.length > 0) {
-            const urlArg = fnText === "http.NewRequestWithContext" ? args[2] : args[1];
-            const urlMask = urlArg ? taintMask(urlArg, env) : 0;
-            if (urlArg && (urlMask & ALL)) {
-              const parent = node.parent?.type === "expression_list" ? node.parent.parent : node.parent;
-              if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
-                const left = parent.childForFieldName("left");
-                const ids = left ? identifiersOf(left) : [];
-                if (ids[0]) env.set(ids[0].text, urlMask);
-              }
-            }
-          }
-        }
-
-        // client.Do(req) -- ssrf sink where the DANGER is the receiver's
-        // (`client`'s) call target, but the actual taint lives on the
-        // ARGUMENT (`req`), not the receiver itself -- the inverse shape
-        // from Decode's receiver-tainted check above.
-        if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Do" && args[0]) {
-          if (sinkHit(node, [args[0]], "ssrf", env, taintMask)) emit("ssrf", node, sourceLabelGo(args[0]), calleeTextGo(fn) ?? "Do");
-        }
-
-        // Same-file interprocedural seeding (one hop) -- mirrors
-        // astTaint.ts/astTaintPython.ts exactly.
-        if (fn?.type === "identifier" && localFns.has(fn.text)) {
-          const fnName = fn.text;
-          const localFn = localFns.get(fnName)!;
-          const taintedIdx = new Map<number, number>();
-          args.forEach((arg, i) => {
-            const m = taintMask(arg, env) & ALL;
-            if (!m) return;
-            if (localFn.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
-          });
-          if (taintedIdx.size > 0) {
-            const existing = seededParams.get(fnName) ?? new Map<number, number>();
-            for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
-            seededParams.set(fnName, existing);
-          }
-        }
+      // client.Do(req) -- ssrf sink where the DANGER is the receiver's
+      // (`client`'s) call target, but the actual taint lives on the
+      // ARGUMENT (`req`), not the receiver itself -- the inverse shape
+      // from Decode's receiver-tainted check above.
+      if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Do" && args[0]) {
+        if (sinkHit(node, [args[0]], "ssrf", env, taintMask)) emit("ssrf", node, sourceLabelGo(args[0]), calleeTextGo(fn) ?? "Do");
       }
 
-      for (const c of node.namedChildren) if (c) walk(c, env, taintMask);
+      // Same-file interprocedural seeding (one hop) -- mirrors
+      // astTaint.ts/astTaintPython.ts exactly.
+      if (fn?.type === "identifier" && localFns.has(fn.text)) {
+        const fnName = fn.text;
+        const localFn = localFns.get(fnName)!;
+        const taintedIdx = new Map<number, number>();
+        args.forEach((arg, i) => {
+          const m = taintMask(arg, env) & ALL;
+          if (!m) return;
+          if (localFn.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
+        });
+        if (taintedIdx.size > 0) {
+          const existing = seededParams.get(fnName) ?? new Map<number, number>();
+          for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
+          seededParams.set(fnName, existing);
+        }
+      }
     };
 
-    const rootTaintMask = makeTaintMaskGo(localFns, propagating);
-    walk(root, new Map(), rootTaintMask);
+    const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall });
+
+    walker.walk(root, new Map());
 
     // Second pass, bounded worklist (Decision 3): re-walk any local function
     // whose params were seeded tainted by a call site above, so sinks inside
@@ -897,8 +1337,7 @@ export function scanAstTaintGo(
           const shape = fn.paramShapes.find(s => s.index === idx);
           if (shape) env.set(shape.name, m);
         }
-        const seededTaintMask = makeTaintMaskGo(localFns, propagating);
-        for (const c of fn.body.namedChildren) if (c) walk(c, env, seededTaintMask);
+        walker.walk(fn.body, env);
       }
       if (!changed) break;
     }

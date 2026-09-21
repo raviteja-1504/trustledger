@@ -667,18 +667,12 @@ public class A {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
-  // Documents the accepted, still-open gap (see astTaintJava.ts's
-  // collectBolaFindings docblock and this phase's plan's "Explicitly out of
-  // scope" section): the engine asks "is there ANY ownership comparison
-  // anywhere in this method", not "does that comparison correctly GATE this
-  // specific sink". An inverted condition -- the exact WebGoat
-  // IDOREditOtherProfile.java shape, `!id.equals(principal)` guarding the
-  // code that SHOULD be safe while the vulnerable branch runs when the check
-  // fails -- still incorrectly suppresses here. Real branch/CFG-aware
-  // analysis (out of scope this phase) would be needed to fix this; this
-  // test exists so a future fix has a regression target, not to assert
-  // current behavior is correct.
-  it("[known gap, not fixed] still suppresses when an ownership comparison is present but gates the wrong branch", () => {
+  // Formerly a documented gap: the engine asked "is there ANY ownership
+  // comparison in the method". The inverted WebGoat IDOREditOtherProfile.java
+  // shape -- the lookup runs in the arm where `!id.equals(principal)` is TRUE,
+  // i.e. exactly when ownership FAILED -- is now reported, because the
+  // comparison must DOMINATE the sink (path-sensitivity phase).
+  it("reports a lookup in the branch that runs when the ownership comparison FAILS", () => {
     const content = `
 public class A {
   @GetMapping("/api/profile/{userId}")
@@ -690,7 +684,7 @@ public class A {
     return ResponseEntity.status(403).build();
   }
 }`;
-    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
   });
 });
 

@@ -27,7 +27,8 @@
 
 import * as ts from "typescript";
 import {
-  ALL, applyClears, classOf, isTaintedMask, wasCleared, type SuppressedSink, type TaintEnv,
+  ALL, applyClears, applyGuards, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
+  wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
@@ -275,8 +276,20 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>) {
       const path = calleeText(expr);
       return (path ? (env.get(path) ?? 0) : 0) | taintMask(expr.expression, env);
     }
-    if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-      return taintMask(expr.left, env) | taintMask(expr.right, env);
+    if (ts.isBinaryExpression(expr)) {
+      const k = expr.operatorToken.kind;
+      // +, and the value-producing logical operators: `a || b` / `a ?? b` /
+      // `a && b` evaluate to one of their operands, so either can carry taint.
+      if (k === ts.SyntaxKind.PlusToken || k === ts.SyntaxKind.BarBarToken ||
+          k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.AmpersandAmpersandToken) {
+        return taintMask(expr.left, env) | taintMask(expr.right, env);
+      }
+    }
+    // `c ? a : b` -- the value is one of the two arms; the CONDITION is
+    // deliberately excluded (a tainted condition does not make the chosen
+    // constant tainted).
+    if (ts.isConditionalExpression(expr)) {
+      return taintMask(expr.whenTrue, env) | taintMask(expr.whenFalse, env);
     }
     if (ts.isTemplateExpression(expr)) return expr.templateSpans.reduce((m, s) => m | taintMask(s.expression, env), 0);
     if (ts.isSpreadElement(expr)) return taintMask(expr.expression, env);
@@ -380,11 +393,14 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
     }
   } else if (
     ts.isExpressionStatement(node) && ts.isBinaryExpression(node.expression) &&
-    node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    (node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken || isCompoundAssign(node.expression.operatorToken.kind))
   ) {
     const { left, right } = node.expression;
+    // `x += y` / `x ||= y` / `x ??= y` keep whatever taint x already had
+    // (OR), unlike plain `=`, which overwrites it.
+    const compound = node.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken;
     if (ts.isIdentifier(left)) {
-      env.set(left.text, maskFn(right, env));
+      env.set(left.text, maskFn(right, env) | (compound ? (env.get(left.text) ?? 0) : 0));
     } else if (ts.isPropertyAccessExpression(left)) {
       // Field-sensitive write: `obj.field = expr` -- stores under the same
       // composite "root.field" key the read side (makeTaintMask, above)
@@ -392,25 +408,298 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
       // is left untouched, so a consumer that only ever checked obj before
       // this change sees exactly what it saw before.
       const path = calleeText(left);
-      if (path) env.set(path, maskFn(right, env));
+      if (path) env.set(path, maskFn(right, env) | (compound ? (env.get(path) ?? 0) : 0));
     }
   }
 }
 
+function isCompoundAssign(k: ts.SyntaxKind): boolean {
+  return k === ts.SyntaxKind.PlusEqualsToken || k === ts.SyntaxKind.BarBarEqualsToken ||
+    k === ts.SyntaxKind.QuestionQuestionEqualsToken || k === ts.SyntaxKind.AmpersandAmpersandEqualsToken;
+}
+
+// ── Validation guards (narrow, unambiguous only) ────────────────────────────
+
+function isLiteralNode(e: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(e)) return isLiteralNode(e.expression);
+  return ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e) ||
+    (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(e.operand)) ||
+    e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword;
+}
+
+/** Is `e` a collection made ONLY of literals -- an array/Set literal, or a top-level `const` bound to one? */
+function isLiteralCollection(e: ts.Expression, sf: ts.SourceFile, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (ts.isParenthesizedExpression(e)) return isLiteralCollection(e.expression, sf, depth + 1);
+  if (ts.isArrayLiteralExpression(e)) return e.elements.length > 0 && e.elements.every(el => isLiteralNode(el));
+  if (ts.isNewExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "Set" && e.arguments?.length === 1) {
+    return isLiteralCollection(e.arguments[0], sf, depth + 1);
+  }
+  if (ts.isIdentifier(e)) {
+    for (const st of sf.statements) {
+      if (!ts.isVariableStatement(st) || !(st.declarationList.flags & ts.NodeFlags.Const)) continue;
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.name.text === e.text && d.initializer) return isLiteralCollection(d.initializer, sf, depth + 1);
+      }
+    }
+  }
+  return false;
+}
+
+const invert = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+
 /**
- * Builds the env a function body would have right before its return(s),
- * given one seeded parameter -- a flat, non-lexically-scoped traversal (does
- * not stop at nested function/arrow boundaries; a pre-existing imprecision
- * shared with the rest of this engine, not a new one introduced here).
- * Calls inside the body stay opaque (isTaintedFn is the shallow,
- * empty-propagating evaluator), preserving computeReturnTaintPropagating's
- * documented non-recursive bound.
+ * The variables a condition PROVES safe, and on which side. Deliberately a
+ * closed, unambiguous set -- literal-collection membership, strict
+ * numeric/type checks, equality with a literal. Regex matches, prefix checks
+ * and custom validator functions are NOT recognized: a wrongly recognized
+ * guard silently hides a real finding, so anything ambiguous stays reported.
  */
-function envAfterBody(body: ts.Node, seed: Env, maskFn: TaintMaskFn): Env {
-  const env = new Map(seed);
-  const visit = (n: ts.Node) => { applyDeclAndAssign(n, env, maskFn); ts.forEachChild(n, visit); };
-  visit(body);
-  return env;
+function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
+  if (ts.isParenthesizedExpression(cond)) return guardsOfCondition(cond.expression, sf);
+  if (ts.isPrefixUnaryExpression(cond) && cond.operator === ts.SyntaxKind.ExclamationToken) {
+    return guardsOfCondition(cond.operand, sf).map(invert);
+  }
+  if (ts.isBinaryExpression(cond)) {
+    const k = cond.operatorToken.kind;
+    const { left, right } = cond;
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)].filter(g => g.holds === "true");
+    }
+    if (k === ts.SyntaxKind.BarBarToken) {
+      return [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)].filter(g => g.holds === "false");
+    }
+    const eq = k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsEqualsToken;
+    const neq = k === ts.SyntaxKind.ExclamationEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    if (eq || neq) {
+      const holds: "true" | "false" = eq ? "true" : "false";
+      // x === "admin" / "admin" === x
+      if (ts.isIdentifier(left) && isLiteralNode(right)) return [{ name: left.text, holds }];
+      if (ts.isIdentifier(right) && isLiteralNode(left)) return [{ name: right.text, holds }];
+      // typeof x === "number" / "boolean"
+      const typeofSide = ts.isTypeOfExpression(left) ? left : ts.isTypeOfExpression(right) ? right : null;
+      const lit = typeofSide === left ? right : left;
+      if (typeofSide && ts.isIdentifier(typeofSide.expression) && ts.isStringLiteral(lit) && (lit.text === "number" || lit.text === "boolean")) {
+        return [{ name: typeofSide.expression.text, holds }];
+      }
+    }
+    // COLL.indexOf(x) !== -1 / >= 0 / > -1   (and the negations)
+    if (ts.isCallExpression(left) && ts.isPropertyAccessExpression(left.expression) && left.expression.name.text === "indexOf" &&
+        left.arguments.length === 1 && ts.isIdentifier(left.arguments[0]) && isLiteralCollection(left.expression.expression, sf) &&
+        isLiteralNode(right)) {
+      const n = right.getText(sf);
+      const found = (neq && n === "-1") || (k === ts.SyntaxKind.GreaterThanToken && n === "-1") ||
+        (k === ts.SyntaxKind.GreaterThanEqualsToken && n === "0");
+      const missing = (eq && n === "-1") || (k === ts.SyntaxKind.LessThanToken && n === "0");
+      if (found) return [{ name: (left.arguments[0] as ts.Identifier).text, holds: "true" }];
+      if (missing) return [{ name: (left.arguments[0] as ts.Identifier).text, holds: "false" }];
+    }
+    return [];
+  }
+  if (ts.isCallExpression(cond)) {
+    const callee = cond.expression;
+    const arg = cond.arguments.length >= 1 ? cond.arguments[0] : undefined;
+    // COLL.includes(x) / COLL.has(x) against a literal-only collection
+    if (ts.isPropertyAccessExpression(callee) && (callee.name.text === "includes" || callee.name.text === "has") &&
+        cond.arguments.length === 1 && arg && ts.isIdentifier(arg) && isLiteralCollection(callee.expression, sf)) {
+      return [{ name: arg.text, holds: "true" }];
+    }
+    // Number.isInteger / isFinite / isSafeInteger (x)
+    if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Number" &&
+        ["isInteger", "isFinite", "isSafeInteger"].includes(callee.name.text) && arg && ts.isIdentifier(arg)) {
+      return [{ name: arg.text, holds: "true" }];
+    }
+    // isNaN(x) is FALSE for numeric-looking input
+    if (ts.isIdentifier(callee) && callee.text === "isNaN" && arg && ts.isIdentifier(arg)) {
+      return [{ name: arg.text, holds: "false" }];
+    }
+  }
+  return [];
+}
+
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves both the interprocedural summary builder (no sink checks,
+// no nested functions, collects return masks) and the main scan (sink checks,
+// nested functions walked with a cloned env). Branches walk each arm on a
+// CLONE of the env and join with may-taint OR; an arm ending in return/throw
+// is dropped from the join, and code after a terminating statement is dead
+// and not walked at all.
+
+function isFunctionLike(n: ts.Node): boolean {
+  return ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) ||
+    ts.isMethodDeclaration(n) || ts.isConstructorDeclaration(n) ||
+    ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n);
+}
+
+/** Visit `root` and its descendants WITHOUT entering nested function bodies (those are collected into `fns`). */
+function scanExprSkippingFunctions(root: ts.Node, visit: (n: ts.Node) => void, fns: ts.Node[]): void {
+  const go = (n: ts.Node) => {
+    if (n !== root && isFunctionLike(n)) { fns.push(n); return; }
+    visit(n);
+    ts.forEachChild(n, go);
+  };
+  go(root);
+}
+
+interface WalkerHooks {
+  taintMask: TaintMaskFn;
+  sf: ts.SourceFile;
+  /** Called for every expression-level node of a statement, with the env at that point (sink checks live here). */
+  onVisit?: (n: ts.Node, env: Env) => void;
+  /** Called for each `return expr;` with the env at that point. */
+  onReturn?: (expr: ts.Expression, env: Env) => void;
+  /** Called before a statement's own assignments are applied (bookkeeping only). */
+  onStatement?: (n: ts.Node) => void;
+  /** Walk nested function bodies (main scan) or ignore them (summaries: their returns aren't this function's). */
+  descendFunctions: boolean;
+}
+
+function createWalker(h: WalkerHooks) {
+  const { taintMask, sf } = h;
+
+  const handleExpr = (node: ts.Node, env: Env) => {
+    const fns: ts.Node[] = [];
+    scanExprSkippingFunctions(node, n => h.onVisit?.(n, env), fns);
+    if (h.descendFunctions) for (const f of fns) walkFunction(f, env);
+  };
+
+  const walkFunction = (fn: ts.Node, env: Env) => {
+    const f = fn as ts.FunctionLikeDeclaration;
+    if (!f.body) return;
+    // A closure sees captured outer variables (cloned env), but its own
+    // parameters shadow same-named outer ones and start untainted.
+    const fenv = cloneEnv(env);
+    for (const prm of f.parameters) if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, 0);
+    if (ts.isBlock(f.body)) walkNode(f.body, fenv);
+    else handleExpr(f.body, fenv);
+  };
+
+  const bindLoopVar = (init: ts.ForInitializer | undefined, mask: number, env: Env) => {
+    if (init && ts.isVariableDeclarationList(init)) {
+      for (const d of init.declarations) if (ts.isIdentifier(d.name)) env.set(d.name.text, mask);
+    }
+  };
+
+  const walkBlock = (stmts: readonly ts.Node[], env: Env): boolean => {
+    for (const st of stmts) if (walkNode(st, env)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walkNode = (node: ts.Node, env: Env): boolean => {
+    if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isModuleBlock(node)) return walkBlock(node.statements, env);
+    if (ts.isLabeledStatement(node)) return walkNode(node.statement, env);
+
+    if (ts.isIfStatement(node)) {
+      handleExpr(node.expression, env);
+      const guards = guardsOfCondition(node.expression, sf);
+      const thenEnv = cloneEnv(env); applyGuards(thenEnv, guardedNames(guards, "true"));
+      const elseEnv = cloneEnv(env); applyGuards(elseEnv, guardedNames(guards, "false"));
+      const thenTerm = walkNode(node.thenStatement, thenEnv);
+      const elseTerm = node.elseStatement ? walkNode(node.elseStatement, elseEnv) : false;
+      const joined = joinArms([{ env: thenEnv, terminated: thenTerm }, { env: elseEnv, terminated: elseTerm }]);
+      assignEnv(env, joined.env);
+      return joined.terminated;
+    }
+
+    if (ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node) ||
+        ts.isWhileStatement(node) || ts.isDoStatement(node)) {
+      if (ts.isForStatement(node)) {
+        if (node.initializer) {
+          if (ts.isVariableDeclarationList(node.initializer)) {
+            for (const d of node.initializer.declarations) {
+              if (ts.isIdentifier(d.name) && d.initializer) env.set(d.name.text, taintMask(d.initializer, env));
+            }
+          }
+          handleExpr(node.initializer, env);
+        }
+        if (node.condition) handleExpr(node.condition, env);
+        if (node.incrementor) handleExpr(node.incrementor, env);
+      } else if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+        handleExpr(node.expression, env);
+        // the loop variable iterates the (possibly tainted) collection
+        bindLoopVar(node.initializer, taintMask(node.expression, env), env);
+      } else {
+        handleExpr(node.expression, env);
+      }
+      const pre = cloneEnv(env);
+      const bodyEnv = cloneEnv(env);
+      // Two passes over the body so a value assigned late in iteration N
+      // reaches a sink early in iteration N+1 (loop-carried flow); findings
+      // dedupe by id+line, so the repeat is free of duplicates.
+      let term = walkNode(node.statement, bodyEnv);
+      if (!term) term = walkNode(node.statement, bodyEnv);
+      assignEnv(env, joinArms([{ env: pre, terminated: false }, { env: bodyEnv, terminated: term }]).env);
+      return false; // a loop may run zero times
+    }
+
+    if (ts.isSwitchStatement(node)) {
+      handleExpr(node.expression, env);
+      const subject = ts.isIdentifier(node.expression) ? node.expression.text : null;
+      const arms: Arm[] = [];
+      let hasDefault = false;
+      for (const clause of node.caseBlock.clauses) {
+        const cenv = cloneEnv(env);
+        if (ts.isCaseClause(clause)) {
+          handleExpr(clause.expression, cenv);
+          // inside `case "a":` the subject IS that literal
+          if (subject && isLiteralNode(clause.expression)) applyGuards(cenv, [subject]);
+        } else {
+          hasDefault = true;
+        }
+        arms.push({ env: cenv, terminated: walkBlock(clause.statements, cenv) });
+      }
+      if (!hasDefault) arms.push({ env: cloneEnv(env), terminated: false });
+      const joined = joinArms(arms);
+      assignEnv(env, joined.env);
+      return joined.terminated;
+    }
+
+    if (ts.isTryStatement(node)) {
+      const pre = cloneEnv(env);
+      const tryEnv = cloneEnv(env);
+      const arms: Arm[] = [{ env: tryEnv, terminated: walkNode(node.tryBlock, tryEnv) }];
+      if (node.catchClause) {
+        // an exception can be thrown from anywhere in the try body
+        const catchEnv = joinEnvs([pre, tryEnv]);
+        const v = node.catchClause.variableDeclaration;
+        if (v && ts.isIdentifier(v.name)) catchEnv.set(v.name.text, 0);
+        arms.push({ env: catchEnv, terminated: walkNode(node.catchClause.block, catchEnv) });
+      }
+      const joined = joinArms(arms);
+      assignEnv(env, joined.env);
+      let term = joined.terminated;
+      if (node.finallyBlock) term = walkNode(node.finallyBlock, env) || term;
+      return term;
+    }
+
+    if (ts.isReturnStatement(node) || ts.isThrowStatement(node)) {
+      if (node.expression) {
+        handleExpr(node.expression, env);
+        if (ts.isReturnStatement(node)) h.onReturn?.(node.expression, env);
+      }
+      return true;
+    }
+
+    if (isFunctionLike(node)) {
+      // a function DECLARATION / method as a statement: walk its body on a clone
+      if (h.descendFunctions) walkFunction(node, env);
+      return false;
+    }
+
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      if (h.descendFunctions) for (const m of node.members) if (isFunctionLike(m)) walkFunction(m, env);
+      return false;
+    }
+
+    // Everything else (expression statements, variable statements, ...):
+    // apply its own declarations/assignments, then check its expressions.
+    h.onStatement?.(node);
+    applyDeclAndAssign(node, env, taintMask);
+    handleExpr(node, env);
+    return false;
+  };
+
+  return { walkNode, handleExpr };
 }
 
 /**
@@ -448,23 +737,26 @@ function envAfterBody(body: ts.Node, seed: Env, maskFn: TaintMaskFn): Env {
 function computeReturnTaintPropagating(fn: LocalFn, maskFn: TaintMaskFn): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
-  const returnExprs: ts.Expression[] = [];
-  if (!ts.isBlock(fn.body)) {
-    returnExprs.push(fn.body as ts.Expression); // arrow expression body
-  } else {
-    const collect = (n: ts.Node) => {
-      if (ts.isReturnStatement(n) && n.expression) { returnExprs.push(n.expression); return; }
-      ts.forEachChild(n, collect);
-    };
-    collect(fn.body);
-  }
+  const sf = fn.body.getSourceFile();
   for (const shape of paramShapesOf(fn)) {
     const seed: Env = new Map();
     seed.set(shape.name, ALL);
-    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, maskFn) : seed;
+    // Path-sensitive: the mask at EACH return, evaluated with the env on that
+    // path (so a value sanitized on one branch and raw on another propagates
+    // only what survives), and returns inside nested functions don't count.
+    let surviving = 0;
+    if (ts.isBlock(fn.body)) {
+      const walker = createWalker({
+        taintMask: maskFn, sf, descendFunctions: false,
+        onReturn: (expr, env) => { surviving |= maskFn(expr, env); },
+      });
+      walker.walkNode(fn.body, seed);
+    } else {
+      surviving = maskFn(fn.body as ts.Expression, seed); // arrow expression body
+    }
     // Only the low (still-dangerous) bits are a summary; the shadow half is
     // per-scan bookkeeping and must not leak into a stored/cross-file shape.
-    const surviving = returnExprs.reduce((m, expr) => m | maskFn(expr, env), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -743,60 +1035,54 @@ export function scanAstTaint(
       }
     };
 
-    const walkStatements = (node: ts.Node, env: Env) => {
-      // Variable declarations / destructuring / simple reassignment (x =
-      // expr) -- shared with computeReturnTaintPropagating's envAfterBody
-      // via applyDeclAndAssign, see that function's docblock. The
-      // XSS-assignment check itself (obj.prop = expr) is handled uniformly
-      // by the generic visitExpr traversal below, which visits this same
-      // binary expression as a child of `node` -- no need to special-case
-      // it here too.
-      applyDeclAndAssign(node, env, taintMask);
-      // Tier-2 message-attribution bookkeeping only (see initializerOf's
-      // declaration) -- kept as a separate pass over the same statement
-      // rather than folded into applyDeclAndAssign, since
-      // computeReturnTaintPropagating's envAfterBody reuses that function
-      // and has no use for (or access to) this file-scoped map.
-      if (ts.isVariableStatement(node)) {
-        for (const decl of node.declarationList.declarations) {
-          if (decl.initializer && ts.isIdentifier(decl.name)) initializerOf.set(decl.name.text, decl.initializer);
-        }
-      }
-
-      // Sink checks: any call/new expression anywhere in this node
-      const visitExpr = (n: ts.Node) => {
-        if (ts.isCallExpression(n)) {
-          checkCallForSink(n, env);
-          // Same-file call binding: seed callee params for tainted args, one hop.
-          // Matched by INDEX (via paramShapesOf, including rest-param
-          // overflow), not by re-deriving positions ad hoc here.
-          if (ts.isIdentifier(n.expression) && localFns.has(n.expression.text)) {
-            const fnName = n.expression.text;
-            const fn = localFns.get(fnName)!;
-            const shapes = paramShapesOf(fn);
-            // param index -> classes tainted at THIS call site (the callee's
-            // parameter is only tainted for those classes, not for ALL)
-            const taintedIdx = new Map<number, number>();
-            n.arguments.forEach((arg, i) => {
-              const m = taintMask(arg, env) & ALL;
-              if (!m) return;
-              const shape = shapes.find(s => s.isRest ? i >= s.index : s.index === i);
-              if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
-            });
-            if (taintedIdx.size > 0) {
-              const existing = seededParams.get(fnName) ?? new Map<number, number>();
-              for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
-              seededParams.set(fnName, existing);
-            }
+    // Expression-level checks for one node, with the env at that point.
+    // (Statement structure, branching and nested functions are the walker's job.)
+    const onVisit = (n: ts.Node, env: Env) => {
+      if (ts.isCallExpression(n)) {
+        checkCallForSink(n, env);
+        // Same-file call binding: seed callee params for tainted args, one hop.
+        // Matched by INDEX (via paramShapesOf, including rest-param
+        // overflow), not by re-deriving positions ad hoc here.
+        if (ts.isIdentifier(n.expression) && localFns.has(n.expression.text)) {
+          const fnName = n.expression.text;
+          const fn = localFns.get(fnName)!;
+          const shapes = paramShapesOf(fn);
+          // param index -> classes tainted at THIS call site (the callee's
+          // parameter is only tainted for those classes, not for ALL)
+          const taintedIdx = new Map<number, number>();
+          n.arguments.forEach((arg, i) => {
+            const m = taintMask(arg, env) & ALL;
+            if (!m) return;
+            const shape = shapes.find(s => s.isRest ? i >= s.index : s.index === i);
+            if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
+          });
+          if (taintedIdx.size > 0) {
+            const existing = seededParams.get(fnName) ?? new Map<number, number>();
+            for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
+            seededParams.set(fnName, existing);
           }
         }
-        if (ts.isNewExpression(n)) checkNewExprForSink(n);
-        if (ts.isBinaryExpression(n)) checkAssignmentForXSS(n, env);
-        ts.forEachChild(n, visitExpr);
-      };
-      visitExpr(node);
+      }
+      if (ts.isNewExpression(n)) checkNewExprForSink(n);
+      if (ts.isBinaryExpression(n)) checkAssignmentForXSS(n, env);
+    };
 
-      ts.forEachChild(node, child => walkStatements(child, env));
+    const walker = createWalker({
+      taintMask, sf: sourceFile, descendFunctions: true, onVisit,
+      // Tier-2 message-attribution bookkeeping only (see initializerOf's
+      // declaration) -- kept separate from applyDeclAndAssign, since the
+      // summary builder reuses that function and has no access to this map.
+      onStatement: (node) => {
+        if (ts.isVariableStatement(node)) {
+          for (const decl of node.declarationList.declarations) {
+            if (decl.initializer && ts.isIdentifier(decl.name)) initializerOf.set(decl.name.text, decl.initializer);
+          }
+        }
+      },
+    });
+    const walkStatements = (node: ts.Node, env: Env) => {
+      if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isModuleBlock(node)) walker.walkNode(node, env);
+      else walker.handleExpr(node, env); // arrow expression body
     };
 
     walkStatements(sourceFile, new Map());

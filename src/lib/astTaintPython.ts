@@ -43,7 +43,10 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
-import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import {
+  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
 // webpack provides this global on Node.js targets specifically to escape its
@@ -504,6 +507,16 @@ function makeTaintMaskPy(localFns: Map<string, LocalFn>, propagating: Propagatin
       const inner = node.namedChildren[0];
       return inner ? taintMask(inner, env) : 0;
     }
+    // `a if c else b` -- children are positional [a, c, b]; the value is one
+    // of the two arms, the CONDITION is deliberately excluded.
+    if (node.type === "conditional_expression") {
+      const parts = node.namedChildren;
+      return (parts[0] ? taintMask(parts[0], env) : 0) | (parts[2] ? taintMask(parts[2], env) : 0);
+    }
+    // `a or b` / `a and b` evaluate to one of their operands.
+    if (node.type === "boolean_operator") {
+      return orAll([node.childForFieldName("left"), node.childForFieldName("right")]);
+    }
     return 0;
   };
   return taintMask;
@@ -511,40 +524,323 @@ function makeTaintMaskPy(localFns: Map<string, LocalFn>, propagating: Propagatin
 
 type TaintMaskFnPy = ReturnType<typeof makeTaintMaskPy>;
 
+// ── Validation guards (narrow, unambiguous only) ────────────────────────────
+
+function isLiteralPy(n: SyntaxNode): boolean {
+  if (n.type === "string") return !n.namedChildren.some(c => c?.type === "interpolation");
+  return n.type === "integer" || n.type === "float" || n.type === "true" || n.type === "false" || n.type === "none";
+}
+
+/** A tuple/list/set made ONLY of literals, or a module-level name bound to one. */
+function isLiteralCollectionPy(n: SyntaxNode, root: SyntaxNode, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (n.type === "tuple" || n.type === "list" || n.type === "set") {
+    return n.namedChildren.length > 0 && n.namedChildren.every(c => !!c && isLiteralPy(c));
+  }
+  if (n.type === "identifier") {
+    for (const st of root.namedChildren) {
+      const asg = st?.type === "expression_statement" ? st.namedChildren[0] : null;
+      if (asg?.type !== "assignment") continue;
+      const l = asg.childForFieldName("left");
+      const r = asg.childForFieldName("right");
+      if (l?.type === "identifier" && l.text === n.text && r) return isLiteralCollectionPy(r, root, depth + 1);
+    }
+  }
+  return false;
+}
+
+const invertPy = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+
+/**
+ * The variables a condition PROVES safe, and on which side -- a closed set:
+ * literal-collection membership, equality with a literal, isinstance(x, int/
+ * float/bool), and x.isdigit()/isnumeric()/isdecimal(). Regex matches,
+ * startswith and custom validator calls are deliberately NOT recognized.
+ */
+function guardsOfConditionPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionPy(inner, root) : [];
+    }
+    case "not_operator": {
+      const inner = cond.childForFieldName("argument");
+      return inner ? guardsOfConditionPy(inner, root).map(invertPy) : [];
+    }
+    case "boolean_operator": {
+      const op = cond.childForFieldName("operator")?.text;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      const all = [...guardsOfConditionPy(l, root), ...guardsOfConditionPy(r, root)];
+      return op === "and" ? all.filter(g => g.holds === "true") : op === "or" ? all.filter(g => g.holds === "false") : [];
+    }
+    case "comparison_operator": {
+      const [l, r] = cond.namedChildren;
+      if (cond.namedChildren.length !== 2 || !l || !r) return [];
+      const op = cond.text.slice(l.endIndex - cond.startIndex, r.startIndex - cond.startIndex).trim();
+      if (l.type === "identifier") {
+        if (op === "in" && isLiteralCollectionPy(r, root)) return [{ name: l.text, holds: "true" }];
+        if (op === "not in" && isLiteralCollectionPy(r, root)) return [{ name: l.text, holds: "false" }];
+        if (op === "==" && isLiteralPy(r)) return [{ name: l.text, holds: "true" }];
+        if (op === "!=" && isLiteralPy(r)) return [{ name: l.text, holds: "false" }];
+      }
+      if (r.type === "identifier" && isLiteralPy(l)) {
+        if (op === "==") return [{ name: r.text, holds: "true" }];
+        if (op === "!=") return [{ name: r.text, holds: "false" }];
+      }
+      return [];
+    }
+    case "call": {
+      const fn = cond.childForFieldName("function");
+      const args = argListOf(cond);
+      if (fn?.type === "identifier" && fn.text === "isinstance" && args.length === 2 && args[0].type === "identifier") {
+        const t = args[1];
+        const okType = (n: SyntaxNode) => n.type === "identifier" && ["int", "float", "bool"].includes(n.text);
+        if (okType(t) || (t.type === "tuple" && t.namedChildren.length > 0 && t.namedChildren.every(c => !!c && okType(c)))) {
+          return [{ name: args[0].text, holds: "true" }];
+        }
+      }
+      if (fn?.type === "attribute" && args.length === 0) {
+        const { object, attribute } = attributeParts(fn);
+        if (object?.type === "identifier" && ["isdigit", "isnumeric", "isdecimal"].includes(attribute ?? "")) {
+          return [{ name: object.text, holds: "true" }];
+        }
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves the interprocedural summary builder (no sink checks, no
+// nested functions, collects return masks) and the main scan (sink checks,
+// nested functions walked on a cloned env). Branches walk each arm on a CLONE
+// of the env and join with may-taint OR (shared combinators in
+// taint/taintCore.ts); an arm ending in return/raise is dropped from the
+// join, and code after a terminating statement is dead and not walked.
+
+interface WalkHooksPy {
+  localFns: Map<string, LocalFn>;
+  propagating: PropagatingPy;
+  root: SyntaxNode;
+  /** Sink checks / call-site seeding for one `call` node, with the env at that point. */
+  onCall?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => void;
+  /** Called for each `return expr`, with the env on that path. */
+  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => void;
+  /** Walk nested function bodies (main scan) or ignore them (summaries). */
+  descendFunctions: boolean;
+}
+
+function createWalkerPy(h: WalkHooksPy) {
+  const masks = new Map<boolean, TaintMaskFnPy>();
+  const maskFor = (django: boolean): TaintMaskFnPy => {
+    let m = masks.get(django);
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django); masks.set(django, m); }
+    return m;
+  };
+
+  const identifiersIn = (n: SyntaxNode | null): string[] => {
+    if (!n) return [];
+    if (n.type === "identifier") return [n.text];
+    return n.namedChildren.flatMap(c => (c ? identifiersIn(c) : []));
+  };
+
+  const walkStmts = (nodes: readonly (SyntaxNode | null)[], env: Env, django: boolean): boolean => {
+    for (const c of nodes) if (c && walk(c, env, django)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walkFunction = (fn: SyntaxNode, env: Env) => {
+    const body = fn.childForFieldName("body");
+    if (!body) return;
+    // A nested function sees captured outer variables (cloned env); its own
+    // parameters shadow same-named outer ones and start untainted -- except a
+    // FastAPI route handler, whose parameters ARE the request input.
+    const django = hasRequestParam(fn);
+    const fenv = cloneEnv(env);
+    const seeded = isFastApiHandler(fn);
+    for (const prm of paramNamesOf(fn)) fenv.set(prm, seeded ? ALL : 0);
+    walk(body, fenv, django);
+  };
+
+  const walk = (node: SyntaxNode, env: Env, django: boolean): boolean => {
+    const taintMask = maskFor(django);
+    switch (node.type) {
+      case "function_definition":
+        if (h.descendFunctions) walkFunction(node, env);
+        return false;
+
+      case "block":
+      case "module":
+        return walkStmts(node.namedChildren, env, django);
+
+      case "if_statement": {
+        const branches: Branch[] = [];
+        const addCond = (condNode: SyntaxNode | null, bodyNode: SyntaxNode | null) => {
+          branches.push({
+            visitCond: (e) => { if (condNode) walk(condNode, e, django); },
+            guards: () => (condNode ? guardsOfConditionPy(condNode, h.root) : []),
+            body: (e) => (bodyNode ? walk(bodyNode, e, django) : false),
+          });
+        };
+        addCond(node.childForFieldName("condition"), node.childForFieldName("consequence"));
+        for (const alt of node.childrenForFieldName("alternative")) {
+          if (!alt) continue;
+          if (alt.type === "elif_clause") {
+            addCond(alt.childForFieldName("condition"), alt.childForFieldName("consequence"));
+          } else if (alt.type === "else_clause") {
+            const body = alt.childForFieldName("body");
+            branches.push({ body: (e) => (body ? walk(body, e, django) : false) });
+          }
+        }
+        return walkIfChain(env, branches);
+      }
+
+      case "for_statement": {
+        const right = node.childForFieldName("right");
+        if (right) walk(right, env, django);
+        const rmask = right ? taintMask(right, env) : 0;
+        for (const name of identifiersIn(node.childForFieldName("left"))) env.set(name, rmask);
+        const body = node.childForFieldName("body");
+        return walkLoop(env, (e) => (body ? walk(body, e, django) : false));
+      }
+
+      case "while_statement": {
+        const cond = node.childForFieldName("condition");
+        if (cond) walk(cond, env, django);
+        const body = node.childForFieldName("body");
+        return walkLoop(env, (e) => (body ? walk(body, e, django) : false));
+      }
+
+      case "try_statement": {
+        const body = node.childForFieldName("body");
+        const elseB = node.namedChildren.find(c => c?.type === "else_clause");
+        const finallyC = node.namedChildren.find(c => c?.type === "finally_clause");
+        const lastBlock = (c: SyntaxNode) => [...c.namedChildren].reverse().find(x => x?.type === "block") ?? null;
+        const catches = node.namedChildren
+          .filter(c => c?.type === "except_clause" || c?.type === "except_group_clause")
+          .map(c => ({
+            // `except E as e:` -- the handler binds `e`, shadowing any outer `e`
+            bind: [c!.text.match(/^\s*except\*?[^:\n]*?\bas\s+(\w+)/)?.[1]].filter((n): n is string => !!n),
+            body: (e: Env) => { const b = lastBlock(c!); return b ? walk(b, e, django) : false; },
+          }));
+        return walkTry(
+          env,
+          (e) => {
+            let t = body ? walk(body, e, django) : false;
+            if (!t && elseB) { const eb = elseB.childForFieldName("body") ?? lastBlock(elseB); if (eb) t = walk(eb, e, django); }
+            return t;
+          },
+          catches,
+          finallyC ? (e) => { const fb = lastBlock(finallyC); return fb ? walk(fb, e, django) : false; } : undefined,
+        );
+      }
+
+      case "match_statement": {
+        const subject = node.childForFieldName("subject");
+        if (subject) walk(subject, env, django);
+        const subjectName = subject?.type === "identifier" ? subject.text : null;
+        const cases = (node.childForFieldName("body")?.namedChildren ?? []).filter(c => c?.type === "case_clause");
+        return walkSwitch(env, cases.map(cl => {
+          const pattern = cl!.namedChildren.find(x => x?.type === "case_pattern");
+          const patText = pattern?.text.trim() ?? "";
+          const body = cl!.childForFieldName("consequence");
+          return {
+            isDefault: patText === "_",
+            // inside `case "a":` / `case 5:` the subject IS that literal
+            pre: (e: Env) => { if (subjectName && /^(?:["'0-9-]|True$|False$|None$)/.test(patText)) applyGuards(e, [subjectName]); },
+            body: (e: Env) => (body ? walk(body, e, django) : false),
+          };
+        }));
+      }
+
+      case "return_statement": {
+        const v = node.namedChildren[0];
+        if (v) { walk(v, env, django); h.onReturn?.(v, env, taintMask); }
+        return true;
+      }
+
+      case "raise_statement":
+        for (const c of node.namedChildren) if (c) walk(c, env, django);
+        return true;
+
+      default:
+        break;
+    }
+
+    if (node.type === "assignment") {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      if (left && right) {
+        const mask = taintMask(right, env);
+        if (left.type === "identifier") {
+          env.set(left.text, mask);
+        } else if ((left.type === "pattern_list" || left.type === "tuple_pattern") && (mask & ALL)) {
+          for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, mask);
+        } else if (left.type === "attribute") {
+          // Field-sensitive write: `obj.field = expr` -- stores under the same
+          // composite "root.field" key the read side (makeTaintMaskPy) checks.
+          // Additive only: obj's own bare-identifier env entry is untouched.
+          const path = calleeTextPy(left);
+          if (path) env.set(path, mask);
+        }
+      }
+    }
+    // `x += y` keeps whatever taint x already had (OR), unlike plain `=`.
+    if (node.type === "augmented_assignment") {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      if (left && right) {
+        const mask = taintMask(right, env);
+        if (left.type === "identifier") env.set(left.text, mask | (env.get(left.text) ?? 0));
+        else if (left.type === "attribute") {
+          const path = calleeTextPy(left);
+          if (path) env.set(path, mask | (env.get(path) ?? 0));
+        }
+      }
+    }
+
+    if (node.type === "call") h.onCall?.(node, env, taintMask);
+
+    for (const child of node.namedChildren) if (child) walk(child, env, django);
+    return false;
+  };
+
+  return { walk };
+}
+
 /**
  * For each of `fn`'s parameters INDEPENDENTLY (seed only that one param
  * tainted, all others left untainted), does `fn`'s return value become
- * tainted? Returns the set of parameter INDICES whose taint actually
- * reaches the return -- not a single per-function boolean (which would mean
- * a call like build_log(safe_id, tainted_message), where only user_id --
- * not message -- flows into the return, incorrectly firing). Sound because
- * makeIsTaintedPy is purely OR-shaped (every combinator is `||`/`.some()`,
- * nothing de-taints), so seeding a superset of params can only ever taint a
- * superset of what seeding a subset taints. Mirrors astTaint.ts's
- * computeReturnTaintPropagating exactly, genuinely simpler here since
- * Python has only function_definition (def/async def), no separate
- * arrow/expression function forms to special-case. `isTaintedFn` is
- * threaded in by the caller (see buildPropagatingMapPy below) rather than
- * hardcoded to an always-empty-map evaluator here, so the same function
- * serves the bounded same-file fixed-point iteration.
+ * tainted? Returns the parameter INDICES whose taint actually reaches a
+ * return, with the sink classes that survive. Path-sensitive: the mask is
+ * taken at EACH return with the env on that path (so a value coerced on one
+ * branch and raw on another propagates only what survives), assignments
+ * before the return are applied (`q = "SELECT " + x; return q` propagates --
+ * the old flat version seeded only the parameter, so it never did), and a
+ * return inside a nested function is not this function's return. Sound
+ * because every combinator is a bitwise OR and a sanitizer clears a FIXED
+ * set of classes, so seeding a superset of params can only taint a superset.
  */
-function computeReturnTaintPropagatingPy(fn: LocalFn, maskFn: TaintMaskFnPy): Map<number, number> {
+function computeReturnTaintPropagatingPy(
+  fn: LocalFn, localFns: Map<string, LocalFn>, propagating: PropagatingPy, root: SyntaxNode,
+): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
-  const returnValues: SyntaxNode[] = [];
-  const collect = (n: SyntaxNode) => {
-    if (n.type === "return_statement") {
-      const value = n.namedChildren[0];
-      if (value) { returnValues.push(value); return; }
-    }
-    for (const child of n.namedChildren) if (child) collect(child);
-  };
-  collect(fn.body);
   for (const shape of fn.paramShapes) {
+    let surviving = 0;
+    const walker = createWalkerPy({
+      localFns, propagating, root, descendFunctions: false,
+      onReturn: (expr, env, mask) => { surviving |= mask(expr, env); },
+    });
     const env: Env = new Map();
     env.set(shape.name, ALL);
+    walker.walk(fn.body, env, false);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
-    const surviving = returnValues.reduce((m, v) => m | maskFn(v, env), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -555,13 +851,12 @@ function computeReturnTaintPropagatingPy(fn: LocalFn, maskFn: TaintMaskFnPy): Ma
 // per-engine-file convention (no shared taint-engine base module).
 const MAX_PROPAGATION_ROUNDS_PY = 3;
 
-function buildPropagatingMapPy(localFns: Map<string, LocalFn>): PropagatingPy {
+function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode): PropagatingPy {
   const propagating: PropagatingPy = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
     let changed = false;
-    const maskRound = makeTaintMaskPy(localFns, propagating, false);
     for (const [name, fn] of localFns) {
-      const found = computeReturnTaintPropagatingPy(fn, maskRound);
+      const found = computeReturnTaintPropagatingPy(fn, localFns, propagating, root);
       // Monotonic merge (only ever adds a parameter or adds surviving classes).
       const merged = new Map(propagating.get(name) ?? []);
       let grew = false;
@@ -629,7 +924,7 @@ export function scanAstTaintPython(
 
     const importMap = buildImportMapPy(root);
     const localFns = collectLocalFunctionsPy(root);
-    const propagating = buildPropagatingMapPy(localFns);
+    const propagating = buildPropagatingMapPy(localFns, root);
 
     const findings: AstTaintPyFinding[] = [];
     const seen = new Set<string>();
@@ -649,87 +944,47 @@ export function scanAstTaintPython(
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
 
-    const walk = (node: SyntaxNode, env: Env, inDjangoRequestFn: boolean, taintMask: TaintMaskFnPy) => {
-      if (node.type === "assignment") {
-        const left = node.childForFieldName("left");
-        const right = node.childForFieldName("right");
-        if (left && right) {
-          const mask = taintMask(right, env);
-          if (left.type === "identifier") {
-            env.set(left.text, mask);
-          } else if ((left.type === "pattern_list" || left.type === "tuple_pattern") && (mask & ALL)) {
-            for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, mask);
-          } else if (left.type === "attribute") {
-            // Field-sensitive write: `obj.field = expr` -- stores under the
-            // same composite "root.field" key the read side (makeTaintMaskPy,
-            // above) checks. Additive only: obj's own bare-identifier env
-            // entry (if any) is left untouched.
-            const path = calleeTextPy(left);
-            if (path) env.set(path, mask);
-          }
+    // Sink checks and same-file call-site seeding for one `call` node, with
+    // the env at that point. Statement structure, branching, assignments and
+    // nested functions are the shared walker's job (createWalkerPy).
+    const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      const match = matchSinkPy(node, importMap);
+      if (match) {
+        const cls = classOf(match.id);
+        let taintedArg: SyntaxNode | undefined;
+        let cleared = false;
+        for (const a of match.args) {
+          const m = taintMask(a, env);
+          if (m & cls) { taintedArg = a; break; }
+          if (wasCleared(m, cls)) cleared = true;
+        }
+        if (taintedArg) emit(match.id, node, sourceLabelPy(taintedArg), match.sinkExpr);
+        else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(node) });
+      }
+      const fnNode = node.childForFieldName("function");
+      if (fnNode?.type === "identifier" && localFns.has(fnNode.text)) {
+        const fnName = fnNode.text;
+        const fn = localFns.get(fnName)!;
+        const args = argListOf(node);
+        const taintedIdx = new Map<number, number>();
+        args.forEach((arg, i) => {
+          const m = taintMask(arg, env) & ALL;
+          if (!m) return;
+          const shape = fn.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
+          if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
+        });
+        if (taintedIdx.size > 0) {
+          const existing = seededParams.get(fnName) ?? new Map<number, number>();
+          for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
+          seededParams.set(fnName, existing);
         }
       }
-
-      if (node.type === "call") {
-        const match = matchSinkPy(node, importMap);
-        if (match) {
-          const cls = classOf(match.id);
-          let taintedArg: SyntaxNode | undefined;
-          let cleared = false;
-          for (const a of match.args) {
-            const m = taintMask(a, env);
-            if (m & cls) { taintedArg = a; break; }
-            if (wasCleared(m, cls)) cleared = true;
-          }
-          if (taintedArg) emit(match.id, node, sourceLabelPy(taintedArg), match.sinkExpr);
-          else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(node) });
-        }
-        const fnNode = node.childForFieldName("function");
-        if (fnNode?.type === "identifier" && localFns.has(fnNode.text)) {
-          const fnName = fnNode.text;
-          const fn = localFns.get(fnName)!;
-          const args = argListOf(node);
-          const taintedIdx = new Map<number, number>();
-          args.forEach((arg, i) => {
-            const m = taintMask(arg, env) & ALL;
-            if (!m) return;
-            const shape = fn.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
-            if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
-          });
-          if (taintedIdx.size > 0) {
-            const existing = seededParams.get(fnName) ?? new Map<number, number>();
-            for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
-            seededParams.set(fnName, existing);
-          }
-        }
-      }
-
-      // FastAPI parameter-injection: taint every param of a route-decorated
-      // handler at entry, then walk its body with that seeded env.
-      if (node.type === "function_definition" && isFastApiHandler(node)) {
-        const fnEnv: Env = new Map(env);
-        for (const p of paramNamesOf(node)) fnEnv.set(p, ALL);
-        const body = node.childForFieldName("body");
-        if (body) for (const child of body.namedChildren) if (child) walk(child, fnEnv, false, taintMask);
-        return; // don't also walk with the outer (untainted) env below
-      }
-
-      // Django view-function scoping: request.GET/.POST only treated as a
-      // source while inside a function whose own param is literally `request`.
-      if (node.type === "function_definition") {
-        const nextInDjango = hasRequestParam(node);
-        if (nextInDjango !== inDjangoRequestFn) {
-          const scopedTaintMask = makeTaintMaskPy(localFns, propagating, nextInDjango);
-          for (const child of node.namedChildren) if (child) walk(child, env, nextInDjango, scopedTaintMask);
-          return;
-        }
-      }
-
-      for (const child of node.namedChildren) if (child) walk(child, env, inDjangoRequestFn, taintMask);
     };
 
-    const rootTaintMask = makeTaintMaskPy(localFns, propagating, false);
-    walk(root, new Map(), false, rootTaintMask);
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall });
+    const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
+
+    walk(root, new Map(), false);
 
     // Second pass, bounded worklist (see astTaint.ts's identical structure
     // for the full rationale): re-walking a seeded function can itself seed
@@ -752,8 +1007,7 @@ export function scanAstTaintPython(
           const shape = fn.paramShapes[idx];
           if (shape) env.set(shape.name, m);
         }
-        const seededTaintMask = makeTaintMaskPy(localFns, propagating, false);
-        for (const child of fn.body.namedChildren) if (child) walk(child, env, false, seededTaintMask);
+        walk(fn.body, env, false);
       }
       if (!changed) break;
     }

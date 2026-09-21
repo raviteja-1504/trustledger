@@ -60,7 +60,10 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
-import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import {
+  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
 // See astTaintPython.ts's/astTaintGo.ts's identical helper for why:
@@ -184,7 +187,7 @@ export function findEnclosingFunctionNameCSharp(node: SyntaxNode): string {
  * directly), unlike Java's flat primarySuffix array. Mirrors calleeTextGo/
  * calleeText exactly. */
 function calleeTextCSharp(node: SyntaxNode): string | null {
-  if (node.type === "identifier") return node.text;
+  if (node.type === "identifier" || node.type === "predefined_type") return node.text;
   if (node.type === "member_access_expression") {
     const expr = node.childForFieldName("expression");
     const name = node.childForFieldName("name");
@@ -328,6 +331,8 @@ interface EngineCtx {
   // method name -> (tainted param index -> classes tainted at the call site)
   seededParams: Map<string, Map<number, number>>;
   varTypes: VarTypes;
+  // File root -- lets guards resolve a literal-collection identifier declared elsewhere in the file.
+  root?: SyntaxNode;
   findings: AstTaintCSharpFinding[];
   seen: Set<string>;
   // Sinks whose argument was tainted for the sink's class but positively
@@ -374,8 +379,24 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       const op = node.childForFieldName("operator")?.type;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if (op === "+" && left && right) return taintMask(left, env) | taintMask(right, env);
+      if ((op === "+" || op === "??") && left && right) return taintMask(left, env) | taintMask(right, env);
       return 0;
+    }
+    if (node.type === "conditional_expression") {
+      // the condition steers control, it does not flow into the value
+      const cons = node.childForFieldName("consequence");
+      const alt = node.childForFieldName("alternative");
+      return (cons ? taintMask(cons, env) : 0) | (alt ? taintMask(alt, env) : 0);
+    }
+    if (node.type === "switch_expression") {
+      // value = union of the arm results; the subject is not part of the value
+      let m = 0;
+      for (const arm of node.namedChildren) {
+        if (arm?.type !== "switch_expression_arm") continue;
+        const result = arm.namedChildren[arm.namedChildren.length - 1];
+        if (result) m |= taintMask(result, env);
+      }
+      return m;
     }
     if (node.type === "member_access_expression") {
       // Field-sensitive read: OR the full dotted path composite key (set by
@@ -454,15 +475,18 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  const taintMask = makeTaintMaskCSharp(ctx);
-  const returnExprs = findAllNodes(method.body, "return_statement")
-    .map(ret => ret.namedChildren[0])
-    .filter((e): e is SyntaxNode => !!e);
   for (const shape of method.paramShapes) {
+    let surviving = 0;
+    // Path-sensitive: the mask is taken at EACH return with the env on that
+    // path; a return inside a lambda / local function is not this method's.
+    // Sink checks would run against a throwaway ctx, so use a sink-free copy.
+    const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+      { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     env.set(shape.name, ALL);
+    walker.walk(method.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
-    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env), 0) & ALL;
+    surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
@@ -706,50 +730,428 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   }
 }
 
-// ── Statement-level walk (declarations + assignments + sink-visiting) ────
+// ── Narrow validation guards ────────────────────────────────────────────────
+// Same policy as every other engine: only unambiguous proofs that a bare
+// identifier is safe -- literal equality, membership in a literal collection,
+// strict numeric parses (`int.TryParse`), strict numeric type tests (`x is
+// int`), literal patterns (`x is "a" or "b"`). NOT recognized: regex matches,
+// prefix checks, custom validators.
 
-function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx) {
-  const taintMask = makeTaintMaskCSharp(ctx);
+const STRICT_PARSE_TYPES_CS = new Set([
+  "int", "long", "short", "byte", "sbyte", "uint", "ulong", "ushort", "double", "float", "decimal", "bool",
+  "Int16", "Int32", "Int64", "UInt16", "UInt32", "UInt64", "Double", "Single", "Decimal", "Boolean", "Byte", "SByte", "Guid",
+]);
 
-  if (node.type === "local_declaration_statement") {
-    const varDecl = node.namedChildren.find(c => c && c.type === "variable_declaration");
-    const typeNode = varDecl?.childForFieldName("type");
-    const declaredTypeSimpleName = typeNode && typeNode.type === "identifier" ? typeNode.text : undefined;
-    for (const declarator of varDecl?.namedChildren.filter(c => c && c.type === "variable_declarator") ?? []) {
-      if (!declarator) continue;
-      const nameTok = declarator.namedChildren.find(c => c && c.type === "identifier");
-      if (!nameTok) continue;
-      const equalsClause = declarator.namedChildren.find(c => c && c.type === "equals_value_clause");
-      const initExpr = equalsClause?.namedChildren[0];
-      env.set(nameTok.text, initExpr ? taintMask(initExpr, env) : 0);
-      // `var cmd = new SqlCommand(sql);` -- declaredTypeSimpleName is
-      // undefined for `var` (implicit_type), so the receiver-typed sink
-      // check (SqlCommand.ExecuteReader) needs the type inferred from the
-      // initializer's own constructor instead, when there is one.
-      const inferredTypeName = declaredTypeSimpleName
-        ?? (initExpr?.type === "object_creation_expression" ? initExpr.childForFieldName("type")?.text : undefined);
-      if (inferredTypeName) ctx.varTypes.set(nameTok.text, inferredTypeName);
+function isLiteralCS(n: SyntaxNode): boolean {
+  if (n.type === "parenthesized_expression") return !!n.namedChildren[0] && isLiteralCS(n.namedChildren[0]);
+  return [
+    "string_literal", "verbatim_string_literal", "raw_string_literal", "integer_literal", "real_literal",
+    "character_literal", "boolean_literal",
+  ].includes(n.type);
+}
+
+/** An initializer_expression whose every element is a literal. */
+function isLiteralInitializerCS(n: SyntaxNode | null | undefined): boolean {
+  if (!n || n.type !== "initializer_expression") return false;
+  const els = n.namedChildren.filter((c): c is SyntaxNode => !!c);
+  return els.length > 0 && els.every(isLiteralCS);
+}
+
+/** `new[] {"a","b"}`, `new string[] {...}`, `new List<string> {...}`, `new HashSet<string>(new[]{...})`,
+ * `{ "a", "b" }` (field initializer), C# 12 `["a","b"]`, or an identifier EVERY binding of which,
+ * file-wide, is such a literal (a name that is ever rebound to something else is not trusted). */
+function isLiteralCollectionCS(n: SyntaxNode, root: SyntaxNode | undefined, depth = 0): boolean {
+  switch (n.type) {
+    case "initializer_expression":
+      return isLiteralInitializerCS(n);
+    case "collection_expression": {
+      const els = n.namedChildren.filter((c): c is SyntaxNode => !!c);
+      return els.length > 0 && els.every(isLiteralCS);
     }
+    case "implicit_array_creation_expression":
+    case "array_creation_expression":
+      return isLiteralInitializerCS(n.namedChildren.find(c => c?.type === "initializer_expression"));
+    case "object_creation_expression": {
+      const init = n.namedChildren.find(c => c?.type === "initializer_expression");
+      if (init) return isLiteralInitializerCS(init);
+      const args = argListOfCSharp(n);
+      return args.length === 1 && isLiteralCollectionCS(args[0], root, depth + 1);
+    }
+    case "identifier": {
+      if (!root || depth > 0) return false;
+      const bindings: SyntaxNode[] = [];
+      let opaque = false;
+      const visit = (x: SyntaxNode) => {
+        if (x.type === "variable_declarator") {
+          const name = x.namedChildren.find(c => c?.type === "identifier");
+          if (name?.text === n.text) {
+            const init = x.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0];
+            if (init) bindings.push(init); else opaque = true;
+          }
+        } else if (x.type === "assignment_expression") {
+          const left = x.childForFieldName("left");
+          if (left?.type === "identifier" && left.text === n.text) opaque = true; // rebound after declaration
+        }
+        for (const c of x.namedChildren) if (c) visit(c);
+      };
+      visit(root);
+      return !opaque && bindings.length > 0 && bindings.every(b => isLiteralCollectionCS(b, root, depth + 1));
+    }
+    default:
+      return false;
   }
+}
 
-  // Assignment: `x = expr;` or `obj.Field = expr;`. Restricted to the
-  // plain `=` operator only (not `+=`/`-=`/etc) -- a compound assignment
-  // would need env.get(key) OR'd into the new value to stay additive-only,
-  // which isn't implemented here; left unhandled (falls through to the
-  // generic recursion below) rather than risk incorrectly de-tainting an
-  // already-tainted target.
-  if (node.type === "assignment_expression") {
-    const opNode = node.namedChildren.find(c => c && c.type === "assignment_operator");
-    if (opNode?.text === "=") {
+/** `"a"`, `"a" or "b"`, `("a" or "b")` -- a pattern made only of literal constants. */
+function isLiteralPatternCS(p: SyntaxNode): boolean {
+  if (p.type === "constant_pattern") return !!p.namedChildren[0] && isLiteralCS(p.namedChildren[0]);
+  if (p.type === "or_pattern") {
+    const parts = p.namedChildren.filter((c): c is SyntaxNode => !!c);
+    return parts.length > 0 && parts.every(isLiteralPatternCS);
+  }
+  if (p.type === "parenthesized_pattern") return !!p.namedChildren[0] && isLiteralPatternCS(p.namedChildren[0]);
+  return false;
+}
+
+function invertCS(g: Guard): Guard {
+  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+}
+
+function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Guard[] {
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionCS(inner, root) : [];
+    }
+    case "prefix_unary_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.namedChildren[0];
+      return inner ? guardsOfConditionCS(inner, root).map(invertCS) : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      if (op === "&&") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "true");
+      if (op === "||") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "false");
+      if (op === "==" || op === "!=") {
+        const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
+        if (l.type === "identifier" && isLiteralCS(r)) return [{ name: l.text, holds: holdsWhenEqual }];
+        if (r.type === "identifier" && isLiteralCS(l)) return [{ name: r.text, holds: holdsWhenEqual }];
+      }
+      return [];
+    }
+    case "is_expression": {
+      // `x is int` -- strict type test
+      const l = cond.childForFieldName("left") ?? cond.namedChildren[0];
+      const r = cond.childForFieldName("right") ?? cond.namedChildren[1];
+      if (l?.type === "identifier" && r && CSHARP_NUMERIC_CAST_TYPES.has(r.text)) return [{ name: l.text, holds: "true" }];
+      return [];
+    }
+    case "is_pattern_expression": {
+      const l = cond.childForFieldName("expression") ?? cond.namedChildren[0];
+      const p = cond.childForFieldName("pattern") ?? cond.namedChildren[1];
+      if (l?.type !== "identifier" || !p) return [];
+      if (p.type === "declaration_pattern") {
+        const t = p.childForFieldName("type") ?? p.namedChildren[0];
+        if (t && CSHARP_NUMERIC_CAST_TYPES.has(t.text)) return [{ name: l.text, holds: "true" }];
+      }
+      if (isLiteralPatternCS(p)) return [{ name: l.text, holds: "true" }];
+      return [];
+    }
+    case "invocation_expression": {
+      const fn = cond.childForFieldName("function");
+      if (fn?.type !== "member_access_expression") return [];
+      const recv = fn.childForFieldName("expression");
+      const name = fn.childForFieldName("name")?.text;
+      const args = argListOfCSharp(cond);
+      if (!recv || !name) return [];
+      // int.TryParse(x, out ...) -- x parses as a number
+      if (name === "TryParse" && STRICT_PARSE_TYPES_CS.has(recv.text) && args[0]?.type === "identifier") {
+        return [{ name: args[0].text, holds: "true" }];
+      }
+      // ALLOWED.Contains(x) / new[] {"a"}.Contains(x)
+      if (name === "Contains" && args.length === 1 && args[0].type === "identifier" && isLiteralCollectionCS(recv, root)) {
+        return [{ name: args[0].text, holds: "true" }];
+      }
+      if (name === "Equals") {
+        // x.Equals("lit") / "lit".Equals(x) / string.Equals(x, "lit")
+        if (args.length === 1) {
+          if (recv.type === "identifier" && isLiteralCS(args[0])) return [{ name: recv.text, holds: "true" }];
+          if (isLiteralCS(recv) && args[0].type === "identifier") return [{ name: args[0].text, holds: "true" }];
+        }
+        if (args.length === 2 && (recv.text === "string" || recv.text === "String")) {
+          if (args[0].type === "identifier" && isLiteralCS(args[1])) return [{ name: args[0].text, holds: "true" }];
+          if (isLiteralCS(args[0]) && args[1].type === "identifier") return [{ name: args[1].text, holds: "true" }];
+        }
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
+// ── Path-sensitive statement walk ───────────────────────────────────────────
+// One walker serves the interprocedural summary builder (no nested functions,
+// collects return masks) and the main scan (sink checks, lambdas/local
+// functions walked on a cloned env). Branches walk each arm on a CLONE of the
+// env and join with may-taint OR (shared combinators in taint/taintCore.ts);
+// an arm ending in return/throw is dropped from the join, and code after a
+// terminating statement is dead and not walked.
+
+interface WalkOptsCS {
+  /** Walk lambda / local-function / anonymous-method bodies (main scan) or ignore them (summaries). */
+  descendFunctions: boolean;
+  /** Called for each `return expr`, with the env on that path. */
+  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnCS) => void;
+}
+
+function statementTerminatesCS(n: SyntaxNode | null | undefined): boolean {
+  if (!n) return false;
+  if (n.type === "return_statement" || n.type === "throw_statement") return true;
+  if (n.type === "block") return n.namedChildren.some(c => statementTerminatesCS(c));
+  if (n.type === "if_statement") {
+    const alt = n.childForFieldName("alternative");
+    return !!alt && statementTerminatesCS(n.childForFieldName("consequence")) && statementTerminatesCS(alt);
+  }
+  return false;
+}
+
+/** Parameter names a lambda / local function / anonymous method introduces. */
+function paramNamesOfCS(fn: SyntaxNode): string[] {
+  const names: string[] = [];
+  const body = fn.childForFieldName("body");
+  const fromList = (list: SyntaxNode) => {
+    for (const p of list.namedChildren) {
+      if (!p) continue;
+      if (p.type === "identifier") names.push(p.text);
+      else if (p.type === "parameter") { const nm = p.childForFieldName("name"); if (nm) names.push(nm.text); }
+    }
+  };
+  const params = fn.childForFieldName("parameters");
+  if (params) fromList(params);
+  for (const c of fn.namedChildren) {
+    if (!c || c.id === body?.id || c.id === params?.id) continue;
+    if (c.type === "identifier") names.push(c.text);          // x => ...
+    else if (c.type === "parameter_list") fromList(c);
+    else if (c.type === "parameter") { const nm = c.childForFieldName("name"); if (nm) names.push(nm.text); }
+  }
+  return names;
+}
+
+const FUNCTION_NODES_CS = new Set(["lambda_expression", "anonymous_method_expression", "local_function_statement"]);
+const SEQUENCE_STATEMENTS_CS = new Set(["using_statement", "lock_statement", "fixed_statement", "checked_statement", "unsafe_statement"]);
+const SWITCH_LABELS_CS = new Set(["case_switch_label", "default_switch_label", "case_pattern_switch_label"]);
+
+function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
+  const taintMask = makeTaintMaskCSharp(ctx);
+  const root = ctx.root;
+
+  const walkStmts = (nodes: readonly (SyntaxNode | null)[], env: Env): boolean => {
+    for (const c of nodes) if (c && walk(c, env)) return true; // dead code after a terminator is not walked
+    return false;
+  };
+
+  const walkFunction = (fn: SyntaxNode, env: Env) => {
+    const body = fn.childForFieldName("body");
+    if (!body) return;
+    // A nested function sees captured outer variables (cloned env); its own
+    // parameters shadow same-named outer ones and start untainted.
+    const fenv = cloneEnv(env);
+    for (const p of paramNamesOfCS(fn)) fenv.set(p, 0);
+    walk(body, fenv);
+  };
+
+  const walk = (node: SyntaxNode, env: Env): boolean => {
+    switch (node.type) {
+      case "lambda_expression":
+      case "anonymous_method_expression":
+      case "local_function_statement":
+        if (opts.descendFunctions) walkFunction(node, env);
+        return false;
+
+      case "block":
+        return walkStmts(node.namedChildren, env);
+
+      case "if_statement": {
+        const branches: Branch[] = [];
+        let cur: SyntaxNode | null = node;
+        while (cur && cur.type === "if_statement") {
+          const cond = cur.childForFieldName("condition");
+          const cons = cur.childForFieldName("consequence");
+          branches.push({
+            visitCond: (e) => { if (cond) walk(cond, e); },
+            guards: () => (cond ? guardsOfConditionCS(cond, root) : []),
+            body: (e) => (cons ? walk(cons, e) : false),
+          });
+          const alt: SyntaxNode | null = cur.childForFieldName("alternative");
+          if (alt && alt.type !== "if_statement") {
+            branches.push({ body: (e) => walk(alt, e) });
+            cur = null;
+          } else {
+            cur = alt;
+          }
+        }
+        return walkIfChain(env, branches);
+      }
+
+      case "conditional_expression": {
+        // `c ? a : b` -- arms are walked on cloned envs with the condition's guards
+        const cond = node.childForFieldName("condition");
+        const cons = node.childForFieldName("consequence");
+        const alt = node.childForFieldName("alternative");
+        walkIfChain(env, [
+          {
+            visitCond: (e) => { if (cond) walk(cond, e); },
+            guards: () => (cond ? guardsOfConditionCS(cond, root) : []),
+            body: (e) => { if (cons) walk(cons, e); return false; },
+          },
+          { body: (e) => { if (alt) walk(alt, e); return false; } },
+        ]);
+        return false;
+      }
+
+      case "for_statement": {
+        for (const i of node.childrenForFieldName("initializer")) if (i) walk(i, env);
+        const cond = node.childForFieldName("condition");
+        if (cond) walk(cond, env);
+        const body = node.childForFieldName("body");
+        const updates = node.childrenForFieldName("update");
+        return walkLoop(env, (e) => {
+          const t = body ? walk(body, e) : false;
+          if (!t) for (const u of updates) if (u) walk(u, e);
+          return t;
+        });
+      }
+
+      case "for_each_statement": {
+        const right = node.childForFieldName("right");
+        if (right) walk(right, env);
+        const rmask = right ? taintMask(right, env) : 0;
+        const left = node.childForFieldName("left");
+        const names = left ? (left.type === "identifier" ? [left] : findAllNodes(left, "identifier")) : [];
+        for (const n of names) env.set(n.text, rmask);
+        const body = node.childForFieldName("body");
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "while_statement": {
+        const named = node.namedChildren.filter((c): c is SyntaxNode => !!c);
+        const cond = node.childForFieldName("condition") ?? named[0] ?? null;
+        const body = node.childForFieldName("body") ?? named[named.length - 1] ?? null;
+        if (cond && cond.id !== body?.id) walk(cond, env);
+        return walkLoop(env, (e) => (body ? walk(body, e) : false));
+      }
+
+      case "do_statement": {
+        const named = node.namedChildren.filter((c): c is SyntaxNode => !!c);
+        const body = node.childForFieldName("body") ?? named[0] ?? null;
+        const cond = node.childForFieldName("condition") ?? named[named.length - 1] ?? null;
+        const term = walkLoop(env, (e) => (body ? walk(body, e) : false));
+        if (cond && cond.id !== body?.id) walk(cond, env);
+        return term;
+      }
+
+      case "try_statement": {
+        const body = node.childForFieldName("body");
+        const finallyC = node.namedChildren.find(c => c?.type === "finally_clause");
+        const catches = node.namedChildren
+          .filter(c => c?.type === "catch_clause")
+          .map(c => {
+            const decl = c!.namedChildren.find(x => x?.type === "catch_declaration");
+            const nm = decl?.childForFieldName("name");
+            const cbody = c!.childForFieldName("body");
+            return { bind: nm ? [nm.text] : [], body: (e: Env) => (cbody ? walk(cbody, e) : false) };
+          });
+        return walkTry(
+          env,
+          (e) => (body ? walk(body, e) : false),
+          catches,
+          finallyC ? (e) => { const fb = finallyC.namedChildren.find(x => x?.type === "block"); return fb ? walk(fb, e) : false; } : undefined,
+        );
+      }
+
+      case "switch_statement": {
+        const value = node.childForFieldName("value");
+        if (value) walk(value, env);
+        const subject = value?.type === "identifier" ? value.text : null;
+        const sections = (node.childForFieldName("body") ?? node).namedChildren.filter(c => c?.type === "switch_section");
+        return walkSwitch(env, sections.map(sec => {
+          const labels = sec!.namedChildren.filter((c): c is SyntaxNode => !!c && SWITCH_LABELS_CS.has(c.type));
+          const stmts = sec!.namedChildren.filter(c => !!c && !SWITCH_LABELS_CS.has(c.type));
+          return {
+            isDefault: labels.some(l => l.type === "default_switch_label"),
+            // `case "a": case "b":` -- inside, the subject IS one of the literals.
+            pre: (e: Env) => {
+              if (subject && labels.length > 0 && labels.every(l => l.type === "case_switch_label" && !!l.namedChildren[0] && isLiteralCS(l.namedChildren[0]))) {
+                applyGuards(e, [subject]);
+              }
+            },
+            body: (e: Env) => walkStmts(stmts, e),
+          };
+        }));
+      }
+
+      case "return_statement": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        const v = node.namedChildren[0];
+        if (v) opts.onReturn?.(v, env, taintMask);
+        return true;
+      }
+
+      case "throw_statement":
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        return true;
+
+      default:
+        break;
+    }
+
+    // using / lock / ...: a sequence of a header and a body -- terminates when its body does
+    if (SEQUENCE_STATEMENTS_CS.has(node.type)) return walkStmts(node.namedChildren, env);
+
+    if (node.type === "local_declaration_statement") {
+      const varDecl = node.namedChildren.find(c => c && c.type === "variable_declaration");
+      const typeNode = varDecl?.childForFieldName("type");
+      const declaredTypeSimpleName = typeNode && typeNode.type === "identifier" ? typeNode.text : undefined;
+      for (const declarator of varDecl?.namedChildren.filter(c => c && c.type === "variable_declarator") ?? []) {
+        if (!declarator) continue;
+        const nameTok = declarator.namedChildren.find(c => c && c.type === "identifier");
+        if (!nameTok) continue;
+        const equalsClause = declarator.namedChildren.find(c => c && c.type === "equals_value_clause");
+        const initExpr = equalsClause?.namedChildren[0];
+        env.set(nameTok.text, initExpr ? taintMask(initExpr, env) : 0);
+        // `var cmd = new SqlCommand(sql);` -- declaredTypeSimpleName is
+        // undefined for `var` (implicit_type), so the receiver-typed sink
+        // check (SqlCommand.ExecuteReader) needs the type inferred from the
+        // initializer's own constructor instead, when there is one.
+        const inferredTypeName = declaredTypeSimpleName
+          ?? (initExpr?.type === "object_creation_expression" ? initExpr.childForFieldName("type")?.text : undefined);
+        if (inferredTypeName) ctx.varTypes.set(nameTok.text, inferredTypeName);
+      }
+    }
+
+    // Assignment: `x = expr;`, `x += expr;`, `x ??= expr;`, `obj.Field = expr;`.
+    // A compound operator keeps whatever taint the target already had (OR).
+    if (node.type === "assignment_expression") {
+      const opNode = node.namedChildren.find(c => c && c.type === "assignment_operator");
+      const compound = !!opNode && opNode.text !== "=";
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      const mask = right ? taintMask(right, env) : 0;
+      const rhs = right ? taintMask(right, env) : 0;
+      const put = (key: string): number => {
+        const mask = compound ? rhs | (env.get(key) ?? 0) : rhs;
+        env.set(key, mask);
+        return mask;
+      };
       if (left?.type === "identifier") {
-        env.set(left.text, mask);
+        put(left.text);
       } else if (left?.type === "member_access_expression") {
         const key = calleeTextCSharp(left);
         if (key) {
-          env.set(key, mask);
+          const mask = put(key);
           // Structural sink: `xxx.Filter = tainted` (System.DirectoryServices
           // DirectorySearcher.Filter) -- an assignment-target-IS-the-sink
           // shape, since the vulnerable API here is a property setter, not
@@ -762,25 +1164,31 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
         }
       }
     }
-  }
 
-  if (node.type === "invocation_expression") {
-    const fn = node.childForFieldName("function");
-    const args = argListOfCSharp(node);
-    if (fn) {
-      checkCallSink(fn, args, node, env, ctx, taintMask);
-      if (fn.type === "identifier" && ctx.localMethods.has(fn.text)) {
-        seedLocalMethodParams(fn.text, args, env, ctx);
+    if (node.type === "invocation_expression") {
+      const fn = node.childForFieldName("function");
+      const args = argListOfCSharp(node);
+      if (fn) {
+        checkCallSink(fn, args, node, env, ctx, taintMask);
+        if (fn.type === "identifier" && ctx.localMethods.has(fn.text)) {
+          seedLocalMethodParams(fn.text, args, env, ctx);
+        }
       }
     }
-  }
-  if (node.type === "object_creation_expression") {
-    checkNewExpressionSink(node, env, ctx, taintMask);
-  }
+    if (node.type === "object_creation_expression") {
+      checkNewExpressionSink(node, env, ctx, taintMask);
+    }
 
-  for (const child of node.namedChildren) {
-    if (child) walkForDeclarationsAndSinks(child, env, ctx);
-  }
+    for (const child of node.namedChildren) if (child) walk(child, env);
+    return false;
+  };
+
+  return { walk, taintMask };
+}
+
+/** Main-scan entry: walks one method body (or seeded re-walk) with sink checks and call-site seeding. */
+function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx) {
+  createWalkerCS(ctx, { descendFunctions: true }).walk(node, env);
 }
 
 // ── BOLA: sink shapes, ownership-comparison detection, per-method emission ──
@@ -797,7 +1205,7 @@ const BOLA_LOOKUP_NAME_RE = /^Get\w*By(?:Id|Guid)?$/i;
 const BOLA_WRITE_NAME_RE = /^(?:Delete|Remove|Update)\w*$/i;
 const PRINCIPAL_NAME_RE = /^(?:User|HttpContext\.User)(?:\.|$)/;
 
-interface BolaSinkCandidate { node: SyntaxNode; sourceExpr: string; sinkExpr: string }
+interface BolaSinkCandidate { node: SyntaxNode; sourceExpr: string; sinkExpr: string; idNames: Set<string> }
 
 function isPrincipalShaped(text: string): boolean {
   return PRINCIPAL_NAME_RE.test(text);
@@ -813,10 +1221,8 @@ function checkBolaSinkCandidate(
   const isNamedLookup = BOLA_LOOKUP_NAME_RE.test(tail) || BOLA_WRITE_NAME_RE.test(tail);
   if (!isKnownLookup && !isNamedLookup) return;
   const arg0 = args[0];
-  const argIds = findAllNodes(arg0, "identifier").map(n => n.text);
-  if (argIds.some(id => resourceIdParamNames.has(id))) {
-    candidates.push({ node, sourceExpr: arg0.text, sinkExpr: text });
-  }
+  const idNames = new Set(findAllNodes(arg0, "identifier").map(n => n.text).filter(id => resourceIdParamNames.has(id)));
+  if (idNames.size > 0) candidates.push({ node, sourceExpr: arg0.text, sinkExpr: text, idNames });
 }
 
 /** `new ClassName(id)` -- reuses argReferencesResourceId-equivalent logic
@@ -827,10 +1233,8 @@ function checkBolaConstructorSinkCandidate(node: SyntaxNode, resourceIdParamName
   if (!className) return;
   const args = argListOfCSharp(node);
   if (args.length === 0) return;
-  const argIds = findAllNodes(args[0], "identifier").map(n => n.text);
-  if (argIds.some(id => resourceIdParamNames.has(id))) {
-    candidates.push({ node, sourceExpr: args[0].text, sinkExpr: `new ${className}` });
-  }
+  const idNames = new Set(findAllNodes(args[0], "identifier").map(n => n.text).filter(id => resourceIdParamNames.has(id)));
+  if (idNames.size > 0) candidates.push({ node, sourceExpr: args[0].text, sinkExpr: `new ${className}`, idNames });
 }
 
 function comparisonSuppresses(leftNode: SyntaxNode, rightNode: SyntaxNode, resourceIdParamNames: Set<string>): boolean {
@@ -843,15 +1247,109 @@ function comparisonSuppresses(leftNode: SyntaxNode, rightNode: SyntaxNode, resou
   return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
 }
 
+type SideCS = "true" | "false";
+
+/** Which side(s) of `cond` establish that a resource id in `ids` equals the
+ * authenticated principal (`==` holds on the true side, `!=` on the false
+ * side; `!`/`&&`/`||` compose like validation guards do). An identifier
+ * condition (`isOwner`) resolves ONE hop to its last preceding declaration
+ * or assignment. */
+function ownershipSidesCS(cond: SyntaxNode, ids: Set<string>, body: SyntaxNode, resolve = true): SideCS[] {
+  const flip = (s: SideCS): SideCS => (s === "true" ? "false" : "true");
+  switch (cond.type) {
+    case "parenthesized_expression": {
+      const inner = cond.namedChildren[0];
+      return inner ? ownershipSidesCS(inner, ids, body, resolve) : [];
+    }
+    case "prefix_unary_expression": {
+      if (cond.child(0)?.type !== "!") return [];
+      const inner = cond.namedChildren[0];
+      return inner ? ownershipSidesCS(inner, ids, body, resolve).map(flip) : [];
+    }
+    case "binary_expression": {
+      const op = cond.childForFieldName("operator")?.type;
+      const l = cond.childForFieldName("left");
+      const r = cond.childForFieldName("right");
+      if (!l || !r) return [];
+      if (op === "==" || op === "!=") return comparisonSuppresses(l, r, ids) ? [op === "==" ? "true" : "false"] : [];
+      if (op === "&&") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s === "true");
+      if (op === "||") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s === "false");
+      return [];
+    }
+    case "invocation_expression": {
+      const fn = cond.childForFieldName("function");
+      const args = argListOfCSharp(cond);
+      if (fn?.type === "member_access_expression" && fn.childForFieldName("name")?.text === "Equals") {
+        const receiver = fn.childForFieldName("expression");
+        if (args.length === 1 && receiver && comparisonSuppresses(receiver, args[0], ids)) return ["true"];
+        // string.Equals(a, b) / object.Equals(a, b)
+        if (args.length === 2 && comparisonSuppresses(args[0], args[1], ids)) return ["true"];
+      }
+      return [];
+    }
+    case "identifier": {
+      if (!resolve) return [];
+      let best: { end: number; expr: SyntaxNode } | null = null;
+      const consider = (end: number, expr: SyntaxNode | null | undefined) => {
+        if (expr && end <= cond.startIndex && (!best || end > best.end)) best = { end, expr };
+      };
+      const visit = (n: SyntaxNode) => {
+        if (n.type === "variable_declarator") {
+          const name = n.namedChildren.find(c => c?.type === "identifier");
+          if (name?.text === cond.text) consider(n.endIndex, n.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0]);
+        } else if (n.type === "assignment_expression") {
+          const left = n.childForFieldName("left");
+          if (left?.type === "identifier" && left.text === cond.text) consider(n.endIndex, n.childForFieldName("right"));
+        }
+        for (const c of n.namedChildren) if (c) visit(c);
+      };
+      visit(body);
+      const found = best as { end: number; expr: SyntaxNode } | null;
+      return found ? ownershipSidesCS(found.expr, ids, body, false) : [];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Does an ownership comparison DOMINATE `sink`? It must (a) sit in an if
+ * condition (or a ternary condition) that precedes the sink in source order
+ * and (b) put the sink on the continuing path: the sink is in the arm where
+ * the comparison establishes ownership, or the arm where it does not always
+ * terminates (return/throw) and the sink comes after the whole if. A
+ * comparison that is unused, follows the lookup, or guards a different branch
+ * no longer suppresses.
+ */
+function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNode): boolean {
+  const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
+    !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
+  let found = false;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "if_statement" || n.type === "conditional_expression") {
+      const cond = n.childForFieldName("condition");
+      const cons = n.childForFieldName("consequence");
+      const alt = n.childForFieldName("alternative");
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = ownershipSidesCS(cond, ids, body);
+        const afterIf = n.type === "if_statement" && sink.startIndex >= n.endIndex && contains(n.parent, sink);
+        if (sides.includes("true") && (contains(cons, sink) || (afterIf && statementTerminatesCS(alt)))) found = true;
+        if (sides.includes("false") && (contains(alt, sink) || (afterIf && statementTerminatesCS(cons)))) found = true;
+      }
+    }
+    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(body);
+  return found;
+}
+
 /**
  * Per-method post-check, not per-call-site -- mirrors astTaintJava.ts's
- * collectBolaFindings exactly: candidate sinks are collected but not
- * emitted until a full body walk confirms no suppressing ownership
- * comparison exists anywhere in the method. Purely structural (no env/
- * taint), same posture as Java's version and the same documented,
- * accepted gap (an inverted `if (!x.Equals(y))` guard still incorrectly
- * suppresses -- branch/CFG-aware analysis is out of scope, see this
- * module's own docblock).
+ * collectBolaFindings: candidate sinks are collected during the body walk and
+ * each is emitted unless an ownership comparison for ITS resource id
+ * dominates it (see ownershipDominatesCS) -- not merely "a comparison exists
+ * somewhere in the method". Purely structural (no env/taint).
  */
 function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (!method.body) return;
@@ -860,33 +1358,19 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (method.resourceIdParamNames.size === 0) return;
 
   const candidates: BolaSinkCandidate[] = [];
-  let hasOwnershipComparison = false;
-
   for (const inv of findAllNodes(method.body, "invocation_expression")) {
     const fn = inv.childForFieldName("function");
     if (!fn) continue;
-    const args = argListOfCSharp(inv);
-    checkBolaSinkCandidate(fn, args, inv, method.resourceIdParamNames, candidates);
-    const tail = calleeTextCSharp(fn)?.split(".").pop();
-    if (tail === "Equals" && args[0]) {
-      const receiver = fn.type === "member_access_expression" ? fn.childForFieldName("expression") : null;
-      if (receiver && comparisonSuppresses(receiver, args[0], method.resourceIdParamNames)) hasOwnershipComparison = true;
-    }
+    checkBolaSinkCandidate(fn, argListOfCSharp(inv), inv, method.resourceIdParamNames, candidates);
   }
   for (const oc of findAllNodes(method.body, "object_creation_expression")) {
     checkBolaConstructorSinkCandidate(oc, method.resourceIdParamNames, candidates);
   }
-  for (const bin of findAllNodes(method.body, "binary_expression")) {
-    const op = bin.childForFieldName("operator")?.type;
-    if (op !== "==" && op !== "!=") continue;
-    const left = bin.childForFieldName("left");
-    const right = bin.childForFieldName("right");
-    if (left && right && comparisonSuppresses(left, right, method.resourceIdParamNames)) hasOwnershipComparison = true;
-  }
 
-  if (!hasOwnershipComparison) {
-    const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
-    for (const c of candidates) emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+  const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
+  for (const c of candidates) {
+    if (ownershipDominatesCS(c.node, c.idNames, method.body)) continue;
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
   }
 }
 
@@ -903,7 +1387,7 @@ export function scanAstTaintCSharp(
     const localMethods = collectLocalMethods(root);
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), findings: [], seen: new Set(), suppressed: suppressedOut,
+      varTypes: new Map(), root, findings: [], seen: new Set(), suppressed: suppressedOut,
     };
 
     const propagating = buildPropagatingMapCSharp(localMethods, ctx);
