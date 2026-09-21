@@ -16,7 +16,7 @@ function delayed<T>(x: T): () => T { return () => x; }
 function escapeHtml(v: string) { return v.replaceAll("<", "&lt;"); }
 `;
 const handler = (body: string, top = "") => `${HELPERS}\n${top}\napp.get("/a", async (req: any, res: any) => {\n  const x = req.query.q;\n${body}\n});\n`;
-const ids = (code: string) => scanAstTaint(code, "a.ts").map(f => f.id);
+const ids = (code: string): string[] => scanAstTaint(code, "a.ts").map(f => f.id);
 const has = (code: string, id: string) => ids(code).includes(id);
 const sql = (expr: string) => handler(`db.query("S " + ${expr});`);
 

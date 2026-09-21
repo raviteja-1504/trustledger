@@ -44,7 +44,10 @@ const TABLES: Record<SanitizerLang, Table> = {
   py: {
     exact: {
       "markupsafe.escape": XSS, "Markup.escape": XSS, "bleach.clean": XSS, "html.escape": XSS,
-      "django.utils.html.escape": XSS,
+      "django.utils.html.escape": XSS, "flask.escape": XSS, "escape": XSS, "escape_html": XSS, "html_escape": XSS,
+      "sanitize_html": XSS, "escape_for_html": XSS,
+      // str(x) keeps every string-injection class but defeats operator-object (NoSQL) injection
+      "str": C.NOSQL,
       "shlex.quote": C.CMD,
       "os.path.basename": C.PATH, "werkzeug.utils.secure_filename": C.PATH, "secure_filename": C.PATH,
       "urllib.parse.quote": URL_SAFE, "urllib.parse.quote_plus": URL_SAFE,
