@@ -61,7 +61,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type SuppressedSink, type TaintEnv,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -81,6 +81,8 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintCSharpId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
+  | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg"
+  | "eval-exec" | "ssti"
   | "bola-missing-ownership-check";
 
 export interface AstTaintCSharpFinding {
@@ -188,12 +190,15 @@ export function findEnclosingFunctionNameCSharp(node: SyntaxNode): string {
  * calleeText exactly. */
 function calleeTextCSharp(node: SyntaxNode): string | null {
   if (node.type === "identifier" || node.type === "predefined_type") return node.text;
+  if (node.type === "this_expression" || node.type === "base_expression") return "this";
+  if (node.type === "generic_name") return node.namedChildren.find(c => c?.type === "identifier")?.text ?? null;
   if (node.type === "member_access_expression") {
     const expr = node.childForFieldName("expression");
     const name = node.childForFieldName("name");
     if (!expr || !name) return null;
     const base = calleeTextCSharp(expr);
-    return base ? `${base}.${name.text}` : null;
+    // `JsonConvert.DeserializeObject<T>` -> `JsonConvert.DeserializeObject`
+    return base ? `${base}.${stripGenerics(name.text)}` : null;
   }
   return null;
 }
@@ -244,6 +249,181 @@ function lineOf(node: SyntaxNode): number {
   return node.startPosition.row + 1;
 }
 
+// ── C# recall helpers (sources, carriers, string shapes, sinks) ──────────────
+
+/** `JsonConvert.DeserializeObject<Dictionary<string, string>>` -> `JsonConvert.DeserializeObject` */
+function stripGenerics(text: string): string {
+  let prev = "";
+  let cur = text;
+  while (cur !== prev) { prev = cur; cur = cur.replace(/<[^<>]*>/g, ""); }
+  return cur;
+}
+
+// Static/utility calls whose RESULT carries the taint of their arguments (string, path, URL, JSON and
+// container plumbing that neither validates nor neutralizes anything). Opaque calls stay untainted.
+const CS_PASSTHROUGH = new Set([
+  "string.Join", "String.Join", "string.Concat", "String.Concat", "string.Format", "String.Format", "string.Copy", "String.Copy",
+  "Path.Combine", "Path.GetFullPath", "Path.GetDirectoryName", "Path.ChangeExtension", "Path.GetRelativePath",
+  "WebUtility.UrlDecode", "HttpUtility.UrlDecode", "Uri.UnescapeDataString", "WebUtility.HtmlDecode", "HttpUtility.HtmlDecode",
+  "Convert.FromBase64String", "Convert.ToBase64String", "Convert.ToString",
+  "JsonConvert.SerializeObject", "JsonConvert.DeserializeObject", "JsonSerializer.Serialize", "JsonSerializer.Deserialize",
+  "Enumerable.Concat", "Enumerable.Repeat", "Task.FromResult", "Uri.EscapeUriString", "Environment.ExpandEnvironmentVariables",
+]);
+const CS_ENCODING_RE = /^Encoding\.\w+\.(?:GetString|GetBytes)$|^Convert\.(?:FromBase64String|ToBase64String)$/;
+const CS_DECODERS = new Set(["WebUtility.UrlDecode", "HttpUtility.UrlDecode", "Uri.UnescapeDataString", "WebUtility.HtmlDecode", "HttpUtility.HtmlDecode", "Convert.FromBase64String"]);
+// Receiver methods whose result also includes their ARGUMENTS (replacement text, joined items).
+const CS_ARG_CARRYING_METHODS = new Set(["Replace", "Concat", "Insert", "PadLeft", "PadRight", "Format", "Join", "AppendFormat"]);
+const CS_MUTATORS = new Set(["Add", "AddRange", "Append", "AppendLine", "AppendFormat", "Insert", "Push", "Enqueue", "TryAdd", "Set", "Put", "AddFirst", "AddLast"]);
+const CS_BUILTIN_METHOD_NAMES = new Set([
+  "Add", "Remove", "Get", "Set", "Append", "Insert", "Contains", "Find", "First", "Select", "Where", "ToString", "Trim", "Split",
+  "Replace", "Join", "Format", "Concat", "Equals", "Parse", "Write", "Read", "Close", "Execute", "Invoke", "Run", "Send", "Delete", "Create",
+]);
+const CS_SECRET_NAME_RE = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
+const CS_SENSITIVE_PROP_RE = /^(?:role|roles|isadmin|is_admin|admin|permissions?|privileges?|scope|scopes|isstaff|issuperuser|groups?)$/i;
+const CS_SQL_COMMAND_TYPES = new Set(["SqlCommand", "OleDbCommand", "MySqlCommand", "NpgsqlCommand", "SqliteCommand", "OracleCommand", "SqlDataAdapter", "OdbcCommand"]);
+const CS_WEAK_CRYPTO_TYPES = new Set(["MD5CryptoServiceProvider", "SHA1CryptoServiceProvider", "DESCryptoServiceProvider", "RC2CryptoServiceProvider", "TripleDESCryptoServiceProvider", "SHA1Managed", "MD5Cng"]);
+const CS_TEMPLATE_ROOT_RE = /(?:Template|Handlebars|Razor|Engine|Liquid|Scriban|Fluid|Mustache)/;
+const CS_NOSQL_RECEIVER_RE = /coll|mongo|\bdb\b|users?\b|orders?\b|accounts?\b/i;
+const CS_NOSQL_TAILS = new Set(["Find", "FindAsync", "FindOne", "FindOneAsync", "FindSync", "DeleteOne", "DeleteMany", "UpdateOne", "UpdateMany", "ReplaceOne", "Aggregate", "CountDocuments", "FindOneAndUpdate", "FindOneAndDelete"]);
+const CS_SQL_START_RE = /^\s*(?:select|insert|update|delete|with|call|exec(?:ute)?|merge|replace)\b/i;
+const CS_LDAP_SHAPE_RE = /\(\s*[&|!]?\s*(?:\(\s*)?[\w.-]+\s*(?:=|~=|>=|<=)\s*$/;
+const CS_XPATH_SHAPE_RE = /\/\/?[\w*@.:-]+(?:\/[\w*@.:()-]+)*\[[^\]]*=\s*['"]?$/;
+const CS_SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+
+/** A C# string literal's value (regular or verbatim), or null. */
+function csStringValue(n: SyntaxNode): string | null {
+  if (n.type === "string_literal") return n.text.replace(/^"|"$/g, "");
+  if (n.type === "verbatim_string_literal") return n.text.replace(/^@"|"$/g, "");
+  if (n.type === "parenthesized_expression" && n.namedChildren[0]) return csStringValue(n.namedChildren[0]);
+  return null;
+}
+/** Flatten a `a + b + c` chain into its operands, or null when it is not a pure `+` chain. */
+function csConcatOperands(n: SyntaxNode): SyntaxNode[] | null {
+  if (n.type !== "binary_expression" || n.childForFieldName("operator")?.type !== "+") return null;
+  const l = n.childForFieldName("left");
+  const r = n.childForFieldName("right");
+  if (!l || !r) return null;
+  const left = l.type === "binary_expression" ? csConcatOperands(l) : [l];
+  return left ? [...left, r] : null;
+}
+
+/** Field/property names declared in the file (class-level state visible to every method). */
+function collectClassFieldNamesCS(root: SyntaxNode): Set<string> {
+  const names = new Set<string>();
+  for (const decl of [...findAllNodes(root, "field_declaration"), ...findAllNodes(root, "property_declaration")]) {
+    if (decl.type === "property_declaration") { const nm = decl.childForFieldName("name"); if (nm) names.add(nm.text); continue; }
+    for (const d of findAllNodes(decl, "variable_declarator")) {
+      const nm = d.namedChildren.find(c => c?.type === "identifier");
+      if (nm) names.add(nm.text);
+    }
+  }
+  return names;
+}
+
+const localNamesCacheCS = new WeakMap<SyntaxNode, Set<string>>();
+/** Parameters and locals declared inside a method / lambda / local function (nested functions' own locals excluded). */
+function localNamesOfCS(fn: SyntaxNode): Set<string> {
+  const cached = localNamesCacheCS.get(fn);
+  if (cached) return cached;
+  const names = new Set<string>();
+  for (const p of paramNamesOfCS(fn)) names.add(p);
+  const params = fn.childForFieldName("parameters");
+  if (params) for (const p of params.namedChildren) { const nm = p?.childForFieldName("name"); if (nm) names.add(nm.text); }
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "variable_declarator") { const nm = n.namedChildren.find(c => c?.type === "identifier"); if (nm) names.add(nm.text); }
+    else if (n.type === "for_each_statement") { const l = n.childForFieldName("left"); if (l?.type === "identifier") names.add(l.text); }
+    else if (n.type === "declaration_expression" || n.type === "declaration_pattern") { const nm = n.childForFieldName("name"); if (nm) names.add(nm.text); }
+    else if (n.type === "catch_declaration") { const nm = n.childForFieldName("name"); if (nm) names.add(nm.text); }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(fn);
+  localNamesCacheCS.set(fn, names);
+  return names;
+}
+function isLocalNameCS(id: SyntaxNode): boolean {
+  for (let cur: SyntaxNode | null = id.parent; cur; cur = cur.parent) {
+    if ((cur.type === "method_declaration" || cur.type === "lambda_expression" || cur.type === "local_function_statement" ||
+         cur.type === "anonymous_method_expression" || cur.type === "constructor_declaration") && localNamesOfCS(cur).has(id.text)) return true;
+  }
+  return false;
+}
+function enclosingMethodCS(n: SyntaxNode): SyntaxNode | null {
+  for (let cur: SyntaxNode | null = n.parent; cur; cur = cur.parent) if (cur.type === "method_declaration" || cur.type === "constructor_declaration") return cur;
+  return null;
+}
+function isParamOfEnclosingCS(id: SyntaxNode): boolean {
+  for (let cur: SyntaxNode | null = id.parent; cur; cur = cur.parent) {
+    if (cur.type === "method_declaration" || cur.type === "lambda_expression" || cur.type === "local_function_statement") {
+      const params = cur.childForFieldName("parameters");
+      const names = params ? params.namedChildren.map(p => p?.childForFieldName("name")?.text) : [];
+      if (names.includes(id.text) || paramNamesOfCS(cur).includes(id.text)) return true;
+    }
+  }
+  return false;
+}
+function rootIdentCS(n: SyntaxNode | null | undefined): SyntaxNode | null {
+  let cur: SyntaxNode | null | undefined = n;
+  while (cur) {
+    if (cur.type === "identifier") return cur;
+    if (cur.type === "member_access_expression") cur = cur.childForFieldName("expression");
+    else if (cur.type === "element_access_expression") cur = cur.childForFieldName("expression") ?? cur.namedChildren[0];
+    else if (cur.type === "parenthesized_expression" || cur.type === "cast_expression") cur = cur.namedChildren[cur.namedChildren.length - 1] ?? null;
+    else if (cur.type === "invocation_expression") cur = cur.childForFieldName("function");
+    else if (cur.type === "object_creation_expression") return null;
+    else return null;
+  }
+  return null;
+}
+
+/** Record taint written into a class field/static container (visible to every method). Main scan only. */
+function recordFieldStickyCS(name: string | null, mask: number, ctx: EngineCtx, node: SyntaxNode): void {
+  if (!name || !ctx.recordSticky || !(mask & ALL) || !ctx.classFieldNames.has(name)) return;
+  const id = rootIdentCS(node);
+  if (id && isLocalNameCS(id)) return;
+  const next = (ctx.sticky.get(name) ?? 0) | (mask & ALL);
+  if (next !== (ctx.sticky.get(name) ?? 0)) { ctx.sticky.set(name, next); ctx.stickyDirty = true; }
+}
+
+/** A string built around an untrusted operand: SQL / LDAP / XPath text, or an escaped value inside <script>. */
+function checkShapesCS(
+  node: SyntaxNode, parts: Array<{ lit?: string; expr?: SyntaxNode }>, env: Env, ctx: EngineCtx, mask: TaintMaskFnCS,
+): void {
+  let prefix = "";
+  for (const p of parts) {
+    if (p.lit !== undefined) { prefix += p.lit; continue; }
+    const m = mask(p.expr!, env);
+    const src = p.expr!.text.replace(/\s+/g, " ").slice(0, 60);
+    if ((m & classOf("sql-injection")) && CS_SQL_START_RE.test(prefix)) {
+      emit(ctx, "sql-injection", node, src, "SQL string construction", undefined,
+        `Untrusted '${src}' is concatenated into a SQL statement — use parameterized commands (SqlParameter)`);
+    }
+    if ((m & classOf("ldap-injection")) && CS_LDAP_SHAPE_RE.test(prefix)) {
+      emit(ctx, "ldap-injection", node, src, "LDAP filter construction", undefined,
+        `Untrusted '${src}' is concatenated into an LDAP filter — escape it (RFC 4515) before use`);
+    }
+    if ((m & classOf("xpath-injection")) && CS_XPATH_SHAPE_RE.test(prefix)) {
+      emit(ctx, "xpath-injection", node, src, "XPath expression construction", undefined,
+        `Untrusted '${src}' is concatenated into an XPath expression — use XPathExpression with variables`);
+    }
+    if (wasCleared(m, classOf("xss")) && CS_SCRIPT_CONTEXT_RE.test(prefix)) {
+      emit(ctx, "xss", node, src, "HTML string", undefined,
+        `HTML-encoded value '${src}' is placed inside a <script> block — HTML encoding does not neutralize JavaScript string context`);
+    }
+    prefix += "";
+  }
+}
+
+/** `$"...{x}..."` -> literal/expression parts. */
+function interpolatedPartsCS(n: SyntaxNode): Array<{ lit?: string; expr?: SyntaxNode }> {
+  const parts: Array<{ lit?: string; expr?: SyntaxNode }> = [];
+  for (const c of n.namedChildren) {
+    if (!c) continue;
+    if (c.type === "interpolation") { const e = c.namedChildren[0]; if (e) parts.push({ expr: e }); }
+    else if (c.type === "string_content" || c.type === "interpolated_string_text" || c.type === "string_literal_content") parts.push({ lit: c.text });
+  }
+  return parts;
+}
+
 // ── Taint sources ────────────────────────────────────────────────────────
 
 const ASP_SOURCE_ATTRIBUTES = new Set(["FromRoute", "FromQuery", "FromBody", "FromHeader", "FromForm"]);
@@ -263,10 +443,9 @@ function isTaintSourceExprCSharp(node: SyntaxNode): boolean {
   if (node.type === "member_access_expression") {
     const text = calleeTextCSharp(node);
     if (!text) return false;
-    const tail = text.split(".").pop() ?? "";
-    // Request.QueryString (bare, no indexer) -- the other three
-    // (Query/Form/Headers/Cookies) are always indexed, handled below.
-    return tail === "QueryString" && /(?:^|\.)Request\.QueryString$/.test(text);
+    // Request.QueryString / Request.Path / Request.Body ... (bare, no indexer); Query/Form/Headers/
+    // Cookies are usually indexed, handled below.
+    return /(?:^|\.)Request\.(?:QueryString|Path|PathBase|Body|Host|Query|Form|Headers|Cookies)$/.test(text);
   }
   if (node.type === "element_access_expression") {
     const expr = node.childForFieldName("expression") ?? node.namedChildren[0];
@@ -293,6 +472,8 @@ const SEVERITY: Record<AstTaintCSharpId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "critical",
   "ssrf": "critical", "path-traversal": "critical", "insecure-deserialization": "critical",
   "ldap-injection": "critical", "xpath-injection": "critical", "open-redirect": "medium",
+  "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
+  "timing-attack": "medium", "jwt-none-alg": "critical", "eval-exec": "critical", "ssti": "critical",
   // Fallback only -- collectBolaFindings always passes a severityOverride
   // (medium for read endpoints, high for write/unknown).
   "bola-missing-ownership-check": "high",
@@ -302,6 +483,9 @@ const LABEL: Record<AstTaintCSharpId, string> = {
   "ssrf": "Server-Side Request Forgery", "path-traversal": "Path Traversal",
   "insecure-deserialization": "Insecure Deserialization", "ldap-injection": "LDAP Injection",
   "xpath-injection": "XPath Injection", "open-redirect": "Open Redirect",
+  "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection", "mass-assignment": "Mass Assignment",
+  "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
+  "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
@@ -339,11 +523,16 @@ interface EngineCtx {
   // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
   // regex layer's duplicate for a flow this engine proved safe.
   suppressed?: SuppressedSink[];
+  // Taint written into class fields / static containers, visible to every method (second pass).
+  sticky: Map<string, number>;
+  stickyDirty: boolean;
+  recordSticky: boolean;
+  classFieldNames: Set<string>;
 }
 
 function emit(
   ctx: EngineCtx, id: AstTaintCSharpId, node: SyntaxNode, sourceExpr: string, sinkExpr: string,
-  severityOverride?: "critical" | "high" | "medium",
+  severityOverride?: "critical" | "high" | "medium", detailOverride?: string,
 ) {
   const line = lineOf(node);
   const key = `${id}:${line}`;
@@ -351,16 +540,37 @@ function emit(
   ctx.seen.add(key);
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
-    detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+    detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
   });
 }
 
 type TaintMaskFnCS = (node: SyntaxNode, env: Env) => number;
 
+// `typeof(T).GetProperty(name)` / `type.GetMethod(name)` -- the looked-up member is chosen by the argument.
+const CS_REFLECTION_LOOKUPS = new Set(["GetProperty", "GetField", "GetMethod", "GetMember", "GetConstructor", "GetEvent"]);
+
+/** The bare name of the same-file method a call resolves to: `Foo(x)`, `this.Foo(x)`, `repo.Foo(x)`, `Helper.Foo(x)`. */
+function resolveLocalCalleeCS(fn: SyntaxNode | null | undefined, ctx: EngineCtx): string | null {
+  if (!fn) return null;
+  if (fn.type === "identifier") return ctx.localMethods.has(fn.text) ? fn.text : null;
+  if (fn.type === "generic_name") { const n = fn.namedChildren.find(c => c?.type === "identifier")?.text; return n && ctx.localMethods.has(n) ? n : null; }
+  if (fn.type === "member_access_expression") {
+    const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
+    if (name && ctx.localMethods.has(name) && !CS_BUILTIN_METHOD_NAMES.has(name)) return name;
+  }
+  return null;
+}
+
 function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
   const taintMask = (node: SyntaxNode, env: Env): number => {
     if (isTaintSourceExprCSharp(node)) return ALL;
-    if (node.type === "identifier") return env.get(node.text) ?? 0;
+    if (node.type === "identifier") {
+      const m = env.get(node.text);
+      if (m !== undefined) return m;
+      // Not a local: class fields / static containers carry taint written by OTHER methods.
+      if (!ctx.classFieldNames.has(node.text) || isLocalNameCS(node)) return 0;
+      return ctx.sticky.get(node.text) ?? 0;
+    }
     if (node.type === "argument" || node.type === "parenthesized_expression" || node.type === "interpolation") {
       const inner = node.namedChildren[0];
       return inner ? taintMask(inner, env) : 0;
@@ -415,7 +625,10 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       // deliberately the baseline rule from the start (unlike astTaintGo.ts,
       // which needed a later correction pass for the http.NewRequest
       // two-step pattern specifically because it lacked this as a default).
-      return argListOfCSharp(node).reduce((m, a) => m | taintMask(a, env), 0);
+      let m = argListOfCSharp(node).reduce((acc, a) => acc | taintMask(a, env), 0);
+      // `new X { A = a, ["k"] = v }` / `new BsonDocument { { "k", v } }` -- initializer values are part of the object
+      for (const c of node.namedChildren) if (c?.type === "initializer_expression") m |= taintMask(c, env);
+      return m;
     }
     if (node.type === "invocation_expression") {
       const fn = node.childForFieldName("function");
@@ -431,10 +644,11 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
         if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
       }
       // Same-file interprocedural, bounded (see buildPropagatingMapCSharp).
-      if (fn?.type === "identifier") {
-        const propIdx = ctx.propagatingParams.get(fn.text);
+      const localName = resolveLocalCalleeCS(fn, ctx);
+      if (localName) {
+        const propIdx = ctx.propagatingParams.get(localName);
         if (propIdx) {
-          const callee = ctx.localMethods.get(fn.text);
+          const callee = ctx.localMethods.get(localName);
           const shapes = callee?.paramShapes ?? [];
           let m = 0;
           for (const [i, surviving] of propIdx) {
@@ -443,11 +657,27 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
           if (m) return m;
         }
       }
+      // Curated string/path/URL/JSON plumbing: the result carries its arguments' taint. Decoders
+      // re-taint what a sanitizer cleared (encode-then-decode).
+      if (text && (CS_PASSTHROUGH.has(text) || CS_ENCODING_RE.test(text))) {
+        const m = args.reduce((acc, a) => acc | taintMask(a, env), 0);
+        return CS_DECODERS.has(text) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
+      }
+      // `MakeRenderer(v)()` -- calling the value another call returned
+      if (fn?.type === "invocation_expression") return taintMask(fn, env);
+      // `cb(v)` / `render()` -- a delegate held in a parameter or local: its result depends on what it was
+      // built from (the variable's own taint) and on what it is called with.
+      if (fn?.type === "identifier" && !ctx.localMethods.has(fn.text) && isLocalNameCS(fn)) {
+        return args.reduce((acc, a) => acc | taintMask(a, env), env.get(fn.text) ?? 0);
+      }
       // Generic passthrough: a method call on an already-tainted receiver
-      // stays tainted (e.g. dirty.Trim(), dirty.ToLower()).
+      // stays tainted (e.g. dirty.Trim(), dirty.ToLower()); replacement / joined text also carries its arguments.
       if (fn?.type === "member_access_expression") {
         const expr = fn.childForFieldName("expression");
-        if (expr) return taintMask(expr, env);
+        const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
+        let m = expr ? taintMask(expr, env) : 0;
+        if (CS_ARG_CARRYING_METHODS.has(name) || CS_REFLECTION_LOOKUPS.has(name)) m |= args.reduce((acc, a) => acc | taintMask(a, env), 0);
+        return m;
       }
       return 0;
     }
@@ -480,7 +710,7 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
     // Path-sensitive: the mask is taken at EACH return with the env on that
     // path; a return inside a lambda / local function is not this method's.
     // Sink checks would run against a throwaway ctx, so use a sink-free copy.
-    const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+    const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     env.set(shape.name, ALL);
@@ -573,6 +803,8 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   if (paramList) {
     let index = 0;
     for (const param of paramList.namedChildren) {
+      // tree-sitter-c-sharp mis-parses `params T[] name`: the name arrives as a bare identifier sibling
+      if (param?.type === "identifier") { paramShapes.push({ name: param.text, index }); index++; continue; }
       if (!param || param.type !== "parameter") continue;
       const pName = param.childForFieldName("name");
       if (!pName) { index++; continue; }
@@ -596,7 +828,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       index++;
     }
   }
-  const body = methodDecl.childForFieldName("body");
+  const body = methodDecl.childForFieldName("body") ?? methodDecl.namedChildren.find(c => c?.type === "arrow_expression_clause") ?? null;
   return { name: nameNode.text, paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null };
 }
 
@@ -634,16 +866,49 @@ function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
 
 // ── Sink checks ──────────────────────────────────────────────────────────
 
-const FS_PATH_ROOTS = new Set(["Path", "File", "Directory"]);
+const CS_FS_CLASSES = new Set(["Path", "File", "Directory", "FileInfo", "DirectoryInfo"]);
+const CS_FS_TAILS = new Set([
+  "ReadAllText", "ReadAllTextAsync", "WriteAllText", "WriteAllTextAsync", "ReadAllLines", "ReadLines", "WriteAllLines", "AppendAllText",
+  "ReadAllBytes", "WriteAllBytes", "Open", "OpenRead", "OpenWrite", "OpenText", "Create", "CreateText", "Delete", "Copy", "Move",
+  "GetFiles", "GetDirectories", "EnumerateFiles", "CreateDirectory",
+]);
+const CS_SSRF_TAILS = new Set([
+  "GetAsync", "PostAsync", "PutAsync", "DeleteAsync", "SendAsync", "GetStringAsync", "GetByteArrayAsync", "GetStreamAsync",
+  "PostAsJsonAsync", "PutAsJsonAsync", "DownloadString", "DownloadStringAsync", "DownloadStringTaskAsync", "DownloadData",
+  "DownloadFile", "DownloadFileAsync", "UploadString", "UploadData",
+]);
+const CS_DAPPER_TAILS = new Set([
+  "Query", "QueryAsync", "QueryFirst", "QueryFirstAsync", "QueryFirstOrDefault", "QueryFirstOrDefaultAsync", "QuerySingle",
+  "QuerySingleOrDefault", "Execute", "ExecuteAsync", "ExecuteScalar", "ExecuteScalarAsync", "ExecuteReader",
+]);
+const CS_EVAL_OWNERS = new Set(["CSharpScript", "CSScript", "Assembly", "Activator", "AppDomain", "Type"]);
+const CS_EVAL_TAILS = new Set([
+  "EvaluateAsync", "RunAsync", "Create", "Evaluate", "Load", "LoadFrom", "LoadFile", "UnsafeLoadFrom", "GetType", "CreateInstance",
+  "CreateInstanceFrom", "CreateComInstanceFrom",
+]);
+const CS_REGEX_STATIC_TAILS = new Set(["IsMatch", "Match", "Matches", "Replace", "Split", "Count", "EnumerateMatches"]);
+const CS_SSTI_TAILS = new Set(["Parse", "ParseAsync", "Compile", "CompileRenderAsync", "RunCompile", "RunCompileAsync", "Render", "Process"]);
+const CS_JWT_DECODE_RE = /FromBase64String|Base64UrlDecode|Base64UrlEncoder\s*\.\s*Decode|WebEncoders\s*\.\s*Base64UrlDecode/;
+const CS_JWT_VERIFY_RE = /ValidateToken|TokenValidationParameters|VerifySignature|SignatureValid|ComputeHash|HMAC|IssuerSigningKey|RSA\b|VerifyData/i;
+
+function lastCallNameCS(call: SyntaxNode | null | undefined): string {
+  const fn = call?.childForFieldName("function");
+  return fn ? stripGenerics(fn.text.split(".").pop() ?? "") : "";
+}
 
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
-  const text = calleeTextCSharp(fn);
+  // A call chained off another call (`t.GetMethod(m).Invoke(...)`, `new HttpClient().GetStringAsync(u)`) has no
+  // dotted root; it still has a method name to match.
+  const text = calleeTextCSharp(fn)
+    ?? (fn.type === "member_access_expression" ? "_." + stripGenerics(fn.childForFieldName("name")?.text ?? "") : null);
   if (!text) return;
   const parts = text.split(".");
   const tail = parts[parts.length - 1];
   const rootVar = parts[0];
+  // The class the static call is made on: `System.IO.File.ReadAllText` -> File, `Regex.IsMatch` -> Regex.
+  const owner = parts.length >= 2 ? parts[parts.length - 2] : "";
   const argMasks = args.map(a => taintMask(a, env));
   const combined = argMasks.reduce((m, x) => m | x, 0);
   const firstIdx = argMasks.findIndex(m => (m & ALL) !== 0);
@@ -656,35 +921,39 @@ function checkCallSink(
     if (mask & cls) emit(ctx, id, node, source, text);
     else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
+  const receiver = fn.type === "member_access_expression" ? fn.childForFieldName("expression") : null;
+  const reflective = receiver?.type === "invocation_expression" && CS_REFLECTION_LOOKUPS.has(lastCallNameCS(receiver));
 
   // sql-injection: EF Core raw-SQL calls (arg-tainted) and ADO.NET
   // SqlCommand receiver-tainted (tracked via env at the SqlCommand-typed
   // local declaration site, mirroring astTaintJava.ts's ObjectInputStream
   // readObject pattern).
-  if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw") {
+  if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw" || tail === "ExecuteSqlRawAsync" || tail === "SqlQueryRaw") {
     fire("sql-injection");
-  } else if ((tail === "ExecuteReader" || tail === "ExecuteNonQuery" || tail === "ExecuteScalar")
-             && ctx.varTypes.get(rootVar) === "SqlCommand") {
+  } else if ((tail === "ExecuteReader" || tail === "ExecuteNonQuery" || tail === "ExecuteScalar" || tail === "ExecuteReaderAsync"
+              || tail === "ExecuteNonQueryAsync" || tail === "ExecuteScalarAsync" || tail === "Fill")
+             && CS_SQL_COMMAND_TYPES.has(ctx.varTypes.get(rootVar) ?? "")) {
     fire("sql-injection", env.get(rootVar) ?? 0, rootVar);
-  } else if (tail === "Start" && rootVar === "Process") {
+  } else if (CS_DAPPER_TAILS.has(tail) && owner && /conn|db|sql|database/i.test(owner) && args[0]) {
+    fire("sql-injection", argMasks[0] ?? 0, args[0].text);
+  } else if (tail === "Start" && owner === "Process") {
     fire("command-injection");
-  } else if (tail === "Raw" && rootVar === "Html") {
+  } else if (tail === "Raw" && owner === "Html") {
     fire("xss");
-  } else if (tail === "Write" && rootVar === "Response") {
+  } else if ((tail === "Write" || tail === "WriteAsync") && (owner === "Response" || owner === "Body")) {
     fire("xss");
-  } else if (tail === "Content") {
+  } else if (tail === "Content" || (owner === "Results" && tail === "Text")) {
     // ControllerBase.Content(html, contentType) -- ASP.NET Core's
     // return-raw-HTML helper. Bare call (no rootVar prefix beyond
     // "Content" itself); the common real shape is a concatenated HTML
     // string, already resolved by taintMask's recursive binary_expression walk.
-    fire("xss");
-  } else if (tail === "GetAsync" || tail === "PostAsync" || tail === "PutAsync" || tail === "DeleteAsync" || tail === "SendAsync"
-             || tail === "GetStringAsync" || tail === "GetByteArrayAsync" || tail === "GetStreamAsync"
-             || tail === "PostAsJsonAsync" || tail === "PutAsJsonAsync") {
+    fire("xss", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
+  } else if (CS_SSRF_TAILS.has(tail) || (tail === "OpenRead" && !CS_FS_CLASSES.has(owner))
+             || ((tail === "Create" || tail === "CreateHttp") && (owner === "WebRequest" || owner === "HttpWebRequest"))) {
     fire("ssrf");
-  } else if (tail === "Combine" && rootVar === "Path") {
+  } else if (tail === "Combine" && owner === "Path") {
     fire("path-traversal");
-  } else if (FS_PATH_ROOTS.has(rootVar) && ["ReadAllText", "WriteAllText", "Open", "Create", "Delete", "ReadAllBytes", "WriteAllBytes"].includes(tail)) {
+  } else if (CS_FS_CLASSES.has(owner) && CS_FS_TAILS.has(tail)) {
     fire("path-traversal");
   } else if (tail === "PhysicalFile") {
     // ControllerBase.PhysicalFile(path, contentType) -- ASP.NET Core's
@@ -694,9 +963,12 @@ function checkCallSink(
     fire("path-traversal");
   } else if (tail === "Deserialize") {
     fire("insecure-deserialization");
+  } else if ((tail === "DeserializeObject" || tail === "PopulateObject") && args.some(a => /TypeNameHandling\s*\.\s*(?:All|Auto|Objects|Arrays)/.test(a.text))) {
+    fire("insecure-deserialization", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   } else if (tail === "Redirect" || tail === "RedirectPermanent") {
     fire("open-redirect");
-  } else if ((tail === "Compile" && rootVar === "XPathExpression") || (tail === "SelectNodes" || tail === "SelectSingleNode")) {
+  } else if ((tail === "Compile" && owner === "XPathExpression") || tail === "SelectNodes" || tail === "SelectSingleNode"
+             || tail === "XPathSelectElements" || tail === "XPathSelectElement" || tail === "XPathEvaluate") {
     fire("xpath-injection");
   } else if (/ldap/i.test(rootVar) && /^(?:Search|FindOne|FindAll)$/i.test(tail)) {
     // Call-shaped LDAP sink -- a custom helper (LdapHelper.Search(filter),
@@ -707,6 +979,24 @@ function checkCallSink(
     // this is a rootVar-name heuristic (same reasoning as the BOLA
     // lookup-name broadening below) rather than a class allowlist.
     fire("ldap-injection");
+  } else if (owner === "Headers" && (tail === "Add" || tail === "Append" || tail === "TryAdd" || tail === "Set")) {
+    fire("header-injection");
+  } else if (CS_EVAL_OWNERS.has(owner) && CS_EVAL_TAILS.has(tail) && args[0]) {
+    fire("eval-exec", argMasks[0] ?? 0, args[0].text);
+  } else if (tail === "Invoke" && reflective) {
+    fire("eval-exec", taintMask(receiver!, env), receiver!.text);
+  } else if (tail === "SetValue" && reflective) {
+    fire("mass-assignment", taintMask(receiver!, env), receiver!.text);
+  } else if (owner === "Regex" && CS_REGEX_STATIC_TAILS.has(tail) && args[1] && !/Regex\s*\.\s*Escape\s*\(/.test(args[1].text)) {
+    fire("redos", argMasks[1] ?? 0, args[1].text);
+  } else if (CS_TEMPLATE_ROOT_RE.test(owner) && CS_SSTI_TAILS.has(tail) && args[0]) {
+    fire("ssti", argMasks[0] ?? 0, args[0].text);
+  } else if (CS_NOSQL_TAILS.has(tail) && receiver && /coll|mongo/i.test(receiver.text)) {
+    fire("nosql-injection", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
+  } else if (tail === "Parse" && owner === "BsonDocument") {
+    fire("nosql-injection", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
+  } else if ((tail === "ReadJwtToken" || tail === "ReadToken") && !/ValidateToken|TokenValidationParameters/.test(ctx.content)) {
+    fire("jwt-none-alg", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   }
 }
 
@@ -714,7 +1004,7 @@ function checkCallSink(
  * shape, mirroring astTaintGo.ts's checkNewExpressionSink. */
 function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
   const typeNode = node.childForFieldName("type");
-  const className = typeNode?.type === "identifier" ? typeNode.text : null;
+  const className = typeNode ? stripGenerics(typeNode.text).split(".").pop() ?? null : null;
   if (!className) return;
   const args = argListOfCSharp(node);
   const argMasks = args.map(a => taintMask(a, env));
@@ -722,12 +1012,22 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   // still reaches the suppression record below.
   const firstIdx = argMasks.findIndex(m => m !== 0);
   if (firstIdx < 0) return;
-  const combined = argMasks.reduce((m, x) => m | x, 0);
-  if (className === "ProcessStartInfo") {
-    const cls = classOf("command-injection");
-    if (combined & cls) emit(ctx, "command-injection", node, args[firstIdx].text, "new ProcessStartInfo");
-    else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id: "command-injection", line: lineOf(node) });
-  }
+  const fire = (id: AstTaintCSharpId, idx: number = firstIdx) => {
+    const m = argMasks[idx] ?? 0;
+    const cls = classOf(id);
+    if (m & cls) emit(ctx, id, node, args[idx].text, `new ${className}`);
+    else if (wasCleared(m, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
+  if (className === "ProcessStartInfo") fire("command-injection");
+  // `new SqlCommand(q, conn).ExecuteScalar()` -- built inline; a declared command is reported at its Execute* call instead.
+  else if (CS_SQL_COMMAND_TYPES.has(className) && node.parent?.type !== "equals_value_clause" && node.parent?.type !== "assignment_expression") fire("sql-injection", 0);
+  else if (className === "HttpRequestMessage" && args.length >= 2) fire("ssrf", 1);
+  else if (className === "RedirectResult") fire("open-redirect", 0);
+  else if (className === "HtmlString") fire("xss", 0);
+  else if (className === "Regex") fire("redos", 0);
+  else if (className === "DirectorySearcher" || className === "SearchRequest") fire("ldap-injection", 0);
+  else if ((className === "FileStream" || className === "StreamReader" || className === "StreamWriter" || className === "FileInfo" || className === "DirectoryInfo")
+           && args[0] && !/(?:^|\.)Request\.Body$|Stream\b/.test(args[0].text)) fire("path-traversal", 0);
 }
 
 // ── Narrow validation guards ────────────────────────────────────────────────
@@ -1034,6 +1334,17 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         const names = left ? (left.type === "identifier" ? [left] : findAllNodes(left, "identifier")) : [];
         for (const n of names) env.set(n.text, rmask);
         const body = node.childForFieldName("body");
+        if ((rmask & ALL) && body) {
+          for (const asg of findAllNodes(body, "assignment_expression")) {
+            const l = asg.childForFieldName("left");
+            const r = asg.childForFieldName("right");
+            if (l?.type !== "element_access_expression" || !r) continue;
+            if (names.some(n => l.text.includes(n.text + ".Key") && r.text.includes(n.text + ".Value"))) {
+              emit(ctx, "mass-assignment", asg, right?.text ?? "", "dictionary merge", undefined,
+                "Every entry of the request-supplied map is copied into another object/dictionary — an attacker can set fields (role, isAdmin, ...) the API never meant to expose");
+            }
+          }
+        }
         return walkLoop(env, (e) => (body ? walk(body, e) : false));
       }
 
@@ -1094,6 +1405,13 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         }));
       }
 
+      case "arrow_expression_clause": {
+        // expression-bodied method: static string Id(string v) => v;
+        const v = node.namedChildren[0];
+        if (v) { walk(v, env); opts.onReturn?.(v, env, taintMask); }
+        return true;
+      }
+
       case "return_statement": {
         for (const c of node.namedChildren) if (c) walk(c, env);
         const v = node.namedChildren[0];
@@ -1112,11 +1430,11 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
     // using / lock / ...: a sequence of a header and a body -- terminates when its body does
     if (SEQUENCE_STATEMENTS_CS.has(node.type)) return walkStmts(node.namedChildren, env);
 
-    if (node.type === "local_declaration_statement") {
-      const varDecl = node.namedChildren.find(c => c && c.type === "variable_declaration");
-      const typeNode = varDecl?.childForFieldName("type");
+    if (node.type === "variable_declaration") {
+      const varDecl: SyntaxNode = node;
+      const typeNode = varDecl.childForFieldName("type");
       const declaredTypeSimpleName = typeNode && typeNode.type === "identifier" ? typeNode.text : undefined;
-      for (const declarator of varDecl?.namedChildren.filter(c => c && c.type === "variable_declarator") ?? []) {
+      for (const declarator of varDecl.namedChildren.filter(c => c && c.type === "variable_declarator")) {
         if (!declarator) continue;
         const nameTok = declarator.namedChildren.find(c => c && c.type === "identifier");
         if (!nameTok) continue;
@@ -1146,12 +1464,39 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         env.set(key, mask);
         return mask;
       };
-      if (left?.type === "identifier") {
-        put(left.text);
-      } else if (left?.type === "member_access_expression") {
+      const inInitializer = node.parent?.type === "initializer_expression";
+      if (left?.type === "identifier" && !inInitializer) {
+        recordFieldStickyCS(left.text, put(left.text), ctx, left);
+      } else if (left?.type === "element_access_expression" && !inInitializer) {
+        // d[k] = v / Saved[user] = s / Response.Headers["X"] = v
+        const baseExpr = left.childForFieldName("expression") ?? left.namedChildren[0];
+        const baseText = baseExpr ? calleeTextCSharp(baseExpr) : null;
+        if (baseText && /(?:^|\.)Response\.Headers$/.test(baseText)) {
+          const cls = classOf("header-injection");
+          if (rhs & cls) emit(ctx, "header-injection", node, right?.text ?? "", baseText + "[...]");
+          else if (wasCleared(rhs, cls)) ctx.suppressed?.push({ id: "header-injection", line: lineOf(node) });
+        } else {
+          const rootId = rootIdentCS(left);
+          if (rootId) {
+            env.set(rootId.text, taintMask(rootId, env) | rhs);
+            recordFieldStickyCS(rootId.text, rhs, ctx, rootId);
+          }
+        }
+      } else if (left?.type === "member_access_expression" && !inInitializer) {
         const key = calleeTextCSharp(left);
         if (key) {
           const mask = put(key);
+          const rootId = rootIdentCS(left);
+          if (rootId) recordFieldStickyCS(rootId.text, mask, ctx, rootId);
+          // cmd.CommandText = tainted, psi.FileName / psi.Arguments = tainted: property-setter sinks
+          const setterSink = key.endsWith(".CommandText") ? "sql-injection" as const
+            : ((key.endsWith(".FileName") || key.endsWith(".Arguments")) && rootId && ctx.varTypes.get(rootId.text) === "ProcessStartInfo") ? "command-injection" as const
+            : null;
+          if (setterSink) {
+            const cls = classOf(setterSink);
+            if (mask & cls) emit(ctx, setterSink, node, right!.text, key);
+            else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id: setterSink, line: lineOf(node) });
+          }
           // Structural sink: `xxx.Filter = tainted` (System.DirectoryServices
           // DirectorySearcher.Filter) -- an assignment-target-IS-the-sink
           // shape, since the vulnerable API here is a property setter, not
@@ -1170,8 +1515,65 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
       const args = argListOfCSharp(node);
       if (fn) {
         checkCallSink(fn, args, node, env, ctx, taintMask);
-        if (fn.type === "identifier" && ctx.localMethods.has(fn.text)) {
-          seedLocalMethodParams(fn.text, args, env, ctx);
+        const localName = resolveLocalCalleeCS(fn, ctx);
+        if (localName) seedLocalMethodParams(localName, args, env, ctx);
+        // sb.Append(x) / list.Add(x) / Comments.Add(c): the container now holds x
+        if (fn.type === "member_access_expression" && !localName) {
+          const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
+          const recv = fn.childForFieldName("expression");
+          const rootId = rootIdentCS(recv);
+          if (CS_MUTATORS.has(name) && rootId && rootId.text !== "Response" && rootId.text !== "HttpContext"
+              && !/(?:^|\.)Parameters$/.test(recv?.text ?? "") && !CS_SQL_COMMAND_TYPES.has(ctx.varTypes.get(rootId.text) ?? "")) {
+            const added = args.reduce((m, a) => m | taintMask(a, env), 0);
+            if (added & ALL) {
+              env.set(rootId.text, taintMask(rootId, env) | added);
+              recordFieldStickyCS(rootId.text, added, ctx, rootId);
+            }
+          }
+        }
+        // string.Format("SELECT ... '{0}'", x)
+        const callee = calleeTextCSharp(fn);
+        if ((callee === "string.Format" || callee === "String.Format") && args.length >= 2) {
+          const tmpl = csStringValue(args[0]);
+          if (tmpl !== null) {
+            const parts: Array<{ lit?: string; expr?: SyntaxNode }> = [];
+            let last = 0;
+            for (const m of tmpl.matchAll(/\{(\d+)[^}]*\}/g)) {
+              parts.push({ lit: tmpl.slice(last, m.index) });
+              const a = args[1 + Number(m[1])];
+              if (a) parts.push({ expr: a });
+              last = (m.index ?? 0) + m[0].length;
+            }
+            parts.push({ lit: tmpl.slice(last) });
+            checkShapesCS(node, parts, env, ctx, taintMask);
+          }
+        }
+      }
+    }
+    if (node.type === "interpolated_string_expression") {
+      checkShapesCS(node, interpolatedPartsCS(node), env, ctx, taintMask);
+    }
+    if (node.type === "binary_expression") {
+      const op = node.childForFieldName("operator")?.type;
+      const parentOp = node.parent?.type === "binary_expression" ? node.parent.childForFieldName("operator")?.type : undefined;
+      if (op === "+" && parentOp !== "+") {
+        const operands = csConcatOperands(node);
+        if (operands) {
+          checkShapesCS(node, operands.map(o => { const lit = csStringValue(o); return lit !== null ? { lit } : { expr: o }; }), env, ctx, taintMask);
+        }
+      }
+      if (op === "==" || op === "!=") {
+        // token == AppSecret -- variable-time comparison of an untrusted value against a stored secret
+        const l = node.childForFieldName("left");
+        const r = node.childForFieldName("right");
+        const nameOf = (n: SyntaxNode | null) => (n?.type === "identifier" ? n.text : n?.type === "member_access_expression" ? n.childForFieldName("name")?.text : undefined);
+        for (const [secret, other] of [[l, r], [r, l]] as const) {
+          const nm = nameOf(secret);
+          if (secret && other && nm && CS_SECRET_NAME_RE.test(nm) && !isLiteralCS(other) && (taintMask(other, env) & ALL) && !(taintMask(secret, env) & ALL)) {
+            emit(ctx, "timing-attack", node, other.text, nm, undefined,
+              "An untrusted value is compared to a stored secret with ==, which returns at the first differing byte — use CryptographicOperations.FixedTimeEquals");
+            break;
+          }
         }
       }
     }
@@ -1374,6 +1776,52 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   }
 }
 
+// ── Structural per-method checks ────────────────────────────────────────────
+
+/** Names of types declared in this file that carry a privilege-shaped property (Role, IsAdmin, ...). */
+function collectSensitiveTypesCS(root: SyntaxNode): Set<string> {
+  const out = new Set<string>();
+  for (const cls of [...findAllNodes(root, "class_declaration"), ...findAllNodes(root, "record_declaration"), ...findAllNodes(root, "struct_declaration")]) {
+    const name = cls.childForFieldName("name")?.text;
+    if (!name) continue;
+    for (const prop of findAllNodes(cls, "property_declaration")) {
+      const pn = prop.childForFieldName("name")?.text;
+      if (pn && CS_SENSITIVE_PROP_RE.test(pn) && !attributeNamesOf(prop).some(a => /^(?:BindNever|JsonIgnore|ReadOnly)$/.test(a))) out.add(name);
+    }
+  }
+  return out;
+}
+
+/** An endpoint that binds a whole request model carrying privileged properties, with no [Bind] allowlist. */
+function checkMassAssignmentBinding(methodDecl: SyntaxNode, method: LocalMethod, sensitiveTypes: Set<string>, ctx: EngineCtx) {
+  if (!method.authMeta.isEndpoint || method.authMeta.verbTier === "read" || sensitiveTypes.size === 0) return;
+  const attrText = methodDecl.namedChildren.filter(c => c?.type === "attribute_list").map(c => c!.text).join(" ");
+  if (/Authorize\s*\([^)]*(?:Roles|Policy)/.test(attrText)) return;
+  const params = methodDecl.childForFieldName("parameters");
+  for (const p of params?.namedChildren ?? []) {
+    if (!p || p.type !== "parameter") continue;
+    const attrs = attributeNamesOf(p);
+    if (!attrs.some(a => a === "FromBody" || a === "FromForm") || attrs.includes("Bind")) continue;
+    const typeName = stripGenerics(p.childForFieldName("type")?.text ?? "").replace(/[?\[\]]/g, "");
+    if (!sensitiveTypes.has(typeName)) continue;
+    emit(ctx, "mass-assignment", p, typeName, "model binding", undefined,
+      "The request body is bound straight onto '" + typeName + "', which has privileged properties (role / isAdmin / ...) — bind a dedicated DTO or use [Bind]");
+  }
+}
+
+/** Hand-rolled JWT parsing: split on '.', base64-decode the payload, trust the claims -- with no signature validation in sight. */
+function checkHandRolledJwt(method: LocalMethod, ctx: EngineCtx) {
+  const body = method.body;
+  if (!body) return;
+  const text = body.text;
+  if (!/\.Split\(\s*(?:'\.'|"\.")\s*\)/.test(text) || !CS_JWT_DECODE_RE.test(text) || CS_JWT_VERIFY_RE.test(text)) return;
+  if (method.sourceParamNames.size === 0 && !/Request\./.test(text)) return;
+  const decode = findAllNodes(body, "invocation_expression").find(n => CS_JWT_DECODE_RE.test(n.childForFieldName("function")?.text ?? ""));
+  if (!decode) return;
+  emit(ctx, "jwt-none-alg", decode, "bearer token", "manual JWT decode", undefined,
+    "The token payload is base64-decoded and its claims trusted without verifying the signature — use JwtSecurityTokenHandler.ValidateToken");
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
 export function scanAstTaintCSharp(
@@ -1388,17 +1836,39 @@ export function scanAstTaintCSharp(
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), root, findings: [], seen: new Set(), suppressed: suppressedOut,
+      sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     };
+    const sensitiveTypes = collectSensitiveTypesCS(root);
+    const methodDecls = new Map<string, SyntaxNode>();
+    for (const decl of findAllNodes(root, "method_declaration")) {
+      const nm = decl.childForFieldName("name")?.text;
+      if (nm && localMethods.get(nm)?.body && !methodDecls.has(nm)) methodDecls.set(nm, decl);
+    }
 
     const propagating = buildPropagatingMapCSharp(localMethods, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
 
-    for (const [, method] of localMethods) {
-      if (!method.body) continue;
-      const env: Env = new Map();
-      method.sourceParamNames.forEach(p => env.set(p, ALL));
-      walkForDeclarationsAndSinks(method.body, env, ctx);
-      collectBolaFindings(method, ctx);
+    ctx.recordSticky = true;
+    const scanMethods = (structural: boolean) => {
+      for (const [name, method] of localMethods) {
+        if (!method.body) continue;
+        const env: Env = new Map();
+        method.sourceParamNames.forEach(p => env.set(p, ALL));
+        walkForDeclarationsAndSinks(method.body, env, ctx);
+        if (structural) {
+          collectBolaFindings(method, ctx);
+          checkHandRolledJwt(method, ctx);
+          const decl = methodDecls.get(name);
+          if (decl) checkMassAssignmentBinding(decl, method, sensitiveTypes, ctx);
+        }
+      }
+    };
+    scanMethods(true);
+    // Taint written into class fields / static containers by one method is visible to every method:
+    // re-walk until that memory stops growing (bounded).
+    for (let round = 0; round < 2 && ctx.stickyDirty; round++) {
+      ctx.stickyDirty = false;
+      scanMethods(false);
     }
 
     // Second pass, bounded worklist -- see astTaintJava.ts's/astTaint.ts's
