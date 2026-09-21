@@ -44,6 +44,11 @@ import {
   findEnclosingFunctionNameGo, findNodeAtRowGo, astTaintGoSeverity, astTaintGoLabel,
 } from "./astTaintGo";
 import type { Node as GoSyntaxNode } from "web-tree-sitter";
+import {
+  parseCSharpSourceSync, isCSharpParserReady, scanAstTaintCSharp,
+  findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel,
+} from "./astTaintCSharp";
+import type { Node as CSharpSyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -5860,6 +5865,15 @@ function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoS
   }));
 }
 
+// C# taint engine wrapper -- mirrors findAstTaintJavaFindings exactly
+// (severityOverride only ever set by the BOLA detector, same as Java's).
+function findAstTaintCSharpFindings(content: string, filePath: string, root: CSharpSyntaxNode): ScanIndicator[] {
+  return scanAstTaintCSharp(content, filePath, root).map(f => ({
+    id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -5961,6 +5975,19 @@ export function analyzeFile(
     lang === "golang" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isGoParserReady()
       ? parseGoSourceSync(content, file_path)
       : null;
+  // C# AST parse -- see astTaintCSharp.ts. Same tree-sitter warm-cache
+  // contract as pyTree/goTree above. lang === "csharp" covers BOTH .cs and
+  // .cshtml (LANG_MAP maps both extensions the same way), but
+  // tree-sitter-c_sharp parses real C# only -- Razor's mixed HTML/C#
+  // syntax with @ directives isn't valid C#, so .cshtml is excluded by
+  // extension here and stays on its existing regex coverage
+  // (findNamedTaintXSSCSharp etc), matching this phase's own documented
+  // scope.
+  const csTree: CSharpSyntaxNode | null =
+    lang === "csharp" && !file_path.toLowerCase().endsWith(".cshtml")
+    && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
+      ? parseCSharpSourceSync(content, file_path)
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6061,6 +6088,7 @@ export function analyzeFile(
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines) : []),
+    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
@@ -6202,6 +6230,9 @@ export function analyzeFile(
     }
     if (javaCst) {
       return findEnclosingFunctionNameJava(javaCst, Math.max(0, line - 1));
+    }
+    if (csTree) {
+      return findEnclosingFunctionNameCSharp(findNodeAtRowCSharp(csTree, Math.max(0, line - 1)));
     }
     return "unknown";
   };

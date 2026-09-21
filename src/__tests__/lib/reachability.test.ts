@@ -3,8 +3,12 @@ import { scoreExploitability } from "@/lib/reachability";
 import { parseSourceFile, findNodeAtPosition, findEnclosingFunctionName } from "@/lib/astTaint";
 import { analyzeFile, type ScanIndicator } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => {
+  await warmPythonTaintEngine();
+  await warmCSharpTaintEngine();
+}, 30000);
 
 // Regression test for a real bug found via direct investigation: scoreExploitability
 // used to take a single `containingFunction` string applied to EVERY indicator in
@@ -259,5 +263,41 @@ def handle_search(request):
     const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
     expect(reachable).toBeDefined();
     expect(reachable?.reachability).not.toBe("unreachable");
+  });
+});
+
+// C# reachability parity -- astTaintCSharp.ts is a brand-new engine (not an
+// upgrade to an existing one), built with findEnclosingFunctionNameCSharp/
+// findNodeAtRowCSharp and the resolveContainingFunction wiring from the
+// start, so there is no "before" bug to demonstrate here the way the
+// Java/Python sections above do -- this proves the wiring is correct and
+// working, not that a regression was fixed.
+describe("analyzeFile() -- C# reachability resolves per-method", () => {
+  it("an [HttpGet]-decorated endpoint method's finding is NOT hardcoded unreachable, and differs from a helper method never called from an endpoint", () => {
+    const content = `
+public class A {
+  [HttpGet("search")]
+  public IActionResult Search([FromQuery] string name) {
+    var sql = "SELECT * FROM Users WHERE Name = '" + name + "'";
+    db.Users.FromSqlRaw(sql);
+    return Ok();
+  }
+
+  private void DeadHelper(string name) {
+    var sql2 = "SELECT * FROM Logs WHERE Name = '" + name + "'";
+    db.Logs.FromSqlRaw(sql2);
+  }
+}
+`;
+    const result = analyzeFile("A.cs", content);
+    const lines = content.split("\n");
+    const searchLine = lines.findIndex(l => l.includes("SELECT * FROM Users")) + 1;
+    const deadLine = lines.findIndex(l => l.includes("SELECT * FROM Logs")) + 1;
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    expect(reachable).toBeDefined();
+    expect(dead).toBeDefined();
+    expect(reachable?.reachability).not.toBe("unreachable");
+    expect(dead?.reachability).toBe("unreachable");
   });
 });

@@ -113,6 +113,15 @@ function tryMatchFunc(line: string): FuncMatch | null {
   // exactly like JS/Go.
   m = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s+)*(public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:abstract\s+)?[\w<>[\],.\s]+?\s+(\w+)\s*\(([^)]*)\)/);
   if (m) return { isExported: m[1] === "public", isAsync: false, name: m[2], params: m[3] };
+  // public async Task<IActionResult> DeleteUser(string id) {  (C#) -- same
+  // "explicit access-modifier anchor" precedent as Java's pattern above,
+  // adapted for C#'s [Attribute] bracket syntax instead of @Annotation and
+  // its own modifier vocabulary. Unlike Java, C# idiom always puts the
+  // access modifier first (an access modifier after static/etc isn't valid
+  // C#), so a fixed modifier order after the anchor is sufficient, not an
+  // arbitrary-order match.
+  m = line.match(/^\s*(?:\[\w+(?:\([^)]*\))?\]\s*)*(public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:override\s+)?(?:virtual\s+)?(?:sealed\s+)?(?:abstract\s+)?(?:new\s+)?[\w<>[\],.\s]+?\s+(\w+)\s*\(([^)]*)\)/);
+  if (m) return { isExported: m[1] === "public", isAsync: /\basync\b/.test(line), name: m[2], params: m[3] };
   // func foo(a int) {  (Go)
   m = line.match(/^func\s+(\w+)\s*\(([^)]*)\)/);
   if (m) return { isExported: /^[A-Z]/.test(m[1]), isAsync: false, name: m[1], params: m[2] };
@@ -308,15 +317,19 @@ const JAVA_ENTRY_ANNOTATION_RE = /^\s*@(?:Get|Post|Put|Patch|Delete|Request)Mapp
 // the def" placement. Mirrors astTaintPython.ts's FASTAPI_DECORATOR_RE
 // vocabulary plus Flask's @app.route(...).
 const PY_ENTRY_DECORATOR_RE = /^\s*@(?:\w+\.)?(?:app|router)\.(?:route|get|post|put|delete|patch|options|head)\s*\(/;
+// C#: ASP.NET Core route attributes -- same "line above the signature"
+// placement (confirmed directly via tree-sitter probing), matching
+// astTaintCSharp.ts's own HTTP_VERB_ATTRIBUTES/isEndpoint vocabulary.
+const CSHARP_ENTRY_ANNOTATION_RE = /^\s*\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\b/;
 
 /** Checks the few raw source lines immediately above a matched function's
- * start_line for a Java annotation or Python decorator marking it an HTTP
- * entry point. */
+ * start_line for a Java annotation, Python decorator, or C# attribute
+ * marking it an HTTP entry point. */
 function hasEntryMarkerAbove(content: string, startLine: number): boolean {
   const lines = content.split("\n");
   const windowStart = Math.max(0, startLine - 1 - 5);
   for (let i = windowStart; i < startLine - 1; i++) {
-    if (JAVA_ENTRY_ANNOTATION_RE.test(lines[i]) || PY_ENTRY_DECORATOR_RE.test(lines[i])) return true;
+    if (JAVA_ENTRY_ANNOTATION_RE.test(lines[i]) || PY_ENTRY_DECORATOR_RE.test(lines[i]) || CSHARP_ENTRY_ANNOTATION_RE.test(lines[i])) return true;
   }
   return false;
 }

@@ -27,6 +27,11 @@ export async function register() {
     const { warmGoTaintEngine } = await import("./lib/astTaintGo");
     warmGoTaintEngine().catch(() => { /* already logged inside astTaintGo.ts */ });
 
+    // 3c. Same warm-up for the C# AST taint engine -- see
+    //     astTaintCSharp.ts's own docblock.
+    const { warmCSharpTaintEngine } = await import("./lib/astTaintCSharp");
+    warmCSharpTaintEngine().catch(() => { /* already logged inside astTaintCSharp.ts */ });
+
     // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
     const org    = process.env.NEXT_PUBLIC_ORG ?? "unknown";

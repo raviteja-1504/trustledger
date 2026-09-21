@@ -225,4 +225,80 @@ describe("callGraph.detectEntryPoints — multi-language entry points (Decision 
     const entries = detectEntryPoints(funcs, content);
     expect(entries).not.toContain("helper");
   });
+
+  it("flags a C# method annotated with [HttpGet], attribute on the line above the signature", () => {
+    const content = [
+      "public class A {",
+      "  [HttpGet(\"{id}\")]",
+      "  private IActionResult GetUser(string id) {",
+      "    return Ok(Database.Find(id));",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).toContain("GetUser");
+  });
+
+  it("does not flag a private C# method with no route attribute", () => {
+    const content = [
+      "public class A {",
+      "  private IActionResult Helper(string id) {",
+      "    return Ok(Database.Find(id));",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).not.toContain("Helper");
+  });
+});
+
+describe("callGraph.extractFunctions — C# method pattern (new capability)", () => {
+  it("extracts a public C# method with a generic return type", () => {
+    const content = [
+      "public class A {",
+      "  public Task<IActionResult> GetUser(string id) {",
+      "    return Ok(repo.Find(id));",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const fn = funcs.find(f => f.name === "GetUser");
+    expect(fn).toBeDefined();
+    expect(fn!.is_exported).toBe(true);
+  });
+
+  it("extracts a private C# method with a void return type", () => {
+    const content = [
+      "public class A {",
+      "  private void LogAndRun(string cmd) {",
+      "    Process.Start(cmd);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const fn = funcs.find(f => f.name === "LogAndRun");
+    expect(fn).toBeDefined();
+    expect(fn!.is_exported).toBe(false);
+  });
+
+  it("extracts an async C# method with multiple modifiers", () => {
+    const content = [
+      "public class A {",
+      "  public static async Task<string> FetchAsync(string url) {",
+      "    return await client.GetStringAsync(url);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    expect(funcs.some(f => f.name === "FetchAsync")).toBe(true);
+  });
+
+  it("does not match a C# if/for/while control-flow statement as its own method", () => {
+    const content = "public class A {\n  public void M() {\n    if (x) {\n      y();\n    }\n  }\n}\n";
+    const funcs = extractFunctions(content);
+    expect(funcs.some(f => f.name === "M")).toBe(true);
+    expect(funcs.some(f => f.name === "if")).toBe(false);
+  });
 });
