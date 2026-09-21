@@ -26,6 +26,10 @@
  */
 
 import * as ts from "typescript";
+import {
+  ALL, applyClears, classOf, isTaintedMask, wasCleared, type SuppressedSink, type TaintEnv,
+} from "./taint/taintCore";
+import { sanitizerClears } from "./taint/sanitizers";
 
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec";
@@ -110,17 +114,13 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
 
 // ── Sink dispatch table ──────────────────────────────────────────────────────
 
-// Known sanitizer/escaping calls -- a match makes isTainted return false for
-// that CallExpression regardless of its argument's own taint. Correctly
-// handles the common `const clean = sanitize(dirty); sink(clean)` pattern
-// for free (assignment always re-evaluates isTainted(initializer, env)
-// fresh), but does NOT retroactively clean a variable through a sticky
-// in-place mutation site (e.g. the tainted-receiver method passthrough just
-// below) -- a documented, accepted narrower gap, not attempted here.
-const SANITIZER_NAMES = new Set([
-  "DOMPurify.sanitize", "sanitizeHtml", "he.encode", "he.escape",
-  "escapeHtml", "xss", "validator.escape",
-]);
+// Sanitizers live in taint/sanitizers.ts, keyed by the sink classes each one
+// actually neutralizes (an HTML escaper clears XSS, not SQL/command/path).
+// The common `const clean = sanitize(dirty); sink(clean)` pattern works
+// because assignment re-evaluates the initializer's mask fresh; a sticky
+// in-place mutation site (the tainted-receiver passthrough in
+// makeTaintMask) is still not retroactively cleaned -- a documented,
+// accepted narrower gap.
 
 const CMD_SINK_NAMES = new Set(["exec", "execSync", "spawn", "spawnSync"]);
 const FS_SINK_NAMES = new Set([
@@ -237,10 +237,10 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
 
 // ── Taint environment / propagation ──────────────────────────────────────────
 
-type Env = Map<string, boolean>;
+type Env = TaintEnv;
 
 /**
- * Builds the core taint predicate as a closure over `propagating` so every
+ * Builds the core taint evaluator as a closure over `propagating` so every
  * call site (there are several, scattered through the statement walk below)
  * doesn't need to thread an extra parameter through by hand. `propagating`
  * maps a function's CALL-SITE NAME (a local function's bare name, OR --
@@ -261,43 +261,51 @@ type Env = Map<string, boolean>;
  * only `userId` -- not `message` -- flows into buildLog's return does NOT
  * fire, even though buildLog is "propagating" for its userId parameter.
  */
-function makeIsTainted(propagating: Map<string, ParamShape[]>) {
-  const isTainted = (expr: ts.Expression, env: Env): boolean => {
-    if (ts.isParenthesizedExpression(expr)) return isTainted(expr.expression, env);
-    if (isTaintSourceExpr(expr)) return true;
-    if (ts.isIdentifier(expr)) return env.get(expr.text) === true;
+function makeTaintMask(propagating: Map<string, ParamShape[]>) {
+  const taintMask = (expr: ts.Expression, env: Env): number => {
+    if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
+    if (isTaintSourceExpr(expr)) return ALL;
+    if (ts.isIdentifier(expr)) return env.get(expr.text) ?? 0;
     if (ts.isPropertyAccessExpression(expr)) {
-      // Field-sensitive read: check the composite "root.field" key first
-      // (set by applyDeclAndAssign's field-write branch below); fall back
-      // to the existing root-object-taint check when no field-specific
-      // entry exists -- pure recall gain, this can only ever ADD a `true`
-      // result the old root-collapse behavior would have missed, never
-      // remove one already found that way.
+      // Field-sensitive read: OR the composite "root.field" key (set by
+      // applyDeclAndAssign's field-write branch below) with the root-object
+      // mask -- pure recall gain, this can only ever ADD classes the old
+      // root-collapse behavior would have missed, never remove one already
+      // found that way.
       const path = calleeText(expr);
-      if (path && env.get(path) === true) return true;
-      return isTainted(expr.expression, env);
+      return (path ? (env.get(path) ?? 0) : 0) | taintMask(expr.expression, env);
     }
     if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-      return isTainted(expr.left, env) || isTainted(expr.right, env);
+      return taintMask(expr.left, env) | taintMask(expr.right, env);
     }
-    if (ts.isTemplateExpression(expr)) return expr.templateSpans.some(s => isTainted(s.expression, env));
-    if (ts.isSpreadElement(expr)) return isTainted(expr.expression, env);
-    if (ts.isArrayLiteralExpression(expr)) return expr.elements.some(e => isTainted(e, env));
+    if (ts.isTemplateExpression(expr)) return expr.templateSpans.reduce((m, s) => m | taintMask(s.expression, env), 0);
+    if (ts.isSpreadElement(expr)) return taintMask(expr.expression, env);
+    if (ts.isArrayLiteralExpression(expr)) return expr.elements.reduce((m, e) => m | taintMask(e, env), 0);
     if (ts.isObjectLiteralExpression(expr)) {
-      return expr.properties.some(p => ts.isPropertyAssignment(p) && isTainted(p.initializer, env));
+      return expr.properties.reduce((m, p) => (ts.isPropertyAssignment(p) ? m | taintMask(p.initializer, env) : m), 0);
     }
     if (ts.isCallExpression(expr)) {
-      const sanitizerName = calleeText(expr.expression);
-      if (sanitizerName && SANITIZER_NAMES.has(sanitizerName)) return false;
+      // Known sanitizer: the argument's taint passes THROUGH minus only the
+      // classes this sanitizer actually neutralizes (an HTML escaper leaves
+      // SQL/command/path taint intact). Opaque calls stay untainted below.
+      const calleeName = calleeText(expr.expression);
+      if (calleeName) {
+        const clears = sanitizerClears("js", calleeName);
+        if (clears !== null) return expr.arguments[0] ? applyClears(taintMask(expr.arguments[0], env), clears) : 0;
+      }
       // A call to a local (or cross-file-imported) function known to
       // propagate taint from SPECIFIC params to its return value -- e.g.
       // buildCommand(host) where buildCommand(h) { return `ping -c1 ${h}`; }.
-      // Only the arguments at the propagating indices are checked, not
-      // every argument.
+      // Only the arguments at the propagating indices are checked, and only
+      // the classes that survive the callee's own body (shape.mask) count.
       if (ts.isIdentifier(expr.expression)) {
         const shapes = propagating.get(expr.expression.text);
-        if (shapes && shapes.some(shape => argsForShape(expr.arguments, shape).some(a => isTainted(a, env)))) {
-          return true;
+        if (shapes) {
+          let m = 0;
+          for (const shape of shapes) {
+            for (const a of argsForShape(expr.arguments, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
+          }
+          if (m) return m;
         }
       }
       // Passthrough for a method call on an already-tainted receiver
@@ -305,13 +313,15 @@ function makeIsTainted(propagating: Map<string, ParamShape[]>) {
       // anything referencing a tainted value" recall bias already
       // established in extractTaintedVars' second-hop rule (scanner.ts),
       // not a claim that every such method is unsafe on its own.
-      if (ts.isPropertyAccessExpression(expr.expression)) return isTainted(expr.expression.expression, env);
+      if (ts.isPropertyAccessExpression(expr.expression)) return taintMask(expr.expression.expression, env);
     }
-    if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) return isTainted(expr.expression, env);
-    return false;
+    if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) return taintMask(expr.expression, env);
+    return 0;
   };
-  return isTainted;
+  return taintMask;
 }
+
+type TaintMaskFn = (e: ts.Expression, env: Env) => number;
 
 interface LocalFn {
   params: ts.NodeArray<ts.ParameterDeclaration>;
@@ -324,7 +334,10 @@ interface LocalFn {
   exportedNames: string[];
 }
 
-export interface ParamShape { name: string; index: number; isRest: boolean }
+// `mask` (only set on entries of a `propagating` map, never on a bare
+// parameter list) is the sink classes that still survive from this
+// parameter to the function's return value; absent means ALL.
+export interface ParamShape { name: string; index: number; isRest: boolean; mask?: number }
 
 /** Which of `args` correspond to `shape`: exactly one arg for a fixed
  * param, every arg from `shape.index` onward for a rest param. */
@@ -352,16 +365,16 @@ function paramShapesOf(fn: LocalFn): ParamShape[] {
  * identifier the old env never had a value for. Confirmed by direct trace
  * of the pre-fix code, not a hypothetical.
  */
-function applyDeclAndAssign(node: ts.Node, env: Env, isTaintedFn: (e: ts.Expression, env: Env) => boolean): void {
+function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void {
   if (ts.isVariableStatement(node)) {
     for (const decl of node.declarationList.declarations) {
       if (!decl.initializer) continue;
-      const tainted = isTaintedFn(decl.initializer, env);
+      const mask = maskFn(decl.initializer, env);
       if (ts.isIdentifier(decl.name)) {
-        env.set(decl.name.text, tainted);
-      } else if (ts.isObjectBindingPattern(decl.name) && tainted) {
+        env.set(decl.name.text, mask);
+      } else if (ts.isObjectBindingPattern(decl.name) && isTaintedMask(mask)) {
         for (const el of decl.name.elements) {
-          if (ts.isIdentifier(el.name)) env.set(el.name.text, true);
+          if (ts.isIdentifier(el.name)) env.set(el.name.text, mask);
         }
       }
     }
@@ -371,15 +384,15 @@ function applyDeclAndAssign(node: ts.Node, env: Env, isTaintedFn: (e: ts.Express
   ) {
     const { left, right } = node.expression;
     if (ts.isIdentifier(left)) {
-      env.set(left.text, isTaintedFn(right, env));
+      env.set(left.text, maskFn(right, env));
     } else if (ts.isPropertyAccessExpression(left)) {
       // Field-sensitive write: `obj.field = expr` -- stores under the same
-      // composite "root.field" key the read side (isTainted, above) checks.
-      // Additive only: obj's own bare-identifier env entry (if any) is left
-      // untouched, so a consumer that only ever checked isTainted(obj)
-      // before this change sees exactly what it saw before.
+      // composite "root.field" key the read side (makeTaintMask, above)
+      // checks. Additive only: obj's own bare-identifier env entry (if any)
+      // is left untouched, so a consumer that only ever checked obj before
+      // this change sees exactly what it saw before.
       const path = calleeText(left);
-      if (path) env.set(path, isTaintedFn(right, env));
+      if (path) env.set(path, maskFn(right, env));
     }
   }
 }
@@ -393,9 +406,9 @@ function applyDeclAndAssign(node: ts.Node, env: Env, isTaintedFn: (e: ts.Express
  * empty-propagating evaluator), preserving computeReturnTaintPropagating's
  * documented non-recursive bound.
  */
-function envAfterBody(body: ts.Node, seed: Env, isTaintedFn: (e: ts.Expression, env: Env) => boolean): Env {
+function envAfterBody(body: ts.Node, seed: Env, maskFn: TaintMaskFn): Env {
   const env = new Map(seed);
-  const visit = (n: ts.Node) => { applyDeclAndAssign(n, env, isTaintedFn); ts.forEachChild(n, visit); };
+  const visit = (n: ts.Node) => { applyDeclAndAssign(n, env, maskFn); ts.forEachChild(n, visit); };
   visit(body);
   return env;
 }
@@ -412,15 +425,18 @@ function envAfterBody(body: ts.Node, seed: Env, isTaintedFn: (e: ts.Expression, 
  * message) only using userId in its return still fired on
  * buildLog(safeId, taintedMessage)).
  *
- * Testing each parameter independently is sound because the taint predicate
- * (makeIsTainted) is purely OR-shaped -- every combinator is `||`/`.some()`,
- * nothing ever de-taints -- so seeding a superset of params can only ever
- * taint a superset of what seeding a subset taints. No parameter whose own
- * taint is independently sufficient is missed, and no parameter is falsely
- * required to co-occur with another.
+ * Testing each parameter independently is sound because the taint evaluator
+ * (makeTaintMask) is purely OR-shaped per sink class -- every combinator is a
+ * bitwise OR, and a sanitizer clears a FIXED set of classes regardless of
+ * what else is tainted (`m & ~clears` distributes over OR) -- so seeding a
+ * superset of params can only ever taint a superset of what seeding a subset
+ * taints, class by class. No parameter whose own taint is independently
+ * sufficient is missed, and no parameter is falsely required to co-occur
+ * with another. The returned mask records which classes SURVIVE, so a
+ * wrapper around an HTML escaper still propagates SQL/command taint.
  *
  * Nested calls inside `fn`'s own body are resolved using whatever
- * `isTaintedFn` the caller passes in -- see buildPropagatingMap below,
+ * `maskFn` the caller passes in -- see buildPropagatingMap below,
  * which threads a bounded, round-capped view of the file's OWN in-progress
  * propagating map (never fully opaque, but never unbounded/recursive
  * either) rather than the always-empty map this function used to build
@@ -429,8 +445,9 @@ function envAfterBody(body: ts.Node, seed: Env, isTaintedFn: (e: ts.Expression, 
  * genuinely shallow, one file at a time) and the bounded same-file
  * fixed-point below.
  */
-function computeReturnTaintPropagating(fn: LocalFn, isTaintedFn: (e: ts.Expression, env: Env) => boolean): Set<number> {
-  const propagatingIdx = new Set<number>();
+function computeReturnTaintPropagating(fn: LocalFn, maskFn: TaintMaskFn): Map<number, number> {
+  // param index -> sink classes that still survive to the return value
+  const propagatingIdx = new Map<number, number>();
   const returnExprs: ts.Expression[] = [];
   if (!ts.isBlock(fn.body)) {
     returnExprs.push(fn.body as ts.Expression); // arrow expression body
@@ -443,9 +460,12 @@ function computeReturnTaintPropagating(fn: LocalFn, isTaintedFn: (e: ts.Expressi
   }
   for (const shape of paramShapesOf(fn)) {
     const seed: Env = new Map();
-    seed.set(shape.name, true);
-    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, isTaintedFn) : seed;
-    if (returnExprs.some(expr => isTaintedFn(expr, env))) propagatingIdx.add(shape.index);
+    seed.set(shape.name, ALL);
+    const env = ts.isBlock(fn.body) ? envAfterBody(fn.body, seed, maskFn) : seed;
+    // Only the low (still-dangerous) bits are a summary; the shadow half is
+    // per-scan bookkeeping and must not leak into a stored/cross-file shape.
+    const surviving = returnExprs.reduce((m, expr) => m | maskFn(expr, env), 0) & ALL;
+    if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
 }
@@ -473,12 +493,24 @@ function buildPropagatingMap(localFns: Map<string, LocalFn>): Map<string, ParamS
   const propagating = new Map<string, ParamShape[]>();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
-    const isTaintedRound = makeIsTainted(propagating);
+    const maskRound = makeTaintMask(propagating);
     for (const [name, fn] of localFns) {
-      const idx = computeReturnTaintPropagating(fn, isTaintedRound);
-      const existingSize = propagating.get(name)?.length ?? 0;
-      if (idx.size > existingSize) {
-        propagating.set(name, paramShapesOf(fn).filter(s => idx.has(s.index)));
+      const found = computeReturnTaintPropagating(fn, maskRound);
+      // Monotonic merge: a round can only ADD parameters or ADD surviving
+      // classes to an existing one, never remove -- the same convergence
+      // guarantee the boolean version had (each per-class bit is monotone
+      // under OR just as the single bit was).
+      const merged = new Map<number, ParamShape>((propagating.get(name) ?? []).map(s => [s.index, s]));
+      let grew = false;
+      for (const shape of paramShapesOf(fn)) {
+        const m = found.get(shape.index);
+        if (!m) continue;
+        const prev = merged.get(shape.index);
+        const next = (prev?.mask ?? 0) | m;
+        if (!prev || next !== (prev.mask ?? 0)) { merged.set(shape.index, { ...shape, mask: next }); grew = true; }
+      }
+      if (grew) {
+        propagating.set(name, [...merged.values()].sort((a, b) => a.index - b.index));
         changed = true;
       }
     }
@@ -614,6 +646,11 @@ const LABEL: Record<AstTaintId, string> = {
 export function scanAstTaint(
   content: string, filePath: string, presparsed?: ts.SourceFile,
   crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer -- lets scanner.ts drop the regex layer's
+  // duplicate finding for a flow this engine proved safe. Optional out-param
+  // so the return type (and every existing caller) stays unchanged.
+  suppressedOut?: SuppressedSink[],
 ): AstTaintFinding[] {
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
@@ -623,8 +660,9 @@ export function scanAstTaint(
     if (crossFilePropagating) {
       for (const [name, info] of crossFilePropagating) propagating.set(name, info.shapes);
     }
-    const isTainted = makeIsTainted(propagating);
-    const seededParams = new Map<string, Set<number>>(); // fn name -> tainted param indices
+    const taintMask = makeTaintMask(propagating);
+    // fn name -> (tainted param index -> classes tainted at the call site)
+    const seededParams = new Map<string, Map<number, number>>();
     // Message-attribution only (Tier 2, "assign then use downstream"): the
     // initializer expression a bare identifier was last assigned from, kept
     // in lockstep with `env` wherever a VariableStatement sets it. NOT
@@ -676,8 +714,16 @@ export function scanAstTaint(
       }
       const match = matchSink(call, importMap);
       if (!match) return;
-      const taintedArg = match.args.find(a => isTainted(a, env));
+      const cls = classOf(match.id);
+      let taintedArg: ts.Expression | undefined;
+      let cleared = false;
+      for (const a of match.args) {
+        const m = taintMask(a, env);
+        if (m & cls) { taintedArg = a; break; }
+        if (wasCleared(m, cls)) cleared = true;
+      }
       if (taintedArg) emit(match.id, call, sourceLabel(taintedArg), match.sinkExpr, taintedArg);
+      else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(call) });
     };
 
     const checkNewExprForSink = (node: ts.NewExpression) => {
@@ -690,8 +736,10 @@ export function scanAstTaint(
       if (node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
       if (!ts.isPropertyAccessExpression(node.left)) return;
       const prop = node.left.name.text;
-      if ((prop === "innerHTML" || prop === "outerHTML") && isTainted(node.right, env)) {
-        emit("xss", node, sourceLabel(node.right), `.${prop}`, node.right);
+      if (prop === "innerHTML" || prop === "outerHTML") {
+        const m = taintMask(node.right, env);
+        if (m & classOf("xss")) emit("xss", node, sourceLabel(node.right), `.${prop}`, node.right);
+        else if (wasCleared(m, classOf("xss"))) suppressedOut?.push({ id: "xss", line: lineOf(node) });
       }
     };
 
@@ -703,7 +751,7 @@ export function scanAstTaint(
       // by the generic visitExpr traversal below, which visits this same
       // binary expression as a child of `node` -- no need to special-case
       // it here too.
-      applyDeclAndAssign(node, env, isTainted);
+      applyDeclAndAssign(node, env, taintMask);
       // Tier-2 message-attribution bookkeeping only (see initializerOf's
       // declaration) -- kept as a separate pass over the same statement
       // rather than folded into applyDeclAndAssign, since
@@ -726,15 +774,18 @@ export function scanAstTaint(
             const fnName = n.expression.text;
             const fn = localFns.get(fnName)!;
             const shapes = paramShapesOf(fn);
-            const taintedIdx = new Set<number>();
+            // param index -> classes tainted at THIS call site (the callee's
+            // parameter is only tainted for those classes, not for ALL)
+            const taintedIdx = new Map<number, number>();
             n.arguments.forEach((arg, i) => {
-              if (!isTainted(arg, env)) return;
+              const m = taintMask(arg, env) & ALL;
+              if (!m) return;
               const shape = shapes.find(s => s.isRest ? i >= s.index : s.index === i);
-              if (shape) taintedIdx.add(shape.index);
+              if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
             });
             if (taintedIdx.size > 0) {
-              const existing = seededParams.get(fnName) ?? new Set<number>();
-              taintedIdx.forEach(i => existing.add(i));
+              const existing = seededParams.get(fnName) ?? new Map<number, number>();
+              for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
               seededParams.set(fnName, existing);
             }
           }
@@ -768,15 +819,15 @@ export function scanAstTaint(
       for (const [fnName, idxSet] of toWalk) {
         const fn = localFns.get(fnName);
         if (!fn) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
         const env: Env = new Map();
         const shapes = paramShapesOf(fn);
-        for (const idx of idxSet) {
+        for (const [idx, m] of idxSet) {
           const shape = shapes[idx];
-          if (shape) env.set(shape.name, true);
+          if (shape) env.set(shape.name, m);
         }
         walkStatements(fn.body, env);
       }

@@ -37,6 +37,7 @@ import {
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
 } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
+import type { SuppressedSink } from "./taint/taintCore";
 import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
@@ -6139,8 +6140,9 @@ function shouldAstParse(content: string, filePath: string): boolean {
 function findAstTaintFindings(
   content: string, filePath: string, sourceFile: ts.SourceFile,
   crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  suppressed?: SuppressedSink[],
 ): ScanIndicator[] {
-  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating).map(f => ({
+  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed).map(f => ({
     id: f.id, label: astTaintLabel(f.id), severity: astTaintSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6148,8 +6150,8 @@ function findAstTaintFindings(
 
 // Same wrapper for astTaintPython.ts's Phase 2 engine -- see its own
 // docblock for the tree-sitter/WASM warm-cache design.
-function findAstTaintPythonFindings(content: string, filePath: string, rootNode: PySyntaxNode): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode).map(f => ({
+function findAstTaintPythonFindings(content: string, filePath: string, rootNode: PySyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
+  return scanAstTaintPython(content, filePath, rootNode, suppressed).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6159,8 +6161,8 @@ function findAstTaintPythonFindings(content: string, filePath: string, rootNode:
 // docblock. No warm-cache concern here (java-parser is pure JS,
 // synchronous, no WASM -- this mirrors astTaint.ts's simplicity, not
 // astTaintPython.ts's).
-function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst).map(f => ({
+function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
+  return scanAstTaintJava(content, filePath, cst, suppressed).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6172,12 +6174,12 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
 // this file's raw lines -- "is there an ownership check nearby" is a
 // line-window-context fact, not something the parser alone can answer, the
 // same AST-taint + regex-context hybrid astTaintJava.ts's own BOLA detector uses.
-function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[]): ScanIndicator[] {
+function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[], suppressed?: SuppressedSink[]): ScanIndicator[] {
   const idorAuthCheckNearby = (line: number) => {
     const windowStart = Math.max(0, line - 1 - 15);
     return lines.slice(windowStart, line).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
   };
-  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby).map(f => ({
+  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6185,16 +6187,16 @@ function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoS
 
 // C# taint engine wrapper -- mirrors findAstTaintJavaFindings exactly
 // (severityOverride only ever set by the BOLA detector, same as Java's).
-function findAstTaintCSharpFindings(content: string, filePath: string, root: CSharpSyntaxNode): ScanIndicator[] {
-  return scanAstTaintCSharp(content, filePath, root).map(f => ({
+function findAstTaintCSharpFindings(content: string, filePath: string, root: CSharpSyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
+  return scanAstTaintCSharp(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
 }
 
 // PHP taint engine wrapper -- mirrors findAstTaintCSharpFindings exactly.
-function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyntaxNode): ScanIndicator[] {
-  return scanAstTaintPHP(content, filePath, root).map(f => ({
+function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
+  return scanAstTaintPHP(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintPHPLabel(f.id), severity: f.severityOverride ?? astTaintPHPSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6334,7 +6336,24 @@ export function analyzeFile(
   // instead of silently dropping them, so a real issue inside a vendored
   // library is still visible (just not risk-scored as if it were this repo's
   // own code). This replaces the earlier blunt on/off gate.
-  const vulnIndicatorsRaw: ScanIndicator[] = [
+  // AST engines run FIRST so the sinks they positively proved safe (tainted,
+  // then correctly sanitized for that sink's class) are known before the
+  // regex findings are merged in. A regex finding with the same id+line as
+  // one of those is the sanitizer-blind regex layer re-adding a flow the AST
+  // engine already cleared -- dropped. Deliberately NOT "drop every regex
+  // finding on a line an AST engine looked at": that would also hide true
+  // positives the engine merely failed to see. AST findings themselves are
+  // never filtered here.
+  const suppressedSinks: SuppressedSink[] = [];
+  const astIndicators: ScanIndicator[] = [
+    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
+    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
+    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks) : []),
+    ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks) : []),
+  ];
+  const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
     ...findInsecureDeserialization(lines),
     ...findInsecureDeserializationGoDecoder(lines),
@@ -6425,12 +6444,13 @@ export function analyzeFile(
     ...findTOCTOU(lines),
     ...findCookieInsecurity(lines),
     ...findCookieInsecurityOtherLangs(lines),
-    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
-    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines) : []),
-    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree) : []),
-    ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree) : []),
+  ];
+  const suppressedKeys = new Set(suppressedSinks.map(x => `${x.id}:${x.line}`));
+  const vulnIndicatorsRaw: ScanIndicator[] = [
+    ...(suppressedKeys.size === 0
+      ? regexVulnIndicatorsRaw
+      : regexVulnIndicatorsRaw.filter(i => !suppressedKeys.has(`${i.id}:${i.line ?? ""}`))),
+    ...astIndicators,
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 

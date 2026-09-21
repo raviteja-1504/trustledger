@@ -60,6 +60,8 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
 // See astTaintPython.ts's/astTaintGo.ts's identical helper for why:
 // require.resolve(...) from inside webpack-bundled code doesn't do real
@@ -274,10 +276,12 @@ function isTaintSourceExprCSharp(node: SyntaxNode): boolean {
 }
 
 // ── Sanitizer/de-taint recognition ──────────────────────────────────────
-// Matched by method-name TAIL (any receiver), same permissive-by-design
-// posture as every other engine's sanitizer table.
-const CSHARP_SANITIZER_TAILS = new Set([
-  "HtmlEncode", "UrlEncode", "JavaScriptStringEncode", "Encode",
+// Now lives in taint/sanitizers.ts, keyed by the sink classes each one
+// actually neutralizes (HtmlEncode clears XSS, not SQL/command/path); the
+// bare `Encode` tail is receiver-aware there (only the web encoders count).
+// Numeric CASTS -- `(int)x` -- are modeled in makeTaintMaskCSharp below.
+const CSHARP_NUMERIC_CAST_TYPES = new Set([
+  "int", "long", "short", "byte", "sbyte", "uint", "ulong", "ushort", "double", "float", "decimal", "bool",
 ]);
 
 // ── Sink dispatch table ──────────────────────────────────────────────────
@@ -302,7 +306,9 @@ const LABEL: Record<AstTaintCSharpId, string> = {
 // Flat, OR-shaped, no de-tainting (aside from the sanitizer table above) --
 // same explicit design as every other engine here.
 
-type Env = Map<string, boolean>;
+type Env = TaintEnv;
+// method name -> (param index -> sink classes that survive to its return value)
+type PropagatingCS = Map<string, Map<number, number>>;
 type VarTypes = Map<string, string>;
 interface ParamShape { name: string; index: number }
 interface LocalMethod {
@@ -318,11 +324,16 @@ interface EngineCtx {
   content: string;
   lines: string[];
   localMethods: Map<string, LocalMethod>;
-  propagatingParams: Map<string, Set<number>>;
-  seededParams: Map<string, Set<number>>;
+  propagatingParams: PropagatingCS;
+  // method name -> (tainted param index -> classes tainted at the call site)
+  seededParams: Map<string, Map<number, number>>;
   varTypes: VarTypes;
   findings: AstTaintCSharpFinding[];
   seen: Set<string>;
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
+  // regex layer's duplicate for a flow this engine proved safe.
+  suppressed?: SuppressedSink[];
 }
 
 function emit(
@@ -339,88 +350,95 @@ function emit(
   });
 }
 
-function makeIsTaintedCSharp(ctx: EngineCtx): (node: SyntaxNode, env: Env) => boolean {
-  const isTainted = (node: SyntaxNode, env: Env): boolean => {
-    if (isTaintSourceExprCSharp(node)) return true;
-    if (node.type === "identifier") return env.get(node.text) === true;
-    if (node.type === "argument") {
+type TaintMaskFnCS = (node: SyntaxNode, env: Env) => number;
+
+function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
+  const taintMask = (node: SyntaxNode, env: Env): number => {
+    if (isTaintSourceExprCSharp(node)) return ALL;
+    if (node.type === "identifier") return env.get(node.text) ?? 0;
+    if (node.type === "argument" || node.type === "parenthesized_expression" || node.type === "interpolation") {
       const inner = node.namedChildren[0];
-      return inner ? isTainted(inner, env) : false;
+      return inner ? taintMask(inner, env) : 0;
     }
-    if (node.type === "parenthesized_expression") {
-      const inner = node.namedChildren[0];
-      return inner ? isTainted(inner, env) : false;
+    if (node.type === "cast_expression") {
+      // (int)x / (long)x / (bool)x -- a numeric cast neutralizes every
+      // injection class (was silently taint-PRESERVING through the generic
+      // fallback while int.Parse(x) cleared, an inconsistency within this
+      // one engine). Any other cast ((string)x, (MyType)x) passes through.
+      const typeNode = node.childForFieldName("type") ?? node.namedChildren[0];
+      const valueNode = node.childForFieldName("value") ?? node.namedChildren[node.namedChildren.length - 1];
+      const inner = valueNode ? taintMask(valueNode, env) : 0;
+      return typeNode && CSHARP_NUMERIC_CAST_TYPES.has(typeNode.text) ? applyClears(inner, NUMERIC_CLEARS) : inner;
     }
     if (node.type === "binary_expression") {
       const op = node.childForFieldName("operator")?.type;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if (op === "+" && left && right) return isTainted(left, env) || isTainted(right, env);
-      return false;
+      if (op === "+" && left && right) return taintMask(left, env) | taintMask(right, env);
+      return 0;
     }
     if (node.type === "member_access_expression") {
-      // Field-sensitive read: the full dotted path composite key FIRST
-      // (set by the assignment write-side below), falling back to the
-      // root/operand's own taint -- pure recall gain, never removes a
-      // `true` result the fallback alone would find.
+      // Field-sensitive read: OR the full dotted path composite key (set by
+      // the assignment write-side below) with the root/operand's own mask --
+      // pure recall gain, never removes a class the fallback alone finds.
       const path = calleeTextCSharp(node);
-      if (path && env.get(path) === true) return true;
       const expr = node.childForFieldName("expression");
-      return expr ? isTainted(expr, env) : false;
+      return (path ? (env.get(path) ?? 0) : 0) | (expr ? taintMask(expr, env) : 0);
     }
     if (node.type === "element_access_expression") {
       const expr = node.childForFieldName("expression") ?? node.namedChildren[0];
-      return expr ? isTainted(expr, env) : false;
+      return expr ? taintMask(expr, env) : 0;
     }
     if (node.type === "object_creation_expression") {
       // A constructor call is tainted if ANY of its arguments are --
       // deliberately the baseline rule from the start (unlike astTaintGo.ts,
       // which needed a later correction pass for the http.NewRequest
       // two-step pattern specifically because it lacked this as a default).
-      const args = argListOfCSharp(node);
-      return args.some(a => isTainted(a, env));
+      return argListOfCSharp(node).reduce((m, a) => m | taintMask(a, env), 0);
     }
     if (node.type === "invocation_expression") {
       const fn = node.childForFieldName("function");
       const args = argListOfCSharp(node);
       const text = fn ? calleeTextCSharp(fn) : null;
-      const tail = text?.split(".").pop() ?? (fn?.type === "identifier" ? fn.text : undefined);
-      // Sanitizer calls de-taint at this point, checked BEFORE the
-      // propagating-fn/passthrough checks below, so a sanitized value can't
-      // be re-tainted by one of them in this same call.
-      if (tail && CSHARP_SANITIZER_TAILS.has(tail)) return false;
+      // Known sanitizer: the argument's taint passes THROUGH minus only the
+      // classes it neutralizes. Checked BEFORE the propagating-fn/passthrough
+      // checks below, so a sanitized value can't be re-tainted by one of
+      // them in this same call.
+      const calleeName = text ?? (fn?.type === "identifier" ? fn.text : null);
+      if (calleeName) {
+        const clears = sanitizerClears("cs", calleeName, args.map(a => a.text));
+        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      }
       // Same-file interprocedural, bounded (see buildPropagatingMapCSharp).
       if (fn?.type === "identifier") {
         const propIdx = ctx.propagatingParams.get(fn.text);
         if (propIdx) {
           const callee = ctx.localMethods.get(fn.text);
           const shapes = callee?.paramShapes ?? [];
-          const matched = [...propIdx].some(i => shapes[i] !== undefined && args[i] !== undefined && isTainted(args[i], env));
-          if (matched) return true;
+          let m = 0;
+          for (const [i, surviving] of propIdx) {
+            if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+          }
+          if (m) return m;
         }
       }
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. dirty.Trim(), dirty.ToLower()).
       if (fn?.type === "member_access_expression") {
         const expr = fn.childForFieldName("expression");
-        if (expr && isTainted(expr, env)) return true;
+        if (expr) return taintMask(expr, env);
       }
-      return false;
-    }
-    if (node.type === "interpolation") {
-      const inner = node.namedChildren[0];
-      return inner ? isTainted(inner, env) : false;
+      return 0;
     }
     // Generic fallback -- recurse into every named child and OR-combine.
-    // Confirmed directly (via probing $"...{x}..." interpolated strings)
-    // that this alone correctly reaches an interpolation's inner
-    // expression without any interpolated_string_expression-specific case.
-    for (const child of node.namedChildren) {
-      if (child && isTainted(child, env)) return true;
-    }
-    return false;
+    // Confirmed directly (via probing interpolated strings) that this alone
+    // correctly reaches an interpolation's inner expression without any
+    // interpolated_string_expression-specific case.
+    let m = 0;
+    for (const child of node.namedChildren) if (child) m |= taintMask(child, env);
+    return m;
   };
-  return isTainted;
+  return taintMask;
 }
 
 /**
@@ -432,35 +450,41 @@ function makeIsTaintedCSharp(ctx: EngineCtx): (node: SyntaxNode, env: Env) => bo
  * round cap below, mirroring the other four engines' current (already-
  * upgraded) design, not their original one-shot shape.
  */
-function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx): Set<number> {
-  const propagatingIdx = new Set<number>();
+function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx): Map<number, number> {
+  // param index -> sink classes that still survive to the return value
+  const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  const isTainted = makeIsTaintedCSharp(ctx);
+  const taintMask = makeTaintMaskCSharp(ctx);
   const returnExprs = findAllNodes(method.body, "return_statement")
     .map(ret => ret.namedChildren[0])
     .filter((e): e is SyntaxNode => !!e);
   for (const shape of method.paramShapes) {
     const env: Env = new Map();
-    env.set(shape.name, true);
-    if (returnExprs.some(expr => isTainted(expr, env))) propagatingIdx.add(shape.index);
+    env.set(shape.name, ALL);
+    // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
+    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env), 0) & ALL;
+    if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
 }
 
 const MAX_PROPAGATION_ROUNDS = 3;
 
-function buildPropagatingMapCSharp(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): Map<string, Set<number>> {
-  const propagating = new Map<string, Set<number>>();
+function buildPropagatingMapCSharp(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): PropagatingCS {
+  const propagating: PropagatingCS = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
     const roundCtx: EngineCtx = { ...baseCtx, propagatingParams: propagating };
     for (const [name, method] of localMethods) {
-      const idx = computeReturnTaintPropagatingCSharp(method, roundCtx);
-      const existingSize = propagating.get(name)?.size ?? 0;
-      if (idx.size > existingSize) {
-        propagating.set(name, idx);
-        changed = true;
+      const found = computeReturnTaintPropagatingCSharp(method, roundCtx);
+      // Monotonic merge (only ever adds a parameter or adds surviving classes).
+      const merged = new Map(propagating.get(name) ?? []);
+      let grew = false;
+      for (const [idx, m] of found) {
+        const next = (merged.get(idx) ?? 0) | m;
+        if (next !== (merged.get(idx) ?? 0)) { merged.set(idx, next); grew = true; }
       }
+      if (grew) { propagating.set(name, merged); changed = true; }
     }
     if (!changed) break;
   }
@@ -473,15 +497,16 @@ function buildPropagatingMapCSharp(localMethods: Map<string, LocalMethod>, baseC
 function seedLocalMethodParams(calleeName: string, args: SyntaxNode[], env: Env, ctx: EngineCtx) {
   const callee = ctx.localMethods.get(calleeName);
   if (!callee) return;
-  const isTainted = makeIsTaintedCSharp(ctx);
-  const taintedIdx = new Set<number>();
+  const taintMask = makeTaintMaskCSharp(ctx);
+  const taintedIdx = new Map<number, number>();
   args.forEach((arg, i) => {
-    if (!isTainted(arg, env)) return;
-    if (callee.paramShapes.some(s => s.index === i)) taintedIdx.add(i);
+    const m = taintMask(arg, env) & ALL;
+    if (!m) return;
+    if (callee.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
   });
   if (taintedIdx.size === 0) return;
-  const existing = ctx.seededParams.get(calleeName) ?? new Set<number>();
-  taintedIdx.forEach(i => existing.add(i));
+  const existing = ctx.seededParams.get(calleeName) ?? new Map<number, number>();
+  for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
   ctx.seededParams.set(calleeName, existing);
 }
 
@@ -588,59 +613,68 @@ function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
 const FS_PATH_ROOTS = new Set(["Path", "File", "Directory"]);
 
 function checkCallSink(
-  fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean,
+  fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
   const text = calleeTextCSharp(fn);
   if (!text) return;
   const parts = text.split(".");
   const tail = parts[parts.length - 1];
   const rootVar = parts[0];
-  const taintedArg = args.find(a => isTainted(a, env));
-  const sourceExpr = taintedArg ? taintedArg.text : text;
+  const argMasks = args.map(a => taintMask(a, env));
+  const combined = argMasks.reduce((m, x) => m | x, 0);
+  const firstIdx = argMasks.findIndex(m => (m & ALL) !== 0);
+  const sourceExpr = firstIdx >= 0 ? args[firstIdx].text : text;
+  // Each sink is gated on ITS OWN class (an HtmlEncode no longer hides a
+  // SQL/command/path sink); a value tainted-then-positively-cleared for the
+  // sink's class records a suppression instead (regex-layer veto).
+  const fire = (id: AstTaintCSharpId, mask: number = combined, source: string = sourceExpr) => {
+    const cls = classOf(id);
+    if (mask & cls) emit(ctx, id, node, source, text);
+    else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
 
   // sql-injection: EF Core raw-SQL calls (arg-tainted) and ADO.NET
   // SqlCommand receiver-tainted (tracked via env at the SqlCommand-typed
   // local declaration site, mirroring astTaintJava.ts's ObjectInputStream
   // readObject pattern).
-  if ((tail === "FromSqlRaw" || tail === "ExecuteSqlRaw") && taintedArg) {
-    emit(ctx, "sql-injection", node, sourceExpr, text);
+  if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw") {
+    fire("sql-injection");
   } else if ((tail === "ExecuteReader" || tail === "ExecuteNonQuery" || tail === "ExecuteScalar")
-             && ctx.varTypes.get(rootVar) === "SqlCommand" && env.get(rootVar) === true) {
-    emit(ctx, "sql-injection", node, rootVar, text);
-  } else if (tail === "Start" && rootVar === "Process" && taintedArg) {
-    emit(ctx, "command-injection", node, sourceExpr, text);
-  } else if (tail === "Raw" && rootVar === "Html" && taintedArg) {
-    emit(ctx, "xss", node, sourceExpr, text);
-  } else if (tail === "Write" && rootVar === "Response" && taintedArg) {
-    emit(ctx, "xss", node, sourceExpr, text);
-  } else if (tail === "Content" && taintedArg) {
+             && ctx.varTypes.get(rootVar) === "SqlCommand") {
+    fire("sql-injection", env.get(rootVar) ?? 0, rootVar);
+  } else if (tail === "Start" && rootVar === "Process") {
+    fire("command-injection");
+  } else if (tail === "Raw" && rootVar === "Html") {
+    fire("xss");
+  } else if (tail === "Write" && rootVar === "Response") {
+    fire("xss");
+  } else if (tail === "Content") {
     // ControllerBase.Content(html, contentType) -- ASP.NET Core's
     // return-raw-HTML helper. Bare call (no rootVar prefix beyond
-    // "Content" itself), tainted-arg-gated like every sink here; the
-    // common real shape is a concatenated HTML string, already resolved
-    // by isTainted's recursive binary_expression walk.
-    emit(ctx, "xss", node, sourceExpr, text);
-  } else if ((tail === "GetAsync" || tail === "PostAsync" || tail === "PutAsync" || tail === "DeleteAsync" || tail === "SendAsync"
-              || tail === "GetStringAsync" || tail === "GetByteArrayAsync" || tail === "GetStreamAsync"
-              || tail === "PostAsJsonAsync" || tail === "PutAsJsonAsync") && taintedArg) {
-    emit(ctx, "ssrf", node, sourceExpr, text);
-  } else if (tail === "Combine" && rootVar === "Path" && taintedArg) {
-    emit(ctx, "path-traversal", node, sourceExpr, text);
-  } else if (FS_PATH_ROOTS.has(rootVar) && ["ReadAllText", "WriteAllText", "Open", "Create", "Delete", "ReadAllBytes", "WriteAllBytes"].includes(tail) && taintedArg) {
-    emit(ctx, "path-traversal", node, sourceExpr, text);
-  } else if (tail === "PhysicalFile" && taintedArg) {
+    // "Content" itself); the common real shape is a concatenated HTML
+    // string, already resolved by taintMask's recursive binary_expression walk.
+    fire("xss");
+  } else if (tail === "GetAsync" || tail === "PostAsync" || tail === "PutAsync" || tail === "DeleteAsync" || tail === "SendAsync"
+             || tail === "GetStringAsync" || tail === "GetByteArrayAsync" || tail === "GetStreamAsync"
+             || tail === "PostAsJsonAsync" || tail === "PutAsJsonAsync") {
+    fire("ssrf");
+  } else if (tail === "Combine" && rootVar === "Path") {
+    fire("path-traversal");
+  } else if (FS_PATH_ROOTS.has(rootVar) && ["ReadAllText", "WriteAllText", "Open", "Create", "Delete", "ReadAllBytes", "WriteAllBytes"].includes(tail)) {
+    fire("path-traversal");
+  } else if (tail === "PhysicalFile") {
     // ControllerBase.PhysicalFile(path, contentType) -- ASP.NET Core's
     // file-serving helper, a distinct sink shape from the System.IO.File/
-    // Path static-class checks above (this is an instance-method call
-    // with no meaningful rootVar of its own).
-    emit(ctx, "path-traversal", node, sourceExpr, text);
-  } else if (tail === "Deserialize" && taintedArg) {
-    emit(ctx, "insecure-deserialization", node, sourceExpr, text);
-  } else if ((tail === "Redirect" || tail === "RedirectPermanent") && taintedArg) {
-    emit(ctx, "open-redirect", node, sourceExpr, text);
+    // Path static-class checks above (an instance-method call with no
+    // meaningful rootVar of its own).
+    fire("path-traversal");
+  } else if (tail === "Deserialize") {
+    fire("insecure-deserialization");
+  } else if (tail === "Redirect" || tail === "RedirectPermanent") {
+    fire("open-redirect");
   } else if ((tail === "Compile" && rootVar === "XPathExpression") || (tail === "SelectNodes" || tail === "SelectSingleNode")) {
-    if (taintedArg) emit(ctx, "xpath-injection", node, sourceExpr, text);
-  } else if (/ldap/i.test(rootVar) && /^(?:Search|FindOne|FindAll)$/i.test(tail) && taintedArg) {
+    fire("xpath-injection");
+  } else if (/ldap/i.test(rootVar) && /^(?:Search|FindOne|FindAll)$/i.test(tail)) {
     // Call-shaped LDAP sink -- a custom helper (LdapHelper.Search(filter),
     // Ldap.FindOne(...)), distinct from the DirectorySearcher.Filter
     // property-assignment shape handled structurally in
@@ -648,26 +682,34 @@ function checkCallSink(
     // code has no fixed "Search" method name to allowlist exactly, so
     // this is a rootVar-name heuristic (same reasoning as the BOLA
     // lookup-name broadening below) rather than a class allowlist.
-    emit(ctx, "ldap-injection", node, sourceExpr, text);
+    fire("ldap-injection");
   }
 }
 
 /** `new ClassName(taintedArg)` -- the constructor-call-itself-is-the-sink
  * shape, mirroring astTaintGo.ts's checkNewExpressionSink. */
-function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean) {
+function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
   const typeNode = node.childForFieldName("type");
   const className = typeNode?.type === "identifier" ? typeNode.text : null;
   if (!className) return;
   const args = argListOfCSharp(node);
-  const taintedArg = args.find(a => isTainted(a, env));
-  if (!taintedArg) return;
-  if (className === "ProcessStartInfo") emit(ctx, "command-injection", node, taintedArg.text, "new ProcessStartInfo");
+  const argMasks = args.map(a => taintMask(a, env));
+  // Any bit (taint OR shadow) counts so a tainted-then-sanitized value
+  // still reaches the suppression record below.
+  const firstIdx = argMasks.findIndex(m => m !== 0);
+  if (firstIdx < 0) return;
+  const combined = argMasks.reduce((m, x) => m | x, 0);
+  if (className === "ProcessStartInfo") {
+    const cls = classOf("command-injection");
+    if (combined & cls) emit(ctx, "command-injection", node, args[firstIdx].text, "new ProcessStartInfo");
+    else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id: "command-injection", line: lineOf(node) });
+  }
 }
 
 // ── Statement-level walk (declarations + assignments + sink-visiting) ────
 
 function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx) {
-  const isTainted = makeIsTaintedCSharp(ctx);
+  const taintMask = makeTaintMaskCSharp(ctx);
 
   if (node.type === "local_declaration_statement") {
     const varDecl = node.namedChildren.find(c => c && c.type === "variable_declaration");
@@ -679,8 +721,7 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
       if (!nameTok) continue;
       const equalsClause = declarator.namedChildren.find(c => c && c.type === "equals_value_clause");
       const initExpr = equalsClause?.namedChildren[0];
-      const tainted = initExpr ? isTainted(initExpr, env) : false;
-      env.set(nameTok.text, tainted);
+      env.set(nameTok.text, initExpr ? taintMask(initExpr, env) : 0);
       // `var cmd = new SqlCommand(sql);` -- declaredTypeSimpleName is
       // undefined for `var` (implicit_type), so the receiver-typed sink
       // check (SqlCommand.ExecuteReader) needs the type inferred from the
@@ -702,18 +743,22 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
     if (opNode?.text === "=") {
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      const tainted = right ? isTainted(right, env) : false;
+      const mask = right ? taintMask(right, env) : 0;
       if (left?.type === "identifier") {
-        env.set(left.text, tainted);
+        env.set(left.text, mask);
       } else if (left?.type === "member_access_expression") {
         const key = calleeTextCSharp(left);
         if (key) {
-          env.set(key, tainted);
+          env.set(key, mask);
           // Structural sink: `xxx.Filter = tainted` (System.DirectoryServices
           // DirectorySearcher.Filter) -- an assignment-target-IS-the-sink
           // shape, since the vulnerable API here is a property setter, not
           // a method call.
-          if (key.endsWith(".Filter") && tainted) emit(ctx, "ldap-injection", node, right!.text, key);
+          if (key.endsWith(".Filter")) {
+            const cls = classOf("ldap-injection");
+            if (mask & cls) emit(ctx, "ldap-injection", node, right!.text, key);
+            else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id: "ldap-injection", line: lineOf(node) });
+          }
         }
       }
     }
@@ -723,14 +768,14 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
     const fn = node.childForFieldName("function");
     const args = argListOfCSharp(node);
     if (fn) {
-      checkCallSink(fn, args, node, env, ctx, isTainted);
+      checkCallSink(fn, args, node, env, ctx, taintMask);
       if (fn.type === "identifier" && ctx.localMethods.has(fn.text)) {
         seedLocalMethodParams(fn.text, args, env, ctx);
       }
     }
   }
   if (node.type === "object_creation_expression") {
-    checkNewExpressionSink(node, env, ctx, isTainted);
+    checkNewExpressionSink(node, env, ctx, taintMask);
   }
 
   for (const child of node.namedChildren) {
@@ -847,13 +892,18 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
-export function scanAstTaintCSharp(content: string, filePath: string, root: SyntaxNode): AstTaintCSharpFinding[] {
+export function scanAstTaintCSharp(
+  content: string, filePath: string, root: SyntaxNode,
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer -- see EngineCtx.suppressed.
+  suppressedOut?: SuppressedSink[],
+): AstTaintCSharpFinding[] {
   try {
     const lines = content.split("\n");
     const localMethods = collectLocalMethods(root);
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), findings: [], seen: new Set(),
+      varTypes: new Map(), findings: [], seen: new Set(), suppressed: suppressedOut,
     };
 
     const propagating = buildPropagatingMapCSharp(localMethods, ctx);
@@ -862,7 +912,7 @@ export function scanAstTaintCSharp(content: string, filePath: string, root: Synt
     for (const [, method] of localMethods) {
       if (!method.body) continue;
       const env: Env = new Map();
-      method.sourceParamNames.forEach(p => env.set(p, true));
+      method.sourceParamNames.forEach(p => env.set(p, ALL));
       walkForDeclarationsAndSinks(method.body, env, ctx);
       collectBolaFindings(method, ctx);
     }
@@ -877,14 +927,14 @@ export function scanAstTaintCSharp(content: string, filePath: string, root: Synt
       for (const [methodName, idxSet] of toWalk) {
         const method = localMethods.get(methodName);
         if (!method?.body) continue;
-        const signature = `${methodName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        const signature = `${methodName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
         const env: Env = new Map();
-        for (const idx of idxSet) {
+        for (const [idx, m] of idxSet) {
           const shape = method.paramShapes[idx];
-          if (shape) env.set(shape.name, true);
+          if (shape) env.set(shape.name, m);
         }
         walkForDeclarationsAndSinks(method.body, env, ctx);
       }

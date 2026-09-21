@@ -51,6 +51,8 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import { sanitizerClears } from "./taint/sanitizers";
 
 // See astTaintPython.ts's identical helper for why: require.resolve(...)
 // from inside webpack-bundled code doesn't do real filesystem resolution,
@@ -401,7 +403,9 @@ function structuralOwnershipCheckSuppressesGo(sinkNode: SyntaxNode, resourceIdEx
 // astTaintPython.ts / astTaintJava.ts. Nothing in makeIsTaintedGo ever
 // clears a taint flag once set.
 
-type Env = Map<string, boolean>;
+type Env = TaintEnv;
+// fn name -> (param index -> sink classes that survive to its return value)
+type PropagatingGo = Map<string, Map<number, number>>;
 interface ParamShape { name: string; index: number }
 interface LocalFn { paramShapes: ParamShape[]; body: SyntaxNode }
 
@@ -427,103 +431,98 @@ function isFormatCall(text: string): boolean {
   return text === "fmt.Sprintf" || text === "fmt.Errorf" || text === "fmt.Sprint" || text === "fmt.Sprintln";
 }
 
-/** strconv.Atoi/ParseInt/ParseFloat/ParseBool -- the extremely common
- * "convert a query-param string to a typed value" idiom
- * (`id, err := strconv.Atoi(q)`). Generalizes the existing regex layer's
- * narrow goStrconvAssign carve-out (scanner.ts) into the same "known
- * taint-preserving conversion" passthrough as isFormatCall above, rather
- * than reproducing its exact narrow shape. */
-function isTaintPreservingConversion(text: string): boolean {
-  return text === "strconv.Atoi" || text === "strconv.ParseInt" ||
-         text === "strconv.ParseFloat" || text === "strconv.ParseBool";
-}
+// ── Sanitizer/de-taint recognition ──────────────────────────────────────
+// Sanitizers live in taint/sanitizers.ts, keyed by the sink classes each one
+// actually neutralizes. strconv.Atoi/ParseInt/ParseFloat/ParseBool used to be
+// deliberately taint-PRESERVING here (so an IDOR check on the converted id
+// still fired); they now clear every INJECTION class (a %d into SQL is not
+// injectable) while keeping the CONTROL bit, which is exactly what the IDOR
+// check asks for -- no special case needed at the IDOR site beyond its class.
 
-// ── Sanitizer/de-taint recognition (Decision 2) ─────────────────────────
-// The deferred item from this file's own original phase, now delivered --
-// see astTaint.ts's SANITIZER_NAMES for the JS/TS equivalent this mirrors.
-// Matched by full dotted call text, same as every other table in this file.
-const GO_SANITIZER_NAMES = new Set([
-  "html.EscapeString", "template.HTMLEscapeString", "template.JSEscapeString",
-]);
-
-function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string, Set<number>>) {
-  const isTainted = (node: SyntaxNode, env: Env): boolean => {
-    if (isTaintSourceExprGo(node)) return true;
-    if (node.type === "identifier") return env.get(node.text) === true;
+function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: PropagatingGo) {
+  const taintMask = (node: SyntaxNode, env: Env): number => {
+    if (isTaintSourceExprGo(node)) return ALL;
+    if (node.type === "identifier") return env.get(node.text) ?? 0;
     if (node.type === "binary_expression") {
       const op = node.childForFieldName("operator")?.type;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if (op === "+" && left && right) return isTainted(left, env) || isTainted(right, env);
-      return false;
+      if (op === "+" && left && right) return taintMask(left, env) | taintMask(right, env);
+      return 0;
     }
     if (node.type === "call_expression") {
       const fn = node.childForFieldName("function");
       const args = argListOfGo(node);
       const text = fn ? calleeTextGo(fn) : null;
-      // Sanitizer calls de-taint at this point, checked BEFORE the
-      // format-call/conversion passthrough and every other taint-increasing
-      // branch below, so a sanitized value can't be re-tainted by one of
-      // them in this same call.
-      if (text && GO_SANITIZER_NAMES.has(text)) return false;
-      if (text && (isFormatCall(text) || isTaintPreservingConversion(text))) return args.some(a => isTainted(a, env));
+      // Known sanitizer: the argument's taint passes THROUGH minus only the
+      // classes it neutralizes. Checked BEFORE the format-call passthrough
+      // and every other taint-increasing branch below, so a sanitized value
+      // can't be re-tainted by one of them in this same call.
+      if (text) {
+        const clears = sanitizerClears("go", text);
+        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      }
+      if (text && isFormatCall(text)) return args.reduce((m, a) => m | taintMask(a, env), 0);
       // A call to a local function known to propagate taint from SPECIFIC
-      // params to its return value (see computeReturnTaintPropagatingGo).
+      // params to its return value (see computeReturnTaintPropagatingGo),
+      // limited to the classes that survive the callee's own body.
       if (fn?.type === "identifier") {
         const propIdx = propagating.get(fn.text);
         if (propIdx) {
           const callee = localFns.get(fn.text);
           const shapes = callee?.paramShapes ?? [];
-          const matched = [...propIdx].some(i => shapes[i] !== undefined && args[i] !== undefined && isTainted(args[i], env));
-          if (matched) return true;
+          let m = 0;
+          for (const [i, surviving] of propIdx) {
+            if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+          }
+          if (m) return m;
         }
       }
       // Passthrough method call on an already-tainted receiver
       // (dec.Decode(), strings.TrimSpace(x) via selector on a tainted var).
       if (fn?.type === "selector_expression") {
         const operand = fn.childForFieldName("operand");
-        if (operand) return isTainted(operand, env);
+        if (operand) return taintMask(operand, env);
       }
-      return false;
+      return 0;
     }
     if (node.type === "index_expression") {
       const operand = node.childForFieldName("operand");
-      return operand ? isTainted(operand, env) : false;
+      return operand ? taintMask(operand, env) : 0;
     }
-    // Field-sensitive read (Decision 1): a bare selector like `user.Name`
-    // checks the full dotted-path composite key FIRST (set by the new
-    // selector-expression assignment handling in `walk`'s short_var_decl/
-    // assignment_statement branch below), falling back to the operand's own
-    // taint -- pure recall gain, never removes a `true` result the operand
-    // check alone would already find. Unlike Java, no one-level scoping
-    // needed here: calleeTextGo already resolves the full chain generically.
+    // Field-sensitive read: a bare selector like `user.Name` ORs the full
+    // dotted-path composite key (set by the selector-expression assignment
+    // handling in `walk`'s short_var_decl/assignment_statement branch below)
+    // with the operand's own mask -- pure recall gain. Unlike Java, no
+    // one-level scoping needed: calleeTextGo resolves the full chain.
     if (node.type === "selector_expression") {
       const path = calleeTextGo(node);
-      if (path && env.get(path) === true) return true;
       const operand = node.childForFieldName("operand");
-      return operand ? isTainted(operand, env) : false;
+      return (path ? (env.get(path) ?? 0) : 0) | (operand ? taintMask(operand, env) : 0);
     }
     if (node.type === "unary_expression") {
       const operand = node.namedChildren[0];
-      return operand ? isTainted(operand, env) : false;
+      return operand ? taintMask(operand, env) : 0;
     }
     if (node.type === "parenthesized_expression") {
       const inner = node.namedChildren[0];
-      return inner ? isTainted(inner, env) : false;
+      return inner ? taintMask(inner, env) : 0;
     }
     if (node.type === "composite_literal") {
       const body = node.childForFieldName("body");
-      if (!body) return false;
-      return body.namedChildren.some(el => {
-        if (!el) return false;
-        if (el.type === "keyed_element") return el.namedChildren[1] ? isTainted(el.namedChildren[1], env) : false;
-        return isTainted(el, env); // unkeyed literal element (slice/array literal entries)
-      });
+      if (!body) return 0;
+      return body.namedChildren.reduce((m: number, el) => {
+        if (!el) return m;
+        if (el.type === "keyed_element") return el.namedChildren[1] ? m | taintMask(el.namedChildren[1], env) : m;
+        return m | taintMask(el, env); // unkeyed literal element (slice/array literal entries)
+      }, 0);
     }
-    return false;
+    return 0;
   };
-  return isTainted;
+  return taintMask;
 }
+
+type TaintMaskFnGo = ReturnType<typeof makeTaintMaskGo>;
 
 /**
  * For each of `fn`'s parameters INDEPENDENTLY, does `fn`'s return value
@@ -542,8 +541,9 @@ function makeIsTaintedGo(localFns: Map<string, LocalFn>, propagating: Map<string
  * which threads a bounded, round-capped view of the file's own in-progress
  * propagating map instead.
  */
-function computeReturnTaintPropagatingGo(fn: LocalFn, isTaintedFn: ReturnType<typeof makeIsTaintedGo>): Set<number> {
-  const propagatingIdx = new Set<number>();
+function computeReturnTaintPropagatingGo(fn: LocalFn, maskFn: TaintMaskFnGo): Map<number, number> {
+  // param index -> sink classes that still survive to the return value
+  const propagatingIdx = new Map<number, number>();
   const returnValues: SyntaxNode[] = [];
   const collect = (n: SyntaxNode) => {
     if (n.type === "return_statement") {
@@ -560,8 +560,10 @@ function computeReturnTaintPropagatingGo(fn: LocalFn, isTaintedFn: ReturnType<ty
   collect(fn.body);
   for (const shape of fn.paramShapes) {
     const env: Env = new Map();
-    env.set(shape.name, true);
-    if (returnValues.some(v => isTaintedFn(v, env))) propagatingIdx.add(shape.index);
+    env.set(shape.name, ALL);
+    // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
+    const surviving = returnValues.reduce((m, v) => m | maskFn(v, env), 0) & ALL;
+    if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
 }
@@ -582,18 +584,21 @@ const MAX_PROPAGATION_ROUNDS = 3;
  * parameter count) -- convergence is never in doubt, the round cap only
  * bounds worst-case cost on a large file's call graph.
  */
-function buildPropagatingMapGo(localFns: Map<string, LocalFn>): Map<string, Set<number>> {
-  const propagating = new Map<string, Set<number>>();
+function buildPropagatingMapGo(localFns: Map<string, LocalFn>): PropagatingGo {
+  const propagating: PropagatingGo = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
-    const isTaintedRound = makeIsTaintedGo(localFns, propagating);
+    const maskRound = makeTaintMaskGo(localFns, propagating);
     for (const [name, fn] of localFns) {
-      const idx = computeReturnTaintPropagatingGo(fn, isTaintedRound);
-      const existingSize = propagating.get(name)?.size ?? 0;
-      if (idx.size > existingSize) {
-        propagating.set(name, idx);
-        changed = true;
+      const found = computeReturnTaintPropagatingGo(fn, maskRound);
+      // Monotonic merge (only ever adds a parameter or adds surviving classes).
+      const merged = new Map(propagating.get(name) ?? []);
+      let grew = false;
+      for (const [idx, m] of found) {
+        const next = (merged.get(idx) ?? 0) | m;
+        if (next !== (merged.get(idx) ?? 0)) { merged.set(idx, next); grew = true; }
       }
+      if (grew) { propagating.set(name, merged); changed = true; }
     }
     if (!changed) break;
   }
@@ -666,6 +671,10 @@ function assignmentKeyOfGo(target: SyntaxNode): string | null {
 export function scanAstTaintGo(
   content: string, filePath: string, presparsed?: SyntaxNode | null,
   idorAuthCheckNearby?: (line: number) => boolean,
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
+  // regex layer's duplicate for a flow this engine proved safe.
+  suppressedOut?: SuppressedSink[],
 ): AstTaintGoFinding[] {
   try {
     const root = presparsed ?? parseGoSourceSync(content, filePath);
@@ -689,9 +698,28 @@ export function scanAstTaintGo(
       });
     };
 
-    const seededParams = new Map<string, Set<number>>();
+    // fn name -> (tainted param index -> classes tainted at the call site)
+    const seededParams = new Map<string, Map<number, number>>();
 
-    const walk = (node: SyntaxNode, env: Env, isTainted: ReturnType<typeof makeIsTaintedGo>) => {
+    // First argument tainted for `id`'s class, if any. When none is but one
+    // was tainted-then-positively-cleared, records a suppression instead
+    // (for the regex-layer veto).
+    const sinkHit = (
+      node: SyntaxNode, args: readonly SyntaxNode[], id: AstTaintGoId | "idor",
+      env: Env, taintMask: TaintMaskFnGo,
+    ): SyntaxNode | undefined => {
+      const cls = classOf(id);
+      let cleared = false;
+      for (const a of args) {
+        const m = taintMask(a, env);
+        if (m & cls) return a;
+        if (wasCleared(m, cls)) cleared = true;
+      }
+      if (cleared) suppressedOut?.push({ id, line: lineOf(node) });
+      return undefined;
+    };
+
+    const walk = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => {
       if (node.type === "short_var_declaration" || node.type === "assignment_statement") {
         const left = node.childForFieldName("left");
         const right = node.childForFieldName("right");
@@ -709,9 +737,9 @@ export function scanAstTaintGo(
             // for a plain field write (`user.Name = input`), where
             // leftTargets.length is already 1 -- assignmentKeyOfGo resolves
             // both shapes uniformly.
-            const tainted = isTainted(rightVals[0], env);
+            const mask = taintMask(rightVals[0], env);
             const key = assignmentKeyOfGo(leftTargets[0]);
-            if (key) env.set(key, tainted);
+            if (key) env.set(key, mask);
           } else {
             // Positional 1:1 multi-assignment (`a, b = x, y`, including a
             // field target: `user.Name, user.Email = a, b`) -- each side has
@@ -719,7 +747,7 @@ export function scanAstTaintGo(
             leftTargets.forEach((target, i) => {
               const rhs = rightVals[i];
               const key = assignmentKeyOfGo(target);
-              if (rhs && key) env.set(key, isTainted(rhs, env));
+              if (rhs && key) env.set(key, taintMask(rhs, env));
             });
           }
         }
@@ -731,17 +759,21 @@ export function scanAstTaintGo(
 
         const match = matchSinkGo(node);
         if (match) {
-          const taintedArg = match.args.find(a => isTainted(a, env));
+          const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
           if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
         }
 
         const sqlMatch = matchSqlInjectionGo(node);
-        if (sqlMatch && isTainted(sqlMatch.args[0], env)) {
-          emit("sql-injection", node, sourceLabelGo(sqlMatch.args[0]), sqlMatch.sinkExpr);
+        if (sqlMatch) {
+          const hit = sinkHit(node, [sqlMatch.args[0]], "sql-injection", env, taintMask);
+          if (hit) emit("sql-injection", node, sourceLabelGo(sqlMatch.args[0]), sqlMatch.sinkExpr);
         }
 
+        // IDOR asks "is this id attacker-CONTROLLED", not "is it injectable":
+        // classOf("idor") is the CONTROL bit, which numeric coercion
+        // (strconv.Atoi(c.Param("id"))) deliberately does not clear.
         const idorMatch = matchIdorGo(node);
-        if (idorMatch && isTainted(idorMatch.args[0], env)) {
+        if (idorMatch && sinkHit(node, [idorMatch.args[0]], "idor", env, taintMask)) {
           const suppressed = (idorAuthCheckNearby?.(lineOf(node)) ?? false) ||
             structuralOwnershipCheckSuppressesGo(node, idorMatch.args[0]);
           if (!suppressed) emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
@@ -752,7 +784,7 @@ export function scanAstTaintGo(
         // similar via the propagation rule right below), args are irrelevant.
         if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Decode") {
           const operand = fn.childForFieldName("operand");
-          if (operand && isTainted(operand, env)) {
+          if (operand && sinkHit(node, [operand], "insecure-deserialization", env, taintMask)) {
             emit("insecure-deserialization", node, sourceLabelGo(operand), calleeTextGo(fn) ?? "Decode");
           }
         }
@@ -777,7 +809,7 @@ export function scanAstTaintGo(
               if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
                 const left = parent.childForFieldName("left");
                 const ids = left ? identifiersOf(left) : [];
-                if (ids[0]) env.set(ids[0].text, true);
+                if (ids[0]) env.set(ids[0].text, ALL);
               }
             }
           }
@@ -792,12 +824,13 @@ export function scanAstTaintGo(
           // shape as Decode, since neither is arg-tainted in the usual sense.
           if ((fnText === "http.NewRequest" || fnText === "http.NewRequestWithContext") && args.length > 0) {
             const urlArg = fnText === "http.NewRequestWithContext" ? args[2] : args[1];
-            if (urlArg && isTainted(urlArg, env)) {
+            const urlMask = urlArg ? taintMask(urlArg, env) : 0;
+            if (urlArg && (urlMask & ALL)) {
               const parent = node.parent?.type === "expression_list" ? node.parent.parent : node.parent;
               if (parent && (parent.type === "short_var_declaration" || parent.type === "assignment_statement")) {
                 const left = parent.childForFieldName("left");
                 const ids = left ? identifiersOf(left) : [];
-                if (ids[0]) env.set(ids[0].text, true);
+                if (ids[0]) env.set(ids[0].text, urlMask);
               }
             }
           }
@@ -808,7 +841,7 @@ export function scanAstTaintGo(
         // ARGUMENT (`req`), not the receiver itself -- the inverse shape
         // from Decode's receiver-tainted check above.
         if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Do" && args[0]) {
-          if (isTainted(args[0], env)) emit("ssrf", node, sourceLabelGo(args[0]), calleeTextGo(fn) ?? "Do");
+          if (sinkHit(node, [args[0]], "ssrf", env, taintMask)) emit("ssrf", node, sourceLabelGo(args[0]), calleeTextGo(fn) ?? "Do");
         }
 
         // Same-file interprocedural seeding (one hop) -- mirrors
@@ -816,24 +849,25 @@ export function scanAstTaintGo(
         if (fn?.type === "identifier" && localFns.has(fn.text)) {
           const fnName = fn.text;
           const localFn = localFns.get(fnName)!;
-          const taintedIdx = new Set<number>();
+          const taintedIdx = new Map<number, number>();
           args.forEach((arg, i) => {
-            if (!isTainted(arg, env)) return;
-            if (localFn.paramShapes.some(s => s.index === i)) taintedIdx.add(i);
+            const m = taintMask(arg, env) & ALL;
+            if (!m) return;
+            if (localFn.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
           });
           if (taintedIdx.size > 0) {
-            const existing = seededParams.get(fnName) ?? new Set<number>();
-            taintedIdx.forEach(i => existing.add(i));
+            const existing = seededParams.get(fnName) ?? new Map<number, number>();
+            for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
             seededParams.set(fnName, existing);
           }
         }
       }
 
-      for (const c of node.namedChildren) if (c) walk(c, env, isTainted);
+      for (const c of node.namedChildren) if (c) walk(c, env, taintMask);
     };
 
-    const rootIsTainted = makeIsTaintedGo(localFns, propagating);
-    walk(root, new Map(), rootIsTainted);
+    const rootTaintMask = makeTaintMaskGo(localFns, propagating);
+    walk(root, new Map(), rootTaintMask);
 
     // Second pass, bounded worklist (Decision 3): re-walk any local function
     // whose params were seeded tainted by a call site above, so sinks inside
@@ -854,17 +888,17 @@ export function scanAstTaintGo(
       for (const [fnName, idxSet] of toWalk) {
         const fn = localFns.get(fnName);
         if (!fn) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
         const env: Env = new Map();
-        for (const idx of idxSet) {
+        for (const [idx, m] of idxSet) {
           const shape = fn.paramShapes.find(s => s.index === idx);
-          if (shape) env.set(shape.name, true);
+          if (shape) env.set(shape.name, m);
         }
-        const seededIsTainted = makeIsTaintedGo(localFns, propagating);
-        for (const c of fn.body.namedChildren) if (c) walk(c, env, seededIsTainted);
+        const seededTaintMask = makeTaintMaskGo(localFns, propagating);
+        for (const c of fn.body.namedChildren) if (c) walk(c, env, seededTaintMask);
       }
       if (!changed) break;
     }

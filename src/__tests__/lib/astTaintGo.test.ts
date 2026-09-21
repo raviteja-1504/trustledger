@@ -246,14 +246,22 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
   describe("multi-return heuristic (Decision 6: first-LHS-only)", () => {
     it("tracks the first return value as tainted and never taints trailing err/ok", () => {
-      const content = wrap(`
+      // A same-file taint-preserving helper, not strconv.Atoi: numeric
+      // coercion now (correctly) clears path-traversal taint, so it can no
+      // longer stand in for "a multi-return call whose first value is tainted".
+      const content = `${HANDLER_PREFIX}func parse(s string) (string, error) {
+	return s, nil
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("id")
-	id, err := strconv.Atoi(q)
+	id, err := parse(q)
 	os.ReadFile(id)
 	if err != nil {
 		os.ReadFile(err)
 	}
-`);
+}
+`;
       const findings = scanAstTaintGo(content, "x.go");
       // Both calls are structurally identical sinks; only the first (using
       // `id`, the first LHS identifier) should ever be flagged.
@@ -300,14 +308,48 @@ func handler(w http.ResponseWriter, r *http.Request) {
   });
 
   describe("sanitizer/de-taint recognition (Decision 2, new capability)", () => {
-    it("does not flag a value sanitized via html.EscapeString before reaching a sink", () => {
+    it("STILL flags command injection after html.EscapeString (an HTML escaper is the wrong class for a command sink)", () => {
+      // This test used to assert the opposite -- that html.EscapeString
+      // cleared command-injection taint. That was a false negative: escaping
+      // < and > does nothing to stop shell metacharacters. Sanitizers are now
+      // keyed by the sink classes they actually neutralize.
       const content = wrap(`
 	q := r.URL.Query().Get("host")
 	clean := html.EscapeString(q)
 	exec.Command("ping", clean)
 `);
       const findings = scanAstTaintGo(content, "x.go");
-      expect(findings.some(f => f.id === "command-injection")).toBe(false);
+      expect(findings.some(f => f.id === "command-injection")).toBe(true);
+    });
+
+    it("does not flag path traversal after filepath.Base (the right class for a path sink)", () => {
+      const content = wrap(`
+	q := r.URL.Query().Get("f")
+	clean := filepath.Base(q)
+	os.ReadFile(clean)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "path-traversal")).toBe(false);
+    });
+
+    it("still flags command injection after filepath.Base (path sanitizer, wrong class)", () => {
+      const content = wrap(`
+	q := r.URL.Query().Get("host")
+	clean := filepath.Base(q)
+	exec.Command("ping", clean)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "command-injection")).toBe(true);
+    });
+
+    it("numeric coercion (strconv.Atoi) clears injection classes but the id stays attacker-controlled for IDOR", () => {
+      const content = wrap(`
+	q := r.URL.Query().Get("id")
+	id, _ := strconv.Atoi(q)
+	db.Query(fmt.Sprintf("SELECT * FROM t WHERE id = %d", id))
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      expect(findings.some(f => f.id === "sql-injection")).toBe(false);
     });
 
     it("still flags the same shape unsanitized (baseline)", () => {

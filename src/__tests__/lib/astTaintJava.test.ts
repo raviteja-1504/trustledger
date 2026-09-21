@@ -546,7 +546,11 @@ public class A {
     expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
   });
 
-  it("does not flag a value sanitized via the OWASP Java Encoder (Encode.forHtml) before reaching a sink", () => {
+  // These two used to assert the opposite -- that an HTML encoder cleared
+  // COMMAND-injection taint. That was a false negative: HTML-escaping does
+  // nothing to stop shell metacharacters. Sanitizers are now keyed by the
+  // sink classes they actually neutralize, so the command sink still fires.
+  it("STILL flags command injection after the OWASP Java Encoder (Encode.forHtml) -- an HTML encoder is the wrong class", () => {
     const content = `
 public class A {
   public void handle(@RequestParam String input) {
@@ -554,10 +558,10 @@ public class A {
     Runtime.getRuntime().exec(clean);
   }
 }`;
-    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
   });
 
-  it("does not flag a value sanitized via Commons Text (StringEscapeUtils.escapeHtml4) before reaching a sink", () => {
+  it("STILL flags command injection after Commons Text (StringEscapeUtils.escapeHtml4) -- wrong class", () => {
     const content = `
 public class A {
   public void handle(@RequestParam String input) {
@@ -565,7 +569,29 @@ public class A {
     Runtime.getRuntime().exec(clean);
   }
 }`;
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+  });
+
+  it("does not flag command injection after ESAPI encodeForOS (the right class for a command sink)", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    String clean = ESAPI.encoder().encodeForOS(codec, input);
+    Runtime.getRuntime().exec(clean);
+  }
+}`;
     expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+  });
+
+  it("does not flag SQL injection after Integer.parseInt (numeric coercion clears injection classes)", () => {
+    const content = `
+public class A {
+  public void handle(@RequestParam String input) {
+    int id = Integer.parseInt(input);
+    stmt.executeQuery("SELECT * FROM t WHERE id = " + id);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "sql-injection")).toBe(false);
   });
 });
 

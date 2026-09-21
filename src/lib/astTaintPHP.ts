@@ -81,6 +81,8 @@
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
 declare const __non_webpack_require__: NodeJS.Require | undefined;
 function nodeRequire(): NodeJS.Require {
@@ -250,10 +252,13 @@ function isTaintSourceExprPHP(node: SyntaxNode): boolean {
 }
 
 // ── Sanitizer/de-taint recognition ──────────────────────────────────────
-const PHP_SANITIZER_NAMES = new Set([
-  "htmlspecialchars", "htmlentities", "escapeshellarg", "escapeshellcmd",
-  "mysqli_real_escape_string", "filter_var", "strip_tags",
-]);
+// Now lives in taint/sanitizers.ts, keyed by the sink classes each one
+// actually neutralizes (htmlspecialchars clears XSS, not SQL/command/path),
+// with filter_var depending on its filter constant and method-style
+// sanitizers limited to the real ones (mysqli->real_escape_string,
+// PDO->quote) instead of matching any `->htmlspecialchars`. Numeric CASTS --
+// `(int)$x` -- are modeled in makeTaintMaskPHP below.
+const PHP_NUMERIC_CAST_TYPES = new Set(["int", "integer", "float", "double", "bool", "boolean"]);
 
 // ── Sink dispatch tables ─────────────────────────────────────────────────
 
@@ -277,7 +282,9 @@ const LABEL: Record<AstTaintPHPId, string> = {
 
 // ── Taint environment / propagation ─────────────────────────────────────
 
-type Env = Map<string, boolean>;
+type Env = TaintEnv;
+// function name -> (param index -> sink classes that survive to its return value)
+type PropagatingPHP = Map<string, Map<number, number>>;
 interface ParamShape { name: string; index: number }
 interface LocalFunction {
   name: string;
@@ -291,8 +298,13 @@ interface EngineCtx {
   content: string;
   lines: string[];
   localFunctions: Map<string, LocalFunction>;
-  propagatingParams: Map<string, Set<number>>;
-  seededParams: Map<string, Set<number>>;
+  propagatingParams: PropagatingPHP;
+  // function name -> (tainted param index -> classes tainted at the call site)
+  seededParams: Map<string, Map<number, number>>;
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
+  // regex layer's duplicate for a flow this engine proved safe.
+  suppressed?: SuppressedSink[];
   findings: AstTaintPHPFinding[];
   seen: Set<string>;
   // $var = new ClassName(...) -- variable-to-class-name tracking, mirroring
@@ -317,66 +329,87 @@ function emit(
   });
 }
 
-function makeIsTaintedPHP(ctx: EngineCtx): (node: SyntaxNode, env: Env) => boolean {
-  const isTainted = (node: SyntaxNode, env: Env): boolean => {
-    if (isTaintSourceExprPHP(node)) return true;
+type TaintMaskFnPHP = (node: SyntaxNode, env: Env) => number;
+
+function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
+  const taintMask = (node: SyntaxNode, env: Env): number => {
+    if (isTaintSourceExprPHP(node)) return ALL;
     if (node.type === "variable_name") {
       const varName = variableBareName(node);
-      return !!varName && env.get(varName) === true;
+      return varName ? (env.get(varName) ?? 0) : 0;
     }
-    if (node.type === "name") return false;
+    if (node.type === "name") return 0;
     if (node.type === "argument") {
       const inner = node.namedChildren[0];
-      return inner ? isTainted(inner, env) : false;
+      return inner ? taintMask(inner, env) : 0;
+    }
+    if (node.type === "cast_expression") {
+      // (int)$x / (float)$x / (bool)$x -- a numeric cast neutralizes every
+      // injection class (was silently taint-PRESERVING through the generic
+      // fallback while intval($x) cleared, an inconsistency within this one
+      // engine). Any other cast ((string)$x, (array)$x) passes through.
+      const typeNode = node.childForFieldName("type") ?? node.namedChildren[0];
+      const valueNode = node.childForFieldName("value") ?? node.namedChildren[node.namedChildren.length - 1];
+      const inner = valueNode ? taintMask(valueNode, env) : 0;
+      return typeNode && PHP_NUMERIC_CAST_TYPES.has(typeNode.text.trim().toLowerCase()) ? applyClears(inner, NUMERIC_CLEARS) : inner;
     }
     if (node.type === "binary_expression") {
       const op = node.childForFieldName("operator")?.type;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if ((op === "." || op === "+") && left && right) return isTainted(left, env) || isTainted(right, env);
-      return false;
+      if ((op === "." || op === "+") && left && right) return taintMask(left, env) | taintMask(right, env);
+      return 0;
     }
     if (node.type === "member_access_expression") {
-      // Field-sensitive read: the full dotted path composite key FIRST
-      // (set by the assignment write-side below), falling back to the
-      // base's own taint -- pure recall gain, never removes a `true`
-      // result the fallback alone would find.
+      // Field-sensitive read: OR the full dotted path composite key (set by
+      // the assignment write-side below) with the base's own mask -- pure
+      // recall gain, never removes a class the fallback alone would find.
       const path = calleeTextPHP(node);
-      if (path && env.get(path) === true) return true;
       const base = node.namedChildren[0];
-      return base ? isTainted(base, env) : false;
+      return (path ? (env.get(path) ?? 0) : 0) | (base ? taintMask(base, env) : 0);
     }
     if (node.type === "object_creation_expression") {
-      const args = argListOfPHP(node);
-      return args.some(a => isTainted(a, env));
+      return argListOfPHP(node).reduce((m, a) => m | taintMask(a, env), 0);
     }
     if (node.type === "function_call_expression") {
       const fnNode = node.childForFieldName("function");
       const fnName = fnNode?.type === "name" ? fnNode.text : null;
       const args = argListOfPHP(node);
-      if (fnName && PHP_SANITIZER_NAMES.has(fnName)) return false;
+      if (fnName) {
+        // Known sanitizer: the argument's taint passes THROUGH minus only
+        // the classes it neutralizes (filter_var depends on its constant).
+        const clears = sanitizerClears("php", fnName, args.map(a => a.text));
+        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      }
       // filter_input(...) -- itself a source call, regardless of args.
-      if (fnName === "filter_input") return true;
+      if (fnName === "filter_input") return ALL;
       if (fnName) {
         const propIdx = ctx.propagatingParams.get(fnName);
         if (propIdx) {
           const callee = ctx.localFunctions.get(fnName);
           const shapes = callee?.paramShapes ?? [];
-          const matched = [...propIdx].some(i => shapes[i] !== undefined && args[i] !== undefined && isTainted(args[i], env));
-          if (matched) return true;
+          let m = 0;
+          for (const [i, surviving] of propIdx) {
+            if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+          }
+          if (m) return m;
         }
       }
-      return false;
+      return 0;
     }
     if (node.type === "member_call_expression") {
       const methodName = node.childForFieldName("name")?.text;
-      if (methodName && PHP_SANITIZER_NAMES.has(methodName)) return false;
-      if (methodName && LARAVEL_REQUEST_METHODS.has(methodName)) return true;
+      if (methodName) {
+        const args = argListOfPHP(node);
+        const clears = sanitizerClears("php", calleeTextPHP(node) ?? methodName, args.map(a => a.text));
+        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      }
+      if (methodName && LARAVEL_REQUEST_METHODS.has(methodName)) return ALL;
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. $dirty->trim()).
       const receiver = node.namedChildren[0];
-      if (receiver && isTainted(receiver, env)) return true;
-      return false;
+      if (receiver) return taintMask(receiver, env);
+      return 0;
     }
     // Generic fallback -- recurse into every named child and OR-combine.
     // Confirmed directly (via probing "...{$id}..." encapsed_string
@@ -385,12 +418,11 @@ function makeIsTaintedPHP(ctx: EngineCtx): (node: SyntaxNode, env: Env) => boole
     // interpolation-specific node -- so this alone reaches it without a
     // special case, the same conclusion astTaintCSharp.ts's own docblock
     // reached for its own $"...{x}..." equivalent.
-    for (const child of node.namedChildren) {
-      if (child && isTainted(child, env)) return true;
-    }
-    return false;
+    let m = 0;
+    for (const child of node.namedChildren) if (child) m |= taintMask(child, env);
+    return m;
   };
-  return isTainted;
+  return taintMask;
 }
 
 /**
@@ -398,35 +430,41 @@ function makeIsTaintedPHP(ctx: EngineCtx): (node: SyntaxNode, env: Env) => boole
  * become tainted? Returns the set of propagating parameter INDICES --
  * identical reasoning to every other engine's computeReturnTaintPropagating*.
  */
-function computeReturnTaintPropagatingPHP(fn: LocalFunction, ctx: EngineCtx): Set<number> {
-  const propagatingIdx = new Set<number>();
+function computeReturnTaintPropagatingPHP(fn: LocalFunction, ctx: EngineCtx): Map<number, number> {
+  // param index -> sink classes that still survive to the return value
+  const propagatingIdx = new Map<number, number>();
   if (!fn.body) return propagatingIdx;
-  const isTainted = makeIsTaintedPHP(ctx);
+  const taintMask = makeTaintMaskPHP(ctx);
   const returnExprs = findAllNodes(fn.body, "return_statement")
     .map(ret => ret.namedChildren[0])
     .filter((e): e is SyntaxNode => !!e);
   for (const shape of fn.paramShapes) {
     const env: Env = new Map();
-    env.set(shape.name, true);
-    if (returnExprs.some(expr => isTainted(expr, env))) propagatingIdx.add(shape.index);
+    env.set(shape.name, ALL);
+    // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
+    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env), 0) & ALL;
+    if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
 }
 
 const MAX_PROPAGATION_ROUNDS = 3;
 
-function buildPropagatingMapPHP(localFunctions: Map<string, LocalFunction>, baseCtx: EngineCtx): Map<string, Set<number>> {
-  const propagating = new Map<string, Set<number>>();
+function buildPropagatingMapPHP(localFunctions: Map<string, LocalFunction>, baseCtx: EngineCtx): PropagatingPHP {
+  const propagating: PropagatingPHP = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
     const roundCtx: EngineCtx = { ...baseCtx, propagatingParams: propagating };
     for (const [name, fn] of localFunctions) {
-      const idx = computeReturnTaintPropagatingPHP(fn, roundCtx);
-      const existingSize = propagating.get(name)?.size ?? 0;
-      if (idx.size > existingSize) {
-        propagating.set(name, idx);
-        changed = true;
+      const found = computeReturnTaintPropagatingPHP(fn, roundCtx);
+      // Monotonic merge (only ever adds a parameter or adds surviving classes).
+      const merged = new Map(propagating.get(name) ?? []);
+      let grew = false;
+      for (const [idx, m] of found) {
+        const next = (merged.get(idx) ?? 0) | m;
+        if (next !== (merged.get(idx) ?? 0)) { merged.set(idx, next); grew = true; }
       }
+      if (grew) { propagating.set(name, merged); changed = true; }
     }
     if (!changed) break;
   }
@@ -436,15 +474,16 @@ function buildPropagatingMapPHP(localFunctions: Map<string, LocalFunction>, base
 function seedLocalFunctionParams(calleeName: string, args: SyntaxNode[], env: Env, ctx: EngineCtx) {
   const callee = ctx.localFunctions.get(calleeName);
   if (!callee) return;
-  const isTainted = makeIsTaintedPHP(ctx);
-  const taintedIdx = new Set<number>();
+  const taintMask = makeTaintMaskPHP(ctx);
+  const taintedIdx = new Map<number, number>();
   args.forEach((arg, i) => {
-    if (!isTainted(arg, env)) return;
-    if (callee.paramShapes.some(s => s.index === i)) taintedIdx.add(i);
+    const m = taintMask(arg, env) & ALL;
+    if (!m) return;
+    if (callee.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
   });
   if (taintedIdx.size === 0) return;
-  const existing = ctx.seededParams.get(calleeName) ?? new Set<number>();
-  taintedIdx.forEach(i => existing.add(i));
+  const existing = ctx.seededParams.get(calleeName) ?? new Map<number, number>();
+  for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
   ctx.seededParams.set(calleeName, existing);
 }
 
@@ -532,56 +571,62 @@ const CMD_FUNCTIONS = new Set(["shell_exec", "system", "passthru", "popen", "pro
 // conflict.
 const NOSQL_CALL_TAILS = new Set(["find", "findOne", "findMany", "updateOne", "deleteOne", "remove"]);
 
-function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean, env: Env) {
+function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const fnNode = node.childForFieldName("function");
   const fnName = fnNode?.type === "name" ? fnNode.text : null;
   if (!fnName) return;
   const args = argListOfPHP(node);
-  const taintedArg = args.find(a => isTainted(a, env));
-  if (!taintedArg) return;
-  const sourceExpr = taintedArg.text;
+  const argMasks = args.map(a => taintMask(a, env));
+  const combined = argMasks.reduce((m, x) => m | x, 0);
+  // Any bit (taint OR shadow): a value that was tainted and then sanitized
+  // must still reach fire() so the suppression gets recorded.
+  const firstIdx = argMasks.findIndex(m => m !== 0);
+  if (firstIdx < 0) return;
+  const sourceExpr = args[firstIdx].text;
+  // Each sink is gated on ITS OWN class (htmlspecialchars no longer hides a
+  // SQL/command/path sink); tainted-then-positively-cleared records a
+  // suppression instead (regex-layer veto).
+  const fire = (id: AstTaintPHPId, mask: number = combined, source: string = sourceExpr) => {
+    const cls = classOf(id);
+    if (mask & cls) emit(ctx, id, node, source, fnName);
+    else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
 
   if (SQL_FUNCTIONS.has(fnName)) {
-    emit(ctx, "sql-injection", node, sourceExpr, fnName);
+    fire("sql-injection");
   } else if (CMD_FUNCTIONS.has(fnName)) {
-    emit(ctx, "command-injection", node, sourceExpr, fnName);
+    fire("command-injection");
   } else if (fnName === "unserialize") {
-    emit(ctx, "insecure-deserialization", node, sourceExpr, fnName);
+    fire("insecure-deserialization");
   } else if (fnName === "include" || fnName === "require" || fnName === "include_once" || fnName === "require_once") {
     // Dead in practice -- confirmed directly that plain `include $x;` is a
     // distinct language-construct node (include_expression), never a
     // function_call_expression -- kept as a harmless defensive fallback
     // only, matching checkIncludeExpressionSink below for the real path.
-    emit(ctx, "file-inclusion", node, sourceExpr, fnName);
+    fire("file-inclusion");
   } else if (fnName === "fopen" || fnName === "file_get_contents" || fnName === "readfile") {
-    emit(ctx, "path-traversal", node, sourceExpr, fnName);
+    fire("path-traversal");
   } else if (fnName === "header") {
     // header("Location: " . $tainted) is open-redirect; header("X-Anything:
     // " . $tainted) for any other header name is header-injection -- same
     // call, discriminated purely by the literal string prefix (read
     // directly off the tainted arg's raw .text, since that's the whole
     // concatenation expression here, e.g. `"Location: " . $next`).
-    if (/^["']?\s*Location\s*:/i.test(sourceExpr)) {
-      emit(ctx, "open-redirect", node, sourceExpr, fnName);
-    } else {
-      emit(ctx, "header-injection", node, sourceExpr, fnName);
-    }
+    fire(/^["']?\s*Location\s*:/i.test(sourceExpr) ? "open-redirect" : "header-injection");
   } else if (fnName === "ldap_search") {
     // ldap_search($link, $base_dn, $filter) -- confirmed 3-arg positional
     // signature; the filter is args[2], not just "any tainted arg" (the
     // $link/$base_dn args could themselves be tainted in a contrived case
     // without that being the real vulnerability).
-    if (args.length >= 3 && isTainted(args[2], env)) {
-      emit(ctx, "ldap-injection", node, args[2].text, fnName);
-    }
+    if (args.length >= 3) fire("ldap-injection", argMasks[2], args[2].text);
   } else if (fnName === "curl_setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- always a bare function
     // call in PHP, never a method call (confirmed: no OOP cURL wrapper in
     // the standard library). args[0] is the handle, args[1] the CURLOPT_*
     // constant, args[2] the value -- a tainted match anywhere in args is
-    // already confirmed above (taintedArg), close enough given this
-    // engine's established "accept some imprecision" posture.
-    emit(ctx, "ssrf", node, sourceExpr, fnName);
+    // close enough given this engine's established "accept some
+    // imprecision" posture.
+    fire("ssrf");
   }
 }
 
@@ -589,20 +634,29 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: 
 // (`include_expression`/`require_expression`), not function calls -- a
 // real, confirmed structural difference from every other sink in this
 // table, handled separately.
-function checkIncludeExpressionSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean, env: Env) {
+function checkIncludeExpressionSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const target = node.namedChildren[0];
-  if (target && isTainted(target, env)) {
-    emit(ctx, "file-inclusion", node, target.text, node.type);
-  }
+  if (!target) return;
+  const m = taintMask(target, env);
+  const cls = classOf("file-inclusion");
+  if (m & cls) emit(ctx, "file-inclusion", node, target.text, node.type);
+  else if (wasCleared(m, cls)) ctx.suppressed?.push({ id: "file-inclusion", line: lineOf(node) });
 }
 
-function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: SyntaxNode, e: Env) => boolean, env: Env) {
+function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const methodName = node.childForFieldName("name")?.text;
   if (!methodName) return;
   const args = argListOfPHP(node);
-  const taintedArg = args.find(a => isTainted(a, env));
-  if (!taintedArg) return;
-  const sourceExpr = taintedArg.text;
+  const argMasks = args.map(a => taintMask(a, env));
+  const combined = argMasks.reduce((m, x) => m | x, 0);
+  const firstIdx = argMasks.findIndex(m => m !== 0);
+  if (firstIdx < 0) return;
+  const sourceExpr = args[firstIdx].text;
+  const fire = (id: AstTaintPHPId, sink: string = methodName) => {
+    const cls = classOf(id);
+    if (combined & cls) emit(ctx, id, node, sourceExpr, sink);
+    else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
   if (SQL_CALL_TAILS.has(methodName)) {
     // Receiver-type-aware discrimination (mirrors astTaintCSharp.ts's
     // ctx.varTypes-based checkCallSink) -- ->query()/->exec()/->prepare()
@@ -611,26 +665,26 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, isTainted: (n: Sy
     const receiver = node.namedChildren[0];
     const receiverName = receiver?.type === "variable_name" ? variableBareName(receiver) : null;
     if (methodName === "query" && receiverName && ctx.varTypes.get(receiverName) === "DOMXPath") {
-      emit(ctx, "xpath-injection", node, sourceExpr, methodName);
+      fire("xpath-injection");
     } else {
-      emit(ctx, "sql-injection", node, sourceExpr, methodName);
+      fire("sql-injection");
     }
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
-    emit(ctx, "nosql-injection", node, sourceExpr, methodName);
+    fire("nosql-injection");
   } else if (methodName === "setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- args[0] is the handle,
     // args[1] the CURLOPT_* constant, args[2] the value; a tainted MATCH
-    // anywhere in args is already confirmed above, close enough given this
-    // engine's "accept some imprecision" posture (matches every other
-    // engine's loose arg-tainted checks elsewhere).
-    emit(ctx, "ssrf", node, sourceExpr, "curl_setopt");
+    // anywhere in args is close enough given this engine's "accept some
+    // imprecision" posture (matches every other engine's loose arg-tainted
+    // checks elsewhere).
+    fire("ssrf", "curl_setopt");
   }
 }
 
 // ── Statement-level walk ─────────────────────────────────────────────────
 
 function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx) {
-  const isTainted = makeIsTaintedPHP(ctx);
+  const taintMask = makeTaintMaskPHP(ctx);
 
   // No separate declaration statement in PHP -- see this module's own
   // docblock for why assignment_expression alone covers both first-use and
@@ -638,11 +692,11 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
   if (node.type === "assignment_expression") {
     const left = node.childForFieldName("left");
     const right = node.childForFieldName("right");
-    const tainted = right ? isTainted(right, env) : false;
+    const mask = right ? taintMask(right, env) : 0;
     if (left?.type === "variable_name") {
       const varName = variableBareName(left);
       if (varName) {
-        env.set(varName, tainted);
+        env.set(varName, mask);
         // $var = new ClassName(...) -- class-name tracking (see
         // EngineCtx.varTypes's own docblock). className extraction reuses
         // the exact same technique collectBolaFindings' own
@@ -654,28 +708,35 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
       }
     } else if (left?.type === "member_access_expression") {
       const key = calleeTextPHP(left);
-      if (key) env.set(key, tainted);
+      if (key) env.set(key, mask);
     }
   }
 
   if (node.type === "echo_statement" || node.type === "print_statement") {
+    const cls = classOf("xss");
+    let cleared = false;
     for (const child of node.namedChildren) {
-      if (child && isTainted(child, env)) {
+      if (!child) continue;
+      const m = taintMask(child, env);
+      if (m & cls) {
         emit(ctx, "xss", node, child.text, node.type === "echo_statement" ? "echo" : "print");
+        cleared = false;
         break;
       }
+      if (wasCleared(m, cls)) cleared = true;
     }
+    if (cleared) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
   }
 
   if (node.type === "function_call_expression") {
-    checkFunctionCallSink(node, ctx, isTainted, env);
+    checkFunctionCallSink(node, ctx, taintMask, env);
     const fnNode = node.childForFieldName("function");
     if (fnNode?.type === "name" && ctx.localFunctions.has(fnNode.text)) {
       seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
     }
   }
   if (node.type === "member_call_expression") {
-    checkMemberCallSink(node, ctx, isTainted, env);
+    checkMemberCallSink(node, ctx, taintMask, env);
     const methodName = node.childForFieldName("name")?.text;
     if (methodName && ctx.localFunctions.has(methodName)) {
       seedLocalFunctionParams(methodName, argListOfPHP(node), env, ctx);
@@ -683,7 +744,7 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
   }
   if (node.type === "include_expression" || node.type === "require_expression"
       || node.type === "include_once_expression" || node.type === "require_once_expression") {
-    checkIncludeExpressionSink(node, ctx, isTainted, env);
+    checkIncludeExpressionSink(node, ctx, taintMask, env);
   }
 
   for (const child of node.namedChildren) {
@@ -832,13 +893,18 @@ function collectBolaFindings(
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
-export function scanAstTaintPHP(content: string, filePath: string, root: SyntaxNode): AstTaintPHPFinding[] {
+export function scanAstTaintPHP(
+  content: string, filePath: string, root: SyntaxNode,
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer -- see EngineCtx.suppressed.
+  suppressedOut?: SuppressedSink[],
+): AstTaintPHPFinding[] {
   try {
     const lines = content.split("\n");
     const localFunctions = collectLocalFunctions(root);
     const ctx: EngineCtx = {
       content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
-      findings: [], seen: new Set(), varTypes: new Map(),
+      findings: [], seen: new Set(), varTypes: new Map(), suppressed: suppressedOut,
     };
 
     const propagating = buildPropagatingMapPHP(localFunctions, ctx);
@@ -912,14 +978,14 @@ export function scanAstTaintPHP(content: string, filePath: string, root: SyntaxN
       for (const [fnName, idxSet] of toWalk) {
         const fn = localFunctions.get(fnName);
         if (!fn?.body) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
         const env: Env = new Map();
-        for (const idx of idxSet) {
+        for (const [idx, m] of idxSet) {
           const shape = fn.paramShapes[idx];
-          if (shape) env.set(shape.name, true);
+          if (shape) env.set(shape.name, m);
         }
         walkForDeclarationsAndSinks(fn.body, env, ctx);
       }

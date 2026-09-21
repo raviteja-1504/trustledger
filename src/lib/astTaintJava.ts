@@ -43,6 +43,8 @@
 
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
+import { ALL, applyClears, classOf, wasCleared, type SuppressedSink, type TaintEnv } from "./taint/taintCore";
+import { sanitizerClears } from "./taint/sanitizers";
 
 export type AstTaintJavaId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
@@ -157,13 +159,9 @@ const SERVLET_SOURCE_CALLS = new Set(["getParameter", "getHeader", "getParameter
 // three real Java escaping libraries: OWASP Java Encoder (Encode.forHtml/
 // forHtmlAttribute/forHtmlContent/forJavaScript/forUriComponent), ESAPI
 // (encodeForHTML/encodeForJavaScript), and Commons Text/Lang
-// (escapeHtml4/escapeHtml3). See astTaint.ts's SANITIZER_NAMES for the
-// JS/TS equivalent this mirrors.
-const JAVA_SANITIZER_TAILS = new Set([
-  "forHtml", "forHtmlAttribute", "forHtmlContent", "forJavaScript", "forUriComponent",
-  "encodeForHTML", "encodeForJavaScript",
-  "escapeHtml4", "escapeHtml3",
-]);
+// (escapeHtml4/escapeHtml3). Now lives in taint/sanitizers.ts, keyed by the
+// sink classes each tail actually neutralizes (an HTML encoder clears XSS,
+// not SQL/command/path) -- see astTaint.ts for the shared design.
 
 // ── BOLA: Spring resource-identifier / authorization-annotation classification ──
 
@@ -206,7 +204,9 @@ function extractMethodAuthMeta(methodDecl: CstNode): MethodAuthMeta {
 
 // ── Environment ──────────────────────────────────────────────────────────
 
-type Env = Map<string, boolean>;
+type Env = TaintEnv;
+// method name -> (param index -> sink classes that survive to its return value)
+type PropagatingJava = Map<string, Map<number, number>>;
 type VarTypes = Map<string, string>; // local var name -> declared type's simple name (e.g. "ObjectInputStream")
 
 interface ParamShape { name: string; index: number; isRest: boolean }
@@ -406,15 +406,19 @@ interface EngineCtx {
   localMethods: Map<string, LocalMethod>;
   // Which of a local method's parameter INDICES have taint that reaches its
   // return value -- see computeReturnTaintPropagatingJava.
-  propagatingParams: Map<string, Set<number>>;
+  propagatingParams: PropagatingJava;
   // Which of a local method's parameter INDICES were tainted at some call
-  // site to it -- consumed by a second pass in scanAstTaintJava that
-  // re-walks the method's own body with those params seeded, so a sink call
-  // INSIDE the callee (not just in its return) becomes reachable. Java had
-  // no equivalent of this mechanism at all before -- astTaint.ts's/
-  // astTaintPython.ts's own versions of it were already correct and are
-  // mirrored here, not just fixed.
-  seededParams: Map<string, Set<number>>;
+  // site to it (and for which sink classes) -- consumed by a second pass in
+  // scanAstTaintJava that re-walks the method's own body with those params
+  // seeded, so a sink call INSIDE the callee (not just in its return)
+  // becomes reachable. Java had no equivalent of this mechanism at all
+  // before -- astTaint.ts's/astTaintPython.ts's own versions of it were
+  // already correct and are mirrored here, not just fixed.
+  seededParams: Map<string, Map<number, number>>;
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
+  // regex layer's duplicate for a flow this engine proved safe.
+  suppressed?: SuppressedSink[];
   varTypes: VarTypes;
   // Class field names, collected once per file -- used by the BOLA
   // Map-field pseudo-repository sink shape to distinguish a class-level
@@ -465,7 +469,7 @@ function extractInstantiatedClassName(uc: CstNode): string | null {
 }
 
 function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
-  { parts: string[]; taint: boolean; rootVar: string | null; isNewExprOf: string | null } {
+  { parts: string[]; taint: number; rootVar: string | null; isNewExprOf: string | null } {
   const fqn = firstNode(prefix, "fqnOrRefType");
   if (fqn) {
     const parts: string[] = [];
@@ -487,8 +491,8 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     // Deliberately scoped to exactly one field level (parts[0]+parts[1]),
     // not the full dotted chain, matching the same one-level scope used on
     // the write side below.
-    let taint = rootVar !== null && env.get(rootVar) === true;
-    if (!taint && parts.length >= 2 && env.get(`${parts[0]}.${parts[1]}`) === true) taint = true;
+    let taint = rootVar !== null ? (env.get(rootVar) ?? 0) : 0;
+    if (parts.length >= 2) taint |= env.get(`${parts[0]}.${parts[1]}`) ?? 0;
     return { parts, taint, rootVar, isNewExprOf: null };
   }
   const newExpr = firstNode(prefix, "newExpression");
@@ -497,15 +501,15 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     const className = uc ? extractInstantiatedClassName(uc) : null;
     const argList = uc ? firstNode(uc, "argumentList") : undefined;
     const args = argList ? allNodes(argList, "expression") : [];
-    const taint = args.some(a => isTainted(a, env, ctx));
+    const taint = args.reduce((m, a) => m | taintMask(a, env, ctx), 0);
     return { parts: className ? [className] : [], taint, rootVar: null, isNewExprOf: className };
   }
   const paren = firstNode(prefix, "parenthesisExpression");
   if (paren) {
     const inner = firstNode(paren, "expression");
-    return { parts: [], taint: inner ? isTainted(inner, env, ctx) : false, rootVar: null, isNewExprOf: null };
+    return { parts: [], taint: inner ? taintMask(inner, env, ctx) : 0, rootVar: null, isNewExprOf: null };
   }
-  return { parts: [], taint: false, rootVar: null, isNewExprOf: null };
+  return { parts: [], taint: 0, rootVar: null, isNewExprOf: null };
 }
 
 /**
@@ -538,10 +542,10 @@ function assignmentTargetKey(lhsUnary: CstNode | undefined, env: Env, ctx: Engin
  */
 function walkPrimaryChain(
   primary: CstNode, env: Env, ctx: EngineCtx,
-  onCall?: (info: { calleeName: string; tail: string; rootVar: string | null; args: CstNode[]; chainTaintBefore: boolean; node: CstNode; isNewURL: boolean }) => void,
-): boolean {
+  onCall?: (info: CallInfo) => void,
+): number {
   const prefix = firstNode(primary, "primaryPrefix");
-  if (!prefix) return false;
+  if (!prefix) return 0;
   const { parts, taint: prefixTaint, rootVar, isNewExprOf } = primaryPrefixInfo(prefix, env, ctx);
   let chainTaint = prefixTaint;
   let nameParts = [...parts];
@@ -563,15 +567,19 @@ function walkPrimaryChain(
       const tail = nameParts[nameParts.length - 1] ?? "";
       const calleeName = nameParts.join(".");
       const chainTaintBefore = chainTaint;
-      const anyArgTainted = args.some(a => isTainted(a, env, ctx));
+      const argMasks = args.map(a => taintMask(a, env, ctx));
+      const anyArgMask = argMasks.reduce((m, x) => m | x, 0);
 
-      // Sanitizer/escaping calls (Decision 2) -- de-taint at this point in
-      // the chain, checked BEFORE source/append/format/propagating-param
-      // checks so a sanitized value can't be re-tainted by one of those in
-      // this same call. Still reports the call (onCall) for sink-matching/
-      // seeding consistency, but skips every taint-increasing branch below.
-      if (JAVA_SANITIZER_TAILS.has(tail)) {
-        chainTaint = false;
+      // Known sanitizer/escaping call -- the value passes THROUGH minus only
+      // the classes this sanitizer actually neutralizes (an HTML encoder
+      // leaves SQL/command/path taint intact), checked BEFORE
+      // source/append/format/propagating-param so a sanitized value can't be
+      // re-tainted by one of those in this same call. Still reports the call
+      // (onCall) for sink-matching/seeding consistency, but skips every
+      // taint-increasing branch below.
+      const clears = sanitizerClears("java", calleeName || tail);
+      if (clears !== null) {
+        chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
         onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
         nameParts = [];
         continue;
@@ -579,32 +587,34 @@ function walkPrimaryChain(
 
       // Servlet API source: request.getParameter/getHeader/getParameterValues/getQueryString.
       if (rootVar === "request" && SERVLET_SOURCE_CALLS.has(tail)) {
-        chainTaint = true;
+        chainTaint = ALL;
       }
       // StringBuilder/StringBuffer .append() -- sticky, and propagate back onto the receiver variable.
       if (tail === "append") {
-        chainTaint = chainTaint || anyArgTainted;
-        if (rootVar) env.set(rootVar, (env.get(rootVar) === true) || chainTaint);
+        chainTaint |= anyArgMask;
+        if (rootVar) env.set(rootVar, (env.get(rootVar) ?? 0) | chainTaint);
       }
       // String.format(...) / "...".formatted(...) -- closes a real, confirmed gap.
       if (tail === "format" || tail === "formatted") {
-        chainTaint = chainTaint || anyArgTainted;
+        chainTaint |= anyArgMask;
       }
       // Same-file interprocedural, one hop: a call to a local method whose
       // return value is known (computeReturnTaintPropagatingJava) to depend
       // on SPECIFIC parameters -- e.g. executeQuery(buildQuery(uid)) where
       // buildQuery merely returns a tainted concatenation of uid and never
       // calls a sink itself. Only the arguments at the propagating indices
-      // are checked, not every argument.
+      // are checked, and only the classes that survive the callee's body.
       const propIdx = ctx.propagatingParams.get(tail);
       if (propIdx) {
         const callee = ctx.localMethods.get(tail);
         const shapes = callee?.paramShapes ?? [];
-        const matched = [...propIdx].some(i => {
+        let m = 0;
+        for (const [i, surviving] of propIdx) {
           const shape = shapes[i];
-          return shape ? argsForShape(args, shape).some(a => isTainted(a, env, ctx)) : false;
-        });
-        if (matched) chainTaint = true;
+          if (!shape) continue;
+          for (const a of argsForShape(args, shape)) m |= taintMask(a, env, ctx) & surviving;
+        }
+        if (m) chainTaint |= m;
       }
 
       onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL });
@@ -619,7 +629,12 @@ function walkPrimaryChain(
   return chainTaint;
 }
 
-function isTainted(node: CstNode, env: Env, ctx: EngineCtx): boolean {
+interface CallInfo {
+  calleeName: string; tail: string; rootVar: string | null; args: CstNode[];
+  chainTaintBefore: number; node: CstNode; isNewURL: boolean;
+}
+
+function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
   switch (node.name) {
     case "primary":
       return walkPrimaryChain(node, env, ctx);
@@ -635,11 +650,11 @@ function isTainted(node: CstNode, env: Env, ctx: EngineCtx): boolean {
       // chain). Only a present, non-"+" operator (comparison, instanceof,
       // bitwise) should block propagation -- no operator at all means this
       // is just a wrapper and MUST still recurse into its one operand.
-      if (ops.length > 0 && !ops.some(t => t.image === "+")) return false;
-      return operands.some(o => isTainted(o, env, ctx));
+      if (ops.length > 0 && !ops.some(t => t.image === "+")) return 0;
+      return operands.reduce((m, o) => m | taintMask(o, env, ctx), 0);
     }
     case "literal":
-      return false;
+      return 0;
     default: {
       // Generic fallback for the many transparent wrapper productions
       // (expression, conditionalExpression, unaryExpression, argumentList's
@@ -650,60 +665,70 @@ function isTainted(node: CstNode, env: Env, ctx: EngineCtx): boolean {
       // and avoids hand-enumerating each wrapper type. Deliberately
       // permissive (never de-taints), matching the "accept some imprecision
       // for recall" philosophy established in astTaint.ts.
+      let m = 0;
       for (const key of Object.keys(node.children)) {
         for (const el of node.children[key]) {
-          if (!isToken(el) && isTainted(el, env, ctx)) return true;
+          if (!isToken(el)) m |= taintMask(el, env, ctx);
         }
       }
-      return false;
+      return m;
     }
   }
 }
 
 // ── Sink dispatch (invoked via walkPrimaryChain's onCall side-channel) ────
 
-function checkCallSink(info: { calleeName: string; tail: string; rootVar: string | null; args: CstNode[]; chainTaintBefore: boolean; node: CstNode; isNewURL: boolean }, env: Env, ctx: EngineCtx) {
+function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   const { tail, rootVar, args, chainTaintBefore, node, calleeName } = info;
-  const taintedArg = args.find(a => isTainted(a, env, ctx));
-  const tainted = chainTaintBefore || !!taintedArg;
-  const sourceExpr = taintedArg ? nodeText(taintedArg) : calleeName;
+  const argMasks = args.map(a => taintMask(a, env, ctx));
+  const combined = chainTaintBefore | argMasks.reduce((m, x) => m | x, 0);
+  const firstTaintedIdx = argMasks.findIndex(m => (m & ALL) !== 0);
+  const sourceExpr = firstTaintedIdx >= 0 ? nodeText(args[firstTaintedIdx]) : calleeName;
 
-  if (tainted) {
-    if (tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") {
-      emit(ctx, "sql-injection", node, sourceExpr, calleeName);
-    } else if ((tail === "query" || tail === "update") && /jdbcTemplate/i.test(rootVar ?? "")) {
-      emit(ctx, "sql-injection", node, sourceExpr, calleeName);
-    } else if (tail === "exec" && rootVar !== null) {
-      emit(ctx, "command-injection", node, sourceExpr, calleeName);
-    } else if (tail === "sendRedirect") {
-      emit(ctx, "open-redirect", node, sourceExpr, calleeName);
-    } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "") && isTainted(args[1], env, ctx)) {
-      // Spring's fluent ResponseEntity.status(...).header("Location", next).build()
-      // -- a modern REST idiom for redirects, distinct from the classic
-      // Servlet response.sendRedirect(...) above but an equally real sink.
-      emit(ctx, "open-redirect", node, nodeText(args[1]), calleeName);
-    } else if (tail === "getForObject" || tail === "postForObject" || tail === "exchange") {
-      emit(ctx, "ssrf", node, sourceExpr, calleeName);
-    } else if (info.isNewURL && (tail === "openConnection" || tail === "openStream")) {
-      emit(ctx, "ssrf", node, sourceExpr, calleeName);
-    } else if (tail === "get" && rootVar === "Paths") {
-      emit(ctx, "path-traversal", node, sourceExpr, calleeName);
-    } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
-      emit(ctx, "path-traversal", node, sourceExpr, calleeName);
-    } else if (tail === "search") {
-      emit(ctx, "ldap-injection", node, sourceExpr, calleeName);
-    } else if (tail === "evaluate") {
-      emit(ctx, "xpath-injection", node, sourceExpr, calleeName);
-    } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
-      emit(ctx, "xss", node, sourceExpr, calleeName);
-    }
+  // One sink per call: a hit emits; a value that was tainted for this sink's
+  // class but positively cleared by a sanitizer records a suppression
+  // instead (for the regex-layer veto). Each sink is gated on ITS class, so
+  // an HTML encoder no longer hides a SQL/command/path sink.
+  const fire = (id: AstTaintJavaId, mask: number = combined, source: string = sourceExpr, sink: string = calleeName) => {
+    const cls = classOf(id);
+    if (mask & cls) emit(ctx, id, node, source, sink);
+    else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
+
+  if (tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") {
+    fire("sql-injection");
+  } else if ((tail === "query" || tail === "update") && /jdbcTemplate/i.test(rootVar ?? "")) {
+    fire("sql-injection");
+  } else if (tail === "exec" && rootVar !== null) {
+    fire("command-injection");
+  } else if (tail === "sendRedirect") {
+    fire("open-redirect");
+  } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "")) {
+    // Spring's fluent ResponseEntity.status(...).header("Location", next).build()
+    // -- a modern REST idiom for redirects, distinct from the classic
+    // Servlet response.sendRedirect(...) above but an equally real sink.
+    fire("open-redirect", argMasks[1], nodeText(args[1]));
+  } else if (tail === "getForObject" || tail === "postForObject" || tail === "exchange") {
+    fire("ssrf");
+  } else if (info.isNewURL && (tail === "openConnection" || tail === "openStream")) {
+    fire("ssrf");
+  } else if (tail === "get" && rootVar === "Paths") {
+    fire("path-traversal");
+  } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
+    fire("path-traversal");
+  } else if (tail === "search") {
+    fire("ldap-injection");
+  } else if (tail === "evaluate") {
+    fire("xpath-injection");
+  } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
+    fire("xss");
   }
 
   // Insecure deserialization: <var>.readObject() where <var> was declared
   // ObjectInputStream-typed and its OWN construction was built from tainted
   // data (tracked via env at the localVariableDeclaration site below).
-  if (tail === "readObject" && rootVar && ctx.varTypes.get(rootVar) === "ObjectInputStream" && env.get(rootVar) === true) {
-    emit(ctx, "insecure-deserialization", node, rootVar, "readObject");
+  if (tail === "readObject" && rootVar && ctx.varTypes.get(rootVar) === "ObjectInputStream") {
+    fire("insecure-deserialization", env.get(rootVar) ?? 0, rootVar, "readObject");
   }
 }
 
@@ -717,12 +742,21 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   if (!className) return;
   const argList = firstNode(uc, "argumentList");
   const args = argList ? allNodes(argList, "expression") : [];
-  const taintedArg = args.find(a => isTainted(a, env, ctx));
-  if (!taintedArg) return;
-  const sourceExpr = nodeText(taintedArg);
-  if (className === "ProcessBuilder") emit(ctx, "command-injection", primaryNode, sourceExpr, "new ProcessBuilder");
+  const argMasks = args.map(a => taintMask(a, env, ctx));
+  // Any bit (taint OR shadow) counts: a value that was tainted and then
+  // sanitized must still reach `fire` so the suppression gets recorded.
+  const firstIdx = argMasks.findIndex(m => m !== 0);
+  if (firstIdx < 0) return;
+  const sourceExpr = nodeText(args[firstIdx]);
+  const fire = (id: AstTaintJavaId, sink: string) => {
+    const cls = classOf(id);
+    const combined = argMasks.reduce((m, x) => m | x, 0);
+    if (combined & cls) emit(ctx, id, primaryNode, sourceExpr, sink);
+    else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id, line: lineOf(primaryNode) });
+  };
+  if (className === "ProcessBuilder") fire("command-injection", "new ProcessBuilder");
   if (className === "File" || className === "FileInputStream" || className === "FileOutputStream") {
-    emit(ctx, "path-traversal", primaryNode, sourceExpr, `new ${className}`);
+    fire("path-traversal", `new ${className}`);
   }
 }
 
@@ -747,16 +781,19 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
  * a ctx with empty propagatingParams/localMethods) and the bounded
  * fixed-point below (pass ctx with the in-progress round map).
  */
-function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx): Set<number> {
-  const propagatingIdx = new Set<number>();
+function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx): Map<number, number> {
+  // param index -> sink classes that still survive to the return value
+  const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
   const returnExprs = findAllNodes(method.body, "returnStatement")
     .map(ret => firstNode(ret, "expression"))
     .filter((e): e is CstNode => !!e);
   for (const shape of method.paramShapes) {
     const env: Env = new Map();
-    env.set(shape.name, true);
-    if (returnExprs.some(expr => isTainted(expr, env, ctx))) propagatingIdx.add(shape.index);
+    env.set(shape.name, ALL);
+    // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
+    const surviving = returnExprs.reduce((m, expr) => m | taintMask(expr, env, ctx), 0) & ALL;
+    if (surviving) propagatingIdx.set(shape.index, surviving);
   }
   return propagatingIdx;
 }
@@ -779,18 +816,21 @@ const MAX_PROPAGATION_ROUNDS = 3;
  * bounded by its own parameter count) -- convergence is never in doubt, the
  * round cap only bounds worst-case cost on a large file's call graph.
  */
-function buildPropagatingMapJava(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): Map<string, Set<number>> {
-  const propagating = new Map<string, Set<number>>();
+function buildPropagatingMapJava(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): PropagatingJava {
+  const propagating: PropagatingJava = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
     const roundCtx: EngineCtx = { ...baseCtx, propagatingParams: propagating };
     for (const [name, method] of localMethods) {
-      const idx = computeReturnTaintPropagatingJava(method, roundCtx);
-      const existingSize = propagating.get(name)?.size ?? 0;
-      if (idx.size > existingSize) {
-        propagating.set(name, idx);
-        changed = true;
+      const found = computeReturnTaintPropagatingJava(method, roundCtx);
+      // Monotonic merge (only ever adds a parameter or adds surviving classes).
+      const merged = new Map(propagating.get(name) ?? []);
+      let grew = false;
+      for (const [idx, m] of found) {
+        const next = (merged.get(idx) ?? 0) | m;
+        if (next !== (merged.get(idx) ?? 0)) { merged.set(idx, next); grew = true; }
       }
+      if (grew) { propagating.set(name, merged); changed = true; }
     }
     if (!changed) break;
   }
@@ -811,15 +851,17 @@ function seedLocalMethodParams(
 ) {
   const callee = ctx.localMethods.get(info.tail);
   if (!callee) return;
-  const taintedIdx = new Set<number>();
+  // param index -> classes tainted at THIS call site
+  const taintedIdx = new Map<number, number>();
   info.args.forEach((arg, i) => {
-    if (!isTainted(arg, env, ctx)) return;
+    const m = taintMask(arg, env, ctx) & ALL;
+    if (!m) return;
     const shape = callee.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
-    if (shape) taintedIdx.add(shape.index);
+    if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
   });
   if (taintedIdx.size === 0) return;
-  const existing = ctx.seededParams.get(info.tail) ?? new Set<number>();
-  taintedIdx.forEach(i => existing.add(i));
+  const existing = ctx.seededParams.get(info.tail) ?? new Map<number, number>();
+  for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
   ctx.seededParams.set(info.tail, existing);
 }
 
@@ -844,8 +886,7 @@ function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
       if (!nameTok) continue;
       const init = firstNode(vd, "variableInitializer");
       const initExpr = init ? firstNode(init, "expression") : undefined;
-      const tainted = initExpr ? isTainted(initExpr, env, ctx) : false;
-      env.set(nameTok.image, tainted);
+      env.set(nameTok.image, initExpr ? taintMask(initExpr, env, ctx) : 0);
       if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
     }
   }
@@ -870,7 +911,7 @@ function walkForDeclarationsAndSinks(node: CstNode, env: Env, ctx: EngineCtx) {
       const lhsUnary = firstNode(node, "unaryExpression");
       const rhsExpr = firstNode(node, "expression");
       const key = assignmentTargetKey(lhsUnary, env, ctx);
-      if (key) env.set(key, rhsExpr ? isTainted(rhsExpr, env, ctx) : false);
+      if (key) env.set(key, rhsExpr ? taintMask(rhsExpr, env, ctx) : 0);
     }
   }
 
@@ -1163,13 +1204,19 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
-export function scanAstTaintJava(content: string, filePath: string, cst: CstNode): AstTaintJavaFinding[] {
+export function scanAstTaintJava(
+  content: string, filePath: string, cst: CstNode,
+  // Sinks whose argument was tainted for the sink's class but positively
+  // cleared by a sanitizer -- see EngineCtx.suppressed.
+  suppressedOut?: SuppressedSink[],
+): AstTaintJavaFinding[] {
   try {
     const lines = content.split("\n");
     const localMethods = collectLocalMethods(cst);
     const ctx: EngineCtx = {
       content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), findings: [], seen: new Set(),
+      suppressed: suppressedOut,
     };
     const propagating = buildPropagatingMapJava(localMethods, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
@@ -1181,7 +1228,7 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       // an un-annotated parameter is not automatically tainted (unlike the
       // interprocedural pre-pass above, which deliberately seeds each param
       // independently to answer a different, broader question).
-      method.springParamNames.forEach(p => env.set(p, true));
+      method.springParamNames.forEach(p => env.set(p, ALL));
       walkForDeclarationsAndSinks(method.body, env, ctx);
       collectBolaFindings(method, ctx);
     }
@@ -1206,14 +1253,14 @@ export function scanAstTaintJava(content: string, filePath: string, cst: CstNode
       for (const [methodName, idxSet] of toWalk) {
         const method = localMethods.get(methodName);
         if (!method?.body) continue;
-        const signature = `${methodName}:${[...idxSet].sort((a, b) => a - b).join(",")}`;
+        const signature = `${methodName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
         if (walkedSignatures.has(signature)) continue;
         walkedSignatures.add(signature);
         changed = true;
         const env: Env = new Map();
-        for (const idx of idxSet) {
+        for (const [idx, m] of idxSet) {
           const shape = method.paramShapes[idx];
-          if (shape) env.set(shape.name, true);
+          if (shape) env.set(shape.name, m);
         }
         walkForDeclarationsAndSinks(method.body, env, ctx);
       }
