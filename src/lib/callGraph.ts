@@ -125,11 +125,29 @@ function tryMatchFunc(line: string): FuncMatch | null {
   // func foo(a int) {  (Go)
   m = line.match(/^func\s+(\w+)\s*\(([^)]*)\)/);
   if (m) return { isExported: /^[A-Z]/.test(m[1]), isAsync: false, name: m[1], params: m[2] };
+  // function foo($a, $b) {  /  public static function foo($a, $b) {  (PHP)
+  // -- unlike C#'s fixed modifier order, PHP idiom allows `public static`
+  // OR `static public` (both legal), so this matches any order/repetition
+  // of the modifier keywords rather than anchoring on a single first one.
+  // No explicit visibility modifier at all means implicitly public for a
+  // class method, and a top-level (non-class) function is always globally
+  // callable -- both cases correctly resolve isExported=true here since
+  // the check is "no private/protected present", not "public present".
+  m = line.match(/^\s*((?:(?:public|private|protected|static|final|abstract)\s+)*)function\s+(\w+)\s*\(([^)]*)\)/);
+  if (m) {
+    const modifiers = m[1];
+    const isExported = !/\b(?:private|protected)\b/.test(modifiers);
+    return { isExported, isAsync: false, name: m[2], params: m[3] };
+  }
   return null;
 }
 
 function parseParams(raw: string): string[] {
-  return raw.split(",").map(p => p.trim().split(/[\s:=]/)[0].replace(/^\.\.\./, "")).filter(Boolean);
+  // The trailing .replace(/^\$/, "") strips PHP's `$` parameter sigil --
+  // purely additive for every other language (no other language's param
+  // names start with a literal `$`), so this is safe to apply universally
+  // rather than needing a PHP-specific branch here.
+  return raw.split(",").map(p => p.trim().split(/[\s:=]/)[0].replace(/^\.\.\./, "").replace(/^\$/, "")).filter(Boolean);
 }
 
 const PY_DEF_RE = /^\s*(?:async\s+)?def\s+\w+\s*\(/;
@@ -369,6 +387,20 @@ export function detectEntryPoints(funcs: FunctionNode[], content: string): strin
   let rm: RegExpExecArray | null;
   while ((rm = goRouteRe.exec(content)) !== null) {
     if (funcNames.has(rm[1])) entries.add(rm[1]);
+  }
+  // PHP: same registration-site shape as Go above, not Java/Python/C#'s
+  // marker-above-signature convention -- confirmed directly that Laravel
+  // registers routes centrally (Route::get('/x', [Controller::class,
+  // 'method']) or the older 'Controller@method' string form) and
+  // WordPress registers hooks the same way (add_action('init',
+  // 'my_handler')), neither as a decorator on the handler itself. Handles
+  // both the array-callable and "Class@method"/bare-string callable
+  // shapes; capture group 1 is the string form, group 2 the array form.
+  const phpRouteRe = /\b(?:Route::(?:get|post|put|delete|patch|any|match)|add_action|add_filter)\s*\(\s*['"][^'"]*['"]\s*,\s*(?:['"](?:[\w\\]+@)?(\w+)['"]|\[\s*(?:[\w\\]+::class|\$\w+|['"][\w\\]+['"])\s*,\s*['"](\w+)['"]\s*\])/g;
+  let pm: RegExpExecArray | null;
+  while ((pm = phpRouteRe.exec(content)) !== null) {
+    const name = pm[1] ?? pm[2];
+    if (name && funcNames.has(name)) entries.add(name);
   }
   return Array.from(entries);
 }

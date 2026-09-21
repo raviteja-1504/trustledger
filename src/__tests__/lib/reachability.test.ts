@@ -4,10 +4,12 @@ import { parseSourceFile, findNodeAtPosition, findEnclosingFunctionName } from "
 import { analyzeFile, type ScanIndicator } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
+import { warmPhpTaintEngine } from "@/lib/astTaintPHP";
 
 beforeAll(async () => {
   await warmPythonTaintEngine();
   await warmCSharpTaintEngine();
+  await warmPhpTaintEngine();
 }, 30000);
 
 // Regression test for a real bug found via direct investigation: scoreExploitability
@@ -290,6 +292,45 @@ public class A {
 }
 `;
     const result = analyzeFile("A.cs", content);
+    const lines = content.split("\n");
+    const searchLine = lines.findIndex(l => l.includes("SELECT * FROM Users")) + 1;
+    const deadLine = lines.findIndex(l => l.includes("SELECT * FROM Logs")) + 1;
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    expect(reachable).toBeDefined();
+    expect(dead).toBeDefined();
+    expect(reachable?.reachability).not.toBe("unreachable");
+    expect(dead?.reachability).toBe("unreachable");
+  });
+});
+
+// PHP reachability parity -- astTaintPHP.ts is a brand-new engine (not an
+// upgrade to an existing one), built with findEnclosingFunctionNamePHP/
+// findNodeAtRowPHP and the resolveContainingFunction wiring from the
+// start, so there is no "before" bug to demonstrate here the way the
+// Java/Python sections above do -- this proves the wiring (including the
+// new Laravel-route-registration-site entry-point detection in
+// callGraph.ts) is correct and working, not that a regression was fixed.
+describe("analyzeFile() -- PHP reachability resolves per-method", () => {
+  it("a Laravel-route-registered method's finding is NOT hardcoded unreachable, and differs from a helper method never referenced by any route", () => {
+    const content = `<?php
+class UserController {
+  public function search() {
+    $name = $_GET['name'];
+    $sql = "SELECT * FROM Users WHERE Name = '" . $name . "'";
+    mysqli_query($conn, $sql);
+  }
+
+  private function deadHelper() {
+    $name2 = $_GET['name2'];
+    $sql2 = "SELECT * FROM Logs WHERE Name = '" . $name2 . "'";
+    mysqli_query($conn, $sql2);
+  }
+}
+
+Route::get('/search', [UserController::class, 'search']);
+`;
+    const result = analyzeFile("UserController.php", content);
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM Users")) + 1;
     const deadLine = lines.findIndex(l => l.includes("SELECT * FROM Logs")) + 1;

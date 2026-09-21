@@ -302,3 +302,103 @@ describe("callGraph.extractFunctions — C# method pattern (new capability)", ()
     expect(funcs.some(f => f.name === "if")).toBe(false);
   });
 });
+
+describe("callGraph.extractFunctions — PHP function pattern (new capability, $-sigil-aware)", () => {
+  it("extracts a public PHP class method and strips the $ sigil from its params", () => {
+    const content = [
+      "class UserController {",
+      "  public function getUser($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const fn = funcs.find(f => f.name === "getUser");
+    expect(fn).toBeDefined();
+    expect(fn!.is_exported).toBe(true);
+    expect(fn!.params).toEqual(["id"]);
+  });
+
+  it("extracts a private PHP method (not exported) regardless of modifier order", () => {
+    const content = [
+      "class UserController {",
+      "  static private function helper($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const fn = funcs.find(f => f.name === "helper");
+    expect(fn).toBeDefined();
+    expect(fn!.is_exported).toBe(false);
+  });
+
+  it("treats a class method with no explicit visibility modifier as implicitly public", () => {
+    const content = [
+      "class UserController {",
+      "  function getUser($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const fn = funcs.find(f => f.name === "getUser");
+    expect(fn).toBeDefined();
+    expect(fn!.is_exported).toBe(true);
+  });
+});
+
+describe("callGraph.detectEntryPoints — PHP Laravel/WordPress registration-site entry points (new capability)", () => {
+  it("flags a PHP method referenced by Laravel's array-callable Route::get(...)", () => {
+    const content = [
+      "class UserController {",
+      "  private function getUser($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+      "Route::get('/users/{id}', [UserController::class, 'getUser']);",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).toContain("getUser");
+  });
+
+  it("flags a PHP method referenced by Laravel's 'Controller@method' string callable", () => {
+    const content = [
+      "class UserController {",
+      "  private function getUser($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+      "Route::get('/users/{id}', 'UserController@getUser');",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).toContain("getUser");
+  });
+
+  it("flags a PHP function registered as a WordPress action hook", () => {
+    const content = [
+      "function my_handler() {",
+      "  echo $_GET['id'];",
+      "}",
+      "add_action('init', 'my_handler');",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).toContain("my_handler");
+  });
+
+  it("does not flag a PHP method never referenced by any route/hook registration", () => {
+    const content = [
+      "class UserController {",
+      "  private function helper($id) {",
+      "    return Database::find($id);",
+      "  }",
+      "}",
+    ].join("\n");
+    const funcs = extractFunctions(content);
+    const entries = detectEntryPoints(funcs, content);
+    expect(entries).not.toContain("helper");
+  });
+});

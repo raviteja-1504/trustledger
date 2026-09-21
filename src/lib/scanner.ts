@@ -49,6 +49,11 @@ import {
   findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel,
 } from "./astTaintCSharp";
 import type { Node as CSharpSyntaxNode } from "web-tree-sitter";
+import {
+  parsePhpSourceSync, isPhpParserReady, scanAstTaintPHP,
+  findEnclosingFunctionNamePHP, findNodeAtRowPHP, astTaintPHPSeverity, astTaintPHPLabel,
+} from "./astTaintPHP";
+import type { Node as PhpSyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -5874,6 +5879,14 @@ function findAstTaintCSharpFindings(content: string, filePath: string, root: CSh
   }));
 }
 
+// PHP taint engine wrapper -- mirrors findAstTaintCSharpFindings exactly.
+function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyntaxNode): ScanIndicator[] {
+  return scanAstTaintPHP(content, filePath, root).map(f => ({
+    id: f.id, label: astTaintPHPLabel(f.id), severity: f.severityOverride ?? astTaintPHPSeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -5988,6 +6001,15 @@ export function analyzeFile(
     && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
       ? parseCSharpSourceSync(content, file_path)
       : null;
+  // PHP AST parse -- see astTaintPHP.ts. Same tree-sitter warm-cache
+  // contract as pyTree/goTree/csTree above. This engine parses plain .php
+  // only -- confirmed the bundled tree-sitter-php.wasm grammar during
+  // probing, not a Laravel Blade/WordPress mixed-HTML variant, matching
+  // this phase's own documented scope.
+  const phpTree: PhpSyntaxNode | null =
+    lang === "php" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPhpParserReady()
+      ? parsePhpSourceSync(content, file_path)
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6089,6 +6111,7 @@ export function analyzeFile(
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree) : []),
+    ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree) : []),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 
@@ -6233,6 +6256,9 @@ export function analyzeFile(
     }
     if (csTree) {
       return findEnclosingFunctionNameCSharp(findNodeAtRowCSharp(csTree, Math.max(0, line - 1)));
+    }
+    if (phpTree) {
+      return findEnclosingFunctionNamePHP(findNodeAtRowPHP(phpTree, Math.max(0, line - 1)));
     }
     return "unknown";
   };
