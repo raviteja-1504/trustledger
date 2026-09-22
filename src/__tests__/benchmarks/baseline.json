@@ -1,0 +1,1058 @@
+{
+  "typescript": {
+    "totalCases": 61,
+    "casesWithFinding": 58,
+    "astOnlyFindingCount": 57,
+    "astOnlyByCase": {
+      "10": [
+        "open-redirect"
+      ],
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "14": [
+        "prototype-pollution"
+      ],
+      "15": [
+        "sql-injection"
+      ],
+      "16": [
+        "sql-injection"
+      ],
+      "17": [
+        "sql-injection"
+      ],
+      "18": [
+        "eval-exec"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec",
+        "xss"
+      ],
+      "21": [
+        "nosql-injection"
+      ],
+      "22": [
+        "nosql-injection"
+      ],
+      "23": [
+        "xss"
+      ],
+      "24": [
+        "xss"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "ssrf"
+      ],
+      "30": [
+        "ssrf"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "32": [
+        "path-traversal"
+      ],
+      "33": [
+        "sql-injection"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "40": [
+        "sql-injection"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "43": [
+        "sql-injection"
+      ],
+      "44": [
+        "xss"
+      ],
+      "46": [
+        "sql-injection"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "eval-exec"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection"
+      ],
+      "01": [
+        "sql-injection"
+      ],
+      "02": [
+        "sql-injection"
+      ],
+      "03": [
+        "sql-injection"
+      ],
+      "04": [
+        "command-injection"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "ssrf",
+        "xss"
+      ],
+      "09": [
+        "ssrf"
+      ]
+    }
+  },
+  "python": {
+    "totalCases": 60,
+    "casesWithFinding": 56,
+    "astOnlyFindingCount": 51,
+    "astOnlyByCase": {
+      "10": [
+        "open-redirect",
+        "xss"
+      ],
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "13": [
+        "mass-assignment"
+      ],
+      "14": [
+        "mass-assignment"
+      ],
+      "18": [
+        "ssti",
+        "xss"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec"
+      ],
+      "21": [
+        "nosql-injection"
+      ],
+      "22": [
+        "nosql-injection"
+      ],
+      "23": [
+        "ldap-injection"
+      ],
+      "24": [
+        "xpath-injection"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "ssrf"
+      ],
+      "30": [
+        "ssrf"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "32": [
+        "path-traversal"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "44": [
+        "xss"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "eval-exec"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection",
+        "insecure-deserialization",
+        "path-traversal",
+        "sql-injection",
+        "ssti",
+        "xss"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "ssrf"
+      ],
+      "09": [
+        "ssrf"
+      ]
+    }
+  },
+  "java": {
+    "totalCases": 67,
+    "casesWithFinding": 60,
+    "astOnlyFindingCount": 56,
+    "astOnlyByCase": {
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "13": [
+        "mass-assignment"
+      ],
+      "14": [
+        "mass-assignment"
+      ],
+      "15": [
+        "sql-injection"
+      ],
+      "16": [
+        "sql-injection"
+      ],
+      "17": [
+        "sql-injection"
+      ],
+      "18": [
+        "ssti"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec"
+      ],
+      "23": [
+        "ldap-injection"
+      ],
+      "24": [
+        "xpath-injection"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "ssrf"
+      ],
+      "30": [
+        "ssrf"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "32": [
+        "path-traversal"
+      ],
+      "33": [
+        "sql-injection"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "40": [
+        "sql-injection"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "43": [
+        "sql-injection"
+      ],
+      "44": [
+        "xss"
+      ],
+      "46": [
+        "sql-injection"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "eval-exec"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "57": [
+        "weak-crypto"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection"
+      ],
+      "01": [
+        "sql-injection"
+      ],
+      "02": [
+        "sql-injection"
+      ],
+      "03": [
+        "sql-injection"
+      ],
+      "04": [
+        "command-injection"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "ssrf"
+      ],
+      "09": [
+        "ssrf"
+      ],
+      "bonus01": [
+        "insecure-deserialization"
+      ],
+      "bonus04": [
+        "ldap-injection"
+      ],
+      "bonus07": [
+        "sql-injection"
+      ]
+    }
+  },
+  "go": {
+    "totalCases": 67,
+    "casesWithFinding": 63,
+    "astOnlyFindingCount": 62,
+    "astOnlyByCase": {
+      "10": [
+        "open-redirect"
+      ],
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "13": [
+        "mass-assignment"
+      ],
+      "14": [
+        "mass-assignment"
+      ],
+      "15": [
+        "sql-injection"
+      ],
+      "16": [
+        "sql-injection"
+      ],
+      "17": [
+        "sql-injection"
+      ],
+      "18": [
+        "ssti"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec"
+      ],
+      "21": [
+        "nosql-injection"
+      ],
+      "22": [
+        "nosql-injection"
+      ],
+      "23": [
+        "ldap-injection"
+      ],
+      "24": [
+        "xpath-injection"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "ssrf"
+      ],
+      "30": [
+        "ssrf"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "32": [
+        "path-traversal"
+      ],
+      "33": [
+        "sql-injection"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "40": [
+        "sql-injection"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "43": [
+        "sql-injection"
+      ],
+      "44": [
+        "xss"
+      ],
+      "46": [
+        "sql-injection"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "eval-exec"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "57": [
+        "weak-crypto"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection"
+      ],
+      "01": [
+        "sql-injection"
+      ],
+      "02": [
+        "sql-injection"
+      ],
+      "03": [
+        "sql-injection"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "ssrf"
+      ],
+      "09": [
+        "ssrf"
+      ],
+      "bonus01": [
+        "insecure-deserialization"
+      ],
+      "bonus02": [
+        "command-injection"
+      ],
+      "bonus03": [
+        "path-traversal"
+      ],
+      "bonus04": [
+        "ssti"
+      ],
+      "bonus05": [
+        "sql-injection"
+      ],
+      "bonus06": [
+        "open-redirect"
+      ],
+      "bonus07": [
+        "ssrf"
+      ]
+    }
+  },
+  "csharp": {
+    "totalCases": 67,
+    "casesWithFinding": 63,
+    "astOnlyFindingCount": 62,
+    "astOnlyByCase": {
+      "10": [
+        "open-redirect"
+      ],
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "13": [
+        "mass-assignment"
+      ],
+      "14": [
+        "mass-assignment"
+      ],
+      "15": [
+        "sql-injection"
+      ],
+      "16": [
+        "sql-injection"
+      ],
+      "17": [
+        "sql-injection"
+      ],
+      "18": [
+        "ssti",
+        "xss"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec"
+      ],
+      "21": [
+        "nosql-injection"
+      ],
+      "22": [
+        "nosql-injection"
+      ],
+      "23": [
+        "ldap-injection"
+      ],
+      "24": [
+        "xpath-injection"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "ssrf"
+      ],
+      "30": [
+        "ssrf"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "32": [
+        "path-traversal"
+      ],
+      "33": [
+        "sql-injection"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "40": [
+        "sql-injection"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "43": [
+        "sql-injection"
+      ],
+      "44": [
+        "xss"
+      ],
+      "46": [
+        "sql-injection"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "eval-exec"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection"
+      ],
+      "01": [
+        "sql-injection"
+      ],
+      "02": [
+        "sql-injection"
+      ],
+      "03": [
+        "sql-injection"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "ssrf"
+      ],
+      "09": [
+        "ssrf"
+      ],
+      "bonus01": [
+        "insecure-deserialization"
+      ],
+      "bonus03": [
+        "insecure-deserialization"
+      ],
+      "bonus04": [
+        "command-injection"
+      ],
+      "bonus05": [
+        "path-traversal"
+      ],
+      "bonus06": [
+        "bola-missing-ownership-check",
+        "sql-injection"
+      ],
+      "bonus07": [
+        "xss"
+      ]
+    }
+  },
+  "php": {
+    "totalCases": 67,
+    "casesWithFinding": 60,
+    "astOnlyFindingCount": 61,
+    "astOnlyByCase": {
+      "10": [
+        "open-redirect"
+      ],
+      "11": [
+        "xss"
+      ],
+      "12": [
+        "header-injection"
+      ],
+      "13": [
+        "mass-assignment"
+      ],
+      "14": [
+        "mass-assignment"
+      ],
+      "15": [
+        "bola-missing-ownership-check",
+        "sql-injection"
+      ],
+      "16": [
+        "bola-missing-ownership-check",
+        "sql-injection"
+      ],
+      "17": [
+        "bola-missing-ownership-check",
+        "sql-injection"
+      ],
+      "18": [
+        "ssti"
+      ],
+      "19": [
+        "eval-exec"
+      ],
+      "20": [
+        "eval-exec"
+      ],
+      "21": [
+        "nosql-injection"
+      ],
+      "22": [
+        "nosql-injection"
+      ],
+      "23": [
+        "ldap-injection"
+      ],
+      "24": [
+        "xpath-injection"
+      ],
+      "26": [
+        "header-injection"
+      ],
+      "27": [
+        "xss"
+      ],
+      "28": [
+        "xss"
+      ],
+      "29": [
+        "path-traversal"
+      ],
+      "30": [
+        "path-traversal"
+      ],
+      "31": [
+        "command-injection"
+      ],
+      "33": [
+        "sql-injection"
+      ],
+      "34": [
+        "xss"
+      ],
+      "35": [
+        "xss"
+      ],
+      "36": [
+        "xss"
+      ],
+      "37": [
+        "xss"
+      ],
+      "38": [
+        "xss"
+      ],
+      "39": [
+        "xss"
+      ],
+      "40": [
+        "sql-injection"
+      ],
+      "41": [
+        "xss"
+      ],
+      "42": [
+        "xss"
+      ],
+      "44": [
+        "xss"
+      ],
+      "46": [
+        "sql-injection"
+      ],
+      "47": [
+        "redos"
+      ],
+      "48": [
+        "redos"
+      ],
+      "49": [
+        "file-inclusion",
+        "path-traversal"
+      ],
+      "50": [
+        "path-traversal"
+      ],
+      "51": [
+        "header-injection"
+      ],
+      "52": [
+        "xss"
+      ],
+      "53": [
+        "xss"
+      ],
+      "55": [
+        "mass-assignment"
+      ],
+      "56": [
+        "jwt-none-alg"
+      ],
+      "58": [
+        "timing-attack"
+      ],
+      "60": [
+        "command-injection"
+      ],
+      "01": [
+        "sql-injection"
+      ],
+      "02": [
+        "sql-injection"
+      ],
+      "03": [
+        "sql-injection"
+      ],
+      "05": [
+        "command-injection"
+      ],
+      "06": [
+        "path-traversal"
+      ],
+      "07": [
+        "path-traversal"
+      ],
+      "08": [
+        "path-traversal"
+      ],
+      "09": [
+        "ssrf"
+      ],
+      "bonus01": [
+        "insecure-deserialization"
+      ],
+      "bonus04": [
+        "file-inclusion"
+      ],
+      "bonus05": [
+        "sql-injection"
+      ],
+      "bonus06": [
+        "open-redirect"
+      ],
+      "bonus07": [
+        "xss"
+      ]
+    }
+  }
+}

@@ -1,0 +1,553 @@
+// TrustLedger HARD Go AST/Taint Benchmark - 60 cases + 7 bonus cases. BENCHMARK ONLY.
+package main
+
+import (
+	"database/sql"
+	"encoding/base64"
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"io"
+	"crypto/md5"
+	"math/rand"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"plugin"
+	"reflect"
+	"regexp"
+	"strings"
+	"text/template"
+)
+
+const baseDir = "/srv/app/uploads"
+const appSecret = "benchmark-secret"
+
+var db *sql.DB
+var savedSearches = map[string]string{}
+var comments []string
+var cache = map[string]string{}
+
+func identity(v string) string { return v }
+func decodeTwice(v string) string {
+	a, _ := url.QueryUnescape(v)
+	b, _ := url.QueryUnescape(a)
+	return b
+}
+func normalizeURL(v string) string { return "http://127.0.0.1:8080/" + v }
+func execSQL(q string) (*sql.Rows, error) { return db.Query(q) }
+func shell(cmd string) ([]byte, error) { return exec.Command("sh", "-c", cmd).Output() }
+
+// 01 SQLi helper + Sprintf + identity
+func buildUserQuery(id string) string {
+	n := strings.TrimSpace(id)
+	return fmt.Sprintf("SELECT * FROM users WHERE id = '%s'", n)
+}
+func case01(w http.ResponseWriter, r *http.Request) {
+	q := buildUserQuery(identity(r.URL.Query().Get("id")))
+	execSQL(q)
+}
+
+// 02 SQLi through map field
+func buildSearch(m map[string]string) string { return "%" + m["term"] + "%" }
+func case02(w http.ResponseWriter, r *http.Request) {
+	state := map[string]string{"term": r.URL.Query().Get("q")}
+	part := buildSearch(state)
+	db.Query("SELECT * FROM users WHERE name LIKE '" + part + "'")
+}
+
+// 03 second-order SQLi
+func case03save(w http.ResponseWriter, r *http.Request) {
+	savedSearches[r.FormValue("user")] = r.FormValue("search")
+}
+func case03run(w http.ResponseWriter, r *http.Request) {
+	stored := savedSearches[r.URL.Query().Get("user")]
+	db.Query("SELECT * FROM users WHERE name = '" + stored + "'")
+}
+
+// 04 command injection list -> join -> shell
+func buildCommand(parts []string) string { return strings.Join(parts, " ") }
+func case04(w http.ResponseWriter, r *http.Request) {
+	hosts := r.URL.Query()["host"]
+	cmd := buildCommand(append([]string{"ping", "-c", "1"}, hosts...))
+	shell(cmd)
+}
+
+// 05 command injection through struct fields
+type toolConfig struct{ Executable, Argument string }
+
+func runTool(c toolConfig) ([]byte, error) { return exec.Command(c.Executable, c.Argument).Output() }
+func case05(w http.ResponseWriter, r *http.Request) {
+	runTool(toolConfig{Executable: r.FormValue("bin"), Argument: r.FormValue("arg")})
+}
+
+// 06 double decode path traversal
+func resolveUpload(name string) string { return filepath.Join(baseDir, decodeTwice(name)) }
+func case06(w http.ResponseWriter, r *http.Request) {
+	data, _ := os.ReadFile(resolveUpload(r.URL.Query().Get("name")))
+	w.Write(data)
+}
+
+// 07 clean without containment
+func case07(w http.ResponseWriter, r *http.Request) {
+	name := strings.ReplaceAll(r.URL.Query().Get("name"), "..", "")
+	data, _ := os.ReadFile(filepath.Clean(filepath.Join(baseDir, name)))
+	w.Write(data)
+}
+
+// 08 SSRF host/port/path
+func buildTarget(host, port, path string) string { return "http://" + host + ":" + port + path }
+func case08(w http.ResponseWriter, r *http.Request) {
+	t := buildTarget(r.URL.Query().Get("host"), r.URL.Query().Get("port"), r.URL.Query().Get("path"))
+	resp, _ := http.Get(t)
+	io.Copy(w, resp.Body)
+}
+
+// 09 SSRF recursive redirects
+func fetchWithRedirects(u string, depth int) ([]byte, error) {
+	if depth > 5 {
+		return nil, fmt.Errorf("too many")
+	}
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		return fetchWithRedirects(loc, depth+1)
+	}
+	return io.ReadAll(resp.Body)
+}
+func case09(w http.ResponseWriter, r *http.Request) {
+	fetchWithRedirects(r.URL.Query().Get("url"), 0)
+}
+
+// 10 open redirect
+func case10(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, normalizeURL(r.URL.Query().Get("next")), http.StatusFound)
+}
+
+// 11 XSS through closure
+func renderLater(v string) func() string { return func() string { return v } }
+func sendToBrowser(s string) string { return s }
+func case11(w http.ResponseWriter, r *http.Request) {
+	render := renderLater(r.URL.Query().Get("html"))
+	fmt.Fprint(w, sendToBrowser(render()))
+}
+
+// 12 header injection
+func case12(w http.ResponseWriter, r *http.Request) {
+	v := r.URL.Query().Get("value")
+	w.Header().Set("Content-Disposition", "attachment; filename="+v)
+}
+
+// 13 map merge (pollution analogue)
+func deepMerge(t, s map[string]interface{}) map[string]interface{} {
+	for k, v := range s {
+		if sub, ok := v.(map[string]interface{}); ok {
+			if tsub, ok2 := t[k].(map[string]interface{}); ok2 {
+				deepMerge(tsub, sub)
+				continue
+			}
+		}
+		t[k] = v
+	}
+	return t
+}
+func case13(w http.ResponseWriter, r *http.Request) {
+	var in map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&in)
+	deepMerge(map[string]interface{}{"options": map[string]interface{}{}}, in)
+}
+
+// 14 dynamic field set via reflect
+type config struct{ Role, Debug string }
+
+func setField(c *config, name, value string) {
+	reflect.ValueOf(c).Elem().FieldByName(name).SetString(value)
+}
+func case14(w http.ResponseWriter, r *http.Request) {
+	c := &config{Role: "user"}
+	setField(c, r.FormValue("field"), r.FormValue("value"))
+}
+
+// 15 BOLA
+func getInvoice(id string) { db.Query("SELECT * FROM invoices WHERE id = '" + id + "'") }
+func case15(w http.ResponseWriter, r *http.Request) {
+	getInvoice(r.URL.Query().Get("invoiceId"))
+}
+
+// 16 repository BOLA
+type userRepo struct{ db *sql.DB }
+
+func (u *userRepo) findByID(id string) { u.db.Query("SELECT * FROM users WHERE id = '" + id + "'") }
+func case16(w http.ResponseWriter, r *http.Request) {
+	repo := &userRepo{db: db}
+	repo.findByID(r.URL.Query().Get("userId"))
+}
+
+// 17 lookup without authorization
+func getProject(id string) *sql.Rows {
+	rows, _ := db.Query("SELECT id, owner_id, name FROM projects WHERE id = '" + id + "'")
+	return rows
+}
+func case17(w http.ResponseWriter, r *http.Request) {
+	p := getProject(r.URL.Query().Get("id"))
+	json.NewEncoder(w).Encode(p)
+}
+
+// 18 SSTI
+func case18(w http.ResponseWriter, r *http.Request) {
+	t, _ := template.New("x").Parse(r.FormValue("template"))
+	t.Execute(w, map[string]string{"user": r.FormValue("user")})
+}
+
+// 19 dynamic plugin load
+func case19(w http.ResponseWriter, r *http.Request) {
+	plugin.Open(r.FormValue("plugin"))
+}
+
+// 20 reflection dispatch by name
+type handlers struct{}
+
+func (handlers) Ping(s string) {}
+func case20(w http.ResponseWriter, r *http.Request) {
+	m := reflect.ValueOf(handlers{}).MethodByName(r.FormValue("method"))
+	m.Call([]reflect.Value{reflect.ValueOf(r.FormValue("argument"))})
+}
+
+// 21 NoSQL injection
+type collection struct{}
+
+func (collection) FindOne(filter interface{}) {}
+
+var coll collection
+
+func case21(w http.ResponseWriter, r *http.Request) {
+	var body map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&body)
+	coll.FindOne(map[string]interface{}{"username": body["username"], "password": body["password"]})
+}
+
+// 22 NoSQL merge
+func case22(w http.ResponseWriter, r *http.Request) {
+	var f map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&f)
+	coll.FindOne(deepMerge(map[string]interface{}{"active": true}, f))
+}
+
+// 23 LDAP injection
+func ldapSearch(filter string) {}
+func case23(w http.ResponseWriter, r *http.Request) {
+	ldapSearch("(&(objectClass=person)(uid=" + r.URL.Query().Get("user") + "))")
+}
+
+// 24 XPath injection
+func xpathQuery(expr string) {}
+func case24(w http.ResponseWriter, r *http.Request) {
+	xpathQuery("/users/user[name/text()='" + r.URL.Query().Get("user") + "']")
+}
+
+// 25 parameter pollution
+func case25(w http.ResponseWriter, r *http.Request) {
+	role := r.URL.Query()["role"]
+	if len(role) > 0 && role[0] == "admin" {
+		w.Write([]byte("admin"))
+	}
+}
+
+// 26 CRLF header after unescape
+func case26(w http.ResponseWriter, r *http.Request) {
+	d, _ := url.QueryUnescape(r.URL.Query().Get("location"))
+	w.Header().Set("X-Next", d)
+}
+
+// 27 stored XSS
+func case27store(w http.ResponseWriter, r *http.Request) { comments = append(comments, r.FormValue("comment")) }
+func case27render(w http.ResponseWriter, r *http.Request) {
+	var b strings.Builder
+	for _, c := range comments {
+		b.WriteString("<li>" + c + "</li>")
+	}
+	fmt.Fprint(w, b.String())
+}
+
+// 28 cache poisoning / XSS
+func case28(w http.ResponseWriter, r *http.Request) {
+	key := r.Header.Get("X-Cache-Key")
+	if v, ok := cache[key]; ok {
+		fmt.Fprint(w, v)
+		return
+	}
+	body := "<h1>Hello " + r.URL.Query().Get("name") + "</h1>"
+	cache[key] = body
+	fmt.Fprint(w, body)
+}
+
+// 29 SSRF after weak host suffix check
+func case29(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	if !strings.HasSuffix(host, ".example.com") {
+		return
+	}
+	http.Get("http://" + host + "/image")
+}
+
+// 30 SSRF after protocol-only check
+func case30(w http.ResponseWriter, r *http.Request) {
+	u := r.URL.Query().Get("url")
+	if !strings.HasPrefix(u, "http:") && !strings.HasPrefix(u, "https:") {
+		return
+	}
+	http.Get(u)
+}
+
+// 31 shell injection joined
+func case31(w http.ResponseWriter, r *http.Request) {
+	exec.Command("sh", "-c", r.FormValue("program")+" "+r.FormValue("arg")).Run()
+}
+
+// 32 path traversal write
+func case32(w http.ResponseWriter, r *http.Request) {
+	os.WriteFile(filepath.Join(baseDir, r.FormValue("entry")), []byte(r.FormValue("content")), 0644)
+}
+
+// 33 auth bypass + SQL
+func case33(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("accountId")
+	rows, _ := db.Query("SELECT * FROM users WHERE id = '" + id + "'")
+	if r.URL.Query().Get("id") == r.Header.Get("X-Account-ID") {
+		json.NewEncoder(w).Encode(rows)
+	}
+}
+
+// 34 callback XSS
+func withValue(v string, cb func(string) string) string { return cb(v) }
+func case34(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, withValue(r.URL.Query().Get("q"), func(x string) string { return "<div>" + x + "</div>" }))
+}
+
+// 35 HTML escape in JS context
+func escapeHTML(v string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "'", "&#39;").Replace(v)
+}
+func case35(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "<script>const x = '%s';</script>", escapeHTML(r.URL.Query().Get("value")))
+}
+
+// 36 encode then decode
+func case36(w http.ResponseWriter, r *http.Request) {
+	enc := url.QueryEscape(r.URL.Query().Get("value"))
+	dec, _ := url.QueryUnescape(enc)
+	fmt.Fprint(w, "<div>"+dec+"</div>")
+}
+
+// 37 re-taint after sanitizer
+func sanitizeThenAppend(v, suffix string) string { return escapeHTML(v) + suffix }
+func case37(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, "<div>"+sanitizeThenAppend(r.URL.Query().Get("value"), r.URL.Query().Get("suffix"))+"</div>")
+}
+
+// 38 branch merge
+func case38(w http.ResponseWriter, r *http.Request) {
+	v := r.URL.Query().Get("value")
+	out := v
+	if r.URL.Query().Get("safe") == "1" {
+		out = escapeHTML(v)
+	}
+	fmt.Fprint(w, "<p>"+out+"</p>")
+}
+
+// 39 sanitized field mutated with fresh data
+func case39(w http.ResponseWriter, r *http.Request) {
+	obj := map[string]string{"value": escapeHTML(r.URL.Query().Get("value"))}
+	obj["value"] = obj["value"] + r.URL.Query().Get("suffix")
+	fmt.Fprint(w, "<div>"+obj["value"]+"</div>")
+}
+
+// 40 dynamic map field into SQL
+func case40(w http.ResponseWriter, r *http.Request) {
+	var m map[string]string
+	json.NewDecoder(r.Body).Decode(&m)
+	field := r.URL.Query().Get("field")
+	db.Query("SELECT * FROM records WHERE value = '" + m[field] + "'")
+}
+
+// 41 variadic propagation
+func combine(prefix string, vals ...string) string { return prefix + ":" + strings.Join(vals, ",") }
+func case41(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fmt.Fprint(w, "<div>"+combine("values", q.Get("a"), q.Get("b"), q.Get("c"))+"</div>")
+}
+
+// 42 higher-order
+func mapValue(v string, f func(string) string) string { return f(v) }
+func case42(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, mapValue(r.URL.Query().Get("value"), func(x string) string { return "<span>" + x + "</span>" }))
+}
+
+// 43 goroutine/channel propagation
+func case43(w http.ResponseWriter, r *http.Request) {
+	ch := make(chan string, 1)
+	id := r.URL.Query().Get("id")
+	go func() { ch <- "SELECT * FROM users WHERE id = '" + id + "'" }()
+	q := <-ch
+	db.Query(q)
+}
+
+// 44 callback chain
+func then(v string, cb func(string) string) string { return cb(v) }
+func case44(w http.ResponseWriter, r *http.Request) {
+	x := then(r.URL.Query().Get("value"), strings.TrimSpace)
+	fmt.Fprint(w, then(x, func(y string) string { return "<img src='" + y + "'>" }))
+}
+
+// 45 sanitizer wrapper (safe oracle)
+func case45(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "<div data-value=\"%s\"></div>", escapeHTML(r.URL.Query().Get("value")))
+}
+
+// 46 ORDER BY identifier
+func case46(w http.ResponseWriter, r *http.Request) {
+	db.Query("SELECT * FROM users ORDER BY " + r.URL.Query().Get("sort"))
+}
+
+// 47 ReDoS
+func case47(w http.ResponseWriter, r *http.Request) {
+	re := regexp.MustCompile(r.URL.Query().Get("pattern"))
+	re.MatchString(r.URL.Query().Get("value"))
+}
+
+// 48 ReDoS helper
+func compileUserRegex(p string) *regexp.Regexp { return regexp.MustCompile("(?i)" + p) }
+func case48(w http.ResponseWriter, r *http.Request) {
+	compileUserRegex(r.FormValue("pattern")).MatchString(r.FormValue("input"))
+}
+
+// 49 dynamic plugin symbol
+func case49(w http.ResponseWriter, r *http.Request) {
+	p, _ := plugin.Open("/srv/plugins/x.so")
+	p.Lookup(r.URL.Query().Get("symbol"))
+}
+
+// 50 traversal with extension
+func case50(w http.ResponseWriter, r *http.Request) {
+	data, _ := os.ReadFile(filepath.Join("/etc/myapp", r.URL.Query().Get("name")+".json"))
+	w.Write(data)
+}
+
+// 51 header after marshal/unmarshal
+func case51(w http.ResponseWriter, r *http.Request) {
+	payload, _ := json.Marshal(map[string]string{"value": r.URL.Query().Get("value")})
+	var parsed map[string]string
+	json.Unmarshal(payload, &parsed)
+	w.Header().Set("X-Value", parsed["value"])
+}
+
+// 52 multiple sources by branch
+func choose(a, b string, pick bool) string {
+	if pick {
+		return a
+	}
+	return b
+}
+func case52(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, "<span>"+choose(r.FormValue("a"), r.FormValue("b"), r.FormValue("pick") == "1")+"</span>")
+}
+
+// 53 closure capture
+func makeRenderer(v string) func() string {
+	captured := v
+	return func() string { return "<h1>" + captured + "</h1>" }
+}
+func case53(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, makeRenderer(r.URL.Query().Get("value"))())
+}
+
+// 54 client-controlled role
+func case54(w http.ResponseWriter, r *http.Request) {
+	if r.FormValue("role") == "admin" {
+		w.Write([]byte("admin"))
+	}
+}
+
+// 55 mass assignment
+type account struct {
+	Email string
+	Role  string
+	Admin bool
+}
+
+func case55(w http.ResponseWriter, r *http.Request) {
+	var a account
+	json.NewDecoder(r.Body).Decode(&a)
+}
+
+// 56 JWT decode without verification
+func case56(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), ".")
+	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims map[string]interface{}
+	json.Unmarshal(payload, &claims)
+	if claims["role"] == "admin" {
+		w.Write([]byte("privileged"))
+	}
+}
+
+// 57 weak hashing
+func case57(w http.ResponseWriter, r *http.Request) {
+	sum := md5.Sum([]byte(r.FormValue("password")))
+	fmt.Fprintf(w, "%x", sum)
+}
+
+// 58 timing-sensitive secret compare
+func case58(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("token") == appSecret {
+		w.Write([]byte("ok"))
+	}
+}
+
+// 59 weak randomness token
+func case59(w http.ResponseWriter, r *http.Request) {
+	token := fmt.Sprintf("%d", rand.Int63())
+	w.Write([]byte(token))
+}
+
+// 60 shell injection through env-like map
+func case60(w http.ResponseWriter, r *http.Request) {
+	env := map[string]string{"TOOL_ARGS": r.FormValue("value")}
+	exec.Command("sh", "-c", "echo "+env["TOOL_ARGS"]).Run()
+}
+
+// Bonus Go-specific cases
+func bonus01(w http.ResponseWriter, r *http.Request) {
+	var v interface{}
+	gob.NewDecoder(r.Body).Decode(&v)
+}
+func bonus02(w http.ResponseWriter, r *http.Request) {
+	exec.Command(r.FormValue("program"), r.FormValue("argument")).Run()
+}
+func bonus03(w http.ResponseWriter, r *http.Request) {
+	f := r.FormValue("filename")
+	os.WriteFile(filepath.Join(baseDir, f), []byte(r.FormValue("content")), 0644)
+}
+func bonus04(w http.ResponseWriter, r *http.Request) {
+	t := r.FormValue("template")
+	template.Must(template.New("t").Parse(t)).Execute(w, nil)
+}
+func bonus05(w http.ResponseWriter, r *http.Request) {
+	v := r.URL.Query().Get("value")
+	db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", v))
+}
+func bonus06(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, r.URL.Query().Get("to"), 302)
+}
+func bonus07(w http.ResponseWriter, r *http.Request) {
+	resp, _ := http.Get(r.URL.Query().Get("u"))
+	io.Copy(w, resp.Body)
+}
+
+func main() {
+	fmt.Println("TrustLedger Hard Go Benchmark")
+}

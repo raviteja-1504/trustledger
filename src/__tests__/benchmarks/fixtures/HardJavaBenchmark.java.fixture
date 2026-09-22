@@ -1,0 +1,154 @@
+/* TrustLedger HARD Java AST/Taint Benchmark - 60 cases + 7 bonus cases. BENCHMARK ONLY. */
+import java.io.*;
+import java.net.*;
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+import java.util.regex.*;
+import javax.crypto.Cipher;
+
+public class TrustLedgerHardJavaBenchmark {
+    static final String BASE_DIR="/srv/app/uploads"; static final String SECRET="benchmark-secret";
+    static Map<String,String> saved=new HashMap<>(); static List<String> comments=new ArrayList<>();
+    static Map<String,String> cache=new HashMap<>();
+    static String id(String x){return x;} static String decode2(String x)throws Exception{return URLDecoder.decode(URLDecoder.decode(x,"UTF-8"),"UTF-8");}
+    static String sql(Connection db,String q)throws Exception{return db.createStatement().executeQuery(q).toString();}
+    static String url(String x){return URI.create("http://127.0.0.1:8080/").resolve(x).toString();}
+
+    // 01 SQLi
+    static String c01(Connection db, @RequestParam String id)throws Exception{return sql(db,"SELECT * FROM users WHERE id='"+id(id)+"'");}
+    // 02 nested-field SQLi
+    static String c02(Connection db, @RequestParam String term)throws Exception{Map<String,String> o=new HashMap<>();o.put("term",term);return sql(db,"SELECT * FROM users WHERE name LIKE '%"+o.get("term")+"%'");}
+    // 03 second-order SQLi
+    static void c03save( @RequestParam String user, @RequestParam String search){saved.put(user,search);} static String c03(Connection db, @RequestParam String user)throws Exception{return sql(db,"SELECT * FROM users WHERE name='"+saved.get(user)+"'");}
+    // 04 command injection
+    static String c04( @RequestParam String host)throws Exception{return new String(Runtime.getRuntime().exec("ping -c 1 "+host).getInputStream().readAllBytes());}
+    // 05 ProcessBuilder command injection
+    static String c05( @RequestParam String exe, @RequestParam String arg)throws Exception{return new String(new ProcessBuilder(exe,arg).start().getInputStream().readAllBytes());}
+    // 06 double-decode path traversal
+    static String c06( @RequestParam String name)throws Exception{return Files.readString(Path.of(BASE_DIR,decode2(name)));}
+    // 07 normalize without containment
+    static String c07( @RequestParam String name)throws Exception{return Files.readString(Path.of(BASE_DIR,name).toAbsolutePath().normalize());}
+    // 08 SSRF host/port/path
+    static String c08( @RequestParam String host, @RequestParam String port, @RequestParam String path)throws Exception{return new URL("http",host,Integer.parseInt(port),path).openStream().readAllBytes().toString();}
+    // 09 SSRF recursive redirects
+    static String c09( @RequestParam String u)throws Exception{return c09r(u,0);} static String c09r( @RequestParam String u,int d)throws Exception{if(d>5)throw new IllegalArgumentException();HttpURLConnection c=(HttpURLConnection)new URL(u).openConnection();c.setInstanceFollowRedirects(false);String l=c.getHeaderField("Location");return l!=null?c09r(l,d+1):new String(c.getInputStream().readAllBytes());}
+    // 10 open redirect
+    static String c10( @RequestParam String next){return url(next);}
+    // 11 XSS closure
+    static String c11( @RequestParam String v){final String x=v; return ()->"<div>"+x+"</div>".get();}
+    interface SupplierLike{String get();}
+    // 12 header injection
+    static Map<String,String> c12( @RequestParam String v){Map<String,String> h=new HashMap<>();h.put("Content-Disposition","attachment; filename="+v);return h;}
+    // 13 recursive object/map pollution analogue
+    static void merge(Map<String,Object> t,Map<String,Object>s){for(var e:s.entrySet()){if(e.getValue() instanceof Map && t.get(e.getKey()) instanceof Map)merge((Map)t.get(e.getKey()),(Map)e.getValue());else t.put(e.getKey(),e.getValue());}}
+    static Map<String,Object> c13( @RequestParam Map<String,Object>a){Map<String,Object>t=new HashMap<>();t.put("options",new HashMap<>());merge(t,a);return t;}
+    // 14 dynamic property
+    static class Config{public String role="user";public String debug="false";}
+    static Config c14(Config c, @RequestParam String field, @RequestParam String value)throws Exception{c.getClass().getField(field).set(c,value);return c;}
+    // 15 BOLA
+    static String c15(Connection db, @RequestParam String id)throws Exception{return sql(db,"SELECT * FROM invoices WHERE id='"+id+"'");}
+    // 16 repository BOLA
+    static class Repo{Connection db;Repo(Connection d){db=d;}String find(String id)throws Exception{return sql(db,"SELECT * FROM users WHERE id='"+id+"'");}}
+    static String c16(Repo r, @RequestParam String id)throws Exception{return r.find(id);}
+    // 17 lookup without auth
+    static String c17(Connection db, @RequestParam String id)throws Exception{String p=sql(db,"SELECT * FROM projects WHERE id='"+id+"'");return "export="+p;}
+    // 18 SSTI-like template
+    static String c18( @RequestParam String template, @RequestParam String user){return template.replace("${user}",user);}
+    // 19 eval
+    static Object c19(javax.script.ScriptEngine e, @RequestParam String expression)throws Exception{return e.eval(expression);}
+    // 20 dynamic reflection
+    static Object c20( @RequestParam String cls, @RequestParam String method, @RequestParam String value)throws Exception{return Class.forName(cls).getMethod(method,String.class).invoke(Class.forName(cls).getDeclaredConstructor().newInstance(),value);}
+    // 21 NoSQLi
+    static Map<String,Object> c21( @RequestParam String u, @RequestParam String p){Map<String,Object>m=new HashMap<>();m.put("username",u);m.put("password",p);return m;}
+    // 22 NoSQLi merge
+    static Map<String,Object> c22( @RequestParam Map<String,Object>a){Map<String,Object>m=new HashMap<>();m.put("active",true);merge(m,a);return m;}
+    // 23 LDAPi
+    static String c23( @RequestParam String u){return "(&(objectClass=person)(uid="+u+"))";}
+    // 24 XPathi
+    static String c24( @RequestParam String u){return "/users/user[name/text()='"+u+"']";}
+    // 25 parameter pollution
+    static boolean c25( @RequestParam String[] role, @RequestParam String[] action){return role.length>0&&action.length>0&&"admin".equals(role[0])&&"delete".equals(action[0]);}
+    // 26 CRLF/header after decode
+    static Map<String,String> c26( @RequestParam String x)throws Exception{Map<String,String>h=new HashMap<>();h.put("X-Next",URLDecoder.decode(x,"UTF-8"));return h;}
+    // 27 stored XSS
+    static void c27save( @RequestParam String x){comments.add(x);} static String c27(){StringBuilder b=new StringBuilder();for(String x:comments)b.append("<li>").append(x).append("</li>");return b.toString();}
+    // 28 cache poisoning/XSS
+    static String c28( @RequestParam String key, @RequestParam String name){if(cache.containsKey(key))return cache.get(key);String b="<h1>Hello "+name+"</h1>";cache.put(key,b);return b;}
+    // 29 weak hostname SSRF
+    static String c29( @RequestParam String host)throws Exception{if(!host.endsWith(".example.com"))return "blocked";return new URL("http://"+host+"/internal").openStream().readAllBytes().toString();}
+    // 30 protocol-only SSRF
+    static String c30( @RequestParam String u)throws Exception{if(!(u.startsWith("http:")||u.startsWith("https:")))return "blocked";return new URL(u).openStream().readAllBytes().toString();}
+    // 31 shell injection
+    static String c31( @RequestParam String program, @RequestParam String arg)throws Exception{return new String(Runtime.getRuntime().exec(new String[]{"sh","-c",program+" "+arg}).getInputStream().readAllBytes());}
+    // 32 traversal write
+    static String c32( @RequestParam String name, @RequestParam String content)throws Exception{Path p=Path.of(BASE_DIR,name);Files.writeString(p,content);return p.toString();}
+    // 33 auth bypass + SQL
+    static String c33(Connection db, @RequestParam String id, @RequestParam String auth)throws Exception{if(id.equals(auth))return sql(db,"SELECT * FROM users WHERE id='"+id+"'");return "denied";}
+    // 34 callback XSS
+    static String c34( @RequestParam String v){FunctionLike f=x->"<div>"+x+"</div>";return f.apply(v);} interface FunctionLike{String apply(String x);}
+    // 35 HTML sanitizer in JS context
+    static String enc(String x){return x.replace("<","&lt;").replace(">","&gt;").replace("'","&#39;");} static String c35( @RequestParam String v){return "<script>let x='"+enc(v)+"';</script>";}
+    // 36 encode/decode
+    static String c36( @RequestParam String v)throws Exception{return "<div>"+URLDecoder.decode(URLEncoder.encode(v,"UTF-8"),"UTF-8")+"</div>";}
+    // 37 re-taint after sanitizer
+    static String c37( @RequestParam String v, @RequestParam String suffix){return "<div>"+enc(v)+suffix+"</div>";}
+    // 38 branch merge
+    static String c38( @RequestParam String v,boolean safe){String x=safe?enc(v):v;return "<p>"+x+"</p>";}
+    // 39 sanitized field mutation
+    static String c39( @RequestParam String v, @RequestParam String suffix){Map<String,String>m=new HashMap<>();m.put("value",enc(v));m.put("value",m.get("value")+suffix);return "<div>"+m.get("value")+"</div>";}
+    // 40 dynamic map field SQL
+    static String c40(Connection db, @RequestParam Map<String,String>m, @RequestParam String field)throws Exception{return sql(db,"SELECT * FROM records WHERE value='"+m.get(field)+"'");}
+    // 41 varargs propagation
+    static String combine(String p,String...v){return p+":"+String.join(",",v);} static String c41( @RequestParam String a, @RequestParam String b, @RequestParam String c){return "<div>"+combine("values",a,b,c)+"</div>";}
+    // 42 higher-order
+    static String c42( @RequestParam String v){return map(v,x->"<span>"+x+"</span>");} static String map(String v,FunctionLike f){return f.apply(v);}
+    // 43 CompletableFuture propagation
+    static String c43(Connection db, @RequestParam String id)throws Exception{String q=java.util.concurrent.CompletableFuture.supplyAsync(()->"SELECT * FROM users WHERE id='"+id+"'").get();return sql(db,q);}
+    // 44 callback chain
+    static String c44( @RequestParam String v){String x=map(v,String::trim);return map(x,y->"<img src='"+y+"'>");}
+    // 45 sanitizer wrapper (safe oracle)
+    static String c45( @RequestParam String v){return "<div data-value=\""+enc(v)+"\"></div>";}
+    // 46 SQL identifier injection
+    static String c46(Connection db, @RequestParam String col)throws Exception{return sql(db,"SELECT * FROM users ORDER BY "+col);}
+    // 47 ReDoS
+    static boolean c47( @RequestParam String pattern, @RequestParam String input){return Pattern.compile(pattern).matcher(input).find();}
+    // 48 ReDoS helper
+    static Pattern compileRegex(String p){return Pattern.compile(p,Pattern.CASE_INSENSITIVE);} static boolean c48( @RequestParam String p, @RequestParam String x){return compileRegex(p).matcher(x).find();}
+    // 49 dynamic class loading
+    static Class<?> c49( @RequestParam String name)throws Exception{return Class.forName(name);}
+    // 50 traversal with extension
+    static String c50( @RequestParam String name)throws Exception{return Files.readString(Path.of("/etc/myapp",name+".json").toAbsolutePath());}
+    // 51 header after serialize/restore analogue
+    static String c51( @RequestParam String v){Map<String,String>m=new HashMap<>();m.put("value",v);String restored=m.get("value");Map<String,String>h=new HashMap<>();h.put("X-Value",restored);return h.toString();}
+    // 52 multiple sources branch
+    static String c52( @RequestParam String a, @RequestParam String b,boolean pick){return "<span>"+(pick?a:b)+"</span>";}
+    // 53 closure capture
+    static String c53( @RequestParam String v){final String captured=v;FunctionLike f=x->"<h1>"+captured+"</h1>";return f.apply("");}
+    // 54 client-controlled role (safe oracle: authorization logic alone)
+    static boolean c54( @RequestParam String role){return "admin".equals(role);}
+    // 55 mass assignment
+    static class Account{public String email="";public String role="user";public boolean admin=false;}
+    static Account c55(Account a, @RequestParam Map<String,String>fields)throws Exception{for(var e:fields.entrySet()){try{var f=a.getClass().getField(e.getKey());if(f.getType()==boolean.class)f.setBoolean(a,Boolean.parseBoolean(e.getValue()));else f.set(a,e.getValue());}catch(NoSuchFieldException ignored){}}return a;}
+    // 56 JWT decode without signature verification
+    static String c56( @RequestParam String token){String[]p=token.split("\\.");if(p.length!=3)return "invalid";String payload=new String(Base64.getUrlDecoder().decode(p[1]));return payload.contains("\"role\":\"admin\"")?"privileged":"user";}
+    // 57 weak crypto
+    static String c57( @RequestParam String password)throws Exception{var md=java.security.MessageDigest.getInstance("MD5");return HexFormat.of().formatHex(md.digest(password.getBytes()));}
+    // 58 timing attack
+    static boolean c58( @RequestParam String supplied){return supplied.equals(SECRET);}
+    // 59 insecure randomness
+    static String c59(){return Long.toHexString(new Random().nextLong());}
+    // 60 shell injection via env-like object
+    static String c60( @RequestParam String v)throws Exception{Map<String,String>env=new HashMap<>();env.put("TOOL_ARGS",v);return new String(Runtime.getRuntime().exec(new String[]{"sh","-c","echo "+env.get("TOOL_ARGS")}).getInputStream().readAllBytes());}
+
+    // Bonus Java-specific cases
+    static Object bonus01( @RequestParam byte[] data)throws Exception{return new ObjectInputStream(new ByteArrayInputStream(data)).readObject();}
+    static javax.xml.parsers.DocumentBuilder bonus02()throws Exception{var f=javax.xml.parsers.DocumentBuilderFactory.newInstance();f.setFeature("http://xml.org/sax/features/external-general-entities",true);return f.newDocumentBuilder();}
+    static javax.xml.parsers.DocumentBuilder bonus03()throws Exception{var f=javax.xml.parsers.DocumentBuilderFactory.newInstance();f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd",true);return f.newDocumentBuilder();}
+    static String bonus04( @RequestParam String host, @RequestParam String user){return "ldap://"+host+"/dc=example,dc=com?uid="+user;}
+    static Cipher bonus05()throws Exception{return Cipher.getInstance("DES/ECB/PKCS5Padding");}
+    static String bonus06(){String password="HardcodedPassword123!";return password;}
+    static String bonus07( @RequestParam String id){return String.format("SELECT * FROM users WHERE id='%s'",id);}
+
+    public static void main(String[]args){System.out.println("TrustLedger Hard Java Benchmark: 60 cases + 7 bonus cases");}
+}

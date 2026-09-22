@@ -1,0 +1,619 @@
+/**
+ * TrustLedger HARD TypeScript SAST Benchmark
+ * 60 intentionally vulnerable patterns for AST/taint gap analysis.
+ * BENCHMARK ONLY — DO NOT DEPLOY.
+ */
+
+import express, { Request, Response } from "express";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as childProcess from "node:child_process";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as crypto from "node:crypto";
+
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+const db: any = {
+  query: async (_q: string) => ({ rows: [] }),
+  execute: async (_q: string, _p?: unknown[]) => ({ rows: [] }),
+};
+
+const mongo: any = { find: async (_f: unknown) => [] };
+const SECRET = process.env.APP_SECRET ?? "benchmark-secret";
+const BASE_UPLOAD = "/srv/app/uploads";
+const INTERNAL_HOST = "http://127.0.0.1:8080";
+
+/* Helpers deliberately obscure the source-to-sink relationship. */
+
+function identity<T>(x: T): T { return x; }
+function wrap<T>(x: T): { value: T } { return { value: x }; }
+function unwrap<T>(x: { value: T }): T { return x.value; }
+function delayed<T>(x: T): () => T { return () => x; }
+
+function choose<T>(a: T, b: T, flag: boolean): T {
+  return flag ? a : b;
+}
+
+function decodeTwice(value: string): string {
+  return decodeURIComponent(decodeURIComponent(value));
+}
+
+function normalizeUrl(input: string): string {
+  return new URL(input, INTERNAL_HOST).toString();
+}
+
+/* 01 SQL injection: helper + template + generic identity. */
+function buildUserQuery(id: string): string {
+  const normalized = String(id).trim();
+  return `SELECT * FROM users WHERE id = '${normalized}'`;
+}
+app.get("/01/users", async (req: Request, res: Response) => {
+  const query = buildUserQuery(identity(String(req.query.id)));
+  res.json((await db.query(query)).rows);
+});
+
+/* 02 SQL injection through nested object property. */
+function buildSearchFilter(input: { term: string }) {
+  const filter = { where: { expression: `%${input.term}%` } };
+  return filter.where.expression;
+}
+app.get("/02/search", async (req: Request, res: Response) => {
+  const state = wrap({ term: String(req.query.q ?? "") });
+  const sqlPart = buildSearchFilter(unwrap(state));
+  res.json(await db.query(`SELECT * FROM products WHERE name LIKE '${sqlPart}'`));
+});
+
+/* 03 Second-order SQL injection. */
+const savedSearches = new Map<string, string>();
+app.post("/03/save-search", (req: Request, res: Response) => {
+  savedSearches.set(String(req.body.user), String(req.body.search));
+  res.json({ ok: true });
+});
+async function executeSavedSearch(user: string) {
+  const stored = savedSearches.get(user) ?? "";
+  return db.query(`SELECT * FROM audit WHERE query_text = '${stored}'`);
+}
+app.get("/03/run-search", async (req: Request, res: Response) => {
+  res.json(await executeSavedSearch(String(req.query.user)));
+});
+
+/* 04 Command injection through array -> join -> shell execution. */
+function buildCommand(parts: string[]): string {
+  return parts.map(identity).join(" ");
+}
+app.post("/04/ping", (req: Request, res: Response) => {
+  const hosts = Array.isArray(req.body.hosts)
+    ? req.body.hosts.map(String)
+    : [String(req.body.host)];
+  const command = buildCommand(["ping", "-c", "1", ...hosts]);
+  res.type("text").send(childProcess.execSync(command).toString());
+});
+
+/* 05 Command injection through object fields into execFileSync. */
+function runTool(config: { executable: string; argument: string }) {
+  return childProcess.execFileSync(config.executable, [config.argument]).toString();
+}
+app.post("/05/tool", (req: Request, res: Response) => {
+  res.send(runTool({
+    executable: String(req.body.bin),
+    argument: String(req.body.arg),
+  }));
+});
+
+/* 06 Path traversal through double decoding + resolve. */
+function resolveUpload(name: string): string {
+  return path.resolve(BASE_UPLOAD, decodeTwice(name));
+}
+app.get("/06/file", (req: Request, res: Response) => {
+  res.sendFile(resolveUpload(String(req.query.name)));
+});
+
+/* 07 Fake sanitization: removing '..' is not containment validation. */
+function fakeSafeFilename(name: string): string {
+  return name.replaceAll("..", "");
+}
+app.get("/07/file", (req: Request, res: Response) => {
+  res.sendFile(path.join(BASE_UPLOAD, fakeSafeFilename(String(req.query.name))));
+});
+
+/* 08 SSRF: attacker controls hostname, port and path through URL object. */
+function buildTarget(host: string, port: string, route: string): string {
+  const u = new URL("http://example.invalid");
+  u.protocol = "http:";
+  u.hostname = host;
+  u.port = port;
+  u.pathname = route;
+  return u.toString();
+}
+app.get("/08/proxy", async (req: Request, res: Response) => {
+  const target = buildTarget(String(req.query.host), String(req.query.port), String(req.query.path));
+  await new Promise<void>((resolve, reject) => {
+    http.get(target, r => {
+      let body = "";
+      r.on("data", c => body += c);
+      r.on("end", () => { res.send(body); resolve(); });
+    }).on("error", reject);
+  });
+});
+
+/* 09 SSRF: validates only first URL; redirects are not revalidated. */
+async function fetchWithRedirects(url: string, depth = 0): Promise<string> {
+  if (depth > 5) throw new Error("too many redirects");
+  const parsed = new URL(url);
+  if (!parsed.protocol.startsWith("http")) throw new Error("bad protocol");
+  return new Promise((resolve, reject) => {
+    https.get(url, r => {
+      const location = r.headers.location;
+      if (location) {
+        fetchWithRedirects(location, depth + 1).then(resolve, reject);
+        return;
+      }
+      let data = "";
+      r.on("data", x => data += x);
+      r.on("end", () => resolve(data));
+    }).on("error", reject);
+  });
+}
+app.get("/09/fetch", async (req: Request, res: Response) => {
+  res.send(await fetchWithRedirects(String(req.query.url)));
+});
+
+/* 10 Open redirect through URL normalization that does not enforce allowlists. */
+app.get("/10/redirect", (req: Request, res: Response) => {
+  res.redirect(normalizeUrl(String(req.query.next)));
+});
+
+/* 11 XSS through alias + closure. */
+function renderLater(input: string): () => string {
+  return delayed(unwrap(wrap(input)));
+}
+function sendToBrowser(html: string) { return html; }
+app.get("/11/html", (req: Request, res: Response) => {
+  res.type("html").send(sendToBrowser(renderLater(String(req.query.html))()));
+});
+
+/* 12 Header injection through array join. */
+app.get("/12/header", (req: Request, res: Response) => {
+  const headerValue = ["attachment; filename=", String(req.query.value)].join("");
+  res.setHeader("Content-Disposition", headerValue);
+  res.end("ok");
+});
+
+/* 13 Prototype pollution through recursive merge. */
+function deepMerge(target: Record<string, any>, source: Record<string, any>) {
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (!target[key]) target[key] = {};
+      deepMerge(target[key], value);
+    } else {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+app.post("/13/config", (req: Request, res: Response) => {
+  res.json(deepMerge({ featureFlags: {}, options: {} }, req.body));
+});
+
+/* 14 Prototype pollution through dynamic dotted path. */
+function setPath(obj: any, dottedPath: string, value: unknown) {
+  const parts = dottedPath.split(".");
+  let cursor = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cursor[parts[i]] ??= {};
+    cursor = cursor[parts[i]];
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+app.post("/14/set", (req: Request, res: Response) => {
+  const target: Record<string, unknown> = {};
+  setPath(target, String(req.body.path), req.body.value);
+  res.json(target);
+});
+
+/* 15 BOLA: authenticated route but no object ownership check. */
+async function getInvoice(invoiceId: string) {
+  return db.query(`SELECT * FROM invoices WHERE id = '${invoiceId}'`);
+}
+app.get("/15/invoices/:invoiceId", async (req: Request, res: Response) => {
+  res.json((await getInvoice(String(req.params.invoiceId))).rows);
+});
+
+/* 16 BOLA hidden behind repository abstraction. */
+class UserRepository {
+  async findById(id: string) {
+    return db.query(`SELECT * FROM users WHERE id = '${id}'`);
+  }
+}
+const users = new UserRepository();
+app.get("/16/users/:userId", async (req: Request, res: Response) => {
+  res.json((await users.findById(String(req.params.userId))).rows);
+});
+
+/* 17 Missing authorization after indirect resource lookup. */
+async function getProject(projectId: string) {
+  const result = await db.query(
+    `SELECT id, owner_id, name FROM projects WHERE id = '${projectId}'`,
+  );
+  return result.rows[0];
+}
+app.get("/17/projects/:id/export", async (req: Request, res: Response) => {
+  const project = await getProject(String(req.params.id));
+  res.json({ export: true, project });
+});
+
+/* 18 SSTI/dynamic compilation. */
+function compileTemplate(source: string, context: Record<string, unknown>) {
+  const body = `"use strict"; return \`${source}\`;`;
+  const fn = new Function("context", body);
+  return fn(context);
+}
+app.post("/18/template", (req: Request, res: Response) => {
+  res.send(compileTemplate(String(req.body.template), { user: req.body.user }));
+});
+
+/* 19 Eval hidden behind alias. */
+const dynamicRunner = eval;
+app.post("/19/eval", (req: Request, res: Response) => {
+  res.send(String(dynamicRunner(String(req.body.expression))));
+});
+
+/* 20 Dynamic global function lookup after attacker-controlled JSON. */
+function decodeState(encoded: string): any {
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+}
+app.post("/20/state", (req: Request, res: Response) => {
+  const state = decodeState(String(req.body.state));
+  const fn = (globalThis as any)[String(state.method)];
+  if (typeof fn === "function") res.send(String(fn(state.argument)));
+  else res.status(400).send("invalid");
+});
+
+/* 21 NoSQL injection: attacker can submit operator-shaped values. */
+app.post("/21/users", async (req: Request, res: Response) => {
+  const filter = { username: req.body.username, password: req.body.password };
+  res.json(await mongo.find(filter));
+});
+
+/* 22 NoSQL injection through attacker-controlled filter merge. */
+function makeFilter(userFilter: Record<string, unknown>) {
+  return deepMerge({ active: true, role: "user" }, userFilter);
+}
+app.post("/22/filter", async (req: Request, res: Response) => {
+  res.json(await mongo.find(makeFilter(req.body.filter)));
+});
+
+/* 23 LDAP injection through helper + template. */
+function buildLdapFilter(username: string): string {
+  return `(&(objectClass=person)(uid=${identity(username)}))`;
+}
+function ldapSearch(filter: string) { return filter; }
+app.get("/23/ldap", (req: Request, res: Response) => {
+  res.send(ldapSearch(buildLdapFilter(String(req.query.user))));
+});
+
+/* 24 XPath injection. */
+function xpathForUser(user: string) {
+  return `/users/user[name/text()='${user}']`;
+}
+function selectXPath(expression: string) { return expression; }
+app.get("/24/xpath", (req: Request, res: Response) => {
+  res.send(selectXPath(xpathForUser(String(req.query.user))));
+});
+
+/* 25 HTTP parameter pollution / inconsistent parameter interpretation. */
+function first(value: string | string[]): string {
+  return Array.isArray(value) ? value[0] : value;
+}
+app.get("/25/admin", (req: Request, res: Response) => {
+  const role = first(String(req.query.role ?? ""));
+  const action = first(String(req.query.action ?? ""));
+  if (role === "admin" && action === "delete") res.send("admin operation");
+  else res.status(403).send("denied");
+});
+
+/* 26 CRLF/header injection after URL decoding. */
+app.get("/26/location", (req: Request, res: Response) => {
+  res.setHeader("X-Next", decodeURIComponent(String(req.query.location)));
+  res.end("ok");
+});
+
+/* 27 Stored XSS: persistence breaks direct source-to-sink flow. */
+const comments: string[] = [];
+app.post("/27/comment", (req: Request, res: Response) => {
+  comments.push(String(req.body.comment));
+  res.json({ ok: true });
+});
+app.get("/27/comments", (_req: Request, res: Response) => {
+  res.type("html").send(`<ul>${comments.map(c => `<li>${c}</li>`).join("")}</ul>`);
+});
+
+/* 28 Cache poisoning / attacker-controlled cache key and response. */
+const responseCache = new Map<string, string>();
+app.get("/28/cache", async (req: Request, res: Response) => {
+  const cacheKey = String(req.headers["x-cache-key"] ?? "default");
+  if (responseCache.has(cacheKey)) {
+    res.send(responseCache.get(cacheKey));
+    return;
+  }
+  const body = `<h1>Hello ${String(req.query.name)}</h1>`;
+  responseCache.set(cacheKey, body);
+  res.send(body);
+});
+
+/* 29 SSRF: hostname suffix check separated from actual network use. */
+function isAllowedHostname(host: string) { return host.endsWith(".example.com"); }
+app.get("/29/image", async (req: Request, res: Response) => {
+  const host = String(req.query.host);
+  if (!isAllowedHostname(host)) return res.status(400).send("bad host");
+  const response = await fetch(`http://${host}/image`);
+  res.send(await response.text());
+});
+
+/* 30 SSRF: superficial protocol validation only. */
+function allowedProtocol(url: string) { return /^https?:/i.test(url); }
+app.get("/30/url", async (req: Request, res: Response) => {
+  const url = String(req.query.url);
+  if (!allowedProtocol(url)) return res.status(400).send("protocol");
+  const target = new URL(url).toString();
+  res.send(await (await fetch(target)).text());
+});
+
+/* 31 Shell injection through array join. */
+function shellCommand(program: string, args: string[]) {
+  return [program, ...args].map(String).join(" ");
+}
+app.post("/31/shell", (req: Request, res: Response) => {
+  const cmd = shellCommand(
+    String(req.body.program),
+    Array.isArray(req.body.args) ? req.body.args : [String(req.body.args)],
+  );
+  childProcess.exec(cmd).stdout?.pipe(res);
+});
+
+/* 32 Archive/path extraction style traversal. */
+function extractEntry(base: string, entryName: string) {
+  return path.join(base, entryName);
+}
+app.post("/32/extract", (req: Request, res: Response) => {
+  const destination = extractEntry(BASE_UPLOAD, String(req.body.entry));
+  fs.writeFileSync(destination, String(req.body.content));
+  res.json({ destination });
+});
+
+/* 33 Authorization bypass: check one identifier, retrieve another. */
+app.get("/33/account", async (req: Request, res: Response) => {
+  const id = String(req.query.accountId ?? req.query.id ?? "");
+  const account = await db.query(`SELECT * FROM accounts WHERE id = '${id}'`);
+  if (String(req.query.id) === String(req.headers["x-account-id"])) {
+    return res.json(account.rows);
+  }
+  res.status(403).send("denied");
+});
+
+/* 34 Taint hidden inside callback. */
+function withValue<T>(value: T, callback: (x: T) => T): T {
+  return callback(value);
+}
+app.get("/34/callback", (req: Request, res: Response) => {
+  const value = withValue(String(req.query.q), x => `${x}`);
+  res.send(value);
+});
+
+/* 35 Context confusion: HTML escaping used inside JavaScript string. */
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+app.get("/35/script", (req: Request, res: Response) => {
+  const value = escapeHtml(String(req.query.value));
+  res.type("html").send(`<script>const x = '${value}';</script>`);
+});
+
+/* 36 Encode then decode: sanitizer result is re-tainted by decoding. */
+app.get("/36/decode", (req: Request, res: Response) => {
+  const encoded = encodeURIComponent(String(req.query.value));
+  const decoded = decodeURIComponent(encoded);
+  res.type("html").send(`<div>${decoded}</div>`);
+});
+
+/* 37 Re-taint after sanitization. */
+function sanitizeThenAppend(value: string, suffix: string) {
+  return escapeHtml(value) + suffix;
+}
+app.get("/37/retaint", (req: Request, res: Response) => {
+  res.type("html").send(`<div>${sanitizeThenAppend(
+    String(req.query.value), String(req.query.suffix),
+  )}</div>`);
+});
+
+/* 38 Branch merge: one safe path, one raw path. */
+app.get("/38/branch", (req: Request, res: Response) => {
+  const value = String(req.query.value);
+  const output = req.query.safe === "1" ? escapeHtml(value) : value;
+  res.type("html").send(`<p>${output}</p>`);
+});
+
+/* 39 Sanitized field is later mutated with a new tainted value. */
+app.get("/39/mutation", (req: Request, res: Response) => {
+  const obj = { value: escapeHtml(String(req.query.value)) };
+  obj.value = obj.value + String(req.query.suffix);
+  res.type("html").send(`<div>${obj.value}</div>`);
+});
+
+/* 40 Dynamic property access. */
+app.get("/40/dynamic-property", async (req: Request, res: Response) => {
+  const field = String(req.query.field);
+  const value = (req.body as any)[field];
+  res.json(await db.query(`SELECT * FROM records WHERE value = '${value}'`));
+});
+
+/* 41 Rest-parameter propagation. */
+function combine(prefix: string, ...values: string[]) {
+  return `${prefix}:${values.join(",")}`;
+}
+app.get("/41/rest", (req: Request, res: Response) => {
+  res.send(combine("values", String(req.query.a), String(req.query.b), String(req.query.c)));
+});
+
+/* 42 Higher-order function propagation. */
+function mapValue<T, U>(value: T, fn: (x: T) => U): U { return fn(value); }
+app.get("/42/hof", (req: Request, res: Response) => {
+  const result = mapValue(String(req.query.value), x => `<div>${x}</div>`);
+  res.type("html").send(result);
+});
+
+/* 43 Async return propagation. */
+async function makeSql(id: string): Promise<string> {
+  return `SELECT * FROM orders WHERE id = '${id}'`;
+}
+app.get("/43/async", async (req: Request, res: Response) => {
+  const query = await makeSql(String(req.query.id));
+  res.json(await db.query(query));
+});
+
+/* 44 Promise-chain propagation. */
+app.get("/44/promise", async (req: Request, res: Response) => {
+  const result = await Promise.resolve(String(req.query.value))
+    .then(x => x.trim())
+    .then(x => `<img src="${x}">`);
+  res.type("html").send(result);
+});
+
+/* 45 Cross-function sanitizer wrapper. */
+function sanitizeForHtml(value: string) { return escapeHtml(value); }
+function buildHtml(value: string) {
+  return `<div data-value="${sanitizeForHtml(value)}"></div>`;
+}
+app.get("/45/context", (req: Request, res: Response) => {
+  res.type("html").send(buildHtml(String(req.query.value)));
+});
+
+/* 46 SQL identifier injection: ORDER BY cannot be safely parameterized as a value. */
+function orderBy(column: string) { return `SELECT * FROM users ORDER BY ${column}`; }
+app.get("/46/order", async (req: Request, res: Response) => {
+  res.json(await db.query(orderBy(String(req.query.sort))));
+});
+
+/* 47 User-controlled regular expression. */
+app.get("/47/regex", (req: Request, res: Response) => {
+  const re = new RegExp(String(req.query.pattern));
+  res.json({ matched: re.test(String(req.query.value)) });
+});
+
+/* 48 ReDoS hidden behind helper. */
+function compileUserRegex(pattern: string) { return new RegExp(pattern, "i"); }
+app.post("/48/redos", (req: Request, res: Response) => {
+  const regex = compileUserRegex(String(req.body.pattern));
+  res.json({ result: regex.test(String(req.body.input)) });
+});
+
+/* 49 Dynamic module loading. */
+app.get("/49/load", async (req: Request, res: Response) => {
+  const loaded = await import(String(req.query.module));
+  res.json(Object.keys(loaded));
+});
+
+/* 50 Path traversal through extension-appending helper. */
+function readConfig(name: string) {
+  return fs.readFileSync(path.resolve("/etc/myapp", `${name}.json`), "utf8");
+}
+app.get("/50/config", (req: Request, res: Response) => {
+  res.type("json").send(readConfig(String(req.query.name)));
+});
+
+/* 51 Header sink after JSON serialize/parse: useful for semantic alias tracking. */
+app.get("/51/header-json", (req: Request, res: Response) => {
+  const payload = JSON.stringify({ value: String(req.query.value) });
+  const parsed = JSON.parse(payload);
+  res.setHeader("X-Value", parsed.value);
+  res.end("ok");
+});
+
+/* 52 Multiple sources merged into a single sink. */
+app.post("/52/multi", (req: Request, res: Response) => {
+  const input = choose(
+    String(req.body.a), String(req.body.b), Boolean(req.body.pick),
+  );
+  res.type("html").send(`<span>${input}</span>`);
+});
+
+/* 53 Closure capture. */
+function makeRenderer(value: string) {
+  const captured = value;
+  return () => `<h1>${captured}</h1>`;
+}
+app.get("/53/closure", (req: Request, res: Response) => {
+  res.type("html").send(makeRenderer(String(req.query.value))());
+});
+
+/* 54 Authorization trusts a client-controlled role. */
+app.post("/54/role", (req: Request, res: Response) => {
+  if (String(req.body.role) === "admin") {
+    res.json({ admin: true });
+    return;
+  }
+  res.status(403).send("forbidden");
+});
+
+/* 55 Mass assignment. */
+class Account {
+  id = "";
+  email = "";
+  role = "user";
+  isAdmin = false;
+}
+app.post("/55/account", (req: Request, res: Response) => {
+  res.json(Object.assign(new Account(), req.body));
+});
+
+/* 56 JWT trust without signature verification. */
+function decodeJwt(token: string): any {
+  const [, payload] = token.split(".");
+  return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+}
+app.get("/56/jwt", (req: Request, res: Response) => {
+  const token = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  const claims = decodeJwt(token);
+  if (claims.role === "admin") res.json({ privileged: true });
+  else res.status(403).send("forbidden");
+});
+
+/* 57 Weak password hashing. */
+app.post("/57/hash", (req: Request, res: Response) => {
+  const digest = crypto.createHash("md5").update(String(req.body.password)).digest("hex");
+  res.json({ digest });
+});
+
+/* 58 Secret comparison using ordinary equality. */
+app.get("/58/token", (req: Request, res: Response) => {
+  if (String(req.query.token) === SECRET) res.send("ok");
+  else res.status(401).send("no");
+});
+
+/* 59 Weak random token generation. */
+app.get("/59/token", (_req: Request, res: Response) => {
+  res.json({ token: Math.random().toString(36).slice(2) });
+});
+
+/* 60 Shell injection through environment-like object before execSync. */
+function executeFromEnvironment(value: string) {
+  const env = { TOOL_ARGS: value };
+  return childProcess.execSync(`echo ${env.TOOL_ARGS}`).toString();
+}
+app.post("/60/env", (req: Request, res: Response) => {
+  res.send(executeFromEnvironment(String(req.body.value)));
+});
+
+export const benchmarkMetadata = {
+  name: "TrustLedger Hard TypeScript Benchmark",
+  version: "1.0",
+  cases: 60,
+  intended: "SAST / AST taint / semantic-analysis benchmarking only",
+};
+
+export default app;

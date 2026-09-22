@@ -1,0 +1,232 @@
+<?php
+// TrustLedger HARD PHP AST/Taint Benchmark - 60 cases + 7 bonus cases. BENCHMARK ONLY.
+
+const BASE_DIR = "/srv/app/uploads";
+const APP_SECRET = "benchmark-secret";
+$saved = [];
+$comments = [];
+$cache = [];
+$db = new mysqli("localhost", "u", "p", "d");
+$pdo = new PDO("sqlite::memory:");
+
+function identity($v) { return $v; }
+function decode_twice($v) { return urldecode(urldecode($v)); }
+function normalize_url($v) { return "http://127.0.0.1:8080/" . $v; }
+function exec_sql($q) { global $db; return $db->query($q); }
+function shell($cmd) { return shell_exec($cmd); }
+
+// 01 SQLi helper + interpolation + identity
+function build_user_query($id) { $n = trim($id); return "SELECT * FROM users WHERE id = '$n'"; }
+function case_01() { return exec_sql(build_user_query(identity($_GET['id']))); }
+
+// 02 SQLi through array field
+function build_search($m) { return "%" . $m['term'] . "%"; }
+function case_02() { $state = ['term' => $_GET['q']]; $part = build_search($state); return exec_sql("SELECT * FROM users WHERE name LIKE '" . $part . "'"); }
+
+// 03 second-order SQLi
+function case_03_save() { global $saved; $saved[$_POST['user']] = $_POST['search']; }
+function case_03_run() { global $saved; $stored = $saved[$_GET['user']]; return exec_sql("SELECT * FROM users WHERE name = '" . $stored . "'"); }
+
+// 04 command injection through array -> implode -> shell
+function build_command($parts) { return implode(" ", $parts); }
+function case_04() { $hosts = $_POST['host']; $cmd = build_command(array_merge(["ping", "-c", "1"], $hosts)); return shell($cmd); }
+
+// 05 command injection through array fields
+function run_tool($c) { return shell_exec($c['executable'] . " " . $c['argument']); }
+function case_05() { return run_tool(['executable' => $_POST['bin'], 'argument' => $_POST['arg']]); }
+
+// 06 double decode path traversal
+function resolve_upload($name) { return BASE_DIR . "/" . decode_twice($name); }
+function case_06() { return file_get_contents(resolve_upload($_GET['name'])); }
+
+// 07 realpath without containment
+function case_07() { $f = str_replace("..", "", $_GET['name']); return file_get_contents(realpath(BASE_DIR . "/" . $f)); }
+
+// 08 SSRF host/port/path
+function build_target($host, $port, $path) { return "http://" . $host . ":" . $port . $path; }
+function case_08() { $t = build_target($_GET['host'], $_GET['port'], $_GET['path']); return file_get_contents($t); }
+
+// 09 SSRF recursive redirects
+function fetch_with_redirects($url, $depth = 0) { if ($depth > 5) { throw new Exception("too many"); } $c = curl_init($url); curl_setopt($c, CURLOPT_RETURNTRANSFER, true); return curl_exec($c); }
+function case_09() { return fetch_with_redirects($_GET['url']); }
+
+// 10 open redirect
+function case_10() { header("Location: " . normalize_url($_GET['next'])); }
+
+// 11 XSS through closure
+function render_later($v) { return function () use ($v) { return $v; }; }
+function send_to_browser($s) { return $s; }
+function case_11() { $render = render_later($_GET['html']); echo send_to_browser($render()); }
+
+// 12 header injection
+function case_12() { $v = $_GET['value']; header("Content-Disposition: attachment; filename=" . $v); }
+
+// 13 array merge (pollution analogue)
+function deep_merge($t, $s) { foreach ($s as $k => $v) { $t[$k] = $v; } return $t; }
+function case_13() { $in = json_decode(file_get_contents("php://input"), true); return deep_merge(["options" => []], $in); }
+
+// 14 dynamic property set
+class Config { public $role = "user"; public $debug = false; }
+function set_attribute($obj, $name, $value) { $obj->$name = $value; }
+function case_14() { $c = new Config(); set_attribute($c, $_POST['attribute'], $_POST['value']); return $c; }
+
+// 15 BOLA
+function get_invoice($id) { global $db; return $db->query("SELECT * FROM invoices WHERE id = '" . $id . "'"); }
+function case_15() { return get_invoice($_GET['invoice_id']); }
+
+// 16 repository BOLA
+class UserRepository { public $db; function find_by_id($id) { return $this->db->query("SELECT * FROM users WHERE id = '" . $id . "'"); } }
+function case_16() { $repo = new UserRepository(); return $repo->find_by_id($_GET['user_id']); }
+
+// 17 lookup without authorization
+function get_project($id) { global $db; $rows = $db->query("SELECT id, owner_id, name FROM projects WHERE id = '" . $id . "'"); return $rows; }
+function case_17() { $p = get_project($_GET['id']); return ["export" => true, "project" => $p]; }
+
+// 18 SSTI
+function case_18() { $t = $_POST['template']; $twig = new \Twig\Environment(new \Twig\Loader\ArrayLoader([])); return $twig->createTemplate($t)->render(['user' => $_POST['user']]); }
+
+// 19 eval
+function case_19() { return eval($_POST['expression']); }
+
+// 20 dynamic function call by name
+function case_20() { $fn = $_POST['function']; return $fn($_POST['argument']); }
+
+// 21 NoSQL injection
+function case_21() { global $collection; $filter = ['username' => $_POST['username'], 'password' => $_POST['password']]; return $collection->findOne($filter); }
+
+// 22 NoSQL merge
+function case_22() { global $collection; $f = json_decode(file_get_contents("php://input"), true); return $collection->findOne(deep_merge(["active" => true], $f)); }
+
+// 23 LDAP injection
+function case_23() { $conn = ldap_connect("ldap://localhost"); return ldap_search($conn, "dc=example,dc=com", "(&(objectClass=person)(uid=" . $_GET['user'] . "))"); }
+
+// 24 XPath injection
+function case_24() { $doc = new DOMDocument(); $xp = new DOMXPath($doc); return $xp->query("/users/user[name/text()='" . $_GET['user'] . "']"); }
+
+// 25 parameter pollution
+function case_25() { $role = $_GET['role']; return is_array($role) ? $role[0] === "admin" : $role === "admin"; }
+
+// 26 CRLF header after decode
+function case_26() { header("X-Next: " . urldecode($_GET['location'])); }
+
+// 27 stored XSS
+function case_27_store() { global $comments; $comments[] = $_POST['comment']; }
+function case_27_render() { global $comments; foreach ($comments as $c) { echo "<li>" . $c . "</li>"; } }
+
+// 28 cache poisoning / XSS
+function case_28() { global $cache; $key = $_SERVER['HTTP_X_CACHE_KEY']; if (isset($cache[$key])) { echo $cache[$key]; return; } $body = "<h1>Hello " . $_GET['name'] . "</h1>"; $cache[$key] = $body; echo $body; }
+
+// 29 SSRF after weak host suffix check
+function case_29() { $host = $_GET['host']; if (substr($host, -12) !== ".example.com") { return "bad host"; } return file_get_contents("http://" . $host . "/image"); }
+
+// 30 SSRF after protocol-only check
+function case_30() { $u = $_GET['url']; if (strpos($u, "http:") !== 0 && strpos($u, "https:") !== 0) { return "bad"; } return file_get_contents($u); }
+
+// 31 shell injection joined
+function case_31() { return system($_POST['program'] . " " . $_POST['arg']); }
+
+// 32 path traversal write
+function case_32() { file_put_contents(BASE_DIR . "/" . $_POST['entry'], $_POST['content']); }
+
+// 33 auth bypass + SQL
+function case_33() { global $db; $id = $_GET['accountId']; $account = $db->query("SELECT * FROM users WHERE id = '" . $id . "'"); if ($_GET['id'] === $_SERVER['HTTP_X_ACCOUNT_ID']) { return $account; } return "denied"; }
+
+// 34 callback XSS
+function with_value($v, $cb) { return $cb($v); }
+function case_34() { echo with_value($_GET['q'], function ($x) { return "<div>" . $x . "</div>"; }); }
+
+// 35 HTML escape in JS context
+function case_35() { $v = htmlspecialchars($_GET['value']); echo "<script>const x = '" . $v . "';</script>"; }
+
+// 36 encode then decode
+function case_36() { $enc = urlencode($_GET['value']); $dec = urldecode($enc); echo "<div>" . $dec . "</div>"; }
+
+// 37 re-taint after sanitizer
+function sanitize_then_append($v, $suffix) { return htmlspecialchars($v) . $suffix; }
+function case_37() { echo "<div>" . sanitize_then_append($_GET['value'], $_GET['suffix']) . "</div>"; }
+
+// 38 branch merge
+function case_38() { $v = $_GET['value']; if ($_GET['safe'] === "1") { $o = htmlspecialchars($v); } else { $o = $v; } echo "<p>" . $o . "</p>"; }
+
+// 39 sanitized field mutated with fresh data
+function case_39() { $obj = ['value' => htmlspecialchars($_GET['value'])]; $obj['value'] = $obj['value'] . $_GET['suffix']; echo "<div>" . $obj['value'] . "</div>"; }
+
+// 40 dynamic array field into SQL
+function case_40() { global $db; $m = json_decode(file_get_contents("php://input"), true); $field = $_GET['field']; return $db->query("SELECT * FROM records WHERE value = '" . $m[$field] . "'"); }
+
+// 41 variadic propagation
+function combine($prefix, ...$vals) { return $prefix . ":" . implode(",", $vals); }
+function case_41() { echo "<div>" . combine("values", $_GET['a'], $_GET['b'], $_GET['c']) . "</div>"; }
+
+// 42 higher-order
+function map_value($v, $f) { return $f($v); }
+function case_42() { echo map_value($_GET['value'], fn($x) => "<span>" . $x . "</span>"); }
+
+// 43 generator/iterator propagation
+function make_sql($id) { yield "SELECT * FROM users WHERE id = '" . $id . "'"; }
+function case_43() { foreach (make_sql($_GET['id']) as $q) { exec_sql($q); } }
+
+// 44 callback chain
+function then_($v, $cb) { return $cb($v); }
+function case_44() { $x = then_($_GET['value'], 'trim'); echo then_($x, function ($y) { return "<img src='" . $y . "'>"; }); }
+
+// 45 sanitizer wrapper (safe oracle)
+function case_45() { echo "<div data-value=\"" . htmlspecialchars($_GET['value'], ENT_QUOTES) . "\"></div>"; }
+
+// 46 ORDER BY identifier
+function case_46() { return exec_sql("SELECT * FROM users ORDER BY " . $_GET['sort']); }
+
+// 47 ReDoS
+function case_47() { return preg_match($_GET['pattern'], $_GET['value']); }
+
+// 48 ReDoS helper
+function compile_user_regex($p) { return "/" . $p . "/i"; }
+function case_48() { return preg_match(compile_user_regex($_POST['pattern']), $_POST['input']); }
+
+// 49 dynamic include
+function case_49() { include $_GET['module'] . ".php"; }
+
+// 50 traversal with extension
+function case_50() { return file_get_contents(realpath("/etc/myapp/" . $_GET['name'] . ".json")); }
+
+// 51 header after json round trip
+function case_51() { $payload = json_encode(["value" => $_GET['value']]); $parsed = json_decode($payload, true); header("X-Value: " . $parsed['value']); }
+
+// 52 multiple sources by branch
+function choose($a, $b, $pick) { return $pick ? $a : $b; }
+function case_52() { echo "<span>" . choose($_POST['a'], $_POST['b'], $_POST['pick'] === "1") . "</span>"; }
+
+// 53 closure capture
+function make_renderer($v) { $captured = $v; return function () use ($captured) { return "<h1>" . $captured . "</h1>"; }; }
+function case_53() { $r = make_renderer($_GET['value']); echo $r(); }
+
+// 54 client-controlled role
+function case_54() { if ($_POST['role'] === "admin") { return ["admin" => true]; } return ["admin" => false]; }
+
+// 55 mass assignment
+function apply_fields($obj, $fields) { foreach ($fields as $k => $v) { $obj->$k = $v; } return $obj; }
+function case_55() { return apply_fields(new Config(), $_POST); }
+
+// 56 JWT decode without verification
+function case_56() { $token = str_replace("Bearer ", "", $_SERVER['HTTP_AUTHORIZATION']); $parts = explode(".", $token); $claims = json_decode(base64_decode($parts[1]), true); if ($claims['role'] === "admin") { return "privileged"; } return "user"; }
+
+// 57 weak hashing
+function case_57() { return md5($_POST['password']); }
+
+// 58 timing-sensitive secret compare
+function case_58() { if ($_GET['token'] == APP_SECRET) { return "ok"; } return "no"; }
+
+// 59 weak randomness token
+function case_59() { $token = rand(); return dechex($token); }
+
+// 60 shell injection through array
+function case_60() { $env = ["TOOL_ARGS" => $_POST['value']]; return shell_exec("echo " . $env['TOOL_ARGS']); }
+
+// Bonus PHP-specific cases
+function bonus01() { return unserialize(base64_decode($_POST['state'])); }
+function bonus02() { $d = new DOMDocument(); $d->loadXML($_POST['xml'], LIBXML_NOENT | LIBXML_DTDLOAD); return $d->textContent; }
+function bonus03() { extract($_POST); return $isAdmin; }
+function bonus04() { return include($_GET['page']); }
+function bonus05() { global $db; $n = $_GET['name']; return $db->query("SELECT * FROM users WHERE name = '$n'"); }
+function bonus06() { header("Location: " . $_GET['to']); exit; }
+function bonus07() { echo "<p>" . $_GET['msg'] . "</p>"; }

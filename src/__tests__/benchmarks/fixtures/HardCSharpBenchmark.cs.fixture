@@ -1,0 +1,259 @@
+// TrustLedger HARD C# AST/Taint Benchmark - 60 cases + 7 bonus cases. BENCHMARK ONLY.
+using System;
+using System.Collections.Generic;
+using System.Data.SqlClient;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Reflection;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Web;
+using System.Xml;
+using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json;
+
+namespace Bench
+{
+    public class Account { public string Email { get; set; } public string Role { get; set; } public bool IsAdmin { get; set; } }
+    public class Config { public string Role { get; set; } = "user"; public string Debug { get; set; } = "false"; }
+
+    [ApiController]
+    public class HardBenchController : ControllerBase
+    {
+        const string BaseDir = "/srv/app/uploads";
+        const string AppSecret = "benchmark-secret";
+        static readonly Dictionary<string, string> Saved = new Dictionary<string, string>();
+        static readonly List<string> Comments = new List<string>();
+        static readonly Dictionary<string, string> Cache = new Dictionary<string, string>();
+        readonly SqlConnection _db = new SqlConnection("Server=.;");
+        readonly HttpClient _http = new HttpClient();
+
+        static string Identity(string v) => v;
+        static string DecodeTwice(string v) => WebUtility.UrlDecode(WebUtility.UrlDecode(v));
+        static string NormalizeUrl(string v) => "http://127.0.0.1:8080/" + v;
+        string ExecSql(string q) { return new SqlCommand(q, _db).ExecuteScalar()?.ToString(); }
+        string Shell(string cmd) { return Process.Start("sh", "-c " + cmd).StandardOutput.ReadToEnd(); }
+
+        // 01 SQLi helper + interpolation + identity
+        static string BuildUserQuery(string id) { var n = id.Trim(); return $"SELECT * FROM users WHERE id = '{n}'"; }
+        [HttpGet("c01")] public IActionResult C01([FromQuery] string id) { return Ok(ExecSql(BuildUserQuery(Identity(id)))); }
+
+        // 02 SQLi through dictionary field
+        static string BuildSearch(Dictionary<string, string> m) { return "%" + m["term"] + "%"; }
+        [HttpGet("c02")] public IActionResult C02([FromQuery] string q) { var state = new Dictionary<string, string> { ["term"] = q }; return Ok(ExecSql("SELECT * FROM users WHERE name LIKE '" + BuildSearch(state) + "'")); }
+
+        // 03 second-order SQLi
+        [HttpPost("c03s")] public IActionResult C03Save([FromForm] string user, [FromForm] string search) { Saved[user] = search; return Ok(); }
+        [HttpGet("c03r")] public IActionResult C03Run([FromQuery] string user) { var stored = Saved[user]; return Ok(ExecSql("SELECT * FROM users WHERE name = '" + stored + "'")); }
+
+        // 04 command injection list -> join -> shell
+        static string BuildCommand(IEnumerable<string> parts) { return string.Join(" ", parts.Select(Identity)); }
+        [HttpPost("c04")] public IActionResult C04([FromForm] string[] host) { var cmd = BuildCommand(new[] { "ping", "-c", "1" }.Concat(host)); return Ok(Shell(cmd)); }
+
+        // 05 command injection through object fields
+        class ToolConfig { public string Executable; public string Argument; }
+        static string RunTool(ToolConfig c) { return Process.Start(c.Executable, c.Argument).StandardOutput.ReadToEnd(); }
+        [HttpPost("c05")] public IActionResult C05([FromForm] string bin, [FromForm] string arg) { return Ok(RunTool(new ToolConfig { Executable = bin, Argument = arg })); }
+
+        // 06 double decode path traversal
+        static string ResolveUpload(string name) { return Path.Combine(BaseDir, DecodeTwice(name)); }
+        [HttpGet("c06")] public IActionResult C06([FromQuery] string name) { return Ok(System.IO.File.ReadAllText(ResolveUpload(name))); }
+
+        // 07 GetFullPath without containment
+        [HttpGet("c07")] public IActionResult C07([FromQuery] string name) { var f = name.Replace("..", ""); return Ok(System.IO.File.ReadAllText(Path.GetFullPath(Path.Combine(BaseDir, f)))); }
+
+        // 08 SSRF host/port/path
+        static string BuildTarget(string host, string port, string path) { return new UriBuilder("http", host, int.Parse(port), path).ToString(); }
+        [HttpGet("c08")] public async Task<IActionResult> C08([FromQuery] string host, [FromQuery] string port, [FromQuery] string path) { return Ok(await _http.GetStringAsync(BuildTarget(host, port, path))); }
+
+        // 09 SSRF recursive redirects
+        async Task<string> FetchWithRedirects(string url, int depth) { if (depth > 5) throw new Exception("too many"); var r = await _http.GetAsync(url); var loc = r.Headers.Location; if (loc != null) return await FetchWithRedirects(loc.ToString(), depth + 1); return await r.Content.ReadAsStringAsync(); }
+        [HttpGet("c09")] public async Task<IActionResult> C09([FromQuery] string url) { return Ok(await FetchWithRedirects(url, 0)); }
+
+        // 10 open redirect
+        [HttpGet("c10")] public IActionResult C10([FromQuery] string next) { return Redirect(NormalizeUrl(next)); }
+
+        // 11 XSS through closure
+        static Func<string> RenderLater(string v) { return () => v; }
+        static string SendToBrowser(string s) { return s; }
+        [HttpGet("c11")] public IActionResult C11([FromQuery] string html) { var render = RenderLater(html); return Content(SendToBrowser(render()), "text/html"); }
+
+        // 12 header injection
+        [HttpGet("c12")] public IActionResult C12([FromQuery] string value) { Response.Headers["Content-Disposition"] = "attachment; filename=" + value; return Ok(); }
+
+        // 13 dictionary merge (pollution analogue)
+        static Dictionary<string, object> DeepMerge(Dictionary<string, object> t, Dictionary<string, object> s) { foreach (var kv in s) { t[kv.Key] = kv.Value; } return t; }
+        [HttpPost("c13")] public IActionResult C13([FromBody] Dictionary<string, object> input) { return Ok(DeepMerge(new Dictionary<string, object>(), input)); }
+
+        // 14 dynamic property set via reflection
+        [HttpPost("c14")] public IActionResult C14([FromForm] string field, [FromForm] string value) { var c = new Config(); typeof(Config).GetProperty(field).SetValue(c, value); return Ok(c); }
+
+        // 15 BOLA
+        string GetInvoice(string id) { return ExecSql("SELECT * FROM invoices WHERE id = '" + id + "'"); }
+        [HttpGet("c15/{invoiceId}")] public IActionResult C15([FromRoute] string invoiceId) { return Ok(GetInvoice(invoiceId)); }
+
+        // 16 repository BOLA
+        class UserRepo { readonly SqlConnection _c; public UserRepo(SqlConnection c) { _c = c; } public string FindById(string id) { return new SqlCommand("SELECT * FROM users WHERE id = '" + id + "'", _c).ExecuteScalar()?.ToString(); } }
+        [HttpGet("c16/{userId}")] public IActionResult C16([FromRoute] string userId) { return Ok(new UserRepo(_db).FindById(userId)); }
+
+        // 17 lookup without authorization
+        string GetProject(string id) { return ExecSql("SELECT id, owner_id, name FROM projects WHERE id = '" + id + "'"); }
+        [HttpGet("c17/{id}")] public IActionResult C17([FromRoute] string id) { var p = GetProject(id); return Ok(new { export = true, project = p }); }
+
+        // 18 SSTI
+        [HttpPost("c18")] public IActionResult C18([FromForm] string template, [FromForm] string user) { return Content(Scriban.Template.Parse(template).Render(new { user }), "text/html"); }
+
+        // 19 eval
+        [HttpPost("c19")] public async Task<IActionResult> C19([FromForm] string expression) { return Ok(await Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.EvaluateAsync(expression)); }
+
+        // 20 reflection dispatch by name
+        [HttpPost("c20")] public IActionResult C20([FromForm] string cls, [FromForm] string method, [FromForm] string value) { var t = Type.GetType(cls); return Ok(t.GetMethod(method).Invoke(Activator.CreateInstance(t), new object[] { value })); }
+
+        // 21 NoSQL injection
+        [HttpPost("c21")] public IActionResult C21([FromBody] Dictionary<string, object> body) { var filter = new MongoDB.Bson.BsonDocument { { "username", body["username"].ToString() }, { "password", body["password"].ToString() } }; return Ok(Coll.Find(filter)); }
+        static dynamic Coll = null;
+
+        // 22 NoSQL merge
+        [HttpPost("c22")] public IActionResult C22([FromBody] Dictionary<string, object> f) { var m = DeepMerge(new Dictionary<string, object> { ["active"] = true }, f); return Ok(Coll.Find(m)); }
+
+        // 23 LDAP injection
+        static string LdapSearch(string filter) { return filter; }
+        [HttpGet("c23")] public IActionResult C23([FromQuery] string user) { return Ok(LdapSearch("(&(objectClass=person)(uid=" + user + "))")); }
+
+        // 24 XPath injection
+        [HttpGet("c24")] public IActionResult C24([FromQuery] string user) { var doc = new XmlDocument(); return Ok(doc.SelectNodes("/users/user[name/text()='" + user + "']")); }
+
+        // 25 parameter pollution
+        [HttpGet("c25")] public IActionResult C25([FromQuery] string[] role) { return Ok(role.Length > 0 && role[0] == "admin"); }
+
+        // 26 CRLF header after decode
+        [HttpGet("c26")] public IActionResult C26([FromQuery] string location) { Response.Headers["X-Next"] = WebUtility.UrlDecode(location); return Ok(); }
+
+        // 27 stored XSS
+        [HttpPost("c27s")] public IActionResult C27Save([FromForm] string comment) { Comments.Add(comment); return Ok(); }
+        [HttpGet("c27r")] public IActionResult C27Render() { var sb = new StringBuilder(); foreach (var c in Comments) sb.Append("<li>" + c + "</li>"); return Content(sb.ToString(), "text/html"); }
+
+        // 28 cache poisoning / XSS
+        [HttpGet("c28")] public IActionResult C28([FromHeader(Name = "X-Cache-Key")] string key, [FromQuery] string name) { if (Cache.ContainsKey(key)) return Content(Cache[key], "text/html"); var body = "<h1>Hello " + name + "</h1>"; Cache[key] = body; return Content(body, "text/html"); }
+
+        // 29 SSRF after weak host suffix check
+        [HttpGet("c29")] public async Task<IActionResult> C29([FromQuery] string host) { if (!host.EndsWith(".example.com")) return BadRequest(); return Ok(await _http.GetStringAsync("http://" + host + "/image")); }
+
+        // 30 SSRF after protocol-only check
+        [HttpGet("c30")] public async Task<IActionResult> C30([FromQuery] string url) { if (!url.StartsWith("http:") && !url.StartsWith("https:")) return BadRequest(); return Ok(await _http.GetStringAsync(url)); }
+
+        // 31 shell injection joined
+        [HttpPost("c31")] public IActionResult C31([FromForm] string program, [FromForm] string arg) { return Ok(Process.Start(new ProcessStartInfo("sh", "-c \"" + program + " " + arg + "\"")).StandardOutput.ReadToEnd()); }
+
+        // 32 path traversal write
+        [HttpPost("c32")] public IActionResult C32([FromForm] string entry, [FromForm] string content) { System.IO.File.WriteAllText(Path.Combine(BaseDir, entry), content); return Ok(); }
+
+        // 33 auth bypass + SQL
+        [HttpGet("c33")] public IActionResult C33([FromQuery] string accountId, [FromQuery] string id, [FromHeader(Name = "X-Account-ID")] string acct) { var account = ExecSql("SELECT * FROM users WHERE id = '" + accountId + "'"); if (id == acct) return Ok(account); return Forbid(); }
+
+        // 34 callback XSS
+        static string WithValue(string v, Func<string, string> cb) { return cb(v); }
+        [HttpGet("c34")] public IActionResult C34([FromQuery] string q) { return Content(WithValue(q, x => "<div>" + x + "</div>"), "text/html"); }
+
+        // 35 HTML encode in JavaScript context
+        [HttpGet("c35")] public IActionResult C35([FromQuery] string value) { var v = HttpUtility.HtmlEncode(value); return Content($"<script>const x = '{v}';</script>", "text/html"); }
+
+        // 36 encode then decode
+        [HttpGet("c36")] public IActionResult C36([FromQuery] string value) { var enc = Uri.EscapeDataString(value); var dec = Uri.UnescapeDataString(enc); return Content("<div>" + dec + "</div>", "text/html"); }
+
+        // 37 re-taint after sanitizer
+        static string SanitizeThenAppend(string v, string suffix) { return HttpUtility.HtmlEncode(v) + suffix; }
+        [HttpGet("c37")] public IActionResult C37([FromQuery] string value, [FromQuery] string suffix) { return Content("<div>" + SanitizeThenAppend(value, suffix) + "</div>", "text/html"); }
+
+        // 38 branch merge
+        [HttpGet("c38")] public IActionResult C38([FromQuery] string value, [FromQuery] string safe) { var o = value; if (safe == "1") o = HttpUtility.HtmlEncode(value); return Content("<p>" + o + "</p>", "text/html"); }
+
+        // 39 sanitized field mutated with fresh data
+        [HttpGet("c39")] public IActionResult C39([FromQuery] string value, [FromQuery] string suffix) { var obj = new Dictionary<string, string> { ["value"] = HttpUtility.HtmlEncode(value) }; obj["value"] = obj["value"] + suffix; return Content("<div>" + obj["value"] + "</div>", "text/html"); }
+
+        // 40 dynamic dictionary field into SQL
+        [HttpPost("c40")] public IActionResult C40([FromBody] Dictionary<string, string> m, [FromQuery] string field) { return Ok(ExecSql("SELECT * FROM records WHERE value = '" + m[field] + "'")); }
+
+        // 41 params propagation
+        static string Combine(string prefix, params string[] vals) { return prefix + ":" + string.Join(",", vals); }
+        [HttpGet("c41")] public IActionResult C41([FromQuery] string a, [FromQuery] string b, [FromQuery] string c) { return Content("<div>" + Combine("values", a, b, c) + "</div>", "text/html"); }
+
+        // 42 higher-order
+        static string MapValue(string v, Func<string, string> f) { return f(v); }
+        [HttpGet("c42")] public IActionResult C42([FromQuery] string value) { return Content(MapValue(value, x => "<span>" + x + "</span>"), "text/html"); }
+
+        // 43 async return propagation
+        static async Task<string> MakeSql(string id) { return await Task.FromResult("SELECT * FROM users WHERE id = '" + id + "'"); }
+        [HttpGet("c43")] public async Task<IActionResult> C43([FromQuery] string id) { var q = await MakeSql(id); return Ok(ExecSql(q)); }
+
+        // 44 callback chain
+        static string Then(string v, Func<string, string> cb) { return cb(v); }
+        [HttpGet("c44")] public IActionResult C44([FromQuery] string value) { var x = Then(value, s => s.Trim()); return Content(Then(x, y => "<img src='" + y + "'>"), "text/html"); }
+
+        // 45 sanitizer wrapper (safe oracle)
+        [HttpGet("c45")] public IActionResult C45([FromQuery] string value) { return Content("<div data-value=\"" + HttpUtility.HtmlEncode(value) + "\"></div>", "text/html"); }
+
+        // 46 ORDER BY identifier
+        [HttpGet("c46")] public IActionResult C46([FromQuery] string sort) { return Ok(ExecSql("SELECT * FROM users ORDER BY " + sort)); }
+
+        // 47 ReDoS
+        [HttpGet("c47")] public IActionResult C47([FromQuery] string pattern, [FromQuery] string value) { return Ok(Regex.IsMatch(value, pattern)); }
+
+        // 48 ReDoS helper
+        static Regex CompileUserRegex(string p) { return new Regex(p, RegexOptions.IgnoreCase); }
+        [HttpPost("c48")] public IActionResult C48([FromForm] string pattern, [FromForm] string input) { return Ok(CompileUserRegex(pattern).IsMatch(input)); }
+
+        // 49 dynamic assembly / type loading
+        [HttpGet("c49")] public IActionResult C49([FromQuery] string module) { return Ok(Assembly.Load(module).GetTypes().Length); }
+
+        // 50 traversal with extension
+        [HttpGet("c50")] public IActionResult C50([FromQuery] string name) { return Ok(System.IO.File.ReadAllText(Path.GetFullPath(Path.Combine("/etc/myapp", name + ".json")))); }
+
+        // 51 header after JSON round trip
+        [HttpGet("c51")] public IActionResult C51([FromQuery] string value) { var payload = JsonConvert.SerializeObject(new { value }); var parsed = JsonConvert.DeserializeObject<Dictionary<string, string>>(payload); Response.Headers["X-Value"] = parsed["value"]; return Ok(); }
+
+        // 52 multiple sources by branch
+        static string Choose(string a, string b, bool pick) { return pick ? a : b; }
+        [HttpPost("c52")] public IActionResult C52([FromForm] string a, [FromForm] string b, [FromForm] string pick) { return Content("<span>" + Choose(a, b, pick == "1") + "</span>", "text/html"); }
+
+        // 53 closure capture
+        static Func<string> MakeRenderer(string v) { var captured = v; return () => "<h1>" + captured + "</h1>"; }
+        [HttpGet("c53")] public IActionResult C53([FromQuery] string value) { return Content(MakeRenderer(value)(), "text/html"); }
+
+        // 54 client-controlled role
+        [HttpPost("c54")] public IActionResult C54([FromForm] string role) { if (role == "admin") return Ok("admin"); return Forbid(); }
+
+        // 55 mass assignment
+        [HttpPost("c55")] public IActionResult C55([FromBody] Account a) { return Ok(a); }
+
+        // 56 JWT decode without verification
+        [HttpGet("c56")] public IActionResult C56([FromHeader(Name = "Authorization")] string authorization) { var parts = authorization.Replace("Bearer ", "").Split('.'); var payload = Encoding.UTF8.GetString(Convert.FromBase64String(parts[1])); var claims = JsonConvert.DeserializeObject<Dictionary<string, object>>(payload); if (claims["role"].ToString() == "admin") return Ok("privileged"); return Forbid(); }
+
+        // 57 weak hashing
+        [HttpPost("c57")] public IActionResult C57([FromForm] string password) { using var md5 = MD5.Create(); return Ok(BitConverter.ToString(md5.ComputeHash(Encoding.UTF8.GetBytes(password)))); }
+
+        // 58 timing-sensitive secret compare
+        [HttpGet("c58")] public IActionResult C58([FromQuery] string token) { if (token == AppSecret) return Ok("ok"); return Unauthorized(); }
+
+        // 59 weak randomness token
+        [HttpGet("c59")] public IActionResult C59() { var token = new Random().Next().ToString("x"); return Ok(token); }
+
+        // 60 shell injection through env-like dictionary
+        [HttpPost("c60")] public IActionResult C60([FromForm] string value) { var env = new Dictionary<string, string> { ["TOOL_ARGS"] = value }; return Ok(Process.Start("sh", "-c \"echo " + env["TOOL_ARGS"] + "\"").StandardOutput.ReadToEnd()); }
+
+        // Bonus C#-specific cases
+        [HttpPost("b1")] public IActionResult Bonus01([FromForm] string state) { var bf = new BinaryFormatter(); return Ok(bf.Deserialize(new MemoryStream(Convert.FromBase64String(state)))); }
+        [HttpPost("b2")] public IActionResult Bonus02([FromForm] string xml) { var d = new XmlDocument(); d.XmlResolver = new XmlUrlResolver(); d.LoadXml(xml); return Ok(d.InnerText); }
+        [HttpPost("b3")] public IActionResult Bonus03([FromForm] string json) { return Ok(JsonConvert.DeserializeObject(json, new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All })); }
+        [HttpPost("b4")] public IActionResult Bonus04([FromForm] string program, [FromForm] string argument) { return Ok(Process.Start(program, argument)); }
+        [HttpPost("b5")] public IActionResult Bonus05([FromForm] string filename, [FromForm] string content) { System.IO.File.WriteAllText(Path.Combine(BaseDir, filename), content); return Ok(); }
+        [HttpGet("b6")] public IActionResult Bonus06([FromQuery] string value) { var cmd = new SqlCommand(string.Format("SELECT * FROM users WHERE name = '{0}'", value), _db); return Ok(cmd.ExecuteScalar()); }
+        [HttpGet("b7")] public IActionResult Bonus07() { var v = Request.Query["value"].ToString(); return Content("<p>" + v + "</p>", "text/html"); }
+    }
+}

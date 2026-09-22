@@ -1,0 +1,781 @@
+"""
+TrustLedger HARD Python AST/Taint Benchmark
+60 intentionally vulnerable cases + 7 bonus cases.
+BENCHMARK ONLY — DO NOT DEPLOY.
+"""
+
+import base64
+import hashlib
+import importlib
+import json
+import os
+import pickle
+import random
+import re
+import sqlite3
+import subprocess
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+
+try:
+    from flask import Flask, Response, redirect, request, render_template_string
+except ImportError:
+    Flask = Response = redirect = request = render_template_string = None
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+APP_SECRET = os.getenv("APP_SECRET", "benchmark-secret")
+BASE_UPLOAD = "/srv/app/uploads"
+INTERNAL_HOST = "http://127.0.0.1:8080"
+
+app = Flask(__name__) if Flask else None
+db = sqlite3.connect(":memory:", check_same_thread=False)
+db.execute("CREATE TABLE IF NOT EXISTS users(id TEXT, name TEXT, role TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS invoices(id TEXT, owner_id TEXT, amount REAL)")
+db.execute("CREATE TABLE IF NOT EXISTS projects(id TEXT, owner_id TEXT, name TEXT)")
+db.commit()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def identity(value):
+    return value
+
+def wrap(value):
+    return {"value": value}
+
+def unwrap(value):
+    return value["value"]
+
+def delayed(value):
+    return lambda: value
+
+def choose(a, b, flag):
+    return a if flag else b
+
+def decode_twice(value):
+    return urllib.parse.unquote(urllib.parse.unquote(value))
+
+def normalize_url(value):
+    return urllib.parse.urljoin(INTERNAL_HOST, value)
+
+def execute_sql(query):
+    return db.execute(query).fetchall()
+
+def shell(command):
+    return subprocess.check_output(command, shell=True, text=True)
+
+# 01 SQLi: helper + f-string + identity
+def build_user_query(user_id):
+    normalized = str(user_id).strip()
+    return f"SELECT * FROM users WHERE id = '{normalized}'"
+
+def case_01(request_obj):
+    query = build_user_query(identity(request_obj.args.get("id")))
+    return execute_sql(query)
+
+# 02 SQLi through nested dictionary field
+def build_search_filter(data):
+    state = {"where": {"expression": f"%{data['term']}%"}}
+    return state["where"]["expression"]
+
+def case_02(request_obj):
+    state = wrap({"term": request_obj.args.get("q", "")})
+    sql_part = build_search_filter(unwrap(state))
+    return execute_sql(
+        f"SELECT * FROM users WHERE name LIKE '{sql_part}'"
+    )
+
+# 03 Second-order SQLi
+saved_searches = {}
+
+def case_03_save(request_obj):
+    saved_searches[str(request_obj.form.get("user"))] = str(
+        request_obj.form.get("search")
+    )
+
+def execute_saved_search(user):
+    stored = saved_searches.get(user, "")
+    return execute_sql(
+        f"SELECT * FROM users WHERE name = '{stored}'"
+    )
+
+def case_03_run(request_obj):
+    return execute_saved_search(request_obj.args.get("user"))
+
+# 04 Command injection through list -> join -> shell
+def build_command(parts):
+    return " ".join(map(identity, parts))
+
+def case_04(request_obj):
+    hosts = request_obj.form.getlist("host")
+    command = build_command(["ping", "-c", "1", *hosts])
+    return shell(command)
+
+# 05 Command injection through dictionary fields
+def run_tool(config):
+    executable = config["executable"]
+    argument = config["argument"]
+    return subprocess.check_output(
+        f"{executable} {argument}", shell=True, text=True
+    )
+
+def case_05(request_obj):
+    config = {
+        "executable": request_obj.form.get("bin"),
+        "argument": request_obj.form.get("arg"),
+    }
+    return run_tool(config)
+
+# 06 Path traversal through double decoding + join
+def resolve_upload(name):
+    decoded = decode_twice(name)
+    return os.path.join(BASE_UPLOAD, decoded)
+
+def case_06(request_obj):
+    target = resolve_upload(request_obj.args.get("name"))
+    with open(target, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+# 07 Path traversal through abspath without containment check
+def fake_safe_filename(name):
+    return name.replace("..", "")
+
+def case_07(request_obj):
+    filename = fake_safe_filename(request_obj.args.get("name"))
+    target = os.path.abspath(os.path.join(BASE_UPLOAD, filename))
+    with open(target, "rb") as handle:
+        return handle.read()
+
+# 08 SSRF through user-controlled host/port/path
+def build_target(host, port, route):
+    return urllib.parse.urlunparse(
+        ("http", host, route, "", "", "")
+    ) + f":{port}"
+
+def case_08(request_obj):
+    target = build_target(
+        request_obj.args.get("host"),
+        request_obj.args.get("port"),
+        request_obj.args.get("path"),
+    )
+    return urllib.request.urlopen(target).read()
+
+# 09 SSRF through redirect recursion
+def fetch_with_redirects(url, depth=0):
+    if depth > 5:
+        raise ValueError("too many redirects")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("bad protocol")
+    response = urllib.request.urlopen(url)
+    location = response.headers.get("Location")
+    if location:
+        return fetch_with_redirects(location, depth + 1)
+    return response.read()
+
+def case_09(request_obj):
+    return fetch_with_redirects(request_obj.args.get("url"))
+
+# 10 Open redirect
+def case_10(request_obj):
+    target = normalize_url(request_obj.args.get("next"))
+    return redirect(target) if redirect else target
+
+# 11 XSS through dictionary + closure
+def render_later(value):
+    boxed = wrap(value)
+    return delayed(unwrap(boxed))
+
+def send_to_browser(value):
+    return value
+
+def case_11(request_obj):
+    render = render_later(request_obj.args.get("html"))
+    html = send_to_browser(render())
+    return Response(html, mimetype="text/html") if Response else html
+
+# 12 Header injection through join
+def case_12(request_obj):
+    value = request_obj.args.get("value")
+    header_value = "".join(["attachment; filename=", value])
+    response = Response("ok") if Response else {"ok": True}
+    if hasattr(response, "headers"):
+        response.headers["Content-Disposition"] = header_value
+    return response
+
+# 13 Python dictionary/object pollution analogue
+def deep_merge(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+def case_13(request_obj):
+    return deep_merge(
+        {"feature_flags": {}, "options": {}},
+        request_obj.get_json(),
+    )
+
+# 14 Dynamic attribute mutation
+class Config:
+    def __init__(self):
+        self.debug = False
+        self.role = "user"
+
+def set_attribute(obj, name, value):
+    setattr(obj, name, value)
+
+def case_14(request_obj):
+    config = Config()
+    set_attribute(
+        config,
+        request_obj.form.get("attribute"),
+        request_obj.form.get("value"),
+    )
+    return config.__dict__
+
+# 15 BOLA
+def get_invoice(invoice_id):
+    return execute_sql(
+        f"SELECT * FROM invoices WHERE id = '{invoice_id}'"
+    )
+
+def case_15(request_obj):
+    return get_invoice(request_obj.view_args["invoice_id"])
+
+# 16 BOLA through repository
+class UserRepository:
+    def find_by_id(self, user_id):
+        return execute_sql(
+            f"SELECT * FROM users WHERE id = '{user_id}'"
+        )
+
+users = UserRepository()
+
+def case_16(request_obj):
+    return users.find_by_id(request_obj.view_args["user_id"])
+
+# 17 Missing authorization after resource lookup
+def get_project(project_id):
+    rows = execute_sql(
+        f"SELECT id, owner_id, name FROM projects WHERE id = '{project_id}'"
+    )
+    return rows[0] if rows else None
+
+def case_17(request_obj):
+    project = get_project(request_obj.view_args["id"])
+    return {"export": True, "project": project}
+
+# 18 SSTI
+def case_18(request_obj):
+    template = request_obj.form.get("template")
+    if render_template_string:
+        return render_template_string(
+            template,
+            user=request_obj.form.get("user"),
+        )
+    return template
+
+# 19 Eval alias
+dynamic_runner = eval
+
+def case_19(request_obj):
+    return dynamic_runner(request_obj.form.get("expression"))
+
+# 20 Dynamic execution through globals()
+def case_20(request_obj):
+    state = json.loads(
+        base64.b64decode(request_obj.form.get("state")).decode()
+    )
+    function = globals().get(state["function"])
+    if callable(function):
+        return function(state.get("argument"))
+    return None
+
+# 21 NoSQL injection
+def mongo_find(filter_document):
+    return filter_document
+
+def case_21(request_obj):
+    document = {
+        "username": request_obj.json.get("username"),
+        "password": request_obj.json.get("password"),
+    }
+    return mongo_find(document)
+
+# 22 NoSQL injection through merge
+def case_22(request_obj):
+    filter_document = deep_merge(
+        {"active": True, "role": "user"},
+        request_obj.json.get("filter"),
+    )
+    return mongo_find(filter_document)
+
+# 23 LDAP injection
+def build_ldap_filter(username):
+    return f"(&(objectClass=person)(uid={identity(username)}))"
+
+def ldap_search(filter_expression):
+    return filter_expression
+
+def case_23(request_obj):
+    return ldap_search(
+        build_ldap_filter(request_obj.args.get("user"))
+    )
+
+# 24 XPath injection
+def xpath_for_user(username):
+    return f"/users/user[name/text()='{username}']"
+
+def select_xpath(expression):
+    return expression
+
+def case_24(request_obj):
+    return select_xpath(xpath_for_user(request_obj.args.get("user")))
+
+# 25 HTTP parameter pollution
+def first(value):
+    return value[0] if isinstance(value, list) else value
+
+def case_25(request_obj):
+    role = first(request_obj.args.getlist("role"))
+    action = first(request_obj.args.getlist("action"))
+    if role == "admin" and action == "delete":
+        return {"authorized": True}
+    return {"authorized": False}
+
+# 26 CRLF/header injection after decoding
+def case_26(request_obj):
+    raw = request_obj.args.get("location")
+    decoded = urllib.parse.unquote(raw)
+    response = Response("ok") if Response else {"ok": True}
+    if hasattr(response, "headers"):
+        response.headers["X-Next"] = decoded
+    return response
+
+# 27 Stored XSS
+comments = []
+
+def case_27_store(request_obj):
+    comments.append(request_obj.form.get("comment"))
+
+def case_27_render():
+    body = "".join(
+        f"<li>{comment}</li>" for comment in comments
+    )
+    return Response(body, mimetype="text/html") if Response else body
+
+# 28 Cache poisoning + stored XSS
+response_cache = {}
+
+def case_28(request_obj):
+    cache_key = request_obj.headers.get("X-Cache-Key", "default")
+    if cache_key in response_cache:
+        return response_cache[cache_key]
+    body = f"<h1>Hello {request_obj.args.get('name')}</h1>"
+    response_cache[cache_key] = body
+    return Response(body, mimetype="text/html") if Response else body
+
+# 29 SSRF after weak hostname suffix validation
+def is_allowed_hostname(host):
+    return host.endswith(".example.com")
+
+def case_29(request_obj):
+    host = request_obj.args.get("host")
+    if not is_allowed_hostname(host):
+        return "bad host"
+    url = f"http://{host}/image"
+    return urllib.request.urlopen(url).read()
+
+# 30 SSRF after protocol-only validation
+def allowed_protocol(url):
+    return url.lower().startswith(("http:", "https:"))
+
+def case_30(request_obj):
+    url = request_obj.args.get("url")
+    if not allowed_protocol(url):
+        return "bad protocol"
+    parsed = urllib.parse.urlparse(url)
+    target = urllib.parse.urlunparse(parsed)
+    return urllib.request.urlopen(target).read()
+
+# 31 Shell injection through joined command
+def shell_command(program, args):
+    return " ".join([program, *args])
+
+def case_31(request_obj):
+    args = request_obj.form.getlist("arg")
+    command = shell_command(
+        request_obj.form.get("program"),
+        args,
+    )
+    return subprocess.check_output(command, shell=True, text=True)
+
+# 32 Path traversal in extraction-like operation
+def extract_entry(base, entry_name, content):
+    destination = os.path.join(base, entry_name)
+    with open(destination, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    return destination
+
+def case_32(request_obj):
+    return extract_entry(
+        BASE_UPLOAD,
+        request_obj.form.get("entry"),
+        request_obj.form.get("content"),
+    )
+
+# 33 Authorization bypass: check one identifier, retrieve another
+def case_33(request_obj):
+    account_id = (
+        request_obj.args.get("accountId")
+        or request_obj.args.get("id")
+    )
+    account = execute_sql(
+        f"SELECT * FROM users WHERE id = '{account_id}'"
+    )
+    if request_obj.args.get("id") == request_obj.headers.get("X-Account-ID"):
+        return account
+    return "denied"
+
+# 34 Taint through callback
+def with_value(value, callback):
+    return callback(value)
+
+def case_34(request_obj):
+    value = with_value(
+        request_obj.args.get("q"),
+        lambda x: f"<div>{x}</div>",
+    )
+    return Response(value, mimetype="text/html") if Response else value
+
+# 35 HTML sanitizer used in JavaScript context
+def escape_html(value):
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+def case_35(request_obj):
+    value = escape_html(request_obj.args.get("value"))
+    html = f"<script>const x = '{value}';</script>"
+    return Response(html, mimetype="text/html") if Response else html
+
+# 36 Encode then decode
+def case_36(request_obj):
+    encoded = urllib.parse.quote(request_obj.args.get("value"))
+    decoded = urllib.parse.unquote(encoded)
+    html = f"<div>{decoded}</div>"
+    return Response(html, mimetype="text/html") if Response else html
+
+# 37 Re-taint after sanitization
+def sanitize_then_append(value, suffix):
+    return escape_html(value) + suffix
+
+def case_37(request_obj):
+    output = sanitize_then_append(
+        request_obj.args.get("value"),
+        request_obj.args.get("suffix"),
+    )
+    return Response(
+        f"<div>{output}</div>",
+        mimetype="text/html",
+    ) if Response else output
+
+# 38 Branch merge
+def case_38(request_obj):
+    value = request_obj.args.get("value")
+    if request_obj.args.get("safe") == "1":
+        output = escape_html(value)
+    else:
+        output = value
+    return Response(
+        f"<p>{output}</p>",
+        mimetype="text/html",
+    ) if Response else output
+
+# 39 Sanitized field mutated with fresh attacker data
+def case_39(request_obj):
+    obj = {"value": escape_html(request_obj.args.get("value"))}
+    obj["value"] = obj["value"] + request_obj.args.get("suffix")
+    return Response(
+        f"<div>{obj['value']}</div>",
+        mimetype="text/html",
+    ) if Response else obj["value"]
+
+# 40 Dynamic dictionary property access into SQL
+def case_40(request_obj):
+    field = request_obj.args.get("field")
+    value = request_obj.json[field]
+    return execute_sql(
+        f"SELECT * FROM records WHERE value = '{value}'"
+    )
+
+# 41 *args interprocedural propagation
+def combine(prefix, *values):
+    return f"{prefix}:{','.join(values)}"
+
+def case_41(request_obj):
+    return combine(
+        "values",
+        request_obj.args.get("a"),
+        request_obj.args.get("b"),
+        request_obj.args.get("c"),
+    )
+
+# 42 Higher-order function
+def map_value(value, callback):
+    return callback(value)
+
+def case_42(request_obj):
+    result = map_value(
+        request_obj.args.get("value"),
+        lambda x: f"<div>{x}</div>",
+    )
+    return Response(result, mimetype="text/html") if Response else result
+
+# 43 Async return propagation
+async def make_sql(user_id):
+    return f"SELECT * FROM users WHERE id = '{user_id}'"
+
+async def case_43(request_obj):
+    query = await make_sql(request_obj.args.get("id"))
+    return execute_sql(query)
+
+# 44 Promise-like callback chain
+def then(value, callback):
+    return callback(value)
+
+def case_44(request_obj):
+    result = then(
+        request_obj.args.get("value"),
+        lambda x: x.strip(),
+    )
+    result = then(
+        result,
+        lambda x: f"<img src='{x}'>",
+    )
+    return Response(result, mimetype="text/html") if Response else result
+
+# 45 Cross-function sanitizer wrapper
+def sanitize_for_html(value):
+    return escape_html(value)
+
+def build_html(value):
+    return f'<div data-value="{sanitize_for_html(value)}"></div>'
+
+def case_45(request_obj):
+    html = build_html(request_obj.args.get("value"))
+    return Response(html, mimetype="text/html") if Response else html
+
+# 46 SQL identifier injection
+def order_by(column):
+    return f"SELECT * FROM users ORDER BY {column}"
+
+def case_46(request_obj):
+    return execute_sql(order_by(request_obj.args.get("sort")))
+
+# 47 ReDoS
+def case_47(request_obj):
+    pattern = request_obj.args.get("pattern")
+    value = request_obj.args.get("value")
+    return bool(re.search(pattern, value))
+
+# 48 ReDoS through helper
+def compile_user_regex(pattern):
+    return re.compile(pattern, re.IGNORECASE)
+
+def case_48(request_obj):
+    regex = compile_user_regex(request_obj.form.get("pattern"))
+    return bool(regex.search(request_obj.form.get("input")))
+
+# 49 Dynamic import
+def case_49(request_obj):
+    module_name = request_obj.args.get("module")
+    module = importlib.import_module(module_name)
+    return dir(module)
+
+# 50 Path traversal through extension appending
+def read_config(name):
+    candidate = os.path.abspath(
+        os.path.join("/etc/myapp", f"{name}.json")
+    )
+    with open(candidate, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+def case_50(request_obj):
+    return read_config(request_obj.args.get("name"))
+
+# 51 Header sink after JSON serialize/deserialize
+def case_51(request_obj):
+    payload = json.dumps({"value": request_obj.args.get("value")})
+    parsed = json.loads(payload)
+    response = Response("ok") if Response else {"ok": True}
+    if hasattr(response, "headers"):
+        response.headers["X-Value"] = parsed["value"]
+    return response
+
+# 52 Multiple tainted sources merged by conditional
+def case_52(request_obj):
+    value = choose(
+        request_obj.json.get("a"),
+        request_obj.json.get("b"),
+        bool(request_obj.json.get("pick")),
+    )
+    return Response(
+        f"<span>{value}</span>",
+        mimetype="text/html",
+    ) if Response else value
+
+# 53 Closure capture
+def make_renderer(value):
+    captured = value
+    return lambda: f"<h1>{captured}</h1>"
+
+def case_53(request_obj):
+    renderer = make_renderer(request_obj.args.get("value"))
+    html = renderer()
+    return Response(html, mimetype="text/html") if Response else html
+
+# 54 Authorization trusts client-controlled role
+def case_54(request_obj):
+    requested_role = request_obj.json.get("role")
+    if requested_role == "admin":
+        return {"admin": True}
+    return {"admin": False}
+
+# 55 Mass assignment
+@dataclass
+class Account:
+    account_id: str = ""
+    email: str = ""
+    role: str = "user"
+    is_admin: bool = False
+
+def apply_fields(account, fields):
+    for key, value in fields.items():
+        setattr(account, key, value)
+    return account
+
+def case_55(request_obj):
+    return apply_fields(Account(), request_obj.json)
+
+# 56 JWT-like decode without signature verification
+def decode_jwt(token):
+    parts = token.split(".")
+    payload = base64.urlsafe_b64decode(
+        parts[1] + "=" * (-len(parts[1]) % 4)
+    )
+    return json.loads(payload.decode())
+
+def case_56(request_obj):
+    token = request_obj.headers.get("Authorization", "")
+    token = token.removeprefix("Bearer ").strip()
+    claims = decode_jwt(token)
+    if claims.get("role") == "admin":
+        return {"privileged": True}
+    return {"privileged": False}
+
+# 57 Weak password hashing
+def case_57(request_obj):
+    password = request_obj.form.get("password")
+    digest = hashlib.md5(password.encode()).hexdigest()
+    return {"digest": digest}
+
+# 58 Timing-sensitive secret comparison
+def case_58(request_obj):
+    supplied = request_obj.args.get("token")
+    if supplied == APP_SECRET:
+        return "ok"
+    return "no"
+
+# 59 Weak randomness for security token
+def case_59():
+    token = random.random().hex()
+    return {"token": token}
+
+# 60 Shell injection through dictionary/env-like object
+def execute_from_environment(value):
+    env = {"TOOL_ARGS": value}
+    return subprocess.check_output(
+        f"echo {env['TOOL_ARGS']}",
+        shell=True,
+        text=True,
+    )
+
+def case_60(request_obj):
+    return execute_from_environment(request_obj.form.get("value"))
+
+# ---------------------------------------------------------------------------
+# Bonus Python-specific cases
+# ---------------------------------------------------------------------------
+
+def bonus_pickle(request_obj):
+    raw = base64.b64decode(request_obj.form.get("state"))
+    return pickle.loads(raw)
+
+def bonus_yaml(request_obj):
+    if yaml is None:
+        return None
+    return yaml.load(
+        request_obj.form.get("yaml"),
+        Loader=yaml.Loader,
+    )
+
+def bonus_format(request_obj):
+    template = request_obj.form.get("template")
+    return template.format(
+        user=request_obj.form.get("user"),
+        role=request_obj.form.get("role"),
+    )
+
+def bonus_sql(request_obj):
+    value = request_obj.args.get("value")
+    cursor = db.cursor()
+    cursor.execute(
+        f"SELECT * FROM users WHERE name = '{value}'"
+    )
+    return cursor.fetchall()
+
+def bonus_execve(request_obj):
+    executable = request_obj.form.get("program")
+    argument = request_obj.form.get("argument")
+    return subprocess.run(
+        [executable, argument],
+        capture_output=True,
+    )
+
+def bonus_write(request_obj):
+    filename = request_obj.form.get("filename")
+    with open(os.path.join(BASE_UPLOAD, filename), "w") as handle:
+        handle.write(request_obj.form.get("content"))
+
+def bonus_template(request_obj):
+    if render_template_string:
+        return render_template_string(
+            request_obj.form.get("template")
+        )
+    return request_obj.form.get("template")
+
+
+BENCHMARK_METADATA = {
+    "name": "TrustLedger Hard Python Benchmark",
+    "version": "1.0",
+    "cases": 60,
+    "bonus_cases": 7,
+    "purpose": "AST taint and semantic SAST gap analysis",
+}
+
+if __name__ == "__main__":
+    print(json.dumps(BENCHMARK_METADATA, indent=2))
