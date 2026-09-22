@@ -82,8 +82,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
@@ -107,6 +107,8 @@ export interface AstTaintPHPFinding {
   sourceExpr: string;
   sinkExpr:   string;
   severityOverride?: "critical" | "high" | "medium";
+  // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
+  trace?: TraceStep[];
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintCSharp.ts's identical docblock) ──
@@ -237,6 +239,9 @@ function lineOf(node: SyntaxNode): number {
 }
 
 const PHP_SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+// See astTaint.ts's identical JS/TS check's own docblock for the full reasoning: HTML-escaping
+// doesn't add the quotes an unquoted attribute value needs.
+const PHP_UNQUOTED_ATTR_CONTEXT_RE = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
 
 /** A PHP string literal's value (plain `'...'` or a non-interpolated `"..."`), or null. */
 function phpStringValue(n: SyntaxNode): string | null {
@@ -345,6 +350,7 @@ interface LocalFunction {
 }
 
 interface EngineCtx {
+  filePath: string;
   content: string;
   lines: string[];
   localFunctions: Map<string, LocalFunction>;
@@ -384,6 +390,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, phpTraceResolver),
   });
 }
 
@@ -1035,6 +1042,34 @@ function paramNamesOfPHP(fn: SyntaxNode): string[] {
 }
 
 const NAMED_FUNCTION_NODES_PHP = new Set(["function_definition", "method_declaration"]);
+const ANY_FUNCTION_NODES_PHP = new Set([...NAMED_FUNCTION_NODES_PHP, "anonymous_function_creation_expression", "arrow_function"]);
+
+// Source -> sink trace resolver (see taintCore.ts's buildBackwardTraceGeneric docblock). No
+// cross-file support here (PHP's is explicitly out of scope -- see crossFile.ts's own docblock), so
+// the slice always stays inside this one file. Variable text already carries the `$` sigil (a
+// variable_name node's own .text), matching buildBackwardTraceGeneric's shared identifier pattern.
+function enclosingScopePHP(node: SyntaxNode): SyntaxNode | null {
+  for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) if (ANY_FUNCTION_NODES_PHP.has(cur.type)) return cur;
+  return null;
+}
+function assignmentsInPHP(scope: SyntaxNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
+  const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+  const visit = (n: SyntaxNode) => {
+    if (n !== scope && ANY_FUNCTION_NODES_PHP.has(n.type)) return; // a nested closure's own assignments aren't this scope's
+    if (n.type === "assignment_expression") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "variable_name" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: lineOf(right) });
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return out;
+}
+const phpTraceResolver: TraceResolver<SyntaxNode> = {
+  enclosingScope: enclosingScopePHP, assignmentsIn: assignmentsInPHP,
+  position: n => n.startIndex, line: lineOf, text: n => n.text,
+};
 
 function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
   const taintMask = makeTaintMaskPHP(ctx);
@@ -1347,6 +1382,9 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
             if (lit !== null) { prefix += lit; continue; }
             const m = taintMask(o, env);
             if (wasCleared(m, classOf("xss")) && PHP_SCRIPT_CONTEXT_RE.test(prefix)) {
+              emit(ctx, "xss", node, o.text, "HTML string");
+            }
+            if (wasCleared(m, classOf("xss")) && PHP_UNQUOTED_ATTR_CONTEXT_RE.test(prefix)) {
               emit(ctx, "xss", node, o.text, "HTML string");
             }
             prefix += "";
@@ -1695,7 +1733,7 @@ export function scanAstTaintPHP(
     const lines = content.split("\n");
     const localFunctions = collectLocalFunctions(root);
     const ctx: EngineCtx = {
-      content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
+      filePath, content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
       findings: [], seen: new Set(), varTypes: new Map(), root, suppressed: suppressedOut,
       globalNames: collectGlobalNamesPHP(root), sticky: new Map(), stickyDirty: false, recordSticky: false,
     };

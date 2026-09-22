@@ -6200,7 +6200,7 @@ function findAstTaintPythonFindings(
   return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
-    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 
@@ -6216,7 +6216,7 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
       ? `${f.detail} [input assumed untrusted: parameter of a public method with no in-file caller and no framework annotation]`
       : f.detail,
     confidence: f.entryPointSeeded ? 70 : 95,
-    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 
@@ -6234,7 +6234,7 @@ function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoS
   return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
-    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 
@@ -6244,7 +6244,7 @@ function findAstTaintCSharpFindings(content: string, filePath: string, root: CSh
   return scanAstTaintCSharp(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
-    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 
@@ -6253,7 +6253,7 @@ function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyn
   return scanAstTaintPHP(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintPHPLabel(f.id), severity: f.severityOverride ?? astTaintPHPSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
-    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 

@@ -44,8 +44,8 @@
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
-  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
@@ -67,6 +67,8 @@ export interface AstTaintJavaFinding {
   // Only set for bola-missing-ownership-check (read vs write endpoint
   // severity) -- every other id keeps using the constant SEVERITY table.
   severityOverride?: "critical" | "high" | "medium";
+  // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
+  trace?: TraceStep[];
 }
 
 export function parseJavaSource(content: string): CstNode | null {
@@ -425,6 +427,7 @@ function hasHtmlTagNearby(lines: string[], line: number, window = 8): boolean {
 // ── Core engine ──────────────────────────────────────────────────────────
 
 interface EngineCtx {
+  filePath: string;
   content: string;
   lines: string[];
   localMethods: Map<string, LocalMethod>;
@@ -477,11 +480,16 @@ function emit(
   const key = `${id}:${line}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
+  const traceResolver: TraceResolver<CstNode> = {
+    enclosingScope: () => ctx.currentBody ?? null, assignmentsIn: assignmentsInJava,
+    position: startOf, line: lineOf, text: tokensText,
+  };
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? (id === "bola-missing-ownership-check"
       ? `Resource identifier '${sourceExpr}' reaches ${sinkExpr}(...) with no @PreAuthorize/@Secured/@RolesAllowed annotation and no ownership comparison (.equals()/==/!=) against the authenticated principal anywhere in the method — real per-parameter AST evidence, not a keyword-proximity guess`
       : `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`),
+    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, traceResolver),
   });
 }
 
@@ -530,6 +538,9 @@ const LDAP_SHAPE_RE = /\(\s*[&|!]?\s*(?:\(\s*)?[\w.-]+\s*(?:=|~=|>=|<=)\s*$/;
 const XPATH_SHAPE_RE = /\/\/?[\w*@.:-]+(?:\/[\w*@.:()-]+)*\[[^\]]*=\s*['"]?$/;
 const LDAP_URL_RE = /^ldaps?:\/\//i;
 const SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+// See astTaint.ts's identical JS/TS check's own docblock for the full reasoning: HTML-escaping
+// doesn't add the quotes an unquoted attribute value needs.
+const UNQUOTED_ATTR_CONTEXT_RE = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
 
 /** The lambda an argument/initializer expression IS, if any. */
 function soleLambda(node: CstNode | undefined): CstNode | undefined {
@@ -627,6 +638,10 @@ function checkConcatShapes(bin: CstNode, env: Env, ctx: EngineCtx): void {
       emit(ctx, "xss", bin, src, "HTML string", undefined,
         `HTML-escaped value '${src}' is placed inside a <script> block — HTML escaping does not neutralize JavaScript string context`);
     }
+    if (wasCleared(m, classOf("xss")) && UNQUOTED_ATTR_CONTEXT_RE.test(prefix)) {
+      emit(ctx, "xss", bin, src, "HTML string", undefined,
+        `HTML-escaped value '${src}' is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')`);
+    }
     prefix += "\u0000";
   }
 }
@@ -722,6 +737,49 @@ function assignmentTargetKey(lhsUnary: CstNode | undefined, env: Env, ctx: Engin
   if (parts.length === 0) return null;
   if (parts.length === 1) return parts[0];
   return `${parts[0]}.${parts[1]}`;
+}
+
+// Source -> sink trace resolver (see taintCore.ts's buildBackwardTraceGeneric docblock). No
+// cross-file support here (Java's is explicitly out of scope -- see crossFile.ts's own docblock), so
+// the slice always stays inside this one file. Built inside emit() itself (not a fixed module-level
+// const like the other tree-sitter engines) because its scope comes from ctx.currentBody, which
+// changes with every method the walker enters.
+
+/** `x` when `lhsUnary` reconstructs to nothing but a single bare identifier -- `obj.field`/`arr[i]`
+ * reconstruct to more than one token's worth of text and correctly return null. Sidesteps needing to
+ * re-derive primaryPrefixInfo's own env/ctx-dependent parts extraction just for this structural check. */
+function bareLocalNameJava(lhsUnary: CstNode): string | null {
+  const full = tokensText(lhsUnary);
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(full) ? full : null;
+}
+
+function assignmentsInJava(scope: CstNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
+  const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+  const visit = (n: CstNode) => {
+    if (n !== scope && n.name === "lambdaExpression") return; // a nested closure's own assignments aren't this scope's
+    if (n.name === "localVariableDeclaration") {
+      const vdl = firstNode(n, "variableDeclaratorList");
+      for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+        const declId = firstNode(vd, "variableDeclaratorId");
+        const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+        const init = firstNode(vd, "variableInitializer");
+        const initExpr = init ? firstNode(init, "expression") : undefined;
+        if (nameTok && initExpr) out.push({ name: nameTok.image, position: startOf(n), rhsText: tokensText(initExpr), line: lineOf(initExpr) });
+      }
+    }
+    if (n.name === "binaryExpression") {
+      const assignTok = tokenKids(n, "AssignmentOperator")[0];
+      if (assignTok?.image === "=") {
+        const lhsUnary = firstNode(n, "unaryExpression");
+        const rhsExpr = firstNode(n, "expression");
+        const name = lhsUnary ? bareLocalNameJava(lhsUnary) : null;
+        if (name && rhsExpr) out.push({ name, position: startOf(n), rhsText: tokensText(rhsExpr), line: lineOf(rhsExpr) });
+      }
+    }
+    for (const c of orderedNodeKids(n)) visit(c);
+  };
+  visit(scope);
+  return out;
 }
 
 /**
@@ -2132,7 +2190,7 @@ function runJavaScan(
     const lines = content.split("\n");
     const localMethods = collectLocalMethods(cst);
     const ctx: EngineCtx = {
-      content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+      filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
       suppressed: suppressedOut,
       sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),

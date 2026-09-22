@@ -61,8 +61,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 
@@ -94,6 +94,8 @@ export interface AstTaintCSharpFinding {
   // Only set for bola-missing-ownership-check (read vs write endpoint
   // severity) -- every other id keeps using the constant SEVERITY table.
   severityOverride?: "critical" | "high" | "medium";
+  // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
+  trace?: TraceStep[];
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintGo.ts's identical docblock) ──
@@ -289,6 +291,9 @@ const CS_SQL_START_RE = /^\s*(?:select|insert|update|delete|with|call|exec(?:ute
 const CS_LDAP_SHAPE_RE = /\(\s*[&|!]?\s*(?:\(\s*)?[\w.-]+\s*(?:=|~=|>=|<=)\s*$/;
 const CS_XPATH_SHAPE_RE = /\/\/?[\w*@.:-]+(?:\/[\w*@.:()-]+)*\[[^\]]*=\s*['"]?$/;
 const CS_SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+// See astTaint.ts's identical JS/TS check's own docblock for the full reasoning: HTML-encoding
+// doesn't add the quotes an unquoted attribute value needs.
+const CS_UNQUOTED_ATTR_CONTEXT_RE = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
 
 /** A C# string literal's value (regular or verbatim), or null. */
 function csStringValue(n: SyntaxNode): string | null {
@@ -351,6 +356,44 @@ function enclosingMethodCS(n: SyntaxNode): SyntaxNode | null {
   for (let cur: SyntaxNode | null = n.parent; cur; cur = cur.parent) if (cur.type === "method_declaration" || cur.type === "constructor_declaration") return cur;
   return null;
 }
+
+// Source -> sink trace resolver (see taintCore.ts's buildBackwardTraceGeneric docblock). No
+// cross-file support here (C#'s is explicitly out of scope -- see crossFile.ts's own docblock), so
+// the slice always stays inside this one file. FUNCTION_NODES_CS is declared further down this file;
+// referenced here only inside function bodies (called after module init), so the forward reference is fine.
+function enclosingScopeCS(node: SyntaxNode): SyntaxNode | null {
+  for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) {
+    if (cur.type === "method_declaration" || cur.type === "constructor_declaration" || FUNCTION_NODES_CS.has(cur.type)) return cur;
+  }
+  return null;
+}
+function assignmentsInCS(scope: SyntaxNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
+  const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+  const visit = (n: SyntaxNode) => {
+    if (n !== scope && (n.type === "method_declaration" || n.type === "constructor_declaration" || FUNCTION_NODES_CS.has(n.type))) return;
+    if (n.type === "variable_declaration") {
+      for (const d of n.namedChildren) {
+        if (d?.type !== "variable_declarator") continue;
+        const nameTok = d.namedChildren.find(c => c?.type === "identifier");
+        const init = d.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0];
+        if (nameTok && init) out.push({ name: nameTok.text, position: n.startIndex, rhsText: init.text, line: lineOf(init) });
+      }
+    }
+    if (n.type === "assignment_expression") {
+      const opNode = n.namedChildren.find(c => c?.type === "assignment_operator");
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (opNode?.text === "=" && left?.type === "identifier" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: lineOf(right) });
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return out;
+}
+const csTraceResolver: TraceResolver<SyntaxNode> = {
+  enclosingScope: enclosingScopeCS, assignmentsIn: assignmentsInCS,
+  position: n => n.startIndex, line: lineOf, text: n => n.text,
+};
 function isParamOfEnclosingCS(id: SyntaxNode): boolean {
   for (let cur: SyntaxNode | null = id.parent; cur; cur = cur.parent) {
     if (cur.type === "method_declaration" || cur.type === "lambda_expression" || cur.type === "local_function_statement") {
@@ -408,6 +451,10 @@ function checkShapesCS(
     if (wasCleared(m, classOf("xss")) && CS_SCRIPT_CONTEXT_RE.test(prefix)) {
       emit(ctx, "xss", node, src, "HTML string", undefined,
         `HTML-encoded value '${src}' is placed inside a <script> block — HTML encoding does not neutralize JavaScript string context`);
+    }
+    if (wasCleared(m, classOf("xss")) && CS_UNQUOTED_ATTR_CONTEXT_RE.test(prefix)) {
+      emit(ctx, "xss", node, src, "HTML string", undefined,
+        `HTML-encoded value '${src}' is interpolated into an UNQUOTED HTML attribute — HTML encoding doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')`);
     }
     prefix += "";
   }
@@ -508,6 +555,7 @@ interface LocalMethod {
 }
 
 interface EngineCtx {
+  filePath: string;
   content: string;
   lines: string[];
   localMethods: Map<string, LocalMethod>;
@@ -541,6 +589,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, csTraceResolver),
   });
 }
 
@@ -1834,7 +1883,7 @@ export function scanAstTaintCSharp(
     const lines = content.split("\n");
     const localMethods = collectLocalMethods(root);
     const ctx: EngineCtx = {
-      content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+      filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
       varTypes: new Map(), root, findings: [], seen: new Set(), suppressed: suppressedOut,
       sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     };

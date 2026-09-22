@@ -117,6 +117,128 @@ export interface TraceStep {
   snippet: string;
 }
 
+// A bare identifier for every engine here: PHP's optional `$` sigil is the only per-language
+// variation, so one shared pattern covers all five tree-sitter/CST-based engines below (astTaint.ts's
+// own JS/TS implementation is hand-built against real ts.Node references instead -- see its own
+// buildTrace docblock for why that one stays bespoke).
+const BARE_IDENTIFIER_RE = /^\$?[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Balanced-paren extraction of a call expression's FIRST top-level argument, from raw text --
+ * language-agnostic (every engine here uses C-family call syntax), so this needs no per-language
+ * hook. Returns null when `text` isn't call-shaped (no parens, or something other than a
+ * dotted/bracketed identifier chain immediately before the first paren) or the call has no
+ * arguments. */
+function extractFirstCallArg(text: string): string | null {
+  const open = text.indexOf("(");
+  if (open < 0 || !text.trimEnd().endsWith(")")) return null;
+  if (!/^[\w$.]+$/.test(text.slice(0, open).trim())) return null;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")") {
+      depth--;
+      if (depth !== 0) continue;
+      const inner = text.slice(open + 1, i).trim();
+      if (inner.length === 0) return null;
+      let d2 = 0;
+      for (let j = 0; j < inner.length; j++) {
+        const c = inner[j];
+        if (c === "(" || c === "[" || c === "{") d2++;
+        else if (c === ")" || c === "]" || c === "}") d2--;
+        else if (c === "," && d2 === 0) return inner.slice(0, j).trim();
+      }
+      return inner;
+    }
+  }
+  return null;
+}
+
+/** What buildBackwardTraceGeneric needs from a tree-agnostic engine to walk backward through it --
+ * see its own docblock for the shared algorithm every resolver plugs into. */
+export interface TraceResolver<N> {
+  /** The function/method-like node lexically enclosing `node`, or null (module/top-level scope). */
+  enclosingScope(node: N): N | null;
+  /** Every simple `name = expr`-shaped assignment (declarations included) within `scope` -- a
+   * destructuring/compound target is simply invisible to this, which only means the trace stops one
+   * hop early there, never wrong. */
+  assignmentsIn(scope: N): Array<{ name: string; position: number; rhsText: string; line: number }>;
+  /** A stable, comparable source-order position (e.g. startIndex) -- only used to find the LATEST
+   * assignment that still precedes a given position, never displayed. */
+  position(node: N): number;
+  line(node: N): number;
+  text(node: N): string;
+  /** Cross-file continuation (engines with cross-file support only): when `text` is a call to a
+   * cross-file-propagating import, the extra step(s) to append -- the slice STOPS after these (the
+   * callee's own sub-slice is a documented one-hop boundary, matching astTaint.ts's identical
+   * policy), same as returning null does for a name this resolver doesn't recognize as cross-file. */
+  crossFileHop?(text: string): TraceStep[] | null;
+}
+
+const MAX_TRACE_HOPS = 6;
+
+/**
+ * Bounded backward slice from a sink's tainted argument (given only as TEXT -- every engine here
+ * already computes `sourceExpr` this way) back to its origin, presented source-first. Shared by every
+ * engine except astTaint.ts's own JS/TS implementation (hand-built against real ts.Node references,
+ * see its buildTrace docblock for why) -- five tree-sitter/CST engines would otherwise duplicate this
+ * exact walk five times over. Text/position-based rather than fully AST-typed on purpose: it lets one
+ * function serve resolvers built from completely different parsers (web-tree-sitter's SyntaxNode for
+ * four engines, Chevrotain's CstNode for Java) through one small interface instead of five bespoke
+ * walks. See TraceStep's own docblock for why this whole layer runs only at finding time.
+ */
+export function buildBackwardTraceGeneric<N>(
+  filePath: string, sinkNode: N, sourceText: string, sinkText: string, resolver: TraceResolver<N>,
+): TraceStep[] {
+  const backward: TraceStep[] = [];
+  const visited = new Set<string>();
+  const scope = resolver.enclosingScope(sinkNode);
+  let curText = sourceText.trim();
+  let curPos = resolver.position(sinkNode);
+  let curLine = resolver.line(sinkNode);
+
+  for (let hop = 0; hop < MAX_TRACE_HOPS; hop++) {
+    const crossSteps = resolver.crossFileHop?.(curText);
+    if (crossSteps && crossSteps.length > 0) { backward.push(...crossSteps); break; }
+
+    if (BARE_IDENTIFIER_RE.test(curText)) {
+      if (visited.has(curText)) break; // a re-assignment cycle -- stop rather than loop
+      visited.add(curText);
+      const candidates = scope ? resolver.assignmentsIn(scope).filter(a => a.name === curText && a.position < curPos) : [];
+      if (candidates.length === 0) {
+        backward.push({ file: filePath, line: curLine, kind: "source", label: curText, snippet: curText });
+        break;
+      }
+      const best = candidates.reduce((a, b) => (b.position > a.position ? b : a));
+      backward.push({
+        file: filePath, line: best.line, kind: "assignment",
+        label: `${curText} = ${best.rhsText.slice(0, 80)}`, snippet: best.rhsText.slice(0, 100),
+      });
+      curText = best.rhsText.trim();
+      curPos = best.position;
+      curLine = best.line;
+      continue;
+    }
+
+    const firstArg = extractFirstCallArg(curText);
+    if (firstArg !== null) {
+      backward.push({ file: filePath, line: curLine, kind: "call", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
+      curText = firstArg;
+      continue;
+    }
+
+    backward.push({ file: filePath, line: curLine, kind: "source", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
+    break;
+  }
+
+  backward.reverse();
+  // Adjacent steps that landed on the exact same line with the exact same text are redundant (a
+  // source step immediately followed by an assignment step whose RHS IS that same source, e.g.
+  // `const id = req.query.id;`) -- collapse rather than show the same snippet twice.
+  const deduped = backward.filter((s, i) => i === 0 || s.line !== backward[i - 1].line || s.snippet !== backward[i - 1].snippet);
+  deduped.push({ file: filePath, line: resolver.line(sinkNode), kind: "sink", label: sinkText, snippet: resolver.text(sinkNode).slice(0, 100) });
+  return deduped;
+}
+
 export function cloneEnv(env: TaintEnv): TaintEnv {
   return new Map(env);
 }

@@ -49,8 +49,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
@@ -80,6 +80,10 @@ export interface AstTaintPyFinding {
   detail:     string;
   sourceExpr: string;
   sinkExpr:   string;
+  // Source -> sink trace (best-effort, same-file only -- see taintCore.ts's TraceStep/
+  // buildBackwardTraceGeneric docblocks; a cross-file hop, unlike astTaint.ts's JS/TS
+  // implementation, is a documented gap here rather than built out, to keep this port scoped).
+  trace?: TraceStep[];
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see docblock above) ─────────────
@@ -743,6 +747,32 @@ function enclosingFunctionPy(node: SyntaxNode): SyntaxNode | null {
   for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) if (cur.type === "function_definition") return cur;
   return null;
 }
+
+// Source -> sink trace resolver (see taintCore.ts's buildBackwardTraceGeneric docblock). Same-file
+// only -- see AstTaintPyFinding.trace's own docblock for why the cross-file hop this file's OWN
+// propagation already supports isn't wired into the trace display too, in this pass.
+function assignmentsInPy(scope: SyntaxNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
+  const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+  const visit = (n: SyntaxNode) => {
+    if (n !== scope && (n.type === "function_definition" || n.type === "lambda")) return; // a nested closure's own assignments aren't this scope's
+    if (n.type === "assignment") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "identifier" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: right.startPosition.row + 1 });
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return out;
+}
+const pyTraceResolver: TraceResolver<SyntaxNode> = {
+  enclosingScope: enclosingFunctionPy, assignmentsIn: assignmentsInPy,
+  position: n => n.startIndex, line: n => n.startPosition.row + 1, text: n => n.text,
+};
+
+// See astTaint.ts's identical JS/TS check's own docblock for the full reasoning: HTML-escaping
+// doesn't add the quotes an unquoted attribute value needs.
+const UNQUOTED_ATTR_CONTEXT_RE_PY = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
 
 /** Is identifier `node` bound in an enclosing function scope (a parameter or local) rather than at module scope? */
 function isLocalNamePy(node: SyntaxNode): boolean {
@@ -1554,7 +1584,28 @@ export function scanAstTaintPython(
       findings.push({
         id, line, sinkExpr, sourceExpr,
         detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+        trace: buildBackwardTraceGeneric(filePath, node, sourceExpr, sinkExpr, pyTraceResolver),
       });
+    };
+
+    /** `f"<div title={escaped}>"` (no surrounding quotes): HTML-escaping alone doesn't add the
+     * quotes an unquoted attribute value needs -- see astTaint.ts's identical JS/TS check's own
+     * docblock for the full reasoning. */
+    const escapedInUnquotedAttrContext = (arg: SyntaxNode, env: Env, mask: TaintMaskFnPy): boolean => {
+      let node: SyntaxNode | undefined = arg;
+      if (node.type === "identifier") node = lastAssigned.get(node.text);
+      if (!node || node.type !== "string") return false;
+      let text = "";
+      for (const c of node.namedChildren) {
+        if (!c) continue;
+        if (c.type === "string_content") text += c.text;
+        else if (c.type === "interpolation") {
+          const e = c.childForFieldName("expression");
+          if (e && wasCleared(mask(e, env), classOf("xss")) && UNQUOTED_ATTR_CONTEXT_RE_PY.test(text)) return true;
+          text += " ";
+        }
+      }
+      return false;
     };
 
     // fn name -> (tainted param index -> classes tainted at the call site)
@@ -1593,6 +1644,10 @@ export function scanAstTaintPython(
           const a = match.args.find(x => escapedInScriptContext(x, env, taintMask))!;
           emit("xss", node, sourceLabelPy(a), match.sinkExpr,
             "HTML-escaped value is interpolated inside a <script> block — HTML escaping does not neutralize JavaScript string context (a backslash still breaks out)");
+        } else if (match.id === "xss" && match.args.some(a => escapedInUnquotedAttrContext(a, env, taintMask))) {
+          const a = match.args.find(x => escapedInUnquotedAttrContext(x, env, taintMask))!;
+          emit("xss", node, sourceLabelPy(a), match.sinkExpr,
+            "HTML-escaped value is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')");
         } else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(node) });
       }
       const fnNode = node.childForFieldName("function");

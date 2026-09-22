@@ -52,8 +52,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, guardedNames, walkIfChain, walkLoop, walkSwitch, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
@@ -80,6 +80,8 @@ export interface AstTaintGoFinding {
   detail:     string;
   sourceExpr: string;
   sinkExpr:   string;
+  // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
+  trace?: TraceStep[];
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintPython.ts's docblock) ──
@@ -507,6 +509,10 @@ const SQL_START_RE_GO = /^\s*(?:select|insert|update|delete|with|call|exec(?:ute
 const LDAP_SHAPE_RE_GO = /\(\s*[&|!]?\s*(?:\(\s*)?[\w.-]+\s*(?:=|~=|>=|<=)\s*$/;
 const XPATH_SHAPE_RE_GO = /\/\/?[\w*@.:-]+(?:\/[\w*@.:()-]+)*\[[^\]]*=\s*['"]?$/;
 const SCRIPT_CONTEXT_RE_GO = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+// Inside a still-open tag with a bare `attr=` right at the end and no quote before the hole --
+// HTML-escaping doesn't add the missing quotes an unquoted attribute value needs (see astTaint.ts's
+// identical JS/TS check's own docblock for the full reasoning).
+const UNQUOTED_ATTR_CONTEXT_RE_GO = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
 
 function goStringLiteralValue(n: SyntaxNode): string | null {
   if (n.type === "interpreted_string_literal") return n.text.slice(1, -1);
@@ -1588,6 +1594,36 @@ export function scanAstTaintGo(
     const seen = new Set<string>();
     const lineOf = (node: SyntaxNode): number => node.startPosition.row + 1;
 
+    // Source -> sink trace (see taintCore.ts's buildBackwardTraceGeneric docblock). No cross-file
+    // support here (Go's is explicitly out of scope -- see crossFile.ts's own docblock), so this
+    // resolver has no crossFileHop and the slice always stays inside this one file.
+    const traceResolver: TraceResolver<SyntaxNode> = {
+      enclosingScope: findEnclosingFunctionNodeGo,
+      position: n => n.startIndex,
+      line: lineOf,
+      text: n => n.text,
+      assignmentsIn: (scope) => {
+        const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+        const visit = (n: SyntaxNode) => {
+          if (n !== scope && GO_FUNCTION_NODES.has(n.type)) return; // a nested closure's own assignments aren't this scope's
+          if (n.type === "short_var_declaration" || n.type === "assignment_statement") {
+            // `left`/`right` are expression_list nodes (even for a single target -- confirmed via
+            // assignmentTargetsOfGo's own identical unwrap elsewhere in this file); only the
+            // single-target `x := expr` / `x = expr` shape is worth resolving here (a multi-value
+            // `a, b := f()` has no one RHS expression per name to point at).
+            const left = n.childForFieldName("left");
+            const right = n.childForFieldName("right");
+            const lTarget = left?.namedChildren.length === 1 ? left.namedChildren[0] : null;
+            const rExpr = right?.namedChildren.length === 1 ? right.namedChildren[0] : null;
+            if (lTarget?.type === "identifier" && rExpr) out.push({ name: lTarget.text, position: n.startIndex, rhsText: rExpr.text, line: lineOf(rExpr) });
+          }
+          for (const c of n.namedChildren) if (c) visit(c);
+        };
+        visit(scope);
+        return out;
+      },
+    };
+
     const emit = (id: AstTaintGoId, node: SyntaxNode, sourceExpr: string, sinkExpr: string, detailOverride?: string) => {
       const line = lineOf(node);
       const key = `${id}:${line}`;
@@ -1596,6 +1632,7 @@ export function scanAstTaintGo(
       findings.push({
         id, line, sinkExpr, sourceExpr,
         detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+        trace: buildBackwardTraceGeneric(filePath, node, sourceExpr, sinkExpr, traceResolver),
       });
     };
 
@@ -1792,6 +1829,10 @@ export function scanAstTaintGo(
         if (wasCleared(m, classOf("xss")) && SCRIPT_CONTEXT_RE_GO.test(prefix)) {
           emit("xss", node, src, "HTML string",
             `HTML-escaped value '${src}' is placed inside a <script> block — HTML escaping does not neutralize JavaScript string context`);
+        }
+        if (wasCleared(m, classOf("xss")) && UNQUOTED_ATTR_CONTEXT_RE_GO.test(prefix)) {
+          emit("xss", node, src, "HTML string",
+            `HTML-escaped value '${src}' is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')`);
         }
         prefix += "\u0000";
       }
