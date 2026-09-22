@@ -1,11 +1,15 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 import AppShell from "@/components/AppShell";
 import Providers from "@/components/Providers";
 
 const inter = Inter({ subsets: ["latin"], display: "swap", variable: "--font-inter" });
+// Used selectively (code snippets, stat readouts, trace panels) -- see the home page's own
+// design notes. Loaded globally via next/font so it's self-hosted with no extra request/CLS,
+// but never applied to body text; only components that opt into the --font-mono var use it.
+const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], display: "swap", variable: "--font-mono" });
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://app.trustledger.dev";
 
@@ -77,7 +81,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="theme-color" media="(prefers-color-scheme: light)" content="#6366f1" />
         <meta name="theme-color" media="(prefers-color-scheme: dark)"  content="#0f172a" />
       </head>
-      <body className={`${inter.variable} ${inter.className} text-gray-900`}>
+      <body className={`${inter.variable} ${jetbrainsMono.variable} ${inter.className} text-gray-900`}>
         <Providers>
           <AppShell>{children}</AppShell>
         </Providers>
