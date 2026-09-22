@@ -10,7 +10,7 @@
  * module lets the server run the exact same derivation once and cache it.
  */
 
-import { parsePackageJson, parseRequirementsTxt, parseGoMod } from "@/lib/depAnalysis";
+import { parsePackageJson, parseRequirementsTxt, parseGoMod, parseComposerJson, parseCsproj } from "@/lib/depAnalysis";
 import { lookupVulnerabilities, OSV_ECOSYSTEM, type OsvLookup, type OsvVulnerability } from "@/lib/osvClient";
 import { lookupNpmLicense } from "@/lib/npmLicense";
 import { mapWithConcurrency } from "@/lib/github";
@@ -203,6 +203,13 @@ export function parseImports(content: string, eco: LangEcosystem): string[] {
       const m = t.match(/^require\s+['"]([^'"]+)['"]/); if (m) pkgs.add(m[1]);
     } else if (eco === "php") {
       const m = t.match(/use\s+([\w\\]+)/); if (m) pkgs.add(m[1].split("\\")[0].toLowerCase());
+    } else if (eco === "csharp") {
+      // Namespace prefix only (e.g. "Newtonsoft.Json") -- a `using` directive alone can't reliably
+      // identify the exact NuGet package id, so this never matches a curated NuGet-id-keyed DB entry
+      // (same caveat as the Java branch above). Best-effort signal only; parseCsproj is the real
+      // source of truth for CVE matching when a .csproj is present.
+      const m = t.match(/^using\s+(?:static\s+)?([\w.]+)\s*;/);
+      if (m) { const parts = m[1].split("."); if (parts.length >= 2) pkgs.add(parts.slice(0, 2).join(".")); else pkgs.add(parts[0]); }
     }
   }
   return Array.from(pkgs).filter(Boolean);
@@ -301,6 +308,8 @@ function manifestPackages(filePath: string, content: string): DeclaredPackage[] 
   if (name.endsWith("go.mod"))           return parseGoMod(content).map(p => ({ name: p.name, version: p.version }));
   if (name.endsWith("pom.xml"))          return parsePomXml(content).map(coord => ({ name: coord, version: "" }));
   if (name.endsWith("build.gradle") || name.endsWith("build.gradle.kts")) return parseBuildGradle(content).map(coord => ({ name: coord, version: "" }));
+  if (name.endsWith("composer.json"))    return parseComposerJson(content).map(p => ({ name: p.name, version: p.version }));
+  if (name.endsWith(".csproj"))          return parseCsproj(content).map(p => ({ name: p.name, version: p.version }));
   return null;
 }
 

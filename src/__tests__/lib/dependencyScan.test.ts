@@ -103,6 +103,47 @@ describe("dependencyScan.deriveFindings", () => {
   });
 });
 
+describe("dependencyScan.deriveFindings -- composer.json / .csproj (PHP/C# manifest support)", () => {
+  beforeEach(() => {
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map());
+    mockLookupNpmLicense.mockReset().mockResolvedValue(null);
+  });
+
+  it("parses composer.json and queries OSV against the Packagist ecosystem", async () => {
+    mockLookupVulnerabilities.mockResolvedValue(new Map([
+      ["Packagist|guzzlehttp/guzzle|6.5.0", [{ id: "GHSA-fake", aliases: ["CVE-2022-29248"], severity: "HIGH" as const, summary: "test vuln", fixedIn: "7.4.5" }]],
+    ]));
+    const scan: ScanForDeps = {
+      repo: "acme/demo", pr_number: 1, scan_id: "scan_1",
+      files: [{ file_path: "composer.json", content: JSON.stringify({ require: { php: ">=7.2", "guzzlehttp/guzzle": "6.5.0" } }), ai_percentage: 0.1 }],
+    };
+    const findings = await deriveFindings([scan]);
+    const f = findings.find(x => x.package_name === "guzzlehttp/guzzle");
+    expect(f).toBeDefined();
+    expect(f!.ecosystem).toBe("php");
+    expect(f).toMatchObject({ type: "vulnerable", risk: "HIGH", cve: "CVE-2022-29248" });
+    // "php" the runtime requirement itself is not a real Packagist package.
+    expect(findings.some(x => x.package_name === "php")).toBe(false);
+  });
+
+  it("parses a .csproj and queries OSV against the NuGet ecosystem", async () => {
+    // Newtonsoft.Json is deliberately NOT used here -- it's in NON_CVE_RISK_DB, which takes
+    // precedence over OSV by design (see the earlier "lets NON_CVE_RISK_DB take precedence" test).
+    mockLookupVulnerabilities.mockResolvedValue(new Map([
+      ["NuGet|Serilog|2.10.0", [{ id: "GHSA-fake", aliases: ["CVE-2024-99999"], severity: "HIGH" as const, summary: "test vuln", fixedIn: "2.12.0" }]],
+    ]));
+    const scan: ScanForDeps = {
+      repo: "acme/demo", pr_number: 1, scan_id: "scan_1",
+      files: [{ file_path: "src/Api.csproj", content: `<Project><ItemGroup><PackageReference Include="Serilog" Version="2.10.0" /></ItemGroup></Project>`, ai_percentage: 0.1 }],
+    };
+    const findings = await deriveFindings([scan]);
+    const f = findings.find(x => x.package_name === "Serilog");
+    expect(f).toBeDefined();
+    expect(f!.ecosystem).toBe("csharp");
+    expect(f).toMatchObject({ type: "vulnerable", risk: "HIGH", cve: "CVE-2024-99999" });
+  });
+});
+
 describe("dependencyScan.deriveFindings -- base-image CVE lookup (Decision 2, new capability)", () => {
   beforeEach(() => {
     mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map());

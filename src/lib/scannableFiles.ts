@@ -10,6 +10,11 @@
 export const SCANNABLE_EXTS = new Set([
   "py", "ts", "tsx", "js", "jsx", "rb", "go", "rs",
   "java", "kt", "cs", "php", "cpp", "c", "swift",
+  // .csproj -- C#'s dependency manifest (PackageReference elements, parsed by
+  // depAnalysis.ts's parseCsproj). Project-specific filenames (MyApp.csproj), unlike
+  // package.json/go.mod's fixed basenames, so this needs the extension allowlist rather than
+  // MANIFEST_BASENAMES below.
+  "csproj",
   // XML (Spring/servlet config -- XXE-relevant, and often carries hardcoded
   // DB credentials) and .properties (Java's native key=value config format,
   // which the secrets detector's generic word=value patterns already cover)
@@ -34,6 +39,10 @@ const MANIFEST_BASENAMES = new Set([
   // Java/Kotlin dependency manifests -- previously never fetched, so
   // Maven/Gradle projects never had their dependencies parsed at all.
   "pom.xml", "build.gradle", "build.gradle.kts",
+  // PHP's dependency manifest (parsed by depAnalysis.ts's parseComposerJson) -- previously never
+  // fetched, so PHP projects (this codebase's own 6th first-class taint-engine language) never had
+  // their dependencies parsed at all, same gap Java/Kotlin had before the entry above closed it.
+  "composer.json",
 ]);
 
 // Kubernetes manifests are plain .yaml/.yml -- indistinguishable by

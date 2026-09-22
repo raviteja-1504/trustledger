@@ -29,6 +29,15 @@ describe("scannableFiles.isScannablePath", () => {
     expect(isScannablePath("README.md")).toBe(false);
   });
 
+  it("scans a .csproj file regardless of its project-specific basename", () => {
+    expect(isScannablePath("src/Api/Api.csproj")).toBe(true);
+    expect(isScannablePath("SomeOtherProject.csproj")).toBe(true);
+  });
+
+  it("scans composer.json", () => {
+    expect(isScannablePath("composer.json")).toBe(true);
+  });
+
   it("scans a bare Dockerfile despite having no extension", () => {
     expect(isScannablePath("Dockerfile")).toBe(true);
   });
