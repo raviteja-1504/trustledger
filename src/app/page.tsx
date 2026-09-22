@@ -341,7 +341,7 @@ function TraceVisual() {
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${EMERALD}80` }} />
         </div>
         <span className="text-[11px] font-mono font-semibold ml-2 text-white/68">how a trace reads</span>
-        <span className="ml-auto text-[10px] font-mono text-white/34">illustrative example</span>
+        <span className="ml-auto text-[10px] font-mono text-white/42">illustrative example</span>
       </div>
       <div className="p-5 sm:p-6 font-mono text-[12.5px]">
         {TRACE_STEPS.map((s, i) => (
@@ -372,18 +372,17 @@ function TraceVisual() {
 
 function HeroSection() {
   return (
-    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-32 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 60% at 50% 0%, ${CYAN}22, transparent 60%), ${INK}` }}>
+    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-32 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 55% at 50% 0%, ${CYAN}16, transparent 58%), ${INK}` }}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute -top-32 -left-24 w-[32rem] h-[32rem] rounded-full blur-[120px]" style={{ background: CYAN, opacity: 0.16 }} />
-        <div className="absolute -top-16 -right-24 w-[28rem] h-[28rem] rounded-full blur-[120px]" style={{ background: VIOLET, opacity: 0.13 }} />
-        <div className="absolute top-40 left-1/2 -translate-x-1/2 w-[26rem] h-[26rem] rounded-full blur-[130px]" style={{ background: SKY, opacity: 0.1 }} />
-        <div className="absolute inset-0" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)", backgroundSize: "56px 56px", maskImage: "radial-gradient(ellipse 70% 60% at 50% 20%, black, transparent)" }} />
+        <div className="absolute -top-40 -left-24 w-[30rem] h-[30rem] rounded-full blur-[140px]" style={{ background: CYAN, opacity: 0.08 }} />
+        <div className="absolute -top-24 -right-24 w-[26rem] h-[26rem] rounded-full blur-[140px]" style={{ background: VIOLET, opacity: 0.06 }} />
+        <div className="absolute inset-0" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)", backgroundSize: "56px 56px" }} />
         <div className="absolute bottom-0 left-0 right-0 h-52" style={{ background: `linear-gradient(to top, ${INK}, transparent)` }} />
       </div>
 
       <Reveal className="relative max-w-4xl mx-auto space-y-6">
         <Eyebrow><span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />One platform for everything that touches a PR</Eyebrow>
-        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black text-white tracking-tight leading-[1.05]">
+        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black text-white tracking-tight leading-[1.05]" style={{ textShadow: "0 4px 40px rgba(0,0,0,0.7)" }}>
           AI provenance.<br />
           <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
           One risk score.
@@ -444,7 +443,7 @@ function PillarsSection() {
   const p = PILLARS[active];
 
   return (
-    <section id="platform" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${p.color}12, transparent 65%), ${SURFACE}`, transition: "background 0.5s ease" }}>
+    <section id="platform" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${p.color}0c, transparent 65%), ${SURFACE}`, transition: "background 0.5s ease" }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-12">
           <Eyebrow>The platform</Eyebrow>
@@ -499,7 +498,7 @@ function PillarsSection() {
 function VulnCoverageSection() {
   const groups = Array.from(new Set(VULN_CLASSES.map(v => v.group)));
   return (
-    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}12, transparent 65%), ${INK}` }}>
+    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}0c, transparent 65%), ${INK}` }}>
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
@@ -533,7 +532,7 @@ function VulnCoverageSection() {
 
 function LanguageEngineSection() {
   return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0f, transparent 65%), ${SURFACE}` }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
@@ -565,7 +564,7 @@ function LanguageEngineSection() {
 
 function PipelineSection() {
   return (
-    <section id="how-it-analyzes" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${VIOLET}12, transparent 65%), ${INK}` }}>
+    <section id="how-it-analyzes" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${VIOLET}0c, transparent 65%), ${INK}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Every PR, every push</Eyebrow>
@@ -603,7 +602,7 @@ const FEATURES = [
 
 function FeaturesSection() {
   return (
-    <section id="features" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${CYAN}12, transparent 65%), ${SURFACE}` }}>
+    <section id="features" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${CYAN}0c, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Features</Eyebrow>
@@ -650,7 +649,7 @@ function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; 
 
 function ArchSection() {
   return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${SKY}12, transparent 65%), ${INK}` }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${SKY}0c, transparent 65%), ${INK}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={SKY}>Under the hood</Eyebrow>
@@ -676,7 +675,7 @@ function ArchSection() {
 
 function WhySection() {
   return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0f, transparent 65%), ${SURFACE}` }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Why TrustLedger</Eyebrow>
@@ -692,7 +691,7 @@ function WhySection() {
                   <span className="text-xs font-bold text-white/58">{row.vs}</span>
                 </div>
                 <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.09]">
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/34 mb-2">They do</p><p className="text-sm text-white/58 leading-relaxed">{row.them}</p></div>
+                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/42 mb-2">They do</p><p className="text-sm text-white/58 leading-relaxed">{row.them}</p></div>
                   <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/82 leading-relaxed">{row.us}</p></div>
                 </div>
               </div>
@@ -708,7 +707,7 @@ function WhySection() {
 
 function HowItWorksSection() {
   return (
-    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}12, transparent 65%), ${INK}` }}>
+    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${INK}` }}>
       <div className="max-w-4xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>How it works</Eyebrow>
@@ -743,8 +742,8 @@ function HowItWorksSection() {
 
 function CTASection() {
   return (
-    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}22, transparent 65%), ${SURFACE}` }}>
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] rounded-full blur-[140px] pointer-events-none" style={{ background: CYAN, opacity: 0.1 }} />
+    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}16, transparent 65%), ${SURFACE}` }}>
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] rounded-full blur-[140px] pointer-events-none" style={{ background: CYAN, opacity: 0.06 }} />
       <Reveal className="relative max-w-3xl mx-auto text-center space-y-6">
         <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}1f`, border: `1px solid ${CYAN}44`, boxShadow: `0 0 32px ${CYAN}4d` }}><ShieldIcon size={26} /></div>
         <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
@@ -798,8 +797,8 @@ function Footer() {
         </div>
       </div>
       <div className="max-w-6xl mx-auto mt-10 pt-6 border-t flex flex-col sm:flex-row items-center justify-between gap-3" style={{ borderColor: "rgba(255,255,255,0.14)" }}>
-        <p className="text-xs text-white/32">© 2026 TrustLedger. All rights reserved.</p>
-        <div className="flex items-center gap-1.5 text-xs text-white/32"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />All systems operational</div>
+        <p className="text-xs text-white/40">© 2026 TrustLedger. All rights reserved.</p>
+        <div className="flex items-center gap-1.5 text-xs text-white/40"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />All systems operational</div>
       </div>
     </footer>
   );
@@ -809,7 +808,8 @@ function Footer() {
 
 export default function LandingPage() {
   return (
-    <div style={{ background: INK }}>
+    <div className="tl-landing" style={{ background: INK }}>
+      <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
       <NavBar />
       <HeroSection />
       <PillarsSection />
