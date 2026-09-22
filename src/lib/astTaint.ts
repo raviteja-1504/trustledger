@@ -28,7 +28,7 @@
 import * as ts from "typescript";
 import {
   ALL, applyClears, applyGuards, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
-  SHADOW, wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv,
+  SHADOW, wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 
@@ -43,6 +43,9 @@ export interface AstTaintFinding {
   detail:     string;
   sourceExpr: string;
   sinkExpr:   string;
+  // Source -> sink trace (best-effort, see taintCore.ts's TraceStep docblock). Absent when the
+  // backward slice couldn't be built at all (never blocks the finding itself from firing).
+  trace?: TraceStep[];
 }
 
 function scriptKindFor(filePath: string): ts.ScriptKind {
@@ -1080,6 +1083,17 @@ function buildPropagatingMap(localFns: Map<string, LocalFn>, seed?: Map<string, 
   return propagating;
 }
 
+// Context-aware sanitizer checks: HTML-escaping neutralizes the HTML-BODY context specifically -- it
+// does NOT make a value safe inside a `<script>` block (still a JS string) or an UNQUOTED attribute
+// value (still breaks on whitespace/`=`/backticks, none of which `&lt;`/`&gt;`/`&amp;`/`&quot;`
+// escaping touches). See escapedInScriptContext/escapedInUnquotedAttrContext below for how each walks
+// the template's own accumulated literal prefix against these shapes.
+const SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+// Inside a still-open tag (`[^>]*` -- no `>` reached yet) with a bare `attr=` right at the end and no
+// quote character before the hole -- `<div title="${x}">` and `<div>text=${x}` both correctly don't
+// match (the first ends in `"`, the second's `[^>]*` can't cross the earlier `>`).
+const UNQUOTED_ATTR_CONTEXT_RE = /<[a-zA-Z][-\w]*(?:\s+[-\w]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*\s+[-\w]+=\s*$/;
+
 function sourceLabel(expr: ts.Expression): string {
   return expr.getText().replace(/\s+/g, " ").slice(0, 60);
 }
@@ -1340,12 +1354,18 @@ function structuralChecks(
  */
 export function scanAstTaint(
   content: string, filePath: string, presparsed?: ts.SourceFile,
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer -- lets scanner.ts drop the regex layer's
   // duplicate finding for a flow this engine proved safe. Optional out-param
   // so the return type (and every existing caller) stays unchanged.
   suppressedOut?: SuppressedSink[],
+  // Source -> sink trace generation (explainability layer, see taintCore.ts's TraceStep docblock):
+  // the OTHER files in this batch's own already-parsed ts.SourceFile, keyed by path -- lets a trace
+  // that crosses a cross-file call continue ONE hop into the callee's own body (a real file+line
+  // there, not just an attribution note) instead of stopping at the import. Read-only, best-effort;
+  // absent entries simply stop the trace at that hop rather than throwing.
+  crossFileSources?: Map<string, ts.SourceFile>,
 ): AstTaintFinding[] {
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
@@ -1401,13 +1421,100 @@ export function scanAstTaint(
     const lineOf = (node: ts.Node): number =>
       sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 
+    /** If `text` mentions a cross-file-propagating call, the (name, info) pair, else null. */
+    const crossFileCallIn = (text: string): [string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }] | null => {
+      if (!crossFilePropagating) return null;
+      for (const entry of crossFilePropagating) {
+        if (new RegExp(`\\b${entry[0]}\\s*\\(`).test(text)) return entry;
+      }
+      return null;
+    };
     /** If `text` mentions a cross-file-propagating call, a note for `detail` identifying the import; else "". */
     const crossFileNote = (text: string): string => {
-      if (!crossFilePropagating) return "";
-      for (const [name, info] of crossFilePropagating) {
-        if (new RegExp(`\\b${name}\\s*\\(`).test(text)) return ` [crosses file boundary via "${name}" imported from ${info.fromModule}]`;
+      const hit = crossFileCallIn(text);
+      return hit ? ` [crosses file boundary via "${hit[0]}" imported from ${hit[1].fromModule}]` : "";
+    };
+
+    /** Best-effort: the text of `fnName`'s first return statement in an ALREADY-PARSED other file --
+     * one real extra hop for a cross-file trace, not a full re-walk of the callee (see TraceStep's own
+     * docblock for why this stays a bounded, best-effort layer rather than a full nested taint walk). */
+    const traceCalleeReturn = (calleeSf: ts.SourceFile, calleeFilePath: string, fnName: string): TraceStep | null => {
+      const fn = collectLocalFunctions(calleeSf).get(fnName);
+      if (!fn?.body) return null;
+      let found: ts.Node | undefined;
+      if (ts.isBlock(fn.body)) {
+        const visit = (n: ts.Node) => {
+          if (found) return;
+          if (ts.isReturnStatement(n) && n.expression) { found = n.expression; return; }
+          if (n !== fn.body && isFunctionLike(n)) return; // don't descend into a nested closure's own return
+          ts.forEachChild(n, visit);
+        };
+        visit(fn.body);
+      } else {
+        found = fn.body; // arrow expression body
       }
-      return "";
+      if (!found) return null;
+      const line = calleeSf.getLineAndCharacterOfPosition(found.getStart(calleeSf)).line + 1;
+      const text = found.getText(calleeSf).replace(/\s+/g, " ").slice(0, 100);
+      return { file: calleeFilePath, line, kind: "source", label: text, snippet: text };
+    };
+
+    /**
+     * Backward slice from the tainted argument node to its origin, presented source-first (see
+     * taintCore.ts's TraceStep docblock for why this is a separate, finding-time-only layer from the
+     * mask that actually drives propagation). Bounded (MAX_TRACE_HOPS) and best-effort throughout --
+     * never throws, and an incomplete slice still returns whatever steps it found rather than none.
+     */
+    const MAX_TRACE_HOPS = 6;
+    const buildTrace = (sinkNode: ts.Node, taintedArgExpr: ts.Expression | undefined, sinkExpr: string): TraceStep[] => {
+      const backward: TraceStep[] = [];
+      const visitedIds = new Set<string>();
+      let cur: ts.Expression | undefined = taintedArgExpr;
+      for (let hop = 0; cur && hop < MAX_TRACE_HOPS; hop++) {
+        if (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+          cur = ts.isAsExpression(cur) ? cur.expression : (cur as ts.ParenthesizedExpression | ts.NonNullExpression).expression;
+          continue;
+        }
+        const text = cur.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
+        if (ts.isIdentifier(cur)) {
+          if (visitedIds.has(cur.text)) break; // a re-assignment cycle -- stop rather than loop
+          visitedIds.add(cur.text);
+          const init = initializerOf.get(cur.text);
+          if (!init) { backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text }); break; }
+          const initText = init.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
+          const crossHit = crossFileCallIn(init.getText(sourceFile));
+          if (crossHit) {
+            // The cross-file step's own label already says "x = <call>(...)" worth of context --
+            // a separate generic "assignment" step right before it would just repeat the same line.
+            const [name, info] = crossHit;
+            backward.push({
+              file: filePath, line: lineOf(init), kind: "cross-file",
+              label: `${text} = ${name}(...), crossing into ${info.fromModule}`, snippet: initText,
+            });
+            const calleeSf = info.resolvedPath ? crossFileSources?.get(info.resolvedPath) : undefined;
+            const calleeStep = calleeSf ? traceCalleeReturn(calleeSf, info.resolvedPath!, name) : null;
+            if (calleeStep) backward.push(calleeStep);
+            break; // the callee's OWN sub-slice is a documented one-hop boundary, not recursed further
+          }
+          backward.push({ file: filePath, line: lineOf(init), kind: "assignment", label: `${text} = ${sourceLabel(init)}`, snippet: initText });
+          cur = init;
+          continue;
+        }
+        if (ts.isCallExpression(cur)) {
+          backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: text, snippet: text });
+          cur = cur.arguments[0]; // best-effort: continue through the first argument
+          continue;
+        }
+        backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text });
+        break;
+      }
+      backward.reverse();
+      // A source step and the assignment step right after it are routinely the exact same line/text
+      // (`const id = req.query.id;` -- the source IS the whole initializer) -- collapse that
+      // redundancy rather than showing the same snippet twice.
+      const deduped = backward.filter((s, i) => i === 0 || s.file !== backward[i - 1].file || s.line !== backward[i - 1].line || s.snippet !== backward[i - 1].snippet);
+      deduped.push({ file: filePath, line: lineOf(sinkNode), kind: "sink", label: sinkExpr, snippet: sinkNode.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+      return deduped;
     };
 
     const emit = (id: AstTaintId, node: ts.Node, sourceExpr: string, sinkExpr: string, taintedArgExpr?: ts.Expression, detailOverride?: string) => {
@@ -1426,6 +1533,7 @@ export function scanAstTaint(
       findings.push({
         id, line, sinkExpr, sourceExpr,
         detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess${note}`,
+        trace: buildTrace(node, taintedArgExpr, sinkExpr),
       });
     };
 
@@ -1435,8 +1543,21 @@ export function scanAstTaint(
       let text = arg.head.text;
       for (const span of arg.templateSpans) {
         const m = taintMask(span.expression, env);
-        if (wasCleared(m, classOf("xss")) && /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i.test(text)) return true;
+        if (wasCleared(m, classOf("xss")) && SCRIPT_CONTEXT_RE.test(text)) return true;
         text += "\u0000" + span.literal.text;
+      }
+      return false;
+    };
+
+    /** `\`<div title=${escaped}>\`` (no surrounding quotes): HTML-escaping alone doesn't add the
+     * quotes an unquoted attribute value needs to stop a space-separated `onmouseover=...` breaking out. */
+    const escapedInUnquotedAttrContext = (arg: ts.Expression, env: Env): boolean => {
+      if (!ts.isTemplateExpression(arg)) return false;
+      let text = arg.head.text;
+      for (const span of arg.templateSpans) {
+        const m = taintMask(span.expression, env);
+        if (wasCleared(m, classOf("xss")) && UNQUOTED_ATTR_CONTEXT_RE.test(text)) return true;
+        text += " " + span.literal.text;
       }
       return false;
     };
@@ -1484,6 +1605,10 @@ export function scanAstTaint(
         const a = match.args.find(x => escapedInScriptContext(x, env))!;
         emit("xss", call, sourceLabel(a), match.sinkExpr, a,
           `HTML-escaped value '${sourceLabel(a)}' is interpolated inside a <script> block — HTML escaping does not neutralize JavaScript string context (a backslash still breaks out)`);
+      } else if (match.id === "xss" && match.args.some(a => escapedInUnquotedAttrContext(a, env))) {
+        const a = match.args.find(x => escapedInUnquotedAttrContext(x, env))!;
+        emit("xss", call, sourceLabel(a), match.sinkExpr, a,
+          `HTML-escaped value '${sourceLabel(a)}' is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')`);
       } else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(call) });
     };
 

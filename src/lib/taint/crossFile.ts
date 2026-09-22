@@ -61,10 +61,12 @@ export interface FileGraph {
 }
 
 export interface CrossFileBridge {
-  /** file path -> local call-site name -> { shapes, fromModule } -- fed directly into each engine's
-   * OWN same-file propagating map, so a cross-file call is handled by the exact same machinery as a
-   * local one. Only files with at least one resolved entry appear. */
-  propagatingByFile: Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string }>>;
+  /** file path -> local call-site name -> { shapes, fromModule, resolvedPath } -- fed directly into
+   * each engine's OWN same-file propagating map, so a cross-file call is handled by the exact same
+   * machinery as a local one. `resolvedPath` (the batch file this name actually came from) is carried
+   * only for trace-generation attribution -- never consulted by the taint predicate itself. Only
+   * files with at least one resolved entry appear. */
+  propagatingByFile: Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>>;
   /** file path -> its own fully-resolved export summary (incl. re-exports), after the fixed point. */
   summaries: Map<string, Map<string, CrossFileShape[]>>;
 }
@@ -150,9 +152,9 @@ export function resolveCrossFile(
   }
 
   // Final bridge from the converged summaries.
-  const propagatingByFile = new Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string }>>();
+  const propagatingByFile = new Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>>();
   for (const f of files) {
-    const local = new Map<string, { shapes: CrossFileShape[]; fromModule: string }>();
+    const local = new Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>();
     for (const imp of f.imports) {
       const calleePath = resolvePath(f.path, imp.moduleSpecifier);
       if (!calleePath) continue;
@@ -160,11 +162,11 @@ export function resolveCrossFile(
       if (!calleeSummary) continue;
       if (imp.namespace) {
         for (const [name, shapes] of calleeSummary) {
-          if (shapes.length > 0) local.set(name, { shapes, fromModule: imp.moduleSpecifier });
+          if (shapes.length > 0) local.set(name, { shapes, fromModule: imp.moduleSpecifier, resolvedPath: calleePath });
         }
       } else {
         const shapes = calleeSummary.get(imp.importedName);
-        if (shapes && shapes.length > 0) local.set(imp.localName, { shapes, fromModule: imp.moduleSpecifier });
+        if (shapes && shapes.length > 0) local.set(imp.localName, { shapes, fromModule: imp.moduleSpecifier, resolvedPath: calleePath });
       }
     }
     if (local.size > 0) propagatingByFile.set(f.path, local);

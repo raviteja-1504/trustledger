@@ -96,6 +96,27 @@ export interface SuppressedSink { id: string; line: number }
 
 export type TaintEnv = Map<string, number>;
 
+// ── Source -> sink trace (explainability layer) ─────────────────────────────
+//
+// The taint VALUE propagated through every engine's `env` stays a bitmask (above) -- that is a
+// deliberate, load-bearing design choice, not an unfinished one: propagation runs on every
+// assignment/branch/call in a file, so it has to stay a single integer with O(1) OR/AND/clear, the
+// same reasoning that keeps SHADOW's "was this cleared" bit a shadow half of the SAME integer instead
+// of a parallel structure. A TraceStep chain is the opposite shape -- built ONCE per actual finding
+// (rare, only at emit() time), where the cost of walking back through the AST to explain *why* a
+// value was tainted is negligible and the payoff (a reviewer can see the flow instead of re-deriving
+// it) is real. The two are complementary layers over the same ID_TO_CLASS/SinkClass model, not two
+// competing representations of taint.
+export interface TraceStep {
+  file: string;
+  line: number;
+  kind: "source" | "assignment" | "call" | "sanitizer" | "cross-file" | "sink";
+  /** Short human label, e.g. "req.query.id" or "crosses into src/db.ts via buildQuery". */
+  label: string;
+  /** The relevant source snippet at this step (trimmed, not the whole line). */
+  snippet: string;
+}
+
 export function cloneEnv(env: TaintEnv): TaintEnv {
   return new Map(env);
 }

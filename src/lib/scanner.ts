@@ -33,6 +33,7 @@ import type { ParamShape } from "./astTaint";
 import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
+import type { TraceStep } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
@@ -132,6 +133,21 @@ export interface ScanIndicator {
   reachability?:         "unreachable" | "reachable" | "tainted-path" | "entry-point";
   exploitability_score?: number;
   remediation_urgency?:  "immediate" | "sprint" | "backlog" | "monitor";
+  // The tainted expression and the sink call it flows into, verbatim from the AST engine that found
+  // it (every AstTaint*Finding already carries these) -- surfaced here so fingerprinting and any
+  // consumer that wants the flow's endpoints doesn't have to re-parse `detail`'s free-text template.
+  // Absent for regex-only findings (they have no real data-flow endpoints to report).
+  sourceExpr?: string;
+  sinkExpr?:   string;
+  // Source -> sink trace (JS/TS only for now -- see taintCore.ts's TraceStep docblock and
+  // astTaint.ts's buildTrace). Best-effort and may be a partial slice; absent for every other
+  // language's findings and all regex-only ones.
+  trace?: TraceStep[];
+  // Stable id for this exact finding, computed once over ALL of a file's indicators after they're
+  // assembled (see computeFingerprint below) -- unaffected by unrelated line-number shifts elsewhere
+  // in the file, changes if the actual flow (source/sink text) changes. Meant for cross-scan
+  // dedup/tracking (e.g. "is this the same finding as last PR's scan"), not for display.
+  fingerprint?: string;
 }
 
 export interface FixSuggestion {
@@ -5851,6 +5867,25 @@ function baseConfidence(ind: ScanIndicator): number {
   return c;
 }
 
+/**
+ * Stable, cross-scan finding/flow id (see ScanIndicator.fingerprint's own docblock). Deliberately
+ * excludes `line`: a finding survives unrelated code shifting its line number elsewhere in the file
+ * (the normal case across two scans of a PR being updated), while still changing if the flow itself
+ * changes -- sourceExpr/sinkExpr when the AST engine provided them (every language's wrapper above
+ * threads these through now), else the matched line's own trimmed text, else `detail` as a last
+ * resort (AI/style signals, which have no line at all). Language-agnostic: works identically for
+ * every engine's findings without any of them needing to know fingerprints exist.
+ */
+function computeFingerprint(filePath: string, indicator: ScanIndicator, lines: string[]): string {
+  const flowText = indicator.sourceExpr && indicator.sinkExpr
+    ? `${indicator.sourceExpr}=>${indicator.sinkExpr}`
+    : indicator.line && lines[indicator.line - 1] !== undefined
+      ? lines[indicator.line - 1]
+      : (indicator.detail ?? "");
+  const normalized = flowText.replace(/\s+/g, " ").trim();
+  return crypto.createHash("sha256").update(`${indicator.id}::${filePath}::${normalized}`).digest("hex").slice(0, 16);
+}
+
 // Attaches cwe/confidence/codeCategory evidence to security-scan indicators
 // (not AI-heuristic signals, which have their own explained_signals model).
 // category marks the file as vendored/minified or a test file -- see
@@ -6145,12 +6180,14 @@ function shouldAstParse(content: string, filePath: string): boolean {
 // path), not a proximity guess.
 function findAstTaintFindings(
   content: string, filePath: string, sourceFile: ts.SourceFile,
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
   suppressed?: SuppressedSink[],
+  crossFileSources?: Map<string, ts.SourceFile>,
 ): ScanIndicator[] {
-  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed).map(f => ({
+  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed, crossFileSources).map(f => ({
     id: f.id, label: astTaintLabel(f.id), severity: astTaintSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
 
@@ -6163,6 +6200,7 @@ function findAstTaintPythonFindings(
   return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
   }));
 }
 
@@ -6178,6 +6216,7 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
       ? `${f.detail} [input assumed untrusted: parameter of a public method with no in-file caller and no framework annotation]`
       : f.detail,
     confidence: f.entryPointSeeded ? 70 : 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
   }));
 }
 
@@ -6195,6 +6234,7 @@ function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoS
   return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
   }));
 }
 
@@ -6204,6 +6244,7 @@ function findAstTaintCSharpFindings(content: string, filePath: string, root: CSh
   return scanAstTaintCSharp(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
   }));
 }
 
@@ -6212,6 +6253,7 @@ function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyn
   return scanAstTaintPHP(content, filePath, root, suppressed).map(f => ({
     id: f.id, label: astTaintPHPLabel(f.id), severity: f.severityOverride ?? astTaintPHPSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr,
   }));
 }
 
@@ -6228,7 +6270,7 @@ export function analyzeFile(
   // imports still gets only ONE parse (shared) and TWO walks (Pass 1's
   // lightweight export-summary walk, this function's real walk), not two
   // parses.
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string }>,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
   presparsedTs?: ts.SourceFile,
   // Cross-file REACHABILITY (JS/TS only, one hop) -- same batch-scoped,
   // runScan()-computed, not-persisted-on-FileAnalysis shape as
@@ -6245,6 +6287,11 @@ export function analyzeFile(
   // so a Python file with cross-file imports still gets only one parse.
   crossFileShapesPy?: Map<string, PyParamShape[]>,
   presparsedPy?: PySyntaxNode,
+  // Source -> sink trace generation (JS/TS, see astTaint.ts's buildTrace/taintCore.ts's TraceStep):
+  // the FULL batch's own already-parsed ts.SourceFile map (not just this file's), so a trace that
+  // crosses a cross-file call can continue one real hop into the callee's own body. Read-only,
+  // best-effort -- an absent map or entry simply stops a trace at that hop, never throws.
+  crossFileSourcesTs?: Map<string, ts.SourceFile>,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6366,7 +6413,7 @@ export function analyzeFile(
   // never filtered here.
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
-    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks) : []),
+    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
@@ -6499,8 +6546,17 @@ export function analyzeFile(
       existing.supportingDetectors = existing.supportingDetectors ?? [];
       if (!existing.supportingDetectors.includes(i.label)) existing.supportingDetectors.push(i.label);
     }
+    // Prefer the HIGHER-CONFIDENCE record as the one everything else (severity/cwe/detail/and now
+    // sourceExpr/sinkExpr/trace) is taken from -- an AST data-flow match (confidence 95) carries a
+    // real trace a same-line regex/keyword match never has; keeping whichever fired first would
+    // silently throw that away whenever a regex detector also happens to fire at the same id+line.
+    // supportingDetectors already accumulated above is preserved across the swap either way.
+    if ((i.confidence ?? 0) > (existing.confidence ?? 0)) {
+      byKey.set(k, { ...i, supportingDetectors: existing.supportingDetectors });
+    }
   }
   const indicators = Array.from(byKey.values());
+  for (const i of indicators) i.fingerprint = computeFingerprint(file_path, i, lines);
 
   // AI detection — skipped for config/generated files
   let ai_percentage    = 0;
@@ -7035,7 +7091,7 @@ export function runScan(input: ScanInput): ScanOutput {
   // boundary semanticGraph.ts's own cross-file mechanism already has, not a new limitation.
   const allScanPaths = filesToScan.map(f => f.path);
   const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths));
-  const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string }>>;
+  const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath: string }>>;
 
   // Cross-file REACHABILITY bridge (Decision 1, one hop, JS/TS only) --
   // file path -> names IN THAT FILE that are reachable because some OTHER
@@ -7107,7 +7163,7 @@ export function runScan(input: ScanInput): ScanOutput {
   const files = filesToScan.map(f =>
     analyzeFile(
       f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
-      crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path),
+      crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
     ),
   );
 
