@@ -35,7 +35,7 @@ import { sanitizerClears } from "./taint/sanitizers";
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack"
-  | "prototype-pollution" | "jwt-none-alg";
+  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check";
 
 export interface AstTaintFinding {
   id:         AstTaintId;
@@ -46,6 +46,9 @@ export interface AstTaintFinding {
   // Source -> sink trace (best-effort, see taintCore.ts's TraceStep docblock). Absent when the
   // backward slice couldn't be built at all (never blocks the finding itself from firing).
   trace?: TraceStep[];
+  // Only set for bola-missing-ownership-check (read vs write endpoint severity) -- every other id
+  // keeps using the constant SEVERITY table, same convention as every other engine's BOLA detector.
+  severityOverride?: "critical" | "high" | "medium";
 }
 
 function scriptKindFor(filePath: string): ts.ScriptKind {
@@ -1264,6 +1267,9 @@ const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   "ssrf": "critical", "path-traversal": "critical", "eval-exec": "critical", "open-redirect": "medium",
   "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "prototype-pollution": "high", "jwt-none-alg": "critical",
+  // Fallback only -- collectBolaFindings always passes a severityOverride (medium for a read
+  // verb, high for write/unknown), same convention as every other engine's BOLA detector.
+  "bola-missing-ownership-check": "high",
 };
 const LABEL: Record<AstTaintId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -1272,6 +1278,7 @@ const LABEL: Record<AstTaintId, string> = {
   "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection",
   "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
   "prototype-pollution": "Prototype Pollution", "jwt-none-alg": "JWT Signature Not Verified",
+  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
 /**
@@ -1333,6 +1340,254 @@ function structuralChecks(
     ts.forEachChild(n, visit);
   };
   visit(sf);
+}
+
+// ── BOLA: missing ownership check (structural, not a taint flow) ───────────────
+//
+// Mirrors astTaintJava.ts's/astTaintCSharp.ts's/astTaintPHP.ts's own collectBolaFindings exactly
+// (same algorithm: candidate sinks collected first, each emitted unless a real ownership
+// comparison for ITS resource id DOMINATES it -- not merely "a comparison exists somewhere in the
+// function"), adapted to JS/TS's request-handler shape: a resource id here is read from
+// `req.params.<name>`/`req.query.<name>` (Express/Next.js-style, the same SOURCE_ROOTS/SOURCE_PROPS
+// convention isTaintSourceExpr already uses above), not a typed method parameter/route-template
+// binding the way Java's @PathVariable or C#'s [FromRoute] give the other engines. Purely
+// structural (no env/taint) -- a "was this compared to the principal" question, not "is this
+// injectable".
+
+const BOLA_RESOURCE_ID_RE = /^(?:id|ID|.*_id|.*Id)$/;
+// Express/Next.js/Passport-style authenticated-principal shapes. Not exhaustive (a custom
+// `getCurrentUser()`/`ctx.state.user` helper isn't recognized) -- same "narrow, high-precision
+// only" policy as every other engine's own principal-shape regex.
+const BOLA_PRINCIPAL_RE = /^(?:req|request)\.(?:user\b|auth\b|session\.user(?:Id|_id)?\b)|^res\.locals\.user\b/;
+const BOLA_LOOKUP_METHODS = new Set([
+  "findById", "findByIdAndUpdate", "findByIdAndDelete", "findByIdAndRemove", "findOne", "findOneAndUpdate",
+  "findOneAndDelete", "findOneAndRemove", "findUnique", "deleteOne", "updateOne", "remove", "destroy", "get",
+]);
+
+function bolaLineOf(sf: ts.SourceFile, node: ts.Node): number {
+  return sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+}
+
+/** `req.params.id` / `req.query.userId` -- a resource-id-shaped request read, by TEXT (this runs
+ * before/independent of the real taint walk, so it can't consult `env`). */
+function isBolaResourceIdSourceExpr(node: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  const obj = node.expression;
+  return ts.isPropertyAccessExpression(obj) && ts.isIdentifier(obj.expression) && SOURCE_ROOTS.has(obj.expression.text) &&
+    (obj.name.text === "params" || obj.name.text === "query") && BOLA_RESOURCE_ID_RE.test(node.name.text);
+}
+
+/** Every local variable name assigned (directly, one hop) from a resource-id-shaped request read,
+ * within `fn`'s own body -- mirrors every other engine's identical one-hop "$id = request read"
+ * resolution for its own resource-id parameter equivalent. */
+function collectBolaResourceIdNames(fnBody: ts.Node): Set<string> {
+  const names = new Set<string>();
+  const visit = (n: ts.Node) => {
+    if (n !== fnBody && isFunctionLike(n)) return; // a nested closure's own locals aren't this function's
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && isBolaResourceIdSourceExpr(n.initializer)) {
+      names.add(n.name.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fnBody);
+  return names;
+}
+
+/** Is `node` a resource-id-shaped expression: a bare identifier bound in `idNames`, or an inline
+ * `req.params.X`/`req.query.X` read? */
+function isBolaResourceIdExpr(node: ts.Expression, idNames: Set<string>): boolean {
+  if (ts.isIdentifier(node)) return idNames.has(node.text);
+  return isBolaResourceIdSourceExpr(node);
+}
+
+interface BolaCandidateJS { node: ts.Node; sourceExpr: string; sinkExpr: string }
+
+/** An object literal argument shaped like an ORM "where" clause (`{ where: { id } }`,
+ * `{ id }`, `{ _id: id }`) referencing a resource id anywhere in its (one level deep) properties. */
+function objectLiteralReferencesResourceId(obj: ts.ObjectLiteralExpression, idNames: Set<string>): ts.Expression | null {
+  for (const prop of obj.properties) {
+    if (ts.isPropertyAssignment(prop)) {
+      if (isBolaResourceIdExpr(prop.initializer, idNames)) return prop.initializer;
+      if (ts.isObjectLiteralExpression(prop.initializer)) {
+        const nested = objectLiteralReferencesResourceId(prop.initializer, idNames);
+        if (nested) return nested;
+      }
+    } else if (ts.isShorthandPropertyAssignment(prop) && idNames.has(prop.name.text)) {
+      return prop.name;
+    }
+  }
+  return null;
+}
+
+function collectBolaCandidates(fnBody: ts.Node, idNames: Set<string>): BolaCandidateJS[] {
+  // NOT gated on idNames.size (unlike a bare "no local resource-id var" skip would suggest):
+  // isBolaResourceIdExpr also matches an INLINE req.params.X/req.query.X argument directly, with no
+  // local variable and no help from idNames at all.
+  const candidates: BolaCandidateJS[] = [];
+  const visit = (n: ts.Node) => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const methodName = n.expression.name.text;
+      if (BOLA_LOOKUP_METHODS.has(methodName)) {
+        for (const arg of n.arguments) {
+          if (isBolaResourceIdExpr(arg, idNames)) {
+            candidates.push({ node: n, sourceExpr: arg.getText(), sinkExpr: n.expression.getText() });
+            break;
+          }
+          if (ts.isObjectLiteralExpression(arg)) {
+            const hit = objectLiteralReferencesResourceId(arg, idNames);
+            if (hit) { candidates.push({ node: n, sourceExpr: hit.getText(), sinkExpr: n.expression.getText() }); break; }
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fnBody);
+  return candidates;
+}
+
+/** `x.getText() === principal-shaped` / `principal-shaped === x.getText()` (both `===`/`==`). */
+function isBolaOwnershipComparison(left: ts.Expression, right: ts.Expression, idNames: Set<string>): boolean {
+  const lIsRes = isBolaResourceIdExpr(left, idNames) || (ts.isIdentifier(left) && idNames.has(left.text));
+  const rIsRes = isBolaResourceIdExpr(right, idNames) || (ts.isIdentifier(right) && idNames.has(right.text));
+  const lIsPrin = BOLA_PRINCIPAL_RE.test(left.getText());
+  const rIsPrin = BOLA_PRINCIPAL_RE.test(right.getText());
+  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+}
+
+type BolaSide = "true" | "false";
+
+/** Which side(s) of `cond` establish ownership -- `===`/`==` holds on the true side, `!==`/`!=` on
+ * the false side; `!`/`&&`/`||` compose like a validation guard does. A bare identifier resolves
+ * ONE hop to its most recent preceding assignment in the same function body. */
+function bolaOwnershipSides(cond: ts.Expression, idNames: Set<string>, fnBody: ts.Node, resolve = true): BolaSide[] {
+  const flip = (s: BolaSide): BolaSide => (s === "true" ? "false" : "true");
+  if (ts.isParenthesizedExpression(cond)) return bolaOwnershipSides(cond.expression, idNames, fnBody, resolve);
+  if (ts.isPrefixUnaryExpression(cond) && cond.operator === ts.SyntaxKind.ExclamationToken) {
+    return bolaOwnershipSides(cond.operand, idNames, fnBody, resolve).map(flip);
+  }
+  if (ts.isBinaryExpression(cond)) {
+    const op = cond.operatorToken.kind;
+    if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
+      return isBolaOwnershipComparison(cond.left, cond.right, idNames) ? ["true"] : [];
+    }
+    if (op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken) {
+      return isBolaOwnershipComparison(cond.left, cond.right, idNames) ? ["false"] : [];
+    }
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return [...bolaOwnershipSides(cond.left, idNames, fnBody, resolve), ...bolaOwnershipSides(cond.right, idNames, fnBody, resolve)].filter(s => s === "true");
+    }
+    if (op === ts.SyntaxKind.BarBarToken) {
+      return [...bolaOwnershipSides(cond.left, idNames, fnBody, resolve), ...bolaOwnershipSides(cond.right, idNames, fnBody, resolve)].filter(s => s === "false");
+    }
+    return [];
+  }
+  if (ts.isCallExpression(cond) && ts.isPropertyAccessExpression(cond.expression) && cond.expression.name.text === "equals" && cond.arguments.length === 1) {
+    return isBolaOwnershipComparison(cond.expression.expression, cond.arguments[0], idNames) ? ["true"] : [];
+  }
+  if (ts.isIdentifier(cond) && resolve) {
+    // one-hop resolution to the nearest preceding `const isOwner = ...;` in the same function body
+    let best: { end: number; expr: ts.Expression } | null = null;
+    const visit = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === cond.text && n.initializer) {
+        const end = n.getEnd();
+        if (end <= cond.getStart() && (!best || end > best.end)) best = { end, expr: n.initializer };
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(fnBody);
+    return best ? bolaOwnershipSides((best as { end: number; expr: ts.Expression }).expr, idNames, fnBody, false) : [];
+  }
+  return [];
+}
+
+function bolaStatementTerminates(n: ts.Statement | undefined): boolean {
+  if (!n) return false;
+  if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) return true;
+  if (ts.isBlock(n)) return n.statements.some(bolaStatementTerminates);
+  if (ts.isIfStatement(n)) return !!n.elseStatement && bolaStatementTerminates(n.thenStatement) && bolaStatementTerminates(n.elseStatement);
+  return false;
+}
+
+/**
+ * Does an ownership comparison DOMINATE `sink`? It must (a) sit in an if condition (or ternary
+ * condition) that precedes the sink in source order and (b) put the sink on the continuing path:
+ * the sink is in the arm where the comparison establishes ownership, or the OTHER arm always
+ * terminates (return/throw) and the sink comes after the whole if. A comparison that's unused,
+ * follows the lookup, or guards a different branch no longer suppresses.
+ */
+function bolaOwnershipDominates(sink: ts.Node, idNames: Set<string>, fnBody: ts.Node): boolean {
+  const contains = (outer: ts.Node | undefined, inner: ts.Node) => !!outer && inner.getStart() >= outer.getStart() && inner.getEnd() <= outer.getEnd();
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (found) return;
+    if (ts.isIfStatement(n) && n.expression.getEnd() <= sink.getStart()) {
+      const sides = bolaOwnershipSides(n.expression, idNames, fnBody);
+      const afterIf = sink.getStart() >= n.getEnd() && contains(n.parent, sink);
+      if (sides.includes("true") && (contains(n.thenStatement, sink) || (afterIf && bolaStatementTerminates(n.elseStatement)))) found = true;
+      if (sides.includes("false") && (contains(n.elseStatement, sink) || (afterIf && bolaStatementTerminates(n.thenStatement)))) found = true;
+    } else if (ts.isConditionalExpression(n) && n.condition.getEnd() <= sink.getStart()) {
+      const sides = bolaOwnershipSides(n.condition, idNames, fnBody);
+      if (sides.includes("true") && contains(n.whenTrue, sink)) found = true;
+      if (sides.includes("false") && contains(n.whenFalse, sink)) found = true;
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(fnBody);
+  return found;
+}
+
+/** Every function-like node with a parameter literally named `req`/`request` (Express/Next.js-style
+ * handler convention -- the same SOURCE_ROOTS shape isTaintSourceExpr already gates on). Not every
+ * function in the file: BOLA only makes sense for something that actually receives a request. */
+function collectBolaRequestHandlers(sf: ts.SourceFile): ts.Node[] {
+  const handlers: ts.Node[] = [];
+  const visit = (n: ts.Node) => {
+    if (isFunctionLike(n) && (n as ts.FunctionLikeDeclaration).body &&
+        (n as ts.FunctionLikeDeclaration).parameters.some(p => ts.isIdentifier(p.name) && SOURCE_ROOTS.has(p.name.text))) {
+      handlers.push(n);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return handlers;
+}
+
+/** The enclosing `app.<verb>(...)`/`router.<verb>(...)` call's HTTP verb, if `fn` is passed
+ * directly as (one of) its arguments -- Express/Router convention; a bare `function handler(req,
+ * res)` (Next.js API routes, which branch on `req.method` at runtime) has no such wrapper and
+ * falls through to the unknown/"write" default, the same conservative-when-unsure policy every
+ * other engine's own verb-tier detection uses. */
+function bolaVerbTier(fn: ts.Node): "read" | "write" | "unknown" {
+  const call = fn.parent;
+  if (!call || !ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)) return "unknown";
+  const verb = call.expression.name.text.toLowerCase();
+  if (verb === "get") return "read";
+  if (["post", "put", "patch", "delete"].includes(verb)) return "write";
+  return "unknown";
+}
+
+function collectBolaFindings(sf: ts.SourceFile, findings: AstTaintFinding[], seen: Set<string>): void {
+  for (const fn of collectBolaRequestHandlers(sf)) {
+    const body = (fn as ts.FunctionLikeDeclaration).body;
+    if (!body) continue;
+    const idNames = collectBolaResourceIdNames(body);
+    const candidates = collectBolaCandidates(body, idNames);
+    if (candidates.length === 0) continue;
+    const verbTier = bolaVerbTier(fn);
+    const severity: "medium" | "high" = verbTier === "read" ? "medium" : "high";
+    for (const c of candidates) {
+      if (bolaOwnershipDominates(c.node, idNames, body)) continue;
+      const line = bolaLineOf(sf, c.node);
+      const key = `bola-missing-ownership-check:${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({
+        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr, severityOverride: severity,
+        detail: `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (req.user/req.session/req.auth) anywhere on the path that reaches it — real per-request-handler AST evidence, not a keyword-proximity guess`,
+      });
+    }
+  }
 }
 
 /**
@@ -1759,6 +2014,7 @@ export function scanAstTaint(
 
     // Function-level patterns that are not source-to-sink flows.
     structuralChecks(sourceFile, content, (id, node, detail, sink) => emit(id, node, sink, sink, undefined, detail));
+    collectBolaFindings(sourceFile, findings, seen);
 
     // Second pass, bounded worklist: re-walk any local function whose
     // parameters were seeded as tainted by a call site above, so a sink

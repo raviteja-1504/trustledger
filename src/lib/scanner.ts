@@ -6185,7 +6185,7 @@ function findAstTaintFindings(
   crossFileSources?: Map<string, ts.SourceFile>,
 ): ScanIndicator[] {
   return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed, crossFileSources).map(f => ({
-    id: f.id, label: astTaintLabel(f.id), severity: astTaintSeverity(f.id),
+    id: f.id, label: astTaintLabel(f.id), severity: f.severityOverride ?? astTaintSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
