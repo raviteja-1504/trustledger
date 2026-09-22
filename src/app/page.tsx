@@ -111,6 +111,10 @@ const KeyIcon = (s = 20) => iconEl(<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-
 const UsersIcon = (s = 20) => iconEl(<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>, s);
 const ClipboardIcon = (s = 20) => iconEl(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></>, s);
 const FileScanIcon = (s = 20) => iconEl(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><circle cx="11.5" cy="14.5" r="2.5" /><line x1="13.3" y1="16.3" x2="16" y2="19" /></>, s);
+const AlertIcon = (s = 20) => iconEl(<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>, s);
+const WebhookIcon = (s = 20) => iconEl(<><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c0-.9.3-1.72.83-2.38" /><path d="M18.4 15.03a4 4 0 0 0-3.2-6.03h-.46" /><path d="M8.5 8.5a4 4 0 0 1 6.72-1.5" /><circle cx="18" cy="16.98" r="1.5" /><circle cx="2" cy="17" r="1" /></>, s);
+const DownloadIcon = (s = 20) => iconEl(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>, s);
+const CheckCircleIcon = (s = 20) => iconEl(<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></>, s);
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -223,14 +227,14 @@ const LANGUAGES: LangEngine[] = [
 ];
 
 const PIPELINE_STAGES = [
-  { label: "GitHub webhook", detail: "PR opened or updated", color: "#374151" },
-  { label: "File fetch", detail: "Every changed file, async via queue", color: "#1e3a5f" },
-  { label: "AI signal scan", detail: "AST · git provenance · behavioral", color: SKY },
-  { label: "Taint engine", detail: "Per-language AST + data-flow", color: ROSE },
-  { label: "Secrets + deps", detail: "Credential scan + live CVE lookup", color: AMBER },
-  { label: "Policy engine", detail: "Risk score against merge gates", color: VIOLET },
-  { label: "Attestation gate", detail: "Blocks until reviewer sign-off", color: EMERALD },
-  { label: "Check run ✓", detail: "Posted to the PR", color: EMERALD },
+  { label: "GitHub webhook", detail: "PR opened or updated", color: "#94a3b8", icon: WebhookIcon },
+  { label: "File fetch", detail: "Every changed file, async via queue", color: "#7dd3fc", icon: DownloadIcon },
+  { label: "AI signal scan", detail: "AST · git provenance · behavioral", color: SKY, icon: AiIntelIcon },
+  { label: "Taint engine", detail: "Per-language AST + data-flow", color: ROSE, icon: CodeRiskIcon },
+  { label: "Secrets + deps", detail: "Credential scan + live CVE lookup", color: AMBER, icon: KeyIcon },
+  { label: "Policy engine", detail: "Risk score against merge gates", color: VIOLET, icon: ComplianceIcon },
+  { label: "Attestation gate", detail: "Blocks until reviewer sign-off", color: EMERALD, icon: UsersIcon },
+  { label: "Check run", detail: "Posted to the PR", color: EMERALD, icon: CheckCircleIcon },
 ];
 
 const WHY_ROWS = [
@@ -252,7 +256,7 @@ const ENGINE_FACTS = [
   { label: "Path-sensitive propagation", desc: "Branches are walked on cloned state and merged with a may-taint join; a value sanitized on one branch and raw on another is tracked correctly on both." },
   { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal. A regex match is deliberately NOT trusted." },
   { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
-  { label: "Bounded interprocedural analysis", desc: "Same-file call chains resolve through a fixed-point worklist, capped at 3 rounds, so A calling B calling C converges without an unbounded whole-program solve." },
+  { label: "Bounded call resolution", desc: "Same-file call chains resolve through a fixed-point worklist, capped at 3 rounds, so A calling B calling C converges without an unbounded whole-program solve." },
   { label: "Cross-file fixed point", desc: "Export summaries recompute across up to 3 rounds so a file that only wraps an imported call still gets credited with propagating it." },
 ];
 
@@ -324,10 +328,10 @@ function SignalStrip() {
 }
 
 const TRACE_STEPS = [
-  { kind: "source", file: "route.ts", line: 3, label: "req.query.id", tone: CYAN },
-  { kind: "assignment", file: "route.ts", line: 4, label: "const q = buildQuery(id)", tone: "#94a3b8" },
-  { kind: "cross-file", file: "→ db.ts", line: 2, label: "crosses into ./db via \"buildQuery\"", tone: AMBER },
-  { kind: "sink", file: "route.ts", line: 5, label: "db.execute(q)", tone: ROSE },
+  { kind: "source", file: "diagnostics.ts", line: 4, label: "req.query.host", tone: CYAN },
+  { kind: "assignment", file: "diagnostics.ts", line: 5, label: "const cmd = `ping -c 1 ${host}`", tone: "#94a3b8" },
+  { kind: "cross-file", file: "→ shell.ts", line: 3, label: "crosses into ./shell via \"runPing\"", tone: AMBER },
+  { kind: "sink", file: "diagnostics.ts", line: 6, label: "exec(cmd)", tone: ROSE },
 ];
 
 function TraceVisual() {
@@ -512,11 +516,17 @@ function VulnCoverageSection() {
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: GROUP_COLORS[g] }} />
                 <span className="text-[11px] font-bold uppercase tracking-widest text-white/50 font-mono">{g}</span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {VULN_CLASSES.filter(v => v.group === g).map(v => (
-                  <div key={v.name} className="flex items-center justify-between gap-2 px-3.5 py-3 rounded-xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
-                    <span className="text-sm font-semibold text-white/90">{v.name}</span>
-                    <span className="text-[10px] font-mono text-white/40 shrink-0">{v.cwe}</span>
+                  <div key={v.name} className="group relative flex items-center gap-3 pl-4 pr-3 py-3 rounded-xl border overflow-hidden transition-all" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                    onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${GROUP_COLORS[g]}55`; el.style.background = "rgba(255,255,255,0.07)"; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 24px ${GROUP_COLORS[g]}22, inset 0 1px 0 rgba(255,255,255,0.06)`; }}
+                    onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.14)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.05)"; }}>
+                    <span className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: GROUP_COLORS[g] }} />
+                    <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ color: GROUP_COLORS[g], background: `${GROUP_COLORS[g]}1c` }}>{AlertIcon(15)}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-white/90 truncate">{v.name}</p>
+                      <p className="text-[10px] font-mono text-white/45 mt-0.5">{v.cwe}</p>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -571,13 +581,18 @@ function PipelineSection() {
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">What one scan actually does</h2>
           <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
         </Reveal>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {PIPELINE_STAGES.map((s, i) => (
             <Reveal key={s.label} delay={i * 60}>
-              <div className="relative h-full p-4 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
-                <span className="text-[10px] font-mono font-black" style={{ color: s.color }}>{String(i + 1).padStart(2, "0")}</span>
-                <p className="text-sm font-bold text-white mt-1.5 leading-tight">{s.label}</p>
-                <p className="text-[11px] text-white/50 mt-1 leading-snug">{s.detail}</p>
+              <div className="group relative h-full min-h-[168px] p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${s.color}55`; el.style.background = "rgba(255,255,255,0.065)"; el.style.transform = "translateY(-3px)"; }}
+                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; }}>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ color: s.color, background: `${s.color}1c`, border: `1px solid ${s.color}38` }}>{s.icon(20)}</span>
+                  <span className="text-[11px] font-mono font-black text-white/30">{String(i + 1).padStart(2, "0")}</span>
+                </div>
+                <p className="text-base font-bold text-white leading-tight">{s.label}</p>
+                <p className="text-[12.5px] text-white/55 mt-1.5 leading-snug">{s.detail}</p>
               </div>
             </Reveal>
           ))}
@@ -634,7 +649,7 @@ function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; 
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {facts.map((s, i) => (
         <Reveal key={s.label} delay={i * 40}>
-          <div className="p-4 rounded-xl border h-full" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)" }}>
+          <div className="p-4 rounded-xl border h-full" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)", minHeight: 128 }}>
             <div className="flex items-center gap-2 mb-2">
               <span className="text-[9px] font-black tabular-nums w-4.5 h-4.5 rounded-md flex items-center justify-center shrink-0 font-mono" style={{ background: `${color}2c`, color, border: `1px solid ${color}4d`, width: 18, height: 18 }}>{i + 1}</span>
               <p className="text-xs font-bold text-white/90">{s.label}</p>
