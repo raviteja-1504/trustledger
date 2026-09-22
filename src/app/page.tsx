@@ -307,20 +307,22 @@ function NavBar() {
 // ── Hero: multi-signal strip + trace visual ─────────────────────────────────
 
 const SIGNAL_CHIPS = [
-  { label: "AI-generated", value: "92%", color: SKY },
-  { label: "Secret found", value: "1", color: VIOLET },
-  { label: "Vulnerable dep", value: "CVE-2024", color: AMBER },
-  { label: "SQL injection", value: "traced", color: ROSE },
+  { label: "AI-generated", value: "92%", color: SKY, icon: AiIntelIcon },
+  { label: "Secret found", value: "1", color: VIOLET, icon: KeyIcon },
+  { label: "Vulnerable dep", value: "CVE-2024", color: AMBER, icon: PackageIcon },
+  { label: "SQL injection", value: "traced", color: ROSE, icon: AlertIcon },
 ];
 
 function SignalStrip() {
   return (
-    <div className="flex flex-wrap items-center justify-center gap-2.5">
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-2xl mx-auto">
       {SIGNAL_CHIPS.map((c, i) => (
-        <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2 px-3 py-1.5 rounded-full border font-mono text-[11px]" style={{ borderColor: `${c.color}4d`, background: `${c.color}12` }}>
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
-          <span className="text-white/70">{c.label}</span>
-          <span className="font-bold" style={{ color: c.color }}>{c.value}</span>
+        <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl border text-left" style={{ borderColor: `${c.color}33`, background: `${c.color}0f`, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
+          <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ color: c.color, background: `${c.color}1c`, border: `1px solid ${c.color}38` }}>{c.icon(15)}</span>
+          <div className="min-w-0">
+            <p className="text-[10px] font-mono uppercase tracking-wide text-white/50 truncate">{c.label}</p>
+            <p className="text-sm font-bold font-mono truncate" style={{ color: c.color }}>{c.value}</p>
+          </div>
         </Reveal>
       ))}
     </div>
@@ -330,8 +332,10 @@ function SignalStrip() {
 const TRACE_STEPS = [
   { kind: "source", file: "diagnostics.ts", line: 4, label: "req.query.host", tone: CYAN },
   { kind: "assignment", file: "diagnostics.ts", line: 5, label: "const cmd = `ping -c 1 ${host}`", tone: "#94a3b8" },
+  { kind: "branch", file: "diagnostics.ts", line: 7, label: "if (debugMode) {…} else {…} — taint survives both arms", tone: VIOLET },
   { kind: "cross-file", file: "→ shell.ts", line: 3, label: "crosses into ./shell via \"runPing\"", tone: AMBER },
-  { kind: "sink", file: "diagnostics.ts", line: 6, label: "exec(cmd)", tone: ROSE },
+  { kind: "sink", file: "shell.ts", line: 8, label: "exec(cmd)", tone: ROSE },
+  { kind: "fingerprint", file: "shell.ts", line: 8, label: "stable ID assigned — survives unrelated edits to this file", tone: EMERALD },
 ];
 
 function TraceVisual() {
