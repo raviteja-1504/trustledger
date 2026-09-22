@@ -266,7 +266,7 @@ const STEPS = [
 
 function Eyebrow({ children, color = CYAN }: { children: React.ReactNode; color?: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] px-3 py-1.5 rounded-full border font-mono" style={{ color, background: `${color}14`, borderColor: `${color}33` }}>
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] px-3 py-1.5 rounded-full border font-mono" style={{ color, background: `${color}1c`, borderColor: `${color}4d` }}>
       {children}
     </span>
   );
@@ -276,7 +276,7 @@ function Eyebrow({ children, color = CYAN }: { children: React.ReactNode; color?
 
 function NavBar() {
   return (
-    <header className="fixed top-0 inset-x-0 z-50 border-b" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(5,8,16,0.82)", backdropFilter: "blur(16px) saturate(160%)" }}>
+    <header className="fixed top-0 inset-x-0 z-50 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(5,8,16,0.82)", backdropFilter: "blur(16px) saturate(160%)" }}>
       <div className="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[#050810]" style={{ background: CYAN, boxShadow: `0 0 20px ${CYAN}55` }}>
@@ -286,12 +286,12 @@ function NavBar() {
         </div>
         <nav className="hidden md:flex items-center gap-6">
           {["Platform", "Vulnerabilities", "How it works"].map(l => (
-            <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`} className="text-sm text-white/45 hover:text-white/80 transition-colors font-medium">{l}</a>
+            <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`} className="text-sm text-white/64 hover:text-white/90 transition-colors font-medium">{l}</a>
           ))}
         </nav>
         <div className="flex items-center gap-2">
-          <Link href="/login" className="text-sm font-semibold text-white/50 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
-          <Link href="/login" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: CYAN, boxShadow: `0 2px 16px ${CYAN}4d` }}>
+          <Link href="/login" className="text-sm font-semibold text-white/68 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
+          <Link href="/login" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
             Get started <ArrowRightIcon size={13} />
           </Link>
         </div>
@@ -313,9 +313,9 @@ function SignalStrip() {
   return (
     <div className="flex flex-wrap items-center justify-center gap-2.5">
       {SIGNAL_CHIPS.map((c, i) => (
-        <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2 px-3 py-1.5 rounded-full border font-mono text-[11px]" style={{ borderColor: `${c.color}33`, background: `${c.color}12` }}>
+        <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2 px-3 py-1.5 rounded-full border font-mono text-[11px]" style={{ borderColor: `${c.color}4d`, background: `${c.color}12` }}>
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
-          <span className="text-white/50">{c.label}</span>
+          <span className="text-white/68">{c.label}</span>
           <span className="font-bold" style={{ color: c.color }}>{c.value}</span>
         </Reveal>
       ))}
@@ -333,21 +333,21 @@ const TRACE_STEPS = [
 function TraceVisual() {
   const { ref, shown } = useReveal<HTMLDivElement>();
   return (
-    <div ref={ref} className="relative rounded-2xl overflow-hidden border" style={{ borderColor: "rgba(255,255,255,0.08)", background: "linear-gradient(180deg, rgba(10,15,28,0.9), rgba(6,10,18,0.95))", boxShadow: "0 40px 90px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03)" }}>
-      <div className="px-4 py-2.5 flex items-center gap-2 border-b" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+    <div ref={ref} className="relative rounded-2xl overflow-hidden border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "linear-gradient(180deg, rgba(10,15,28,0.9), rgba(6,10,18,0.95))", boxShadow: "0 40px 90px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.045)" }}>
+      <div className="px-4 py-2.5 flex items-center gap-2 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.035)" }}>
         <div className="flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${ROSE}80` }} />
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${AMBER}80` }} />
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${EMERALD}80` }} />
         </div>
-        <span className="text-[11px] font-mono font-semibold ml-2 text-white/50">how a trace reads</span>
-        <span className="ml-auto text-[10px] font-mono text-white/20">illustrative example</span>
+        <span className="text-[11px] font-mono font-semibold ml-2 text-white/68">how a trace reads</span>
+        <span className="ml-auto text-[10px] font-mono text-white/34">illustrative example</span>
       </div>
       <div className="p-5 sm:p-6 font-mono text-[12.5px]">
         {TRACE_STEPS.map((s, i) => (
           <div key={i} className="relative flex gap-4 pb-6 last:pb-0">
             {i < TRACE_STEPS.length - 1 && (
-              <span className="absolute left-[9px] top-6 bottom-0 w-px overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+              <span className="absolute left-[9px] top-6 bottom-0 w-px overflow-hidden" style={{ background: "rgba(255,255,255,0.11)" }}>
                 <span className="block w-full" style={{ height: "40%", background: `linear-gradient(180deg, transparent, ${CYAN}, transparent)`, animation: shown ? `traceFlow 2.2s ${0.15 + i * 0.15}s ease-in-out infinite` : "none" }} />
               </span>
             )}
@@ -358,9 +358,9 @@ function TraceVisual() {
             <div style={{ opacity: shown ? 1 : 0, transform: shown ? "translateX(0)" : "translateX(-8px)", transition: `opacity 0.4s ${i * 0.13 + 0.05}s, transform 0.4s ${i * 0.13 + 0.05}s` }}>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ color: s.tone, background: `${s.tone}1a` }}>{s.kind}</span>
-                <span className="text-white/25 text-[11px]">{s.file}:{s.line}</span>
+                <span className="text-white/40 text-[11px]">{s.file}:{s.line}</span>
               </div>
-              <p className="mt-1 text-white/75">{s.label}</p>
+              <p className="mt-1 text-white/85">{s.label}</p>
             </div>
           </div>
         ))}
@@ -372,9 +372,12 @@ function TraceVisual() {
 
 function HeroSection() {
   return (
-    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-32 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 60% at 50% 0%, ${CYAN}14, transparent 60%), ${INK}` }}>
+    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-32 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 60% at 50% 0%, ${CYAN}22, transparent 60%), ${INK}` }}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute inset-0" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.022) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.022) 1px, transparent 1px)", backgroundSize: "56px 56px" }} />
+        <div className="absolute -top-32 -left-24 w-[32rem] h-[32rem] rounded-full blur-[120px]" style={{ background: CYAN, opacity: 0.16 }} />
+        <div className="absolute -top-16 -right-24 w-[28rem] h-[28rem] rounded-full blur-[120px]" style={{ background: VIOLET, opacity: 0.13 }} />
+        <div className="absolute top-40 left-1/2 -translate-x-1/2 w-[26rem] h-[26rem] rounded-full blur-[130px]" style={{ background: SKY, opacity: 0.1 }} />
+        <div className="absolute inset-0" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)", backgroundSize: "56px 56px", maskImage: "radial-gradient(ellipse 70% 60% at 50% 20%, black, transparent)" }} />
         <div className="absolute bottom-0 left-0 right-0 h-52" style={{ background: `linear-gradient(to top, ${INK}, transparent)` }} />
       </div>
 
@@ -385,18 +388,24 @@ function HeroSection() {
           <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
           One risk score.
         </h1>
-        <p className="text-lg sm:text-xl text-white/45 max-w-2xl mx-auto leading-relaxed">
+        <p className="text-lg sm:text-xl text-white/64 max-w-2xl mx-auto leading-relaxed">
           TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across six languages, catches secrets and vulnerable dependencies, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-          <Link href="/login" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]" style={{ background: CYAN, boxShadow: `0 4px 28px ${CYAN}4d` }}>
+          <Link href="/login" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
+            style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
+            onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
+            onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
             Get started free <ArrowRightIcon size={15} />
           </Link>
-          <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/70 font-semibold text-sm transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)" }}>
+          <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/82 font-semibold text-sm transition-all border hover:text-white/95"
+            style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.32)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.18)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)"; }}>
             <GitHubIcon size={15} /> Explore the dashboard
           </Link>
         </div>
-        <p className="text-xs text-white/25 font-medium pt-1">No credit card required to start</p>
+        <p className="text-xs text-white/40 font-medium pt-1">No credit card required to start</p>
       </Reveal>
 
       <Reveal delay={120} className="relative mt-10">
@@ -411,8 +420,8 @@ function HeroSection() {
       <Reveal delay={320} className="relative mt-16 w-full max-w-4xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-4">
         {[{ to: 6, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }].map(s => (
           <div key={s.label} className="text-center">
-            <p className="text-3xl font-black font-mono" style={{ color: CYAN }}><CountUp to={s.to} /></p>
-            <p className="text-[11px] text-white/35 font-medium mt-1">{s.label}</p>
+            <p className="text-3xl font-black font-mono" style={{ color: "#67e8f9", textShadow: `0 0 24px ${CYAN}88` }}><CountUp to={s.to} /></p>
+            <p className="text-[11px] text-white/50 font-medium mt-1">{s.label}</p>
           </div>
         ))}
       </Reveal>
@@ -435,21 +444,21 @@ function PillarsSection() {
   const p = PILLARS[active];
 
   return (
-    <section id="platform" className="py-24 px-5" style={{ background: SURFACE }}>
+    <section id="platform" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${p.color}12, transparent 65%), ${SURFACE}`, transition: "background 0.5s ease" }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-12">
           <Eyebrow>The platform</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six pillars. One scan.</h2>
-          <p className="text-white/40 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all six — the same structure as the dashboard itself, not a marketing simplification of it.</p>
+          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all six — the same structure as the dashboard itself, not a marketing simplification of it.</p>
         </Reveal>
 
         {/* Tab bar */}
-        <Reveal delay={100} className="relative flex flex-wrap justify-center gap-1 mb-2 border-b" style={{ borderColor: "rgba(255,255,255,0.07)" }}>
+        <Reveal delay={100} className="relative flex flex-wrap justify-center gap-1 mb-2 border-b" style={{ borderColor: "rgba(255,255,255,0.14)" }}>
           {PILLARS.map((pl, i) => (
             <button key={pl.id} ref={el => { tabRefs.current[i] = el; }} onClick={() => setActive(i)}
               className="relative flex items-center gap-2 px-4 py-3 text-sm font-semibold transition-colors whitespace-nowrap"
-              style={{ color: active === i ? "#fff" : "rgba(255,255,255,0.4)" }}>
-              <span style={{ color: active === i ? pl.color : "rgba(255,255,255,0.3)" }}>{pl.icon(16)}</span>
+              style={{ color: active === i ? "#fff" : "rgba(255,255,255,0.55)" }}>
+              <span style={{ color: active === i ? pl.color : "rgba(255,255,255,0.45)" }}>{pl.icon(16)}</span>
               {pl.name}
             </button>
           ))}
@@ -459,22 +468,22 @@ function PillarsSection() {
         {/* Panel */}
         <div key={p.id} className="grid md:grid-cols-5 gap-8 pt-10" style={{ animation: "fadeSlideIn 0.4s cubic-bezier(0.16,1,0.3,1)" }}>
           <div className="md:col-span-3">
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4" style={{ color: p.color, background: `${p.color}14`, border: `1px solid ${p.color}33` }}>
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4" style={{ color: p.color, background: `${p.color}1c`, border: `1px solid ${p.color}4d` }}>
               {p.icon(22)}
             </div>
             <h3 className="text-2xl font-black text-white tracking-tight mb-2">{p.tagline}</h3>
-            <p className="text-white/50 leading-relaxed mb-5">{p.desc}</p>
+            <p className="text-white/68 leading-relaxed mb-5">{p.desc}</p>
             <div className="flex flex-wrap gap-2">
               {p.pages.map(page => (
-                <span key={page} className="text-[11px] font-mono px-2.5 py-1 rounded-full border text-white/40" style={{ borderColor: "rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)" }}>{page}</span>
+                <span key={page} className="text-[11px] font-mono px-2.5 py-1 rounded-full border text-white/58" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.045)" }}>{page}</span>
               ))}
             </div>
           </div>
           <div className="md:col-span-2 space-y-2.5">
             {p.bullets.map((b, i) => (
-              <div key={i} className="flex items-start gap-2.5 p-3 rounded-xl border" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+              <div key={i} className="flex items-start gap-2.5 p-3 rounded-xl border" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.035)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)" }}>
                 <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: p.color }} />
-                <span className="text-[13px] text-white/60 leading-snug">{b}</span>
+                <span className="text-[13px] text-white/74 leading-snug">{b}</span>
               </div>
             ))}
           </div>
@@ -490,25 +499,25 @@ function PillarsSection() {
 function VulnCoverageSection() {
   const groups = Array.from(new Set(VULN_CLASSES.map(v => v.group)));
   return (
-    <section id="vulnerabilities" className="py-24 px-5" style={{ background: INK }}>
+    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}12, transparent 65%), ${INK}` }}>
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Twenty vulnerability classes, real data-flow evidence</h2>
-          <p className="text-white/40 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — not a keyword or a line pattern.</p>
+          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — not a keyword or a line pattern.</p>
         </Reveal>
         <div className="space-y-8">
           {groups.map((g, gi) => (
             <Reveal key={g} delay={gi * 60}>
               <div className="flex items-center gap-2 mb-3">
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: GROUP_COLORS[g] }} />
-                <span className="text-[11px] font-bold uppercase tracking-widest text-white/35 font-mono">{g}</span>
+                <span className="text-[11px] font-bold uppercase tracking-widest text-white/50 font-mono">{g}</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
                 {VULN_CLASSES.filter(v => v.group === g).map(v => (
-                  <div key={v.name} className="flex items-center justify-between gap-2 px-3.5 py-3 rounded-xl border" style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.025)" }}>
-                    <span className="text-sm font-semibold text-white/80">{v.name}</span>
-                    <span className="text-[10px] font-mono text-white/25 shrink-0">{v.cwe}</span>
+                  <div key={v.name} className="flex items-center justify-between gap-2 px-3.5 py-3 rounded-xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
+                    <span className="text-sm font-semibold text-white/90">{v.name}</span>
+                    <span className="text-[10px] font-mono text-white/40 shrink-0">{v.cwe}</span>
                   </div>
                 ))}
               </div>
@@ -524,25 +533,25 @@ function VulnCoverageSection() {
 
 function LanguageEngineSection() {
   return (
-    <section className="py-24 px-5" style={{ background: SURFACE }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0f, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six languages. Six real parsers.</h2>
-          <p className="text-white/40 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across six syntaxes.</p>
+          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across six syntaxes.</p>
         </Reveal>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {LANGUAGES.map((l, i) => (
             <Reveal key={l.lang} delay={i * 70}>
-              <div className="group p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.025)" }}
-                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = `${ROSE}44`; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.08)"; }}>
+              <div className="group p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${ROSE}55`; el.style.background = "rgba(255,255,255,0.06)"; }}
+                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; }}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-bold text-white text-sm">{l.lang}</span>
-                  <span className="text-[10px] font-mono text-white/25">{l.ext}</span>
+                  <span className="text-[10px] font-mono text-white/40">{l.ext}</span>
                 </div>
-                <p className="text-sm text-white/60 leading-relaxed">{l.note}</p>
-                <p className="text-xs text-white/30 mt-1.5">{l.extra}</p>
+                <p className="text-sm text-white/74 leading-relaxed">{l.note}</p>
+                <p className="text-xs text-white/46 mt-1.5">{l.extra}</p>
               </div>
             </Reveal>
           ))}
@@ -556,20 +565,20 @@ function LanguageEngineSection() {
 
 function PipelineSection() {
   return (
-    <section id="how-it-analyzes" className="py-24 px-5" style={{ background: INK }}>
+    <section id="how-it-analyzes" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${VIOLET}12, transparent 65%), ${INK}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Every PR, every push</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">What one scan actually does</h2>
-          <p className="text-white/40 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
+          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
         </Reveal>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {PIPELINE_STAGES.map((s, i) => (
             <Reveal key={s.label} delay={i * 60}>
-              <div className="relative h-full p-4 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.025)" }}>
+              <div className="relative h-full p-4 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
                 <span className="text-[10px] font-mono font-black" style={{ color: s.color }}>{String(i + 1).padStart(2, "0")}</span>
                 <p className="text-sm font-bold text-white mt-1.5 leading-tight">{s.label}</p>
-                <p className="text-[11px] text-white/35 mt-1 leading-snug">{s.detail}</p>
+                <p className="text-[11px] text-white/50 mt-1 leading-snug">{s.detail}</p>
               </div>
             </Reveal>
           ))}
@@ -594,22 +603,22 @@ const FEATURES = [
 
 function FeaturesSection() {
   return (
-    <section id="features" className="py-24 px-5" style={{ background: SURFACE }}>
+    <section id="features" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${CYAN}12, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Features</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Built like a scanner, not a linter</h2>
-          <p className="text-white/40 mt-3 max-w-xl mx-auto text-lg">Every capability below maps to a real, tested component — not a roadmap slide.</p>
+          <p className="text-white/58 mt-3 max-w-xl mx-auto text-lg">Every capability below maps to a real, tested component — not a roadmap slide.</p>
         </Reveal>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {FEATURES.map((f, i) => (
             <Reveal key={f.title} delay={(i % 4) * 60}>
-              <div className="group relative p-5 rounded-2xl transition-all duration-200 h-full" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)" }}
-                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${f.accent}55`; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 12px 32px ${f.accent}22`; }}
-                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.07)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "none"; }}>
-                <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3.5" style={{ color: f.accent, background: `${f.accent}14`, border: `1px solid ${f.accent}2a` }}>{f.icon(18)}</div>
+              <div className="group relative p-5 rounded-2xl transition-all duration-200 h-full" style={{ background: "rgba(255,255,255,0.045)", border: "1px solid rgba(255,255,255,0.14)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)" }}
+                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${f.accent}66`; el.style.background = "rgba(255,255,255,0.07)"; el.style.transform = "translateY(-3px)"; el.style.boxShadow = `0 16px 36px ${f.accent}2e, inset 0 1px 0 rgba(255,255,255,0.08)`; }}
+                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.14)"; el.style.background = "rgba(255,255,255,0.045)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)"; }}>
+                <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3.5" style={{ color: f.accent, background: `${f.accent}1c`, border: `1px solid ${f.accent}38` }}>{f.icon(18)}</div>
                 <h3 className="text-sm font-bold text-white mb-1.5">{f.title}</h3>
-                <p className="text-[13px] text-white/45 leading-relaxed">{f.desc}</p>
+                <p className="text-[13px] text-white/64 leading-relaxed">{f.desc}</p>
               </div>
             </Reveal>
           ))}
@@ -626,12 +635,12 @@ function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; 
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {facts.map((s, i) => (
         <Reveal key={s.label} delay={i * 40}>
-          <div className="p-4 rounded-xl border h-full" style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.02)" }}>
+          <div className="p-4 rounded-xl border h-full" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)" }}>
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-[9px] font-black tabular-nums w-4.5 h-4.5 rounded-md flex items-center justify-center shrink-0 font-mono" style={{ background: `${color}22`, color, border: `1px solid ${color}40`, width: 18, height: 18 }}>{i + 1}</span>
-              <p className="text-xs font-bold text-white/80">{s.label}</p>
+              <span className="text-[9px] font-black tabular-nums w-4.5 h-4.5 rounded-md flex items-center justify-center shrink-0 font-mono" style={{ background: `${color}2c`, color, border: `1px solid ${color}4d`, width: 18, height: 18 }}>{i + 1}</span>
+              <p className="text-xs font-bold text-white/90">{s.label}</p>
             </div>
-            <p className="text-xs text-white/40 leading-relaxed">{s.desc}</p>
+            <p className="text-xs text-white/58 leading-relaxed">{s.desc}</p>
           </div>
         </Reveal>
       ))}
@@ -641,12 +650,12 @@ function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; 
 
 function ArchSection() {
   return (
-    <section className="py-24 px-5" style={{ background: INK }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${SKY}12, transparent 65%), ${INK}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={SKY}>Under the hood</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Two real engines, documented in the open</h2>
-          <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">The AI-provenance model and the vulnerability taint model are two separate, independently-tested systems — here's the shape of each.</p>
+          <p className="text-white/58 mt-3 text-lg max-w-2xl mx-auto">The AI-provenance model and the vulnerability taint model are two separate, independently-tested systems — here's the shape of each.</p>
         </Reveal>
         <div className="grid lg:grid-cols-2 gap-10">
           <Reveal>
@@ -667,24 +676,24 @@ function ArchSection() {
 
 function WhySection() {
   return (
-    <section className="py-24 px-5" style={{ background: SURFACE }}>
+    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0f, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>Why TrustLedger</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Proof, not a pattern match</h2>
-          <p className="text-white/40 mt-3 text-lg max-w-2xl mx-auto">Every finding traces back to a real signal in your code — reviewers spend time on judgment calls, not re-deriving whether it's real.</p>
+          <p className="text-white/58 mt-3 text-lg max-w-2xl mx-auto">Every finding traces back to a real signal in your code — reviewers spend time on judgment calls, not re-deriving whether it's real.</p>
         </Reveal>
         <div className="space-y-4">
           {WHY_ROWS.map((row, i) => (
             <Reveal key={row.vs} delay={i * 70}>
-              <div className="rounded-2xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.02)" }}>
-                <div className="px-6 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.015)" }}>
-                  <span className="text-[11px] font-bold uppercase tracking-widest text-white/25 font-mono">vs </span>
-                  <span className="text-xs font-bold text-white/40">{row.vs}</span>
+              <div className="rounded-2xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)" }}>
+                <div className="px-6 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.045)" }}>
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-white/40 font-mono">vs </span>
+                  <span className="text-xs font-bold text-white/58">{row.vs}</span>
                 </div>
-                <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.06]">
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/20 mb-2">They do</p><p className="text-sm text-white/40 leading-relaxed">{row.them}</p></div>
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/70 leading-relaxed">{row.us}</p></div>
+                <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.09]">
+                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/34 mb-2">They do</p><p className="text-sm text-white/58 leading-relaxed">{row.them}</p></div>
+                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/82 leading-relaxed">{row.us}</p></div>
                 </div>
               </div>
             </Reveal>
@@ -699,25 +708,25 @@ function WhySection() {
 
 function HowItWorksSection() {
   return (
-    <section id="how-it-works" className="py-24 px-5" style={{ background: INK }}>
+    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}12, transparent 65%), ${INK}` }}>
       <div className="max-w-4xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>How it works</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Up and running in 5 minutes</h2>
-          <p className="text-white/40 mt-3 text-lg">No CI/CD changes. No config files. Install once and every PR is scanned automatically.</p>
+          <p className="text-white/58 mt-3 text-lg">No CI/CD changes. No config files. Install once and every PR is scanned automatically.</p>
         </Reveal>
         <div className="space-y-4">
           {STEPS.map((s, i) => (
             <Reveal key={s.n} delay={i * 80}>
-              <div className="flex gap-6 p-6 rounded-2xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.07)", background: "rgba(255,255,255,0.025)" }}>
+              <div className="flex gap-6 p-6 rounded-2xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)" }}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shrink-0 text-[#050810]" style={{ background: CYAN, boxShadow: `0 4px 16px ${CYAN}4d` }}>{s.n}</div>
-                <div><h3 className="font-bold text-white mb-1">{s.title}</h3><p className="text-sm text-white/45 leading-relaxed">{s.desc}</p></div>
+                <div><h3 className="font-bold text-white mb-1">{s.title}</h3><p className="text-sm text-white/64 leading-relaxed">{s.desc}</p></div>
               </div>
             </Reveal>
           ))}
         </div>
-        <Reveal delay={260} className="mt-10 p-5 rounded-2xl overflow-x-auto border" style={{ borderColor: "rgba(255,255,255,0.08)", background: "#080b12" }}>
-          <p className="text-xs text-white/30 font-mono mb-3"># Or submit scans via the REST API</p>
+        <Reveal delay={260} className="mt-10 p-5 rounded-2xl overflow-x-auto border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "#080b12" }}>
+          <p className="text-xs text-white/46 font-mono mb-3"># Or submit scans via the REST API</p>
           <pre className="text-xs font-mono leading-relaxed whitespace-pre" style={{ color: "#5eead4" }}>{`curl -X POST https://app.trustledger.dev/api/scans \\
   -H 'X-TrustLedger-Key: YOUR_API_KEY' \\
   -H 'Content-Type: application/json' \\
@@ -734,18 +743,22 @@ function HowItWorksSection() {
 
 function CTASection() {
   return (
-    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}14, transparent 65%), ${SURFACE}` }}>
+    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}22, transparent 65%), ${SURFACE}` }}>
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] rounded-full blur-[140px] pointer-events-none" style={{ background: CYAN, opacity: 0.1 }} />
       <Reveal className="relative max-w-3xl mx-auto text-center space-y-6">
-        <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}14`, border: `1px solid ${CYAN}33` }}><ShieldIcon size={26} /></div>
+        <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}1f`, border: `1px solid ${CYAN}44`, boxShadow: `0 0 32px ${CYAN}4d` }}><ShieldIcon size={26} /></div>
         <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
-        <p className="text-white/45 text-lg max-w-xl mx-auto leading-relaxed">
+        <p className="text-white/64 text-lg max-w-xl mx-auto leading-relaxed">
           AI-generated code, leaked secrets, vulnerable dependencies, and broken authorization can all slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-          <Link href="/dashboard" className="flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all active:scale-[0.98] text-[#050810]" style={{ background: CYAN, boxShadow: `0 4px 28px ${CYAN}4d` }}>
+          <Link href="/dashboard" className="flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all active:scale-[0.98] text-[#050810]"
+            style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
+            onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
+            onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
             See the platform in action <ArrowRightIcon />
           </Link>
-          <a href="mailto:hello@trustledger.dev" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/60 font-semibold transition-all border hover:text-white/80" style={{ borderColor: "rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)" }}>Contact us</a>
+          <a href="mailto:hello@trustledger.dev" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/74 font-semibold transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>Contact us</a>
         </div>
       </Reveal>
     </section>
@@ -756,37 +769,37 @@ function CTASection() {
 
 function Footer() {
   return (
-    <footer className="py-12 px-5 border-t" style={{ borderColor: "rgba(255,255,255,0.06)", background: INK }}>
+    <footer className="py-12 px-5 border-t" style={{ borderColor: "rgba(255,255,255,0.09)", background: INK }}>
       <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-start justify-between gap-8">
         <div>
           <div className="flex items-center gap-2.5 mb-3">
             <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[#050810]" style={{ background: CYAN }}><ShieldIcon size={14} /></div>
             <span className="font-bold text-white text-sm">TrustLedger</span>
           </div>
-          <p className="text-xs text-white/25 max-w-xs leading-relaxed">AI provenance, real vulnerability scanning, secrets, dependencies, and compliance — scored, traced, gated, and attested — for teams that care about what ships.</p>
+          <p className="text-xs text-white/40 max-w-xs leading-relaxed">AI provenance, real vulnerability scanning, secrets, dependencies, and compliance — scored, traced, gated, and attested — for teams that care about what ships.</p>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-sm">
           <div>
-            <p className="font-bold text-white/40 text-xs uppercase tracking-wider mb-3">Platform</p>
-            <ul className="space-y-2">{[{ label: "Overview", href: "/dashboard" }, { label: "Vulnerabilities", href: "#vulnerabilities" }, { label: "AI Intel", href: "/trust-score" }, { label: "Threats", href: "/violations" }].map(l => <li key={l.label}><a href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</a></li>)}</ul>
+            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Platform</p>
+            <ul className="space-y-2">{[{ label: "Overview", href: "/dashboard" }, { label: "Vulnerabilities", href: "#vulnerabilities" }, { label: "AI Intel", href: "/trust-score" }, { label: "Threats", href: "/violations" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/40 text-xs uppercase tracking-wider mb-3">Code Risk</p>
-            <ul className="space-y-2">{[{ label: "Scan History", href: "/scans" }, { label: "Secrets", href: "/secrets" }, { label: "Dependencies", href: "/dependencies" }].map(l => <li key={l.label}><a href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</a></li>)}</ul>
+            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Code Risk</p>
+            <ul className="space-y-2">{[{ label: "Scan History", href: "/scans" }, { label: "Secrets", href: "/secrets" }, { label: "Dependencies", href: "/dependencies" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/40 text-xs uppercase tracking-wider mb-3">Compliance</p>
-            <ul className="space-y-2">{[{ label: "SOC 2 / EU AI Act", href: "/reports" }, { label: "Risk Register", href: "/risk-register" }, { label: "SLA Dashboard", href: "/sla" }, { label: "Audit Trail", href: "/audit" }].map(l => <li key={l.label}><Link href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</Link></li>)}</ul>
+            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Compliance</p>
+            <ul className="space-y-2">{[{ label: "SOC 2 / EU AI Act", href: "/reports" }, { label: "Risk Register", href: "/risk-register" }, { label: "SLA Dashboard", href: "/sla" }, { label: "Audit Trail", href: "/audit" }].map(l => <li key={l.label}><Link href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</Link></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/40 text-xs uppercase tracking-wider mb-3">Company</p>
-            <ul className="space-y-2">{[{ label: "Dashboard", href: "/dashboard" }, { label: "Settings", href: "/settings" }, { label: "Contact", href: "mailto:hello@trustledger.dev" }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }].map(l => <li key={l.label}><a href={l.href} className="text-white/25 hover:text-white/55 transition-colors">{l.label}</a></li>)}</ul>
+            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Company</p>
+            <ul className="space-y-2">{[{ label: "Dashboard", href: "/dashboard" }, { label: "Settings", href: "/settings" }, { label: "Contact", href: "mailto:hello@trustledger.dev" }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
         </div>
       </div>
-      <div className="max-w-6xl mx-auto mt-10 pt-6 border-t flex flex-col sm:flex-row items-center justify-between gap-3" style={{ borderColor: "rgba(255,255,255,0.05)" }}>
-        <p className="text-xs text-white/18">© 2026 TrustLedger. All rights reserved.</p>
-        <div className="flex items-center gap-1.5 text-xs text-white/18"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />All systems operational</div>
+      <div className="max-w-6xl mx-auto mt-10 pt-6 border-t flex flex-col sm:flex-row items-center justify-between gap-3" style={{ borderColor: "rgba(255,255,255,0.14)" }}>
+        <p className="text-xs text-white/32">© 2026 TrustLedger. All rights reserved.</p>
+        <div className="flex items-center gap-1.5 text-xs text-white/32"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />All systems operational</div>
       </div>
     </footer>
   );
