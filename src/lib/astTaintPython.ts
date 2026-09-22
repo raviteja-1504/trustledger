@@ -72,7 +72,7 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti"
   | "xss" | "header-injection" | "nosql-injection" | "ldap-injection" | "xpath-injection" | "redos" | "eval-exec"
-  | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg";
+  | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check";
 
 export interface AstTaintPyFinding {
   id:         AstTaintPyId;
@@ -84,6 +84,9 @@ export interface AstTaintPyFinding {
   // buildBackwardTraceGeneric docblocks; a cross-file hop, unlike astTaint.ts's JS/TS
   // implementation, is a documented gap here rather than built out, to keep this port scoped).
   trace?: TraceStep[];
+  // Only set for bola-missing-ownership-check (read vs write endpoint severity) -- every other id
+  // keeps using the constant SEVERITY table, same convention as every other engine's BOLA detector.
+  severityOverride?: "critical" | "high" | "medium";
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see docblock above) ─────────────
@@ -1400,6 +1403,241 @@ function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode,
   return propagating;
 }
 
+// ── BOLA: missing ownership check (structural, not a taint flow) ───────────────
+//
+// Mirrors astTaintPHP.ts's own collectBolaFindings almost exactly (same algorithm and the same
+// "no isEndpoint gate -- Python has no annotation system as rigid as Spring/ASP.NET to gate on
+// either" reasoning PHP's own docblock already gives): candidates are collected per function, then
+// each is emitted unless a real ownership comparison for ITS resource id DOMINATES it, not merely
+// "a comparison exists somewhere in the function". A resource id here is a function PARAMETER whose
+// name matches the convention (Flask URL converters and Django path-kwarg views both bind the URL
+// segment straight to a parameter, e.g. `def order_detail(request, pk):`) -- not a
+// request.args.get()-style read, which Java/C#/PHP's own equivalent doesn't use as a source for
+// this check either.
+
+const BOLA_RESOURCE_ID_RE_PY = /^(?:id|ID|pk|.*_id|.*Id)$/;
+// Django's request.user (the standard auth middleware); Flask-Login's current_user; Flask's g.user
+// convention. Not exhaustive -- same "narrow, high-precision only" policy as every other engine's
+// own principal-shape regex.
+const BOLA_PRINCIPAL_RE_PY = /^(?:self\.)?request\.user\b|^current_user\b|^g\.user\b/;
+const BOLA_LOOKUP_METHOD_TAILS_PY = new Set([
+  "get", "filter", "filter_by", "first", "get_or_404", "exclude",
+  // pymongo/motor-style NoSQL lookups.
+  "find", "find_one", "find_one_and_update", "find_one_and_delete", "delete_one", "update_one",
+]);
+// A bare (non-attribute) call -- Django's get_object_or_404(Model, id=x)/get_list_or_404(...).
+const BOLA_LOOKUP_FUNCS_PY = new Set(["get_object_or_404", "get_list_or_404"]);
+// Same name-convention severity tiering as astTaintPHP.ts's own READ_NAME_RE (Python has no
+// HTTP-verb decorator/annotation to read the way Java's @GetMapping/C#'s [HttpGet] do).
+const BOLA_READ_NAME_RE_PY = /^(?:get|show|index|view|find|list|search)/i;
+
+interface BolaCandidatePy { node: SyntaxNode; sourceExpr: string; sinkExpr: string }
+
+/** Is `node` a resource-id-shaped expression: a bare identifier bound in `idNames`? (Unlike
+ * astTaint.ts's JS/TS version, there's no separate "inline request read" shape here -- the
+ * resource id IS the parameter itself, per this module's own docblock above.) */
+function isBolaResourceIdExprPy(node: SyntaxNode, idNames: Set<string>): boolean {
+  return node.type === "identifier" && idNames.has(node.text);
+}
+
+/** A dict literal argument shaped like an ORM filter (`{"id": x}`) referencing a resource id in
+ * one of its (one level deep) key/value pairs. */
+function dictReferencesResourceIdPy(dict: SyntaxNode, idNames: Set<string>): SyntaxNode | null {
+  for (const pair of dict.namedChildren) {
+    if (pair?.type !== "pair") continue;
+    const value = pair.childForFieldName("value");
+    if (value && isBolaResourceIdExprPy(value, idNames)) return value;
+  }
+  return null;
+}
+
+function collectBolaCandidatesPy(fnBody: SyntaxNode, idNames: Set<string>): BolaCandidatePy[] {
+  const candidates: BolaCandidatePy[] = [];
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "call") {
+      const fn = n.childForFieldName("function");
+      const args = argListOf(n);
+      const isAttrLookup = fn?.type === "attribute" && BOLA_LOOKUP_METHOD_TAILS_PY.has(attributeParts(fn).attribute ?? "");
+      const isBareLookup = fn?.type === "identifier" && BOLA_LOOKUP_FUNCS_PY.has(fn.text);
+      if (isAttrLookup || isBareLookup) {
+        const sinkExpr = fn ? (calleeTextPy(fn) ?? fn.text) : "?";
+        let hit: SyntaxNode | null = null;
+        for (const a of args) {
+          if (a.type === "keyword_argument") {
+            const val = a.childForFieldName("value");
+            if (val && isBolaResourceIdExprPy(val, idNames)) { hit = val; break; }
+          } else if (isBolaResourceIdExprPy(a, idNames)) { hit = a; break; }
+          else if (a.type === "dictionary") { const d = dictReferencesResourceIdPy(a, idNames); if (d) { hit = d; break; } }
+        }
+        if (hit) candidates.push({ node: n, sourceExpr: hit.text, sinkExpr });
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(fnBody);
+  return candidates;
+}
+
+/** `x === principal-shaped` / `principal-shaped === x` (by TEXT -- this runs structurally, not
+ * threaded through the real taint env). */
+function isBolaOwnershipComparisonPy(left: SyntaxNode, right: SyntaxNode, idNames: Set<string>): boolean {
+  const lIsRes = isBolaResourceIdExprPy(left, idNames);
+  const rIsRes = isBolaResourceIdExprPy(right, idNames);
+  const lIsPrin = BOLA_PRINCIPAL_RE_PY.test(left.text);
+  const rIsPrin = BOLA_PRINCIPAL_RE_PY.test(right.text);
+  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+}
+
+type BolaSidePy = "true" | "false";
+
+/** Resolves a bare identifier ONE hop to its most recent preceding assignment (source-order-last
+ * among those before `beforeNode`) within `scope` -- same bounded lookback every other engine's
+ * own guard/ownership resolution uses. */
+function resolveRecentAssignmentPy(scope: SyntaxNode, varName: string, beforeNode: SyntaxNode): SyntaxNode | null {
+  let best: { end: number; expr: SyntaxNode } | null = null;
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "assignment") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "identifier" && left.text === varName && right && n.endIndex <= beforeNode.startIndex) {
+        if (!best || n.endIndex > best.end) best = { end: n.endIndex, expr: right };
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return best ? (best as { end: number; expr: SyntaxNode }).expr : null;
+}
+
+/** Which side(s) of `cond` establish ownership -- `==` holds on the true side, `!=` on the false
+ * side; `not`/`and`/`or` compose like a validation guard does. */
+function bolaOwnershipSidesPy(cond: SyntaxNode, idNames: Set<string>, scope: SyntaxNode, resolve = true): BolaSidePy[] {
+  const flip = (s: BolaSidePy): BolaSidePy => (s === "true" ? "false" : "true");
+  if (cond.type === "parenthesized_expression") {
+    const inner = cond.namedChildren[0];
+    return inner ? bolaOwnershipSidesPy(inner, idNames, scope, resolve) : [];
+  }
+  if (cond.type === "not_operator") {
+    const inner = cond.childForFieldName("argument");
+    return inner ? bolaOwnershipSidesPy(inner, idNames, scope, resolve).map(flip) : [];
+  }
+  if (cond.type === "boolean_operator") {
+    const op = cond.childForFieldName("operator")?.text;
+    const l = cond.childForFieldName("left");
+    const r = cond.childForFieldName("right");
+    if (!l || !r) return [];
+    const all = [...bolaOwnershipSidesPy(l, idNames, scope, resolve), ...bolaOwnershipSidesPy(r, idNames, scope, resolve)];
+    return op === "and" ? all.filter(s => s === "true") : op === "or" ? all.filter(s => s === "false") : [];
+  }
+  if (cond.type === "comparison_operator") {
+    const [l, r] = cond.namedChildren;
+    if (cond.namedChildren.length !== 2 || !l || !r) return [];
+    const op = cond.text.slice(l.endIndex - cond.startIndex, r.startIndex - cond.startIndex).trim();
+    if (op === "==" && isBolaOwnershipComparisonPy(l, r, idNames)) return ["true"];
+    if (op === "!=" && isBolaOwnershipComparisonPy(l, r, idNames)) return ["false"];
+    return [];
+  }
+  if (cond.type === "call") {
+    const fn = cond.childForFieldName("function");
+    const args = argListOf(cond);
+    if (fn?.type === "attribute" && attributeParts(fn).attribute === "equals" && args.length === 1) {
+      const recv = attributeParts(fn).object;
+      if (recv && isBolaOwnershipComparisonPy(recv, args[0], idNames)) return ["true"];
+    }
+  }
+  if (cond.type === "identifier" && resolve) {
+    const rhs = resolveRecentAssignmentPy(scope, cond.text, cond);
+    return rhs ? bolaOwnershipSidesPy(rhs, idNames, scope, false) : [];
+  }
+  return [];
+}
+
+function bolaStatementTerminatesPy(n: SyntaxNode | null | undefined): boolean {
+  if (!n) return false;
+  if (n.type === "return_statement" || n.type === "raise_statement") return true;
+  if (n.type === "block") return n.namedChildren.some(bolaStatementTerminatesPy);
+  if (n.type === "if_statement") {
+    const alt = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+    const hasElse = alt.some(a => a.type === "else_clause");
+    return hasElse && bolaStatementTerminatesPy(n.childForFieldName("consequence"))
+      && alt.every(a => bolaStatementTerminatesPy(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence")));
+  }
+  return false;
+}
+
+/**
+ * Does an ownership comparison DOMINATE `sink`? Same three conditions as every other engine's own
+ * ownershipDominates: (a) an if/elif condition (or ternary condition) precedes the sink in source
+ * order, (b) it puts the sink on the continuing path -- the arm where the comparison establishes
+ * ownership, or the OTHER arm always terminates (return/raise) and the sink comes after the whole
+ * if -- and (c) it's for the SAME resource id the sink's argument uses.
+ */
+function bolaOwnershipDominatesPy(sink: SyntaxNode, idNames: Set<string>, scope: SyntaxNode): boolean {
+  const contains = (outer: SyntaxNode | null | undefined, inner: SyntaxNode) =>
+    !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
+  let found = false;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "if_statement") {
+      const cond = n.childForFieldName("condition");
+      const cons = n.childForFieldName("consequence");
+      const alt = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+      const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
+      const altTerminates = alt.length > 0 && alt.every(a => bolaStatementTerminatesPy(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence")));
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = bolaOwnershipSidesPy(cond, idNames, scope);
+        if (sides.includes("true") && (contains(cons, sink) || (afterIf && altTerminates))) found = true;
+        if (sides.includes("false") && (alt.some(a => contains(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence"), sink))
+          || (afterIf && bolaStatementTerminatesPy(cons)))) found = true;
+      }
+      for (const a of alt) {
+        if (a.type !== "elif_clause") continue;
+        const acond = a.childForFieldName("condition");
+        const acons = a.childForFieldName("consequence");
+        if (acond && acond.endIndex <= sink.startIndex) {
+          const asides = bolaOwnershipSidesPy(acond, idNames, scope);
+          if (asides.includes("true") && contains(acons, sink)) found = true;
+        }
+      }
+    } else if (n.type === "conditional_expression") {
+      const cond = n.childForFieldName("condition");
+      if (cond && cond.endIndex <= sink.startIndex) {
+        const sides = bolaOwnershipSidesPy(cond, idNames, scope);
+        if (sides.includes("true") && contains(n.childForFieldName("consequence"), sink)) found = true;
+        if (sides.includes("false") && contains(n.childForFieldName("alternative"), sink)) found = true;
+      }
+    }
+    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return found;
+}
+
+/** Every parameter name (module-level function or class method) matching the resource-id
+ * convention -- no isEndpoint gate, matching astTaintPHP.ts's own identical reasoning (Python has
+ * no annotation system as rigid as Spring/ASP.NET to gate on). */
+function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTaintPyFinding[], seen: Set<string>): void {
+  for (const [name, fn] of localFns) {
+    if (!fn.body) continue;
+    const idNames = new Set(fn.paramShapes.filter(s => BOLA_RESOURCE_ID_RE_PY.test(s.name)).map(s => s.name));
+    if (idNames.size === 0) continue;
+    const candidates = collectBolaCandidatesPy(fn.body, idNames);
+    if (candidates.length === 0) continue;
+    const severity: "medium" | "high" = BOLA_READ_NAME_RE_PY.test(name) ? "medium" : "high";
+    for (const c of candidates) {
+      if (bolaOwnershipDominatesPy(c.node, idNames, fn.body)) continue;
+      const line = c.node.startPosition.row + 1;
+      const key = `bola-missing-ownership-check:${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      findings.push({
+        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr, severityOverride: severity,
+        detail: `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (request.user/current_user) anywhere on the path that reaches it — real per-parameter AST evidence, not a keyword-proximity guess`,
+      });
+    }
+  }
+}
+
 function sourceLabelPy(node: SyntaxNode): string {
   return node.text.replace(/\s+/g, " ").slice(0, 60);
 }
@@ -1425,6 +1663,9 @@ const SEVERITY: Record<AstTaintPyId, "critical" | "high" | "medium"> = {
   "xss": "critical", "header-injection": "high", "nosql-injection": "critical", "ldap-injection": "critical",
   "xpath-injection": "critical", "redos": "high", "eval-exec": "critical", "insecure-deserialization": "critical",
   "mass-assignment": "high", "timing-attack": "medium", "jwt-none-alg": "critical",
+  // Fallback only -- collectBolaFindingsPy always passes a severityOverride (medium for a read-shaped
+  // function name, high otherwise), same convention as every other engine's BOLA detector.
+  "bola-missing-ownership-check": "high",
 };
 const LABEL: Record<AstTaintPyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -1434,6 +1675,7 @@ const LABEL: Record<AstTaintPyId, string> = {
   "ldap-injection": "LDAP Injection", "xpath-injection": "XPath Injection", "redos": "ReDoS — Regex DoS",
   "eval-exec": "Arbitrary Code Execution", "insecure-deserialization": "Insecure Deserialization",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
+  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
 function isFastApiHandler(fn: SyntaxNode): boolean {
@@ -1806,6 +2048,8 @@ export function scanAstTaintPython(
         }
       }
     }
+
+    collectBolaFindingsPy(localFns, findings, seen);
 
     // Second pass, bounded worklist (see astTaint.ts's identical structure
     // for the full rationale): re-walking a seeded function can itself seed

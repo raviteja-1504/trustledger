@@ -6198,7 +6198,7 @@ function findAstTaintPythonFindings(
   crossFileShapes?: Map<string, PyParamShape[]>,
 ): ScanIndicator[] {
   return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes).map(f => ({
-    id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
+    id: f.id, label: astTaintPyLabel(f.id), severity: f.severityOverride ?? astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
