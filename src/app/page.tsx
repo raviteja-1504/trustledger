@@ -286,11 +286,11 @@ function NavBar() {
         </div>
         <nav className="hidden md:flex items-center gap-6">
           {["Platform", "Vulnerabilities", "How it works"].map(l => (
-            <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`} className="text-sm text-white/64 hover:text-white/90 transition-colors font-medium">{l}</a>
+            <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
           ))}
         </nav>
         <div className="flex items-center gap-2">
-          <Link href="/login" className="text-sm font-semibold text-white/68 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
+          <Link href="/login" className="text-sm font-semibold text-white/70 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
           <Link href="/login" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
             Get started <ArrowRightIcon size={13} />
           </Link>
@@ -315,7 +315,7 @@ function SignalStrip() {
       {SIGNAL_CHIPS.map((c, i) => (
         <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2 px-3 py-1.5 rounded-full border font-mono text-[11px]" style={{ borderColor: `${c.color}4d`, background: `${c.color}12` }}>
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
-          <span className="text-white/68">{c.label}</span>
+          <span className="text-white/70">{c.label}</span>
           <span className="font-bold" style={{ color: c.color }}>{c.value}</span>
         </Reveal>
       ))}
@@ -340,8 +340,8 @@ function TraceVisual() {
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${AMBER}80` }} />
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${EMERALD}80` }} />
         </div>
-        <span className="text-[11px] font-mono font-semibold ml-2 text-white/68">how a trace reads</span>
-        <span className="ml-auto text-[10px] font-mono text-white/42">illustrative example</span>
+        <span className="text-[11px] font-mono font-semibold ml-2 text-white/70">how a trace reads</span>
+        <span className="ml-auto text-[10px] font-mono text-white/40">illustrative example</span>
       </div>
       <div className="p-5 sm:p-6 font-mono text-[12.5px]">
         {TRACE_STEPS.map((s, i) => (
@@ -387,7 +387,7 @@ function HeroSection() {
           <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
           One risk score.
         </h1>
-        <p className="text-lg sm:text-xl text-white/64 max-w-2xl mx-auto leading-relaxed">
+        <p className="text-lg sm:text-xl text-white/65 max-w-2xl mx-auto leading-relaxed">
           TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across six languages, catches secrets and vulnerable dependencies, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
@@ -397,7 +397,7 @@ function HeroSection() {
             onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
             Get started free <ArrowRightIcon size={15} />
           </Link>
-          <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/82 font-semibold text-sm transition-all border hover:text-white/95"
+          <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm transition-all border hover:text-white/95"
             style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}
             onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.32)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
             onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.18)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)"; }}>
@@ -448,7 +448,7 @@ function PillarsSection() {
         <Reveal className="text-center mb-12">
           <Eyebrow>The platform</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six pillars. One scan.</h2>
-          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all six — the same structure as the dashboard itself, not a marketing simplification of it.</p>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all six — the same structure as the dashboard itself, not a marketing simplification of it.</p>
         </Reveal>
 
         {/* Tab bar */}
@@ -471,10 +471,10 @@ function PillarsSection() {
               {p.icon(22)}
             </div>
             <h3 className="text-2xl font-black text-white tracking-tight mb-2">{p.tagline}</h3>
-            <p className="text-white/68 leading-relaxed mb-5">{p.desc}</p>
+            <p className="text-white/70 leading-relaxed mb-5">{p.desc}</p>
             <div className="flex flex-wrap gap-2">
               {p.pages.map(page => (
-                <span key={page} className="text-[11px] font-mono px-2.5 py-1 rounded-full border text-white/58" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.045)" }}>{page}</span>
+                <span key={page} className="text-[11px] font-mono px-2.5 py-1 rounded-full border text-white/60" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.045)" }}>{page}</span>
               ))}
             </div>
           </div>
@@ -482,7 +482,7 @@ function PillarsSection() {
             {p.bullets.map((b, i) => (
               <div key={i} className="flex items-start gap-2.5 p-3 rounded-xl border" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.035)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)" }}>
                 <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: p.color }} />
-                <span className="text-[13px] text-white/74 leading-snug">{b}</span>
+                <span className="text-[13px] text-white/75 leading-snug">{b}</span>
               </div>
             ))}
           </div>
@@ -503,7 +503,7 @@ function VulnCoverageSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Twenty vulnerability classes, real data-flow evidence</h2>
-          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — not a keyword or a line pattern.</p>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — not a keyword or a line pattern.</p>
         </Reveal>
         <div className="space-y-8">
           {groups.map((g, gi) => (
@@ -537,7 +537,7 @@ function LanguageEngineSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six languages. Six real parsers.</h2>
-          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across six syntaxes.</p>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across six syntaxes.</p>
         </Reveal>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {LANGUAGES.map((l, i) => (
@@ -549,8 +549,8 @@ function LanguageEngineSection() {
                   <span className="font-bold text-white text-sm">{l.lang}</span>
                   <span className="text-[10px] font-mono text-white/40">{l.ext}</span>
                 </div>
-                <p className="text-sm text-white/74 leading-relaxed">{l.note}</p>
-                <p className="text-xs text-white/46 mt-1.5">{l.extra}</p>
+                <p className="text-sm text-white/75 leading-relaxed">{l.note}</p>
+                <p className="text-xs text-white/45 mt-1.5">{l.extra}</p>
               </div>
             </Reveal>
           ))}
@@ -569,7 +569,7 @@ function PipelineSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow>Every PR, every push</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">What one scan actually does</h2>
-          <p className="text-white/58 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
         </Reveal>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {PIPELINE_STAGES.map((s, i) => (
@@ -607,7 +607,7 @@ function FeaturesSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow>Features</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Built like a scanner, not a linter</h2>
-          <p className="text-white/58 mt-3 max-w-xl mx-auto text-lg">Every capability below maps to a real, tested component — not a roadmap slide.</p>
+          <p className="text-white/60 mt-3 max-w-xl mx-auto text-lg">Every capability below maps to a real, tested component — not a roadmap slide.</p>
         </Reveal>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {FEATURES.map((f, i) => (
@@ -617,7 +617,7 @@ function FeaturesSection() {
                 onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.14)"; el.style.background = "rgba(255,255,255,0.045)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)"; }}>
                 <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3.5" style={{ color: f.accent, background: `${f.accent}1c`, border: `1px solid ${f.accent}38` }}>{f.icon(18)}</div>
                 <h3 className="text-sm font-bold text-white mb-1.5">{f.title}</h3>
-                <p className="text-[13px] text-white/64 leading-relaxed">{f.desc}</p>
+                <p className="text-[13px] text-white/65 leading-relaxed">{f.desc}</p>
               </div>
             </Reveal>
           ))}
@@ -639,7 +639,7 @@ function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; 
               <span className="text-[9px] font-black tabular-nums w-4.5 h-4.5 rounded-md flex items-center justify-center shrink-0 font-mono" style={{ background: `${color}2c`, color, border: `1px solid ${color}4d`, width: 18, height: 18 }}>{i + 1}</span>
               <p className="text-xs font-bold text-white/90">{s.label}</p>
             </div>
-            <p className="text-xs text-white/58 leading-relaxed">{s.desc}</p>
+            <p className="text-xs text-white/60 leading-relaxed">{s.desc}</p>
           </div>
         </Reveal>
       ))}
@@ -654,7 +654,7 @@ function ArchSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow color={SKY}>Under the hood</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Two real engines, documented in the open</h2>
-          <p className="text-white/58 mt-3 text-lg max-w-2xl mx-auto">The AI-provenance model and the vulnerability taint model are two separate, independently-tested systems — here's the shape of each.</p>
+          <p className="text-white/60 mt-3 text-lg max-w-2xl mx-auto">The AI-provenance model and the vulnerability taint model are two separate, independently-tested systems — here's the shape of each.</p>
         </Reveal>
         <div className="grid lg:grid-cols-2 gap-10">
           <Reveal>
@@ -680,7 +680,7 @@ function WhySection() {
         <Reveal className="text-center mb-14">
           <Eyebrow>Why TrustLedger</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Proof, not a pattern match</h2>
-          <p className="text-white/58 mt-3 text-lg max-w-2xl mx-auto">Every finding traces back to a real signal in your code — reviewers spend time on judgment calls, not re-deriving whether it's real.</p>
+          <p className="text-white/60 mt-3 text-lg max-w-2xl mx-auto">Every finding traces back to a real signal in your code — reviewers spend time on judgment calls, not re-deriving whether it's real.</p>
         </Reveal>
         <div className="space-y-4">
           {WHY_ROWS.map((row, i) => (
@@ -688,11 +688,11 @@ function WhySection() {
               <div className="rounded-2xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)" }}>
                 <div className="px-6 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.045)" }}>
                   <span className="text-[11px] font-bold uppercase tracking-widest text-white/40 font-mono">vs </span>
-                  <span className="text-xs font-bold text-white/58">{row.vs}</span>
+                  <span className="text-xs font-bold text-white/60">{row.vs}</span>
                 </div>
                 <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.09]">
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/42 mb-2">They do</p><p className="text-sm text-white/58 leading-relaxed">{row.them}</p></div>
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/82 leading-relaxed">{row.us}</p></div>
+                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">They do</p><p className="text-sm text-white/60 leading-relaxed">{row.them}</p></div>
+                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/80 leading-relaxed">{row.us}</p></div>
                 </div>
               </div>
             </Reveal>
@@ -712,20 +712,20 @@ function HowItWorksSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow>How it works</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Up and running in 5 minutes</h2>
-          <p className="text-white/58 mt-3 text-lg">No CI/CD changes. No config files. Install once and every PR is scanned automatically.</p>
+          <p className="text-white/60 mt-3 text-lg">No CI/CD changes. No config files. Install once and every PR is scanned automatically.</p>
         </Reveal>
         <div className="space-y-4">
           {STEPS.map((s, i) => (
             <Reveal key={s.n} delay={i * 80}>
               <div className="flex gap-6 p-6 rounded-2xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)" }}>
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shrink-0 text-[#050810]" style={{ background: CYAN, boxShadow: `0 4px 16px ${CYAN}4d` }}>{s.n}</div>
-                <div><h3 className="font-bold text-white mb-1">{s.title}</h3><p className="text-sm text-white/64 leading-relaxed">{s.desc}</p></div>
+                <div><h3 className="font-bold text-white mb-1">{s.title}</h3><p className="text-sm text-white/65 leading-relaxed">{s.desc}</p></div>
               </div>
             </Reveal>
           ))}
         </div>
         <Reveal delay={260} className="mt-10 p-5 rounded-2xl overflow-x-auto border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "#080b12" }}>
-          <p className="text-xs text-white/46 font-mono mb-3"># Or submit scans via the REST API</p>
+          <p className="text-xs text-white/45 font-mono mb-3"># Or submit scans via the REST API</p>
           <pre className="text-xs font-mono leading-relaxed whitespace-pre" style={{ color: "#5eead4" }}>{`curl -X POST https://app.trustledger.dev/api/scans \\
   -H 'X-TrustLedger-Key: YOUR_API_KEY' \\
   -H 'Content-Type: application/json' \\
@@ -747,7 +747,7 @@ function CTASection() {
       <Reveal className="relative max-w-3xl mx-auto text-center space-y-6">
         <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}1f`, border: `1px solid ${CYAN}44`, boxShadow: `0 0 32px ${CYAN}4d` }}><ShieldIcon size={26} /></div>
         <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
-        <p className="text-white/64 text-lg max-w-xl mx-auto leading-relaxed">
+        <p className="text-white/65 text-lg max-w-xl mx-auto leading-relaxed">
           AI-generated code, leaked secrets, vulnerable dependencies, and broken authorization can all slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
@@ -757,7 +757,7 @@ function CTASection() {
             onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
             See the platform in action <ArrowRightIcon />
           </Link>
-          <a href="mailto:hello@trustledger.dev" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/74 font-semibold transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>Contact us</a>
+          <a href="mailto:hello@trustledger.dev" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/75 font-semibold transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>Contact us</a>
         </div>
       </Reveal>
     </section>
@@ -779,19 +779,19 @@ function Footer() {
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-sm">
           <div>
-            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Platform</p>
+            <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Platform</p>
             <ul className="space-y-2">{[{ label: "Overview", href: "/dashboard" }, { label: "Vulnerabilities", href: "#vulnerabilities" }, { label: "AI Intel", href: "/trust-score" }, { label: "Threats", href: "/violations" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Code Risk</p>
+            <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Code Risk</p>
             <ul className="space-y-2">{[{ label: "Scan History", href: "/scans" }, { label: "Secrets", href: "/secrets" }, { label: "Dependencies", href: "/dependencies" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Compliance</p>
+            <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Compliance</p>
             <ul className="space-y-2">{[{ label: "SOC 2 / EU AI Act", href: "/reports" }, { label: "Risk Register", href: "/risk-register" }, { label: "SLA Dashboard", href: "/sla" }, { label: "Audit Trail", href: "/audit" }].map(l => <li key={l.label}><Link href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</Link></li>)}</ul>
           </div>
           <div>
-            <p className="font-bold text-white/58 text-xs uppercase tracking-wider mb-3">Company</p>
+            <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Company</p>
             <ul className="space-y-2">{[{ label: "Dashboard", href: "/dashboard" }, { label: "Settings", href: "/settings" }, { label: "Contact", href: "mailto:hello@trustledger.dev" }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
         </div>
