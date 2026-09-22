@@ -27,15 +27,19 @@ import { scoreExploitability }   from "./reachability";
 import type { ReachabilityReport } from "./reachability";
 import {
   parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
-  computeExportTaintSummary, buildImportBindings,
+  computeExportTaintSummary, buildImportBindings, collectReexports,
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
-import { resolveImportPath } from "./semanticGraph";
+import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
+import { resolveCrossFile } from "./taint/crossFile";
+import type { FileGraph, CrossFileShape } from "./taint/crossFile";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
+  computeExportTaintSummaryPy, collectImportEdgesPy,
 } from "./astTaintPython";
+import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import type { SuppressedSink } from "./taint/taintCore";
 import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava } from "./astTaintJava";
@@ -6152,8 +6156,11 @@ function findAstTaintFindings(
 
 // Same wrapper for astTaintPython.ts's Phase 2 engine -- see its own
 // docblock for the tree-sitter/WASM warm-cache design.
-function findAstTaintPythonFindings(content: string, filePath: string, rootNode: PySyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode, suppressed).map(f => ({
+function findAstTaintPythonFindings(
+  content: string, filePath: string, rootNode: PySyntaxNode, suppressed?: SuppressedSink[],
+  crossFileShapes?: Map<string, PyParamShape[]>,
+): ScanIndicator[] {
+  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
   }));
@@ -6232,6 +6239,12 @@ export function analyzeFile(
   // set below, never `entry_points` -- being called from elsewhere doesn't
   // make a function a network-facing entry point itself, just reachable.
   crossFileReachable?: Set<string>,
+  // Cross-file taint analysis (Python, Pass 2) -- same batch-scoped, runScan()-computed,
+  // not-persisted-on-FileAnalysis shape as crossFilePropagating above. presparsedPy mirrors
+  // presparsedTs: reuses the SAME tree-sitter root runScan()'s own Pass-1 pre-loop already parsed,
+  // so a Python file with cross-file imports still gets only one parse.
+  crossFileShapesPy?: Map<string, PyParamShape[]>,
+  presparsedPy?: PySyntaxNode,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6292,9 +6305,10 @@ export function analyzeFile(
   // if not, this silently falls back to regex-only for this one file, same
   // "no regression" contract as the JS/TS cap above.
   const pyTree: PySyntaxNode | null =
-    lang === "python" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
+    presparsedPy ??
+    (lang === "python" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
       ? parsePythonSourceSync(content, file_path)
-      : null;
+      : null);
   // Java AST parse (Phase 3 -- see astTaintJava.ts). No readiness gate
   // needed, unlike pyTree above: java-parser is pure JS and synchronous,
   // there is nothing to warm up.
@@ -6353,7 +6367,7 @@ export function analyzeFile(
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks) : []),
@@ -6993,50 +7007,56 @@ export function runScan(input: ScanInput): ScanOutput {
   // and scoped accordingly rather than made generic, so those phases add
   // their own parallel blocks instead of overloading this one.
   const jsSourceFiles = new Map<string, ts.SourceFile>();
-  const exportSummaries = new Map<string, Map<string, ParamShape[]>>();
+  const jsFileGraphs: FileGraph[] = [];
   for (const f of filesToScan) {
     if (!shouldAstParse(f.content, f.path)) continue;
     const sf = parseSourceFile(f.content, f.path);
     jsSourceFiles.set(f.path, sf);
-    exportSummaries.set(f.path, computeExportTaintSummary(f.content, f.path, sf));
+    // buildImportBindings is astTaint.ts's real-AST import-binding extraction (NOT ast.ts's
+    // regex-based import parsing used elsewhere below) -- it keeps (local name, original exported
+    // name) pairs, so `import { buildQuery as bq } from "./db"` correctly matches `bq(...)` call
+    // sites, which a name keyed only by the pre-alias exported name would miss.
+    jsFileGraphs.push({
+      path: f.path,
+      imports: buildImportBindings(sf).map(b => ({
+        localName: b.localName, importedName: b.importedName, moduleSpecifier: b.moduleSpecifier, namespace: b.namespace,
+      })),
+      reexports: collectReexports(sf),
+      computeSummary: (incoming) => computeExportTaintSummary(f.content, f.path, sf, incoming as Map<string, ParamShape[]>),
+    });
   }
 
-  // ── Bridge: resolve each file's own relative imports to a per-file
-  // crossFilePropagating map, using astTaint.ts's real-AST import-binding
-  // extraction (NOT ast.ts's regex-based import parsing below -- that keys
-  // by the pre-alias exported name, not the local call-site identifier, so
-  // `import { buildQuery as bq } from "./db"` would fail to match `bq(...)`
-  // call sites). resolveImportPath only resolves `.`-relative specifiers;
-  // bare/package specifiers return null and are silently skipped -- the
-  // same "external package = out of graph" boundary semanticGraph.ts's own
-  // cross-file mechanism already has, not a new limitation.
+  // ── Cross-file taint bridge (JS/TS): named/namespace/CommonJS imports, default exports, and
+  // re-exports (`export { x } from`, `export * from`), resolved as a bounded multi-hop fixed point --
+  // see taint/crossFile.ts's own docblock for the algorithm and what's explicitly out of scope
+  // (a cross-file callee-body sink re-walk; same-file-only for every other language).
+  // resolveImportPath resolves `.`-relative and `@/`-aliased specifiers only; bare/package
+  // specifiers return null and are silently skipped -- external package = out of graph, the same
+  // boundary semanticGraph.ts's own cross-file mechanism already has, not a new limitation.
   const allScanPaths = filesToScan.map(f => f.path);
-  const crossFilePropagatingByFile = new Map<string, Map<string, { shapes: ParamShape[]; fromModule: string }>>();
+  const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths));
+  const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string }>>;
+
   // Cross-file REACHABILITY bridge (Decision 1, one hop, JS/TS only) --
   // file path -> names IN THAT FILE that are reachable because some OTHER
   // file imports and calls them from a function already known-reachable
-  // there. Built in the SAME loop as crossFilePropagating above (same
-  // import bindings, same resolveImportPath boundary), but answers a
-  // different question: not "does taint flow through this call", just
-  // "is this imported function actually called from reachable code".
-  // buildCallGraph(f.content) here is a second, isolated computation
-  // purely for this check -- analyzeFile() below still computes its own
-  // callGraph internally per file; threading a pre-built one through would
-  // have meant a THIRD optional analyzeFile param for a cheap, regex-based
-  // computation that's fine to run twice.
+  // there. A separate, smaller question from the taint bridge above ("is
+  // this imported function actually called from reachable code", not "does
+  // taint flow through this call"), so it stays its own loop rather than
+  // folding into resolveCrossFile. buildCallGraph(f.content) here is a
+  // second, isolated computation purely for this check -- analyzeFile()
+  // below still computes its own callGraph internally per file; threading a
+  // pre-built one through would have meant a THIRD optional analyzeFile
+  // param for a cheap, regex-based computation that's fine to run twice.
   const crossFileReachableByFile = new Map<string, Set<string>>();
   for (const f of filesToScan) {
     const sf = jsSourceFiles.get(f.path);
     if (!sf) continue;
     const bindings = buildImportBindings(sf);
-    const local = new Map<string, { shapes: ParamShape[]; fromModule: string }>();
     const callerGraph = buildCallGraph(f.content);
     for (const b of bindings) {
       const calleePath = resolveImportPath(f.path, b.moduleSpecifier, allScanPaths);
       if (!calleePath) continue; // external package or unresolvable -- skip, never throw
-      const shapes = exportSummaries.get(calleePath)?.get(b.importedName);
-      if (shapes && shapes.length > 0) local.set(b.localName, { shapes, fromModule: b.moduleSpecifier });
-
       const calledFromReachable = callerGraph.edges.some(
         e => e.callee === b.localName && callerGraph.reachable.has(e.caller),
       );
@@ -7046,13 +7066,48 @@ export function runScan(input: ScanInput): ScanOutput {
         crossFileReachableByFile.set(calleePath, set);
       }
     }
-    if (local.size > 0) crossFilePropagatingByFile.set(f.path, local);
+  }
+
+  // ── Cross-file taint bridge (Python): mirrors the JS/TS block above exactly, over
+  // collectImportEdgesPy/resolvePythonImportPath/computeExportTaintSummaryPy instead -- see
+  // taint/crossFile.ts's own docblock for the shared multi-hop algorithm.
+  const pySourceFiles = new Map<string, PySyntaxNode>();
+  const pyFileGraphs: FileGraph[] = [];
+  for (const f of filesToScan) {
+    if (detectLanguage(f.path) !== "python" || !isPythonParserReady()) continue;
+    const root = parsePythonSourceSync(f.content, f.path);
+    if (!root) continue;
+    pySourceFiles.set(f.path, root);
+    pyFileGraphs.push({
+      path: f.path,
+      imports: collectImportEdgesPy(root).map(e => ({
+        localName: e.localName, importedName: e.importedName,
+        // Encodes dots+dotted into one specifier string purely so resolvePath below (a single
+        // (from,spec)=>path callback shared with the JS/TS graph) can recover both -- never shown to
+        // a user, never matched against anything else.
+        moduleSpecifier: `${".".repeat(e.dots)}${e.dotted}`,
+        namespace: e.namespace,
+      })),
+      reexports: [], // Python has no re-export statement equivalent to JS/TS's `export ... from`
+      computeSummary: (incoming) => computeExportTaintSummaryPy(f.content, f.path, root, incoming as Map<string, PyParamShape[]>),
+    });
+  }
+  const pyBridge = resolveCrossFile(pyFileGraphs, (from, spec) => {
+    const dots = spec.match(/^\.*/)?.[0].length ?? 0;
+    return resolvePythonImportPath(from, dots, spec.slice(dots), allScanPaths);
+  });
+  const crossFileShapesPyByFile = pyBridge.propagatingByFile as unknown as Map<string, Map<string, { shapes: PyParamShape[]; fromModule: string }>>;
+  // scanAstTaintPython's crossFileShapes param is a bare name -> shapes map (no per-name
+  // fromModule attribution needed downstream, unlike crossFilePropagatingByFile's JS/TS consumer).
+  const pyShapesOnly = new Map<string, Map<string, PyParamShape[]>>();
+  for (const [path, entries] of crossFileShapesPyByFile) {
+    pyShapesOnly.set(path, new Map([...entries].map(([name, info]) => [name, info.shapes])));
   }
 
   const files = filesToScan.map(f =>
     analyzeFile(
       f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
-      crossFileReachableByFile.get(f.path),
+      crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path),
     ),
   );
 

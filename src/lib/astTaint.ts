@@ -186,7 +186,13 @@ function buildImportMap(sourceFile: ts.SourceFile): Map<string, string> {
   return map;
 }
 
-export interface ImportBinding { localName: string; importedName: string; moduleSpecifier: string }
+export interface ImportBinding {
+  localName: string; importedName: string; moduleSpecifier: string;
+  // `import * as ns from "./mod"` / `const ns = require("./mod")` -- localName is bound to the WHOLE
+  // module; call sites address a specific export as `ns.<name>`, so `importedName` here is the
+  // sentinel "*" rather than one real export.
+  namespace?: boolean;
+}
 
 /**
  * Like buildImportMap, but keeps the (local name, original exported name)
@@ -218,8 +224,34 @@ export function buildImportBindings(sourceFile: ts.SourceFile): ImportBinding[] 
         out.push({ localName: spec.name.text, importedName: (spec.propertyName ?? spec.name).text, moduleSpecifier });
       }
     }
+    if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+      out.push({ localName: clause.namedBindings.name.text, importedName: "*", moduleSpecifier, namespace: true });
+    }
     if (clause.name) out.push({ localName: clause.name.text, importedName: "default", moduleSpecifier });
   });
+
+  // CommonJS `require(...)`: `const x = require("./y")` (whole-module, namespace-like) and
+  // `const { a, b } = require("./y")` (named-like) / `const { a: c } = require("./y")`.
+  const isRequireCall = (n: ts.Node): n is ts.CallExpression =>
+    ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "require"
+    && n.arguments.length === 1 && ts.isStringLiteral(n.arguments[0]);
+  const visitRequire = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.initializer && isRequireCall(node.initializer)) {
+      const moduleSpecifier = (node.initializer.arguments[0] as ts.StringLiteral).text;
+      if (ts.isIdentifier(node.name)) {
+        out.push({ localName: node.name.text, importedName: "*", moduleSpecifier, namespace: true });
+      } else if (ts.isObjectBindingPattern(node.name)) {
+        for (const el of node.name.elements) {
+          if (el.dotDotDotToken || !ts.isIdentifier(el.name)) continue;
+          const importedName = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text : el.name.text;
+          out.push({ localName: el.name.text, importedName, moduleSpecifier });
+        }
+      }
+    }
+    ts.forEachChild(node, visitRequire);
+  };
+  ts.forEachChild(sourceFile, visitRequire);
+
   return out;
 }
 
@@ -1015,8 +1047,11 @@ const MAX_PROPAGATION_ROUNDS = 3;
  * exists purely to bound worst-case cost on a large file's call graph, not
  * because convergence itself is ever in doubt.
  */
-function buildPropagatingMap(localFns: Map<string, LocalFn>): Map<string, ParamShape[]> {
-  const propagating = new Map<string, ParamShape[]>();
+function buildPropagatingMap(localFns: Map<string, LocalFn>, seed?: Map<string, ParamShape[]>): Map<string, ParamShape[]> {
+  // `seed` (cross-file Pass 1 only): shapes already known for names THIS file imports, so a wrapper
+  // around a cross-file call (`export function f(x){ return importedFn(x); }`) is seen as
+  // propagating too -- the multi-hop case buildCrossFileContext's own round loop exists for.
+  const propagating = new Map<string, ParamShape[]>(seed ? [...seed].map(([k, v]) => [k, [...v]]) : []);
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
     const maskRound = makeTaintMask(propagating);
@@ -1052,24 +1087,37 @@ function sourceLabel(expr: ts.Expression): string {
 /**
  * Real `export` detection, needed for the cross-file export-taint summary
  * (computeExportTaintSummary) -- has no bearing on same-file analysis.
- * Explicitly excludes `export default` (mods includes DefaultKeyword) since
- * a default export has no stable name a cross-file import binds to the same
- * way a named export does; that form is a deliberate, documented gap (see
- * computeExportTaintSummary's docblock), not a bug.
+ * `export default` gets exportedNames = ["default"] (a default export has no OTHER stable name a
+ * cross-file import binds to; "default" is exactly the key `import x from "./y"` resolves through --
+ * see collectDefaultExport below for the (unnamed-declaration / bare-identifier) forms this alone
+ * can't reach.
  */
 function hasExportModifier(node: ts.Node): boolean {
   if (!ts.canHaveModifiers(node)) return false;
   const mods = ts.getModifiers(node);
-  return !!mods?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)
-      && !mods?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword);
+  return !!mods?.some(m => m.kind === ts.SyntaxKind.ExportKeyword);
 }
+function isDefaultModifier(node: ts.Node): boolean {
+  if (!ts.canHaveModifiers(node)) return false;
+  const mods = ts.getModifiers(node);
+  return !!mods?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword);
+}
+function exportedNamesOf(node: ts.Node, localName: string): string[] {
+  if (!hasExportModifier(node)) return [];
+  return isDefaultModifier(node) ? ["default"] : [localName];
+}
+
+// synthetic key for `export default function(){}` / `export default (x) => {...}` -- an unnamed
+// declaration with no local name a same-file call site could ever reference by, but which still
+// needs a LocalFn entry so its propagating shapes reach the "default" export summary slot.
+const ANONYMOUS_DEFAULT_KEY = " default";
 
 function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: ts.Node) => {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      const exportedNames = hasExportModifier(node) ? [node.name.text] : [];
-      fns.set(node.name.text, { params: node.parameters, body: node.body, exportedNames });
+    if (ts.isFunctionDeclaration(node) && node.body) {
+      const key = node.name?.text ?? ANONYMOUS_DEFAULT_KEY;
+      fns.set(key, { params: node.parameters, body: node.body, exportedNames: exportedNamesOf(node, key) });
     }
     if (ts.isMethodDeclaration(node) && node.body && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && !fns.has(node.name.text)) {
       fns.set(node.name.text, { params: node.parameters, body: node.body, exportedNames: [], isMethod: true });
@@ -1082,8 +1130,19 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
         // node.parent.parent = VariableStatement), NOT on this
         // VariableDeclaration node itself -- confirmed directly, not assumed.
         const stmt = node.parent?.parent;
-        const exportedNames = stmt && ts.isVariableStatement(stmt) && hasExportModifier(stmt) ? [node.name.text] : [];
+        const exportedNames = stmt && ts.isVariableStatement(stmt) ? exportedNamesOf(stmt, node.name.text) : [];
         fns.set(node.name.text, { params: init.parameters, body: init.body, exportedNames });
+      }
+    }
+    // `module.exports.foo = function/arrow` / `exports.foo = function/arrow` (CommonJS named export).
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isPropertyAccessExpression(node.left)) {
+      const obj = node.left.expression;
+      const isModuleExports = ts.isPropertyAccessExpression(obj) && ts.isIdentifier(obj.expression) && obj.expression.text === "module" && obj.name.text === "exports";
+      const isExports = ts.isIdentifier(obj) && obj.text === "exports";
+      if ((isModuleExports || isExports) && (ts.isFunctionExpression(node.right) || ts.isArrowFunction(node.right)) && node.right.body) {
+        const publicName = node.left.name.text;
+        fns.set(` cjs:${publicName}`, { params: node.right.parameters, body: node.right.body, exportedNames: [publicName] });
       }
     }
     ts.forEachChild(node, visit);
@@ -1092,8 +1151,9 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
 
   // `export { localName as publicName }` -- a named-export list for an
   // already-declared local function (common barrel-file style). Explicitly
-  // scoped OUT: `export { x } from "./y"` (has a moduleSpecifier -- a
-  // re-export, not a local declaration) and `export *`.
+  // scoped OUT here: `export { x } from "./y"` (has a moduleSpecifier -- a
+  // re-export, not a local declaration) is handled by collectReexports
+  // instead, and `export *` similarly.
   ts.forEachChild(sourceFile, node => {
     if (!ts.isExportDeclaration(node) || node.moduleSpecifier || !node.exportClause) return;
     if (!ts.isNamedExports(node.exportClause)) return;
@@ -1102,10 +1162,52 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
       const publicName = spec.name.text;
       const fn = fns.get(localName);
       if (fn && !fn.exportedNames.includes(publicName)) fn.exportedNames.push(publicName);
+      // `export { foo as default }`
+    }
+  });
+
+  // `export default function(){}` / `export default (x) => {...}` / `export default identifier;` --
+  // an ExportAssignment node (`node.expression` is the default-exported value directly), distinct
+  // from the modifier-based forms collectLocalFunctions' main visit loop already handles. `export =`
+  // (CommonJS-style, node.isExportEquals) is a different, unrelated construct and is skipped.
+  ts.forEachChild(sourceFile, node => {
+    if (!ts.isExportAssignment(node) || node.isExportEquals) return;
+    const expr = node.expression;
+    if ((ts.isFunctionExpression(expr) || ts.isArrowFunction(expr)) && expr.body && !fns.has(ANONYMOUS_DEFAULT_KEY)) {
+      fns.set(ANONYMOUS_DEFAULT_KEY, { params: expr.parameters, body: expr.body, exportedNames: ["default"] });
+    } else if (ts.isIdentifier(expr)) {
+      const fn = fns.get(expr.text);
+      if (fn && !fn.exportedNames.includes("default")) fn.exportedNames.push("default");
     }
   });
 
   return fns;
+}
+
+export interface ReexportEdge {
+  // null+null = `export * from "./mod"` -- every name the module exports, under the same name.
+  publicName: string | null;
+  importedName: string | null;
+  moduleSpecifier: string;
+}
+
+/** `export { x } from "./y"`, `export { x as y } from "./z"`, `export * from "./w"`. */
+export function collectReexports(sourceFile: ts.SourceFile): ReexportEdge[] {
+  const out: ReexportEdge[] = [];
+  ts.forEachChild(sourceFile, node => {
+    if (!ts.isExportDeclaration(node) || !node.moduleSpecifier || !ts.isStringLiteral(node.moduleSpecifier)) return;
+    const moduleSpecifier = node.moduleSpecifier.text;
+    if (!node.exportClause) {
+      out.push({ publicName: null, importedName: null, moduleSpecifier }); // export * from "./y"
+      return;
+    }
+    if (ts.isNamedExports(node.exportClause)) {
+      for (const spec of node.exportClause.elements) {
+        out.push({ publicName: spec.name.text, importedName: (spec.propertyName ?? spec.name).text, moduleSpecifier });
+      }
+    }
+  });
+  return out;
 }
 
 /**
@@ -1118,21 +1220,19 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
  * entirely, since none of that is needed for a per-file summary; this is
  * intentionally much cheaper than a full scanAstTaint call.
  *
- * Explicitly deferred, not silently mishandled (see collectLocalFunctions'
- * export detection): `export default`, `export { x } from "./y"`
- * re-exports, `export *`, CommonJS (`module.exports.x = ...`). None of
- * these are ever added to a LocalFn's exportedNames, so they're simply
- * absent from this summary -- a false negative (a missed cross-file
- * detection), never a false positive.
+ * `incoming` (optional, multi-hop): shapes already known, from an EARLIER round of
+ * buildCrossFileContext's own fixed point, for names this file itself imports -- lets a wrapper
+ * around a cross-file call (`export function f(x){ return importedFn(x); }`, importedFn from
+ * elsewhere in the batch) be recognized as propagating too, not just wrappers around same-file calls.
  */
 export function computeExportTaintSummary(
-  content: string, filePath: string, presparsed?: ts.SourceFile,
+  content: string, filePath: string, presparsed?: ts.SourceFile, incoming?: Map<string, ParamShape[]>,
 ): Map<string, ParamShape[]> {
   const summary = new Map<string, ParamShape[]>();
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
     const localFns = collectLocalFunctions(sourceFile);
-    const propagating = buildPropagatingMap(localFns);
+    const propagating = buildPropagatingMap(localFns, incoming);
     for (const [fnName, fn] of localFns) {
       if (fn.exportedNames.length === 0) continue;
       const shapes = propagating.get(fnName);

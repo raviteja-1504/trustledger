@@ -220,7 +220,7 @@ export { buildLog as publicBuildLog };
     expect(summary.get("publicBuildLog")?.map(s => s.index)).toEqual([0]);
   });
 
-  it("excludes export default and non-exported functions", () => {
+  it("includes export default (under the \"default\" key) but excludes non-exported functions", () => {
     const content = `
 export default function buildLog(userId) {
   return \`User \${userId}\`;
@@ -230,7 +230,8 @@ function privateHelper(userId) {
 }
 `;
     const summary = computeExportTaintSummary(content, "app.ts");
-    expect(summary.size).toBe(0);
+    expect(summary.has("default")).toBe(true);
+    expect(summary.size).toBe(1);
   });
 });
 

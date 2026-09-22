@@ -237,7 +237,7 @@ function paramNameOf(p: SyntaxNode): string | null {
   return first?.type === "identifier" ? first.text : null;
 }
 
-interface ParamShape { name: string; index: number; isRest: boolean }
+export interface ParamShape { name: string; index: number; isRest: boolean; mask?: number }
 
 /** Which of `args` correspond to `shape`: exactly one arg for a fixed
  * param, every arg from `shape.index` onward for a *args/**kwargs param
@@ -326,6 +326,148 @@ function calleeTextPy(node: SyntaxNode): string | null {
     return base ? `${base}.${attribute}` : null;
   }
   return null;
+}
+
+export interface ImportEdgePy {
+  /** The name call sites in the importing file use. */
+  localName: string;
+  /** The name as exported by the source module ("*" when `namespace` is true -- see below). */
+  importedName: string;
+  /** Number of leading dots (0 = absolute import). */
+  dots: number;
+  /** The module path with the dots already stripped (e.g. "helpers", "pkg.mod"). */
+  dotted: string;
+  /** `import pkg.mod as m` / `from . import helpers` -- localName is bound to the WHOLE module
+   * (a submodule import, not one specific name inside it); see astTaint.ts's identical namespace
+   * field for why call-site resolution needs no extra handling for this. */
+  namespace?: boolean;
+}
+
+/**
+ * Cross-file import edges for RESOLUTION (which file + which name), as opposed to buildImportMapPy
+ * above (SINK-module recognition only, module name as a bare string, no path resolution). Covers
+ * `from .mod import x [as y]`, `from ..pkg.mod import x`, `from pkg.mod import x` (absolute),
+ * `from . import mod [as m]` (submodule, namespace-like), and `import pkg.mod as m` (namespace).
+ * Deliberately NOT modeled, same "false negative, not a false positive" posture as astTaint.ts's own
+ * documented gaps: `from x import *` (no stable local name to bind shapes to) and a bare
+ * `import pkg.mod` with no alias (real Python binds the top-level name "pkg", requiring call sites to
+ * write the full "pkg.mod.foo()" chain -- a 3+-level dotted chain this file's existing
+ * calleeTextPy-based resolution doesn't reliably walk for cross-file purposes either).
+ */
+export function collectImportEdgesPy(root: SyntaxNode): ImportEdgePy[] {
+  const out: ImportEdgePy[] = [];
+  const visit = (node: SyntaxNode) => {
+    if (node.type === "import_from_statement") {
+      const moduleNode = node.childForFieldName("module_name");
+      if (moduleNode) {
+        if (moduleNode.type === "relative_import") {
+          const dots = (moduleNode.childForFieldName("import_prefix")?.text ?? moduleNode.namedChildren.find(c => c?.type === "import_prefix")?.text ?? ".").length;
+          const dottedNode = moduleNode.namedChildren.find(c => c?.type === "dotted_name");
+          if (dottedNode) {
+            // `from .helpers import build_query` / `from ..pkg.mod import x` -- module_name already
+            // names the specific submodule; every sibling is a NAME inside it.
+            for (const child of node.namedChildren) {
+              if (!child || child === moduleNode) continue;
+              if (child.type === "dotted_name" || child.type === "identifier") {
+                out.push({ localName: child.text, importedName: child.text, dots, dotted: dottedNode.text });
+              } else if (child.type === "aliased_import") {
+                const orig = child.childForFieldName("name")?.text;
+                const alias = child.childForFieldName("alias")?.text;
+                if (orig && alias) out.push({ localName: alias, importedName: orig, dots, dotted: dottedNode.text });
+              }
+            }
+          } else {
+            // `from . import helpers [as h]` -- each imported name is itself a SUBMODULE of the
+            // current package, not an attribute inside one.
+            for (const child of node.namedChildren) {
+              if (!child || child === moduleNode) continue;
+              if (child.type === "dotted_name" || child.type === "identifier") {
+                out.push({ localName: child.text, importedName: "*", dots, dotted: child.text, namespace: true });
+              } else if (child.type === "aliased_import") {
+                const orig = child.childForFieldName("name")?.text;
+                const alias = child.childForFieldName("alias")?.text;
+                if (orig && alias) out.push({ localName: alias, importedName: "*", dots, dotted: orig, namespace: true });
+              }
+            }
+          }
+        } else {
+          // Absolute: `from pkg.mod import x [as y]`.
+          const dotted = moduleNode.text;
+          for (const child of node.namedChildren) {
+            if (!child || child === moduleNode) continue;
+            if (child.type === "dotted_name" || child.type === "identifier") {
+              out.push({ localName: child.text, importedName: child.text, dots: 0, dotted });
+            } else if (child.type === "aliased_import") {
+              const orig = child.childForFieldName("name")?.text;
+              const alias = child.childForFieldName("alias")?.text;
+              if (orig && alias) out.push({ localName: alias, importedName: orig, dots: 0, dotted });
+            }
+          }
+        }
+      }
+    }
+    if (node.type === "import_statement") {
+      for (const child of node.namedChildren) {
+        if (child?.type === "aliased_import") {
+          const orig = child.childForFieldName("name")?.text; // "pkg.mod"
+          const alias = child.childForFieldName("alias")?.text;
+          if (orig && alias) out.push({ localName: alias, importedName: "*", dots: 0, dotted: orig, namespace: true });
+        }
+      }
+    }
+    for (const c of node.namedChildren) if (c) visit(c);
+  };
+  visit(root);
+  return out;
+}
+
+/** Every function_definition whose PARENT is the module root directly (decorators aside) -- the only
+ * names a real `from this_module import x` could ever bind to; a class method has no such stable
+ * import path (class-method cross-file summaries are out of scope, same as astTaint.ts's). */
+function moduleLevelFunctionNamesPy(root: SyntaxNode): Set<string> {
+  const names = new Set<string>();
+  for (const child of root.namedChildren) {
+    const node = child?.type === "decorated_definition" ? child.namedChildren.find(c => c?.type === "function_definition") : child;
+    if (node?.type === "function_definition") {
+      const name = node.childForFieldName("name")?.text;
+      if (name) names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Cross-file taint analysis, Pass 1: a cheap sibling of scanAstTaintPython's full walk, computed once
+ * per file in the batch before any file's real scan runs -- mirrors astTaint.ts's own
+ * computeExportTaintSummary exactly (see its docblock for the full rationale, incl. the `incoming`
+ * multi-hop parameter). Every MODULE-LEVEL function is implicitly "exported" (Python has no export
+ * keyword); the summary is keyed by that function's own name.
+ */
+export function computeExportTaintSummaryPy(
+  content: string, filePath: string, presparsed?: SyntaxNode | null, incoming?: Map<string, ParamShape[]>,
+): Map<string, ParamShape[]> {
+  const summary = new Map<string, ParamShape[]>();
+  try {
+    const root = presparsed ?? parsePythonSourceSync(content, filePath);
+    if (!root) return summary;
+    const localFns = collectLocalFunctionsPy(root);
+    const exportable = moduleLevelFunctionNamesPy(root);
+    const propagating = buildPropagatingMapPy(localFns, root, incoming);
+    for (const name of exportable) {
+      const idx = propagating.get(name);
+      const fn = localFns.get(name);
+      if (!idx || idx.size === 0 || !fn) continue;
+      const shapes: ParamShape[] = [];
+      for (const shape of fn.paramShapes) {
+        const mask = idx.get(shape.index);
+        if (mask) shapes.push({ ...shape, mask });
+      }
+      if (shapes.length > 0) summary.set(name, shapes);
+    }
+  } catch (err) {
+    console.error(`[astTaintPython] threw computing export summary for ${filePath}:`, err);
+  }
+  return summary;
 }
 
 /** Resolves bare names imported via `from subprocess import run` / `import subprocess as sp` etc. */
@@ -643,7 +785,10 @@ function isGlobalsLookupPy(n: SyntaxNode | null): boolean {
   return fn?.type === "identifier" && PY_GLOBAL_LOOKUPS.has(fn.text);
 }
 
-function makeTaintMaskPy(localFns: Map<string, LocalFn>, propagating: PropagatingPy, inDjangoRequestFn: boolean, sticky?: Map<string, number>) {
+function makeTaintMaskPy(
+  localFns: Map<string, LocalFn>, propagating: PropagatingPy, inDjangoRequestFn: boolean,
+  sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>,
+) {
   let fnValueDepth = 0;
   const taintMask = (node: SyntaxNode, env: Env): number => {
     const orAll = (nodes: (SyntaxNode | null | undefined)[]) =>
@@ -789,6 +934,16 @@ function makeTaintMaskPy(localFns: Map<string, LocalFn>, propagating: Propagatin
           for (const a of argsForShape(args, { ...shape, index: shape.index - shift })) m |= taintMask(a, env) & surviving;
         }
         if (m) return m;
+      } else {
+        // A cross-file import has no LocalFn entry (there is no same-file body \`localFns\` could have
+        // indexed), so its shapes -- each already carrying its own surviving mask -- live in
+        // crossFileShapes instead of propagating/localFns.
+        const cfShapes = crossFileShapes?.get(fnName);
+        if (cfShapes) {
+          let m = 0;
+          for (const shape of cfShapes) for (const a of argsForShape(args, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
+          if (m) return m;
+        }
       }
     }
     // Calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured;
@@ -929,13 +1084,20 @@ interface WalkHooksPy {
   sticky?: Map<string, number>;
   /** Called for every visited node with the env at that point (assignment / comparison / mutation checks). */
   onNode?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => void;
+  // Cross-file taint analysis (Pass 2): for each of THIS file's own imported names that resolve to
+  // an exported function elsewhere in the batch with known-propagating params, its shapes -- each
+  // one already carries its own surviving mask directly (unlike a same-file LocalFn, which is looked
+  // up by name in \`localFns\` separately from \`propagating\`'s index->mask map; a cross-file name has
+  // no LocalFn entry at all, so it needs the self-contained shape instead). See
+  // computeExportTaintSummaryPy's docblock for how scanner.ts builds this.
+  crossFileShapes?: Map<string, ParamShape[]>;
 }
 
 function createWalkerPy(h: WalkHooksPy) {
   const masks = new Map<boolean, TaintMaskFnPy>();
   const maskFor = (django: boolean): TaintMaskFnPy => {
     let m = masks.get(django);
-    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky); masks.set(django, m); }
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes); masks.set(django, m); }
     return m;
   };
 
@@ -1163,13 +1325,14 @@ function createWalkerPy(h: WalkHooksPy) {
  */
 function computeReturnTaintPropagatingPy(
   fn: LocalFn, localFns: Map<string, LocalFn>, propagating: PropagatingPy, root: SyntaxNode,
+  crossFileShapes?: Map<string, ParamShape[]>,
 ): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   for (const shape of fn.paramShapes) {
     let surviving = 0;
     const walker = createWalkerPy({
-      localFns, propagating, root, descendFunctions: false,
+      localFns, propagating, root, descendFunctions: false, crossFileShapes,
       onReturn: (expr, env, mask) => { surviving |= mask(expr, env); },
     });
     const env: Env = new Map();
@@ -1187,12 +1350,12 @@ function computeReturnTaintPropagatingPy(
 // per-engine-file convention (no shared taint-engine base module).
 const MAX_PROPAGATION_ROUNDS_PY = 3;
 
-function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode): PropagatingPy {
+function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode, crossFileShapes?: Map<string, ParamShape[]>): PropagatingPy {
   const propagating: PropagatingPy = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
     let changed = false;
     for (const [name, fn] of localFns) {
-      const found = computeReturnTaintPropagatingPy(fn, localFns, propagating, root);
+      const found = computeReturnTaintPropagatingPy(fn, localFns, propagating, root, crossFileShapes);
       // Monotonic merge (only ever adds a parameter or adds surviving classes).
       const merged = new Map(propagating.get(name) ?? []);
       let grew = false;
@@ -1260,6 +1423,9 @@ export function scanAstTaintPython(
   // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
   // regex layer's duplicate for a flow this engine proved safe.
   suppressedOut?: SuppressedSink[],
+  // Cross-file taint analysis (Pass 2) -- see WalkHooksPy.crossFileShapes's own docblock and
+  // computeExportTaintSummaryPy below for how scanner.ts builds this.
+  crossFileShapes?: Map<string, ParamShape[]>,
 ): AstTaintPyFinding[] {
   try {
     const root = presparsed ?? parsePythonSourceSync(content, filePath);
@@ -1267,7 +1433,7 @@ export function scanAstTaintPython(
 
     const importMap = buildImportMapPy(root);
     const localFns = collectLocalFunctionsPy(root);
-    const propagating = buildPropagatingMapPy(localFns, root);
+    const propagating = buildPropagatingMapPy(localFns, root, crossFileShapes);
 
     // Module-scope container memory: taint appended/stored into a module-level list/dict by one function
     // is visible to every function that reads it back (stored XSS, second-order SQL).
@@ -1561,7 +1727,7 @@ export function scanAstTaintPython(
       if (m & classOf("xss")) emit("xss", expr, sourceLabelPy(expr), "handler return value");
     };
 
-    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky });
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes });
     const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
 
     walk(root, new Map(), false);

@@ -163,23 +163,55 @@ export function buildSemanticGraph(
 
 // ── Import path resolver ──────────────────────────────────────────────────────
 
+// Path -> real file, built once per distinct `allFiles` ARRAY (not per call) so repeatedly resolving
+// many import edges against the same batch -- the normal case, every caller below builds one file list
+// and resolves every edge against it -- is O(files) once instead of O(imports × files). Keyed by
+// reference (a WeakMap, so a stale index for a batch that's gone out of scope is simply garbage
+// collected, never manually invalidated) rather than by content, since every real call site passes a
+// single list built once per graph/scan and reused across all its own resolveImportPath calls.
+const pathIndexCache = new WeakMap<string[], Map<string, string>>();
+function pathIndexFor(allFiles: string[]): Map<string, string> {
+  let idx = pathIndexCache.get(allFiles);
+  if (!idx) {
+    idx = new Map();
+    for (const f of allFiles) idx.set(normPath(f), f);
+    pathIndexCache.set(allFiles, idx);
+  }
+  return idx;
+}
+
+// `@/` -> `src/` (root-relative alias), the one convention common enough across real TS codebases
+// (and used throughout this very repo's own imports) to hardcode as a heuristic. A real
+// tsconfig.json/jsconfig.json `paths`/`baseUrl` read is a deliberate, documented gap -- resolving one
+// would need this function to read FILE CONTENT, not just paths, a signature change left for its own
+// pass rather than rushed in here.
+const ROOT_ALIAS_RE = /^@\//;
+
 export function resolveImportPath(fromFile: string, importSpec: string, allFiles: string[]): string | null {
-  if (!importSpec.startsWith(".")) return null; // external package — not in our graph
+  const isRelative = importSpec.startsWith(".");
+  const isAliased = ROOT_ALIAS_RE.test(importSpec);
+  if (!isRelative && !isAliased) return null; // external package — not in our graph
 
   const fromDir  = fromFile.replace(/[\\/][^\\/]+$/, "");
-  const resolved = normPath(fromDir + "/" + importSpec);
+  const resolved = isAliased ? normPath("src/" + importSpec.replace(ROOT_ALIAS_RE, "")) : normPath(fromDir + "/" + importSpec);
+  const index = pathIndexFor(allFiles);
 
-  // Try exact match first
-  for (const f of allFiles) {
-    if (normPath(f) === resolved) return f;
+  const exact = index.get(resolved);
+  if (exact) return exact;
+
+  // A `./x.js`/`./x.mjs`/`./x.cjs` specifier (real ESM-with-TS-sources convention) resolves against
+  // the TS source, not a literal .js file that was never in the batch to begin with.
+  const tsCounterpart = resolved.replace(/\.(mjs|cjs|js)x?$/, m => (m.startsWith(".mjs") ? ".mts" : m.startsWith(".cjs") ? ".cts" : m.endsWith("x") ? ".tsx" : ".ts"));
+  if (tsCounterpart !== resolved) {
+    const hit = index.get(tsCounterpart);
+    if (hit) return hit;
   }
-  // Try with common extensions
-  const exts = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"];
+
+  // Try with common extensions (bare specifier with no extension at all -- the common case).
+  const exts = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.tsx", "/index.js"];
   for (const ext of exts) {
-    const candidate = resolved + ext;
-    for (const f of allFiles) {
-      if (normPath(f) === candidate) return f;
-    }
+    const hit = index.get(resolved + ext);
+    if (hit) return hit;
   }
   return null;
 }
@@ -193,6 +225,62 @@ function normPath(p: string): string {
     else if (part !== ".") { out.push(part); }
   }
   return out.join("/");
+}
+
+// ── Python import path resolver ────────────────────────────────────────────────
+//
+// Python's own module system has no `.`-relative-specifier convention the way JS/TS's does --
+// `from .helpers import x` (1 dot = current package), `from ..pkg.mod import x` (2 dots = one
+// package up), and `from pkg.mod import x` (0 dots = an ABSOLUTE import, resolved against
+// sys.path -- a repo's real source root, which this scanner never knows for certain) are three
+// genuinely different resolution rules, not variations on one relative-path join.
+
+/** For a relative import (`dots` >= 1): walk `dots - 1` directories up from the importing file's OWN
+ * directory (1 dot = the current package, i.e. that same directory), then join the dotted remainder. */
+function resolvePythonRelative(fromFile: string, dots: number, remainder: string, index: Map<string, string>): string | null {
+  let dir = fromFile.replace(/[\\/][^\\/]+$/, "");
+  for (let i = 0; i < dots - 1; i++) dir = dir.replace(/[\\/][^\\/]+$/, "");
+  const base = remainder ? normPath(`${dir}/${remainder.replace(/\./g, "/")}`) : normPath(dir);
+  return index.get(`${base}.py`) ?? index.get(`${base}/__init__.py`) ?? null;
+}
+
+/** For an absolute import (`import pkg.mod`, `from pkg.mod import x`): the real source root (`src/`,
+ * `app/`, a `src-layout` package dir, ...) isn't knowable from paths alone, so this tries the
+ * importing file's own ancestor directories first (the common case: siblings under the same
+ * source root), then falls back to a longest-dotted-suffix match against the whole batch. */
+function resolvePythonAbsolute(fromFile: string, dotted: string, index: Map<string, string>): string | null {
+  const segments = dotted.split(".");
+  const rel = segments.join("/");
+  let dir = fromFile.replace(/[\\/][^\\/]+$/, "");
+  for (;;) {
+    const base = normPath(`${dir}/${rel}`);
+    const hit = index.get(`${base}.py`) ?? index.get(`${base}/__init__.py`);
+    if (hit) return hit;
+    const parent = dir.replace(/[\\/][^\\/]+$/, "");
+    if (parent === dir || !dir.includes("/")) break;
+    dir = parent;
+  }
+  // Longest-suffix fallback: does any batch file END with these path segments? (source root unknown,
+  // so a full match isn't possible -- this is a best-effort heuristic, consistent with this module's
+  // own "external/unresolvable = out of graph, never throws" posture elsewhere.)
+  const suffix = `/${rel}.py`;
+  const suffixInit = `/${rel}/__init__.py`;
+  let best: string | null = null;
+  for (const [norm, real] of index) {
+    if (norm.endsWith(suffix) || norm.endsWith(suffixInit) || norm === `${rel}.py`) {
+      if (!best || norm.length > best.length) best = real;
+    }
+  }
+  return best;
+}
+
+/** Resolves a Python import specifier (as tree-sitter-python gives it -- see astTaintPython.ts's
+ * collectImportEdgesPy) to a batch file path, or null (external package / unresolvable -- out of
+ * graph, exactly like resolveImportPath's own boundary). `dots` is the number of leading dots
+ * (0 = absolute); `dotted` is the module path with the dots already stripped. */
+export function resolvePythonImportPath(fromFile: string, dots: number, dotted: string, allFiles: string[]): string | null {
+  const index = pathIndexFor(allFiles);
+  return dots > 0 ? resolvePythonRelative(fromFile, dots, dotted, index) : resolvePythonAbsolute(fromFile, dotted, index);
 }
 
 // ── Cycle detection (DFS) ─────────────────────────────────────────────────────
