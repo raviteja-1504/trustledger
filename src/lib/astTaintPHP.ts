@@ -82,7 +82,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, SHADOW, applyClears, applyGuards, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type SuppressedSink, type TaintEnv,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -97,7 +97,8 @@ export type AstTaintPHPId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "file-inclusion"
   | "bola-missing-ownership-check" | "header-injection" | "ldap-injection"
-  | "nosql-injection" | "xpath-injection";
+  | "nosql-injection" | "xpath-injection"
+  | "eval-exec" | "ssti" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg";
 
 export interface AstTaintPHPFinding {
   id:         AstTaintPHPId;
@@ -235,6 +236,26 @@ function lineOf(node: SyntaxNode): number {
   return node.startPosition.row + 1;
 }
 
+const PHP_SCRIPT_CONTEXT_RE = /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*$/i;
+
+/** A PHP string literal's value (plain `'...'` or a non-interpolated `"..."`), or null. */
+function phpStringValue(n: SyntaxNode): string | null {
+  if (n.type === "string") return n.namedChildren.filter(c => c?.type === "string_content").map(c => c!.text).join("");
+  if (n.type === "encapsed_string" && n.namedChildren.every(c => !!c && (c.type === "string_content" || c.type === "escape_sequence"))) {
+    return n.namedChildren.map(c => c!.text).join("");
+  }
+  return null;
+}
+/** Flatten a `a . b . c` concatenation chain into its operands, or null when it is not a pure `.` chain. */
+function phpConcatOperands(n: SyntaxNode): SyntaxNode[] | null {
+  if (n.type !== "binary_expression" || n.childForFieldName("operator")?.type !== ".") return null;
+  const l = n.childForFieldName("left");
+  const r = n.childForFieldName("right");
+  if (!l || !r) return null;
+  const left = l.type === "binary_expression" && l.childForFieldName("operator")?.type === "." ? phpConcatOperands(l) : [l];
+  return left ? [...left, r] : null;
+}
+
 // ── Taint sources ────────────────────────────────────────────────────────
 
 const SUPERGLOBAL_NAMES = new Set(["_GET", "_POST", "_REQUEST", "_COOKIE", "_FILES", "_SERVER"]);
@@ -245,6 +266,27 @@ const SUPERGLOBAL_NAMES = new Set(["_GET", "_POST", "_REQUEST", "_COOKIE", "_FIL
 // parameter has no attribute this engine can reliably read without
 // re-probing a parameter type-hint field shape that wasn't confirmed.
 const LARAVEL_REQUEST_METHODS = new Set(["input", "query", "all", "post", "get"]);
+
+// Set into env by \`extract($tainted)\` -- see makeTaintMaskPHP's variable_name case. An impossible PHP
+// variable name, so it can never collide with a real one.
+const PHP_WILDCARD_VAR = "\\u0000wildcard";
+
+// Static/utility functions whose RESULT carries the taint of their arguments (string/array plumbing that
+// neither validates nor neutralizes anything). Opaque calls stay untainted, exactly as before.
+const PHP_PASSTHROUGH = new Set([
+  "trim", "ltrim", "rtrim", "strtolower", "strtoupper", "mb_strtolower", "mb_strtoupper", "ucfirst", "lcfirst",
+  "ucwords", "nl2br", "addslashes", "stripslashes", "wordwrap", "str_pad", "str_repeat", "number_format",
+  "substr", "mb_substr", "sprintf", "vsprintf", "str_replace", "str_ireplace", "preg_replace", "preg_replace_callback",
+  "implode", "join", "explode", "array_merge", "array_merge_recursive", "array_combine", "array_values", "array_keys",
+  "array_map", "array_filter", "array_slice", "array_unique", "array_reverse", "array_pad",
+  "json_encode", "json_decode", "serialize", "realpath", "dirname", "pathinfo",
+  "base64_encode", "base64_decode", "bin2hex", "hex2bin", "htmlspecialchars_decode", "html_entity_decode",
+  "urldecode", "rawurldecode",
+]);
+// Decoders re-taint what a sanitizer cleared (encode-then-decode round trip) -- SHADOW-bit retaint,
+// matching every other engine's identical decoder table.
+const PHP_DECODERS = new Set(["urldecode", "rawurldecode", "base64_decode", "html_entity_decode", "htmlspecialchars_decode"]);
+const PHP_SECRET_NAME_RE = /secret|token|password|passwd|apikey|api_key|hmac|signature/i;
 
 function isTaintSourceExprPHP(node: SyntaxNode): boolean {
   if (node.type !== "subscript_expression") return false;
@@ -272,6 +314,8 @@ const SEVERITY: Record<AstTaintPHPId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "header-injection": "critical", "ldap-injection": "critical",
   "nosql-injection": "critical", "xpath-injection": "critical",
+  "eval-exec": "critical", "ssti": "critical", "mass-assignment": "high", "redos": "high",
+  "timing-attack": "medium", "jwt-none-alg": "critical",
 };
 const LABEL: Record<AstTaintPHPId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -281,6 +325,9 @@ const LABEL: Record<AstTaintPHPId, string> = {
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "header-injection": "HTTP Header Injection", "ldap-injection": "LDAP Injection",
   "nosql-injection": "NoSQL Injection", "xpath-injection": "XPath Injection",
+  "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
+  "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
+  "jwt-none-alg": "JWT Signature Not Verified",
 };
 
 // ── Taint environment / propagation ─────────────────────────────────────
@@ -318,6 +365,12 @@ interface EngineCtx {
   varTypes: Map<string, string>;
   // File root -- lets guards resolve a literal-array variable/constant declared elsewhere in the file.
   root?: SyntaxNode;
+  // `global $x;` memory: a variable one function writes and another reads via `global`, visible across
+  // the whole file (second-order flows) -- mirrors astTaintCSharp.ts's ctx.sticky exactly.
+  globalNames: Set<string>;
+  sticky: Map<string, number>;
+  stickyDirty: boolean;
+  recordSticky: boolean;
 }
 
 function emit(
@@ -343,7 +396,11 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       const varName = variableBareName(node);
       // a bare superglobal (`foreach ($_POST as $k => $v)`) is attacker-controlled as a whole
       if (varName && SUPERGLOBAL_NAMES.has(varName)) return ALL;
-      return varName ? (env.get(varName) ?? 0) : 0;
+      if (!varName) return 0;
+      const bound = env.get(varName);
+      // extract($tainted) makes every subsequently-read, not-otherwise-bound local variable
+      // attacker-controlled -- see the assignment where PHP_WILDCARD_VAR is set.
+      return bound !== undefined ? bound : (env.get(PHP_WILDCARD_VAR) ?? 0);
     }
     if (node.type === "name") return 0;
     if (node.type === "argument") {
@@ -408,6 +465,9 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       }
       // filter_input(...) -- itself a source call, regardless of args.
       if (fnName === "filter_input") return ALL;
+      // file_get_contents("php://input") -- reads the raw request body, attacker-controlled
+      // regardless of args being a literal string.
+      if (fnName === "file_get_contents" && /php:\/\/input/i.test(args[0]?.text ?? "")) return ALL;
       if (fnName) {
         const propIdx = ctx.propagatingParams.get(fnName);
         if (propIdx) {
@@ -419,6 +479,17 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
           }
           if (m) return m;
         }
+      }
+      // Curated string/array/JSON plumbing: the result carries its arguments' taint.
+      if (fnName && PHP_PASSTHROUGH.has(fnName)) {
+        const m = args.reduce((acc, a) => acc | taintMask(a, env), 0);
+        return PHP_DECODERS.has(fnName) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
+      }
+      // \`$fn(...)\` -- calling a variable as a function: its result depends on what the variable
+      // itself holds (a closure captured from tainted data) and on what it is called with.
+      if (!fnName && fnNode?.type === "variable_name") {
+        const nm = variableBareName(fnNode);
+        return args.reduce((m, a) => m | taintMask(a, env), nm ? (env.get(nm) ?? 0) : 0);
       }
       return 0;
     }
@@ -587,6 +658,18 @@ function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
   return functions;
 }
 
+/** Every variable name that appears in a `global $x;` declaration anywhere in the file. */
+function collectGlobalNamesPHP(root: SyntaxNode): Set<string> {
+  return new Set(findAllNodes(root, "global_declaration").flatMap(g => variableNamesIn(g)));
+}
+
+/** Record taint written into a `global`-shared variable (visible to every function). Main scan only. */
+function recordGlobalStickyPHP(name: string | null, mask: number, ctx: EngineCtx): void {
+  if (!name || !ctx.recordSticky || !(mask & ALL) || !ctx.globalNames.has(name)) return;
+  const next = (ctx.sticky.get(name) ?? 0) | (mask & ALL);
+  if (next !== (ctx.sticky.get(name) ?? 0)) { ctx.sticky.set(name, next); ctx.stickyDirty = true; }
+}
+
 // ── Sink checks ──────────────────────────────────────────────────────────
 
 const SQL_CALL_TAILS = new Set(["query", "exec", "prepare"]);
@@ -647,6 +730,14 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // $link/$base_dn args could themselves be tainted in a contrived case
     // without that being the real vulnerability).
     if (args.length >= 3) fire("ldap-injection", argMasks[2], args[2].text);
+  } else if (fnName === "eval") {
+    fire("eval-exec");
+  } else if (fnName === "curl_init") {
+    if (args[0]) fire("ssrf", argMasks[0], args[0].text);
+  } else if ((fnName === "preg_match" || fnName === "preg_match_all" || fnName === "preg_replace" || fnName === "preg_replace_callback" || fnName === "preg_split")
+             && args[0] && (argMasks[0] & ALL)) {
+    // The PATTERN itself (not the subject/data being matched) is attacker-controlled.
+    fire("redos", argMasks[0], args[0].text);
   } else if (fnName === "curl_setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- always a bare function
     // call in PHP, never a method call (confirmed: no OOP cURL wrapper in
@@ -699,6 +790,8 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     }
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
     fire("nosql-injection");
+  } else if (methodName === "createTemplate" || methodName === "renderString" || methodName === "fetchFromString") {
+    fire("ssti");
   } else if (methodName === "setopt") {
     // curl_setopt($ch, CURLOPT_URL, $tainted) -- args[0] is the handle,
     // args[1] the CURLOPT_* constant, args[2] the value; a tainted MATCH
@@ -707,6 +800,49 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     // checks elsewhere).
     fire("ssrf", "curl_setopt");
   }
+}
+
+/** The body of the function/method lexically enclosing \`node\`, or null (top-level code). */
+function enclosingFunctionBodyPHP(node: SyntaxNode): SyntaxNode | null {
+  for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) {
+    if (cur.type === "function_definition" || cur.type === "method_declaration") return cur.childForFieldName("body") ?? null;
+  }
+  return null;
+}
+
+/** Was \`varName\` EVER assigned directly from a superglobal (\`$fn = $_POST['x'];\`) somewhere in \`body\`,
+ * and NEVER assigned a closure/callable elsewhere? Deliberately narrow (favors precision): a callback
+ * parameter that is simply CALLED, never itself assigned, doesn't match this at all (no false positive on
+ * \`$cb($v)\` inside a normal higher-order helper) -- only a variable that's DEMONSTRABLY been overwritten
+ * with raw request data, the real "attacker chooses which function runs" shape. */
+function isEverAssignedFromSourcePHP(body: SyntaxNode | null, varName: string): boolean {
+  if (!body) return false;
+  let fromSource = false;
+  let everCallable = false;
+  for (const assign of findAllNodes(body, "assignment_expression")) {
+    const left = assign.childForFieldName("left");
+    if (left?.type !== "variable_name" || variableBareName(left) !== varName) continue;
+    const right = assign.childForFieldName("right");
+    if (!right) continue;
+    if (right.type === "anonymous_function_creation_expression" || right.type === "arrow_function") { everCallable = true; continue; }
+    if (isTaintSourceExprPHP(right)) { fromSource = true; continue; }
+    if (right.type === "variable_name") {
+      const nm = variableBareName(right);
+      if (nm && SUPERGLOBAL_NAMES.has(nm)) fromSource = true;
+    }
+  }
+  return fromSource && !everCallable;
+}
+
+/** \`$fn(...)\` where \`$fn\` itself holds an attacker-chosen function NAME (not a stored closure/callback --
+ * see isEverAssignedFromSourcePHP's own docblock for why those are excluded). */
+function checkDynamicCallSink(node: SyntaxNode, fnNode: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
+  const varName = variableBareName(fnNode);
+  if (!varName) return;
+  const m = taintMask(fnNode, env);
+  if (!(m & ALL)) return;
+  if (!isEverAssignedFromSourcePHP(enclosingFunctionBodyPHP(node), varName)) return;
+  emit(ctx, "eval-exec", node, fnNode.text, "dynamic function call");
 }
 
 // ── Narrow validation guards ────────────────────────────────────────────────
@@ -998,6 +1134,26 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         if (subject) walk(subject, env);
         const rmask = subject ? taintMask(subject, env) : 0;
         if (target) bindTargets(target, rmask, env);
+        // `foreach ($s as $k => $v) { $t[$k] = $v; }` -- every entry of a tainted array is copied
+        // into another one wholesale (an attacker can set keys the API never meant to expose).
+        if ((rmask & ALL) && body) {
+          const isPair = target?.type === "pair";
+          const keyName = isPair && target!.namedChildren[0]?.type === "variable_name" ? variableBareName(target!.namedChildren[0]) : null;
+          const valName = isPair
+            ? (target!.namedChildren[1]?.type === "variable_name" ? variableBareName(target!.namedChildren[1]) : null)
+            : (target?.type === "variable_name" ? variableBareName(target) : null);
+          if (keyName && valName) {
+            for (const asg of findAllNodes(body, "assignment_expression")) {
+              const l = asg.childForFieldName("left");
+              const r = asg.childForFieldName("right");
+              if (l?.type !== "subscript_expression" || r?.type !== "variable_name" || variableBareName(r) !== valName) continue;
+              const idx = l.namedChildren[1];
+              if (idx?.type === "variable_name" && variableBareName(idx) === keyName && l.namedChildren[0]?.type === "variable_name") {
+                emit(ctx, "mass-assignment", asg, subject?.text ?? "", "array merge");
+              }
+            }
+          }
+        }
         return walkLoop(env, (e) => (body ? walk(body, e) : false));
       }
 
@@ -1096,6 +1252,12 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         for (const c of node.namedChildren) if (c) walk(c, env);
         return true;
 
+      case "yield_expression": {
+        for (const c of node.namedChildren) if (c) walk(c, env);
+        opts.onReturn?.(node, env, taintMask);
+        return false;
+      }
+
       case "expression_statement": {
         for (const c of node.namedChildren) if (c) walk(c, env);
         return statementTerminatesPHP(node);
@@ -1113,6 +1275,7 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const varName = variableBareName(left);
         if (varName) {
           env.set(varName, mask);
+          recordGlobalStickyPHP(varName, mask, ctx);
           // $var = new ClassName(...) -- class-name tracking (see
           // EngineCtx.varTypes's own docblock). className extraction reuses
           // the exact same technique collectBolaFindings' own
@@ -1125,6 +1288,14 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       } else if (left?.type === "member_access_expression") {
         const key = calleeTextPHP(left);
         if (key) env.set(key, mask);
+        // \`$obj->$name = $value;\` -- the property NAME itself (not just the value) is attacker-controlled,
+        // letting a request pick which field to overwrite (role, isAdmin, ...).
+        const nameField = left.childForFieldName("name");
+        if (nameField && nameField.type !== "name") {
+          const nm = taintMask(nameField, env);
+          if (nm & ALL) emit(ctx, "mass-assignment", node, nameField.text, "dynamic property assignment");
+          else if (wasCleared(nm, ALL)) ctx.suppressed?.push({ id: "mass-assignment", line: lineOf(node) });
+        }
       } else if (left?.type === "list_literal" || left?.type === "array_creation_expression") {
         // [$a, $b] = f() / list($a, $b) = f() -- every target receives the value's taint
         bindTargets(left, mask, env);
@@ -1132,7 +1303,11 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         // $arr['k'] = tainted -- the read side (`$arr['k']`) resolves to the base variable, so OR into it
         const base = left.namedChildren[0];
         const baseName = base?.type === "variable_name" ? variableBareName(base) : null;
-        if (baseName) env.set(baseName, (env.get(baseName) ?? 0) | mask);
+        if (baseName) {
+          const next = (env.get(baseName) ?? 0) | mask;
+          env.set(baseName, next);
+          recordGlobalStickyPHP(baseName, next, ctx);
+        }
       }
     }
 
@@ -1151,6 +1326,45 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const base = left.namedChildren[0];
         const baseName = base?.type === "variable_name" ? variableBareName(base) : null;
         if (baseName) env.set(baseName, (env.get(baseName) ?? 0) | mask);
+      }
+    }
+
+    if (node.type === "global_declaration") {
+      // `global $c;` -- pulls in whatever another function has already written to the shared variable.
+      for (const name of variableNamesIn(node)) env.set(name, (env.get(name) ?? 0) | (ctx.sticky.get(name) ?? 0));
+    }
+
+    if (node.type === "binary_expression") {
+      const op = node.childForFieldName("operator")?.type;
+      if (op === "." && node.parent?.type !== "binary_expression") {
+        // A `.`-concatenation chain being built: an HTML-encoded value placed inside a <script> block
+        // is still XSS (HTML encoding doesn't neutralize JavaScript string context).
+        const operands = phpConcatOperands(node);
+        if (operands) {
+          let prefix = "";
+          for (const o of operands) {
+            const lit = phpStringValue(o);
+            if (lit !== null) { prefix += lit; continue; }
+            const m = taintMask(o, env);
+            if (wasCleared(m, classOf("xss")) && PHP_SCRIPT_CONTEXT_RE.test(prefix)) {
+              emit(ctx, "xss", node, o.text, "HTML string");
+            }
+            prefix += "";
+          }
+        }
+      }
+      if (op === "==" || op === "===" || op === "!=" || op === "!==") {
+        const l = node.childForFieldName("left");
+        const r = node.childForFieldName("right");
+        const nameOf = (n: SyntaxNode | null) => (n?.type === "name" ? n.text : n?.type === "variable_name" ? variableBareName(n) : undefined);
+        for (const [secret, other] of [[l, r], [r, l]] as const) {
+          const nm = nameOf(secret);
+          if (secret && other && nm && PHP_SECRET_NAME_RE.test(nm) && !isLiteralPHP(other)
+              && (taintMask(other, env) & ALL) && !(taintMask(secret, env) & ALL)) {
+            emit(ctx, "timing-attack", node, other.text, nm);
+            break;
+          }
+        }
       }
     }
 
@@ -1173,8 +1387,14 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
     if (node.type === "function_call_expression") {
       checkFunctionCallSink(node, ctx, taintMask, env);
       const fnNode = node.childForFieldName("function");
-      if (fnNode?.type === "name" && ctx.localFunctions.has(fnNode.text)) {
-        seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
+      if (fnNode?.type === "name") {
+        if (ctx.localFunctions.has(fnNode.text)) seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
+        if (fnNode.text === "extract") {
+          const args = argListOfPHP(node);
+          if (args[0] && (taintMask(args[0], env) & ALL)) env.set(PHP_WILDCARD_VAR, ALL);
+        }
+      } else if (fnNode?.type === "variable_name") {
+        checkDynamicCallSink(node, fnNode, ctx, taintMask, env);
       }
     }
     if (node.type === "member_call_expression") {
@@ -1442,6 +1662,27 @@ function collectBolaFindings(
   }
 }
 
+// ── Structural per-function checks ──────────────────────────────────────────
+
+const JWT_DECODE_RE_PHP = /base64_decode|base64url_decode/;
+const JWT_VERIFY_RE_PHP = /hash_hmac|hash_equals|JWT::decode|Firebase.{0,3}JWT|openssl_verify/;
+
+/** Hand-rolled JWT parsing: split the token on '.', base64-decode the payload, trust the claims -- with
+ * no signature check anywhere in sight. Same structural (not data-flow) shape as every other engine's
+ * identical check. */
+function checkHandRolledJwtPHP(bodyNodes: SyntaxNode[], ctx: EngineCtx) {
+  for (const body of bodyNodes) {
+    const text = body.text;
+    if (!/explode\s*\(\s*["']\.["']/.test(text) || !JWT_DECODE_RE_PHP.test(text) || JWT_VERIFY_RE_PHP.test(text)) continue;
+    const decode = findAllNodes(body, "function_call_expression").find(n => {
+      const fnNode = n.childForFieldName("function");
+      return fnNode?.type === "name" && JWT_DECODE_RE_PHP.test(fnNode.text);
+    });
+    if (!decode) continue;
+    emit(ctx, "jwt-none-alg", decode, "bearer token", "manual JWT decode");
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────
 
 export function scanAstTaintPHP(
@@ -1456,16 +1697,29 @@ export function scanAstTaintPHP(
     const ctx: EngineCtx = {
       content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
       findings: [], seen: new Set(), varTypes: new Map(), root, suppressed: suppressedOut,
+      globalNames: collectGlobalNamesPHP(root), sticky: new Map(), stickyDirty: false, recordSticky: false,
     };
 
     const propagating = buildPropagatingMapPHP(localFunctions, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
 
-    for (const [, fn] of localFunctions) {
-      if (!fn.body) continue;
-      const env: Env = new Map();
-      walkForDeclarationsAndSinks(fn.body, env, ctx);
-      collectBolaFindings([fn.body], fn.resourceIdParamNames, fn.authMeta, ctx);
+    ctx.recordSticky = true;
+    const scanFunctions = (structural: boolean) => {
+      for (const [, fn] of localFunctions) {
+        if (!fn.body) continue;
+        const env: Env = new Map();
+        walkForDeclarationsAndSinks(fn.body, env, ctx);
+        if (structural) {
+          collectBolaFindings([fn.body], fn.resourceIdParamNames, fn.authMeta, ctx);
+          checkHandRolledJwtPHP([fn.body], ctx);
+        }
+      }
+    };
+    scanFunctions(true);
+    // `global $x;` memory one function writes is visible to another: re-walk until it stops growing.
+    for (let round = 0; round < 2 && ctx.stickyDirty; round++) {
+      ctx.stickyDirty = false;
+      scanFunctions(false);
     }
 
     // Also walk top-level (non-function) statements once, so a superglobal
