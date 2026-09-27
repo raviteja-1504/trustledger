@@ -67,3 +67,15 @@ export function authzVerdict(evidence: ReadonlySet<AuthzKind>): AuthzVerdict {
   if (evidence.has("role")) return "role-only";
   return "unchecked";
 }
+
+/** Decorator / middleware names that establish WHO the caller is (and typically inject the principal as a parameter). */
+const AUTHENTICATION_WORDS = new Set(["auth", "authenticated", "authentication", "login", "jwt", "token", "session"]);
+export function isAuthenticationGuardName(name: string): boolean {
+  return wordsOf(name).some(w => AUTHENTICATION_WORDS.has(w));
+}
+
+/** Parameter names that, under an authentication decorator, hold the authenticated principal. */
+const PRINCIPAL_PARAM_NAMES = new Set(["user", "current_user", "currentuser", "principal", "auth_user"]);
+export function isPrincipalParamName(name: string): boolean {
+  return PRINCIPAL_PARAM_NAMES.has(name.toLowerCase());
+}

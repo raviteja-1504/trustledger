@@ -125,3 +125,24 @@ describe("existing id-vs-principal comparison still protects", () => {
     expect(bola(view(body))).toHaveLength(0);
   });
 });
+
+describe("principal injected by an authentication decorator", () => {
+  const check = "order = Order.objects.get(id=pk)\nif user != order.user:\n    return HttpResponseForbidden()\nreturn JsonResponse({'o': order.id})";
+  const viewWithUser = (body: string, deco: string) =>
+    [deco, "def get_order(request, pk, user=None):", ...body.split("\n").map(l => "    " + l), ""].filter(l => l !== "").join("\n") + "\n";
+  it("`user` is the principal under @jwt_auth_required / @login_required", () => {
+    expect(bola(viewWithUser(check, "@jwt_auth_required"))).toHaveLength(0);
+    expect(bola(viewWithUser(check, "@login_required"))).toHaveLength(0);
+  });
+  it("without an authentication decorator `user` is just a parameter", () => {
+    expect(bola(viewWithUser(check, ""))).toHaveLength(1);
+    expect(bola(viewWithUser(check, "@app.route('/o/<pk>')"))).toHaveLength(1);
+  });
+  it("a differently named parameter is not the principal", () => {
+    const other = ["@jwt_auth_required", "def get_order(request, pk, account=None):", "    order = Order.objects.get(id=pk)", "    if account != order.user:", "        return HttpResponseForbidden()", "    return JsonResponse({})", ""].join("\n");
+    expect(bola(other)).toHaveLength(1);
+  });
+  it("an id-vs-`user` comparison still needs the principal to be the injected one", () => {
+    expect(bola(viewWithUser("if pk != user.id:\n    return HttpResponseForbidden()\norder = Order.objects.get(id=pk)", "@jwt_auth_required"))).toHaveLength(0);
+  });
+});

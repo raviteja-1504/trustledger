@@ -53,7 +53,7 @@ import {
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
-import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
+import { authzVerdict, classifyGuardName, isAuthenticationGuardName, isMutatingLookup, isOwnerField, isPrincipalParamName, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 import { assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 
 // webpack provides this global on Node.js targets specifically to escape its
@@ -1668,7 +1668,9 @@ function unwrapBolaCoercionPy(n: SyntaxNode): SyntaxNode {
 
 function isBolaPrincipalExprPy(n: SyntaxNode, ctx: BolaCtxPy): boolean {
   const u = unwrapBolaCoercionPy(n);
-  return (u.type === "identifier" && ctx.principalNames.has(u.text)) || BOLA_PRINCIPAL_RE_PY.test(u.text);
+  let root: SyntaxNode | null | undefined = u;
+  while (root && root.type === "attribute") root = attributeParts(root).object;   // `user.id` is the principal's id
+  return (root?.type === "identifier" && ctx.principalNames.has(root.text)) || BOLA_PRINCIPAL_RE_PY.test(u.text);
 }
 
 /** `order.user`, `order.owner_id`, `order.user.id`: the owner column of a record the view loaded. */
@@ -1861,6 +1863,20 @@ function bolaGuardClauseKindPy(sink: SyntaxNode, ctx: BolaCtxPy, scope: SyntaxNo
   return best;
 }
 
+/** Does the view carry an authentication decorator (`@login_required`, `@jwt_auth_required`)? Those inject the principal. */
+function hasAuthenticationDecoratorPy(fnBody: SyntaxNode): boolean {
+  const def = fnBody.parent;
+  const decorated = def?.parent?.type === "decorated_definition" ? def.parent : null;
+  if (!decorated) return false;
+  let found = false;
+  const scan = (n: SyntaxNode) => {
+    if (n.type === "identifier" && isAuthenticationGuardName(n.text)) found = true;
+    for (const c of n.namedChildren) if (c) scan(c);
+  };
+  for (const d of decorated.namedChildren) if (d?.type === "decorator") scan(d);
+  return found;
+}
+
 /** Decorator-level guards: `@permission_required("x")` (role), `@owner_required` / `@permission_classes([IsOwner])` (ownership). */
 function bolaDecoratorGuardKindsPy(fnBody: SyntaxNode): Map<AuthzKind, string> {
   const out = new Map<AuthzKind, string>();
@@ -2025,6 +2041,8 @@ function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTain
     if (candidates.length === 0) continue;
     const baseSeverity: "medium" | "high" = BOLA_READ_NAME_RE_PY.test(name) ? "medium" : "high";
     const principalNames = collectBolaPrincipalNamesPy(fn.body);
+    // `@jwt_auth_required def put(self, request, order_id, user=None)`: the decorator hands the authenticated user in as `user`
+    if (hasAuthenticationDecoratorPy(fn.body)) for (const s of fn.paramShapes) if (isPrincipalParamName(s.name)) principalNames.add(s.name);
     const decoratorGuards = bolaDecoratorGuardKindsPy(fn.body);
     for (const c of candidates) {
       const fnNode = c.node.childForFieldName("function");
