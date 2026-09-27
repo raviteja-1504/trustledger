@@ -85,19 +85,30 @@ export function applyClears(mask: number, clears: number): number {
 //
 // A taint value's 32 bits are: the class half (bits 0-14, "still dangerous for class c"), the shadow half (bits
 // 16-30, "was cleared for class c"), and exactly two unused bits. Bit 15 -- the one between the halves -- carries
-// the only VALUE KIND that changes what a sink should conclude: "this value was URL-encoded". (Bit 31 is the sign
-// bit and is left alone.) It is a kind rather than a class: it says nothing about what the value can reach, only
-// how it got cleared, which is what decides whether the clearing still holds where the value ends up.
+// the only VALUE KIND that changes what a sink should conclude: "this value's clearing depends on WHERE it ends
+// up, not just that it was cleared". (Bit 31 is the sign bit and is left alone.) It is a kind rather than a class:
+// it says nothing about what the value can reach, only how it got cleared, which is what decides whether the
+// clearing still holds where the value ends up.
 //
-// Why URL-encoding needs a kind. Encoding is a real defence in a path/query component and no defence at all in a
-// host position (`169.254.169.254` has no character an encoder changes). The class/shadow bits alone can only say
-// "SSRF was cleared" -- true for a guard, true for a coercion, and true for an encoder, which are three different
-// promises. Only the encoder's is position-dependent, so only it is marked. See taint/sinkShape.ts for the
-// position analysis that consumes this.
+// Why some clearing needs a kind. Three different sanitizer FAMILIES clear the same class bits for three
+// different reasons, and only one promise survives a change of position:
+//   - a full coercion (parseInt, Number, an (int) cast) changes what the value IS -- a number can't carry a SQL
+//     quote or a URL scheme no matter where it lands, so its clearing is safe EVERYWHERE.
+//   - an encoder (encodeURIComponent, urllib.parse.quote) or an escaper (mysqli_real_escape_string, addslashes)
+//     changes the value's TEXT, neutralizing exactly the characters that matter in ONE syntactic position -- a
+//     path/query segment for a URL encoder, a quoted string literal for a SQL escaper -- and nothing outside it:
+//     `169.254.169.254` has no character a URL encoder touches, so `"http://" + enc(host)` still lets the
+//     attacker choose the host; `1; DROP TABLE users--` has no quote a SQL escaper needs to touch, so
+//     `"...WHERE id = " + escape(id)` is still injectable in that unquoted position.
+//   - a guard (allowlist membership, `applyGuards`) doesn't change the value at all -- it proves the value was
+//     one of a fixed set of safe ones, which holds everywhere, so it sets no kind either.
+// The class/shadow bits alone can only say "class c was cleared" -- true for all three families, which is not
+// enough to tell a position-dependent clearing from a permanent one. See taint/sinkShape.ts for the position
+// analyses (one per sink shape: URL, SQL, ...) that consume this bit.
 //
 // Every engine masks class decisions with `& ALL` (the shadow half already forced that discipline), so the extra
 // bit is invisible to them: it can never make a value look tainted and never survives a full coercion below.
-export const KIND_URL_ENCODED = 1 << 15;
+export const KIND_POSITION_SENSITIVE = 1 << 15;
 
 /** A numeric/boolean/uuid coercion neutralizes the injection classes an encoder never does (SQL, command). */
 export function isCoercionClears(clears: number): boolean {
@@ -109,16 +120,31 @@ export function isUrlEncoderClears(clears: number): boolean {
   return (clears & SinkClass.SSRF) !== 0 && !isCoercionClears(clears);
 }
 
+/** The SQL-escaper family (mysqli_real_escape_string, addslashes, connection.escape, ...) neutralizes quote-breaking
+ * characters -- a real defence inside a quoted string literal, none at all outside one. */
+export function isSqlEscapeClears(clears: number): boolean {
+  return (clears & SinkClass.SQL) !== 0 && !isCoercionClears(clears);
+}
+
+/** Whether `clears` is a POSITION-DEPENDENT clearing (an encoder or escaper) rather than a permanent one (a
+ * coercion or, via applyGuards, a guard). One shared kind bit serves every sink-shape family: each position
+ * analysis (sinkShape.ts) already filters by its OWN class first (`wasCleared(mask, SinkClass.SSRF)` vs
+ * `...SQL`), so a value that is e.g. SQL-escaped-only never confuses the SSRF analysis, which never asks about
+ * the SQL class bit at all. */
+function isPositionDependentClears(clears: number): boolean {
+  return isUrlEncoderClears(clears) || isSqlEscapeClears(clears);
+}
+
 /**
  * applyClears plus value-kind bookkeeping; engines call this at a SANITIZER call (guards use applyGuards, which
  * deliberately sets no kind: an allowlist check is safe in every position). A full coercion (parseInt, Number, ...)
  * clears the kind too -- whatever the value was, it is now a number. The kind is only set when something was actually
- * cleared, so an untainted value passed through an encoder stays plain 0.
+ * cleared, so an untainted value passed through an encoder/escaper stays plain 0.
  */
 export function applySanitizer(mask: number, clears: number): number {
   const out = applyClears(mask, clears);
-  if (isCoercionClears(clears)) return out & ~KIND_URL_ENCODED;
-  return isUrlEncoderClears(clears) && (mask & clears & ALL) !== 0 ? out | KIND_URL_ENCODED : out;
+  if (isCoercionClears(clears)) return out & ~KIND_POSITION_SENSITIVE;
+  return isPositionDependentClears(clears) && (mask & clears & ALL) !== 0 ? out | KIND_POSITION_SENSITIVE : out;
 }
 
 /** Is the value still dangerous for any class at all? */

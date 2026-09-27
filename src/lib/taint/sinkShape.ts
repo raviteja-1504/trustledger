@@ -21,7 +21,7 @@
 // It is deliberately engine-independent: no AST types, only strings and masks, so it is unit-testable in isolation
 // and the JS/TS and Python engines cannot drift apart on the rule.
 
-import { KIND_URL_ENCODED, SinkClass, wasCleared } from "./taintCore";
+import { KIND_POSITION_SENSITIVE, SinkClass, wasCleared } from "./taintCore";
 
 export type UrlPart<N> = { kind: "literal"; text: string } | { kind: "opaque"; node: N };
 
@@ -50,13 +50,13 @@ export function insideOpenAuthority(text: string): boolean {
   return /^(?:[a-z][a-z0-9+.\-]*:)?\/\/[^/?#]*$/i.test(text);
 }
 
-export type SsrfUrlVerdict =
-  | "vulnerable"   // some attacker-influenced operand can shape the host
-  | "safe"         // every attacker-influenced operand sits after a literal that pins the host
-  | "no-taint";    // nothing attacker-influenced in the URL at all -- callers fall back to their ordinary logic
+export type PositionVerdict =
+  | "vulnerable"   // some attacker-influenced operand sits where it can still do damage
+  | "safe"         // every attacker-influenced operand sits where its own clearing actually holds
+  | "no-taint";    // nothing attacker-influenced at all -- callers fall back to their ordinary logic
 
 export interface SsrfAssessment<N> {
-  verdict: SsrfUrlVerdict;
+  verdict: PositionVerdict;
   /** For "vulnerable": the operand that can shape the host -- lets a finding name `host`, not the whole template. */
   culprit?: N;
   /** For "vulnerable": the culprit was URL-encoded and only the ENCODING cleared it (so the message can say why that isn't enough). */
@@ -84,7 +84,7 @@ export function assessSsrfUrl<N>(parts: readonly UrlPart<N>[], maskOf: (node: N)
     if (part.kind === "literal") { text += part.text; continue; }
     const m = maskOf(part.node);
     const tainted = (m & SinkClass.SSRF) !== 0;
-    const encodedOnly = !tainted && (m & KIND_URL_ENCODED) !== 0 && wasCleared(m, SinkClass.SSRF);
+    const encodedOnly = !tainted && (m & KIND_POSITION_SENSITIVE) !== 0 && wasCleared(m, SinkClass.SSRF);
     if (tainted || encodedOnly) {
       if (tainted ? !hostPinned(text) : insideOpenAuthority(text)) return { verdict: "vulnerable", culprit: part.node, encoded: encodedOnly };
       sawInfluencedButPinned = true;
@@ -94,4 +94,72 @@ export function assessSsrfUrl<N>(parts: readonly UrlPart<N>[], maskOf: (node: N)
     }
   }
   return { verdict: sawInfluencedButPinned ? "safe" : "no-taint" };
+}
+
+// ── SQL sink-argument shape: is the untrusted part inside a quoted string literal? ────────────
+
+// The same shape question, for a different reason. A string-ESCAPER (mysqli_real_escape_string, addslashes,
+// connection.escape) neutralizes exactly the characters that let a value break out of a QUOTED SQL string
+// literal -- a real defence there, and no defence at all outside one:
+//
+//     "SELECT * FROM t WHERE name = '" + escape(name) + "'"    escaper's job: name can't end the literal early   -> safe
+//     "SELECT * FROM t WHERE id = " + escape(id)                no quotes to break out of -- escape() only removes
+//                                                                 quote/backslash characters, and `1 OR 1=1` has
+//                                                                 none -- the value is still arbitrary SQL          -> vulnerable
+//     "SELECT * FROM t ORDER BY " + escape(column)               same: an identifier position, no quotes at all   -> vulnerable
+//
+// Unlike a URL, a plainly TAINTED (unescaped) value is vulnerable in EVERY position here -- a raw value can break
+// out of a string literal (`'; DROP TABLE t--`) exactly as easily as it can inject unquoted SQL (`1; DROP TABLE
+// t--`), so there is no SQL analogue of hostPinned's "safe once a literal has closed off the position" case for
+// tainted operands. Only the ESCAPED case is position-dependent, which is exactly what the shared
+// KIND_POSITION_SENSITIVE bit was built to answer.
+
+/**
+ * Is the text built so far INSIDE an open, single-quoted SQL string literal? Toggles on every unescaped `'`.
+ * A backslash escaping the next character (MySQL, and Postgres with standard_conforming_strings off) skips it
+ * so an escaped quote never toggles. SQL's OTHER escape for a literal quote inside one -- doubling it, `''` --
+ * needs no special case: two toggles is a no-op by simple parity, the same as skipping the pair outright.
+ */
+export function insideSqlStringLiteral(textBeforeOperand: string): boolean {
+  let inString = false;
+  for (let i = 0; i < textBeforeOperand.length; i++) {
+    const c = textBeforeOperand[i];
+    if (c === "\\" && inString) { i++; continue; }
+    if (c === "'") inString = !inString;
+  }
+  return inString;
+}
+
+export interface SqlAssessment<N> {
+  verdict: PositionVerdict;
+  /** For "vulnerable": the operand that carries the injection. */
+  culprit?: N;
+  /** For "vulnerable": the culprit was escaped and only the ESCAPING cleared it (so the message can say why that isn't enough here). */
+  escaped?: boolean;
+}
+
+/**
+ * Decide a SQL query argument, position by position. `maskOf` is the engine's own taint evaluation of one opaque
+ * operand at the sink. A plainly TAINTED operand is vulnerable in every position (see module docblock above); an
+ * ESCAPED one (kind bit, escaping is what cleared it) is vulnerable only OUTSIDE a quoted string literal. A value
+ * cleared by a GUARD or a full coercion carries no kind bit and is safe anywhere.
+ */
+export function assessSqlInjection<N>(parts: readonly UrlPart<N>[], maskOf: (node: N) => number): SqlAssessment<N> {
+  let text = "";
+  let sawInfluencedButSafe = false;
+  for (const part of parts) {
+    if (part.kind === "literal") { text += part.text; continue; }
+    const m = maskOf(part.node);
+    const tainted = (m & SinkClass.SQL) !== 0;
+    const escapedOnly = !tainted && (m & KIND_POSITION_SENSITIVE) !== 0 && wasCleared(m, SinkClass.SQL);
+    if (tainted) return { verdict: "vulnerable", culprit: part.node, escaped: false };
+    if (escapedOnly) {
+      if (!insideSqlStringLiteral(text)) return { verdict: "vulnerable", culprit: part.node, escaped: true };
+      sawInfluencedButSafe = true;
+      text += TRUSTED_OPAQUE;      // an escaped value can't itself contain an unescaped quote, so it can't change whether later text is "inside a literal"
+    } else {
+      text += TRUSTED_OPAQUE;
+    }
+  }
+  return { verdict: sawInfluencedButSafe ? "safe" : "no-taint" };
 }

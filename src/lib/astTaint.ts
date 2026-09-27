@@ -32,7 +32,7 @@ import {
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
-import { assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
+import { assessSqlInjection, assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
 
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
@@ -165,19 +165,21 @@ function unwrapExpr(e: ts.Expression): ts.Expression {
   return e;
 }
 
-/** A URL expression as ordered literal / opaque parts: template literals and `+` chains are split, anything else is one opaque operand. */
-function decomposeUrlExpr(e: ts.Expression): UrlPart<ts.Expression>[] {
+/** A string-building expression as ordered literal / opaque parts: template literals and `+` chains are split,
+ * anything else is one opaque operand. Shared by every sink-shape position model (URL, SQL, ...) that needs to
+ * ask "where in the built text does this operand land", not just "is it tainted". */
+function decomposeConcatExpr(e: ts.Expression): UrlPart<ts.Expression>[] {
   e = unwrapExpr(e);
   if (ts.isStringLiteralLike(e)) return [{ kind: "literal", text: e.text }];
   if (ts.isTemplateExpression(e)) {
     const parts: UrlPart<ts.Expression>[] = [{ kind: "literal", text: e.head.text }];
     for (const span of e.templateSpans) {
-      parts.push(...decomposeUrlExpr(span.expression), { kind: "literal", text: span.literal.text });
+      parts.push(...decomposeConcatExpr(span.expression), { kind: "literal", text: span.literal.text });
     }
     return parts;
   }
   if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    return [...decomposeUrlExpr(e.left), ...decomposeUrlExpr(e.right)];
+    return [...decomposeConcatExpr(e.left), ...decomposeConcatExpr(e.right)];
   }
   return [{ kind: "opaque", node: e }];
 }
@@ -1160,14 +1162,19 @@ function directSinkHit(
     const match = matchSink(n, importMap);
     if (!match) return null;
     const cls = classOf(match.id);
-    let urlPinned: ts.Expression | undefined;
+    let positionCleared: ts.Expression | undefined;
     if (match.id === "ssrf" && match.args[0]) {
-      const url = assessSsrfUrl(decomposeUrlExpr(match.args[0]), x => maskFn(x, env));
+      const url = assessSsrfUrl(decomposeConcatExpr(match.args[0]), x => maskFn(x, env));
       if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
-      if (url.verdict === "safe") urlPinned = match.args[0];
+      if (url.verdict === "safe") positionCleared = match.args[0];
+    }
+    if (match.id === "sql-injection" && match.args[0]) {
+      const sql = assessSqlInjection(decomposeConcatExpr(match.args[0]), x => maskFn(x, env));
+      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (sql.verdict === "safe") positionCleared = match.args[0];
     }
     for (const a of match.args) {
-      if (a === urlPinned) continue;   // host pinned by a literal (mirrors checkCallForSink)
+      if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors checkCallForSink)
       if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
       if (maskFn(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
     }
@@ -2329,10 +2336,10 @@ export function scanAstTaint(
       const match = matchSink(call, importMap);
       if (!match) return;
       const cls = classOf(match.id);
-      let urlPinned: ts.Expression | undefined;
+      let positionCleared: ts.Expression | undefined;
       let cleared = false;
       if (match.id === "ssrf" && match.args[0]) {
-        const url: SsrfAssessment<ts.Expression> = assessSsrfUrl(decomposeUrlExpr(match.args[0]), n => taintMask(n, env));
+        const url: SsrfAssessment<ts.Expression> = assessSsrfUrl(decomposeConcatExpr(match.args[0]), n => taintMask(n, env));
         if (url.verdict === "vulnerable") {
           const culprit = url.culprit!;
           emit("ssrf", call, sourceLabel(culprit), match.sinkExpr, culprit, url.encoded
@@ -2340,11 +2347,22 @@ export function scanAstTaint(
             : undefined);
           return;
         }
-        if (url.verdict === "safe") { urlPinned = match.args[0]; cleared = true; }
+        if (url.verdict === "safe") { positionCleared = match.args[0]; cleared = true; }
+      }
+      if (match.id === "sql-injection" && match.args[0]) {
+        const sql = assessSqlInjection(decomposeConcatExpr(match.args[0]), n => taintMask(n, env));
+        if (sql.verdict === "vulnerable") {
+          const culprit = sql.culprit!;
+          emit("sql-injection", call, sourceLabel(culprit), match.sinkExpr, culprit, sql.escaped
+            ? `Escaped value '${sourceLabel(culprit)}' is placed outside a quoted string literal (an identifier, or an unquoted numeric position) — string-escaping only neutralizes characters that break out of a quoted literal`
+            : undefined);
+          return;
+        }
+        if (sql.verdict === "safe") { positionCleared = match.args[0]; cleared = true; }
       }
       let taintedArg: ts.Expression | undefined;
       for (const a of match.args) {
-        if (a === urlPinned) continue;   // host pinned by a literal: this operand can't choose the target
+        if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe: this operand can't reach the sink through the position this check already cleared
         if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
         const m = taintMask(a, env);
         if (m & cls) { taintedArg = a; break; }

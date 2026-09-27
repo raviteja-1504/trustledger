@@ -38,6 +38,11 @@ const TABLES: Record<SanitizerLang, Table> = {
       "parseInt": NUMERIC, "parseFloat": NUMERIC, "Number": NUMERIC, "Boolean": NUMERIC, "BigInt": NUMERIC,
       // String(x) keeps every string-injection class but defeats operator-object (NoSQL) injection
       "String": C.NOSQL,
+      // mysql/mysql2/node-mysql `Connection.escape(value)` (also exposed as the standalone `mysql.escape`),
+      // and the `sqlstring` package's own `SqlString.escape` -- quote-escapers, valid only inside a quoted
+      // string literal (see taint/sinkShape.ts's assessSqlInjection for the position check that consumes this).
+      "mysql.escape": C.SQL, "connection.escape": C.SQL, "pool.escape": C.SQL, "SqlString.escape": C.SQL,
+      "sqlstring.escape": C.SQL,
     },
     tail: {},
   },
@@ -48,6 +53,9 @@ const TABLES: Record<SanitizerLang, Table> = {
       "sanitize_html": XSS, "escape_for_html": XSS,
       // str(x) keeps every string-injection class but defeats operator-object (NoSQL) injection
       "str": C.NOSQL,
+      // pymysql/MySQLdb quote-escapers -- valid only inside a quoted string literal (see
+      // taint/sinkShape.ts's assessSqlInjection for the position check that consumes this).
+      "pymysql.escape_string": C.SQL, "MySQLdb.escape_string": C.SQL, "escape_string": C.SQL,
       "shlex.quote": C.CMD,
       "os.path.basename": C.PATH, "werkzeug.utils.secure_filename": C.PATH, "secure_filename": C.PATH,
       "urllib.parse.quote": URL_SAFE, "urllib.parse.quote_plus": URL_SAFE,

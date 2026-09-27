@@ -54,7 +54,7 @@ import {
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isAuthenticationGuardName, isMutatingLookup, isOwnerField, isPrincipalParamName, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
-import { assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
+import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 
 // webpack provides this global on Node.js targets specifically to escape its
 // own require() interception. Needed here because require.resolve(...) from
@@ -1482,14 +1482,19 @@ function directSinkHitPy(
     const match = matchSinkPy(node, importMap);
     if (!match) return null;
     const cls = classOf(match.id);
-    let urlPinned: SyntaxNode | undefined;
+    let positionCleared: SyntaxNode | undefined;
     if (match.id === "ssrf" && match.args[0]) {
-      const url = assessSsrfUrl(decomposeUrlExprPy(match.args[0]), x => taintMask(x, env));
+      const url = assessSsrfUrl(decomposeConcatExprPy(match.args[0]), x => taintMask(x, env));
       if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
-      if (url.verdict === "safe") urlPinned = match.args[0];
+      if (url.verdict === "safe") positionCleared = match.args[0];
+    }
+    if (match.id === "sql-injection" && match.args[0]) {
+      const sql = assessSqlInjection(decomposeConcatExprPy(match.args[0]), x => taintMask(x, env));
+      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (sql.verdict === "safe") positionCleared = match.args[0];
     }
     for (const a of match.args) {
-      if (a === urlPinned) continue;   // host pinned by a literal (mirrors onCall)
+      if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors onCall)
       if (taintMask(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
     }
     return null;
@@ -2079,8 +2084,8 @@ function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTain
   }
 }
 
-/** A URL expression as ordered literal / opaque parts: f-strings, implicit concatenation and `+` chains are split, anything else is one opaque operand. */
-function decomposeUrlExprPy(node: SyntaxNode): UrlPart<SyntaxNode>[] {
+/** A string-building expression as ordered literal / opaque parts: f-strings, implicit concatenation and `+` chains are split, anything else is one opaque operand. Shared by every sink-shape position model (URL, SQL, ...). */
+function decomposeConcatExprPy(node: SyntaxNode): UrlPart<SyntaxNode>[] {
   while (node.type === "parenthesized_expression" && node.namedChildren[0]) node = node.namedChildren[0]!;
   if (node.type === "string") {
     const parts: UrlPart<SyntaxNode>[] = [];
@@ -2089,15 +2094,15 @@ function decomposeUrlExprPy(node: SyntaxNode): UrlPart<SyntaxNode>[] {
       if (c.type === "string_content" || c.type === "escape_sequence") parts.push({ kind: "literal", text: c.text });
       else if (c.type === "interpolation") {
         const e = c.childForFieldName("expression");
-        if (e) parts.push(...decomposeUrlExprPy(e));
+        if (e) parts.push(...decomposeConcatExprPy(e));
       }
     }
     return parts;
   }
-  if (node.type === "concatenated_string") return node.namedChildren.flatMap(c => (c ? decomposeUrlExprPy(c) : []));
+  if (node.type === "concatenated_string") return node.namedChildren.flatMap(c => (c ? decomposeConcatExprPy(c) : []));
   if (node.type === "binary_operator" && node.childForFieldName("operator")?.text === "+") {
     const l = node.childForFieldName("left"), r = node.childForFieldName("right");
-    if (l && r) return [...decomposeUrlExprPy(l), ...decomposeUrlExprPy(r)];
+    if (l && r) return [...decomposeConcatExprPy(l), ...decomposeConcatExprPy(r)];
   }
   return [{ kind: "opaque", node }];
 }
@@ -2387,21 +2392,32 @@ export function scanAstTaintPython(
         const cls = classOf(match.id);
         let taintedArg: SyntaxNode | undefined;
         let cleared = false;
-        let urlPinned: SyntaxNode | undefined;
-        let ssrfEmitted = false;
+        let positionCleared: SyntaxNode | undefined;
+        let positionEmitted = false;
         if (match.id === "ssrf" && match.args[0]) {
-          const url = assessSsrfUrl(decomposeUrlExprPy(match.args[0]), n => taintMask(n, env));
+          const url = assessSsrfUrl(decomposeConcatExprPy(match.args[0]), n => taintMask(n, env));
           if (url.verdict === "vulnerable") {
             const culprit = url.culprit!;
             emit("ssrf", node, sourceLabelPy(culprit), match.sinkExpr, url.encoded
               ? `URL-encoded value '${sourceLabelPy(culprit)}' is placed in the host position — encoding does not stop an attacker choosing the host`
               : undefined);
-            ssrfEmitted = true;
+            positionEmitted = true;
           }
-          if (url.verdict === "safe") { urlPinned = match.args[0]; cleared = true; }
+          if (url.verdict === "safe") { positionCleared = match.args[0]; cleared = true; }
         }
-        for (const a of ssrfEmitted ? [] : match.args) {
-          if (a === urlPinned) continue;   // host pinned by a literal: this operand can't choose the target
+        if (match.id === "sql-injection" && match.args[0]) {
+          const sql = assessSqlInjection(decomposeConcatExprPy(match.args[0]), n => taintMask(n, env));
+          if (sql.verdict === "vulnerable") {
+            const culprit = sql.culprit!;
+            emit("sql-injection", node, sourceLabelPy(culprit), match.sinkExpr, sql.escaped
+              ? `Escaped value '${sourceLabelPy(culprit)}' is placed outside a quoted string literal (an identifier, or an unquoted numeric position) — string-escaping only neutralizes characters that break out of a quoted literal`
+              : undefined);
+            positionEmitted = true;
+          }
+          if (sql.verdict === "safe") { positionCleared = match.args[0]; cleared = true; }
+        }
+        for (const a of positionEmitted ? [] : match.args) {
+          if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe
           const m = taintMask(a, env);
           if (m & cls) { taintedArg = a; break; }
           if (wasCleared(m, cls)) cleared = true;
