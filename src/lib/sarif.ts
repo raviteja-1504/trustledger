@@ -31,6 +31,7 @@ export const SARIF_RULE_META: Record<string, { title: string; description: strin
   "hardcoded-secret":         { title: "Hardcoded Secret",               description: "Credential or API key committed directly in source.", cwe: "CWE-798" },
   "high-entropy-secret":      { title: "High-Entropy Secret",            description: "High-entropy string in a credential-like context, likely a secret.", cwe: "CWE-798" },
   "command-injection":        { title: "OS Command Injection",           description: "Shell command built from unsanitised input.", cwe: "CWE-78" },
+  "argument-injection":       { title: "Argument Injection",             description: "Attacker-controlled value passed as a bare argv element, with no `--` end-of-options marker, letting it be read as a flag by the target program instead of data.", cwe: "CWE-88" },
   "path-traversal":           { title: "Path Traversal",                 description: "File path built from unsanitised input without canonicalisation.", cwe: "CWE-22" },
   "xxe":                      { title: "XML External Entity (XXE)",      description: "XML parser configured to resolve external entities/DTDs from untrusted input.", cwe: "CWE-611" },
   "insecure-file-upload":     { title: "Insecure File Upload",           description: "File upload accepted with no MIME-type/extension validation or size limit.", cwe: "CWE-434" },

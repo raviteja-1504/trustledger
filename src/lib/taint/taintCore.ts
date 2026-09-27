@@ -56,6 +56,7 @@ const ID_TO_CLASS: Record<string, number> = {
   "ssti": SinkClass.SSTI,
   "idor": SinkClass.CONTROL,
   "bola-missing-ownership-check": SinkClass.CONTROL,
+  "argument-injection": SinkClass.CONTROL,
 };
 
 /** Sink class for a finding id. Unknown ids (e.g. authorization findings,

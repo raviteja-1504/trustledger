@@ -12,6 +12,7 @@ const INDICATOR_LABEL: Record<string, string> = {
   "eval-exec":          "Code execution (eval/exec)",
   "jwt-none-alg":       "JWT none-algorithm",
   "command-injection":  "Command injection",
+  "argument-injection": "Argument injection",
   "ai-comment-pattern": "AI comment pattern",
   "hallucinated-method-call": "Hallucinated method call",
   "license-header-contamination": "License header contamination",

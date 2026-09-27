@@ -28,6 +28,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "hardcoded-secret":           { id: "CWE-798",  title: "Use of Hard-coded Credentials" },
   "high-entropy-secret":        { id: "CWE-798",  title: "Use of Hard-coded Credentials" },
   "command-injection":          { id: "CWE-78",   title: "OS Command Injection" },
+  "argument-injection":         { id: "CWE-88",   title: "Argument Injection or Modification" },
   "path-traversal":             { id: "CWE-22",   title: "Path Traversal" },
   "file-inclusion":             { id: "CWE-98",   title: "PHP Local/Remote File Inclusion" },
   "weak-signing-secret":        { id: "CWE-321",  title: "Use of Hard-coded Cryptographic Key" },

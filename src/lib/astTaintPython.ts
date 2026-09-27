@@ -54,7 +54,7 @@ import {
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isAuthenticationGuardName, isMutatingLookup, isOwnerField, isPrincipalParamName, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
-import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
+import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 
 // webpack provides this global on Node.js targets specifically to escape its
 // own require() interception. Needed here because require.resolve(...) from
@@ -74,7 +74,8 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti"
   | "xss" | "header-injection" | "nosql-injection" | "ldap-injection" | "xpath-injection" | "redos" | "eval-exec"
-  | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check";
+  | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check"
+  | "argument-injection";
 
 export interface AstTaintPyFinding {
   id:         AstTaintPyId;
@@ -1493,6 +1494,10 @@ function directSinkHitPy(
       if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
       if (sql.verdict === "safe") positionCleared = match.args[0];
     }
+    if (match.id === "command-injection") {
+      const argInj = findArgumentInjectionCulpritPy(node, importMap, x => taintMask(x, env));
+      if (argInj) return { id: "argument-injection", sinkExpr: argInj.calleeName };
+    }
     for (const a of match.args) {
       if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors onCall)
       if (taintMask(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
@@ -2107,6 +2112,41 @@ function decomposeConcatExprPy(node: SyntaxNode): UrlPart<SyntaxNode>[] {
   return [{ kind: "opaque", node }];
 }
 
+// subprocess.call/run/Popen/check_output/check_call(argv_list): with shell=False (the safe idiom), each argv
+// LIST ELEMENT is its own argument -- no shell in between, so shlex.quote does nothing for it. Only a literal
+// '--' element, or a literal prefix within the element itself, rules out the attacker choosing a leading '-'
+// that the target program reads as a flag instead of data. See taint/sinkShape.ts.
+const ARGV_LIST_SINK_TAILS_PY = new Set(["call", "run", "Popen", "check_output", "check_call"]);
+
+/** The first argv-list element (if any) an attacker could make start with `-`, for a subprocess.*(list) call --
+ * shared by the main scan's checkArgumentInjectionPy and the cross-file summary walk's directSinkHitPy. */
+function findArgumentInjectionCulpritPy(
+  node: SyntaxNode, importMap: Map<string, string>, maskOf: (n: SyntaxNode) => number,
+): { culprit: SyntaxNode; calleeName: string } | null {
+  const fnNode = node.childForFieldName("function");
+  const text = fnNode ? calleeTextPy(fnNode) : null;
+  if (!text) return null;
+  const parts = text.split(".");
+  const resolvedModule = importMap.get(parts[0]) ?? parts[0];
+  if (parts[0] !== "subprocess" && resolvedModule !== "subprocess") return null;
+  const tail = parts[parts.length - 1];
+  if (!ARGV_LIST_SINK_TAILS_PY.has(tail)) return null;
+  const args = argListOf(node);
+  const first = args.filter(a => a.type !== "keyword_argument")[0];
+  if (!first || (first.type !== "list" && first.type !== "tuple") || hasShellTrue(args)) return null;
+  const elements = first.namedChildren.filter((c): c is SyntaxNode => !!c);
+  let pastDashDash = false;
+  for (const el of elements.slice(1)) {   // element 0 is the executable, a different concern
+    if (el.type === "string" && el.namedChildren.find(c => c?.type === "string_content")?.text === "--") {
+      pastDashDash = true; continue;
+    }
+    if (pastDashDash) continue;
+    const assessment = assessArgumentInjection(decomposeConcatExprPy(el), maskOf);
+    if (assessment.verdict === "vulnerable") return { culprit: assessment.culprit!, calleeName: text };
+  }
+  return null;
+}
+
 function sourceLabelPy(node: SyntaxNode): string {
   return node.text.replace(/\s+/g, " ").slice(0, 60);
 }
@@ -2134,7 +2174,7 @@ const SEVERITY: Record<AstTaintPyId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "timing-attack": "medium", "jwt-none-alg": "critical",
   // Fallback only -- collectBolaFindingsPy always passes a severityOverride (medium for a read-shaped
   // function name, high otherwise), same convention as every other engine's BOLA detector.
-  "bola-missing-ownership-check": "high",
+  "bola-missing-ownership-check": "high", "argument-injection": "high",
 };
 const LABEL: Record<AstTaintPyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -2144,7 +2184,7 @@ const LABEL: Record<AstTaintPyId, string> = {
   "ldap-injection": "LDAP Injection", "xpath-injection": "XPath Injection", "redos": "ReDoS — Regex DoS",
   "eval-exec": "Arbitrary Code Execution", "insecure-deserialization": "Insecure Deserialization",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
-  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
+  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)", "argument-injection": "Argument Injection",
 };
 
 function isFastApiHandler(fn: SyntaxNode): boolean {
@@ -2368,10 +2408,18 @@ export function scanAstTaintPython(
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
 
+    const checkArgumentInjectionPy = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      const found = findArgumentInjectionCulpritPy(node, importMap, n => taintMask(n, env));
+      if (!found) return;
+      emit("argument-injection", node, sourceLabelPy(found.culprit), found.calleeName,
+        `Attacker-controlled value '${sourceLabelPy(found.culprit)}' is passed as its own argv element to ${found.calleeName}(...) with no preceding '--' -- if it starts with '-', the target program reads it as a FLAG, not data (e.g. rsync's --rsh, tar's --checkpoint-action), regardless of shell-quoting`);
+    };
+
     // Sink checks and same-file call-site seeding for one `call` node, with
     // the env at that point. Statement structure, branching, assignments and
     // nested functions are the shared walker's job (createWalkerPy).
     const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      checkArgumentInjectionPy(node, env, taintMask);
       checkCrossFileSinks(node, env, taintMask);
       const fnCallee = node.childForFieldName("function");
       // a function chosen from globals() by an attacker-supplied name is then called

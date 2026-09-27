@@ -163,3 +163,48 @@ export function assessSqlInjection<N>(parts: readonly UrlPart<N>[], maskOf: (nod
   }
   return { verdict: sawInfluencedButSafe ? "safe" : "no-taint" };
 }
+
+// ── Argument-injection sink shape: could this array/list element be read as a FLAG? ──────────
+
+// A shell quoting function (shlex.quote, escapeshellarg) makes a value a safe, atomic SHELL token -- it
+// says nothing about how the TARGET PROGRAM's own argument parser reads that token once the shell (or no
+// shell at all, for an argv-array call like spawn/execFile/subprocess.run(list)) hands it over. A value that
+// happens to start with `-`/`--` is still read as a FLAG by the program, not as data -- CWE-88, distinct from
+// the shell-metacharacter injection (CWE-78) escaping defends against. This is a real, if less famous, class
+// of vulnerability: rsync's `--rsh=<cmd>` runs an arbitrary command as the remote shell, tar's
+// `--checkpoint-action=exec=<cmd>` does the same, and many other tools have an option that reaches a shell,
+// a file write, or worse.
+//
+// Escaping never protects here -- correctly-shell-quoted text can still start with `-`. What DOES protect it:
+//   - a literal `--` element earlier in the SAME argv array (the POSIX end-of-options marker every well-behaved
+//     CLI parser honors: everything after it is a positional argument, never a flag) -- checked by the caller,
+//     one array at a time, since it is about SIBLING elements, not this element's own construction;
+//   - a non-empty LITERAL prefix within this element's OWN text (`"./" + name`, `"--file=" + name`) -- the
+//     result can't start with `-` if something real comes before the attacker-controlled part.
+// An opaque-but-UNTAINTED prefix (a config value, a constant) does NOT count: its content is unknown, and
+// nothing rules out it being empty at runtime, so a tainted part right after it could still land first.
+
+export interface ArgInjectionAssessment<N> {
+  verdict: PositionVerdict;
+  /** For "vulnerable": the operand that could be read as a flag by the target program. */
+  culprit?: N;
+}
+
+/**
+ * Decide ONE argv element, in isolation: could the attacker-controlled part of it be the element's first
+ * character? `maskOf` is the engine's own taint evaluation at the sink; the CONTROL bit (see taintCore.ts) is
+ * "the caller chose this value" -- exactly what matters here, and unlike the injection classes it survives
+ * both a numeric coercion and a shell-escape untouched, since neither stops a value from starting with `-`.
+ */
+export function assessArgumentInjection<N>(parts: readonly UrlPart<N>[], maskOf: (node: N) => number): ArgInjectionAssessment<N> {
+  let leadingDashRuledOut = false;
+  for (const part of parts) {
+    if (part.kind === "literal") {
+      if (part.text.length > 0) leadingDashRuledOut = true;
+      continue;
+    }
+    if (leadingDashRuledOut) continue;
+    if ((maskOf(part.node) & SinkClass.CONTROL) !== 0) return { verdict: "vulnerable", culprit: part.node };
+  }
+  return { verdict: "no-taint" };
+}

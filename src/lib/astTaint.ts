@@ -32,12 +32,12 @@ import {
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
-import { assessSqlInjection, assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
+import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
 
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack"
-  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check";
+  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check" | "argument-injection";
 
 export interface AstTaintFinding {
   id:         AstTaintId;
@@ -182,6 +182,38 @@ function decomposeConcatExpr(e: ts.Expression): UrlPart<ts.Expression>[] {
     return [...decomposeConcatExpr(e.left), ...decomposeConcatExpr(e.right)];
   }
   return [{ kind: "opaque", node: e }];
+}
+
+// spawn(cmd, [...args])/execFile(cmd, [...args])/fork(modulePath, [...args]): each ARGV ELEMENT is its own
+// argument (no shell in between, even without shell:true), so a shell-quoting sanitizer does nothing for it --
+// only the argument-injection position model (a literal `--` element, or a literal prefix within the element
+// itself) can rule out the attacker choosing a leading `-`. See taint/sinkShape.ts.
+const ARGV_ARRAY_SINK_NAMES = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
+
+/** The first argv-array element (if any) an attacker could make start with `-`, for a spawn/execFile/fork call
+ * -- shared by the main scan's checkArgumentInjection and the cross-file summary walk's directSinkHit, so the
+ * two can't drift on what counts (mirrors matchSink's own single-source-of-truth role for its sink table). */
+function findArgumentInjectionCulprit(
+  call: ts.CallExpression, importMap: Map<string, string>, maskOf: (n: ts.Expression) => number,
+): { culprit: ts.Expression; calleeName: string } | null {
+  const calleeName = calleeText(call.expression);
+  if (!calleeName) return null;
+  const parts = calleeName.split(".");
+  const tail = parts[parts.length - 1];
+  const resolvedModule = importMap.get(parts[0]);
+  // Same recognition breadth as command-injection's own matchSink (a qualified call, an import resolved
+  // to child_process, or a bare call whose name is itself one of the known sink names).
+  if (!ARGV_ARRAY_SINK_NAMES.has(tail) || !(resolvedModule === "child_process" || parts.length > 1 || ARGV_ARRAY_SINK_NAMES.has(calleeName))) return null;
+  const argsArray = call.arguments[1];
+  if (!argsArray || !ts.isArrayLiteralExpression(argsArray)) return null;
+  let pastDashDash = false;
+  for (const el of argsArray.elements) {
+    if (ts.isStringLiteralLike(el) && el.text === "--") { pastDashDash = true; continue; }
+    if (pastDashDash || isFunctionExpr(el)) continue;
+    const assessment = assessArgumentInjection(decomposeConcatExpr(el), maskOf);
+    if (assessment.verdict === "vulnerable") return { culprit: assessment.culprit!, calleeName };
+  }
+  return null;
 }
 
 /** `res.type("html").send` -> "res.send" (root must be a response-shaped identifier, every hop a fluent helper). */
@@ -1173,6 +1205,10 @@ function directSinkHit(
       if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
       if (sql.verdict === "safe") positionCleared = match.args[0];
     }
+    if (match.id === "command-injection") {
+      const argInj = findArgumentInjectionCulprit(n, importMap, x => maskFn(x, env));
+      if (argInj) return { id: "argument-injection", sinkExpr: argInj.calleeName };
+    }
     for (const a of match.args) {
       if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors checkCallForSink)
       if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
@@ -1475,6 +1511,7 @@ const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   // Fallback only -- collectBolaFindings always passes a severityOverride (medium for a read
   // verb, high for write/unknown), same convention as every other engine's BOLA detector.
   "bola-missing-ownership-check": "high",
+  "argument-injection": "high",
 };
 const LABEL: Record<AstTaintId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -1484,6 +1521,7 @@ const LABEL: Record<AstTaintId, string> = {
   "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
   "prototype-pollution": "Prototype Pollution", "jwt-none-alg": "JWT Signature Not Verified",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
+  "argument-injection": "Argument Injection",
 };
 
 /**
@@ -2306,6 +2344,13 @@ export function scanAstTaint(
       }
     };
 
+    const checkArgumentInjection = (call: ts.CallExpression, env: Env) => {
+      const found = findArgumentInjectionCulprit(call, importMap, n => taintMask(n, env));
+      if (!found) return;
+      emit("argument-injection", call, sourceLabel(found.culprit), found.calleeName, found.culprit,
+        `Attacker-controlled value '${sourceLabel(found.culprit)}' is passed as its own argv element to ${found.calleeName}(...) with no preceding '--' -- if it starts with '-', the target program reads it as a FLAG, not data (e.g. rsync's --rsh, tar's --checkpoint-action), regardless of shell-quoting`);
+    };
+
     const checkCallForSink = (call: ts.CallExpression, env: Env) => {
       if (ts.isIdentifier(call.expression) && (call.expression.text === "eval" || evalAliases.has(call.expression.text))) {
         emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", call.expression.text, call.arguments[0]);
@@ -2467,6 +2512,7 @@ export function scanAstTaint(
     const onVisit = (n: ts.Node, env: Env) => {
       if (ts.isCallExpression(n)) {
         checkCallForSink(n, env);
+        checkArgumentInjection(n, env);
         checkCrossFileSinks(n, env);
         // Same-file call binding: seed callee params for tainted args, one hop.
         // Matched by INDEX (via paramShapesOf, including rest-param

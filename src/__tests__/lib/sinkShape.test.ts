@@ -1,4 +1,4 @@
-import { assessSqlInjection, assessSsrfUrl, hostPinned, insideOpenAuthority, insideSqlStringLiteral } from "@/lib/taint/sinkShape";
+import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, hostPinned, insideOpenAuthority, insideSqlStringLiteral } from "@/lib/taint/sinkShape";
 import type { UrlPart } from "@/lib/taint/sinkShape";
 import {
   ALL, applyClears, applySanitizer, isSqlEscapeClears, isTaintedMask, isUrlEncoderClears, KIND_POSITION_SENSITIVE,
@@ -259,5 +259,62 @@ describe("KIND_POSITION_SENSITIVE is shared: escaping SQL sets the same bit URL-
     // the SSRF position model must not be confused by a value that happens to carry the shared kind bit
     // for an unrelated class: it only asks about SinkClass.SSRF, which this value was never cleared for
     expect(assessSsrfUrl([op(enc)], m => m).verdict).toBe("no-taint");
+  });
+});
+
+// ── Argument injection (CWE-88): a shell-quoted value can still be read as a FLAG by the target program ──
+type ArgP = UrlPart<number>;
+const argLit = (text: string): ArgP => ({ kind: "literal", text });
+const argOp = (mask: number): ArgP => ({ kind: "opaque", node: mask });
+const argVerdict = (...parts: ArgP[]) => assessArgumentInjection(parts, m => m).verdict;
+
+const ARG_TAINTED = ALL;                                    // straight from a request: has CONTROL set
+const ARG_ESCAPED = applySanitizer(ALL, SinkClass.CMD);      // shlex.quote/escapeshellarg: CONTROL untouched
+const ARG_COERCED = applySanitizer(ALL, ALL & ~SinkClass.CONTROL);   // parseInt: NUMERIC deliberately spares CONTROL
+const ARG_GUARDED = applyClears(ALL, ALL);                   // an allowlist/regex guard: clears CONTROL too
+
+describe("assessArgumentInjection: a tainted element with no literal prefix can start with a dash", () => {
+  it("the whole element is the tainted value", () => {
+    expect(argVerdict(argOp(ARG_TAINTED))).toBe("vulnerable");
+  });
+  it("shell-escaping does not help -- CONTROL is untouched by shlex.quote/escapeshellarg", () => {
+    expect(argVerdict(argOp(ARG_ESCAPED))).toBe("vulnerable");
+  });
+  it("a numeric coercion does not help either -- a negative number still starts with '-'", () => {
+    expect(argVerdict(argOp(ARG_COERCED))).toBe("vulnerable");
+  });
+});
+
+describe("assessArgumentInjection: a non-empty literal prefix within the element rules out a leading dash", () => {
+  it("a literal path prefix (the common './' + name defence)", () => {
+    expect(argVerdict(argLit("./"), argOp(ARG_TAINTED))).toBe("no-taint");
+  });
+  it("a literal flag=value prefix", () => {
+    expect(argVerdict(argLit("--file="), argOp(ARG_ESCAPED))).toBe("no-taint");
+  });
+  it("an empty literal does not count as a prefix", () => {
+    expect(argVerdict(argLit(""), argOp(ARG_TAINTED))).toBe("vulnerable");
+  });
+  it("a literal AFTER the tainted part does not retroactively protect it", () => {
+    expect(argVerdict(argOp(ARG_TAINTED), argLit("/suffix"))).toBe("vulnerable");
+  });
+});
+
+describe("assessArgumentInjection: an untainted-but-OPAQUE prefix does not count (its content, and emptiness, are unknown)", () => {
+  it("a trusted config value ahead of a tainted part is not enough", () => {
+    expect(argVerdict(argOp(0), argOp(ARG_TAINTED))).toBe("vulnerable");
+  });
+});
+
+describe("assessArgumentInjection: a guard clears CONTROL too -- genuinely safe", () => {
+  it("an allowlist-checked value is safe even with no literal prefix", () => {
+    expect(argVerdict(argOp(ARG_GUARDED))).toBe("no-taint");
+  });
+});
+
+describe("assessArgumentInjection: nothing attacker-influenced", () => {
+  it("literal-only, or no parts at all", () => {
+    expect(argVerdict()).toBe("no-taint");
+    expect(argVerdict(argLit("--verbose"))).toBe("no-taint");
   });
 });

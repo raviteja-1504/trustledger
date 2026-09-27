@@ -115,6 +115,12 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0.56, cwe:"CWE-78",
   },
+  // Real impact depends on the TARGET PROGRAM's own flags (rsync --rsh, tar --checkpoint-action, ...) rather
+  // than guaranteed shell metacharacter execution -- lower C/I/A than command-injection, same reachability shape.
+  "argument-injection": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.22, I:0.22, A:0.22, cwe:"CWE-88",
+  },
   "path-traversal": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0.56, I:0.22, A:0, cwe:"CWE-22",
