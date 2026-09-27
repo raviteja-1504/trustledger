@@ -566,12 +566,100 @@ public class A {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
-  it("suppresses when [Authorize] is present, regardless of method body", () => {
+  it("a bare [Authorize] proves authentication, not that the caller owns THIS object -- still reports", () => {
+    // Formerly fully suppressed: the old check asked only "is [Authorize] present", true of nearly
+    // every real endpoint, and unrelated to whether THIS resource id is checked at all.
     const content = `
 public class A {
   [Authorize]
   [HttpDelete("{id}")]
   public IActionResult DeleteUser([FromRoute] string id) {
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("[Authorize(Roles=\"Admin\")] is a real role control, but reports downgraded -- not full suppression", () => {
+    const content = `
+public class A {
+  [Authorize(Roles = "Admin")]
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].severityOverride).toBe("medium");
+    expect(found[0].detail).toMatch(/role\/permission check/);
+  });
+
+  it("[Authorize(Policy=\"ResourceOwner\")] -- the policy's NAME is judged like a guard name -- protects fully", () => {
+    const content = `
+public class A {
+  [Authorize(Policy = "ResourceOwner")]
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("[Authorize(Policy=\"AdminOnly\")] is role-only by its name, same as Roles=", () => {
+    const content = `
+public class A {
+  [Authorize(Policy = "AdminOnly")]
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].severityOverride).toBe("medium");
+  });
+
+  it("a guard call in the body handed the id is ownership-level even with no attribute at all", () => {
+    const content = `
+public class A {
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    if (!accessControl.CanAccess(id, User)) { return Forbid(); }
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a guard call testing only a role (no id in its arguments) is role-only", () => {
+    const content = `
+public class A {
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    if (!accessControl.HasPermission(User, "Admin")) { return Forbid(); }
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).toMatch(/role\/permission check/);
+  });
+
+  it("a role attribute PLUS a real ownership comparison in the body is fully proven", () => {
+    const content = `
+public class A {
+  [Authorize(Roles = "User")]
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    if (id != User.Identity.Name) { return Forbid(); }
     db.Users.Remove(id);
     return Ok();
   }

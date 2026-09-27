@@ -65,6 +65,7 @@ import {
   type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
 // See astTaintPython.ts's/astTaintGo.ts's identical helper for why:
 // require.resolve(...) from inside webpack-bundled code doesn't do real
@@ -823,23 +824,43 @@ function seedLocalMethodParams(calleeName: string, args: SyntaxNode[], env: Env,
 const HTTP_VERB_ATTRIBUTES: Record<string, "read" | "write"> = {
   HttpGet: "read", HttpPost: "write", HttpPut: "write", HttpDelete: "write", HttpPatch: "write",
 };
-const AUTH_SUPPRESS_ATTRIBUTES = new Set(["Authorize"]);
+// `[Authorize]` bare (no Roles/Policy) is AUTHENTICATION only -- "some signed-in user", not "THIS user
+// owns THIS object" -- and used to fully suppress the check by presence alone regardless. `Roles="Admin"`
+// is role evidence. `Policy="..."` is opaque (the policy's own handler, defined elsewhere, decides what it
+// checks) -- its NAME is judged the same way a guard function's name is (an ASP.NET Core convention: policy
+// names are usually descriptive, e.g. "ResourceOwner", "SameUser", "AdminOnly").
+const ROLES_ARG_RE = /\bRoles\s*=\s*"([^"]*)"/;
+const POLICY_ARG_RE = /\bPolicy\s*=\s*"([^"]*)"/;
+
+function authorizeEvidenceOf(attrText: string): Set<AuthzKind> {
+  const kinds = new Set<AuthzKind>();
+  for (const m of attrText.matchAll(/Authorize\s*(?:\(([^)]*)\))?/g)) {
+    const args = m[1] ?? "";
+    if (ROLES_ARG_RE.test(args)) kinds.add("role");
+    const policy = POLICY_ARG_RE.exec(args)?.[1];
+    if (policy) {
+      const kind = classifyGuardName(policy);
+      if (kind) kinds.add(kind);
+    }
+  }
+  return kinds;
+}
 
 interface MethodAuthMeta {
   isEndpoint: boolean;
   verbTier: "read" | "write" | "unknown";
-  suppressedByAuthAnnotation: boolean;
+  /** Evidence from [Authorize(Roles=...)]/[Authorize(Policy=...)] alone, independent of the method body. */
+  annotationEvidence: Set<AuthzKind>;
 }
 
-function extractMethodAuthMeta(attrNames: string[]): MethodAuthMeta {
+function extractMethodAuthMeta(attrNames: string[], attrText: string): MethodAuthMeta {
   let isEndpoint = false;
   let verbTier: MethodAuthMeta["verbTier"] = "unknown";
   for (const name of attrNames) {
     if (name in HTTP_VERB_ATTRIBUTES) { isEndpoint = true; verbTier = HTTP_VERB_ATTRIBUTES[name]; }
     if (name === "Route") isEndpoint = true;
   }
-  const suppressedByAuthAnnotation = attrNames.some(n => AUTH_SUPPRESS_ATTRIBUTES.has(n));
-  return { isEndpoint, verbTier, suppressedByAuthAnnotation };
+  return { isEndpoint, verbTier, annotationEvidence: authorizeEvidenceOf(attrText) };
 }
 
 function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
@@ -849,7 +870,8 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   // after it) so implicit-binding seeding below can gate on
   // authMeta.isEndpoint -- authMeta itself never depended on the params.
   const attrNames = attributeNamesOf(methodDecl);
-  const authMeta = extractMethodAuthMeta(attrNames);
+  const attrText = methodDecl.namedChildren.filter(c => c?.type === "attribute_list").map(c => c!.text).join(" ");
+  const authMeta = extractMethodAuthMeta(attrNames, attrText);
   const paramList = methodDecl.childForFieldName("parameters");
   const paramShapes: ParamShape[] = [];
   const sourceParamNames = new Set<string>();
@@ -1703,15 +1725,28 @@ function comparisonSuppresses(leftNode: SyntaxNode, rightNode: SyntaxNode, resou
   return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
 }
 
-type SideCS = "true" | "false";
+interface SideCS { holds: "true" | "false"; kind: AuthzKind }
 
-/** Which side(s) of `cond` establish that a resource id in `ids` equals the
- * authenticated principal (`==` holds on the true side, `!=` on the false
- * side; `!`/`&&`/`||` compose like validation guards do). An identifier
- * condition (`isOwner`) resolves ONE hop to its last preceding declaration
- * or assignment. */
+/** A guard call in the condition, judged by name (classifyGuardName) -- ownership-level when it's handed
+ * the resource id itself, role-level otherwise (`if (!accessControl.CanAccess(id, User)) ...` vs
+ * `if (!User.IsInRole("Admin"))`). */
+function guardCallSideCS(cond: SyntaxNode, ids: Set<string>): SideCS | null {
+  if (cond.type !== "invocation_expression") return null;
+  const fn = cond.childForFieldName("function");
+  const name = fn?.type === "member_access_expression" ? fn.childForFieldName("name")?.text : fn?.type === "identifier" ? fn.text : null;
+  const kind = name ? classifyGuardName(name) : null;
+  if (!kind) return null;
+  const args = argListOfCSharp(cond);
+  const mentionsId = args.some(a => findAllNodes(a, "identifier").some(n => ids.has(n.text)));
+  return { holds: "true", kind: kind === "role" && mentionsId ? "ownership" : kind };
+}
+
+/** Which side(s) of `cond` establish OWNERSHIP OR ROLE evidence for a resource id in `ids` -- `==`/`.Equals`
+ * hold on the true side, `!=` on the false side; `!`/`&&`/`||` compose like validation guards do. An
+ * identifier condition (`isOwner`) resolves ONE hop to its last preceding declaration or assignment. A
+ * bare guard-call condition (not itself a comparison) carries whatever classifyGuardName says it does. */
 function ownershipSidesCS(cond: SyntaxNode, ids: Set<string>, body: SyntaxNode, resolve = true): SideCS[] {
-  const flip = (s: SideCS): SideCS => (s === "true" ? "false" : "true");
+  const flip = (s: SideCS): SideCS => ({ holds: s.holds === "true" ? "false" : "true", kind: s.kind });
   switch (cond.type) {
     case "parenthesized_expression": {
       const inner = cond.namedChildren[0];
@@ -1727,9 +1762,9 @@ function ownershipSidesCS(cond: SyntaxNode, ids: Set<string>, body: SyntaxNode, 
       const l = cond.childForFieldName("left");
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
-      if (op === "==" || op === "!=") return comparisonSuppresses(l, r, ids) ? [op === "==" ? "true" : "false"] : [];
-      if (op === "&&") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s === "true");
-      if (op === "||") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s === "false");
+      if (op === "==" || op === "!=") return comparisonSuppresses(l, r, ids) ? [{ holds: op === "==" ? "true" : "false", kind: "ownership" }] : [];
+      if (op === "&&") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s.holds === "true");
+      if (op === "||") return [...ownershipSidesCS(l, ids, body, resolve), ...ownershipSidesCS(r, ids, body, resolve)].filter(s => s.holds === "false");
       return [];
     }
     case "invocation_expression": {
@@ -1737,11 +1772,12 @@ function ownershipSidesCS(cond: SyntaxNode, ids: Set<string>, body: SyntaxNode, 
       const args = argListOfCSharp(cond);
       if (fn?.type === "member_access_expression" && fn.childForFieldName("name")?.text === "Equals") {
         const receiver = fn.childForFieldName("expression");
-        if (args.length === 1 && receiver && comparisonSuppresses(receiver, args[0], ids)) return ["true"];
+        if (args.length === 1 && receiver && comparisonSuppresses(receiver, args[0], ids)) return [{ holds: "true", kind: "ownership" }];
         // string.Equals(a, b) / object.Equals(a, b)
-        if (args.length === 2 && comparisonSuppresses(args[0], args[1], ids)) return ["true"];
+        if (args.length === 2 && comparisonSuppresses(args[0], args[1], ids)) return [{ holds: "true", kind: "ownership" }];
       }
-      return [];
+      const guard = guardCallSideCS(cond, ids);
+      return guard ? [guard] : [];
     }
     case "identifier": {
       if (!resolve) return [];
@@ -1769,18 +1805,21 @@ function ownershipSidesCS(cond: SyntaxNode, ids: Set<string>, body: SyntaxNode, 
 }
 
 /**
- * Does an ownership comparison DOMINATE `sink`? It must (a) sit in an if
- * condition (or a ternary condition) that precedes the sink in source order
- * and (b) put the sink on the continuing path: the sink is in the arm where
- * the comparison establishes ownership, or the arm where it does not always
- * terminates (return/throw) and the sink comes after the whole if. A
- * comparison that is unused, follows the lookup, or guards a different branch
- * no longer suppresses.
+ * Does an ownership OR role comparison DOMINATE `sink`? It must (a) sit in an if condition (or a ternary
+ * condition) that precedes the sink in source order and (b) put the sink on the continuing path: the sink
+ * is in the arm where the comparison establishes the evidence, or the arm where it does not always
+ * terminates (return/throw) and the sink comes after the whole if. A comparison that is unused, follows
+ * the lookup, or guards a different branch no longer suppresses. Returns the KIND of evidence that
+ * dominated (a role check downgrades rather than fully suppresses), or null if nothing does.
  */
-function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNode): boolean {
+function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNode): AuthzKind | null {
   const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
     !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
-  let found = false;
+  const kindOf = (sides: SideCS[], holds: "true" | "false"): AuthzKind => {
+    const matching = sides.filter(s => s.holds === holds);
+    return matching.some(s => s.kind === "ownership") ? "ownership" : "role";
+  };
+  let found: AuthzKind | null = null;
   const visit = (n: SyntaxNode) => {
     if (found) return;
     if (n.type === "if_statement" || n.type === "conditional_expression") {
@@ -1790,8 +1829,8 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
       if (cond && cond.endIndex <= sink.startIndex) {
         const sides = ownershipSidesCS(cond, ids, body);
         const afterIf = n.type === "if_statement" && sink.startIndex >= n.endIndex && contains(n.parent, sink);
-        if (sides.includes("true") && (contains(cons, sink) || (afterIf && statementTerminatesCS(alt)))) found = true;
-        if (sides.includes("false") && (contains(alt, sink) || (afterIf && statementTerminatesCS(cons)))) found = true;
+        if (sides.some(s => s.holds === "true") && (contains(cons, sink) || (afterIf && statementTerminatesCS(alt)))) found = kindOf(sides, "true");
+        if (sides.some(s => s.holds === "false") && (contains(alt, sink) || (afterIf && statementTerminatesCS(cons)))) found = kindOf(sides, "false");
       }
     }
     if (!found) for (const c of n.namedChildren) if (c) visit(c);
@@ -1810,7 +1849,6 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
 function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (!method.body) return;
   if (!method.authMeta.isEndpoint) return;
-  if (method.authMeta.suppressedByAuthAnnotation) return;
   if (method.resourceIdParamNames.size === 0) return;
 
   const candidates: BolaSinkCandidate[] = [];
@@ -1823,10 +1861,18 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
     checkBolaConstructorSinkCandidate(oc, method.resourceIdParamNames, candidates);
   }
 
-  const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
+  const baseSeverity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
   for (const c of candidates) {
-    if (ownershipDominatesCS(c.node, c.idNames, method.body)) continue;
-    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+    const evidence = new Set<AuthzKind>(method.authMeta.annotationEvidence);
+    const dominating = ownershipDominatesCS(c.node, c.idNames, method.body);
+    if (dominating) evidence.add(dominating);
+    const verdict = authzVerdict(evidence);
+    if (verdict === "proven") continue;
+    const roleOnly = verdict === "role-only";
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, roleOnly ? "medium" : baseSeverity,
+      roleOnly
+        ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check, but nothing establishes that the caller owns THIS object — a role limits who can reach the endpoint, not which objects they may read or change`
+        : undefined);
   }
 }
 
