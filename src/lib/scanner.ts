@@ -27,18 +27,27 @@ import { scoreExploitability }   from "./reachability";
 import type { ReachabilityReport } from "./reachability";
 import {
   parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
-  computeExportTaintSummary, buildImportBindings, collectReexports,
+  computeExportTaintSummary, computeExportSinkSummary, buildImportBindings, collectReexports,
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
 import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
-import type { TraceStep } from "./taint/taintCore";
+import { assignFingerprints } from "./findingIdentity";
+import { selectSsaFunctions } from "./ssaSelection";
+import { toAiProbability } from "./aiCalibration";
+import type { AiProbability, CalibrationMap } from "./aiCalibration";
+import { DEFAULT_AI_CALIBRATION } from "./aiCalibration.data";
+import { computeCrossFileReachable } from "./crossFileReachability";
+import type { ReachFile } from "./crossFileReachability";
+import { computeFileCacheKey, cloneAnalysis, sha256Hex } from "./incrementalCache";
+import type { CachedFileResult } from "./incrementalCache";
+import type { TraceStep, ParamSinkFact } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
-  computeExportTaintSummaryPy, collectImportEdgesPy,
+  computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy,
 } from "./astTaintPython";
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
@@ -143,10 +152,11 @@ export interface ScanIndicator {
   // astTaint.ts's buildTrace). Best-effort and may be a partial slice; absent for every other
   // language's findings and all regex-only ones.
   trace?: TraceStep[];
-  // Stable id for this exact finding, computed once over ALL of a file's indicators after they're
-  // assembled (see computeFingerprint below) -- unaffected by unrelated line-number shifts elsewhere
-  // in the file, changes if the actual flow (source/sink text) changes. Meant for cross-scan
-  // dedup/tracking (e.g. "is this the same finding as last PR's scan"), not for display.
+  // Stable id for this exact finding -- see findingIdentity.ts for the full design. Present on EVERY
+  // indicator (security findings, AI signals, and the PR-level post-pass ones), assigned after they are all
+  // assembled. Unaffected by unrelated line-number shifts; changes if the flow (source/sink text) or the
+  // enclosing function changes; two findings never share one (an ordinal breaks exact-duplicate ties), so
+  // acknowledging one can't silently acknowledge another. For cross-scan tracking, not for display.
   fingerprint?: string;
 }
 
@@ -5867,25 +5877,6 @@ function baseConfidence(ind: ScanIndicator): number {
   return c;
 }
 
-/**
- * Stable, cross-scan finding/flow id (see ScanIndicator.fingerprint's own docblock). Deliberately
- * excludes `line`: a finding survives unrelated code shifting its line number elsewhere in the file
- * (the normal case across two scans of a PR being updated), while still changing if the flow itself
- * changes -- sourceExpr/sinkExpr when the AST engine provided them (every language's wrapper above
- * threads these through now), else the matched line's own trimmed text, else `detail` as a last
- * resort (AI/style signals, which have no line at all). Language-agnostic: works identically for
- * every engine's findings without any of them needing to know fingerprints exist.
- */
-function computeFingerprint(filePath: string, indicator: ScanIndicator, lines: string[]): string {
-  const flowText = indicator.sourceExpr && indicator.sinkExpr
-    ? `${indicator.sourceExpr}=>${indicator.sinkExpr}`
-    : indicator.line && lines[indicator.line - 1] !== undefined
-      ? lines[indicator.line - 1]
-      : (indicator.detail ?? "");
-  const normalized = flowText.replace(/\s+/g, " ").trim();
-  return crypto.createHash("sha256").update(`${indicator.id}::${filePath}::${normalized}`).digest("hex").slice(0, 16);
-}
-
 // Attaches cwe/confidence/codeCategory evidence to security-scan indicators
 // (not AI-heuristic signals, which have their own explained_signals model).
 // category marks the file as vendored/minified or a test file -- see
@@ -6180,7 +6171,7 @@ function shouldAstParse(content: string, filePath: string): boolean {
 // path), not a proximity guess.
 function findAstTaintFindings(
   content: string, filePath: string, sourceFile: ts.SourceFile,
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string; sinks?: ParamSinkFact[] }>,
   suppressed?: SuppressedSink[],
   crossFileSources?: Map<string, ts.SourceFile>,
 ): ScanIndicator[] {
@@ -6196,8 +6187,9 @@ function findAstTaintFindings(
 function findAstTaintPythonFindings(
   content: string, filePath: string, rootNode: PySyntaxNode, suppressed?: SuppressedSink[],
   crossFileShapes?: Map<string, PyParamShape[]>,
+  crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
 ): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes).map(f => ({
+  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: f.severityOverride ?? astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6270,7 +6262,7 @@ export function analyzeFile(
   // imports still gets only ONE parse (shared) and TWO walks (Pass 1's
   // lightweight export-summary walk, this function's real walk), not two
   // parses.
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string; sinks?: ParamSinkFact[] }>,
   presparsedTs?: ts.SourceFile,
   // Cross-file REACHABILITY (JS/TS only, one hop) -- same batch-scoped,
   // runScan()-computed, not-persisted-on-FileAnalysis shape as
@@ -6292,6 +6284,9 @@ export function analyzeFile(
   // crosses a cross-file call can continue one real hop into the callee's own body. Read-only,
   // best-effort -- an absent map or entry simply stops a trace at that hop, never throws.
   crossFileSourcesTs?: Map<string, ts.SourceFile>,
+  // Python parameter -> sink facts for imported names (see ParamSinkFact) -- same batch-scoped,
+  // runScan()-computed, not-persisted shape as crossFileShapesPy above.
+  crossFileSinksPy?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6414,7 +6409,7 @@ export function analyzeFile(
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks) : []),
@@ -6556,7 +6551,8 @@ export function analyzeFile(
     }
   }
   const indicators = Array.from(byKey.values());
-  for (const i of indicators) i.fingerprint = computeFingerprint(file_path, i, lines);
+  // (Fingerprints are assigned further down, once EVERY indicator -- AI signals, attribution, watermark,
+  // behavioral, supply-chain -- exists and the enclosing-function resolver is defined. See findingIdentity.ts.)
 
   // AI detection — skipped for config/generated files
   let ai_percentage    = 0;
@@ -6677,6 +6673,9 @@ export function analyzeFile(
     }
     return "unknown";
   };
+  // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
+  // enclosing-function resolution is available, so this is the one place identities are minted.
+  assignFingerprints(indicators, { filePath: file_path, lines, enclosingFunction: resolveContainingFunction, fileLevelIds: FILE_LEVEL_INDICATOR_IDS });
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
     ? scoreExploitability(indicators, content, callGraph, resolveContainingFunction)
     : null;
@@ -6710,12 +6709,14 @@ export function analyzeFile(
   const ast_metrics = astResult.metrics;
   const ast_risks   = astResult.risks;
 
-  // SSA taint analysis on top-N most complex functions (capped for performance)
+  // SSA taint analysis on a bounded subset of the file's functions. Chosen by SECURITY EXPOSURE (functions that
+  // contain a finding, by severity), with complexity only as the tiebreak -- it used to be "the 3 most complex",
+  // which routinely skipped a short handler holding a real vulnerability in favour of complex utility code. See
+  // ssaSelection.ts for the ranking and the line budget that replaced the fixed count.
   const ssa_taint_paths: TaintPath[] = [];
-  if (indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0) {
-    const topFuncs = [...astResult.functions]
-      .sort((a, b) => b.complexity - a.complexity)
-      .slice(0, 3);
+  const securityIndicators = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id));
+  if (securityIndicators.length > 0) {
+    const topFuncs = selectSsaFunctions(astResult.functions, securityIndicators.map(i => ({ line: i.line, severity: i.severity })));
     for (const fn of topFuncs) {
       const bodyLines = extractFunctionBody(content, fn.line, fn.endLine);
       const ssaResult = buildSSA(bodyLines, fn.line);
@@ -6763,6 +6764,13 @@ export const AI_SIGNAL_IDS = new Set([
   "jsdoc-completeness","zero-debug-artifacts","import-exhaustiveness","ai-blast-radius",
 ]);
 
+// One-per-file signals with no line, whose `detail` carries volatile numbers ("42% match"): their
+// fingerprint is (rule id, file) only -- see findingIdentity.ts. The AI style signals above plus the
+// attribution/watermark/behavioral/supply-chain indicators analyzeFile appends after them.
+const FILE_LEVEL_INDICATOR_IDS: ReadonlySet<string> = new Set([
+  ...AI_SIGNAL_IDS, "ai-model-attribution", "watermark-detection", "behavioral-risk", "supply-chain-risk",
+]);
+
 export interface ScanSummary {
   total_security_findings:  number;
   critical_count:           number;
@@ -6791,7 +6799,19 @@ export interface ScanInput {
   branch?:            string;
   files:              Array<{ path: string; content: string }>;
   all_file_paths?:    string[];                // ALL paths in the PR (not just scannable ones) — for tooling detection
-  prev_hashes?:       Record<string, string>;  // incremental: path → previous content_hash; skip if unchanged
+  // Incremental reuse: the previous scan's ScanOutput.file_cache (path -> cached result). A file whose
+  // cache key still matches is NOT re-analyzed -- its cached analysis is reused and still included in
+  // ScanOutput.files, so every aggregate stays whole-PR. `files` must carry content for EVERY file (also
+  // the unchanged ones): unchanged files are still parsed for the cross-file import graph, and the key
+  // covers the callee content a cross-file flow depends on. See incrementalCache.ts for why a bare
+  // content-hash match is not enough. (Replaces the old `prev_hashes`, which dropped unchanged files.)
+  prev_results?:      Record<string, CachedFileResult>;
+  // Extra key material, e.g. the deploy's commit SHA, so a scanner release can never serve a previous
+  // release's cached findings even if SCAN_CACHE_VERSION was not bumped.
+  cache_namespace?:   string;
+  // Calibration map for turning the AI evidence score into a probability (see aiCalibration.ts). Omitted =
+  // the bundled default, which ships as none: the result then reports `ai_probability.status: "uncalibrated"`.
+  calibration?:       CalibrationMap | null;
   git_log?:           string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
   pr_metadata?:       PRMetadata;              // PR behavior signals (LOC, commits, timing)
   developer_baseline?: DeveloperBaseline;      // author's historical PR patterns (Phase 3)
@@ -7009,7 +7029,16 @@ export interface ScanOutput {
   trust_chain:          TrustChain;
   cross_file_consistency: CrossFileConsistency;
   compliance:           ComplianceReport;
-  skipped_unchanged:    number;  // incremental scan: files skipped because hash unchanged
+  skipped_unchanged:    number;  // incremental scan: files whose analysis was reused from prev_results
+  // Every file's reusable result (post-analyzeFile, pre-PR-level post-pass), for the caller to persist and
+  // pass back as prev_results next scan. Optional so hand-built ScanOutputs (api/scans) stay valid.
+  file_cache?:          Record<string, CachedFileResult>;
+  // The AI number, named for what it is. Identical to total_ai_percentage (kept for compatibility): an EVIDENCE
+  // SCORE -- monotone in how much AI-typical evidence was found, useful for ranking/thresholds, NOT a probability.
+  ai_evidence_score?:   number;
+  // The calibrated probability P(AI | evidence score) with a confidence interval -- or an explicit, reasoned
+  // "uncalibrated" (value null). Never a guess: see aiCalibration.ts.
+  ai_probability?:      AiProbability;
   semantic_graph:       SemanticGraph | null;
   git_provenance:       GitProvenanceSummary | null;
   ai_tooling:           AIToolingArtifact[];
@@ -7027,15 +7056,11 @@ function percentile(sorted: number[], p: number): number {
 export function runScan(input: ScanInput): ScanOutput {
   const start = Date.now();
 
-  // Incremental scanning: skip files whose content hash hasn't changed
-  let skipped_unchanged = 0;
-  const prev = input.prev_hashes ?? {};
-  const filesToScan = input.files.filter(f => {
-    if (!prev[f.path]) return true;
-    const hash = crypto.createHash("sha256").update(f.content).digest("hex");
-    if (hash === prev[f.path]) { skipped_unchanged++; return false; }
-    return true;
-  });
+  // Incremental scanning (see incrementalCache.ts). EVERY provided file participates in the cross-file
+  // import graph / semantic graph / aggregates -- what a valid cache entry skips is only the expensive
+  // per-file analyzeFile() pass below. (This used to filter unchanged files out of the whole scan.)
+  const allFiles = input.files;
+  const contentHashByPath = new Map(allFiles.map(f => [f.path, sha256Hex(f.content ?? "")]));
 
   // PR-level prior bias: when PR behavior or baseline deviation indicate strong
   // AI likelihood, give each file a small evidence boost via computeAIPercentage's
@@ -7064,7 +7089,7 @@ export function runScan(input: ScanInput): ScanOutput {
   // their own parallel blocks instead of overloading this one.
   const jsSourceFiles = new Map<string, ts.SourceFile>();
   const jsFileGraphs: FileGraph[] = [];
-  for (const f of filesToScan) {
+  for (const f of allFiles) {
     if (!shouldAstParse(f.content, f.path)) continue;
     const sf = parseSourceFile(f.content, f.path);
     jsSourceFiles.set(f.path, sf);
@@ -7079,6 +7104,9 @@ export function runScan(input: ScanInput): ScanOutput {
       })),
       reexports: collectReexports(sf),
       computeSummary: (incoming) => computeExportTaintSummary(f.content, f.path, sf, incoming as Map<string, ParamShape[]>),
+      // Which parameters of each export reach a sink (in its body, or transitively in another file's) -- the
+      // other half of a cross-file summary, so a wrapper that sinks its parameter and returns nothing is seen.
+      computeSinks: (inShapes, inSinks) => computeExportSinkSummary(f.content, f.path, sf, inShapes as Map<string, ParamShape[]>, inSinks),
     });
   }
 
@@ -7089,47 +7117,45 @@ export function runScan(input: ScanInput): ScanOutput {
   // resolveImportPath resolves `.`-relative and `@/`-aliased specifiers only; bare/package
   // specifiers return null and are silently skipped -- external package = out of graph, the same
   // boundary semanticGraph.ts's own cross-file mechanism already has, not a new limitation.
-  const allScanPaths = filesToScan.map(f => f.path);
+  const allScanPaths = allFiles.map(f => f.path);
   const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths));
-  const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath: string }>>;
+  const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath: string; sinks: ParamSinkFact[] }>>;
 
-  // Cross-file REACHABILITY bridge (Decision 1, one hop, JS/TS only) --
-  // file path -> names IN THAT FILE that are reachable because some OTHER
-  // file imports and calls them from a function already known-reachable
-  // there. A separate, smaller question from the taint bridge above ("is
-  // this imported function actually called from reachable code", not "does
-  // taint flow through this call"), so it stays its own loop rather than
-  // folding into resolveCrossFile. buildCallGraph(f.content) here is a
-  // second, isolated computation purely for this check -- analyzeFile()
-  // below still computes its own callGraph internally per file; threading a
-  // pre-built one through would have meant a THIRD optional analyzeFile
-  // param for a cheap, regex-based computation that's fine to run twice.
-  const crossFileReachableByFile = new Map<string, Set<string>>();
-  for (const f of filesToScan) {
+  // Cross-file REACHABILITY bridge (multi-hop, JS/TS only) -- file path -> names IN THAT FILE that are reachable
+  // because of code in OTHER files, including the local helpers those names call. A separate question from the
+  // taint bridge above ("is this imported function reachable from a request", not "does taint flow through
+  // it"), so it stays its own pass. The graph algorithm lives in crossFileReachability.ts -- a worklist over
+  // (file, name) nodes, so chains of any length, re-export barrels and cross-file-reached helpers all resolve
+  // (the old one-pass bridge stopped after one hop) -- and this block only builds its per-file inputs.
+  // buildCallGraph(f.content) is a second, isolated computation purely for this: analyzeFile() computes its own
+  // per file, and threading one through would add yet another optional param for a cheap regex pass.
+  const reachInputs: ReachFile[] = [];
+  for (const f of allFiles) {
     const sf = jsSourceFiles.get(f.path);
     if (!sf) continue;
-    const bindings = buildImportBindings(sf);
-    const callerGraph = buildCallGraph(f.content);
-    for (const b of bindings) {
-      const calleePath = resolveImportPath(f.path, b.moduleSpecifier, allScanPaths);
-      if (!calleePath) continue; // external package or unresolvable -- skip, never throw
-      const calledFromReachable = callerGraph.edges.some(
-        e => e.callee === b.localName && callerGraph.reachable.has(e.caller),
-      );
-      if (calledFromReachable) {
-        const set = crossFileReachableByFile.get(calleePath) ?? new Set<string>();
-        set.add(b.importedName);
-        crossFileReachableByFile.set(calleePath, set);
-      }
-    }
+    const graph = buildCallGraph(f.content);
+    reachInputs.push({
+      path: f.path,
+      edges: graph.edges,
+      reachable: graph.reachable,
+      imports: buildImportBindings(sf).map(b => ({
+        localName: b.localName, importedName: b.importedName, namespace: b.namespace,
+        resolvedPath: resolveImportPath(f.path, b.moduleSpecifier, allScanPaths), // null: external/unresolvable -- skipped
+      })),
+      reexports: collectReexports(sf).map(re => ({
+        publicName: re.publicName, importedName: re.importedName,
+        resolvedPath: resolveImportPath(f.path, re.moduleSpecifier, allScanPaths),
+      })),
+    });
   }
+  const crossFileReachableByFile = computeCrossFileReachable(reachInputs);
 
   // ── Cross-file taint bridge (Python): mirrors the JS/TS block above exactly, over
   // collectImportEdgesPy/resolvePythonImportPath/computeExportTaintSummaryPy instead -- see
   // taint/crossFile.ts's own docblock for the shared multi-hop algorithm.
   const pySourceFiles = new Map<string, PySyntaxNode>();
   const pyFileGraphs: FileGraph[] = [];
-  for (const f of filesToScan) {
+  for (const f of allFiles) {
     if (detectLanguage(f.path) !== "python" || !isPythonParserReady()) continue;
     const root = parsePythonSourceSync(f.content, f.path);
     if (!root) continue;
@@ -7146,6 +7172,7 @@ export function runScan(input: ScanInput): ScanOutput {
       })),
       reexports: [], // Python has no re-export statement equivalent to JS/TS's `export ... from`
       computeSummary: (incoming) => computeExportTaintSummaryPy(f.content, f.path, root, incoming as Map<string, PyParamShape[]>),
+      computeSinks: (inShapes, inSinks) => computeExportSinkSummaryPy(f.content, f.path, root, inShapes as Map<string, PyParamShape[]>, inSinks),
     });
   }
   const pyBridge = resolveCrossFile(pyFileGraphs, (from, spec) => {
@@ -7156,29 +7183,60 @@ export function runScan(input: ScanInput): ScanOutput {
   // scanAstTaintPython's crossFileShapes param is a bare name -> shapes map (no per-name
   // fromModule attribution needed downstream, unlike crossFilePropagatingByFile's JS/TS consumer).
   const pyShapesOnly = new Map<string, Map<string, PyParamShape[]>>();
+  // Parameter -> sink facts per imported name (only names that have any), for scanAstTaintPython's call-site check.
+  const pySinksByFile = new Map<string, Map<string, { sinks: ParamSinkFact[]; fromModule: string }>>();
+  for (const [path, entries] of pyBridge.propagatingByFile) {
+    const withSinks = new Map<string, { sinks: ParamSinkFact[]; fromModule: string }>();
+    for (const [name, e] of entries) if (e.sinks.length > 0) withSinks.set(name, { sinks: e.sinks, fromModule: e.fromModule });
+    if (withSinks.size > 0) pySinksByFile.set(path, withSinks);
+  }
   for (const [path, entries] of crossFileShapesPyByFile) {
     pyShapesOnly.set(path, new Map([...entries].map(([name, info]) => [name, info.shapes])));
   }
 
-  const files = filesToScan.map(f =>
-    analyzeFile(
-      f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
-      crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
-    ),
-  );
+  // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
+  // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
+  // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
+  // what makes an unchanged caller re-analyze when its callee changed.
+  const namespace = input.cache_namespace ?? "";
+  const file_cache: Record<string, CachedFileResult> = {};
+  let skipped_unchanged = 0;
+  const files = allFiles.map(f => {
+    const cache_key = computeFileCacheKey({
+      namespace, path: f.path, contentHash: contentHashByPath.get(f.path)!, prPriorBias,
+      jsCrossFile: crossFilePropagatingByFile.get(f.path),
+      contentHashOf: p => contentHashByPath.get(p),
+      crossFileReachable: crossFileReachableByFile.get(f.path),
+      pyCrossFile: pyShapesOnly.get(f.path),
+      pySinks: pySinksByFile.get(f.path),
+    });
+    const cached = input.prev_results?.[f.path];
+    const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
+      ? (skipped_unchanged++, cloneAnalysis(cached.analysis))
+      : analyzeFile(
+          f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
+          crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
+          pySinksByFile.get(f.path),
+        );
+    // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
+    // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
+    // file receive those indicators a second time, since the post-passes re-run over the full set each scan.
+    file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
+    return analysis;
+  });
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────
   // Built early so cross-file taint propagation can inject indicators into
   // `files` before per-file/overall risk is computed below.
   const parseMap = new Map(
-    filesToScan.map(f => [f.path, parseAst(f.content, detectLanguage(f.path))])
+    allFiles.map(f => [f.path, parseAst(f.content, detectLanguage(f.path))])
   );
   const aiScoreMap = new Map(files.map(f => [f.file_path, f.ai_percentage]));
   const taintFiles = new Set(
     files.filter(f => f.ssa_taint_paths.length > 0).map(f => f.file_path)
   );
   const semantic_graph = buildSemanticGraph(
-    filesToScan.map(f => f.path), parseMap, aiScoreMap, taintFiles,
+    allFiles.map(f => f.path), parseMap, aiScoreMap, taintFiles,
   );
 
   // Cross-file taint exposure: flag files that directly import a symbol from
@@ -7202,6 +7260,11 @@ export function runScan(input: ScanInput): ScanOutput {
     f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));
     f.risk_score = calculateRisk(f.indicators, f.ai_percentage);
   }
+
+  // The two post-passes above append line-less indicators (cross-file-taint-exposure, ai-blast-radius)
+  // that analyzeFile never saw. Mint their identities now -- fill-only, so every id assigned during
+  // analyzeFile (including ones reused from the cache) is left exactly as it was.
+  for (const f of files) assignFingerprints(f.indicators, { filePath: f.file_path, fileLevelIds: FILE_LEVEL_INDICATOR_IDS });
 
   // Weighted AI % (large files dominate)
   const totalLines = files.reduce((s, f) => s + f.line_count, 0);
@@ -7421,6 +7484,15 @@ export function runScan(input: ScanInput): ScanOutput {
   };
 
 
+  // The multi-signal combined score is the primary AI metric. Guarded against NaN: any NaN in the sub-calculations
+  // falls back to the code-only score.
+  const total_ai_percentage = (() => {
+    const blended = evidence_breakdown.combined;
+    const fallback = Number.isFinite(boostedAI) ? boostedAI : avgAI;
+    if (!Number.isFinite(blended)) return Number.isFinite(fallback) ? fallback : 0;
+    return blended > fallback ? blended : fallback;
+  })();
+
   return {
     scan_id,
     repo:                 input.repo,
@@ -7429,12 +7501,9 @@ export function runScan(input: ScanInput): ScanOutput {
     overall_risk:         overallRisk,
     // Use multi-signal combined score as the primary AI likelihood metric.
     // Guarded against NaN: any NaN in sub-calculations falls back to code-only.
-    total_ai_percentage: (() => {
-      const blended = evidence_breakdown.combined;
-      const fallback = Number.isFinite(boostedAI) ? boostedAI : avgAI;
-      if (!Number.isFinite(blended)) return Number.isFinite(fallback) ? fallback : 0;
-      return blended > fallback ? blended : fallback;
-    })(),
+    total_ai_percentage,
+    ai_evidence_score:   total_ai_percentage,
+    ai_probability:      toAiProbability(total_ai_percentage, input.calibration === undefined ? DEFAULT_AI_CALIBRATION : input.calibration),
     cross_file_ai_boost:  crossFileBoost,
     mixed_authorship:     mixedAuthorship,
     scan_quality,
@@ -7447,6 +7516,7 @@ export function runScan(input: ScanInput): ScanOutput {
     cross_file_consistency,
     compliance,
     skipped_unchanged,
+    file_cache,
     semantic_graph,
     git_provenance,
     ai_tooling,

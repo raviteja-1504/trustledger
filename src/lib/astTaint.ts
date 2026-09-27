@@ -27,10 +27,12 @@
 
 import * as ts from "typescript";
 import {
-  ALL, applyClears, applyGuards, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
-  SHADOW, wasCleared, type Arm, type Guard, type SuppressedSink, type TaintEnv, type TraceStep,
+  ALL, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
+  SHADOW, mergeSinkFacts, wasCleared, type Arm, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
+import { assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
 
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
@@ -161,6 +163,23 @@ function unwrapExpr(e: ts.Expression): ts.Expression {
   while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) ||
          ts.isTypeAssertionExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression;
   return e;
+}
+
+/** A URL expression as ordered literal / opaque parts: template literals and `+` chains are split, anything else is one opaque operand. */
+function decomposeUrlExpr(e: ts.Expression): UrlPart<ts.Expression>[] {
+  e = unwrapExpr(e);
+  if (ts.isStringLiteralLike(e)) return [{ kind: "literal", text: e.text }];
+  if (ts.isTemplateExpression(e)) {
+    const parts: UrlPart<ts.Expression>[] = [{ kind: "literal", text: e.head.text }];
+    for (const span of e.templateSpans) {
+      parts.push(...decomposeUrlExpr(span.expression), { kind: "literal", text: span.literal.text });
+    }
+    return parts;
+  }
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return [...decomposeUrlExpr(e.left), ...decomposeUrlExpr(e.right)];
+  }
+  return [{ kind: "opaque", node: e }];
 }
 
 /** `res.type("html").send` -> "res.send" (root must be a response-shaped identifier, every hop a fluent helper). */
@@ -424,6 +443,21 @@ function rootIdentifier(e: ts.Expression): ts.Identifier | null {
  * into a module-level array/Map/object from one handler is visible when any
  * handler reads it back (stored XSS, second-order SQL).
  */
+/**
+ * The bare function name a call resolves to when looking up a RETURN-propagation summary: an identifier, or
+ * the property name of `this.x()` / `obj.x()` unless x is a builtin method (`.map`, `.push`, ...). Loose on
+ * purpose (recall-biased): a wrong match only ever taints a value. Sink facts REPORT findings, so they use the
+ * stricter makeSinkCalleeResolver below instead.
+ */
+function calleeFnName(callee: ts.Expression): string | null {
+  if (ts.isIdentifier(callee)) return callee.text;
+  if (ts.isPropertyAccessExpression(callee) &&
+      (callee.expression.kind === ts.SyntaxKind.ThisKeyword || !BUILTIN_METHOD_NAMES.has(callee.name.text))) {
+    return callee.name.text;
+  }
+  return null;
+}
+
 function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>) {
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
@@ -530,7 +564,7 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     const calleeName = calleeText(expr.expression);
     if (calleeName) {
       const clears = sanitizerClears("js", calleeName);
-      if (clears !== null) return expr.arguments[0] ? applyClears(taintMask(expr.arguments[0], env), clears) : 0;
+      if (clears !== null) return expr.arguments[0] ? applySanitizer(taintMask(expr.arguments[0], env), clears) : 0;
     }
     // Curated passthrough builtins (String, JSON.*, Buffer.from, path.*, Object.assign, ...): the result
     // is as tainted as the arguments. A decoder re-taints what an earlier encoder cleared.
@@ -545,11 +579,7 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     // the classes that survive the callee's own body (shape.mask) count.
     // Also resolves `obj.method(x)` / `this.method(x)` to a local class method by name.
     const callee = expr.expression;
-    const fnName = ts.isIdentifier(callee)
-      ? callee.text
-      : ts.isPropertyAccessExpression(callee) &&
-        (callee.expression.kind === ts.SyntaxKind.ThisKeyword || !BUILTIN_METHOD_NAMES.has(callee.name.text))
-        ? callee.name.text : null;
+    const fnName = calleeFnName(callee);
     if (fnName) {
       const shapes = propagating.get(fnName);
       if (shapes) {
@@ -1086,6 +1116,145 @@ function buildPropagatingMap(localFns: Map<string, LocalFn>, seed?: Map<string, 
   return propagating;
 }
 
+// ── Parameter -> sink summaries (see ParamSinkFact in taint/taintCore.ts for the why) ──────────────────
+
+/** Which of `args` a sink fact's parameter binds: one arg for a fixed param, every arg from the index for a rest param. */
+function argsForFact<A>(args: readonly A[], f: Pick<ParamSinkFact, "index" | "isRest">): A[] {
+  return f.isRest ? args.slice(f.index) : (args[f.index] !== undefined ? [args[f.index]] : []);
+}
+
+/**
+ * Which function a call targets, for looking up SINK facts. Stricter than calleeFnName: matching by bare
+ * property name (`client.query(x)` -> an imported `query`) is harmless for taint propagation but would turn
+ * into a false-positive FINDING here. A call resolves only when the target is unambiguous:
+ *   - a bare identifier `f(x)`;
+ *   - `this.f(x)` (a class's own method);
+ *   - `ns.f(x)` where `ns` is a namespace import / `require()` binding of another module;
+ *   - `obj.f(x)` only if `f` is a class method declared in THIS file (and not a builtin method name).
+ */
+function makeSinkCalleeResolver(localFns: ReadonlyMap<string, LocalFn>, namespaceLocals: ReadonlySet<string>) {
+  return (callee: ts.Expression): string | null => {
+    if (ts.isIdentifier(callee)) return callee.text;
+    if (!ts.isPropertyAccessExpression(callee)) return null;
+    const name = callee.name.text;
+    const recv = callee.expression;
+    if (recv.kind === ts.SyntaxKind.ThisKeyword) return name;
+    if (ts.isIdentifier(recv) && namespaceLocals.has(recv.text)) return name;
+    return localFns.get(name)?.isMethod && !BUILTIN_METHOD_NAMES.has(name) ? name : null;
+  };
+}
+
+/**
+ * Does `n`, evaluated under `env`, hand a value still dangerous for the sink's class to a sink? This is the
+ * summary walk's counterpart of scanAstTaint's checkCallForSink / checkAssignmentForXSS tainted-argument
+ * decision: the same matchSink table, the same per-class mask test, the same skip of callback arguments.
+ * It deliberately omits what a SUMMARY has no use for -- the HTML-context special cases (script/unquoted
+ * attribute escapes), the emit/dedup/trace bookkeeping and the suppressed-sink record -- so it stays a
+ * single small seam that crossFileSinkSummary.test.ts checks against the main scan's behaviour for every
+ * sink shape (a parity test, because two copies of a sink decision WILL drift without one).
+ */
+function directSinkHit(
+  n: ts.Node, env: Env, maskFn: TaintMaskFn, importMap: Map<string, string>,
+): { id: AstTaintId; sinkExpr: string } | null {
+  if (ts.isCallExpression(n)) {
+    const match = matchSink(n, importMap);
+    if (!match) return null;
+    const cls = classOf(match.id);
+    let urlPinned: ts.Expression | undefined;
+    if (match.id === "ssrf" && match.args[0]) {
+      const url = assessSsrfUrl(decomposeUrlExpr(match.args[0]), x => maskFn(x, env));
+      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (url.verdict === "safe") urlPinned = match.args[0];
+    }
+    for (const a of match.args) {
+      if (a === urlPinned) continue;   // host pinned by a literal (mirrors checkCallForSink)
+      if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
+      if (maskFn(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
+    }
+    return null;
+  }
+  if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(n.left)) {
+    const prop = n.left.name.text;
+    if ((prop === "innerHTML" || prop === "outerHTML") && (maskFn(n.right, env) & classOf("xss"))) {
+      return { id: "xss", sinkExpr: `.${prop}` };
+    }
+  }
+  return null;
+}
+
+/**
+ * For each parameter of `fn` INDEPENDENTLY (seed only that one, taint class ALL), which sinks does a walk of
+ * the body reach -- directly, or by forwarding the parameter to another function whose own facts are already
+ * known (`knownFacts`: this file's other functions from an earlier round, plus every imported name)?
+ * Independent seeding is sound for the same reason computeReturnTaintPropagating's is: the mask machinery is
+ * OR-shaped per class, so no parameter whose taint alone suffices is missed.
+ *
+ * Nested closures are not descended into (`descendFunctions: false`): a sink inside a callback runs later, on
+ * data the callback receives, not on this function's parameter -- the same scoping the return summary uses.
+ */
+function computeFnSinkFacts(
+  name: string, fn: LocalFn, maskFn: TaintMaskFn, importMap: Map<string, string>, filePath: string,
+  knownFacts: ReadonlyMap<string, readonly ParamSinkFact[]>, resolveCallee: (callee: ts.Expression) => string | null,
+): ParamSinkFact[] {
+  const sf = fn.body.getSourceFile();
+  const lineOf = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+  const out: ParamSinkFact[] = [];
+  for (const shape of paramShapesOf(fn)) {
+    const seed: Env = new Map([[shape.name, ALL]]);
+    const base = { index: shape.index, isRest: shape.isRest };
+    const onVisit = (n: ts.Node, env: Env) => {
+      const direct = directSinkHit(n, env, maskFn, importMap);
+      if (direct) {
+        mergeSinkFacts(out, [{ ...base, id: direct.id, sinkClass: classOf(direct.id), sinkExpr: direct.sinkExpr, file: filePath, line: lineOf(n), via: [name] }]);
+      }
+      if (!ts.isCallExpression(n)) return;
+      const calleeName = resolveCallee(n.expression);
+      const facts = calleeName ? knownFacts.get(calleeName) : undefined;
+      if (!facts) return;
+      for (const f of facts) {
+        for (const a of argsForFact(n.arguments, f)) {
+          if (isFunctionExpr(a)) continue;
+          if (maskFn(a, env) & f.sinkClass) {
+            // Forwarding: this parameter reaches the SAME original sink (file/line/expr unchanged) one call
+            // further out. `via` records the path for attribution only; it is not part of the fact's identity.
+            mergeSinkFacts(out, [{ ...base, id: f.id, sinkClass: f.sinkClass, sinkExpr: f.sinkExpr, file: f.file, line: f.line, via: [name, ...f.via] }]);
+          }
+        }
+      }
+    };
+    const walker = createWalker({ taintMask: maskFn, sf, descendFunctions: false, onVisit });
+    if (ts.isBlock(fn.body)) walker.walkNode(fn.body, seed);
+    else walker.handleExpr(fn.body, seed); // arrow expression body
+  }
+  return out;
+}
+
+/**
+ * Bounded fixed point over a file's functions (bottom-up, like buildPropagatingMap): round N lets a function
+ * see the facts its callees gained in round N-1, so A -> B -> C converges without an unbounded solve.
+ * Monotonic (facts are only ever added; the merge is a capped set-union), so it always settles; the round
+ * cap bounds worst-case cost only. `incomingSinks` seeds the imported names' facts (multi-file hops arrive
+ * through here, one cross-file round at a time -- see taint/crossFile.ts).
+ */
+function buildSinkFactsMap(
+  localFns: Map<string, LocalFn>, maskFn: TaintMaskFn, importMap: Map<string, string>, filePath: string,
+  incomingSinks: ReadonlyMap<string, readonly ParamSinkFact[]>, resolveCallee: (callee: ts.Expression) => string | null,
+): Map<string, ParamSinkFact[]> {
+  const facts = new Map<string, ParamSinkFact[]>();
+  const known = new Map<string, readonly ParamSinkFact[]>(incomingSinks);
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    for (const [name, fn] of localFns) {
+      const found = computeFnSinkFacts(name, fn, maskFn, importMap, filePath, known, resolveCallee);
+      if (found.length === 0) continue;
+      const list = facts.get(name) ?? [];
+      if (mergeSinkFacts(list, found)) { facts.set(name, list); known.set(name, list); changed = true; }
+    }
+    if (!changed) break;
+  }
+  return facts;
+}
+
 // Context-aware sanitizer checks: HTML-escaping neutralizes the HTML-BODY context specifically -- it
 // does NOT make a value safe inside a `<script>` block (still a JS string) or an UNQUOTED attribute
 // value (still breaks on whitespace/`=`/backticks, none of which `&lt;`/`&gt;`/`&amp;`/`&quot;`
@@ -1262,6 +1431,35 @@ export function computeExportTaintSummary(
   return summary;
 }
 
+/**
+ * The sink-fact counterpart of computeExportTaintSummary: for each EXPORTED name, which of its parameters
+ * reach a sink inside its body or, transitively, inside anything it calls (same-file, or another file via
+ * `incomingSinks`). `incomingShapes` is the return-propagation info for imported names, so a wrapper that
+ * pipes an imported helper's RETURN value into a sink (`db.execute(buildQuery(x))`) is seen too.
+ */
+export function computeExportSinkSummary(
+  content: string, filePath: string, presparsed?: ts.SourceFile,
+  incomingShapes?: Map<string, ParamShape[]>, incomingSinks?: Map<string, ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const summary = new Map<string, ParamSinkFact[]>();
+  try {
+    const sourceFile = presparsed ?? parseSourceFile(content, filePath);
+    const localFns = collectLocalFunctions(sourceFile);
+    const maskFn = makeTaintMask(buildPropagatingMap(localFns, incomingShapes));
+    const namespaceLocals = new Set(buildImportBindings(sourceFile).filter(b => b.namespace).map(b => b.localName));
+    const resolveCallee = makeSinkCalleeResolver(localFns, namespaceLocals);
+    const facts = buildSinkFactsMap(localFns, maskFn, buildImportMap(sourceFile), filePath, incomingSinks ?? new Map(), resolveCallee);
+    for (const [fnName, fn] of localFns) {
+      const f = facts.get(fnName);
+      if (!f || f.length === 0 || fn.exportedNames.length === 0) continue;
+      for (const name of fn.exportedNames) summary.set(name, f);
+    }
+  } catch (err) {
+    console.error(`[astTaint] threw computing export sink summary for ${filePath}:`, err);
+  }
+  return summary;
+}
+
 const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "critical",
   "ssrf": "critical", "path-traversal": "critical", "eval-exec": "critical", "open-redirect": "medium",
@@ -1412,6 +1610,14 @@ function objectLiteralReferencesResourceId(obj: ts.ObjectLiteralExpression, idNa
         const nested = objectLiteralReferencesResourceId(prop.initializer, idNames);
         if (nested) return nested;
       }
+      // `$and: [{ _id: id }, ...]` / `OR: [...]`: a filter combinator's branches are filters too
+      if (ts.isArrayLiteralExpression(prop.initializer)) {
+        for (const el of prop.initializer.elements) {
+          if (!ts.isObjectLiteralExpression(el)) continue;
+          const nested = objectLiteralReferencesResourceId(el, idNames);
+          if (nested) return nested;
+        }
+      }
     } else if (ts.isShorthandPropertyAssignment(prop) && idNames.has(prop.name.text)) {
       return prop.name;
     }
@@ -1446,13 +1652,211 @@ function collectBolaCandidates(fnBody: ts.Node, idNames: Set<string>): BolaCandi
   return candidates;
 }
 
-/** `x.getText() === principal-shaped` / `principal-shaped === x.getText()` (both `===`/`==`). */
-function isBolaOwnershipComparison(left: ts.Expression, right: ts.Expression, idNames: Set<string>): boolean {
-  const lIsRes = isBolaResourceIdExpr(left, idNames) || (ts.isIdentifier(left) && idNames.has(left.text));
-  const rIsRes = isBolaResourceIdExpr(right, idNames) || (ts.isIdentifier(right) && idNames.has(right.text));
-  const lIsPrin = BOLA_PRINCIPAL_RE.test(left.getText());
-  const rIsPrin = BOLA_PRINCIPAL_RE.test(right.getText());
-  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+/** What a handler's own body says about the principal and the objects it loads. */
+interface BolaCtx {
+  idNames: Set<string>;         // locals holding a resource id read from the request
+  principalNames: Set<string>;  // locals aliasing the authenticated principal (`const uid = req.user.id`)
+  recordNames: Set<string>;     // locals holding a record LOADED by the lookup under test (`const doc = await Doc.findById(id)`)
+  /** Only a comparison on the loaded record's owner counts (a check that runs AFTER the lookup can't be about the request id). */
+  recordOnly?: boolean;
+}
+
+/** `String(x)`, `x.toString()`, `Number(x)`, parens, `as`: wrappers that don't change WHICH value is compared. */
+function unwrapBolaCoercion(e: ts.Expression): ts.Expression {
+  for (;;) {
+    e = unwrapExpr(e);
+    if (ts.isCallExpression(e)) {
+      if (ts.isIdentifier(e.expression) && (e.expression.text === "String" || e.expression.text === "Number") && e.arguments.length === 1) {
+        e = e.arguments[0]; continue;
+      }
+      if (ts.isPropertyAccessExpression(e.expression) && (e.expression.name.text === "toString" || e.expression.name.text === "toHexString") && e.arguments.length === 0) {
+        e = e.expression.expression; continue;
+      }
+    }
+    return e;
+  }
+}
+
+function isBolaPrincipalExpr(e: ts.Expression, ctx: BolaCtx): boolean {
+  const u = unwrapBolaCoercion(e);
+  return (ts.isIdentifier(u) && ctx.principalNames.has(u.text)) || BOLA_PRINCIPAL_RE.test(u.getText());
+}
+
+/** `doc.owner`, `doc.ownerId`, `doc.user.id`: the owner column of a record the handler loaded. */
+function isBolaRecordOwnerExpr(e: ts.Expression, ctx: BolaCtx): boolean {
+  const u = unwrapBolaCoercion(e);
+  if (!ts.isPropertyAccessExpression(u)) return false;
+  const base = unwrapExpr(u.expression);
+  if (ts.isIdentifier(base) && ctx.recordNames.has(base.text) && isOwnerField(u.name.text)) return true;
+  return ts.isPropertyAccessExpression(base) && ts.isIdentifier(unwrapExpr(base.expression)) &&
+    ctx.recordNames.has((unwrapExpr(base.expression) as ts.Identifier).text) && isOwnerField(base.name.text) &&
+    (u.name.text === "id" || u.name.text === "_id");
+}
+
+/** An ownership comparison: the principal against EITHER the request's resource id (`id === req.user.id`) OR the
+ * owner column of the record that id loaded (`doc.owner !== req.user.id`). */
+function isBolaOwnershipComparison(left: ts.Expression, right: ts.Expression, ctx: BolaCtx): boolean {
+  const isRes = (e: ts.Expression) => (!ctx.recordOnly && isBolaResourceIdExpr(unwrapBolaCoercion(e), ctx.idNames)) || isBolaRecordOwnerExpr(e, ctx);
+  return (isRes(left) && isBolaPrincipalExpr(right, ctx)) || (isBolaPrincipalExpr(left, ctx) && isRes(right));
+}
+
+/** Locals bound from the authenticated principal: `const uid = req.user.id`, `const { id: uid } = req.user`. */
+function collectBolaPrincipalNames(fnBody: ts.Node): Set<string> {
+  const names = new Set<string>();
+  const visit = (n: ts.Node) => {
+    if (n !== fnBody && isFunctionLike(n)) return;
+    if (ts.isVariableDeclaration(n) && n.initializer && BOLA_PRINCIPAL_RE.test(unwrapBolaCoercion(n.initializer).getText())) {
+      if (ts.isIdentifier(n.name)) names.add(n.name.text);
+      else if (ts.isObjectBindingPattern(n.name)) {
+        for (const el of n.name.elements) if (ts.isIdentifier(el.name)) names.add(el.name.text);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fnBody);
+  return names;
+}
+
+/** Keys whose nested filters do NOT all have to hold (`$or`, `OR`, `NOT`): a principal condition under them scopes nothing. */
+const BOLA_NON_CONJUNCTIVE_KEY_RE = /^\$?(?:or|nor|not)$/i;
+
+/**
+ * Is the principal part of this query filter, ANDed with everything else? `{ _id: id, owner: req.user.id }`,
+ * `{ where: { id, userId: uid } }`, `{ user: { id: req.user.id } }`. An `$or`/`OR`/`NOT` branch does not count:
+ * `{ $or: [{ _id: id }, { owner: uid }] }` still returns other people's objects.
+ */
+function objectScopesToPrincipal(obj: ts.ObjectLiteralExpression, ctx: BolaCtx, underOwnerKey = false): boolean {
+  for (const prop of obj.properties) {
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      if (isOwnerField(prop.name.text) && ctx.principalNames.has(prop.name.text)) return true;
+      continue;
+    }
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const key = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : null;
+    if (key !== null && BOLA_NON_CONJUNCTIVE_KEY_RE.test(key)) continue;
+    const val = unwrapExpr(prop.initializer);
+    const ownerKey = underOwnerKey || (key !== null && isOwnerField(key));
+    if (ownerKey && isBolaPrincipalExpr(val, ctx)) return true;
+    if (ts.isObjectLiteralExpression(val) && objectScopesToPrincipal(val, ctx, ownerKey)) return true;
+    if (ts.isArrayLiteralExpression(val) && key !== null && /^\$?and$/i.test(key)) {
+      for (const el of val.elements) if (ts.isObjectLiteralExpression(el) && objectScopesToPrincipal(el, ctx, underOwnerKey)) return true;
+    }
+  }
+  return false;
+}
+
+/** The local a lookup's result is stored in: `const doc = await Doc.findById(id).lean().exec()` -> `doc`. */
+function bolaResultVarOf(call: ts.Node): string | null {
+  let cur: ts.Node = call;
+  for (;;) {
+    const p: ts.Node | undefined = cur.parent;
+    if (!p) return null;
+    if (ts.isAwaitExpression(p) || ts.isParenthesizedExpression(p) || ts.isNonNullExpression(p) || ts.isAsExpression(p)) { cur = p; continue; }
+    if (ts.isPropertyAccessExpression(p) && p.expression === cur && p.parent && ts.isCallExpression(p.parent) &&
+        ["exec", "lean", "populate", "select", "orFail"].includes(p.name.text)) { cur = p.parent; continue; }
+    if (ts.isVariableDeclaration(p) && p.initializer === cur && ts.isIdentifier(p.name)) return p.name.text;
+    return null;
+  }
+}
+
+/** The statement (child of a block / source file / case clause) that contains `node`. */
+function bolaEnclosingStatement(node: ts.Node): ts.Node {
+  let stmt: ts.Node = node;
+  while (stmt.parent && !ts.isBlock(stmt.parent) && !ts.isSourceFile(stmt.parent) && !ts.isCaseClause(stmt.parent) && !ts.isDefaultClause(stmt.parent)) stmt = stmt.parent;
+  return stmt;
+}
+
+/**
+ * A guard clause AFTER the lookup, in the same block, that compares the loaded record's owner to the principal and
+ * leaves on the failing side: `const d = await Doc.findById(id); if (String(d.ownerId) !== uid) return 403;`.
+ * Only sound for a lookup that does not mutate as it fetches (the caller checks) -- by the time such a check runs,
+ * an update/delete has already happened.
+ */
+function bolaPostCheckProtects(sink: ts.Node, ctx: BolaCtx, fnBody: ts.Node): boolean {
+  const stmt = bolaEnclosingStatement(sink);
+  const holder = stmt.parent;
+  if (!holder) return false;
+  const siblings: readonly ts.Node[] = ts.isBlock(holder) || ts.isSourceFile(holder) ? holder.statements : ts.isCaseClause(holder) || ts.isDefaultClause(holder) ? holder.statements : [];
+  for (const sib of siblings) {
+    if (sib.getStart() < stmt.getEnd() || !ts.isIfStatement(sib)) continue;
+    const sides = bolaOwnershipSides(sib.expression, ctx, fnBody);
+    if (sides.includes("true") && bolaStatementTerminates(sib.elseStatement)) return true;
+    if (sides.includes("false") && bolaStatementTerminates(sib.thenStatement)) return true;
+  }
+  return false;
+}
+
+const BOLA_PRINCIPAL_MENTION_RE = /\b(?:req|request)\.(?:user|auth|session)\b|\bres\.locals\.user\b|\bcurrentUser\b|\bprincipal\b/;
+
+function bolaCalleeName(call: ts.CallExpression): string | null {
+  const c = unwrapExpr(call.expression);
+  if (ts.isIdentifier(c)) return c.text;
+  if (ts.isPropertyAccessExpression(c)) return c.name.text;
+  return null;
+}
+
+/** Does `call` hand the OBJECT being accessed (its id, or the loaded record) to a guard? `can(user, "read", doc)`. */
+function bolaCallMentionsObject(call: ts.CallExpression, ctx: BolaCtx): boolean {
+  return call.arguments.some(a => {
+    const u = unwrapBolaCoercion(a);
+    if (isBolaResourceIdExpr(u, ctx.idNames)) return true;
+    let root: ts.Expression = u;
+    while (ts.isPropertyAccessExpression(root)) root = unwrapExpr(root.expression);
+    return ts.isIdentifier(root) && ctx.recordNames.has(root.text);
+  });
+}
+
+/**
+ * A guard clause in the handler that tests the principal's ROLE/permission (or calls a recognized guard function),
+ * before the lookup -- or after it, for a lookup that doesn't mutate. What it establishes depends on what it is
+ * handed: `isOwner(doc, user)` or `can(user, "read", doc)` name the object, so they are ownership-level;
+ * `user.role !== "admin"` does not, so it is role-level (a real control, but not proof about THIS object).
+ */
+function bolaGuardClauseKind(sink: ts.Node, ctx: BolaCtx, fnBody: ts.Node, allowAfter: boolean): { kind: AuthzKind; note: string } | null {
+  const contains = (outer: ts.Node | undefined, inner: ts.Node) => !!outer && inner.getStart() >= outer.getStart() && inner.getEnd() <= outer.getEnd();
+  let best: { kind: AuthzKind; note: string } | null = null;
+  const consider = (kind: AuthzKind, note: string) => { if (!best || (kind === "ownership" && best.kind !== "ownership")) best = { kind, note }; };
+  const visit = (n: ts.Node) => {
+    if (ts.isIfStatement(n) && (bolaStatementTerminates(n.thenStatement) || bolaStatementTerminates(n.elseStatement))) {
+      const before = n.getEnd() <= sink.getStart() && contains(n.parent, sink);
+      const after = allowAfter && n.getStart() >= bolaEnclosingStatement(sink).getEnd() && n.parent === bolaEnclosingStatement(sink).parent;
+      if (before || after) {
+        let calls = 0;
+        const scan = (c: ts.Node) => {
+          if (ts.isCallExpression(c)) {
+            const name = bolaCalleeName(c);
+            const kind = name ? classifyGuardName(name) : null;
+            if (kind) { calls++; consider(kind === "role" && bolaCallMentionsObject(c, ctx) ? "ownership" : kind, `${name}(...) guard`); }
+          }
+          ts.forEachChild(c, scan);
+        };
+        scan(n.expression);
+        const text = n.expression.getText();
+        if (calls === 0 && BOLA_PRINCIPAL_MENTION_RE.test(text) && mentionsRoleFeature(text)) consider("role", "a role/permission check on the principal");
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fnBody);
+  return best;
+}
+
+/** Route-level middleware: `app.get("/d/:id", requireOwner, handler)` / `authorize("admin")`, judged by name. */
+function bolaRouteGuardKinds(fn: ts.Node): Map<AuthzKind, string> {
+  const out = new Map<AuthzKind, string>();
+  const call = fn.parent;
+  if (!call || !ts.isCallExpression(call)) return out;
+  for (const arg of call.arguments) {
+    if (arg === fn) break;
+    const e = unwrapExpr(arg);
+    let name: string | null = null;
+    if (ts.isIdentifier(e)) name = e.text;
+    else if (ts.isPropertyAccessExpression(e)) name = e.name.text;
+    else if (ts.isCallExpression(e)) name = bolaCalleeName(e);
+    const kind = name ? classifyGuardName(name) : null;
+    if (kind && !out.has(kind)) out.set(kind, `route middleware '${name}'`);
+  }
+  return out;
 }
 
 type BolaSide = "true" | "false";
@@ -1460,30 +1864,30 @@ type BolaSide = "true" | "false";
 /** Which side(s) of `cond` establish ownership -- `===`/`==` holds on the true side, `!==`/`!=` on
  * the false side; `!`/`&&`/`||` compose like a validation guard does. A bare identifier resolves
  * ONE hop to its most recent preceding assignment in the same function body. */
-function bolaOwnershipSides(cond: ts.Expression, idNames: Set<string>, fnBody: ts.Node, resolve = true): BolaSide[] {
+function bolaOwnershipSides(cond: ts.Expression, ctx: BolaCtx, fnBody: ts.Node, resolve = true): BolaSide[] {
   const flip = (s: BolaSide): BolaSide => (s === "true" ? "false" : "true");
-  if (ts.isParenthesizedExpression(cond)) return bolaOwnershipSides(cond.expression, idNames, fnBody, resolve);
+  if (ts.isParenthesizedExpression(cond)) return bolaOwnershipSides(cond.expression, ctx, fnBody, resolve);
   if (ts.isPrefixUnaryExpression(cond) && cond.operator === ts.SyntaxKind.ExclamationToken) {
-    return bolaOwnershipSides(cond.operand, idNames, fnBody, resolve).map(flip);
+    return bolaOwnershipSides(cond.operand, ctx, fnBody, resolve).map(flip);
   }
   if (ts.isBinaryExpression(cond)) {
     const op = cond.operatorToken.kind;
     if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsToken) {
-      return isBolaOwnershipComparison(cond.left, cond.right, idNames) ? ["true"] : [];
+      return isBolaOwnershipComparison(cond.left, cond.right, ctx) ? ["true"] : [];
     }
     if (op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken) {
-      return isBolaOwnershipComparison(cond.left, cond.right, idNames) ? ["false"] : [];
+      return isBolaOwnershipComparison(cond.left, cond.right, ctx) ? ["false"] : [];
     }
     if (op === ts.SyntaxKind.AmpersandAmpersandToken) {
-      return [...bolaOwnershipSides(cond.left, idNames, fnBody, resolve), ...bolaOwnershipSides(cond.right, idNames, fnBody, resolve)].filter(s => s === "true");
+      return [...bolaOwnershipSides(cond.left, ctx, fnBody, resolve), ...bolaOwnershipSides(cond.right, ctx, fnBody, resolve)].filter(s => s === "true");
     }
     if (op === ts.SyntaxKind.BarBarToken) {
-      return [...bolaOwnershipSides(cond.left, idNames, fnBody, resolve), ...bolaOwnershipSides(cond.right, idNames, fnBody, resolve)].filter(s => s === "false");
+      return [...bolaOwnershipSides(cond.left, ctx, fnBody, resolve), ...bolaOwnershipSides(cond.right, ctx, fnBody, resolve)].filter(s => s === "false");
     }
     return [];
   }
   if (ts.isCallExpression(cond) && ts.isPropertyAccessExpression(cond.expression) && cond.expression.name.text === "equals" && cond.arguments.length === 1) {
-    return isBolaOwnershipComparison(cond.expression.expression, cond.arguments[0], idNames) ? ["true"] : [];
+    return isBolaOwnershipComparison(cond.expression.expression, cond.arguments[0], ctx) ? ["true"] : [];
   }
   if (ts.isIdentifier(cond) && resolve) {
     // one-hop resolution to the nearest preceding `const isOwner = ...;` in the same function body
@@ -1496,7 +1900,7 @@ function bolaOwnershipSides(cond: ts.Expression, idNames: Set<string>, fnBody: t
       ts.forEachChild(n, visit);
     };
     visit(fnBody);
-    return best ? bolaOwnershipSides((best as { end: number; expr: ts.Expression }).expr, idNames, fnBody, false) : [];
+    return best ? bolaOwnershipSides((best as { end: number; expr: ts.Expression }).expr, ctx, fnBody, false) : [];
   }
   return [];
 }
@@ -1516,18 +1920,18 @@ function bolaStatementTerminates(n: ts.Statement | undefined): boolean {
  * terminates (return/throw) and the sink comes after the whole if. A comparison that's unused,
  * follows the lookup, or guards a different branch no longer suppresses.
  */
-function bolaOwnershipDominates(sink: ts.Node, idNames: Set<string>, fnBody: ts.Node): boolean {
+function bolaOwnershipDominates(sink: ts.Node, ctx: BolaCtx, fnBody: ts.Node): boolean {
   const contains = (outer: ts.Node | undefined, inner: ts.Node) => !!outer && inner.getStart() >= outer.getStart() && inner.getEnd() <= outer.getEnd();
   let found = false;
   const visit = (n: ts.Node) => {
     if (found) return;
     if (ts.isIfStatement(n) && n.expression.getEnd() <= sink.getStart()) {
-      const sides = bolaOwnershipSides(n.expression, idNames, fnBody);
+      const sides = bolaOwnershipSides(n.expression, ctx, fnBody);
       const afterIf = sink.getStart() >= n.getEnd() && contains(n.parent, sink);
       if (sides.includes("true") && (contains(n.thenStatement, sink) || (afterIf && bolaStatementTerminates(n.elseStatement)))) found = true;
       if (sides.includes("false") && (contains(n.elseStatement, sink) || (afterIf && bolaStatementTerminates(n.thenStatement)))) found = true;
     } else if (ts.isConditionalExpression(n) && n.condition.getEnd() <= sink.getStart()) {
-      const sides = bolaOwnershipSides(n.condition, idNames, fnBody);
+      const sides = bolaOwnershipSides(n.condition, ctx, fnBody);
       if (sides.includes("true") && contains(n.whenTrue, sink)) found = true;
       if (sides.includes("false") && contains(n.whenFalse, sink)) found = true;
     }
@@ -1567,24 +1971,51 @@ function bolaVerbTier(fn: ts.Node): "read" | "write" | "unknown" {
   return "unknown";
 }
 
-function collectBolaFindings(sf: ts.SourceFile, findings: AstTaintFinding[], seen: Set<string>): void {
+function collectBolaFindings(sf: ts.SourceFile, findings: AstTaintFinding[], seen: Set<string>, suppressedOut?: SuppressedSink[]): void {
   for (const fn of collectBolaRequestHandlers(sf)) {
     const body = (fn as ts.FunctionLikeDeclaration).body;
     if (!body) continue;
     const idNames = collectBolaResourceIdNames(body);
+    const principalNames = collectBolaPrincipalNames(body);
     const candidates = collectBolaCandidates(body, idNames);
     if (candidates.length === 0) continue;
     const verbTier = bolaVerbTier(fn);
-    const severity: "medium" | "high" = verbTier === "read" ? "medium" : "high";
+    const baseSeverity: "medium" | "high" = verbTier === "read" ? "medium" : "high";
+    const routeGuards = bolaRouteGuardKinds(fn);
     for (const c of candidates) {
-      if (bolaOwnershipDominates(c.node, idNames, body)) continue;
+      const call = c.node as ts.CallExpression;
+      const method = ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text : "";
+      const mutates = isMutatingLookup(method);
+      const recordVar = bolaResultVarOf(call);
+      const ctx: BolaCtx = { idNames, principalNames, recordNames: new Set(recordVar ? [recordVar] : []) };
+
+      // What, if anything, establishes that THIS principal may touch THIS object?
+      const evidence = new Map<AuthzKind, string>();
+      const add = (kind: AuthzKind, why: string) => { if (!evidence.has(kind)) evidence.set(kind, why); };
+      for (const [kind, why] of routeGuards) add(kind, why);
+      if (bolaOwnershipDominates(call, ctx, body)) add("ownership", "the id is compared to the authenticated principal before the lookup");
+      if (call.arguments.some(a => ts.isObjectLiteralExpression(a) && objectScopesToPrincipal(a, ctx))) add("ownership", "the principal is part of the lookup's own filter");
+      if (!mutates && recordVar && bolaPostCheckProtects(call, { ...ctx, recordOnly: true }, body)) add("ownership", "the loaded record's owner is compared to the principal before it is used");
+      const guard = bolaGuardClauseKind(call, ctx, body, !mutates);
+      if (guard) add(guard.kind, guard.note);
+
       const line = bolaLineOf(sf, c.node);
+      const verdict = authzVerdict(new Set(evidence.keys()));
+      if (verdict === "proven") {
+        // The keyword-proximity regex `idor` finding is a duplicate of a lookup this engine proved protected.
+        suppressedOut?.push({ id: "idor", line });
+        continue;
+      }
       const key = `bola-missing-ownership-check:${line}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const roleOnly = verdict === "role-only";
       findings.push({
-        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr, severityOverride: severity,
-        detail: `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (req.user/req.session/req.auth) anywhere on the path that reaches it — real per-request-handler AST evidence, not a keyword-proximity guess`,
+        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr,
+        severityOverride: roleOnly ? "medium" : baseSeverity,
+        detail: roleOnly
+          ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check (${evidence.get("role")}), but nothing establishes that the caller owns THIS object — a role limits who can reach the endpoint, not which objects they may read or change`
+          : `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (req.user/req.session/req.auth) anywhere on the path that reaches it — real per-request-handler AST evidence, not a keyword-proximity guess`,
       });
     }
   }
@@ -1609,7 +2040,9 @@ function collectBolaFindings(sf: ts.SourceFile, findings: AstTaintFinding[], see
  */
 export function scanAstTaint(
   content: string, filePath: string, presparsed?: ts.SourceFile,
-  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }>,
+  // `sinks`: parameter -> sink facts for the imported name (see ParamSinkFact) -- consulted at call sites to
+  // report a tainted argument that reaches a sink INSIDE the imported function's body.
+  crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string; sinks?: ParamSinkFact[] }>,
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer -- lets scanner.ts drop the regex layer's
   // duplicate finding for a flow this engine proved safe. Optional out-param
@@ -1817,6 +2250,55 @@ export function scanAstTaint(
       return false;
     };
 
+    // ── Cross-file parameter -> sink facts (consumer side; see ParamSinkFact in taint/taintCore.ts) ──
+    // A call `runQuery(x)` to an IMPORTED function whose body -- or, through its own calls, another file's
+    // body -- sinks that parameter. Reported at THIS call site (the file under review), with the callee's
+    // real sink location in the trace. Resolution is the strict one: identifier or `ns.f()` of a namespace
+    // import only, so `client.query(x)` is never mistaken for an imported `query`.
+    const crossFileSinkFacts = new Map<string, { sinks: ParamSinkFact[]; fromModule: string }>();
+    if (crossFilePropagating) {
+      for (const [name, info] of crossFilePropagating) {
+        if (info.sinks && info.sinks.length > 0) crossFileSinkFacts.set(name, { sinks: info.sinks, fromModule: info.fromModule });
+      }
+    }
+    const namespaceLocals = crossFileSinkFacts.size > 0
+      ? new Set(buildImportBindings(sourceFile).filter(b => b.namespace).map(b => b.localName))
+      : new Set<string>();
+    const resolveSinkCallee = makeSinkCalleeResolver(new Map(), namespaceLocals);
+    const emitCrossFileSink = (call: ts.CallExpression, arg: ts.Expression, name: string, fromModule: string, fact: ParamSinkFact) => {
+      const line = lineOf(call);
+      const key = `${fact.id}:${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
+      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+      const trace = buildTrace(call, arg, sinkLabel);
+      trace.pop(); // buildTrace closes with a pseudo-"sink" step at THIS call site; the real sink is in the callee
+      trace.push(
+        { file: filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fromModule}${via}`, snippet: call.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) },
+        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+      );
+      findings.push({
+        id: fact.id as AstTaintId, line, sinkExpr: sinkLabel, sourceExpr: sourceLabel(arg),
+        detail: `Tainted expression '${sourceLabel(arg)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via "${name}" imported from ${fromModule}${via}] — real data-flow match across files, not a line-pattern guess`,
+        trace,
+      });
+    };
+    const checkCrossFileSinks = (call: ts.CallExpression, env: Env) => {
+      if (crossFileSinkFacts.size === 0) return;
+      const name = resolveSinkCallee(call.expression);
+      const info = name ? crossFileSinkFacts.get(name) : undefined;
+      if (!name || !info) return;
+      for (const fact of info.sinks) {
+        for (const a of argsForFact(call.arguments, fact)) {
+          if (isFunctionExpr(a)) continue;
+          const m = taintMask(a, env);
+          if (m & fact.sinkClass) { emitCrossFileSink(call, a, name, info.fromModule, fact); break; }
+          if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(call) });
+        }
+      }
+    };
+
     const checkCallForSink = (call: ts.CallExpression, env: Env) => {
       if (ts.isIdentifier(call.expression) && (call.expression.text === "eval" || evalAliases.has(call.expression.text))) {
         emit("eval-exec", call, call.arguments[0] ? sourceLabel(call.arguments[0]) : "eval", call.expression.text, call.arguments[0]);
@@ -1847,9 +2329,22 @@ export function scanAstTaint(
       const match = matchSink(call, importMap);
       if (!match) return;
       const cls = classOf(match.id);
-      let taintedArg: ts.Expression | undefined;
+      let urlPinned: ts.Expression | undefined;
       let cleared = false;
+      if (match.id === "ssrf" && match.args[0]) {
+        const url: SsrfAssessment<ts.Expression> = assessSsrfUrl(decomposeUrlExpr(match.args[0]), n => taintMask(n, env));
+        if (url.verdict === "vulnerable") {
+          const culprit = url.culprit!;
+          emit("ssrf", call, sourceLabel(culprit), match.sinkExpr, culprit, url.encoded
+            ? `URL-encoded value '${sourceLabel(culprit)}' is placed in the host position — encoding does not stop an attacker choosing the host`
+            : undefined);
+          return;
+        }
+        if (url.verdict === "safe") { urlPinned = match.args[0]; cleared = true; }
+      }
+      let taintedArg: ts.Expression | undefined;
       for (const a of match.args) {
+        if (a === urlPinned) continue;   // host pinned by a literal: this operand can't choose the target
         if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
         const m = taintMask(a, env);
         if (m & cls) { taintedArg = a; break; }
@@ -1954,6 +2449,7 @@ export function scanAstTaint(
     const onVisit = (n: ts.Node, env: Env) => {
       if (ts.isCallExpression(n)) {
         checkCallForSink(n, env);
+        checkCrossFileSinks(n, env);
         // Same-file call binding: seed callee params for tainted args, one hop.
         // Matched by INDEX (via paramShapesOf, including rest-param
         // overflow), not by re-deriving positions ad hoc here.
@@ -2014,7 +2510,7 @@ export function scanAstTaint(
 
     // Function-level patterns that are not source-to-sink flows.
     structuralChecks(sourceFile, content, (id, node, detail, sink) => emit(id, node, sink, sink, undefined, detail));
-    collectBolaFindings(sourceFile, findings, seen);
+    collectBolaFindings(sourceFile, findings, seen, suppressedOut);
 
     // Second pass, bounded worklist: re-walk any local function whose
     // parameters were seeded as tainted by a call site above, so a sink

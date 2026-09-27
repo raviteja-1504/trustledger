@@ -49,10 +49,12 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  ALL, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
+  type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
+import { assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 
 // webpack provides this global on Node.js targets specifically to escape its
 // own require() interception. Needed here because require.resolve(...) from
@@ -473,6 +475,37 @@ export function computeExportTaintSummaryPy(
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing export summary for ${filePath}:`, err);
+  }
+  return summary;
+}
+
+/**
+ * The sink-fact counterpart of computeExportTaintSummaryPy: for each module-level function (Python's implicit
+ * "exports"), which of its parameters reach a sink inside its body or, transitively, inside anything it calls
+ * (same file, or another file via `incomingSinks`). `incomingShapes` is the return-propagation info for imported
+ * names, so a wrapper that pipes an imported helper's RETURN value into a sink is seen too.
+ */
+export function computeExportSinkSummaryPy(
+  content: string, filePath: string, presparsed?: SyntaxNode | null,
+  incomingShapes?: Map<string, ParamShape[]>, incomingSinks?: Map<string, ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const summary = new Map<string, ParamSinkFact[]>();
+  try {
+    const root = presparsed ?? parsePythonSourceSync(content, filePath);
+    if (!root) return summary;
+    const localFns = collectLocalFunctionsPy(root);
+    const propagating = buildPropagatingMapPy(localFns, root, incomingShapes);
+    const namespaceLocals = new Set(collectImportEdgesPy(root).filter(e => e.namespace).map(e => e.localName));
+    const facts = buildSinkFactsMapPy(
+      localFns, propagating, root, incomingShapes, buildImportMapPy(root), filePath,
+      incomingSinks ?? new Map(), makeSinkCalleeResolverPy(namespaceLocals),
+    );
+    for (const name of moduleLevelFunctionNamesPy(root)) {
+      const f = facts.get(name);
+      if (f && f.length > 0) summary.set(name, f);
+    }
+  } catch (err) {
+    console.error(`[astTaintPython] threw computing export sink summary for ${filePath}:`, err);
   }
   return summary;
 }
@@ -935,7 +968,7 @@ function makeTaintMaskPy(
       // Known sanitizer: the argument's taint passes THROUGH minus only
       // the classes it actually neutralizes; opaque calls stay untainted.
       const clears = sanitizerClears("py", calleeName);
-      if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      if (clears !== null) return args[0] ? applySanitizer(taintMask(args[0], env), clears) : 0;
       // Curated passthrough builtins; a decoder re-taints what an earlier encoder cleared.
       if (PY_PASSTHROUGH.has(calleeName)) {
         const m = argsMask(args, env);
@@ -1403,6 +1436,139 @@ function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode,
   return propagating;
 }
 
+// ── Parameter -> sink summaries (mirror of astTaint.ts's; see ParamSinkFact in taint/taintCore.ts) ───────
+//
+// Same design as the JS/TS engine: for each parameter INDEPENDENTLY, which sinks does a walk of the body reach
+// -- directly, or by forwarding the parameter to another function whose facts are already known (this file's
+// other functions from an earlier round, plus every imported name). Bottom-up, so facts compose across calls
+// and files, and the finding lands at the CALL SITE in the file under review.
+
+/** Which of `args` a sink fact's parameter binds: one arg for a fixed param, every arg from the index for a rest param. */
+function argsForFactPy<A>(args: readonly A[], f: Pick<ParamSinkFact, "index" | "isRest">): A[] {
+  return f.isRest ? args.slice(f.index) : (args[f.index] !== undefined ? [args[f.index]] : []);
+}
+
+/**
+ * Which function a call targets, for looking up SINK facts. Stricter than the return-propagation lookup
+ * (which matches any non-builtin attribute name): a wrong match there only taints a value, but here it would
+ * become a false-positive FINDING. A call resolves only when the target is unambiguous:
+ *   - a bare identifier `f(x)`;
+ *   - `ns.f(x)` where `ns` is a namespace import (`import pkg.mod as ns` / `from pkg import mod`).
+ * `self.f(x)` / `obj.f(x)` deliberately do not resolve: only MODULE-LEVEL functions are exported (class-method
+ * summaries are out of scope, see moduleLevelFunctionNamesPy), and a module-level function has no `self`, so
+ * such a call can never be one that a cross-file summary is about.
+ */
+function makeSinkCalleeResolverPy(namespaceLocals: ReadonlySet<string>) {
+  return (fn: SyntaxNode | null): string | null => {
+    if (!fn) return null;
+    if (fn.type === "identifier") return fn.text;
+    if (fn.type !== "attribute") return null;
+    const { object, attribute } = attributeParts(fn);
+    return object?.type === "identifier" && attribute && namespaceLocals.has(object.text) ? attribute : null;
+  };
+}
+
+/**
+ * Does `node`, under `env`, hand a value still dangerous for the sink's class to a sink? The summary walk's
+ * counterpart of scanAstTaintPython's onCall sink check and its `response.headers[...] = x` onNode check:
+ * the same matchSinkPy table and per-class mask test, minus the HTML-context special cases and the emit/
+ * suppress bookkeeping a summary has no use for. One small seam, so crossFileSinkSummaryPy.test.ts can check
+ * it against the main scan shape by shape.
+ */
+function directSinkHitPy(
+  node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy, importMap: Map<string, string>,
+): { id: AstTaintPyId; sinkExpr: string } | null {
+  if (node.type === "call") {
+    const match = matchSinkPy(node, importMap);
+    if (!match) return null;
+    const cls = classOf(match.id);
+    let urlPinned: SyntaxNode | undefined;
+    if (match.id === "ssrf" && match.args[0]) {
+      const url = assessSsrfUrl(decomposeUrlExprPy(match.args[0]), x => taintMask(x, env));
+      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (url.verdict === "safe") urlPinned = match.args[0];
+    }
+    for (const a of match.args) {
+      if (a === urlPinned) continue;   // host pinned by a literal (mirrors onCall)
+      if (taintMask(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
+    }
+    return null;
+  }
+  if (node.type === "assignment") {
+    const left = node.childForFieldName("left");
+    const right = node.childForFieldName("right");
+    if (left?.type === "subscript" && right) {
+      const target = left.childForFieldName("value");
+      const targetText = target ? calleeTextPy(target) : null;
+      if (targetText && (targetText === "headers" || targetText.endsWith(".headers")) && (taintMask(right, env) & classOf("header-injection"))) {
+        return { id: "header-injection", sinkExpr: "response.headers[...]" };
+      }
+    }
+  }
+  return null;
+}
+
+function computeFnSinkFactsPy(
+  name: string, fn: LocalFn, localFns: Map<string, LocalFn>, propagating: PropagatingPy, root: SyntaxNode,
+  crossFileShapes: Map<string, ParamShape[]> | undefined, importMap: Map<string, string>, filePath: string,
+  knownFacts: ReadonlyMap<string, readonly ParamSinkFact[]>, resolveCallee: (fn: SyntaxNode | null) => string | null,
+): ParamSinkFact[] {
+  const out: ParamSinkFact[] = [];
+  for (const shape of fn.paramShapes) {
+    const base = { index: shape.index, isRest: shape.isRest };
+    const record = (id: string, sinkExpr: string, file: string, line: number, via: string[]) => {
+      mergeSinkFacts(out, [{ ...base, id, sinkClass: classOf(id), sinkExpr, file, line, via }]);
+    };
+    const onCall = (node: SyntaxNode, env: Env, mask: TaintMaskFnPy) => {
+      const direct = directSinkHitPy(node, env, mask, importMap);
+      if (direct) record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name]);
+      const fnNode = node.childForFieldName("function");
+      const calleeName = resolveCallee(fnNode);
+      const facts = calleeName ? knownFacts.get(calleeName) : undefined;
+      if (!calleeName || !facts) return;
+      const args = argListOf(node);
+      for (const f of facts) {
+        for (const a of argsForFactPy(args, f)) {
+          if (mask(a, env) & f.sinkClass) {
+            // Forwarding: this parameter reaches the SAME original sink (file/line/expr unchanged) one call further out.
+            record(f.id, f.sinkExpr, f.file, f.line, [name, ...f.via]);
+          }
+        }
+      }
+    };
+    const onNode = (node: SyntaxNode, env: Env, mask: TaintMaskFnPy) => {
+      if (node.type !== "assignment") return;
+      const direct = directSinkHitPy(node, env, mask, importMap);
+      if (direct) record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name]);
+    };
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: false, crossFileShapes, onCall, onNode });
+    const env: Env = new Map([[shape.name, ALL]]);
+    walker.walk(fn.body, env, false);
+  }
+  return out;
+}
+
+/** Bounded, monotonic fixed point over a file's functions (see astTaint.ts's buildSinkFactsMap for the argument). */
+function buildSinkFactsMapPy(
+  localFns: Map<string, LocalFn>, propagating: PropagatingPy, root: SyntaxNode,
+  crossFileShapes: Map<string, ParamShape[]> | undefined, importMap: Map<string, string>, filePath: string,
+  incomingSinks: ReadonlyMap<string, readonly ParamSinkFact[]>, resolveCallee: (fn: SyntaxNode | null) => string | null,
+): Map<string, ParamSinkFact[]> {
+  const facts = new Map<string, ParamSinkFact[]>();
+  const known = new Map<string, readonly ParamSinkFact[]>(incomingSinks);
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
+    let changed = false;
+    for (const [name, fn] of localFns) {
+      const found = computeFnSinkFactsPy(name, fn, localFns, propagating, root, crossFileShapes, importMap, filePath, known, resolveCallee);
+      if (found.length === 0) continue;
+      const list = facts.get(name) ?? [];
+      if (mergeSinkFacts(list, found)) { facts.set(name, list); known.set(name, list); changed = true; }
+    }
+    if (!changed) break;
+  }
+  return facts;
+}
+
 // ── BOLA: missing ownership check (structural, not a taint flow) ───────────────
 //
 // Mirrors astTaintPHP.ts's own collectBolaFindings almost exactly (same algorithm and the same
@@ -1478,14 +1644,241 @@ function collectBolaCandidatesPy(fnBody: SyntaxNode, idNames: Set<string>): Bola
   return candidates;
 }
 
-/** `x === principal-shaped` / `principal-shaped === x` (by TEXT -- this runs structurally, not
- * threaded through the real taint env). */
-function isBolaOwnershipComparisonPy(left: SyntaxNode, right: SyntaxNode, idNames: Set<string>): boolean {
-  const lIsRes = isBolaResourceIdExprPy(left, idNames);
-  const rIsRes = isBolaResourceIdExprPy(right, idNames);
-  const lIsPrin = BOLA_PRINCIPAL_RE_PY.test(left.text);
-  const rIsPrin = BOLA_PRINCIPAL_RE_PY.test(right.text);
-  return (lIsRes && rIsPrin) || (lIsPrin && rIsRes);
+/** What a view's own body says about the principal and the objects it loads. */
+interface BolaCtxPy {
+  idNames: Set<string>;         // parameters holding a resource id (`pk`, `order_id`)
+  principalNames: Set<string>;  // locals aliasing the authenticated principal (`user = request.user`)
+  recordNames: Set<string>;     // locals holding a record LOADED by the lookup under test
+  /** Only a comparison on the loaded record's owner counts (a check that runs AFTER the lookup can't be about the request id). */
+  recordOnly?: boolean;
+}
+
+/** `str(x)` / `int(x)` / parens: wrappers that don't change WHICH value is compared. */
+function unwrapBolaCoercionPy(n: SyntaxNode): SyntaxNode {
+  for (;;) {
+    if (n.type === "parenthesized_expression" && n.namedChildren[0]) { n = n.namedChildren[0]!; continue; }
+    if (n.type === "call") {
+      const f = n.childForFieldName("function");
+      const a = argListOf(n);
+      if (f?.type === "identifier" && (f.text === "str" || f.text === "int") && a.length === 1 && a[0].type !== "keyword_argument") { n = a[0]; continue; }
+    }
+    return n;
+  }
+}
+
+function isBolaPrincipalExprPy(n: SyntaxNode, ctx: BolaCtxPy): boolean {
+  const u = unwrapBolaCoercionPy(n);
+  return (u.type === "identifier" && ctx.principalNames.has(u.text)) || BOLA_PRINCIPAL_RE_PY.test(u.text);
+}
+
+/** `order.user`, `order.owner_id`, `order.user.id`: the owner column of a record the view loaded. */
+function isBolaRecordOwnerExprPy(n: SyntaxNode, ctx: BolaCtxPy): boolean {
+  const u = unwrapBolaCoercionPy(n);
+  if (u.type !== "attribute") return false;
+  const { object, attribute } = attributeParts(u);
+  if (!object || !attribute) return false;
+  if (object.type === "identifier" && ctx.recordNames.has(object.text) && isOwnerField(attribute)) return true;
+  if (object.type === "attribute" && (attribute === "id" || attribute === "pk")) {
+    const inner = attributeParts(object);
+    return inner.object?.type === "identifier" && ctx.recordNames.has(inner.object.text) && !!inner.attribute && isOwnerField(inner.attribute);
+  }
+  return false;
+}
+
+/** An ownership comparison: the principal against EITHER the resource id (`pk == request.user.id`) OR the owner
+ * column of the record that id loaded (`order.user != request.user`). */
+function isBolaOwnershipComparisonPy(left: SyntaxNode, right: SyntaxNode, ctx: BolaCtxPy): boolean {
+  const isRes = (n: SyntaxNode) => (!ctx.recordOnly && isBolaResourceIdExprPy(unwrapBolaCoercionPy(n), ctx.idNames)) || isBolaRecordOwnerExprPy(n, ctx);
+  return (isRes(left) && isBolaPrincipalExprPy(right, ctx)) || (isBolaPrincipalExprPy(left, ctx) && isRes(right));
+}
+
+/** Locals bound from the authenticated principal: `user = request.user`, `uid = request.user.id`. */
+function collectBolaPrincipalNamesPy(fnBody: SyntaxNode): Set<string> {
+  const names = new Set<string>();
+  const visit = (n: SyntaxNode) => {
+    if (n !== fnBody && n.type === "function_definition") return;
+    if (n.type === "assignment") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "identifier" && right && BOLA_PRINCIPAL_RE_PY.test(unwrapBolaCoercionPy(right).text)) names.add(left.text);
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(fnBody);
+  return names;
+}
+
+/** Django lookups spell relations `user__id=...` / `owner__pk=...`: the field is the part before the first `__`. */
+const ownerKeyPy = (key: string): boolean => isOwnerField(key.split("__")[0]);
+
+/**
+ * Is the principal part of THIS call's own filter -- `filter(pk=pk, user=request.user)`, `find_one({"_id": pk,
+ * "owner": uid})`, `filter(Order.id == pk, Order.user_id == current_user.id)` -- or of any call earlier in the
+ * same chain (`Order.objects.filter(user=request.user).get(pk=pk)`), or is the chain rooted at the principal
+ * (`request.user.orders.get(pk=pk)`)? Only conjunctive forms count: nothing under an `$or` key.
+ */
+function pyCallScopedToPrincipal(call: SyntaxNode, ctx: BolaCtxPy): boolean {
+  const ownArgsScope = (c: SyntaxNode): boolean => {
+    for (const a of argListOf(c)) {
+      if (a.type === "keyword_argument") {
+        const key = a.childForFieldName("name")?.text;
+        const val = a.childForFieldName("value");
+        if (key && val && ownerKeyPy(key) && isBolaPrincipalExprPy(val, ctx)) return true;
+      } else if (a.type === "dictionary") {
+        for (const pair of a.namedChildren) {
+          if (pair?.type !== "pair") continue;
+          const k = pair.childForFieldName("key")?.namedChildren.find(x => x?.type === "string_content")?.text ?? pair.childForFieldName("key")?.text.replace(/['"]/g, "");
+          const v = pair.childForFieldName("value");
+          if (k && v && isOwnerField(k) && isBolaPrincipalExprPy(v, ctx)) return true;
+        }
+      } else if (a.type === "comparison_operator" && a.namedChildren.length === 2) {
+        const [l, r] = a.namedChildren;
+        const ownerAttr = (n: SyntaxNode | null | undefined) => !!n && n.type === "attribute" && isOwnerField(attributeParts(n).attribute ?? "");
+        if (l && r && a.text.includes("==") && ((ownerAttr(l) && isBolaPrincipalExprPy(r, ctx)) || (ownerAttr(r) && isBolaPrincipalExprPy(l, ctx)))) return true;
+      }
+    }
+    return false;
+  };
+  if (ownArgsScope(call)) return true;
+  let recv: SyntaxNode | null | undefined = call.childForFieldName("function");
+  while (recv) {
+    if (recv.type === "attribute") {
+      if (BOLA_PRINCIPAL_RE_PY.test(recv.text) && recv.text !== "") return true;
+      recv = attributeParts(recv).object;
+    } else if (recv.type === "call") {
+      if (ownArgsScope(recv)) return true;
+      recv = recv.childForFieldName("function");
+    } else if (recv.type === "await") {
+      recv = recv.namedChildren[0];
+    } else break;
+  }
+  return false;
+}
+
+/** The local a lookup's result is stored in: `order = Order.objects.filter(pk=pk).first()` -> `order`. */
+function bolaResultVarOfPy(call: SyntaxNode): string | null {
+  let cur: SyntaxNode = call;
+  for (;;) {
+    const p: SyntaxNode | null = cur.parent;
+    if (!p) return null;
+    if (p.type === "await" || p.type === "parenthesized_expression") { cur = p; continue; }
+    if (p.type === "attribute" && p.childForFieldName("object")?.id === cur.id) { cur = p; continue; }
+    if (p.type === "call" && p.childForFieldName("function")?.id === cur.id) { cur = p; continue; }
+    if (p.type === "assignment" && p.childForFieldName("right")?.id === cur.id) {
+      const left = p.childForFieldName("left");
+      return left?.type === "identifier" ? left.text : null;
+    }
+    return null;
+  }
+}
+
+/** The statement (child of a block / module) that contains `node`. */
+function bolaEnclosingStatementPy(node: SyntaxNode): SyntaxNode {
+  let stmt: SyntaxNode = node;
+  while (stmt.parent && stmt.parent.type !== "block" && stmt.parent.type !== "module") stmt = stmt.parent;
+  return stmt;
+}
+
+/** Does every path through this `if` that FAILS the ownership test leave the function? (guard-clause shape) */
+function ifLeavesOnFailurePy(n: SyntaxNode, sides: BolaSidePy[]): boolean {
+  const alt = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+  const altTerminates = alt.length > 0 && alt.every(a => bolaStatementTerminatesPy(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence")));
+  return (sides.includes("true") && altTerminates) || (sides.includes("false") && bolaStatementTerminatesPy(n.childForFieldName("consequence")));
+}
+
+/**
+ * A guard clause AFTER the lookup, in the same block, that compares the loaded record's owner to the principal and
+ * leaves on the failing side: `order = get_object_or_404(Order, pk=pk); if order.user != request.user: raise PermissionDenied`.
+ * Only sound for a lookup that does not mutate as it fetches (the caller checks).
+ */
+function bolaPostCheckProtectsPy(sink: SyntaxNode, ctx: BolaCtxPy, scope: SyntaxNode): boolean {
+  const stmt = bolaEnclosingStatementPy(sink);
+  const holder = stmt.parent;
+  if (!holder) return false;
+  for (const sib of holder.namedChildren) {
+    if (!sib || sib.type !== "if_statement" || sib.startIndex < stmt.endIndex) continue;
+    const cond = sib.childForFieldName("condition");
+    if (cond && ifLeavesOnFailurePy(sib, bolaOwnershipSidesPy(cond, ctx, scope))) return true;
+  }
+  return false;
+}
+
+const BOLA_PRINCIPAL_MENTION_RE_PY = /\brequest\.user\b|\bcurrent_user\b|\bg\.user\b|\bprincipal\b/;
+
+function bolaCalleeNamePy(call: SyntaxNode): string | null {
+  const f = call.childForFieldName("function");
+  if (f?.type === "identifier") return f.text;
+  if (f?.type === "attribute") return attributeParts(f).attribute ?? null;
+  return null;
+}
+
+/** Does `call` hand the OBJECT being accessed (its id, or the loaded record) to a guard? `can_access(user, order)`. */
+function bolaCallMentionsObjectPy(call: SyntaxNode, ctx: BolaCtxPy): boolean {
+  return argListOf(call).some(a => {
+    const u = unwrapBolaCoercionPy(a.type === "keyword_argument" ? (a.childForFieldName("value") ?? a) : a);
+    if (isBolaResourceIdExprPy(u, ctx.idNames)) return true;
+    let root: SyntaxNode | null | undefined = u;
+    while (root && root.type === "attribute") root = attributeParts(root).object;
+    return root?.type === "identifier" && ctx.recordNames.has(root.text);
+  });
+}
+
+/**
+ * A guard clause in the view that tests the principal's ROLE/permission (or calls a recognized guard function),
+ * before the lookup -- or after it, for a lookup that doesn't mutate. `can_access(user, order)` / `has_perm(p, order)`
+ * are handed the object, so they are ownership-level; `not request.user.is_staff` is role-level.
+ */
+function bolaGuardClauseKindPy(sink: SyntaxNode, ctx: BolaCtxPy, scope: SyntaxNode, allowAfter: boolean): { kind: AuthzKind; note: string } | null {
+  const stmt = bolaEnclosingStatementPy(sink);
+  let best: { kind: AuthzKind; note: string } | null = null;
+  const consider = (kind: AuthzKind, note: string) => { if (!best || (kind === "ownership" && best.kind !== "ownership")) best = { kind, note }; };
+  const visit = (n: SyntaxNode) => {
+    if (n !== scope && n.type === "function_definition") return;
+    if (n.type === "if_statement") {
+      const cond = n.childForFieldName("condition");
+      const alt = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+      const leaves = bolaStatementTerminatesPy(n.childForFieldName("consequence")) ||
+        (alt.length > 0 && alt.every(a => bolaStatementTerminatesPy(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence"))));
+      const before = n.endIndex <= sink.startIndex && !!n.parent && n.parent.startIndex <= sink.startIndex && sink.endIndex <= n.parent.endIndex;
+      const after = allowAfter && n.startIndex >= stmt.endIndex && n.parent?.id === stmt.parent?.id;
+      if (cond && leaves && (before || after)) {
+        let calls = 0;
+        const scan = (c: SyntaxNode) => {
+          if (c.type === "call") {
+            const name = bolaCalleeNamePy(c);
+            const kind = name ? classifyGuardName(name) : null;
+            if (kind) { calls++; consider(kind === "role" && bolaCallMentionsObjectPy(c, ctx) ? "ownership" : kind, `${name}(...) guard`); }
+          }
+          for (const k of c.namedChildren) if (k) scan(k);
+        };
+        scan(cond);
+        if (calls === 0 && BOLA_PRINCIPAL_MENTION_RE_PY.test(cond.text) && mentionsRoleFeature(cond.text)) consider("role", "a role/permission check on the principal");
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return best;
+}
+
+/** Decorator-level guards: `@permission_required("x")` (role), `@owner_required` / `@permission_classes([IsOwner])` (ownership). */
+function bolaDecoratorGuardKindsPy(fnBody: SyntaxNode): Map<AuthzKind, string> {
+  const out = new Map<AuthzKind, string>();
+  const def = fnBody.parent;
+  const decorated = def?.parent?.type === "decorated_definition" ? def.parent : null;
+  if (!decorated) return out;
+  for (const d of decorated.namedChildren) {
+    if (d?.type !== "decorator") continue;
+    const scan = (n: SyntaxNode) => {
+      if (n.type === "identifier" && n.text !== "permission_classes") {   // the wrapper says nothing; its ARGUMENTS name the guard
+        const kind = classifyGuardName(n.text);
+        if (kind && !out.has(kind)) out.set(kind, `decorator '${n.text}'`);
+      }
+      for (const c of n.namedChildren) if (c) scan(c);
+    };
+    scan(d);
+  }
+  return out;
 }
 
 type BolaSidePy = "true" | "false";
@@ -1511,30 +1904,30 @@ function resolveRecentAssignmentPy(scope: SyntaxNode, varName: string, beforeNod
 
 /** Which side(s) of `cond` establish ownership -- `==` holds on the true side, `!=` on the false
  * side; `not`/`and`/`or` compose like a validation guard does. */
-function bolaOwnershipSidesPy(cond: SyntaxNode, idNames: Set<string>, scope: SyntaxNode, resolve = true): BolaSidePy[] {
+function bolaOwnershipSidesPy(cond: SyntaxNode, ctx: BolaCtxPy, scope: SyntaxNode, resolve = true): BolaSidePy[] {
   const flip = (s: BolaSidePy): BolaSidePy => (s === "true" ? "false" : "true");
   if (cond.type === "parenthesized_expression") {
     const inner = cond.namedChildren[0];
-    return inner ? bolaOwnershipSidesPy(inner, idNames, scope, resolve) : [];
+    return inner ? bolaOwnershipSidesPy(inner, ctx, scope, resolve) : [];
   }
   if (cond.type === "not_operator") {
     const inner = cond.childForFieldName("argument");
-    return inner ? bolaOwnershipSidesPy(inner, idNames, scope, resolve).map(flip) : [];
+    return inner ? bolaOwnershipSidesPy(inner, ctx, scope, resolve).map(flip) : [];
   }
   if (cond.type === "boolean_operator") {
     const op = cond.childForFieldName("operator")?.text;
     const l = cond.childForFieldName("left");
     const r = cond.childForFieldName("right");
     if (!l || !r) return [];
-    const all = [...bolaOwnershipSidesPy(l, idNames, scope, resolve), ...bolaOwnershipSidesPy(r, idNames, scope, resolve)];
+    const all = [...bolaOwnershipSidesPy(l, ctx, scope, resolve), ...bolaOwnershipSidesPy(r, ctx, scope, resolve)];
     return op === "and" ? all.filter(s => s === "true") : op === "or" ? all.filter(s => s === "false") : [];
   }
   if (cond.type === "comparison_operator") {
     const [l, r] = cond.namedChildren;
     if (cond.namedChildren.length !== 2 || !l || !r) return [];
     const op = cond.text.slice(l.endIndex - cond.startIndex, r.startIndex - cond.startIndex).trim();
-    if (op === "==" && isBolaOwnershipComparisonPy(l, r, idNames)) return ["true"];
-    if (op === "!=" && isBolaOwnershipComparisonPy(l, r, idNames)) return ["false"];
+    if (op === "==" && isBolaOwnershipComparisonPy(l, r, ctx)) return ["true"];
+    if (op === "!=" && isBolaOwnershipComparisonPy(l, r, ctx)) return ["false"];
     return [];
   }
   if (cond.type === "call") {
@@ -1542,12 +1935,12 @@ function bolaOwnershipSidesPy(cond: SyntaxNode, idNames: Set<string>, scope: Syn
     const args = argListOf(cond);
     if (fn?.type === "attribute" && attributeParts(fn).attribute === "equals" && args.length === 1) {
       const recv = attributeParts(fn).object;
-      if (recv && isBolaOwnershipComparisonPy(recv, args[0], idNames)) return ["true"];
+      if (recv && isBolaOwnershipComparisonPy(recv, args[0], ctx)) return ["true"];
     }
   }
   if (cond.type === "identifier" && resolve) {
     const rhs = resolveRecentAssignmentPy(scope, cond.text, cond);
-    return rhs ? bolaOwnershipSidesPy(rhs, idNames, scope, false) : [];
+    return rhs ? bolaOwnershipSidesPy(rhs, ctx, scope, false) : [];
   }
   return [];
 }
@@ -1555,6 +1948,13 @@ function bolaOwnershipSidesPy(cond: SyntaxNode, idNames: Set<string>, scope: Syn
 function bolaStatementTerminatesPy(n: SyntaxNode | null | undefined): boolean {
   if (!n) return false;
   if (n.type === "return_statement" || n.type === "raise_statement") return true;
+  if (n.type === "expression_statement") {   // Flask/werkzeug `abort(403)` raises
+    const c = n.namedChildren[0];
+    if (c?.type === "call") {
+      const f = c.childForFieldName("function");
+      if ((f?.type === "identifier" && f.text === "abort") || (f?.type === "attribute" && attributeParts(f).attribute === "abort")) return true;
+    }
+  }
   if (n.type === "block") return n.namedChildren.some(bolaStatementTerminatesPy);
   if (n.type === "if_statement") {
     const alt = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
@@ -1572,7 +1972,7 @@ function bolaStatementTerminatesPy(n: SyntaxNode | null | undefined): boolean {
  * ownership, or the OTHER arm always terminates (return/raise) and the sink comes after the whole
  * if -- and (c) it's for the SAME resource id the sink's argument uses.
  */
-function bolaOwnershipDominatesPy(sink: SyntaxNode, idNames: Set<string>, scope: SyntaxNode): boolean {
+function bolaOwnershipDominatesPy(sink: SyntaxNode, ctx: BolaCtxPy, scope: SyntaxNode): boolean {
   const contains = (outer: SyntaxNode | null | undefined, inner: SyntaxNode) =>
     !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
   let found = false;
@@ -1585,7 +1985,7 @@ function bolaOwnershipDominatesPy(sink: SyntaxNode, idNames: Set<string>, scope:
       const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
       const altTerminates = alt.length > 0 && alt.every(a => bolaStatementTerminatesPy(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence")));
       if (cond && cond.endIndex <= sink.startIndex) {
-        const sides = bolaOwnershipSidesPy(cond, idNames, scope);
+        const sides = bolaOwnershipSidesPy(cond, ctx, scope);
         if (sides.includes("true") && (contains(cons, sink) || (afterIf && altTerminates))) found = true;
         if (sides.includes("false") && (alt.some(a => contains(a.type === "else_clause" ? a.childForFieldName("body") : a.childForFieldName("consequence"), sink))
           || (afterIf && bolaStatementTerminatesPy(cons)))) found = true;
@@ -1595,14 +1995,14 @@ function bolaOwnershipDominatesPy(sink: SyntaxNode, idNames: Set<string>, scope:
         const acond = a.childForFieldName("condition");
         const acons = a.childForFieldName("consequence");
         if (acond && acond.endIndex <= sink.startIndex) {
-          const asides = bolaOwnershipSidesPy(acond, idNames, scope);
+          const asides = bolaOwnershipSidesPy(acond, ctx, scope);
           if (asides.includes("true") && contains(acons, sink)) found = true;
         }
       }
     } else if (n.type === "conditional_expression") {
       const cond = n.childForFieldName("condition");
       if (cond && cond.endIndex <= sink.startIndex) {
-        const sides = bolaOwnershipSidesPy(cond, idNames, scope);
+        const sides = bolaOwnershipSidesPy(cond, ctx, scope);
         if (sides.includes("true") && contains(n.childForFieldName("consequence"), sink)) found = true;
         if (sides.includes("false") && contains(n.childForFieldName("alternative"), sink)) found = true;
       }
@@ -1623,19 +2023,65 @@ function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTain
     if (idNames.size === 0) continue;
     const candidates = collectBolaCandidatesPy(fn.body, idNames);
     if (candidates.length === 0) continue;
-    const severity: "medium" | "high" = BOLA_READ_NAME_RE_PY.test(name) ? "medium" : "high";
+    const baseSeverity: "medium" | "high" = BOLA_READ_NAME_RE_PY.test(name) ? "medium" : "high";
+    const principalNames = collectBolaPrincipalNamesPy(fn.body);
+    const decoratorGuards = bolaDecoratorGuardKindsPy(fn.body);
     for (const c of candidates) {
-      if (bolaOwnershipDominatesPy(c.node, idNames, fn.body)) continue;
+      const fnNode = c.node.childForFieldName("function");
+      const method = fnNode?.type === "attribute" ? (attributeParts(fnNode).attribute ?? "") : (fnNode?.text ?? "");
+      const mutates = isMutatingLookup(method);
+      const recordVar = bolaResultVarOfPy(c.node);
+      const ctx: BolaCtxPy = { idNames, principalNames, recordNames: new Set(recordVar ? [recordVar] : []) };
+
+      // What, if anything, establishes that THIS principal may touch THIS object?
+      const evidence = new Map<AuthzKind, string>();
+      const add = (kind: AuthzKind, why: string) => { if (!evidence.has(kind)) evidence.set(kind, why); };
+      for (const [kind, why] of decoratorGuards) add(kind, why);
+      if (bolaOwnershipDominatesPy(c.node, ctx, fn.body)) add("ownership", "the id is compared to the authenticated principal before the lookup");
+      if (pyCallScopedToPrincipal(c.node, ctx)) add("ownership", "the principal is part of the lookup's own filter");
+      if (!mutates && recordVar && bolaPostCheckProtectsPy(c.node, { ...ctx, recordOnly: true }, fn.body)) add("ownership", "the loaded record's owner is compared to the principal before it is used");
+      const guard = bolaGuardClauseKindPy(c.node, ctx, fn.body, !mutates);
+      if (guard) add(guard.kind, guard.note);
+
       const line = c.node.startPosition.row + 1;
+      const verdict = authzVerdict(new Set(evidence.keys()));
+      if (verdict === "proven") continue;
       const key = `bola-missing-ownership-check:${line}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const roleOnly = verdict === "role-only";
       findings.push({
-        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr, severityOverride: severity,
-        detail: `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (request.user/current_user) anywhere on the path that reaches it — real per-parameter AST evidence, not a keyword-proximity guess`,
+        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr,
+        severityOverride: roleOnly ? "medium" : baseSeverity,
+        detail: roleOnly
+          ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check (${evidence.get("role")}), but nothing establishes that the caller owns THIS object — a role limits who can reach the view, not which objects they may read or change`
+          : `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) with no comparison against the authenticated principal (request.user/current_user) anywhere on the path that reaches it — real per-parameter AST evidence, not a keyword-proximity guess`,
       });
     }
   }
+}
+
+/** A URL expression as ordered literal / opaque parts: f-strings, implicit concatenation and `+` chains are split, anything else is one opaque operand. */
+function decomposeUrlExprPy(node: SyntaxNode): UrlPart<SyntaxNode>[] {
+  while (node.type === "parenthesized_expression" && node.namedChildren[0]) node = node.namedChildren[0]!;
+  if (node.type === "string") {
+    const parts: UrlPart<SyntaxNode>[] = [];
+    for (const c of node.namedChildren) {
+      if (!c) continue;
+      if (c.type === "string_content" || c.type === "escape_sequence") parts.push({ kind: "literal", text: c.text });
+      else if (c.type === "interpolation") {
+        const e = c.childForFieldName("expression");
+        if (e) parts.push(...decomposeUrlExprPy(e));
+      }
+    }
+    return parts;
+  }
+  if (node.type === "concatenated_string") return node.namedChildren.flatMap(c => (c ? decomposeUrlExprPy(c) : []));
+  if (node.type === "binary_operator" && node.childForFieldName("operator")?.text === "+") {
+    const l = node.childForFieldName("left"), r = node.childForFieldName("right");
+    if (l && r) return [...decomposeUrlExprPy(l), ...decomposeUrlExprPy(r)];
+  }
+  return [{ kind: "opaque", node }];
 }
 
 function sourceLabelPy(node: SyntaxNode): string {
@@ -1698,6 +2144,9 @@ export function scanAstTaintPython(
   // Cross-file taint analysis (Pass 2) -- see WalkHooksPy.crossFileShapes's own docblock and
   // computeExportTaintSummaryPy below for how scanner.ts builds this.
   crossFileShapes?: Map<string, ParamShape[]>,
+  // Parameter -> sink facts for imported names (see ParamSinkFact): a call whose tainted argument reaches a
+  // sink INSIDE the imported function's body is reported at the call site.
+  crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
 ): AstTaintPyFinding[] {
   try {
     const root = presparsed ?? parsePythonSourceSync(content, filePath);
@@ -1850,6 +2299,49 @@ export function scanAstTaintPython(
       return false;
     };
 
+    // ── Cross-file parameter -> sink facts (consumer side; see ParamSinkFact in taint/taintCore.ts) ──
+    // A call `run_query(x)` to an IMPORTED function whose body -- or, through its own calls, another file's
+    // body -- sinks that parameter. Reported at THIS call site (the file under review), with the callee's
+    // real sink location in the trace. Strict resolution: a bare identifier or `ns.f()` of a namespace import
+    // only, so `client.query(x)` is never mistaken for an imported `query`.
+    const sinkNamespaces = new Set(
+      crossFileSinks && crossFileSinks.size > 0 ? collectImportEdgesPy(root).filter(e => e.namespace).map(e => e.localName) : [],
+    );
+    const resolveSinkCallee = makeSinkCalleeResolverPy(sinkNamespaces);
+    const emitCrossFileSink = (node: SyntaxNode, arg: SyntaxNode, name: string, fromModule: string, fact: ParamSinkFact) => {
+      const line = lineOf(node);
+      const key = `${fact.id}:${line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
+      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+      const trace = buildBackwardTraceGeneric(filePath, node, sourceLabelPy(arg), sinkLabel, pyTraceResolver);
+      trace.pop(); // the generic trace closes with a pseudo-"sink" step at THIS call site; the real sink is in the callee
+      trace.push(
+        { file: filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fromModule}${via}`, snippet: node.text.replace(/\s+/g, " ").slice(0, 100) },
+        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+      );
+      findings.push({
+        id: fact.id as AstTaintPyId, line, sinkExpr: sinkLabel, sourceExpr: sourceLabelPy(arg),
+        detail: `Tainted expression '${sourceLabelPy(arg)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via "${name}" imported from ${fromModule}${via}] — real data-flow match across files, not a line-pattern guess`,
+        trace,
+      });
+    };
+    const checkCrossFileSinks = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      if (!crossFileSinks || crossFileSinks.size === 0) return;
+      const name = resolveSinkCallee(node.childForFieldName("function"));
+      const info = name ? crossFileSinks.get(name) : undefined;
+      if (!name || !info) return;
+      const args = argListOf(node);
+      for (const fact of info.sinks) {
+        for (const a of argsForFactPy(args, fact)) {
+          const m = taintMask(a, env);
+          if (m & fact.sinkClass) { emitCrossFileSink(node, a, name, info.fromModule, fact); break; }
+          if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(node) });
+        }
+      }
+    };
+
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
 
@@ -1857,6 +2349,7 @@ export function scanAstTaintPython(
     // the env at that point. Statement structure, branching, assignments and
     // nested functions are the shared walker's job (createWalkerPy).
     const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      checkCrossFileSinks(node, env, taintMask);
       const fnCallee = node.childForFieldName("function");
       // a function chosen from globals() by an attacker-supplied name is then called
       if (fnCallee?.type === "identifier" && dynDispatch.has(fnCallee.text)) {
@@ -1876,7 +2369,21 @@ export function scanAstTaintPython(
         const cls = classOf(match.id);
         let taintedArg: SyntaxNode | undefined;
         let cleared = false;
-        for (const a of match.args) {
+        let urlPinned: SyntaxNode | undefined;
+        let ssrfEmitted = false;
+        if (match.id === "ssrf" && match.args[0]) {
+          const url = assessSsrfUrl(decomposeUrlExprPy(match.args[0]), n => taintMask(n, env));
+          if (url.verdict === "vulnerable") {
+            const culprit = url.culprit!;
+            emit("ssrf", node, sourceLabelPy(culprit), match.sinkExpr, url.encoded
+              ? `URL-encoded value '${sourceLabelPy(culprit)}' is placed in the host position — encoding does not stop an attacker choosing the host`
+              : undefined);
+            ssrfEmitted = true;
+          }
+          if (url.verdict === "safe") { urlPinned = match.args[0]; cleared = true; }
+        }
+        for (const a of ssrfEmitted ? [] : match.args) {
+          if (a === urlPinned) continue;   // host pinned by a literal: this operand can't choose the target
           const m = taintMask(a, env);
           if (m & cls) { taintedArg = a; break; }
           if (wasCleared(m, cls)) cleared = true;

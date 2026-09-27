@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { analyzeFile } from "@/lib/scanner";
+import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { cached, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
 
@@ -47,9 +48,7 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
   return cached(`reanalysis:${contentHash}`, TTL.SCAN, async () => {
     const analysis = analyzeFile(filePath, content);
     return {
-      indicators: analysis.indicators
-        .filter(i2 => i2.line != null)
-        .map(i2 => ({ id: i2.id, label: i2.label, severity: i2.severity, line: i2.line, detail: i2.detail, codeCategory: i2.codeCategory, cwe: i2.cwe, reachability: i2.reachability, exploitability_score: i2.exploitability_score, remediation_urgency: i2.remediation_urgency })),
+      indicators: toStoredIndicators(analysis.indicators),
       attribution: analysis.attribution,
     };
   });

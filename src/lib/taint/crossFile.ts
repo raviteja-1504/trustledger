@@ -11,11 +11,15 @@
  *
  * Explicitly out of scope, matching this repo's own "documented gap, not a silent miss" convention:
  * Java/Go/C#/PHP cross-file (their visibility model is package/namespace-keyed, a genuinely different
- * mechanism than relative-import resolution); a cross-file callee-body sink re-walk (today's summaries
- * only capture RETURN-value propagation -- a call `importedFn(tainted)` where importedFn's body sinks
- * on that param directly with no return is still same-file-only; the same-file "seededParams" second
- * pass every engine already has would need a cross-file-seeds analog, a distinct, larger feature left
- * for its own pass); dynamic `import()`/`getattr`; class-method summaries; cross-repo resolution.
+ * mechanism than relative-import resolution); dynamic `import()`/`getattr`; class-method summaries;
+ * cross-repo resolution.
+ *
+ * Two kinds of fact flow through the SAME import/re-export graph and the SAME bounded round loop:
+ *   - shapes: which parameters' taint survives to a function's RETURN value (`computeSummary`);
+ *   - sink facts (ParamSinkFact, see taintCore.ts): which parameters reach a SINK inside the function or,
+ *     transitively, inside something it calls -- including in other files (`computeSinks`, optional, so an
+ *     engine without sink summaries yet is unaffected). This is what lets `runQuery(req.query.id)` be
+ *     flagged when runQuery's body sinks its parameter and returns nothing.
  */
 
 /** A parameter shape used only to describe a cross-file summary entry -- structurally identical to
@@ -58,6 +62,15 @@ export interface FileGraph {
    * buildPropagatingMap docblock makes, one level up.
    */
   computeSummary: (incoming: Map<string, CrossFileShape[]>) => Map<string, CrossFileShape[]>;
+  /**
+   * Optional. Recomputes which parameters of this file's exports reach a sink, given the shapes AND sink
+   * facts currently known for the names it imports. Same contract as computeSummary: called once per
+   * round, must be monotonic (only ever adds facts as its inputs grow) for the fixed point to settle.
+   */
+  computeSinks?: (
+    incomingShapes: Map<string, CrossFileShape[]>,
+    incomingSinks: Map<string, ParamSinkFact[]>,
+  ) => Map<string, ParamSinkFact[]>;
 }
 
 export interface CrossFileBridge {
@@ -66,12 +79,23 @@ export interface CrossFileBridge {
    * machinery as a local one. `resolvedPath` (the batch file this name actually came from) is carried
    * only for trace-generation attribution -- never consulted by the taint predicate itself. Only
    * files with at least one resolved entry appear. */
-  propagatingByFile: Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>>;
+  propagatingByFile: Map<string, Map<string, BridgeEntry>>;
   /** file path -> its own fully-resolved export summary (incl. re-exports), after the fixed point. */
   summaries: Map<string, Map<string, CrossFileShape[]>>;
+  /** Same, for sink facts. */
+  sinkSummaries: Map<string, Map<string, ParamSinkFact[]>>;
 }
 
-import { ALL } from "./taintCore";
+/** One imported name as the importing file sees it: return-propagation shapes plus sink facts. */
+export interface BridgeEntry {
+  shapes: CrossFileShape[];
+  sinks: ParamSinkFact[];
+  fromModule: string;
+  resolvedPath: string;
+}
+
+import { ALL, mergeSinkFacts } from "./taintCore";
+import type { ParamSinkFact } from "./taintCore";
 
 // Bounded for the same reason astTaint.ts's MAX_PROPAGATION_ROUNDS is: convergence is guaranteed
 // (every merge below is monotonic OR), the cap only bounds worst-case cost on a large batch.
@@ -95,6 +119,14 @@ function mergeShapesInto(target: Map<string, CrossFileShape[]>, name: string, sh
   return grew;
 }
 
+/** Union `facts` into `target.get(name)`, creating the entry. Returns whether anything grew. */
+function mergeSinksInto(target: Map<string, ParamSinkFact[]>, name: string, facts: readonly ParamSinkFact[]): boolean {
+  if (facts.length === 0) return false;
+  let list = target.get(name);
+  if (!list) { list = []; target.set(name, list); }
+  return mergeSinkFacts(list, facts);
+}
+
 /**
  * Resolves the full cross-file import/re-export graph for one batch of files into a per-file bridge
  * every engine's own same-file propagating map merges in directly. See this module's own docblock for
@@ -105,24 +137,29 @@ export function resolveCrossFile(
   resolvePath: (fromFile: string, moduleSpecifier: string) => string | null,
 ): CrossFileBridge {
   const summaries = new Map<string, Map<string, CrossFileShape[]>>(files.map(f => [f.path, new Map()]));
+  const sinkSummaries = new Map<string, Map<string, ParamSinkFact[]>>(files.map(f => [f.path, new Map()]));
 
   for (let round = 0; round < MAX_CROSS_FILE_ROUNDS; round++) {
     let changed = false;
 
     // 1) Resolve re-exports using the summaries as they stand at the START of this round -- a
     // re-export CHAIN (A re-exports B which re-exports C) converges over successive rounds, same as
-    // any other propagation here.
+    // any other propagation here. Sink facts travel through re-exports exactly like shapes do.
     for (const f of files) {
       const target = summaries.get(f.path)!;
+      const sinkTarget = sinkSummaries.get(f.path)!;
       for (const re of f.reexports) {
         const calleePath = resolvePath(f.path, re.moduleSpecifier);
         if (!calleePath) continue; // external package / unresolvable -- out of graph, never throws
         const calleeSummary = summaries.get(calleePath);
-        if (!calleeSummary) continue;
+        const calleeSinks = sinkSummaries.get(calleePath);
+        if (!calleeSummary || !calleeSinks) continue;
         if (re.publicName === null) {
           for (const [name, shapes] of calleeSummary) if (mergeShapesInto(target, name, shapes)) changed = true;
-        } else if (re.importedName && mergeShapesInto(target, re.publicName, calleeSummary.get(re.importedName) ?? [])) {
-          changed = true;
+          for (const [name, facts] of calleeSinks) if (mergeSinksInto(sinkTarget, name, facts)) changed = true;
+        } else if (re.importedName) {
+          if (mergeShapesInto(target, re.publicName, calleeSummary.get(re.importedName) ?? [])) changed = true;
+          if (mergeSinksInto(sinkTarget, re.publicName, calleeSinks.get(re.importedName) ?? [])) changed = true;
         }
       }
     }
@@ -132,45 +169,61 @@ export function resolveCrossFile(
     // recognized as propagating, closing the one-hop cap (A -> B -> C).
     for (const f of files) {
       const incoming = new Map<string, CrossFileShape[]>();
+      const incomingSinks = new Map<string, ParamSinkFact[]>();
       for (const imp of f.imports) {
         const calleePath = resolvePath(f.path, imp.moduleSpecifier);
         if (!calleePath) continue;
         const calleeSummary = summaries.get(calleePath);
-        if (!calleeSummary) continue;
+        const calleeSinks = sinkSummaries.get(calleePath);
+        if (!calleeSummary || !calleeSinks) continue;
         if (imp.namespace) {
           for (const [name, shapes] of calleeSummary) mergeShapesInto(incoming, name, shapes);
+          for (const [name, facts] of calleeSinks) mergeSinksInto(incomingSinks, name, facts);
         } else {
           mergeShapesInto(incoming, imp.localName, calleeSummary.get(imp.importedName) ?? []);
+          mergeSinksInto(incomingSinks, imp.localName, calleeSinks.get(imp.importedName) ?? []);
         }
       }
       const recomputed = f.computeSummary(incoming);
       const target = summaries.get(f.path)!;
       for (const [name, shapes] of recomputed) if (mergeShapesInto(target, name, shapes)) changed = true;
+
+      if (f.computeSinks) {
+        const sinkTarget = sinkSummaries.get(f.path)!;
+        for (const [name, facts] of f.computeSinks(incoming, incomingSinks)) {
+          if (mergeSinksInto(sinkTarget, name, facts)) changed = true;
+        }
+      }
     }
 
     if (!changed) break;
   }
 
   // Final bridge from the converged summaries.
-  const propagatingByFile = new Map<string, Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>>();
+  const propagatingByFile = new Map<string, Map<string, BridgeEntry>>();
   for (const f of files) {
-    const local = new Map<string, { shapes: CrossFileShape[]; fromModule: string; resolvedPath: string }>();
+    const local = new Map<string, BridgeEntry>();
     for (const imp of f.imports) {
       const calleePath = resolvePath(f.path, imp.moduleSpecifier);
       if (!calleePath) continue;
       const calleeSummary = summaries.get(calleePath);
-      if (!calleeSummary) continue;
-      if (imp.namespace) {
-        for (const [name, shapes] of calleeSummary) {
-          if (shapes.length > 0) local.set(name, { shapes, fromModule: imp.moduleSpecifier, resolvedPath: calleePath });
+      const calleeSinks = sinkSummaries.get(calleePath);
+      if (!calleeSummary || !calleeSinks) continue;
+      const entryFor = (exportName: string, localName: string) => {
+        const shapes = calleeSummary.get(exportName) ?? [];
+        const sinks = calleeSinks.get(exportName) ?? [];
+        if (shapes.length > 0 || sinks.length > 0) {
+          local.set(localName, { shapes, sinks, fromModule: imp.moduleSpecifier, resolvedPath: calleePath });
         }
+      };
+      if (imp.namespace) {
+        for (const name of new Set([...calleeSummary.keys(), ...calleeSinks.keys()])) entryFor(name, name);
       } else {
-        const shapes = calleeSummary.get(imp.importedName);
-        if (shapes && shapes.length > 0) local.set(imp.localName, { shapes, fromModule: imp.moduleSpecifier, resolvedPath: calleePath });
+        entryFor(imp.importedName, imp.localName);
       }
     }
     if (local.size > 0) propagatingByFile.set(f.path, local);
   }
 
-  return { propagatingByFile, summaries };
+  return { propagatingByFile, summaries, sinkSummaries };
 }

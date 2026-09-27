@@ -1,0 +1,97 @@
+// ── Sink-argument shape: WHERE in a URL the untrusted part lands ──────────────
+//
+// The taint mask answers "is this value attacker-influenced, and for which sink classes?". For SSRF that is not
+// enough, because the same tainted value is a critical vulnerability in one position and harmless in another:
+//
+//     fetch(userUrl)                              attacker picks the whole target           -> SSRF
+//     fetch("https://" + host + "/users")         attacker picks the host                   -> SSRF
+//     fetch(`https://api.example.com/users/${id}`) host is a literal; attacker only shapes a
+//                                                  path segment on a server the code chose   -> NOT SSRF
+//
+// The engines used to report all three identically (only the mask was consulted), so the third -- an extremely
+// common pattern, every REST client call -- was a steady source of false positives.
+//
+// The same position question also corrects the OTHER direction. URL-encoding (encodeURIComponent, quote, ...)
+// genuinely neutralizes a value placed in a path or query component, but does nothing for a value in the HOST
+// position: `169.254.169.254` contains no character that encoding touches, so `"http://" + enc(host)` still lets
+// the attacker choose the target. Treating an encoder as clearing SSRF unconditionally made that a false negative.
+//
+// So a URL argument is decomposed into an ordered list of literal and opaque parts (each engine does this from its
+// own AST), and this module decides, position by position, whether an untrusted part can influence the host.
+// It is deliberately engine-independent: no AST types, only strings and masks, so it is unit-testable in isolation
+// and the JS/TS and Python engines cannot drift apart on the rule.
+
+import { KIND_URL_ENCODED, SinkClass, wasCleared } from "./taintCore";
+
+export type UrlPart<N> = { kind: "literal"; text: string } | { kind: "opaque"; node: N };
+
+/** Stands in for an untainted, non-literal operand (a config value, a constant): it is opaque, but the code chose it. */
+const TRUSTED_OPAQUE = "\u0001";
+
+/**
+ * Has the URL's authority (`scheme://user@host:port`) been closed by literal text? True once the text so far contains
+ * a `/`, `?` or `#` after the optional scheme and `//` -- from then on nothing appended can change which host is
+ * contacted. False for `"https://api.example.com"` (no terminator yet: a following `.evil.com` or `@evil.com` would
+ * change the host) and for `"https://"` (the next operand IS the host).
+ */
+export function hostPinned(textBeforeOperand: string): boolean {
+  // Strip the scheme and `//` FIRST, as a separate step. A single regex with the terminator after them backtracks:
+  // `[^/?#]*` would swallow `https:` and count the first slash of `//` as the terminator, calling `https://` pinned.
+  const prefix = /^(?:[a-z][a-z0-9+.\-]*:)?(?:\/\/)?/i.exec(textBeforeOperand)![0];
+  return /[/?#]/.test(textBeforeOperand.slice(prefix.length));
+}
+
+/**
+ * Is the text so far sitting INSIDE an unterminated authority -- `https://`, `https://api.`, `//`? That is the only
+ * place an encoded value can pick the host. Encoded text can't contain `:`, `/`, `?`, `#` or `@`, so with nothing
+ * before it (or a path before it) it is just a relative path segment, and `fetch` cannot mistake it for a host.
+ */
+export function insideOpenAuthority(text: string): boolean {
+  return /^(?:[a-z][a-z0-9+.\-]*:)?\/\/[^/?#]*$/i.test(text);
+}
+
+export type SsrfUrlVerdict =
+  | "vulnerable"   // some attacker-influenced operand can shape the host
+  | "safe"         // every attacker-influenced operand sits after a literal that pins the host
+  | "no-taint";    // nothing attacker-influenced in the URL at all -- callers fall back to their ordinary logic
+
+export interface SsrfAssessment<N> {
+  verdict: SsrfUrlVerdict;
+  /** For "vulnerable": the operand that can shape the host -- lets a finding name `host`, not the whole template. */
+  culprit?: N;
+  /** For "vulnerable": the culprit was URL-encoded and only the ENCODING cleared it (so the message can say why that isn't enough). */
+  encoded?: boolean;
+}
+
+/**
+ * Decide an SSRF URL argument, position by position. `maskOf` is the engine's own taint evaluation of one opaque
+ * operand (with the env at the sink), so sanitizers, guards and propagation are exactly what the engine already
+ * computed -- this only adds the positional question.
+ *
+ * The two kinds of attacker-influenced operand are judged differently, because they can do different things:
+ *   - a plainly TAINTED one can inject anything, including a scheme or a whole other host, so it is safe only after a
+ *     literal has closed the authority (`hostPinned`);
+ *   - a URL-ENCODED one (kind bit, with the encoding being what cleared it) cannot inject delimiters, so it can only
+ *     pick the host where a literal has just opened one and left it unfinished (`insideOpenAuthority`). In a path,
+ *     a query, or standing alone it is harmless -- that is exactly what encoding is for.
+ * A value cleared by a GUARD (allowlist membership, numeric check) or by coercion carries no kind bit and is safe
+ * anywhere.
+ */
+export function assessSsrfUrl<N>(parts: readonly UrlPart<N>[], maskOf: (node: N) => number): SsrfAssessment<N> {
+  let text = "";
+  let sawInfluencedButPinned = false;
+  for (const part of parts) {
+    if (part.kind === "literal") { text += part.text; continue; }
+    const m = maskOf(part.node);
+    const tainted = (m & SinkClass.SSRF) !== 0;
+    const encodedOnly = !tainted && (m & KIND_URL_ENCODED) !== 0 && wasCleared(m, SinkClass.SSRF);
+    if (tainted || encodedOnly) {
+      if (tainted ? !hostPinned(text) : insideOpenAuthority(text)) return { verdict: "vulnerable", culprit: part.node, encoded: encodedOnly };
+      sawInfluencedButPinned = true;
+      text += TRUSTED_OPAQUE;      // attacker-shaped, but it lands where it cannot pick the host; later parts stay safe
+    } else {
+      text += TRUSTED_OPAQUE;
+    }
+  }
+  return { verdict: sawInfluencedButPinned ? "safe" : "no-taint" };
+}

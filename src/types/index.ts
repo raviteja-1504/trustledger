@@ -30,6 +30,14 @@ export interface FileIndicator {
   reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
   exploitability_score?: number;
   remediation_urgency?: "immediate" | "sprint" | "backlog" | "monitor";
+  // Stable cross-scan identity of this exact finding (see src/lib/findingIdentity.ts) -- what suppression /
+  // "new since last scan" tracking should key on, never the line number.
+  fingerprint?: string;
+  // 0-100 evidence strength: 95 = AST data-flow match; lower = pattern/heuristic. NOT severity.
+  confidence?: number;
+  // The tainted expression and the sink it reaches, verbatim from the AST engine (absent for regex findings).
+  sourceExpr?: string;
+  sinkExpr?: string;
 }
 
 // An explicit AI-tooling artifact (a repo config file or a commit/content

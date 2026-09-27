@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
+import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { safeEqual } from "@/lib/safeEqual";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
@@ -222,11 +223,7 @@ export async function POST(req: NextRequest) {
           // GitHub scan-worker path -- previously omitted here, so
           // line-numbered findings (e.g. hallucinated-method-call) silently
           // lost their location for GitLab-scanned PRs.
-          indicators: f.indicators
-            ? f.indicators
-                .filter(i => i.line)
-                .map(i => ({ id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail, codeCategory: i.codeCategory, cwe: i.cwe, reachability: i.reachability, exploitability_score: i.exploitability_score, remediation_urgency: i.remediation_urgency }))
-            : [],
+          indicators: toStoredIndicators(f.indicators),
           attribution: f.attribution,
         })));
 

@@ -81,6 +81,46 @@ export function applyClears(mask: number, clears: number): number {
   return (mask & ~clears) | ((mask & clears & ALL) << SHADOW);
 }
 
+// ── Value kinds ─────────────────────────────────────────────────────────────
+//
+// A taint value's 32 bits are: the class half (bits 0-14, "still dangerous for class c"), the shadow half (bits
+// 16-30, "was cleared for class c"), and exactly two unused bits. Bit 15 -- the one between the halves -- carries
+// the only VALUE KIND that changes what a sink should conclude: "this value was URL-encoded". (Bit 31 is the sign
+// bit and is left alone.) It is a kind rather than a class: it says nothing about what the value can reach, only
+// how it got cleared, which is what decides whether the clearing still holds where the value ends up.
+//
+// Why URL-encoding needs a kind. Encoding is a real defence in a path/query component and no defence at all in a
+// host position (`169.254.169.254` has no character an encoder changes). The class/shadow bits alone can only say
+// "SSRF was cleared" -- true for a guard, true for a coercion, and true for an encoder, which are three different
+// promises. Only the encoder's is position-dependent, so only it is marked. See taint/sinkShape.ts for the
+// position analysis that consumes this.
+//
+// Every engine masks class decisions with `& ALL` (the shadow half already forced that discipline), so the extra
+// bit is invisible to them: it can never make a value look tainted and never survives a full coercion below.
+export const KIND_URL_ENCODED = 1 << 15;
+
+/** A numeric/boolean/uuid coercion neutralizes the injection classes an encoder never does (SQL, command). */
+export function isCoercionClears(clears: number): boolean {
+  return (clears & SinkClass.SQL) !== 0 && (clears & SinkClass.CMD) !== 0;
+}
+
+/** The URL-encoder family of sanitizers clears SSRF (and the other URL-context classes) but not every class. */
+export function isUrlEncoderClears(clears: number): boolean {
+  return (clears & SinkClass.SSRF) !== 0 && !isCoercionClears(clears);
+}
+
+/**
+ * applyClears plus value-kind bookkeeping; engines call this at a SANITIZER call (guards use applyGuards, which
+ * deliberately sets no kind: an allowlist check is safe in every position). A full coercion (parseInt, Number, ...)
+ * clears the kind too -- whatever the value was, it is now a number. The kind is only set when something was actually
+ * cleared, so an untainted value passed through an encoder stays plain 0.
+ */
+export function applySanitizer(mask: number, clears: number): number {
+  const out = applyClears(mask, clears);
+  if (isCoercionClears(clears)) return out & ~KIND_URL_ENCODED;
+  return isUrlEncoderClears(clears) && (mask & clears & ALL) !== 0 ? out | KIND_URL_ENCODED : out;
+}
+
 /** Is the value still dangerous for any class at all? */
 export function isTaintedMask(mask: number): boolean {
   return (mask & ALL) !== 0;
@@ -93,6 +133,73 @@ export function wasCleared(mask: number, cls: number): boolean {
 
 /** A sink whose argument was tainted for its class but positively cleared. */
 export interface SuppressedSink { id: string; line: number }
+
+// ── Parameter -> sink summaries (cross-file) ────────────────────────────────
+//
+// A function's cross-file summary used to carry ONE fact per parameter: which sink classes survive to its
+// RETURN value. That misses the other half of what a callee does with its parameters -- passing them to a
+// sink and returning nothing (`export function runQuery(sql) { db.execute(sql); }`). A call
+// `runQuery(req.query.id)` from another file was invisible: the same-file "seed the callee's params and
+// re-walk its body" pass could never reach a body that lives in a different file.
+//
+// A ParamSinkFact is that missing half: "if the argument bound to parameter `index` carries taint of class
+// `sinkClass`, it reaches sink `sinkExpr` at `file:line`, which reports as finding `id`." Facts are
+// computed BOTTOM-UP per function (each callee's facts before its callers'), so they compose across any
+// number of calls -- including calls into other files' facts -- and flow the same direction as the
+// existing return summaries (callee -> caller). That is a deliberate choice over a top-down "seed the
+// callee from its callers" re-walk: it keeps the dependency edge one-directional (a callee never depends on
+// its callers' content, so incremental reuse and the cross-file fixed point need no new machinery) and the
+// finding lands at the CALL SITE, in the file being changed, which is where a PR review can act on it.
+export interface ParamSinkFact {
+  /** Parameter index the taint enters through; with `isRest`, every argument from this index on. */
+  index: number;
+  isRest: boolean;
+  /** Finding id the sink reports as (e.g. "sql-injection"). */
+  id: string;
+  /** The single SinkClass bit for `id` -- stored so a consumer never re-derives it from an id table. */
+  sinkClass: number;
+  /** The sink call as written, e.g. "db.execute". */
+  sinkExpr: string;
+  /** File and 1-based line of the ORIGINAL sink, kept unchanged across every hop that forwards to it. */
+  file: string;
+  line: number;
+  /** Function names from the summarized function down to the one that contains the sink (attribution only). */
+  via: string[];
+}
+
+/** Identity of a fact for set-union. `via` is deliberately excluded: two routes to the same sink are the
+ * same fact, and a recursive/mutually-recursive forwarder would otherwise grow `via` without bound. */
+export function sinkFactKey(f: ParamSinkFact): string {
+  return `${f.index}:${f.isRest ? 1 : 0}:${f.id}:${f.sinkExpr}:${f.file}:${f.line}`;
+}
+
+/** Bounds a single function's summary. Facts are kept in a deterministic order (sorted by key) so the cap
+ * never makes a scan's output depend on Map iteration order or on which round produced a fact. */
+export const MAX_SINK_FACTS_PER_FN = 24;
+
+/**
+ * Set-union `add` into `into`, first occurrence winning (so the shortest/earliest `via` is kept).
+ * Returns whether anything was added. Keeps `into` sorted and capped at MAX_SINK_FACTS_PER_FN.
+ */
+export function mergeSinkFacts(into: ParamSinkFact[], add: readonly ParamSinkFact[]): boolean {
+  if (add.length === 0) return false;
+  const before = new Set(into.map(sinkFactKey));
+  const have = new Set(before);
+  let pushed = false;
+  for (const f of add) {
+    const k = sinkFactKey(f);
+    if (have.has(k)) continue;
+    have.add(k);
+    into.push(f);
+    pushed = true;
+  }
+  if (!pushed) return false;
+  into.sort((a, b) => { const ka = sinkFactKey(a), kb = sinkFactKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
+  if (into.length > MAX_SINK_FACTS_PER_FN) into.length = MAX_SINK_FACTS_PER_FN;
+  // "Grew" is judged AFTER the cap: a fact the cap immediately dropped is not growth, and reporting it as
+  // such would make a fixed point over a capped summary look perpetually unsettled.
+  return into.some(f => !before.has(sinkFactKey(f)));
+}
 
 export type TaintEnv = Map<string, number>;
 
