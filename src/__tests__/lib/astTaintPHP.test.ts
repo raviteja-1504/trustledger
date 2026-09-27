@@ -288,13 +288,129 @@ function getUser($id) {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
-  it("suppresses when an Auth::check()-style call is present in the function body", () => {
+  it("a bare Auth::check() proves authentication, not that the caller owns THIS object -- still flags", () => {
+    // Formerly suppressed: the old check asked only "does an Auth::check()/Auth::user() call
+    // appear ANYWHERE in the function", which is true of nearly every authenticated endpoint and
+    // says nothing about the resource id it looks up. Auth::check() with no ownership comparison
+    // has no evidence at all now, and IS still reported.
     const content = `<?php
 function deleteUser($id) {
   Auth::check();
   User::where('id', $id)->delete();
 }`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("ownership scoped INSIDE the query chain protects (Laravel's own idiom)", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::where('id', $id)->where('user_id', Auth::id())->first();
+  return $order;
+}`;
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("ownership checked on the LOADED record protects", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::find($id);
+  if ($order->user_id != Auth::id()) { abort(403); }
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a role/permission check alone is a real control but still reports, downgraded, and says why", () => {
+    const content = `<?php
+function deleteUser($id) {
+  if (!Auth::user()->is_admin) { abort(403); }
+  User::where('id', $id)->delete();
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].severityOverride).toBe("medium");
+    expect(found[0].detail).toMatch(/role\/permission check/);
+  });
+
+  it("a guard call handed the object (Gate::allows) is ownership-level", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::find($id);
+  if (Gate::denies('view', $order)) { abort(403); }
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a chain scoped by $or / a differently-keyed where() still reports", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::where('id', $id)->where('status', 'active')->first();
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("a post-check that does NOT leave on failure protects nothing", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::find($id);
+  if ($order->user_id != Auth::id()) { error_log('not owner'); }
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("a post-check after a lookup that mutates as it fetches is too late", () => {
+    const content = `<?php
+function deleteOrder($id) {
+  $order = Order::where('id', $id)->delete();
+  if ($order->user_id != Auth::id()) { abort(403); }
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("a role gate PLUS ownership in the query is proven", () => {
+    const content = `<?php
+function getOrder($id) {
+  if (!Auth::user()->is_admin) { abort(403); }
+  $order = Order::where('id', $id)->where('user_id', Auth::id())->first();
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a principal ALIAS (`$user = Auth::user();`) is recognized through a property access", () => {
+    const content = `<?php
+function getOrder($id) {
+  $user = Auth::user();
+  $order = Order::where('id', $id)->where('user_id', $user->id)->first();
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a role condition that does NOT leave on failure is not a gate -- still reports without the role message", () => {
+    const content = `<?php
+function deleteUser($id) {
+  if (!Auth::user()->is_admin) { error_log('not admin'); }
+  User::where('id', $id)->delete();
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).not.toMatch(/role\/permission check/);
+  });
+
+  it("a post-check re-comparing the id (not the loaded record's owner) does not protect -- $id may have changed since the lookup ran", () => {
+    const content = `<?php
+function getOrder($id) {
+  $order = Order::find($id);
+  $id = $_GET['other'];
+  if ($id != Auth::id()) { abort(403); }
+  return $order;
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
   });
 
   it("does not flag a function with no resource-id-shaped parameter", () => {

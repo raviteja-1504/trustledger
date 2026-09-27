@@ -48,6 +48,7 @@ import {
   type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
 export type AstTaintJavaId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
@@ -195,32 +196,87 @@ const RESOURCE_ID_NAME_RE = /^(?:id|ID|pk|.*_id|.*Id)$/;
 const WRITE_VERB_ANNOTATIONS = new Set(["PostMapping", "PutMapping", "PatchMapping", "DeleteMapping"]);
 const READ_VERB_ANNOTATIONS = new Set(["GetMapping"]);
 const MAPPING_ANNOTATIONS = new Set([...WRITE_VERB_ANNOTATIONS, ...READ_VERB_ANNOTATIONS, "RequestMapping"]);
-// Presence alone suppresses -- the SpEL expression inside @PreAuthorize(...)
-// is never parsed. This means @PreAuthorize("hasRole('ADMIN')") (a real but
-// differently-flavored access control) and @PreAuthorize("#id ==
-// authentication.principal.id") (an actual ownership check) suppress
-// identically. Deliberate: distinguishing them needs a SpEL parser this
-// codebase doesn't have, and the annotation's mere presence is still a
-// syntactically real, high-confidence fact -- a method decorated with any of
-// these three really is under SOME framework-level access control, which the
-// existing regex heuristics could only ever guess at via keyword proximity.
-const AUTH_SUPPRESSION_ANNOTATIONS = new Set(["PreAuthorize", "Secured", "RolesAllowed"]);
+// @Secured/@RolesAllowed take plain role/authority names (`@Secured("ROLE_ADMIN")`) -- there is no
+// expression language here, so presence is always ROLE evidence, never ownership.
+const ROLE_ONLY_ANNOTATIONS = new Set(["Secured", "RolesAllowed"]);
+// @PreAuthorize/@PostAuthorize take a Spring-EL boolean expression, which CAN encode a real ownership
+// check (`"#id == authentication.principal.id"`, `"@orderService.isOwner(#id, authentication)"`) as well
+// as a role check (`"hasRole('ADMIN')"`) -- classifySpelAuthz below tells them apart instead of treating
+// every annotation the same way presence-only suppression used to (a real, previously-documented false
+// negative: @PreAuthorize("hasRole('ADMIN')") suppressed identically to an actual ownership check).
+const SPEL_ANNOTATIONS = new Set(["PreAuthorize", "PostAuthorize"]);
+const AUTH_SUPPRESSION_ANNOTATIONS = new Set([...ROLE_ONLY_ANNOTATIONS, ...SPEL_ANNOTATIONS]);
+
+/** Call-like names inside a SpEL string (`hasRole('ADMIN')`, `@orderService.isOwner(#id, auth)`) -- the
+ * LAST dotted/`@`-prefixed segment before each `(`, with its raw argument text for the object-mention check. */
+function spelCallsIn(expr: string): Array<{ name: string; argsText: string }> {
+  const out: Array<{ name: string; argsText: string }> = [];
+  const re = /(?:@|\b)([\w.]+)\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(expr))) {
+    const parts = m[1].split(".");
+    const name = parts[parts.length - 1];
+    let depth = 1, j = m.index + m[0].length;
+    while (j < expr.length && depth > 0) { if (expr[j] === "(") depth++; else if (expr[j] === ")") depth--; j++; }
+    out.push({ name, argsText: expr.slice(m.index + m[0].length, j - 1) });
+  }
+  return out;
+}
+
+// `#id == authentication.principal.id` / `#id.equals(authentication.name)` (either order), and
+// `returnObject.<owner> == authentication...` for @PostAuthorize checking the method's own return value.
+const SPEL_ID_VS_PRINCIPAL_RE = /#(\w+)\s*(?:==|\.equals\()\s*authentication\.(?:principal\.)?(?:name|id)\b/;
+const SPEL_PRINCIPAL_VS_ID_RE = /authentication\.(?:principal\.)?(?:name|id)\s*==\s*#(\w+)\b/;
+const SPEL_RETURN_OWNER_RE = /returnObject\.(\w+)\s*==\s*authentication\.(?:principal\.)?(?:name|id)\b/;
+
+/** What evidence a @PreAuthorize/@PostAuthorize SpEL expression provides -- ownership, role, both, or
+ * neither (an expression this regex-based reading doesn't recognize is left unclassified, the safe
+ * direction: unlike the old presence-only check, an unrecognized expression no longer suppresses). */
+function classifySpelAuthz(expr: string, resourceIdParamNames: Set<string>): Set<AuthzKind> {
+  const kinds = new Set<AuthzKind>();
+  for (const m of [...expr.matchAll(new RegExp(SPEL_ID_VS_PRINCIPAL_RE, "g"))]) if (resourceIdParamNames.has(m[1])) kinds.add("ownership");
+  for (const m of [...expr.matchAll(new RegExp(SPEL_PRINCIPAL_VS_ID_RE, "g"))]) if (resourceIdParamNames.has(m[1])) kinds.add("ownership");
+  if (SPEL_RETURN_OWNER_RE.test(expr) && isOwnerField(SPEL_RETURN_OWNER_RE.exec(expr)![1])) kinds.add("ownership");
+  for (const { name, argsText } of spelCallsIn(expr)) {
+    const kind = classifyGuardName(name);
+    if (!kind) continue;
+    const mentionsId = [...resourceIdParamNames].some(id => new RegExp(`#${id}\\b`).test(argsText));
+    kinds.add(kind === "role" && mentionsId ? "ownership" : kind);
+  }
+  return kinds;
+}
 
 type HttpVerbTier = "read" | "write" | "unknown";
 interface MethodAuthMeta {
   isEndpoint: boolean;
   verbTier: HttpVerbTier;
-  suppressedByAuthAnnotation: boolean;
+  /** Evidence from @PreAuthorize/@PostAuthorize/@Secured/@RolesAllowed alone (annotation-level, independent
+   * of anything the method body does). */
+  annotationEvidence: Set<AuthzKind>;
 }
 
-function extractMethodAuthMeta(methodDecl: CstNode): MethodAuthMeta {
+function extractMethodAuthMeta(methodDecl: CstNode, resourceIdParamNames: Set<string>): MethodAuthMeta {
   const anns = annotationsFrom(methodDecl, "methodModifier");
   const isEndpoint = anns.some(a => MAPPING_ANNOTATIONS.has(a));
   const verbTier: HttpVerbTier =
     anns.some(a => WRITE_VERB_ANNOTATIONS.has(a)) ? "write" :
     anns.some(a => READ_VERB_ANNOTATIONS.has(a)) ? "read" : "unknown";
-  const suppressedByAuthAnnotation = anns.some(a => AUTH_SUPPRESSION_ANNOTATIONS.has(a));
-  return { isEndpoint, verbTier, suppressedByAuthAnnotation };
+  const annotationEvidence = new Set<AuthzKind>();
+  for (const mod of allNodes(methodDecl, "methodModifier")) {
+    for (const ann of allNodes(mod, "annotation")) {
+      const typeName = firstNode(ann, "typeName");
+      const idToks = typeName ? tokenKids(typeName, "Identifier") : [];
+      const name = idToks[idToks.length - 1]?.image;
+      if (!name) continue;
+      if (ROLE_ONLY_ANNOTATIONS.has(name)) annotationEvidence.add("role");
+      else if (SPEL_ANNOTATIONS.has(name)) {
+        const expr = stringLiteralValue(ann);
+        if (expr) for (const k of classifySpelAuthz(expr, resourceIdParamNames)) annotationEvidence.add(k);
+        else annotationEvidence.add("role");   // present but unparseable (e.g. a constant reference): presence is still a real, if unclassified, control
+      }
+    }
+  }
+  return { isEndpoint, verbTier, annotationEvidence };
 }
 
 // ── Environment ──────────────────────────────────────────────────────────
@@ -322,7 +378,7 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
     }
   }
   const body = firstNode(methodDecl, "methodBody") ?? null;
-  const authMeta = extractMethodAuthMeta(methodDecl);
+  const authMeta = extractMethodAuthMeta(methodDecl, resourceIdParamNames);
   const isPrivate = allNodes(methodDecl, "methodModifier").some(m => tokenKids(m, "Private").length > 0);
   return { name: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, isPrivate, body };
 }
@@ -2050,7 +2106,7 @@ function unwrapIfStatement(bs: CstNode): CstNode | undefined {
   return undefined;
 }
 
-interface OwnSide { holds: "true" | "false" }
+interface OwnSide { holds: "true" | "false"; kind?: AuthzKind }
 
 /**
  * Does an ownership comparison for one of `idNames` DOMINATE `sink`? Walks the
@@ -2060,15 +2116,39 @@ interface OwnSide { holds: "true" | "false" }
  * that is unused, follows the lookup, or guards a different branch no longer
  * suppresses -- the old check was "a comparison exists anywhere in the method".
  */
+/** A guard call in the condition, judged by name (classifyGuardName) -- ownership-level when it's handed the
+ * resource id itself, role-level otherwise (`if (!accessControl.canAccess(id, principal))` vs
+ * `if (!user.hasRole("ADMIN"))`). Runs independently of the equals/isOwner checks above: a condition can
+ * carry BOTH kinds of evidence (`id.equals(principal.getId()) || accessControl.canAccess(id, principal)`). */
+function guardCallSideJava(primary: CstNode, idNames: Set<string>, ctx: EngineCtx): OwnSide | null {
+  let best: OwnSide | null = null;
+  walkPrimaryChain(primary, new Map(), ctx, (info) => {
+    const kind = classifyGuardName(info.tail);
+    if (!kind) return;
+    const mentionsId = info.args.some(a => resourceIdsIn(a, idNames, new Map()).size > 0);
+    const actual: AuthzKind = kind === "role" && mentionsId ? "ownership" : kind;
+    if (!best || (actual === "ownership" && best.kind !== "ownership")) best = { holds: "true", kind: actual };
+  });
+  return best;
+}
+
+/**
+ * Does an ownership OR role comparison for one of `idNames` DOMINATE `sink`? Walks the sink's ancestors: it
+ * must sit in the arm of an if (or ternary) whose condition establishes the evidence on that side, or come
+ * after an earlier sibling if whose OTHER arm always terminates (return/throw). A comparison that is
+ * unused, follows the lookup, or guards a different branch no longer suppresses -- the old check was "a
+ * comparison exists anywhere in the method". Returns the KIND of evidence that dominated (a role check is a
+ * real control, but the caller downgrades rather than fully suppresses on it), or null if nothing does.
+ */
 function ownershipDominatesJava(
   sink: CstNode, body: CstNode, idNames: Set<string>, principalNames: Set<string>,
   localInits: Map<string, CstNode>, ctx: EngineCtx,
-): boolean {
+): AuthzKind | null {
   const make = (resolve: boolean): CondHandlers<OwnSide> => ({
-    compare: (l, op, r) => (comparisonSuppresses(l, r, idNames, principalNames) ? [{ holds: op === "==" ? "true" : "false" }] : []),
+    compare: (l, op, r) => (comparisonSuppresses(l, r, idNames, principalNames) ? [{ holds: op === "==" ? "true" : "false", kind: "ownership" }] : []),
     instanceOf: () => [],
     call: (primary) => {
-      let hit = false;
+      let hit: OwnSide | null = null;
       const chain = chainOfPrimary(primary);
       // `isOwner` -- a boolean local resolved ONE hop to its initializer
       if (resolve && chain && chain.length === 1 && !chain[0].args && localInits.has(chain[0].name)) {
@@ -2077,17 +2157,26 @@ function ownershipDominatesJava(
       walkPrimaryChain(primary, new Map(), ctx, (info) => {
         if (info.tail !== "equals") return;
         if (info.rootVar === "Objects" && info.args.length === 2) {
-          if (comparisonSuppresses(info.args[0], info.args[1], idNames, principalNames)) hit = true;
+          if (comparisonSuppresses(info.args[0], info.args[1], idNames, principalNames)) hit = { holds: "true", kind: "ownership" };
         } else if (info.args[0] && comparisonSuppressesEquals(info.rootVar, info.args[0], idNames, principalNames)) {
-          hit = true;
+          hit = { holds: "true", kind: "ownership" };
         }
       });
-      return hit ? [{ holds: "true" }] : [];
+      const hitKind: AuthzKind | undefined = (hit as OwnSide | null)?.kind;
+      if (hitKind !== "ownership") {
+        const guard = guardCallSideJava(primary, idNames, ctx);
+        if (guard && (hitKind === undefined || guard.kind === "ownership")) hit = guard;
+      }
+      return hit ? [hit as OwnSide] : [];
     },
   });
   const own = make(true);
   const sidesOf = (cond: CstNode | undefined, isBinary = false): OwnSide[] =>
     !cond ? [] : isBinary ? binarySides(cond, own) : condSidesJava(cond, own);
+  const kindOf = (sides: OwnSide[], holds: "true" | "false"): AuthzKind => {
+    const matching = sides.filter(s => s.holds === holds);
+    return matching.some(s => s.kind === "ownership") ? "ownership" : "role";
+  };
 
   const path = pathTo(body, sink);
   for (let i = 0; i < path.length - 1; i++) {
@@ -2097,16 +2186,16 @@ function ownershipDominatesJava(
       const stmts = nodeKids(a, "statement");
       if (cond && child !== cond) {
         const sides = sidesOf(cond);
-        if (child === stmts[0] && sides.some(s => s.holds === "true")) return true;
-        if (child === stmts[1] && sides.some(s => s.holds === "false")) return true;
+        if (child === stmts[0] && sides.some(s => s.holds === "true")) return kindOf(sides, "true");
+        if (child === stmts[1] && sides.some(s => s.holds === "false")) return kindOf(sides, "false");
       }
     } else if (a.name === "conditionalExpression" && tokenKids(a, "QuestionMark").length > 0) {
       const condBin = firstNode(a, "binaryExpression");
       const arms = nodeKids(a, "expression");
       if (condBin && child !== condBin) {
         const sides = sidesOf(condBin, true);
-        if (child === arms[0] && sides.some(s => s.holds === "true")) return true;
-        if (child === arms[1] && sides.some(s => s.holds === "false")) return true;
+        if (child === arms[0] && sides.some(s => s.holds === "true")) return kindOf(sides, "true");
+        if (child === arms[1] && sides.some(s => s.holds === "false")) return kindOf(sides, "false");
       }
     } else if (a.name === "blockStatements") {
       const list = nodeKids(a, "blockStatement");
@@ -2118,12 +2207,12 @@ function ownershipDominatesJava(
         const stmts = nodeKids(ifN, "statement");
         const sides = sidesOf(cond);
         // the arm that does NOT establish ownership never reaches what follows
-        if (sides.some(s => s.holds === "false") && statementTerminatesJava(stmts[0])) return true;
-        if (sides.some(s => s.holds === "true") && stmts[1] && statementTerminatesJava(stmts[1])) return true;
+        if (sides.some(s => s.holds === "false") && statementTerminatesJava(stmts[0])) return kindOf(sides, "false");
+        if (sides.some(s => s.holds === "true") && stmts[1] && statementTerminatesJava(stmts[1])) return kindOf(sides, "true");
       }
     }
   }
-  return false;
+  return null;
 }
 
 /**
@@ -2138,7 +2227,6 @@ function ownershipDominatesJava(
 function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (!method.body) return;
   if (!method.authMeta.isEndpoint) return;
-  if (method.authMeta.suppressedByAuthAnnotation) return;
   if (method.resourceIdParamNames.size === 0) return;
 
   const { types: localTypes, inits: localInits } = collectLocalDeclInfo(method.body);
@@ -2155,10 +2243,18 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   }
   checkBolaConstructorSinkCandidates(method, method.resourceIdParamNames, localInits, candidates);
 
-  const severity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
+  const baseSeverity: "medium" | "high" = method.authMeta.verbTier === "read" ? "medium" : "high";
   for (const c of candidates) {
-    if (ownershipDominatesJava(c.node, method.body, c.idNames, principalNames, localInits, ctx)) continue;
-    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+    const evidence = new Set<AuthzKind>(method.authMeta.annotationEvidence);
+    const dominating = ownershipDominatesJava(c.node, method.body, c.idNames, principalNames, localInits, ctx);
+    if (dominating) evidence.add(dominating);
+    const verdict = authzVerdict(evidence);
+    if (verdict === "proven") continue;
+    const roleOnly = verdict === "role-only";
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, roleOnly ? "medium" : baseSeverity,
+      roleOnly
+        ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check, but nothing establishes that the caller owns THIS object — a role limits who can reach the endpoint, not which objects they may read or change`
+        : undefined);
   }
 }
 

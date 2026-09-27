@@ -37,7 +37,8 @@ const OWNERSHIP_WORDS = new Set(["owner", "owners", "ownership", "owns", "own", 
 /** Words that assert a role or permission, not an object relationship. */
 const ROLE_WORDS = new Set([
   "admin", "admins", "role", "roles", "staff", "superuser", "permission", "permissions", "authorize", "authorise",
-  "authorization", "policy", "policies", "ability", "scope", "scopes", "acl", "guard", "guards", "can", "has", "allow", "allowed",
+  "authorization", "policy", "policies", "ability", "scope", "scopes", "acl", "guard", "guards", "can", "cannot", "has", "allow",
+  "allowed", "allows", "deny", "denies", "denied",
 ]);
 
 /** Classify a middleware / decorator / guard-function NAME. null = not an authorization guard we recognize

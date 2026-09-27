@@ -86,6 +86,7 @@ import {
   type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 
 declare const __non_webpack_require__: NodeJS.Require | undefined;
 function nodeRequire(): NodeJS.Require {
@@ -381,7 +382,7 @@ interface EngineCtx {
 
 function emit(
   ctx: EngineCtx, id: AstTaintPHPId, node: SyntaxNode, sourceExpr: string, sinkExpr: string,
-  severityOverride?: "critical" | "high" | "medium",
+  severityOverride?: "critical" | "high" | "medium", detailOverride?: string,
 ) {
   const line = lineOf(node);
   const key = `${id}:${line}`;
@@ -389,7 +390,7 @@ function emit(
   ctx.seen.add(key);
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
-    detail: `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
+    detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
     trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, phpTraceResolver),
   });
 }
@@ -603,12 +604,10 @@ function seedLocalFunctionParams(calleeName: string, args: SyntaxNode[], env: En
 // capital "I" keeps those safely excluded.
 const RESOURCE_ID_PARAM_RE = /^(?:id|ID|.*_id|.*Id)$/;
 const READ_NAME_RE = /^(?:get|show|index|view|find|list|search)/i;
-const AUTH_SUPPRESS_CALL_RE = /^(?:Auth\.check|Auth\.user|auth\.check|auth\.user)$/;
 
 interface FuncAuthMeta {
   hasResourceIdParam: boolean;
   verbTier: "read" | "write";
-  suppressedByAuthCheck: boolean;
 }
 
 function paramShapesOf(paramList: SyntaxNode | undefined): ParamShape[] {
@@ -633,18 +632,9 @@ function extractFuncInfo(decl: SyntaxNode): LocalFunction | null {
   const resourceIdParamNames = new Set(paramShapes.filter(s => RESOURCE_ID_PARAM_RE.test(s.name)).map(s => s.name));
   const verbTier: "read" | "write" = READ_NAME_RE.test(nameNode.text) ? "read" : "write";
   const body = decl.childForFieldName("body") ?? null;
-  const suppressedByAuthCheck = body
-    ? findAllNodes(body, "member_call_expression").some(mc => {
-      const text = calleeTextPHP(mc);
-      return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
-    }) || findAllNodes(body, "scoped_call_expression").some(sc => {
-      const text = calleeTextPHP(sc);
-      return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
-    })
-    : false;
   return {
     name: nameNode.text, paramShapes, resourceIdParamNames, body,
-    authMeta: { hasResourceIdParam: resourceIdParamNames.size > 0, verbTier, suppressedByAuthCheck },
+    authMeta: { hasResourceIdParam: resourceIdParamNames.size > 0, verbTier },
   };
 }
 
@@ -1506,47 +1496,271 @@ function resolveRecentAssignmentRHS(bodyNodes: SyntaxNode[], varName: string, be
   return found;
 }
 
-/** Does `left`/`right` compare a resource id (one of `ids`) with the authenticated principal? */
-function ownershipComparisonPHP(left: SyntaxNode, right: SyntaxNode, ids: Set<string>): boolean {
-  const lIsRes = variableNamesIn(left).some(id => ids.has(id));
-  const rIsRes = variableNamesIn(right).some(id => ids.has(id));
-  return (lIsRes && isPrincipalShaped(right.text)) || (isPrincipalShaped(left.text) && rIsRes);
+/** What a function's own body says about the principal and the objects it loads. */
+interface BolaCtxPHP {
+  idNames: Set<string>;
+  principalNames: Set<string>;  // locals aliasing the authenticated principal (`$user = Auth::user();`)
+  recordNames: Set<string>;     // locals holding a record LOADED by the lookup under test
+  recordOnly?: boolean;         // only a comparison on the loaded record's owner counts
+}
+
+/** `(int)$x`, `intval($x)`, parens: wrappers that don't change WHICH value is compared. */
+function unwrapBolaCoercionPHP(n: SyntaxNode): SyntaxNode {
+  for (;;) {
+    if (n.type === "parenthesized_expression" && n.namedChildren[0]) { n = n.namedChildren[0]!; continue; }
+    if (n.type === "cast_expression" && n.childForFieldName("value")) { n = n.childForFieldName("value")!; continue; }
+    if (n.type === "function_call_expression") {
+      const fn = n.childForFieldName("function");
+      const a = argListOfPHP(n);
+      if (fn?.type === "name" && (fn.text === "intval" || fn.text === "strval") && a.length === 1) { n = a[0]; continue; }
+    }
+    return n;
+  }
+}
+
+function isBolaPrincipalExprPHP(n: SyntaxNode, ctx: BolaCtxPHP): boolean {
+  const u = unwrapBolaCoercionPHP(n);
+  if (isPrincipalShaped(u.text)) return true;
+  let root: SyntaxNode | null = u;
+  while (root && root.type === "member_access_expression") root = root.namedChildren[0] ?? null;   // `$user->id` -> `$user`
+  const bare = root?.type === "variable_name" ? variableBareName(root) : null;
+  return !!bare && ctx.principalNames.has(bare);
+}
+
+/** `$order->user_id`, `$order->user->id`: the owner column of a record the function loaded. */
+function isBolaRecordOwnerExprPHP(n: SyntaxNode, ctx: BolaCtxPHP): boolean {
+  const u = unwrapBolaCoercionPHP(n);
+  if (u.type !== "member_access_expression") return false;
+  const base = u.namedChildren[0];
+  const prop = u.childForFieldName("name");
+  if (!base || !prop) return false;
+  const baseName = base.type === "variable_name" ? variableBareName(base) : null;
+  if (baseName && ctx.recordNames.has(baseName) && isOwnerField(prop.text)) return true;
+  if (base.type === "member_access_expression" && (prop.text === "id" || prop.text === "pk")) {
+    const innerBase = base.namedChildren[0];
+    const innerProp = base.childForFieldName("name");
+    const innerName = innerBase?.type === "variable_name" ? variableBareName(innerBase) : null;
+    return !!innerName && ctx.recordNames.has(innerName) && !!innerProp && isOwnerField(innerProp.text);
+  }
+  return false;
+}
+
+/** An ownership comparison: the principal against EITHER a resource id (`$id == Auth::id()`) OR the owner
+ * column of the record that id loaded (`$order->user_id != Auth::id()`). */
+function isBolaOwnershipComparisonPHP(left: SyntaxNode, right: SyntaxNode, ctx: BolaCtxPHP): boolean {
+  const isRes = (n: SyntaxNode) =>
+    (!ctx.recordOnly && variableNamesIn(unwrapBolaCoercionPHP(n)).some(id => ctx.idNames.has(id))) || isBolaRecordOwnerExprPHP(n, ctx);
+  return (isRes(left) && isBolaPrincipalExprPHP(right, ctx)) || (isBolaPrincipalExprPHP(left, ctx) && isRes(right));
+}
+
+/** Locals bound from the authenticated principal: `$user = Auth::user();`, `$user = auth()->user();`. */
+function collectBolaPrincipalNamesPHP(bodyNodes: SyntaxNode[]): Set<string> {
+  const names = new Set<string>();
+  for (const body of bodyNodes) {
+    for (const assign of findAllNodes(body, "assignment_expression")) {
+      const left = assign.childForFieldName("left");
+      const right = assign.childForFieldName("right");
+      if (left?.type === "variable_name" && right && isPrincipalShaped(unwrapBolaCoercionPHP(right).text)) {
+        const name = variableBareName(left);
+        if (name) names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
+/** Every `->where()`/`::where()` call in the SAME fluent chain as `node` (both ancestors that wrap it, and
+ * receiver bases it itself wraps) -- `Order::where('id',$id)->where('user_id', Auth::id())->first()` has the
+ * id clause and the owner clause as two links of one chain, neither containing the other. */
+function phpFluentChainCalls(node: SyntaxNode): SyntaxNode[] {
+  let root = node;
+  while (root.parent && (root.parent.type === "member_call_expression" || root.parent.type === "scoped_call_expression") &&
+         root.parent.namedChildren[0]?.id === root.id) root = root.parent;
+  const calls: SyntaxNode[] = [];
+  let cur: SyntaxNode | null = root;
+  while (cur && (cur.type === "member_call_expression" || cur.type === "scoped_call_expression")) {
+    calls.push(cur);
+    cur = cur.namedChildren[0] ?? null;
+  }
+  return calls;
+}
+
+/** Is the principal part of THIS chain's own `->where()` filters -- `->where('user_id', Auth::id())`,
+ * `->where('owner_id', $user->id)`? Laravel's `where()` is conjunctive by default (chained calls AND). */
+function phpChainScopedToPrincipal(node: SyntaxNode, ctx: BolaCtxPHP): boolean {
+  for (const call of phpFluentChainCalls(node)) {
+    const method = call.childForFieldName("name")?.text;
+    if (method !== "where") continue;
+    const args = argListOfPHP(call);
+    if (args.length < 2) continue;
+    const col = args[0].type === "string" ? args[0].namedChildren.find(c => c?.type === "string_content")?.text : null;
+    if (col && isOwnerField(col) && isBolaPrincipalExprPHP(args[1], ctx)) return true;
+  }
+  return false;
+}
+
+/** The variable a lookup's result is stored in: `$order = Order::where(...)->first();` -> `order`. */
+function bolaResultVarOfPHP(node: SyntaxNode): string | null {
+  let cur: SyntaxNode = node;
+  for (;;) {
+    const p: SyntaxNode | null = cur.parent;
+    if (!p) return null;
+    if ((p.type === "member_call_expression" || p.type === "scoped_call_expression") && p.namedChildren[0]?.id === cur.id) { cur = p; continue; }
+    if (p.type === "assignment_expression" && p.childForFieldName("right")?.id === cur.id) {
+      const left = p.childForFieldName("left");
+      return left?.type === "variable_name" ? variableBareName(left) : null;
+    }
+    return null;
+  }
+}
+
+/** The statement (direct child of the enclosing block/program) that contains `node`. */
+function bolaEnclosingStatementPHP(node: SyntaxNode): SyntaxNode {
+  let stmt: SyntaxNode = node;
+  while (stmt.parent && stmt.parent.type !== "compound_statement" && stmt.parent.type !== "program") stmt = stmt.parent;
+  return stmt;
+}
+
+/**
+ * A guard clause AFTER the lookup, in the same block, that compares the loaded record's owner to the principal
+ * and leaves on the failing side: `$order = Order::find($id); if ($order->user_id != Auth::id()) { abort(403); }`.
+ * Only sound for a lookup that does not mutate as it fetches.
+ */
+function bolaPostCheckProtectsPHP(sink: SyntaxNode, ctx: BolaCtxPHP, bodyNodes: SyntaxNode[]): boolean {
+  const stmt = bolaEnclosingStatementPHP(sink);
+  const holder = stmt.parent;
+  const siblings: readonly (SyntaxNode | null)[] = holder ? holder.namedChildren : [];
+  for (const sib of siblings) {
+    if (!sib || sib.type !== "if_statement" || sib.startIndex < stmt.endIndex) continue;
+    const cond = sib.childForFieldName("condition");
+    if (!cond) continue;
+    const sides = ownershipSidesPHP(cond, ctx, bodyNodes);
+    const body = sib.childForFieldName("body");
+    const alts = sib.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+    const altsAllTerminate = alts.some(a => a.type === "else_clause") && alts.every(a => statementTerminatesPHP(a.childForFieldName("body")));
+    if (sides.includes("true") && altsAllTerminate) return true;
+    if (sides.includes("false") && statementTerminatesPHP(body)) return true;
+  }
+  return false;
+}
+
+const BOLA_PRINCIPAL_MENTION_RE_PHP = /\bAuth::|auth\(\)|\$_SESSION\b/;
+
+function bolaCalleeNamePHP(node: SyntaxNode): string | null {
+  if (node.type === "function_call_expression") {
+    const fn = node.childForFieldName("function");
+    return fn?.type === "name" ? fn.text : null;
+  }
+  if (node.type === "member_call_expression" || node.type === "scoped_call_expression") return node.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
+/** Does `call` hand the OBJECT being accessed (its id, or the loaded record) to a guard? `Gate::allows('view', $order)`. */
+function bolaCallMentionsObjectPHP(call: SyntaxNode, ctx: BolaCtxPHP): boolean {
+  return argListOfPHP(call).some(a => {
+    const u = unwrapBolaCoercionPHP(a);
+    if (u.type === "variable_name") {
+      const name = variableBareName(u);
+      if (name && (ctx.idNames.has(name) || ctx.recordNames.has(name))) return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * A guard clause in the function that tests the principal's ROLE/permission (or calls a recognized guard
+ * function/method), before the lookup -- or after it, for a lookup that doesn't mutate.
+ */
+function bolaGuardClauseKindPHP(sink: SyntaxNode, ctx: BolaCtxPHP, bodyNodes: SyntaxNode[], allowAfter: boolean): { kind: AuthzKind; note: string } | null {
+  const stmt = bolaEnclosingStatementPHP(sink);
+  let best: { kind: AuthzKind; note: string } | null = null;
+  const consider = (kind: AuthzKind, note: string) => { if (!best || (kind === "ownership" && best.kind !== "ownership")) best = { kind, note }; };
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "function_declaration" || n.type === "method_declaration") return;
+    if (n.type === "if_statement") {
+      const cond = n.childForFieldName("condition");
+      const body = n.childForFieldName("body");
+      const alts = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
+      const leaves = statementTerminatesPHP(body) || (alts.some(a => a.type === "else_clause") && alts.every(a => statementTerminatesPHP(a.childForFieldName("body"))));
+      const before = n.endIndex <= sink.startIndex && n.parent?.id === stmt.parent?.id;
+      const after = allowAfter && n.startIndex >= stmt.endIndex && n.parent?.id === stmt.parent?.id;
+      if (cond && leaves && (before || after)) {
+        let calls = 0;
+        const scan = (c: SyntaxNode) => {
+          if (c.type === "function_call_expression" || c.type === "member_call_expression" || c.type === "scoped_call_expression") {
+            const name = bolaCalleeNamePHP(c);
+            const kind = name ? classifyGuardName(name) : null;
+            if (kind) { calls++; consider(kind === "role" && bolaCallMentionsObjectPHP(c, ctx) ? "ownership" : kind, `${name}(...) guard`); }
+          }
+          for (const ch of c.namedChildren) if (ch) scan(ch);
+        };
+        scan(cond);
+        if (calls === 0 && BOLA_PRINCIPAL_MENTION_RE_PHP.test(cond.text) && mentionsRoleFeature(cond.text)) consider("role", "a role/permission check on the principal");
+      }
+    }
+    // abort_if($request->user()->cannot('view', $order), 403); -- a guard as a bare expression statement
+    if (n.type === "expression_statement" && n.endIndex <= sink.startIndex && n.parent?.id === stmt.parent?.id) {
+      const call = n.namedChildren[0];
+      if (call?.type === "function_call_expression") {
+        const fnName = call.childForFieldName("function")?.text.toLowerCase();
+        if (fnName === "abort_if" || fnName === "abort_unless" || fnName === "throw_if" || fnName === "throw_unless") {
+          const cond = argListOfPHP(call)[0];
+          if (cond) {
+            let calls = 0;
+            const scan = (c: SyntaxNode) => {
+              if (c.type === "function_call_expression" || c.type === "member_call_expression" || c.type === "scoped_call_expression") {
+                const name = bolaCalleeNamePHP(c);
+                const kind = name ? classifyGuardName(name) : null;
+                if (kind) { calls++; consider(kind === "role" && bolaCallMentionsObjectPHP(c, ctx) ? "ownership" : kind, `${name}(...) guard`); }
+              }
+              for (const ch of c.namedChildren) if (ch) scan(ch);
+            };
+            scan(cond);
+            if (calls === 0 && BOLA_PRINCIPAL_MENTION_RE_PHP.test(cond.text) && mentionsRoleFeature(cond.text)) consider("role", "a role/permission check on the principal");
+          }
+        }
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  for (const b of bodyNodes) visit(b);
+  return best;
 }
 
 type SidePHP = "true" | "false";
 
-/** Which side(s) of `cond` establish that a resource id in `ids` equals the
+/** Which side(s) of `cond` establish that a resource id in `ctx` equals the
  * authenticated principal (`==`/`===` hold on the true side, `!=`/`!==` on
  * the false side; `!`/`&&`/`||` compose like validation guards do). A bare
  * `$isOwner` variable resolves ONE hop to its most recent assignment. */
-function ownershipSidesPHP(cond: SyntaxNode, ids: Set<string>, bodyNodes: SyntaxNode[], resolve = true): SidePHP[] {
+function ownershipSidesPHP(cond: SyntaxNode, ctx: BolaCtxPHP, bodyNodes: SyntaxNode[], resolve = true): SidePHP[] {
   const flip = (s: SidePHP): SidePHP => (s === "true" ? "false" : "true");
   switch (cond.type) {
     case "parenthesized_expression": {
       const inner = cond.namedChildren[0];
-      return inner ? ownershipSidesPHP(inner, ids, bodyNodes, resolve) : [];
+      return inner ? ownershipSidesPHP(inner, ctx, bodyNodes, resolve) : [];
     }
     case "unary_op_expression": {
       if (cond.child(0)?.type !== "!") return [];
       const inner = cond.childForFieldName("argument") ?? cond.namedChildren[0];
-      return inner ? ownershipSidesPHP(inner, ids, bodyNodes, resolve).map(flip) : [];
+      return inner ? ownershipSidesPHP(inner, ctx, bodyNodes, resolve).map(flip) : [];
     }
     case "binary_expression": {
       const op = cond.childForFieldName("operator")?.type;
       const l = cond.childForFieldName("left");
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
-      if (op === "==" || op === "===") return ownershipComparisonPHP(l, r, ids) ? ["true"] : [];
-      if (op === "!=" || op === "!==") return ownershipComparisonPHP(l, r, ids) ? ["false"] : [];
-      if (op === "&&" || op === "and") return [...ownershipSidesPHP(l, ids, bodyNodes, resolve), ...ownershipSidesPHP(r, ids, bodyNodes, resolve)].filter(s => s === "true");
-      if (op === "||" || op === "or") return [...ownershipSidesPHP(l, ids, bodyNodes, resolve), ...ownershipSidesPHP(r, ids, bodyNodes, resolve)].filter(s => s === "false");
+      if (op === "==" || op === "===") return isBolaOwnershipComparisonPHP(l, r, ctx) ? ["true"] : [];
+      if (op === "!=" || op === "!==") return isBolaOwnershipComparisonPHP(l, r, ctx) ? ["false"] : [];
+      if (op === "&&" || op === "and") return [...ownershipSidesPHP(l, ctx, bodyNodes, resolve), ...ownershipSidesPHP(r, ctx, bodyNodes, resolve)].filter(s => s === "true");
+      if (op === "||" || op === "or") return [...ownershipSidesPHP(l, ctx, bodyNodes, resolve), ...ownershipSidesPHP(r, ctx, bodyNodes, resolve)].filter(s => s === "false");
       return [];
     }
     case "variable_name": {
       if (!resolve) return [];
       const name = variableBareName(cond);
       const rhs = name ? resolveRecentAssignmentRHS(bodyNodes, name, cond) : null;
-      return rhs ? ownershipSidesPHP(rhs, ids, bodyNodes, false) : [];
+      return rhs ? ownershipSidesPHP(rhs, ctx, bodyNodes, false) : [];
     }
     default:
       return [];
@@ -1562,7 +1776,7 @@ function ownershipSidesPHP(cond: SyntaxNode, ids: Set<string>, bodyNodes: Syntax
  * if. A comparison that is unused, follows the lookup, or guards a different
  * branch no longer suppresses.
  */
-function ownershipDominatesPHP(sink: SyntaxNode, ids: Set<string>, bodyNodes: SyntaxNode[]): boolean {
+function ownershipDominatesPHP(sink: SyntaxNode, ctx: BolaCtxPHP, bodyNodes: SyntaxNode[]): boolean {
   const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
     !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
   let found = false;
@@ -1574,7 +1788,7 @@ function ownershipDominatesPHP(sink: SyntaxNode, ids: Set<string>, bodyNodes: Sy
       const alts = n.childrenForFieldName("alternative").filter((c): c is SyntaxNode => !!c);
       const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
       if (cond && cond.endIndex <= sink.startIndex) {
-        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        const sides = ownershipSidesPHP(cond, ctx, bodyNodes);
         const inAlts = alts.some(a => contains(a, sink));
         const altsAllTerminate = alts.some(a => a.type === "else_clause") && alts.every(a => statementTerminatesPHP(a.childForFieldName("body")));
         if (sides.includes("true") && (contains(body, sink) || (afterIf && altsAllTerminate))) found = true;
@@ -1584,13 +1798,13 @@ function ownershipDominatesPHP(sink: SyntaxNode, ids: Set<string>, bodyNodes: Sy
       const cond = n.childForFieldName("condition");
       const body = n.childForFieldName("body");
       if (cond && cond.endIndex <= sink.startIndex) {
-        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        const sides = ownershipSidesPHP(cond, ctx, bodyNodes);
         if (sides.includes("true") && contains(body, sink)) found = true;
       }
     } else if (n.type === "conditional_expression") {
       const cond = n.childForFieldName("condition");
       if (cond && cond.endIndex <= sink.startIndex) {
-        const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+        const sides = ownershipSidesPHP(cond, ctx, bodyNodes);
         if (sides.includes("true") && contains(n.childForFieldName("body"), sink)) found = true;
         if (sides.includes("false") && contains(n.childForFieldName("alternative"), sink)) found = true;
       }
@@ -1604,7 +1818,7 @@ function ownershipDominatesPHP(sink: SyntaxNode, ids: Set<string>, bodyNodes: Sy
       if ((isIf || isUnless) && call && n.endIndex <= sink.startIndex && contains(n.parent, sink)) {
         const cond = argListOfPHP(call)[0];
         if (cond) {
-          const sides = ownershipSidesPHP(cond, ids, bodyNodes);
+          const sides = ownershipSidesPHP(cond, ctx, bodyNodes);
           // abort_if(c) aborts when c is true, so what follows runs with c false
           if (sides.includes(isIf ? "false" : "true")) found = true;
         }
@@ -1633,7 +1847,6 @@ function collectBolaFindings(
 ) {
   if (bodyNodes.length === 0) return;
   if (!authMeta.hasResourceIdParam) return;
-  if (authMeta.suppressedByAuthCheck) return;
 
   const candidates: BolaSinkCandidate[] = [];
   const idsIn = (n: SyntaxNode | null | undefined): Set<string> =>
@@ -1693,10 +1906,30 @@ function collectBolaFindings(
     }
   }
 
-  const severity: "medium" | "high" = authMeta.verbTier === "read" ? "medium" : "high";
+  const baseSeverity: "medium" | "high" = authMeta.verbTier === "read" ? "medium" : "high";
+  const principalNames = collectBolaPrincipalNamesPHP(bodyNodes);
   for (const c of candidates) {
-    if (ownershipDominatesPHP(c.node, c.idNames, bodyNodes)) continue;
-    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, severity);
+    // For the `->where(...)` candidate shape the mutating verb (`->delete()`/`->update(...)`) is a
+    // LATER link of the same fluent chain, not the candidate node's own method name.
+    const mutates = phpFluentChainCalls(c.node).some(call => isMutatingLookup(call.childForFieldName("name")?.text ?? ""));
+    const recordVar = bolaResultVarOfPHP(c.node);
+    const bctx: BolaCtxPHP = { idNames: c.idNames, principalNames, recordNames: new Set(recordVar ? [recordVar] : []) };
+
+    const evidence = new Map<AuthzKind, string>();
+    const add = (kind: AuthzKind, why: string) => { if (!evidence.has(kind)) evidence.set(kind, why); };
+    if (ownershipDominatesPHP(c.node, bctx, bodyNodes)) add("ownership", "the id is compared to the authenticated principal before the lookup");
+    if (phpChainScopedToPrincipal(c.node, bctx)) add("ownership", "the principal is part of the lookup's own filter");
+    if (!mutates && recordVar && bolaPostCheckProtectsPHP(c.node, { ...bctx, recordOnly: true }, bodyNodes)) add("ownership", "the loaded record's owner is compared to the principal before it is used");
+    const guard = bolaGuardClauseKindPHP(c.node, bctx, bodyNodes, !mutates);
+    if (guard) add(guard.kind, guard.note);
+
+    const verdict = authzVerdict(new Set(evidence.keys()));
+    if (verdict === "proven") { ctx.suppressed?.push({ id: "idor", line: lineOf(c.node) }); continue; }
+    const roleOnly = verdict === "role-only";
+    emit(ctx, "bola-missing-ownership-check", c.node, c.sourceExpr, c.sinkExpr, roleOnly ? "medium" : baseSeverity,
+      roleOnly
+        ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check (${evidence.get("role")}), but nothing establishes that the caller owns THIS object`
+        : undefined);
   }
 }
 
@@ -1803,18 +2036,9 @@ export function scanAstTaintPHP(
         }
       }
     }
-    const topLevelSuppressedByAuthCheck = topLevelChildren.some(child =>
-      findAllNodes(child, "member_call_expression").some(mc => {
-        const text = calleeTextPHP(mc);
-        return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
-      }) || findAllNodes(child, "scoped_call_expression").some(sc => {
-        const text = calleeTextPHP(sc);
-        return !!text && AUTH_SUPPRESS_CALL_RE.test(text);
-      }));
     collectBolaFindings(topLevelChildren, topLevelResourceIdParamNames, {
       hasResourceIdParam: topLevelResourceIdParamNames.size > 0,
       verbTier: "read",
-      suppressedByAuthCheck: topLevelSuppressedByAuthCheck,
     }, ctx);
 
     // Second pass, bounded worklist -- see astTaintCSharp.ts's/astTaintJava.ts's

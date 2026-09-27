@@ -352,4 +352,7 @@ export const FP_BASELINE: FpBaselineEntry[] = [
   // Added with the JS/TS recall phase: the structural JWT check flags hand-rolled payload decoding.
   { file: "src/lib/jwt.ts", id: "jwt-none-alg", lineHash: "ba3a2f2a74f7", line: 14, severity: "critical",
     reason: "Reviewed: decodeJwtPayload is a documented decode-only helper (its header comment says it does NOT verify the signature and must only be used on tokens already verified via supabase.auth.getUser(), to read extra claims such as session_id). It is never used as an authorization decision on its own." },
+  // Added with the Java BOLA PrincipalState work: same known array-index type-inference gap as the entries above.
+  { file: "src/lib/astTaintJava.ts", id: "hallucinated-method-call", lineHash: "d10807511a39", line: 217, severity: "medium",
+    reason: "False positive: the detector cannot infer an array-index expression's (e.g. arr[i], match[1]) element type and defaults to flagging real built-in String/Array/Object methods (.trim(), .split(), .toLowerCase(), .sort(), .charCodeAt(), etc.) as hallucinated. `m[1]` here is a RegExpExecArray capture group (a string), and `.split(\".\")` is a genuine String.prototype method." },
 ];

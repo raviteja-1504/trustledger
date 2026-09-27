@@ -388,7 +388,11 @@ public class A {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
   });
 
-  it("suppresses when @PreAuthorize is present, regardless of method body", () => {
+  it("@PreAuthorize(\"hasRole(...)\") is a real role control, but proves nothing about THIS object -- still reports, downgraded", () => {
+    // Formerly fully suppressed: the old check asked only "is a @PreAuthorize/@Secured/@RolesAllowed
+    // annotation present", the SAME whether its SpEL expression named a role or an actual ownership
+    // comparison. A role by itself limits WHO can call the endpoint, not WHICH user's object they can
+    // touch through it.
     const content = `
 public class A {
   private final Map<String, Map<String, Object>> users = new HashMap<>();
@@ -399,7 +403,173 @@ public class A {
     return ResponseEntity.ok().build();
   }
 }`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].severityOverride).toBe("medium");
+    expect(found[0].detail).toMatch(/role\/permission check/);
+  });
+
+  it("@Secured/@RolesAllowed are also role-only, never ownership", () => {
+    const secured = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @Secured("ROLE_ADMIN")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    const foundSecured = scan(secured).filter(f => f.id === "bola-missing-ownership-check");
+    expect(foundSecured).toHaveLength(1);
+    expect(foundSecured[0].severityOverride).toBe("medium");
+    expect(foundSecured[0].detail).toMatch(/role\/permission check/);
+    const rolesAllowed = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @RolesAllowed("ADMIN")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    const foundRolesAllowed = scan(rolesAllowed).filter(f => f.id === "bola-missing-ownership-check");
+    expect(foundRolesAllowed).toHaveLength(1);
+    expect(foundRolesAllowed[0].severityOverride).toBe("medium");
+  });
+
+  it("the SpEL comparison also protects with the operands reversed (authentication.principal.id == #userId)", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("authentication.principal.id == #userId")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("@PostAuthorize checking the RETURNED object's owner field also protects", () => {
+    const content = `
+public class A {
+  private final Map<String, Object> orders = new HashMap<>();
+  @PostAuthorize("returnObject.ownerId == authentication.principal.id")
+  @GetMapping("/api/orders/{orderId}")
+  public Object get(@PathVariable String orderId) {
+    return orders.get(orderId);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a SpEL call handed the id (hasPermission(#userId, ...)) upgrades from role to ownership at the annotation itself", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("hasPermission(#userId, 'User', 'delete')")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("an unparseable @PreAuthorize (no string literal, a constant reference) is still a real but unclassified control -- reports, downgraded, not fully suppressed", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize(SecurityExpressions.IS_ADMIN)
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].severityOverride).toBe("medium");
+  });
+
+  it("@PreAuthorize with a real SpEL ownership comparison (#id == authentication.principal.id) still fully protects", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("#userId == authentication.principal.id")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("@PreAuthorize calling an ownership-shaped bean method handed the id also protects", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("@userSecurity.isOwner(#userId, authentication)")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("@PreAuthorize combining a role check with a real ownership comparison is fully proven", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @PreAuthorize("hasRole('USER') and #userId == authentication.principal.id")
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId) {
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a guard call in the method body handed the id, not just a boolean flag, is ownership-level", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId, Authentication authentication) {
+    if (!accessControl.canAccess(userId, authentication)) {
+      return ResponseEntity.status(403).build();
+    }
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a guard call testing only a role (no id in its arguments) is role-only", () => {
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId, Authentication authentication) {
+    if (!accessControl.hasPermission(authentication, "ADMIN")) {
+      return ResponseEntity.status(403).build();
+    }
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    const found = scan(content).filter(f => f.id === "bola-missing-ownership-check");
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).toMatch(/role\/permission check/);
   });
 
   it("recognizes @AuthenticationPrincipal as principal-looking, and never as a tainted resource-id source", () => {
