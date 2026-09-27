@@ -474,6 +474,11 @@ function interpolatedPartsCS(n: SyntaxNode): Array<{ lit?: string; expr?: Syntax
 // ── Taint sources ────────────────────────────────────────────────────────
 
 const ASP_SOURCE_ATTRIBUTES = new Set(["FromRoute", "FromQuery", "FromBody", "FromHeader", "FromForm"]);
+// A bound parameter is only a RESOURCE id -- the thing a BOLA check must own -- when its name looks like
+// one. Without this, `[FromQuery] string person`, an implicitly-bound `int destId`-shaped-but-unrelated
+// param, etc. were all treated as object identifiers, matching any Map access or `new X(...)` that took
+// them as an argument -- same convention astTaint.ts/astTaintPython.ts/astTaintPHP.ts already use.
+const RESOURCE_ID_NAME_RE = /^(?:id|ID|pk|.*_id|.*Id)$/;
 // ASP.NET Core binds a simple-type action-method parameter from the route
 // template or query string IMPLICITLY, by convention, with no [From*]
 // attribute at all -- `GetUser(int id)` is exactly as attacker-controlled
@@ -861,7 +866,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       const attrs = attributeNamesOf(param);
       const hasExplicitSource = attrs.some(a => ASP_SOURCE_ATTRIBUTES.has(a));
       if (hasExplicitSource) sourceParamNames.add(pName.text);
-      if (attrs.includes("FromRoute") || attrs.includes("FromQuery")) resourceIdParamNames.add(pName.text);
+      if ((attrs.includes("FromRoute") || attrs.includes("FromQuery")) && RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
       // Implicit ASP.NET Core model binding (see CSHARP_SIMPLE_TYPE_RE's
       // docblock): only applies to a genuinely unattributed simple-type
       // param of a real controller action (authMeta.isEndpoint) -- a
@@ -871,7 +876,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
         const typeText = param.childForFieldName("type")?.text;
         if (typeText && CSHARP_SIMPLE_TYPE_RE.test(typeText)) {
           sourceParamNames.add(pName.text);
-          resourceIdParamNames.add(pName.text);
+          if (RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
         }
       }
       index++;

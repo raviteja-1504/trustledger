@@ -187,6 +187,11 @@ const SERVLET_SOURCE_CALLS = new Set([
 // Deliberately NOT the same set as SPRING_SOURCE_ANNOTATIONS above, which
 // stays untouched to avoid touching the other 9 detectors' taint semantics.
 const RESOURCE_ID_ANNOTATIONS = new Set(["PathVariable", "RequestParam"]);
+// An annotated binding parameter is only a RESOURCE id -- the thing a BOLA check must own -- when its
+// name looks like one. Without this, `@RequestParam String person`, `@PathVariable int nrOfStars` etc. were
+// all treated as object identifiers, matching any Map .get/put or `new X(...)` that happened to take them
+// as an argument -- same convention astTaint.ts/astTaintPython.ts/astTaintPHP.ts already use.
+const RESOURCE_ID_NAME_RE = /^(?:id|ID|pk|.*_id|.*Id)$/;
 const WRITE_VERB_ANNOTATIONS = new Set(["PostMapping", "PutMapping", "PatchMapping", "DeleteMapping"]);
 const READ_VERB_ANNOTATIONS = new Set(["GetMapping"]);
 const MAPPING_ANNOTATIONS = new Set([...WRITE_VERB_ANNOTATIONS, ...READ_VERB_ANNOTATIONS, "RequestMapping"]);
@@ -311,7 +316,7 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
       if (!info) continue;
       paramShapes.push({ name: info.name, index, isRest: info.isRest, type: info.type, annotated: info.annotations.length > 0 });
       if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
-      if (info.annotations.some(a => RESOURCE_ID_ANNOTATIONS.has(a))) resourceIdParamNames.add(info.name);
+      if (info.annotations.some(a => RESOURCE_ID_ANNOTATIONS.has(a)) && RESOURCE_ID_NAME_RE.test(info.name)) resourceIdParamNames.add(info.name);
       if (info.annotations.includes("AuthenticationPrincipal")) principalParamNames.add(info.name);
       index++;
     }

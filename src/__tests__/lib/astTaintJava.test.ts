@@ -688,6 +688,58 @@ public class A {
   });
 });
 
+// Found re-running WebGoat: any @PathVariable/@RequestParam was treated as a resource id regardless of
+// its NAME, so a Map access or `new X(...)` taking a same-named but unrelated bound parameter (a vote
+// count, free text, a URL) was reported as a missing ownership check. 14 of WebGoat's 18 BOLA findings
+// were exactly this -- e.g. `votes.getOrDefault(nrOfStars, 0)`, `new StringBuilder(person)`,
+// `new URI(url)` -- none of them an object lookup by id at all.
+describe("BOLA — a bound parameter is a resource id only when its NAME looks like one", () => {
+  it("does not flag a Map access keyed by a same-named non-id parameter (WebGoat Assignment8.java shape)", () => {
+    const content = `
+public class A {
+  private Map<Integer, Integer> votes = new HashMap<>();
+  @PostMapping("/challenge8/{stars}")
+  public Object vote(@PathVariable(value = "stars") int nrOfStars) {
+    Integer allVotesForStar = votes.getOrDefault(nrOfStars, 0);
+    votes.put(nrOfStars, allVotesForStar + 1);
+    return allVotesForStar;
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("does not flag a constructor call fed a same-named non-id parameter (WebGoat HttpBasicsLesson.java shape)", () => {
+    const content = `
+public class A {
+  @PostMapping("/HttpBasics/attack1")
+  public Object completed(@RequestParam String person) {
+    return new StringBuilder(person).reverse().toString();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("still flags the same shapes for a param whose name DOES look like a resource id", () => {
+    const mapContent = `
+public class A {
+  private Map<String, String> docs = new HashMap<>();
+  @GetMapping("/docs/{docId}")
+  public Object get(@PathVariable String docId) {
+    return docs.get(docId);
+  }
+}`;
+    expect(scan(mapContent).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+    const ctorContent = `
+public class A {
+  @GetMapping("/profile/{userId}")
+  public Object get(@PathVariable String userId) {
+    return new UserProfile(userId);
+  }
+}`;
+    expect(scan(ctorContent).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+});
+
 describe("findEnclosingFunctionNameJava — reachability resolver parity (Decision 2, new capability)", () => {
   const content = `
 public class A {

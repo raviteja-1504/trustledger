@@ -612,3 +612,64 @@ public class A {
     if (root) expect(() => scanAstTaintCSharp(content, "A.cs", root)).not.toThrow();
   });
 });
+
+// A [FromRoute]/[FromQuery] (or implicitly-bound simple-type) parameter is a resource id only when its
+// NAME looks like one -- otherwise `[FromQuery] string comment` reaching list.Find(comment) reads as an
+// object lookup by id when it's really just a search term. Mirrors the same fix in astTaintJava.ts,
+// which removed 14 false positives from a WebGoat re-run (Map lookups and `new X(...)` calls fed a
+// same-named but unrelated bound parameter).
+describe("BOLA — a bound parameter is a resource id only when its NAME looks like one", () => {
+  it("does not flag a lookup keyed by a same-named non-id [FromQuery] parameter", () => {
+    const content = `
+public class A {
+  [HttpGet("search")]
+  public IActionResult Search([FromQuery] string comment) {
+    var post = posts.Find(comment);
+    return Ok(post);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("does not flag a constructor call fed a same-named non-id parameter", () => {
+    const content = `
+public class A {
+  [HttpPost("attack1")]
+  public IActionResult Completed([FromQuery] string person) {
+    return Ok(new StringBuilder(person).ToString());
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("does not flag an implicitly-bound simple-type parameter whose name isn't id-shaped", () => {
+    const content = `
+public class A {
+  [HttpGet("vote/{stars}")]
+  public IActionResult Vote(int stars) {
+    var count = votes.Find(stars);
+    return Ok(count);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("still flags the same shapes for a parameter whose name DOES look like a resource id", () => {
+    const lookupContent = `
+public class A {
+  [HttpGet("posts")]
+  public IActionResult Get([FromQuery] string postId) {
+    return Ok(posts.Find(postId));
+  }
+}`;
+    expect(scan(lookupContent).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+    const ctorContent = `
+public class A {
+  [HttpGet("{userId}")]
+  public IActionResult Get([FromRoute] string userId) {
+    return Ok(new UserProfile(userId));
+  }
+}`;
+    expect(scan(ctorContent).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+});

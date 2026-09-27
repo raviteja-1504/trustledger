@@ -687,7 +687,7 @@
   "csharp": {
     "totalCases": 67,
     "casesWithFinding": 63,
-    "astOnlyFindingCount": 62,
+    "astOnlyFindingCount": 61,
     "astOnlyByCase": {
       "10": [
         "open-redirect"
@@ -865,7 +865,6 @@
         "path-traversal"
       ],
       "bonus06": [
-        "bola-missing-ownership-check",
         "sql-injection"
       ],
       "bonus07": [
