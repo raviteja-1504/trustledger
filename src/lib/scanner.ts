@@ -42,6 +42,8 @@ import { computeCrossFileReachable } from "./crossFileReachability";
 import type { ReachFile } from "./crossFileReachability";
 import { computeFileCacheKey, cloneAnalysis, sha256Hex } from "./incrementalCache";
 import type { CachedFileResult } from "./incrementalCache";
+import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries } from "./moduleSummaryCache";
+import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
 import type { TraceStep, ParamSinkFact } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
@@ -6806,6 +6808,12 @@ export interface ScanInput {
   // covers the callee content a cross-file flow depends on. See incrementalCache.ts for why a bare
   // content-hash match is not enough. (Replaces the old `prev_hashes`, which dropped unchanged files.)
   prev_results?:      Record<string, CachedFileResult>;
+  // Cross-scan cache for the OTHER stage prev_results doesn't cover: an unchanged file was, until now,
+  // still re-parsed and re-summarized every scan to rebuild the cross-file bridge/reachability graph, since
+  // that stage runs BEFORE analyzeFile and prev_results only lets analyzeFile itself skip. See
+  // moduleSummaryCache.ts's own docblock for why reuse here is exact, not approximate. Optional, same
+  // fallback-to-full-recompute-on-a-cold-cache posture as prev_results.
+  prev_module_cache?: Record<string, CachedModuleSummary>;
   // Extra key material, e.g. the deploy's commit SHA, so a scanner release can never serve a previous
   // release's cached findings even if SCAN_CACHE_VERSION was not bumped.
   cache_namespace?:   string;
@@ -7030,9 +7038,15 @@ export interface ScanOutput {
   cross_file_consistency: CrossFileConsistency;
   compliance:           ComplianceReport;
   skipped_unchanged:    number;  // incremental scan: files whose analysis was reused from prev_results
+  // Incremental scan, the OTHER stage: files whose cross-file summary/sinks/call-graph (and, for JS/TS,
+  // parse) was reused from prev_module_cache instead of recomputed -- see moduleSummaryCache.ts.
+  module_cache_reused?: number;
   // Every file's reusable result (post-analyzeFile, pre-PR-level post-pass), for the caller to persist and
   // pass back as prev_results next scan. Optional so hand-built ScanOutputs (api/scans) stay valid.
   file_cache?:          Record<string, CachedFileResult>;
+  // Every file's cross-file contribution (imports/reexports/summary/sinks/call-graph), for the caller to
+  // persist and pass back as prev_module_cache next scan -- see moduleSummaryCache.ts.
+  module_cache?:        Record<string, CachedModuleSummary>;
   // The AI number, named for what it is. Identical to total_ai_percentage (kept for compatibility): an EVIDENCE
   // SCORE -- monotone in how much AI-typical evidence was found, useful for ranking/thresholds, NOT a probability.
   ai_evidence_score?:   number;
@@ -7061,6 +7075,13 @@ export function runScan(input: ScanInput): ScanOutput {
   // per-file analyzeFile() pass below. (This used to filter unchanged files out of the whole scan.)
   const allFiles = input.files;
   const contentHashByPath = new Map(allFiles.map(f => [f.path, sha256Hex(f.content ?? "")]));
+  // Namespaces BOTH cache round-trips (file_cache below, and moduleSummaryCache's own version+namespace
+  // fold) -- declared once, this early, so a deploy boundary invalidates everything consistently rather
+  // than by coincidence of two separately-computed values agreeing.
+  const namespace = input.cache_namespace ?? "";
+  const moduleCacheHashByPath = new Map(
+    [...contentHashByPath].map(([p, h]) => [p, computeModuleCacheContentHash(namespace, h)]),
+  );
 
   // PR-level prior bias: when PR behavior or baseline deviation indicate strong
   // AI likelihood, give each file a small evidence boost via computeAIPercentage's
@@ -7087,22 +7108,64 @@ export function runScan(input: ScanInput): ScanOutput {
   // cross-file analysis are separate, later phases -- this block is named
   // and scoped accordingly rather than made generic, so those phases add
   // their own parallel blocks instead of overloading this one.
+  // resolveImportPath resolves `.`-relative and `@/`-aliased specifiers only; bare/package
+  // specifiers return null and are silently skipped -- external package = out of graph, the same
+  // boundary semanticGraph.ts's own cross-file mechanism already has, not a new limitation.
+  const allScanPaths = allFiles.map(f => f.path);
+  const prevModuleCache = input.prev_module_cache ?? {};
+  // Which files' cached cross-file contribution (imports/reexports/summary/sinks/call-graph) is still
+  // exactly correct -- see moduleSummaryCache.ts. A cache-valid file needs NO parse at all below: its
+  // FileGraph entry is built straight from the cache, and the fixed point treats its (constant, already-
+  // converged) summary/sinks as a frozen contribution rather than recomputing them from a fresh walk.
+  const jsValidPaths = computeCacheValidity(
+    allFiles.filter(f => shouldAstParse(f.content, f.path)).map(f => ({ path: f.path, contentHash: moduleCacheHashByPath.get(f.path)! })),
+    prevModuleCache, (from, spec) => resolveImportPath(from, spec, allScanPaths),
+  );
+  // Every file's imports/reexports/call-graph as used THIS scan (cached verbatim, or freshly derived) --
+  // the raw material module_cache is built from at the end, once summaries/sinks have converged below.
+  const moduleCacheDraft = new Map<string, { imports: CachedImportEdge[]; reexports: CachedReexportEdge[]; callGraphEdges?: CallEdgeLike[]; callGraphReachable?: string[] }>();
+
   const jsSourceFiles = new Map<string, ts.SourceFile>();
   const jsFileGraphs: FileGraph[] = [];
   for (const f of allFiles) {
     if (!shouldAstParse(f.content, f.path)) continue;
+    if (jsValidPaths.has(f.path)) {
+      const cached = prevModuleCache[f.path];
+      moduleCacheDraft.set(f.path, {
+        imports: cached.imports, reexports: cached.reexports,
+        callGraphEdges: cached.callGraphEdges, callGraphReachable: cached.callGraphReachable,
+      });
+      const summary = new Map(cached.summary), sinks = new Map(cached.sinks);
+      jsFileGraphs.push({
+        path: f.path,
+        imports: cached.imports.map(({ localName, importedName, moduleSpecifier, namespace }) => ({ localName, importedName, moduleSpecifier, namespace })),
+        reexports: cached.reexports.map(({ publicName, importedName, moduleSpecifier }) => ({ publicName, importedName, moduleSpecifier })),
+        // Provably unaffected by `incoming` (computeCacheValidity proved nothing this file transitively
+        // depends on changed) -- returning the same converged value every round is what lets the fixed
+        // point treat it as a frozen contribution rather than re-deriving it from a fresh AST walk.
+        computeSummary: () => summary as Map<string, ParamShape[]>,
+        computeSinks: () => sinks,
+      });
+      continue;
+    }
     const sf = parseSourceFile(f.content, f.path);
     jsSourceFiles.set(f.path, sf);
     // buildImportBindings is astTaint.ts's real-AST import-binding extraction (NOT ast.ts's
     // regex-based import parsing used elsewhere below) -- it keeps (local name, original exported
     // name) pairs, so `import { buildQuery as bq } from "./db"` correctly matches `bq(...)` call
     // sites, which a name keyed only by the pre-alias exported name would miss.
+    const imports = buildImportBindings(sf).map(b => ({
+      localName: b.localName, importedName: b.importedName, moduleSpecifier: b.moduleSpecifier, namespace: b.namespace,
+    }));
+    const reexports = collectReexports(sf);
+    moduleCacheDraft.set(f.path, {
+      imports: imports.map(imp => ({ ...imp, resolvedPath: resolveImportPath(f.path, imp.moduleSpecifier, allScanPaths) })),
+      reexports: reexports.map(re => ({ ...re, resolvedPath: resolveImportPath(f.path, re.moduleSpecifier, allScanPaths) })),
+    });
     jsFileGraphs.push({
       path: f.path,
-      imports: buildImportBindings(sf).map(b => ({
-        localName: b.localName, importedName: b.importedName, moduleSpecifier: b.moduleSpecifier, namespace: b.namespace,
-      })),
-      reexports: collectReexports(sf),
+      imports,
+      reexports,
       computeSummary: (incoming) => computeExportTaintSummary(f.content, f.path, sf, incoming as Map<string, ParamShape[]>),
       // Which parameters of each export reach a sink (in its body, or transitively in another file's) -- the
       // other half of a cross-file summary, so a wrapper that sinks its parameter and returns nothing is seen.
@@ -7114,10 +7177,6 @@ export function runScan(input: ScanInput): ScanOutput {
   // re-exports (`export { x } from`, `export * from`), resolved as a bounded multi-hop fixed point --
   // see taint/crossFile.ts's own docblock for the algorithm and what's explicitly out of scope
   // (a cross-file callee-body sink re-walk; same-file-only for every other language).
-  // resolveImportPath resolves `.`-relative and `@/`-aliased specifiers only; bare/package
-  // specifiers return null and are silently skipped -- external package = out of graph, the same
-  // boundary semanticGraph.ts's own cross-file mechanism already has, not a new limitation.
-  const allScanPaths = allFiles.map(f => f.path);
   const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths));
   const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath: string; sinks: ParamSinkFact[] }>>;
 
@@ -7128,12 +7187,23 @@ export function runScan(input: ScanInput): ScanOutput {
   // (file, name) nodes, so chains of any length, re-export barrels and cross-file-reached helpers all resolve
   // (the old one-pass bridge stopped after one hop) -- and this block only builds its per-file inputs.
   // buildCallGraph(f.content) is a second, isolated computation purely for this: analyzeFile() computes its own
-  // per file, and threading one through would add yet another optional param for a cheap regex pass.
+  // per file, and threading one through would add yet another optional param for a cheap regex pass. Content-
+  // determined alone (no incoming), so a cache-valid file's cached edges/reachable are reused as-is -- no
+  // transitive proof needed beyond the file's own content hash, unlike the summary/sinks above.
   const reachInputs: ReachFile[] = [];
   for (const f of allFiles) {
+    const draft = moduleCacheDraft.get(f.path);
+    if (jsValidPaths.has(f.path) && draft?.callGraphEdges && draft.callGraphReachable) {
+      reachInputs.push({
+        path: f.path, edges: draft.callGraphEdges, reachable: new Set(draft.callGraphReachable),
+        imports: draft.imports, reexports: draft.reexports,
+      });
+      continue;
+    }
     const sf = jsSourceFiles.get(f.path);
     if (!sf) continue;
     const graph = buildCallGraph(f.content);
+    if (draft) { draft.callGraphEdges = graph.edges; draft.callGraphReachable = [...graph.reachable]; }
     reachInputs.push({
       path: f.path,
       edges: graph.edges,
@@ -7152,24 +7222,54 @@ export function runScan(input: ScanInput): ScanOutput {
 
   // ── Cross-file taint bridge (Python): mirrors the JS/TS block above exactly, over
   // collectImportEdgesPy/resolvePythonImportPath/computeExportTaintSummaryPy instead -- see
-  // taint/crossFile.ts's own docblock for the shared multi-hop algorithm.
+  // taint/crossFile.ts's own docblock for the shared multi-hop algorithm. Python isn't yet part of
+  // cross-file reachability (a separate, pre-existing, documented gap), so its module cache carries no
+  // call-graph fields at all.
+  const pyValidPaths = computeCacheValidity(
+    allFiles.filter(f => detectLanguage(f.path) === "python" && isPythonParserReady()).map(f => ({ path: f.path, contentHash: moduleCacheHashByPath.get(f.path)! })),
+    prevModuleCache, (from, spec) => {
+      const dots = spec.match(/^\.*/)?.[0].length ?? 0;
+      return resolvePythonImportPath(from, dots, spec.slice(dots), allScanPaths);
+    },
+  );
   const pySourceFiles = new Map<string, PySyntaxNode>();
   const pyFileGraphs: FileGraph[] = [];
   for (const f of allFiles) {
     if (detectLanguage(f.path) !== "python" || !isPythonParserReady()) continue;
+    if (pyValidPaths.has(f.path)) {
+      const cached = prevModuleCache[f.path];
+      moduleCacheDraft.set(f.path, { imports: cached.imports, reexports: [] });
+      const summary = new Map(cached.summary), sinks = new Map(cached.sinks);
+      pyFileGraphs.push({
+        path: f.path,
+        imports: cached.imports.map(({ localName, importedName, moduleSpecifier, namespace }) => ({ localName, importedName, moduleSpecifier, namespace })),
+        reexports: [],
+        computeSummary: () => summary as Map<string, PyParamShape[]>,
+        computeSinks: () => sinks,
+      });
+      continue;
+    }
     const root = parsePythonSourceSync(f.content, f.path);
     if (!root) continue;
     pySourceFiles.set(f.path, root);
+    const pyImports = collectImportEdgesPy(root).map(e => ({
+      localName: e.localName, importedName: e.importedName,
+      // Encodes dots+dotted into one specifier string purely so resolvePath below (a single
+      // (from,spec)=>path callback shared with the JS/TS graph) can recover both -- never shown to
+      // a user, never matched against anything else.
+      moduleSpecifier: `${".".repeat(e.dots)}${e.dotted}`,
+      namespace: e.namespace,
+    }));
+    moduleCacheDraft.set(f.path, {
+      imports: pyImports.map(imp => {
+        const dots = imp.moduleSpecifier.match(/^\.*/)?.[0].length ?? 0;
+        return { ...imp, resolvedPath: resolvePythonImportPath(f.path, dots, imp.moduleSpecifier.slice(dots), allScanPaths) };
+      }),
+      reexports: [],
+    });
     pyFileGraphs.push({
       path: f.path,
-      imports: collectImportEdgesPy(root).map(e => ({
-        localName: e.localName, importedName: e.importedName,
-        // Encodes dots+dotted into one specifier string purely so resolvePath below (a single
-        // (from,spec)=>path callback shared with the JS/TS graph) can recover both -- never shown to
-        // a user, never matched against anything else.
-        moduleSpecifier: `${".".repeat(e.dots)}${e.dotted}`,
-        namespace: e.namespace,
-      })),
+      imports: pyImports,
       reexports: [], // Python has no re-export statement equivalent to JS/TS's `export ... from`
       computeSummary: (incoming) => computeExportTaintSummaryPy(f.content, f.path, root, incoming as Map<string, PyParamShape[]>),
       computeSinks: (inShapes, inSinks) => computeExportSinkSummaryPy(f.content, f.path, root, inShapes as Map<string, PyParamShape[]>, inSinks),
@@ -7179,6 +7279,24 @@ export function runScan(input: ScanInput): ScanOutput {
     const dots = spec.match(/^\.*/)?.[0].length ?? 0;
     return resolvePythonImportPath(from, dots, spec.slice(dots), allScanPaths);
   });
+
+  // Every file's cross-file contribution, for the caller to persist as prev_module_cache next scan --
+  // built from moduleCacheDraft (imports/reexports/call-graph, cached-or-fresh) plus the JUST-CONVERGED
+  // summary/sinks (jsBridge/pyBridge cover disjoint file sets, so `??` never masks a real value with
+  // the other language's empty default).
+  const module_cache: Record<string, CachedModuleSummary> = {};
+  for (const [path, draft] of moduleCacheDraft) {
+    const summary = (jsBridge.summaries.get(path) ?? pyBridge.summaries.get(path)) as Map<string, CrossFileShape[]> | undefined;
+    const sinks = jsBridge.sinkSummaries.get(path) ?? pyBridge.sinkSummaries.get(path);
+    if (!summary || !sinks) continue;
+    module_cache[path] = {
+      contentHash: moduleCacheHashByPath.get(path)!,
+      imports: draft.imports, reexports: draft.reexports,
+      summary: mapToEntries(summary), sinks: mapToEntries(sinks),
+      callGraphEdges: draft.callGraphEdges, callGraphReachable: draft.callGraphReachable,
+    };
+  }
+
   const crossFileShapesPyByFile = pyBridge.propagatingByFile as unknown as Map<string, Map<string, { shapes: PyParamShape[]; fromModule: string }>>;
   // scanAstTaintPython's crossFileShapes param is a bare name -> shapes map (no per-name
   // fromModule attribution needed downstream, unlike crossFilePropagatingByFile's JS/TS consumer).
@@ -7198,7 +7316,6 @@ export function runScan(input: ScanInput): ScanOutput {
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
   // what makes an unchanged caller re-analyze when its callee changed.
-  const namespace = input.cache_namespace ?? "";
   const file_cache: Record<string, CachedFileResult> = {};
   let skipped_unchanged = 0;
   const files = allFiles.map(f => {
@@ -7517,6 +7634,8 @@ export function runScan(input: ScanInput): ScanOutput {
     compliance,
     skipped_unchanged,
     file_cache,
+    module_cache,
+    module_cache_reused: jsValidPaths.size + pyValidPaths.size,
     semantic_graph,
     git_provenance,
     ai_tooling,
