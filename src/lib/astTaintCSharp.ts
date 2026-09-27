@@ -1819,9 +1819,12 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
     const matching = sides.filter(s => s.holds === holds);
     return matching.some(s => s.kind === "ownership") ? "ownership" : "role";
   };
+  // A role-only match does not stop the search: a LATER guard clause might still establish real
+  // ownership, which must win over an earlier role-only match, not be shadowed by it.
   let found: AuthzKind | null = null;
+  const record = (kind: AuthzKind) => { if (kind === "ownership" || !found) found = kind; };
   const visit = (n: SyntaxNode) => {
-    if (found) return;
+    if (found === "ownership") return;
     if (n.type === "if_statement" || n.type === "conditional_expression") {
       const cond = n.childForFieldName("condition");
       const cons = n.childForFieldName("consequence");
@@ -1829,11 +1832,11 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
       if (cond && cond.endIndex <= sink.startIndex) {
         const sides = ownershipSidesCS(cond, ids, body);
         const afterIf = n.type === "if_statement" && sink.startIndex >= n.endIndex && contains(n.parent, sink);
-        if (sides.some(s => s.holds === "true") && (contains(cons, sink) || (afterIf && statementTerminatesCS(alt)))) found = kindOf(sides, "true");
-        if (sides.some(s => s.holds === "false") && (contains(alt, sink) || (afterIf && statementTerminatesCS(cons)))) found = kindOf(sides, "false");
+        if (sides.some(s => s.holds === "true") && (contains(cons, sink) || (afterIf && statementTerminatesCS(alt)))) record(kindOf(sides, "true"));
+        if (sides.some(s => s.holds === "false") && (contains(alt, sink) || (afterIf && statementTerminatesCS(cons)))) record(kindOf(sides, "false"));
       }
     }
-    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+    if ((found as AuthzKind | null) !== "ownership") for (const c of n.namedChildren) if (c) visit(c);
   };
   visit(body);
   return found;

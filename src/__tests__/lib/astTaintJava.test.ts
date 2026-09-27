@@ -554,6 +554,27 @@ public class A {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
+  it("a role-only guard clause does not shadow a LATER guard clause that establishes real ownership", () => {
+    // Regression: the dominance walk used to STOP at the first matching guard clause, even a role-only
+    // one, so a role check followed by a separate real ownership check never reached the second check.
+    const content = `
+public class A {
+  private final Map<String, Map<String, Object>> users = new HashMap<>();
+  @DeleteMapping("/api/users/{userId}")
+  public Object del(@PathVariable String userId, Authentication authentication) {
+    if (!accessControl.hasPermission(authentication, "user")) {
+      return ResponseEntity.status(403).build();
+    }
+    if (!userId.equals(authentication.getName())) {
+      return ResponseEntity.status(403).build();
+    }
+    users.remove(userId);
+    return ResponseEntity.ok().build();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
   it("a guard call testing only a role (no id in its arguments) is role-only", () => {
     const content = `
 public class A {

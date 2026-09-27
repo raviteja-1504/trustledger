@@ -56,6 +56,7 @@ import {
   type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
 // See astTaintPython.ts's identical helper for why: require.resolve(...)
 // from inside webpack-bundled code doesn't do real filesystem resolution,
@@ -629,15 +630,28 @@ function statementTerminatesGo(n: SyntaxNode | null): boolean {
   return false;
 }
 
-type SideGo = "true" | "false";
+interface SideGo { holds: "true" | "false"; kind: AuthzKind }
 
-/** Which side(s) of `cond` establish that `id` is compared equal to the
- * authenticated principal (`==` holds on the true side, `!=` on the false
- * side; `!`/`&&`/`||` compose like validation guards do). An identifier
- * condition (`isOwner`) resolves ONE hop to its last preceding assignment. */
+/** A guard call in the condition, judged by name (classifyGuardName) -- ownership-level when it's handed
+ * `id` itself, role-level otherwise (`if (!accessControl.CanAccess(id, principal))` vs
+ * `if (!user.HasRole("admin"))`). */
+function guardCallSideGo(cond: SyntaxNode, id: string): SideGo | null {
+  if (cond.type !== "call_expression") return null;
+  const fn = cond.childForFieldName("function");
+  const name = fn?.type === "selector_expression" ? fn.childForFieldName("field")?.text : fn?.type === "identifier" ? fn.text : null;
+  const kind = name ? classifyGuardName(name) : null;
+  if (!kind) return null;
+  const mentionsId = argListOfGo(cond).some(a => a.type === "identifier" && a.text === id);
+  return { holds: "true", kind: kind === "role" && mentionsId ? "ownership" : kind };
+}
+
+/** Which side(s) of `cond` establish OWNERSHIP OR ROLE evidence for `id` -- `==` holds on the true side,
+ * `!=` on the false side; `!`/`&&`/`||` compose like validation guards do. An identifier condition
+ * (`isOwner`) resolves ONE hop to its last preceding assignment. A bare guard-call condition (not itself
+ * a comparison) carries whatever classifyGuardName says it does. */
 function ownershipSidesGo(cond: SyntaxNode, id: string, fnBody: SyntaxNode, resolve = true): SideGo[] {
   const isId = (n: SyntaxNode | null) => !!n && n.type === "identifier" && n.text === id;
-  const flip = (s: SideGo): SideGo => (s === "true" ? "false" : "true");
+  const flip = (s: SideGo): SideGo => ({ holds: s.holds === "true" ? "false" : "true", kind: s.kind });
   switch (cond.type) {
     case "parenthesized_expression": {
       const inner = cond.namedChildren[0];
@@ -655,10 +669,10 @@ function ownershipSidesGo(cond: SyntaxNode, id: string, fnBody: SyntaxNode, reso
       if (!l || !r) return [];
       if (op === "==" || op === "!=") {
         const hit = (isId(l) && isPrincipalShapedGo(r)) || (isId(r) && isPrincipalShapedGo(l));
-        return hit ? [op === "==" ? "true" : "false"] : [];
+        return hit ? [{ holds: op === "==" ? "true" : "false", kind: "ownership" }] : [];
       }
-      if (op === "&&") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s === "true");
-      if (op === "||") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s === "false");
+      if (op === "&&") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s.holds === "true");
+      if (op === "||") return [...ownershipSidesGo(l, id, fnBody, resolve), ...ownershipSidesGo(r, id, fnBody, resolve)].filter(s => s.holds === "false");
       return [];
     }
     case "call_expression": {
@@ -666,9 +680,10 @@ function ownershipSidesGo(cond: SyntaxNode, id: string, fnBody: SyntaxNode, reso
       if (fn?.type === "selector_expression" && fn.childForFieldName("field")?.text === "Equal") {
         const operand = fn.childForFieldName("operand");
         const arg0 = argListOfGo(cond)[0] ?? null;
-        if ((isId(operand) && arg0 && isPrincipalShapedGo(arg0)) || (isId(arg0) && operand && isPrincipalShapedGo(operand))) return ["true"];
+        if ((isId(operand) && arg0 && isPrincipalShapedGo(arg0)) || (isId(arg0) && operand && isPrincipalShapedGo(operand))) return [{ holds: "true", kind: "ownership" }];
       }
-      return [];
+      const guard = guardCallSideGo(cond, id);
+      return guard ? [guard] : [];
     }
     case "identifier": {
       if (!resolve) return [];
@@ -693,19 +708,25 @@ function ownershipSidesGo(cond: SyntaxNode, id: string, fnBody: SyntaxNode, reso
 }
 
 /**
- * Does an ownership comparison for `id` DOMINATE `sink`? It must (a) sit in
- * an if condition that precedes the sink in source order and (b) put the
- * sink on the continuing path: the sink is in the arm where the comparison
- * establishes ownership, or the arm where it does not always terminates and
- * the sink comes after the whole if. A comparison that is unused, follows
- * the lookup, or guards a different branch no longer suppresses.
+ * Does an ownership OR role comparison for `id` DOMINATE `sink`? It must (a) sit in an if condition that
+ * precedes the sink in source order and (b) put the sink on the continuing path: the sink is in the arm
+ * where the comparison establishes the evidence, or the arm where it does not always terminates and the
+ * sink comes after the whole if. A comparison that is unused, follows the lookup, or guards a different
+ * branch no longer suppresses. Returns the KIND of evidence that dominated, or null if nothing does.
  */
-function ownershipDominatesGo(sink: SyntaxNode, id: string, fnBody: SyntaxNode): boolean {
+function ownershipDominatesGo(sink: SyntaxNode, id: string, fnBody: SyntaxNode): AuthzKind | null {
   const contains = (outer: SyntaxNode | null, inner: SyntaxNode) =>
     !!outer && outer.startIndex <= inner.startIndex && inner.endIndex <= outer.endIndex;
-  let found = false;
+  const kindOf = (sides: SideGo[], holds: "true" | "false"): AuthzKind => {
+    const matching = sides.filter(s => s.holds === holds);
+    return matching.some(s => s.kind === "ownership") ? "ownership" : "role";
+  };
+  // A role-only match does not stop the search: a LATER guard clause in the same function might still
+  // establish real ownership, which must win over an earlier role-only match, not be shadowed by it.
+  let found: AuthzKind | null = null;
+  const record = (kind: AuthzKind) => { if (kind === "ownership" || !found) found = kind; };
   const visit = (n: SyntaxNode) => {
-    if (found) return;
+    if (found === "ownership") return;
     if (n.type === "if_statement") {
       const cond = n.childForFieldName("condition");
       const cons = n.childForFieldName("consequence");
@@ -713,11 +734,11 @@ function ownershipDominatesGo(sink: SyntaxNode, id: string, fnBody: SyntaxNode):
       if (cond && cond.endIndex <= sink.startIndex) {
         const sides = ownershipSidesGo(cond, id, fnBody);
         const afterIf = sink.startIndex >= n.endIndex && contains(n.parent, sink);
-        if (sides.includes("true") && (contains(cons, sink) || (afterIf && statementTerminatesGo(alt)))) found = true;
-        if (sides.includes("false") && (contains(alt, sink) || (afterIf && statementTerminatesGo(cons)))) found = true;
+        if (sides.some(s => s.holds === "true") && (contains(cons, sink) || (afterIf && statementTerminatesGo(alt)))) record(kindOf(sides, "true"));
+        if (sides.some(s => s.holds === "false") && (contains(alt, sink) || (afterIf && statementTerminatesGo(cons)))) record(kindOf(sides, "false"));
       }
     }
-    if (!found) for (const c of n.namedChildren) if (c) visit(c);
+    if ((found as AuthzKind | null) !== "ownership") for (const c of n.namedChildren) if (c) visit(c);
   };
   visit(fnBody);
   return found;
@@ -727,12 +748,13 @@ function ownershipDominatesGo(sink: SyntaxNode, id: string, fnBody: SyntaxNode):
  * is itself a bare identifier -- a compound expression (a selector, a call)
  * has no single name a separate comparison elsewhere could reference by,
  * same "bare identifier only" scoping astTaintJava.ts's bareIdentifierOf
- * uses for its own one-hop backward check. */
-function structuralOwnershipCheckSuppressesGo(sinkNode: SyntaxNode, resourceIdExpr: SyntaxNode): boolean {
-  if (resourceIdExpr.type !== "identifier") return false;
+ * uses for its own one-hop backward check. Returns the KIND of evidence
+ * found (a role check is real but does not prove ownership of THIS object). */
+function structuralOwnershipEvidenceGo(sinkNode: SyntaxNode, resourceIdExpr: SyntaxNode): AuthzKind | null {
+  if (resourceIdExpr.type !== "identifier") return null;
   const enclosingFn = findEnclosingFunctionNodeGo(sinkNode);
   const fnBody = enclosingFn?.childForFieldName("body");
-  if (!fnBody) return false;
+  if (!fnBody) return null;
   return ownershipDominatesGo(sinkNode, resourceIdExpr.text, fnBody);
 }
 
@@ -1681,9 +1703,16 @@ export function scanAstTaintGo(
       // (strconv.Atoi(c.Param("id"))) deliberately does not clear.
       const idorMatch = matchIdorGo(node);
       if (idorMatch && sinkHit(node, [idorMatch.args[0]], "idor", env, taintMask)) {
-        const suppressed = (idorAuthCheckNearby?.(lineOf(node)) ?? false) ||
-          structuralOwnershipCheckSuppressesGo(node, idorMatch.args[0]);
-        if (!suppressed) emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr);
+        if (!(idorAuthCheckNearby?.(lineOf(node)) ?? false)) {
+          const structuralKind = structuralOwnershipEvidenceGo(node, idorMatch.args[0]);
+          const verdict = authzVerdict(new Set(structuralKind ? [structuralKind] : []));
+          if (verdict !== "proven") {
+            emit("idor", node, sourceLabelGo(idorMatch.args[0]), idorMatch.sinkExpr,
+              verdict === "role-only"
+                ? `Tainted expression '${sourceLabelGo(idorMatch.args[0])}' flows into ${idorMatch.sinkExpr}(...) behind a role/permission check, but nothing establishes that the caller owns THIS object — a role limits who can reach the endpoint, not which objects they may read or change`
+                : undefined);
+          }
+        }
       }
 
       const fnTextAll = fn ? calleeTextGo(fn) : null;

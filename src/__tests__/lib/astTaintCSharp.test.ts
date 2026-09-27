@@ -638,6 +638,22 @@ public class A {
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
+  it("a role-only guard clause does not shadow a LATER guard clause that establishes real ownership", () => {
+    // Regression: the dominance walk used to STOP at the first matching guard clause, even a role-only
+    // one, so a role check followed by a separate real ownership check never reached the second check.
+    const content = `
+public class A {
+  [HttpDelete("{id}")]
+  public IActionResult DeleteUser([FromRoute] string id) {
+    if (!accessControl.HasPermission(User, "user")) { return Forbid(); }
+    if (id != User.Identity.Name) { return Forbid(); }
+    db.Users.Remove(id);
+    return Ok();
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
   it("a guard call testing only a role (no id in its arguments) is role-only", () => {
     const content = `
 public class A {

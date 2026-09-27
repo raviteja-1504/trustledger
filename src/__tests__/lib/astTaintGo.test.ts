@@ -242,6 +242,75 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const findings = scanAstTaintGo(content, "x.go", undefined, idorAuthCheckNearby);
       expect(findings.some(f => f.id === "idor")).toBe(false);
     });
+
+    // No idorAuthCheckNearby passed in any test below -- these exercise the STRUCTURAL evidence model
+    // (structuralOwnershipEvidenceGo/ownershipDominatesGo) directly, independent of the separate
+    // keyword-proximity regex heuristic covered above.
+
+    it("a guard call handed the id (not just a boolean flag) protects fully", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if !accessControl.CanAccess(id, principal) {
+		return
+	}
+	db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+`);
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "idor")).toBe(false);
+    });
+
+    it("a guard call testing only a role (no id in its arguments) is a real control but does not prove ownership -- still reports, downgraded", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if !accessControl.HasPermission(principal, "admin") {
+		return
+	}
+	db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+`);
+      const findings = scanAstTaintGo(content, "x.go");
+      const found = findings.filter(f => f.id === "idor");
+      expect(found).toHaveLength(1);
+      expect(found[0].detail).toMatch(/role\/permission check/);
+    });
+
+    it("a name that merely CONTAINS guard letters is not a guard, and is still reported", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if !scanner.oracleLookup(id) {
+		return
+	}
+	db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+`);
+      const found = scanAstTaintGo(content, "x.go").filter(f => f.id === "idor");
+      expect(found).toHaveLength(1);
+      expect(found[0].detail).not.toMatch(/role\/permission check/);
+    });
+
+    it("an id-vs-principal comparison PLUS a role check is fully proven (ownership wins)", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if !accessControl.HasPermission(principal, "user") {
+		return
+	}
+	if id != principal.MustGet("userId") {
+		return
+	}
+	db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+`);
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "idor")).toBe(false);
+    });
+
+    it("a role-check condition that does NOT leave on failure is not a gate -- still reports, without the role message", () => {
+      const content = wrap(`
+	id := r.URL.Query().Get("id")
+	if !accessControl.HasPermission(principal, "admin") {
+		log.Println("not admin")
+	}
+	db.QueryRow("SELECT * FROM accounts WHERE id=?", id)
+`);
+      const found = scanAstTaintGo(content, "x.go").filter(f => f.id === "idor");
+      expect(found).toHaveLength(1);
+      expect(found[0].detail).not.toMatch(/role\/permission check/);
+    });
   });
 
   describe("multi-return heuristic (Decision 6: first-LHS-only)", () => {

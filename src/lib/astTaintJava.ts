@@ -2178,41 +2178,47 @@ function ownershipDominatesJava(
     return matching.some(s => s.kind === "ownership") ? "ownership" : "role";
   };
 
+  // A role-only match, at any ancestor level or from any preceding sibling guard clause, does not stop
+  // the search: a LATER or nested one might still establish real ownership, which must win, not be
+  // shadowed by an earlier role-only match.
+  let found: AuthzKind | null = null;
+  const record = (kind: AuthzKind) => { if (kind === "ownership" || !found) found = kind; };
+
   const path = pathTo(body, sink);
-  for (let i = 0; i < path.length - 1; i++) {
+  for (let i = 0; i < path.length - 1 && found !== "ownership"; i++) {
     const a = path[i], child = path[i + 1];
     if (a.name === "ifStatement") {
       const cond = firstNode(a, "expression");
       const stmts = nodeKids(a, "statement");
       if (cond && child !== cond) {
         const sides = sidesOf(cond);
-        if (child === stmts[0] && sides.some(s => s.holds === "true")) return kindOf(sides, "true");
-        if (child === stmts[1] && sides.some(s => s.holds === "false")) return kindOf(sides, "false");
+        if (child === stmts[0] && sides.some(s => s.holds === "true")) record(kindOf(sides, "true"));
+        if (child === stmts[1] && sides.some(s => s.holds === "false")) record(kindOf(sides, "false"));
       }
     } else if (a.name === "conditionalExpression" && tokenKids(a, "QuestionMark").length > 0) {
       const condBin = firstNode(a, "binaryExpression");
       const arms = nodeKids(a, "expression");
       if (condBin && child !== condBin) {
         const sides = sidesOf(condBin, true);
-        if (child === arms[0] && sides.some(s => s.holds === "true")) return kindOf(sides, "true");
-        if (child === arms[1] && sides.some(s => s.holds === "false")) return kindOf(sides, "false");
+        if (child === arms[0] && sides.some(s => s.holds === "true")) record(kindOf(sides, "true"));
+        if (child === arms[1] && sides.some(s => s.holds === "false")) record(kindOf(sides, "false"));
       }
     } else if (a.name === "blockStatements") {
       const list = nodeKids(a, "blockStatement");
       const idx = list.indexOf(child);
-      for (let j = 0; j < idx; j++) {
+      for (let j = 0; j < idx && found !== "ownership"; j++) {
         const ifN = unwrapIfStatement(list[j]);
         if (!ifN) continue;
         const cond = firstNode(ifN, "expression");
         const stmts = nodeKids(ifN, "statement");
         const sides = sidesOf(cond);
         // the arm that does NOT establish ownership never reaches what follows
-        if (sides.some(s => s.holds === "false") && statementTerminatesJava(stmts[0])) return kindOf(sides, "false");
-        if (sides.some(s => s.holds === "true") && stmts[1] && statementTerminatesJava(stmts[1])) return kindOf(sides, "true");
+        if (sides.some(s => s.holds === "false") && statementTerminatesJava(stmts[0])) record(kindOf(sides, "false"));
+        if (sides.some(s => s.holds === "true") && stmts[1] && statementTerminatesJava(stmts[1])) record(kindOf(sides, "true"));
       }
     }
   }
-  return null;
+  return found;
 }
 
 /**
