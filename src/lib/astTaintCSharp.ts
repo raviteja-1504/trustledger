@@ -428,6 +428,25 @@ function recordFieldStickyCS(name: string | null, mask: number, ctx: EngineCtx, 
   if (next !== (ctx.sticky.get(name) ?? 0)) { ctx.sticky.set(name, next); ctx.stickyDirty = true; }
 }
 
+// EF Core APIs that take a FormattableString and turn each {hole} into a DbParameter.
+const EF_PARAMETERIZED_SQL_METHODS = new Set([
+  "FromSql", "FromSqlInterpolated", "SqlQuery", "ExecuteSql", "ExecuteSqlAsync", "ExecuteSqlInterpolated", "ExecuteSqlInterpolatedAsync",
+]);
+
+/** `db.Database.ExecuteSqlInterpolated($"... {x}")`: the interpolated string is handed to EF as a
+ * FormattableString, so its holes become parameters -- not SQL text. Only when passed DIRECTLY: once assigned to
+ * a `string` or concatenated, it is plain text again. */
+function isEfParameterizedInterpolationCS(node: SyntaxNode): boolean {
+  const arg = node.parent;
+  const call = arg?.type === "argument" ? arg.parent?.parent : null;
+  if (!call || call.type !== "invocation_expression") return false;
+  const fn = call.childForFieldName("function");
+  const name = fn?.type === "member_access_expression" ? fn.childForFieldName("name")?.text
+    : fn?.type === "generic_name" ? fn.namedChildren[0]?.text : fn?.text;
+  const bare = name?.replace(/<.*$/, "");
+  return !!bare && EF_PARAMETERIZED_SQL_METHODS.has(bare);
+}
+
 /** A string built around an untrusted operand: SQL / LDAP / XPath text, or an escaped value inside <script>. */
 function checkShapesCS(
   node: SyntaxNode, parts: Array<{ lit?: string; expr?: SyntaxNode }>, env: Env, ctx: EngineCtx, mask: TaintMaskFnCS,
@@ -1296,6 +1315,35 @@ function statementTerminatesCS(n: SyntaxNode | null | undefined): boolean {
 }
 
 /** Parameter names a lambda / local function / anonymous method introduces. */
+const MINIMAL_API_MAP_RE = /^Map(?:Get|Post|Put|Delete|Patch|Methods)$/;
+const BOUND_SCALAR_TYPE_RE = /^(?:string|int|long|short|byte|uint|ulong|decimal|double|float|bool|char|Guid|DateTime|DateTimeOffset|DateOnly|TimeOnly)\??(?:\[\])?$/;
+
+/**
+ * ASP.NET Core minimal API: `app.MapGet("/x", (string q, AppDb db) => ...)`. The handler lambda's parameters
+ * bound from the request -- route/query values (scalars, strings, arrays of them) and anything with an
+ * explicit [From*] attribute -- are request input. Other parameters are dependency-injected services
+ * (AppDb, ILogger, ...) and are left alone.
+ */
+function minimalApiBoundParamsCS(fn: SyntaxNode): string[] {
+  if (fn.type !== "lambda_expression") return [];
+  const arg = fn.parent;
+  const call = arg?.type === "argument" ? arg.parent?.parent : null;
+  if (!call || call.type !== "invocation_expression") return [];
+  const callee = call.childForFieldName("function");
+  const name = callee?.type === "member_access_expression" ? callee.childForFieldName("name")?.text : callee?.text;
+  if (!name || !MINIMAL_API_MAP_RE.test(name)) return [];
+  const params = fn.childForFieldName("parameters");
+  const out: string[] = [];
+  for (const p of params?.namedChildren ?? []) {
+    if (!p || p.type !== "parameter") continue;
+    const pName = p.childForFieldName("name")?.text;
+    const pType = p.childForFieldName("type")?.text.replace(/\s+/g, "") ?? "";
+    const attrs = p.namedChildren.filter(c => c?.type === "attribute_list").map(c => c!.text).join(" ");
+    if (pName && (BOUND_SCALAR_TYPE_RE.test(pType) || /\[\s*From(?:Route|Query|Body|Header|Form)\b/.test(attrs))) out.push(pName);
+  }
+  return out;
+}
+
 function paramNamesOfCS(fn: SyntaxNode): string[] {
   const names: string[] = [];
   const body = fn.childForFieldName("body");
@@ -1337,6 +1385,7 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
     // parameters shadow same-named outer ones and start untainted.
     const fenv = cloneEnv(env);
     for (const p of paramNamesOfCS(fn)) fenv.set(p, 0);
+    for (const p of minimalApiBoundParamsCS(fn)) fenv.set(p, ALL);
     walk(body, fenv);
   };
 
@@ -1626,7 +1675,7 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         }
       }
     }
-    if (node.type === "interpolated_string_expression") {
+    if (node.type === "interpolated_string_expression" && !isEfParameterizedInterpolationCS(node)) {
       checkShapesCS(node, interpolatedPartsCS(node), env, ctx, taintMask);
     }
     if (node.type === "binary_expression") {
@@ -1967,6 +2016,13 @@ export function scanAstTaintCSharp(
       }
     };
     scanMethods(true);
+    // Top-level statements (Program.cs) are one implicit Main: walk them in order. This is where minimal-API
+    // endpoints are declared, so their handler lambdas are only reached from here.
+    const topLevel = root.namedChildren.filter((c): c is SyntaxNode => c?.type === "global_statement");
+    if (topLevel.length > 0) {
+      const env: Env = new Map();
+      for (const st of topLevel) walkForDeclarationsAndSinks(st, env, ctx);
+    }
     // Taint written into class fields / static containers by one method is visible to every method:
     // re-walk until that memory stops growing (bounded).
     for (let round = 0; round < 2 && ctx.stickyDirty; round++) {

@@ -404,6 +404,9 @@ function findOutParamGo(call: SyntaxNode, env: TaintEnv, mask: (n: SyntaxNode, e
 
 const NOSQL_TAILS_GO = new Set(["FindOne", "Find", "UpdateOne", "UpdateMany", "DeleteOne", "DeleteMany", "Aggregate", "CountDocuments", "ReplaceOne", "FindOneAndUpdate", "FindOneAndDelete", "FindOneAndReplace"]);
 const NOSQL_RECEIVER_RE_GO = /coll|mongo|\bdb\b|users?\b|orders?\b|accounts?\b|store|repo/i;
+// The conventional names of a gin/echo/fiber handler's context parameter.
+const FRAMEWORK_CTX_RE = /^(?:c|ctx|context|gc|ec)$/;
+const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download"]);
 const FS_SINKS_GO = new Set([
   "Open", "Create", "OpenFile", "ReadFile", "WriteFile", "Remove", "RemoveAll", "Mkdir", "MkdirAll", "Rename", "Stat",
   "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown",
@@ -439,6 +442,15 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     return { id: "path-traversal", sinkExpr: text, args };
   }
   if (text === "http.ServeFile" && args[2]) return { id: "path-traversal", sinkExpr: text, args: [args[2]] };
+  // Web-framework helpers on the handler's context (gin, echo, fiber): serve a file from a path, or redirect.
+  if (FRAMEWORK_CTX_RE.test(receiverText)) {
+    if (FRAMEWORK_FILE_TAILS.has(tail) && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
+    // gin/echo Redirect(code, location); fiber Redirect(location[, code])
+    if (tail === "Redirect") {
+      const target = args.length >= 2 && /^\d+$|StatusFound|StatusMovedPermanently|StatusSeeOther|StatusTemporaryRedirect|StatusPermanentRedirect/.test(args[0].text) ? args[1] : args[0];
+      return target ? { id: "open-redirect", sinkExpr: text, args: [target] } : null;
+    }
+  }
   if (text === "http.Redirect") {
     // http.Redirect(w, r, target, code) -- target is the 3rd positional arg.
     return args[2] ? { id: "open-redirect", sinkExpr: text, args: [args[2]] } : null;

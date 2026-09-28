@@ -47,7 +47,7 @@ import {
   ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
-import { sanitizerClears } from "./taint/sanitizers";
+import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
 export type AstTaintJavaId =
@@ -181,6 +181,10 @@ const SERVLET_SOURCE_CALLS = new Set([
 // not SQL/command/path) -- see astTaint.ts for the shared design.
 
 // ── BOLA: Spring resource-identifier / authorization-annotation classification ──
+
+// jjwt SigningKeyResolver(Adapter) / Locator callbacks and the types of the unverified token parts they receive.
+const JWT_KEY_RESOLVER_METHODS = new Set(["resolveSigningKey", "resolveSigningKeyBytes", "locate"]);
+const JWT_UNVERIFIED_PARAM_TYPE_RE = /^(?:JwsHeader|JwtHeader|ProtectedHeader|Claims)(?:<.*>)?$/;
 
 // Only PathVariable/RequestParam identify "which resource" -- RequestBody is
 // the write payload (a different role: the thing being written, not the key
@@ -372,6 +376,9 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
       if (!info) continue;
       paramShapes.push({ name: info.name, index, isRest: info.isRest, type: info.type, annotated: info.annotations.length > 0 });
       if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
+      // jjwt key resolution runs BEFORE the signature is verified, so the header/claims it is handed are
+      // whatever the caller put in the token (the `kid` header lookup is the classic injection point).
+      if (JWT_KEY_RESOLVER_METHODS.has(nameTok.image) && JWT_UNVERIFIED_PARAM_TYPE_RE.test(info.type)) springParamNames.add(info.name);
       if (info.annotations.some(a => RESOURCE_ID_ANNOTATIONS.has(a)) && RESOURCE_ID_NAME_RE.test(info.name)) resourceIdParamNames.add(info.name);
       if (info.annotations.includes("AuthenticationPrincipal")) principalParamNames.add(info.name);
       index++;
@@ -570,7 +577,16 @@ function tokensText(node: CstNode): string {
     for (const key of Object.keys(n.children)) for (const el of n.children[key]) { if (isToken(el)) toks.push(el); else visit(el as unknown as CstNode); }
   };
   visit(node);
-  return toks.sort((a, b) => a.startOffset - b.startOffset).map(t => t.image).join("");
+  // Keep a single space wherever the source had whitespace between two tokens (`new URL(x)`, `a + b`); the
+  // bare join produced `newURL(x)` in every finding's source text and trace.
+  let out = "";
+  let prevEnd = -1;
+  for (const t of toks.sort((a, b) => a.startOffset - b.startOffset)) {
+    if (out && t.startOffset > prevEnd + 1) out += " ";
+    out += t.image;
+    prevEnd = t.endOffset ?? t.startOffset + t.image.length - 1;
+  }
+  return out;
 }
 
 const STRINGY_PARAM_TYPE_RE = /^(?:String|CharSequence|StringBuilder|StringBuffer|String\[\]|List<String>|Set<String>|Collection<String>|Map<String,(?:String|Object|\?)>|byte\[\]|char\[\]|InputStream|Reader|Object\[\])$/;
@@ -774,6 +790,17 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
   if (paren) {
     const inner = firstNode(paren, "expression");
     return { parts: [], taint: inner ? taintMask(inner, env, ctx) : 0, rootVar: null, isNewExprOf: null };
+  }
+  // `(String) header.get("kid")` keeps the operand's taint; `(int) x` yields a number, which no longer carries
+  // any injection class (same rule as the PHP/C# engines' numeric casts).
+  const cast = firstNode(prefix, "castExpression");
+  if (cast) {
+    const ref = firstNode(cast, "referenceTypeCastExpression");
+    const prim = firstNode(cast, "primitiveCastExpression");
+    const body = ref ?? prim;
+    const operand = body ? (firstNode(body, "unaryExpressionNotPlusMinus") ?? firstNode(body, "unaryExpression") ?? firstNode(body, "lambdaExpression")) : undefined;
+    const m = operand ? taintMask(operand, env, ctx) : 0;
+    return { parts: [], taint: prim ? applyClears(m, NUMERIC_CLEARS) : m, rootVar: null, isNewExprOf: null };
   }
   // `switch (x) { case ... -> value; }` used as an expression
   const switchExpr = firstNode(prefix, "switchStatement");
@@ -1044,12 +1071,25 @@ function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
 
 // ── Sink dispatch (invoked via walkPrimaryChain's onCall side-channel) ────
 
+/** The part of a sink argument that carries the taint, as source text: for a `+` concatenation, the first
+ * tainted operand; otherwise the whole expression. (nodeText is only the LEFTMOST TOKEN -- for
+ * `"SELECT ... '" + id + "'"` that is the SQL literal, which then reads as the "untrusted input".) */
+function culpritText(arg: CstNode, env: Env, ctx: EngineCtx): string {
+  const bin = findAllNodes(arg, "binaryExpression")[0];   // pre-order: the argument's own top-level binary first
+  const operands = bin ? ((bin.children as Record<string, CstNode[] | undefined>).unaryExpression ?? []) : [];
+  if (operands.length > 1) {
+    const tainted = operands.find(o => (taintMask(o, env, ctx) & ALL) !== 0);
+    if (tainted) return tokensText(tainted);
+  }
+  return tokensText(arg);
+}
+
 function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   const { tail, rootVar, args, chainTaintBefore, node, calleeName } = info;
   const argMasks = args.map(a => taintMask(a, env, ctx));
   const combined = chainTaintBefore | argMasks.reduce((m, x) => m | x, 0);
   const firstTaintedIdx = argMasks.findIndex(m => (m & ALL) !== 0);
-  const sourceExpr = firstTaintedIdx >= 0 ? nodeText(args[firstTaintedIdx]) : calleeName;
+  const sourceExpr = firstTaintedIdx >= 0 ? culpritText(args[firstTaintedIdx], env, ctx) : calleeName;
 
   // One sink per call: a hit emits; a value that was tainted for this sink's
   // class but positively cleared by a sanitizer records a suppression
@@ -1073,11 +1113,14 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     // Spring's fluent ResponseEntity.status(...).header("Location", next).build()
     // -- a modern REST idiom for redirects, distinct from the classic
     // Servlet response.sendRedirect(...) above but an equally real sink.
-    fire("open-redirect", argMasks[1], nodeText(args[1]));
+    fire("open-redirect", argMasks[1], culpritText(args[1], env, ctx));
   } else if (tail === "getForObject" || tail === "postForObject" || tail === "exchange") {
     fire("ssrf");
-  } else if (info.isNewURL && (tail === "openConnection" || tail === "openStream")) {
-    fire("ssrf");
+  } else if (tail === "openConnection" || tail === "openStream") {
+    // Chained on `new URL(x)`, or on a URL held in a variable (`URL u = new URL(x); u.openConnection()`)
+    // whose taint arrives as the receiver's.
+    if (info.isNewURL) fire("ssrf");
+    else if (rootVar && (chainTaintBefore & classOf("ssrf"))) fire("ssrf", chainTaintBefore, rootVar);
   } else if (tail === "get" && rootVar === "Paths") {
     fire("path-traversal");
   } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
@@ -1097,14 +1140,14 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fire("sql-injection", argMasks[0], nodeText(arg0));
   }
   if (tail === "format" && rootVar === "String" && args.length >= 2 && SQL_START_RE.test(literalStringOf(arg0) ?? "")) {
-    fire("sql-injection", argMasks.slice(1).reduce((m, x) => m | x, 0), nodeText(args[1]), "String.format");
+    fire("sql-injection", argMasks.slice(1).reduce((m, x) => m | x, 0), culpritText(args[1], env, ctx), "String.format");
   }
   // HTTP header injection: response.setHeader(name, value) and header-shaped map puts
   if (["setHeader", "addHeader", "setIntHeader", "setDateHeader", "addDateHeader"].includes(tail) && args.length >= 2) {
-    fire("header-injection", argMasks[0] | argMasks[1], nodeText(args[1]));
+    fire("header-injection", argMasks[0] | argMasks[1], culpritText(args[1], env, ctx));
   } else if ((tail === "put" || tail === "add" || tail === "set" || tail === "header") && args.length >= 2) {
     const key = literalStringOf(arg0);
-    if (key && HTTP_HEADER_NAME_RE.test(key)) fire("header-injection", argMasks[1], nodeText(args[1]));
+    if (key && HTTP_HEADER_NAME_RE.test(key)) fire("header-injection", argMasks[1], culpritText(args[1], env, ctx));
   }
   // path traversal: Path.of / Paths.get and the wider java.nio.file.Files surface
   if ((rootVar === "Path" || rootVar === "Paths") && (tail === "of" || tail === "get")) fire("path-traversal");
@@ -1183,7 +1226,7 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   // sanitized must still reach `fire` so the suppression gets recorded.
   const firstIdx = argMasks.findIndex(m => m !== 0);
   if (firstIdx < 0) return;
-  const sourceExpr = nodeText(args[firstIdx]);
+  const sourceExpr = culpritText(args[firstIdx], env, ctx);
   const fire = (id: AstTaintJavaId, sink: string) => {
     const cls = classOf(id);
     const combined = argMasks.reduce((m, x) => m | x, 0);
@@ -1196,6 +1239,9 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
     fire("path-traversal", `new ${className}`);
   }
   if (className === "Socket") fire("ssrf", "new Socket");
+  // auth0 jwks-rsa fetches signing keys from the URL it is given -- fed from a token's own `jku` header,
+  // an attacker chooses where the server fetches keys from (and which keys it trusts).
+  if (className === "JwkProviderBuilder" || className === "UrlJwkProvider") fire("ssrf", `new ${className}`);
   if (className === "BasicDBObject") fire("nosql-injection", "new BasicDBObject");
 }
 

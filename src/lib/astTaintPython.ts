@@ -219,12 +219,13 @@ export function findEnclosingFunctionNamePy(node: SyntaxNode): string {
 
 // ── Taint sources ─────────────────────────────────────────────────────────
 
-const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params"]);
+const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body"]);
 /** `request`, `req`, `request_obj`, `http_request`, ... -- a request object passed as a parameter is as attacker-controlled as the Flask global. */
 const REQUEST_NAME_RE = /^(?:\w+_)?(?:request|req)(?:_\w+)?$/i;
 const isRequestName = (name: string): boolean => REQUEST_NAME_RE.test(name);
 const FLASK_CALL_SOURCES = new Set(["get_json", "get_data"]);
-const DJANGO_DICT_SOURCES = new Set(["GET", "POST"]);
+// Django's request dictionaries: query, form, cookies, uploaded files, and META (which carries every header).
+const DJANGO_DICT_SOURCES = new Set(["GET", "POST", "COOKIES", "FILES", "META", "REQUEST"]);
 const FASTAPI_DECORATOR_RE = /^@(?:\w+\.)?(?:router|app)\.(?:get|post|put|delete|patch|options|head)\s*\(/;
 
 function attributeParts(node: SyntaxNode): { object: SyntaxNode | null; attribute: string | null } {
@@ -603,6 +604,10 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
 
   // eval / exec (and aliases of them), __import__ / importlib.import_module: attacker-chosen code or module
   if (text === "eval" || text === "exec" || evalAliases?.has(text)) return first ? { id: "eval-exec", sinkExpr: text, args: [first] } : null;
+  // PIL's ImageMath.eval / unsafe_eval evaluate their first argument as a Python expression (CVE-2022-22817).
+  if ((tail === "eval" || tail === "unsafe_eval") && parts.length >= 2 && parts[parts.length - 2] === "ImageMath") {
+    return first ? { id: "eval-exec", sinkExpr: text, args: [first] } : null;
+  }
   if (text === "__import__" || text === "importlib.import_module" || (resolvedModule === "importlib" && tail === "import_module")) {
     return first ? { id: "eval-exec", sinkExpr: text, args: [first] } : null;
   }
@@ -768,6 +773,10 @@ const PY_PASSTHROUGH = new Set([
   "str", "bytes", "bytearray", "repr", "ascii", "list", "tuple", "set", "frozenset", "dict", "sorted", "reversed",
   "enumerate", "zip", "map", "filter", "iter", "next", "getattr", "copy.copy", "copy.deepcopy",
   "json.loads", "json.dumps", "json.load",
+  // Regex substitution reshapes a string without validating it. (re.escape is deliberately absent: its result
+  // stays untainted so a pattern built from it isn't reported as regex injection -- there is no dedicated ReDoS
+  // class to clear on its own.)
+  "re.sub", "re.subn",
   "base64.b64decode", "base64.b64encode", "base64.urlsafe_b64decode", "base64.urlsafe_b64encode",
   "b64decode", "b64encode", "urlsafe_b64decode", "urlsafe_b64encode",
   "urllib.parse.unquote", "urllib.parse.unquote_plus", "urllib.parse.unquote_to_bytes", "urllib.parse.urljoin",
