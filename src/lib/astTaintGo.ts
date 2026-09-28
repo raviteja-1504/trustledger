@@ -52,8 +52,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, walkIfChain, walkLoop, walkSwitch, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
@@ -83,6 +83,18 @@ export interface AstTaintGoFinding {
   sinkExpr:   string;
   // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
   trace?: TraceStep[];
+  /** Set when the sink is inside another package's function (a cross-package summary hit): where it really is. */
+  calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
+}
+
+/** Cross-package inputs (see computeGoFuncSinkFacts). */
+export interface GoScanOptions {
+  /** `pkg.Func` / `pkg.Type.Method` -> the parameter -> sink facts of that exported function in another file. */
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
+  /** Summary mode: skip the whole-file walk and instead walk each listed declaration with only parameter
+   * `index` seeded (index -1 = nothing seeded, the baseline); results land in `seedResults`, one per run. */
+  seedRuns?: Array<{ decl: SyntaxNode; index: number }>;
+  seedResults?: AstTaintGoFinding[][];
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintPython.ts's docblock) ──
@@ -404,6 +416,57 @@ function findOutParamGo(call: SyntaxNode, env: TaintEnv, mask: (n: SyntaxNode, e
 
 const NOSQL_TAILS_GO = new Set(["FindOne", "Find", "UpdateOne", "UpdateMany", "DeleteOne", "DeleteMany", "Aggregate", "CountDocuments", "ReplaceOne", "FindOneAndUpdate", "FindOneAndDelete", "FindOneAndReplace"]);
 const NOSQL_RECEIVER_RE_GO = /coll|mongo|\bdb\b|users?\b|orders?\b|accounts?\b|store|repo/i;
+/** Operators whose STRING operand is itself code or a pattern: a tainted string there is injectable. */
+const NOSQL_STRING_OPERATORS_GO = new Set(["$where", "$regex", "$function", "$accumulator", "$expr"]);
+/** Value expressions whose static type may be a map/interface (a decoded `body["user"]` can be `{"$ne": ""}`),
+ * as opposed to calls, concatenations and struct fields, which in practice are typed scalars. */
+const DYNAMIC_VALUE_TYPES_GO = new Set(["identifier", "index_expression", "type_assertion_expression", "parenthesized_expression"]);
+
+/**
+ * The parts of a mongo filter/update document that can carry attacker-chosen operators. Go is typed: a string
+ * value in `bson.M{"code": c.Code}` is matched literally and cannot become `{"$ne": ""}`, so a composite
+ * literal only exposes (a) values under a code/pattern operator, (b) nested documents, recursively, and (c)
+ * values that may be dynamic (DYNAMIC_VALUE_TYPES_GO: a decoded map or one of its entries). A non-literal
+ * document is exposed whole.
+ */
+function nosqlInjectablePartsGo(doc: SyntaxNode): SyntaxNode[] {
+  if (doc.type !== "composite_literal") return [doc];
+  const out: SyntaxNode[] = [];
+  const body = doc.namedChildren.find(c => c?.type === "literal_value");
+  if (!body) return [doc];
+  for (const el of body.namedChildren) {
+    if (el?.type !== "keyed_element") continue;
+    const kids = el.namedChildren.filter((c): c is SyntaxNode => !!c);
+    const keyNode = kids[0], valNode = kids[kids.length - 1];
+    if (!valNode || kids.length < 2) continue;
+    const key = goStringLiteralValue(keyNode.type === "literal_element" ? keyNode.namedChildren[0] ?? keyNode : keyNode);
+    const val = valNode.type === "literal_element" ? valNode.namedChildren[0] ?? valNode : valNode;
+    if (key !== null && NOSQL_STRING_OPERATORS_GO.has(key)) out.push(val);
+    else if (val.type === "composite_literal") out.push(...nosqlInjectablePartsGo(val));
+    else if (DYNAMIC_VALUE_TYPES_GO.has(val.type)) out.push(val);
+  }
+  // bson.D{{Key: "k", Value: v}} -- positional elements
+  for (const el of body.namedChildren) {
+    if (el?.type !== "literal_element") continue;
+    const inner = el.namedChildren[0];
+    if (inner?.type === "literal_value") {
+      const keyed = inner.namedChildren.filter((c): c is SyntaxNode => c?.type === "keyed_element");
+      const positional = inner.namedChildren.filter((c): c is SyntaxNode => c?.type === "literal_element");
+      const k = keyed.find(e => e.namedChildren[0]?.text === "Key");
+      const v = keyed.find(e => e.namedChildren[0]?.text === "Value");
+      // {Key: "k", Value: v} or the unkeyed {"k", v}
+      const kv = k ? goStringLiteralValue(k.namedChildren[k.namedChildren.length - 1]?.namedChildren[0] ?? k)
+        : positional.length === 2 ? goStringLiteralValue(positional[0].namedChildren[0] ?? positional[0]) : null;
+      const vv = v?.namedChildren[v.namedChildren.length - 1] ?? (positional.length === 2 ? positional[1] : undefined);
+      const vNode = vv?.type === "literal_element" ? vv.namedChildren[0] ?? vv : vv;
+      if (!vNode) continue;
+      if (kv !== null && NOSQL_STRING_OPERATORS_GO.has(kv)) out.push(vNode);
+      else if (vNode.type === "composite_literal") out.push(...nosqlInjectablePartsGo(vNode));
+      else if (DYNAMIC_VALUE_TYPES_GO.has(vNode.type)) out.push(vNode);
+    }
+  }
+  return out;
+}
 // The conventional names of a gin/echo/fiber handler's context parameter.
 const FRAMEWORK_CTX_RE = /^(?:c|ctx|context|gc|ec)$/;
 const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download"]);
@@ -499,7 +562,9 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   if (tail === "FieldByName" && args[0]) return { id: "mass-assignment", sinkExpr: text, args: [args[0]] };
   // NoSQL (mongo-style) with an operator-capable filter document
   if (parts.length > 1 && NOSQL_TAILS_GO.has(tail) && NOSQL_RECEIVER_RE_GO.test(receiverText) && args.length > 0) {
-    return { id: "nosql-injection", sinkExpr: text, args: args.slice(-1) };
+    // (ctx, filter[, update|opts...]): the documents after the context, never the context itself.
+    const docs = args.length > 1 && /(?:^|\.)(?:TODO|Background)\(\)$|^ctx$|[cC]tx$|[cC]ontext\(\)$/.test(args[0].text) ? args.slice(1) : args;
+    return { id: "nosql-injection", sinkExpr: text, args: docs.flatMap(nosqlInjectablePartsGo) };
   }
   // LDAP
   if (text === "ldap.NewSearchRequest" && args.length >= 7) return { id: "ldap-injection", sinkExpr: text, args: [args[6]] };
@@ -1563,10 +1628,29 @@ export function scanAstTaintGo(
   // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
   // regex layer's duplicate for a flow this engine proved safe.
   suppressedOut?: SuppressedSink[],
+  opts?: GoScanOptions,
 ): AstTaintGoFinding[] {
   try {
     const root = presparsed ?? parseGoSourceSync(content, filePath);
     if (!root) return [];
+    const crossFileFacts = opts?.crossFileFacts;
+    // Import local name -> the imported package's last path segment (Go's default package name, which is
+    // what a cross-package summary is keyed by). `.` and `_` imports bind no qualifier.
+    const importedPkgs = new Map<string, string>();
+    // Variable -> `pkg.Type` for values of another package's type (`svc *models.Store`, `s := &models.Store{}`).
+    const qualifiedVarTypes = new Map<string, string>();
+    // Struct field -> `pkg.Type` (`type Server struct { Store *models.Store }`, then `s.Store.Find(x)`).
+    const qualifiedFieldTypes = new Map<string, string>();
+    if (crossFileFacts && crossFileFacts.size > 0) {
+      for (const spec of findAllNodesGo(root, "import_spec")) {
+        const path = goStringLiteralValue(spec.childForFieldName("path") ?? spec) ?? "";
+        const seg = path.split("/").pop() ?? "";
+        const alias = spec.childForFieldName("name");
+        if (alias && alias.type !== "package_identifier") continue;
+        const local = alias?.text ?? seg;
+        if (local && seg) importedPkgs.set(local, seg);
+      }
+    }
 
     // Per-scan facts: request/writer variables, escapers, plugin/gob variables, structs with role-like fields.
     goCtx = emptyGoCtx();
@@ -1577,9 +1661,13 @@ export function scanAstTaintGo(
         const names = n.childrenForFieldName("name").filter((x): x is SyntaxNode => !!x).map(x => x.text);
         if (/http\.Request$/.test(type)) requestVars.push(...names);
         if (/http\.ResponseWriter$/.test(type)) for (const nm of names) goCtx.writerVars.add(nm);
+        const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(type);
+        if (q && importedPkgs.has(q[1])) for (const nm of names) qualifiedVarTypes.set(nm, `${importedPkgs.get(q[1])}.${q[2]}`);
       } else if (n.type === "short_var_declaration") {
         const rhs = n.childForFieldName("right")?.text ?? "";
         const ids = identifiersOf(n.childForFieldName("left") ?? n);
+        const q = /^&?([A-Za-z_]\w*)\.([A-Za-z_]\w*)\{/.exec(rhs);
+        if (q && ids[0] && importedPkgs.has(q[1])) qualifiedVarTypes.set(ids[0].text, `${importedPkgs.get(q[1])}.${q[2]}`);
         if (/^plugin\.Open\(/.test(rhs) && ids[0]) goCtx.pluginVars.add(ids[0].text);
         if (/gob\.NewDecoder\(/.test(rhs) && ids[0]) goCtx.gobVars.add(ids[0].text);
         const composite = /^&?([A-Za-z_]\w*)\{/.exec(rhs) ?? /^new\(([A-Za-z_]\w*)\)/.exec(rhs);
@@ -1593,6 +1681,10 @@ export function scanAstTaintGo(
         const st = n.childForFieldName("type");
         if (nm && st?.type === "struct_type") {
           for (const fd of findAllNodesGo(st, "field_declaration")) {
+            const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(fd.childForFieldName("type")?.text ?? "");
+            if (q && importedPkgs.has(q[1])) {
+              for (const f of fd.childrenForFieldName("name")) if (f) qualifiedFieldTypes.set(f.text, `${importedPkgs.get(q[1])}.${q[2]}`);
+            }
             const tag = fd.childForFieldName("tag")?.text ?? "";
             if (/json:"-"/.test(tag)) continue;
             for (const f of fd.childrenForFieldName("name")) if (f && SENSITIVE_FIELD_RE_GO.test(f.text)) goCtx.sensitiveStructs.add(nm);
@@ -1691,12 +1783,69 @@ export function scanAstTaintGo(
       return undefined;
     };
 
+    // `pkg.Func` / `pkg.Type.Method` summary key for a call into another package, if the callee resolves.
+    const crossPackageKey = (fn: SyntaxNode): string | null => {
+      const field = fn.childForFieldName("field")?.text;
+      const operand = fn.childForFieldName("operand");
+      if (!field || !operand) return null;
+      if (operand.type === "identifier") {
+        const t = qualifiedVarTypes.get(operand.text);
+        if (t) return `${t}.${field}`;
+        const pkg = importedPkgs.get(operand.text);
+        return pkg ? `${pkg}.${field}` : null;
+      }
+      if (operand.type === "selector_expression") {
+        const t = qualifiedFieldTypes.get(operand.childForFieldName("field")?.text ?? "");
+        return t ? `${t}.${field}` : null;
+      }
+      return null;
+    };
+
+    // A call whose tainted argument reaches a sink inside another package's exported function.
+    const checkCrossPackageCall = (node: SyntaxNode, fn: SyntaxNode, args: readonly SyntaxNode[], env: Env, taintMask: TaintMaskFnGo) => {
+      const key = crossPackageKey(fn);
+      const list = key ? crossFileFacts?.get(key) : undefined;
+      if (!key || !list) return;
+      for (const fact of list) {
+        const passed = fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
+        // A document built at the call site is judged the same way the sink itself judges one.
+        const bound = fact.id === "nosql-injection" ? passed.flatMap(nosqlInjectablePartsGo) : passed;
+        for (const a of bound) {
+          const m = taintMask(a, env);
+          if (!(m & fact.sinkClass)) {
+            if (wasCleared(m, fact.sinkClass)) suppressedOut?.push({ id: fact.id, line: lineOf(node) });
+            continue;
+          }
+          const line = lineOf(node);
+          const dedupKey = `${fact.id}:${line}`;
+          if (seen.has(dedupKey)) break;
+          seen.add(dedupKey);
+          const source = sourceLabelGo(a);
+          const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+          const trace = buildBackwardTraceGeneric(filePath, node, source, key, traceResolver);
+          trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
+          trace.push(
+            { file: filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: fn.text },
+            { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+          );
+          findings.push({
+            id: fact.id as AstTaintGoId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
+            detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses package boundary${via}] — real data-flow match across files, not a line-pattern guess`,
+            trace,
+            calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
+          });
+          break;
+        }
+      }
+    };
+
     // Sink checks and same-file call-site seeding for one call_expression, with
     // the env at that point. Statement structure, branching, assignments and
     // nested functions are the shared walker's job (createWalkerGo).
     const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => {
       const fn = node.childForFieldName("function");
       const args = argListOfGo(node);
+      if (crossFileFacts && crossFileFacts.size > 0 && fn?.type === "selector_expression") checkCrossPackageCall(node, fn, args, env, taintMask);
 
       const match = matchSinkGo(node);
       if (match) {
@@ -1956,6 +2105,47 @@ export function scanAstTaintGo(
 
     const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall, onNode, sticky });
 
+    const drainSeeded = () => {
+      const walkedSignatures = new Set<string>();
+      for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+        const toWalk = Array.from(seededParams.entries());
+        let changed = false;
+        for (const [fnName, idxSet] of toWalk) {
+          const fn = localFns.get(fnName);
+          if (!fn) continue;
+          const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+          if (walkedSignatures.has(signature)) continue;
+          walkedSignatures.add(signature);
+          changed = true;
+          const env: Env = new Map();
+          for (const [idx, m] of idxSet) {
+            const shape = fn.paramShapes.find(s => s.index === idx);
+            if (shape) env.set(shape.name, m);
+          }
+          walker.walk(fn.body, env);
+        }
+        if (!changed) break;
+      }
+    };
+
+    if (opts?.seedRuns) {
+      const results: AstTaintGoFinding[][] = [];
+      for (const run of opts.seedRuns) {
+        findings.length = 0;
+        seen.clear();
+        seededParams.clear();
+        const body = run.decl.childForFieldName("body");
+        const shape = paramShapesOfGo(run.decl).find(s => s.index === run.index);
+        if (body) {
+          walker.walk(body, shape ? new Map([[shape.name, ALL]]) : new Map());
+          drainSeeded();
+        }
+        results.push([...findings]);
+      }
+      opts.seedResults = results;
+      return [];
+    }
+
     walker.walk(root, new Map());
     // A container written by a handler declared AFTER the one that reads it: walk again with what the first
     // pass learned (findings dedupe by id+line).
@@ -1976,26 +2166,7 @@ export function scanAstTaintGo(
     // `walkedSignatures` skips re-walking a function with a seed set
     // identical to one already walked, while still allowing a re-walk once
     // that function's seed set has genuinely grown.
-    const walkedSignatures = new Set<string>();
-    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
-      const toWalk = Array.from(seededParams.entries());
-      let changed = false;
-      for (const [fnName, idxSet] of toWalk) {
-        const fn = localFns.get(fnName);
-        if (!fn) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
-        if (walkedSignatures.has(signature)) continue;
-        walkedSignatures.add(signature);
-        changed = true;
-        const env: Env = new Map();
-        for (const [idx, m] of idxSet) {
-          const shape = fn.paramShapes.find(s => s.index === idx);
-          if (shape) env.set(shape.name, m);
-        }
-        walker.walk(fn.body, env);
-      }
-      if (!changed) break;
-    }
+    drainSeeded();
 
     // A hand-rolled JWT payload decode in a file that never verifies a signature
     if (!/golang-jwt|dgrijalva\/jwt-go|go-jose|jwt\.Parse|jwt\.Verify|lestrrat/.test(content)) {
@@ -2013,6 +2184,72 @@ export function scanAstTaintGo(
     console.error(`[astTaintGo] threw scanning ${filePath}:`, err);
     return [];
   }
+}
+
+/** Findings that are not "this argument reaches that sink" (an ownership gap, a weak primitive, a hand-rolled
+ * JWT decode, a secret comparison) -- a caller passing tainted data into the function doesn't re-raise them. */
+const NON_FLOW_IDS_GO: ReadonlySet<string> = new Set(["idor", "weak-crypto", "jwt-none-alg", "timing-attack"]);
+
+/**
+ * Cross-package parameter -> sink facts for every exported function (`pkg.Func`) and exported method
+ * (`pkg.Type.Method`) in one file, computed with the scan's own sink logic: each parameter is walked alone
+ * (plus same-file helpers it reaches, and `incoming` facts for calls into further packages). A finding the
+ * function produces with NOTHING seeded (it reads its own request) is not a parameter's fact, so each run is
+ * diffed against that baseline. Keys use the file's `package` name, which is what an importer's default
+ * qualifier (the import path's last segment) names.
+ */
+export function computeGoFuncSinkFacts(
+  content: string, filePath: string, root: SyntaxNode, incoming: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const out = new Map<string, ParamSinkFact[]>();
+  try {
+    const pkg = root.namedChildren.find(c => c?.type === "package_clause")?.namedChildren.find(c => c?.type === "package_identifier")?.text;
+    if (!pkg || pkg === "main") return out;
+    const decls: Array<{ decl: SyntaxNode; key: string; shapes: ParamShape[] }> = [];
+    for (const decl of root.namedChildren) {
+      if (!decl || (decl.type !== "function_declaration" && decl.type !== "method_declaration")) continue;
+      const name = decl.childForFieldName("name")?.text;
+      if (!name || !/^[A-Z]/.test(name) || !decl.childForFieldName("body")) continue;
+      const shapes = paramShapesOfGo(decl);
+      if (shapes.length === 0) continue;
+      let owner = pkg;
+      if (decl.type === "method_declaration") {
+        const recvType = decl.childForFieldName("receiver")?.namedChildren[0]?.childForFieldName("type")?.text ?? "";
+        const t = /^\*?([A-Za-z_]\w*)/.exec(recvType)?.[1];
+        if (!t) continue;
+        owner = `${pkg}.${t}`;
+      }
+      decls.push({ decl, key: `${owner}.${name}`, shapes });
+    }
+    if (decls.length === 0) return out;
+    const seedRuns = decls.flatMap(d => [{ decl: d.decl, index: -1 }, ...d.shapes.map(s => ({ decl: d.decl, index: s.index }))]);
+    const opts: GoScanOptions = { crossFileFacts: incoming, seedRuns };
+    scanAstTaintGo(content, filePath, root, undefined, undefined, opts);
+    const results = opts.seedResults ?? [];
+    let r = 0;
+    for (const d of decls) {
+      const baseline = new Set((results[r++] ?? []).map(f => `${f.id}:${f.line}`));
+      const facts: ParamSinkFact[] = [];
+      for (const shape of d.shapes) {
+        for (const f of results[r++] ?? []) {
+          if (baseline.has(`${f.id}:${f.line}`) || NON_FLOW_IDS_GO.has(f.id)) continue;
+          const where = f.calleeSink;
+          mergeSinkFacts(facts, [{
+            index: shape.index, isRest: false, id: f.id, sinkClass: classOf(f.id),
+            sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
+            via: [d.key, ...(where?.via ?? [])],
+          }]);
+        }
+      }
+      if (facts.length === 0) continue;
+      const list = out.get(d.key) ?? [];
+      mergeSinkFacts(list, facts);
+      out.set(d.key, list);
+    }
+  } catch (err) {
+    console.error(`[astTaintGo] threw computing function sink facts for ${filePath}:`, err);
+  }
+  return out;
 }
 
 export function astTaintGoSeverity(id: AstTaintGoId): "critical" | "high" | "medium" {

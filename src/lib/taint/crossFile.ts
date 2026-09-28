@@ -119,6 +119,19 @@ function mergeShapesInto(target: Map<string, CrossFileShape[]>, name: string, sh
   return grew;
 }
 
+/**
+ * The summary keys one import binding brings in, as [exporter key, local key] pairs: the imported name
+ * itself, plus its QUALIFIED member keys (`UserService.find`, `userService.find`, `repo.find` -- methods of
+ * an exported class, instance or object) renamed to the local binding, so `import { UserService as Svc }`
+ * makes `Svc.find` resolvable at call sites.
+ */
+function bindingKeys(exporterKeys: Iterable<string>, importedName: string, localName: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [[importedName, localName]];
+  const prefix = `${importedName}.`;
+  for (const k of exporterKeys) if (k.startsWith(prefix)) out.push([k, `${localName}.${k.slice(prefix.length)}`]);
+  return out;
+}
+
 /** Union `facts` into `target.get(name)`, creating the entry. Returns whether anything grew. */
 function mergeSinksInto(target: Map<string, ParamSinkFact[]>, name: string, facts: readonly ParamSinkFact[]): boolean {
   if (facts.length === 0) return false;
@@ -158,8 +171,12 @@ export function resolveCrossFile(
           for (const [name, shapes] of calleeSummary) if (mergeShapesInto(target, name, shapes)) changed = true;
           for (const [name, facts] of calleeSinks) if (mergeSinksInto(sinkTarget, name, facts)) changed = true;
         } else if (re.importedName) {
-          if (mergeShapesInto(target, re.publicName, calleeSummary.get(re.importedName) ?? [])) changed = true;
-          if (mergeSinksInto(sinkTarget, re.publicName, calleeSinks.get(re.importedName) ?? [])) changed = true;
+          for (const [from, to] of bindingKeys(calleeSummary.keys(), re.importedName, re.publicName)) {
+            if (mergeShapesInto(target, to, calleeSummary.get(from) ?? [])) changed = true;
+          }
+          for (const [from, to] of bindingKeys(calleeSinks.keys(), re.importedName, re.publicName)) {
+            if (mergeSinksInto(sinkTarget, to, calleeSinks.get(from) ?? [])) changed = true;
+          }
         }
       }
     }
@@ -180,8 +197,12 @@ export function resolveCrossFile(
           for (const [name, shapes] of calleeSummary) mergeShapesInto(incoming, name, shapes);
           for (const [name, facts] of calleeSinks) mergeSinksInto(incomingSinks, name, facts);
         } else {
-          mergeShapesInto(incoming, imp.localName, calleeSummary.get(imp.importedName) ?? []);
-          mergeSinksInto(incomingSinks, imp.localName, calleeSinks.get(imp.importedName) ?? []);
+          for (const [from, to] of bindingKeys(calleeSummary.keys(), imp.importedName, imp.localName)) {
+            mergeShapesInto(incoming, to, calleeSummary.get(from) ?? []);
+          }
+          for (const [from, to] of bindingKeys(calleeSinks.keys(), imp.importedName, imp.localName)) {
+            mergeSinksInto(incomingSinks, to, calleeSinks.get(from) ?? []);
+          }
         }
       }
       const recomputed = f.computeSummary(incoming);
@@ -219,7 +240,8 @@ export function resolveCrossFile(
       if (imp.namespace) {
         for (const name of new Set([...calleeSummary.keys(), ...calleeSinks.keys()])) entryFor(name, name);
       } else {
-        entryFor(imp.importedName, imp.localName);
+        const exporterKeys = new Set([...calleeSummary.keys(), ...calleeSinks.keys()]);
+        for (const [from, to] of bindingKeys(exporterKeys, imp.importedName, imp.localName)) entryFor(from, to);
       }
     }
     if (local.size > 0) propagatingByFile.set(f.path, local);

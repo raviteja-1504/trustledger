@@ -225,6 +225,8 @@ function tierAFindings(lines: string[], content: string): ScanIndicator[] {
 
       const first = receiver[0];
       if (first === "[") {
+        // `m[1].split()` / `f()[0].x()`: an index into something, not an array literal -- element type unknown.
+        if (m.index > 0 && /[\w$)\]]/.test(line[m.index - 1])) continue;
         realMethods = ARRAY_INSTANCE_METHODS;
       } else if (first === '"' || first === "'" || first === "`") {
         realMethods = STRING_INSTANCE_METHODS;

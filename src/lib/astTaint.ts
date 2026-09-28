@@ -372,7 +372,7 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return { id: "nosql-injection", sinkExpr: `${recvText}.${mongoVerb}`, args: [call.arguments[0]] };
   }
   const text = calleeText(callee) ?? fluentResponseText(callee);
-  if (!text) return null;
+  if (!text) return classHeldClientSink(call);
   const parts = text.split(".");
   const head = parts[0];
   const tail = parts[parts.length - 1];
@@ -426,7 +426,53 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return { id: "nosql-injection", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && DB_SINK_METHODS.has(tail)) {
-    return { id: "sql-injection", sinkExpr: text, args: call.arguments };
+    const sqlArg = sqlTextArg(call);
+    return sqlArg ? { id: "sql-injection", sinkExpr: text, args: [sqlArg] } : null;
+  }
+  return null;
+}
+
+/**
+ * The argument of a DB call that is SQL TEXT: the first argument, or the `sql`/`text`/`query` property of an
+ * options object (`query({ text, values })`). Bound values -- `query(sql, [id])`, `{ values: [...] }`,
+ * `{ replacements }` -- are parameters the driver sends separately, never SQL, so they are not checked.
+ */
+function sqlTextArg(call: ts.CallExpression): ts.Expression | undefined {
+  const first = call.arguments[0];
+  if (!first) return undefined;
+  const u = unwrapExpr(first);
+  if (ts.isObjectLiteralExpression(u)) {
+    for (const p of u.properties) {
+      if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ["sql", "text", "query"].includes(p.name.text)) return p.initializer;
+      if (ts.isShorthandPropertyAssignment(p) && ["sql", "text", "query"].includes(p.name.text)) return p.name;
+    }
+  }
+  return first;
+}
+
+/**
+ * `this.db.query(sql)` / `this.pool.query(...)` / `this.repo.query(...)` / `this.users.find(filter)`: a
+ * database client held on the class. calleeText can't name a `this`-rooted chain; this checks ONLY the
+ * SQL/NoSQL client rules for it (never command/HTTP/etc., where `this.pattern.exec(s)` would be a false
+ * match), and needs a field in between -- a class's own `this.query()` is its own method, not a client.
+ */
+function classHeldClientSink(call: ts.CallExpression): SinkMatch | null {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const tail = callee.name.text;
+  const names: string[] = [];
+  let cur: ts.Expression = callee.expression;
+  while (ts.isPropertyAccessExpression(cur)) { names.unshift(cur.name.text); cur = cur.expression; }
+  if (cur.kind !== ts.SyntaxKind.ThisKeyword || names.length === 0) return null;
+  const receiver = `this.${names.join(".")}`;
+  const sinkExpr = `${receiver}.${tail}`;
+  if (NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) && !ts.isStringLiteral(call.arguments[0]) &&
+      NOSQL_RECEIVER_RE.test(names.join("."))) {
+    return { id: "nosql-injection", sinkExpr, args: [call.arguments[0]] };
+  }
+  if (DB_SINK_METHODS.has(tail)) {
+    const sqlArg = sqlTextArg(call);
+    return sqlArg ? { id: "sql-injection", sinkExpr, args: [sqlArg] } : null;
   }
   return null;
 }
@@ -609,6 +655,89 @@ function rootIdentifier(e: ts.Expression): ts.Identifier | null {
  * purpose (recall-biased): a wrong match only ever taints a value. Sink facts REPORT findings, so they use the
  * stricter makeSinkCalleeResolver below instead.
  */
+/** `C` from a type annotation `: C` / `: C<...>` (identifier type names only). */
+function typeRefName(t: ts.TypeNode | undefined): string | null {
+  return t && ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName) ? t.typeName.text : null;
+}
+/** `C` from an initializer `new C(...)` (optionally awaited/parenthesized). */
+function newExprClass(e: ts.Expression | undefined): string | null {
+  const u = e ? unwrapExpr(e) : undefined;
+  return u && ts.isNewExpression(u) && ts.isIdentifier(u.expression) ? u.expression.text : null;
+}
+
+/** The class a local identifier holds, from its declaration: a typed parameter or variable, or `new C()`. */
+function declaredTypeOfIdentifier(id: ts.Identifier): string | null {
+  for (let cur: ts.Node | undefined = id.parent; cur; cur = cur.parent) {
+    if (isFunctionLike(cur)) {
+      for (const p of (cur as ts.FunctionLikeDeclaration).parameters) {
+        if (ts.isIdentifier(p.name) && p.name.text === id.text) return typeRefName(p.type);
+      }
+    }
+    if (ts.isBlock(cur) || ts.isSourceFile(cur)) {
+      for (const st of cur.statements) {
+        if (!ts.isVariableStatement(st) || st.getStart() > id.getStart()) continue;
+        for (const d of st.declarationList.declarations) {
+          if (ts.isIdentifier(d.name) && d.name.text === id.text) return typeRefName(d.type) ?? newExprClass(d.initializer);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** The class `this.<field>` holds: a declared property type / `= new C()`, or a TypeScript constructor
+ * parameter property (`constructor(private readonly users: UserService)` -- how NestJS/Angular inject). */
+function declaredTypeOfThisField(field: ts.PropertyAccessExpression): string | null {
+  let cls: ts.Node | undefined = field.parent;
+  while (cls && !ts.isClassLike(cls)) cls = cls.parent;
+  if (!cls || !ts.isClassLike(cls)) return null;
+  const name = field.name.text;
+  for (const m of cls.members) {
+    if (ts.isPropertyDeclaration(m) && ts.isIdentifier(m.name) && m.name.text === name) return typeRefName(m.type) ?? newExprClass(m.initializer);
+    if (ts.isConstructorDeclaration(m)) {
+      for (const p of m.parameters) {
+        if (ts.isIdentifier(p.name) && p.name.text === name && ts.isParameterPropertyDeclaration(p, m)) return typeRefName(p.type);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Qualified summary keys a method call can target, most specific first: `R.m` for an imported instance,
+ * object or class used directly (`userService.find`, `Repo.find`), then `T.m` for the class R / `this.f`
+ * holds. Only ever matched against summaries of EXPORTED class/object methods, so an array's `.find()` or a
+ * DB client's `.query()` can't be mistaken for an imported service method.
+ */
+function qualifiedCallKeys(callee: ts.Expression): string[] {
+  if (!ts.isPropertyAccessExpression(callee)) return [];
+  const m = callee.name.text;
+  const recv = unwrapExpr(callee.expression);
+  const keys: string[] = [];
+  if (ts.isIdentifier(recv)) {
+    keys.push(`${recv.text}.${m}`);
+    const t = declaredTypeOfIdentifier(recv);
+    if (t) keys.push(`${t}.${m}`);
+  } else if (ts.isPropertyAccessExpression(recv) && recv.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const t = declaredTypeOfThisField(recv);
+    if (t) keys.push(`${t}.${m}`);
+  } else {
+    const t = newExprClass(recv);
+    if (t) keys.push(`${t}.${m}`);
+  }
+  return keys;
+}
+
+/** The summary key a call resolves to in `known`: the name-based resolution first, then a qualified key. */
+function resolveKnownCallee(
+  callee: ts.Expression, known: { has(k: string): boolean }, resolveByName: (c: ts.Expression) => string | null,
+): string | null {
+  const byName = resolveByName(callee);
+  if (byName && known.has(byName)) return byName;
+  for (const k of qualifiedCallKeys(callee)) if (known.has(k)) return k;
+  return null;
+}
+
 function calleeFnName(callee: ts.Expression): string | null {
   if (ts.isIdentifier(callee)) return callee.text;
   if (ts.isPropertyAccessExpression(callee) &&
@@ -757,7 +886,7 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     // the classes that survive the callee's own body (shape.mask) count.
     // Also resolves `obj.method(x)` / `this.method(x)` to a local class method by name.
     const callee = expr.expression;
-    const fnName = calleeFnName(callee);
+    const fnName = resolveKnownCallee(callee, propagating, calleeFnName);
     if (fnName) {
       const shapes = propagating.get(fnName);
       if (shapes) {
@@ -1441,7 +1570,7 @@ function computeFnSinkFacts(
         mergeSinkFacts(out, [{ ...base, id: direct.id, sinkClass: classOf(direct.id), sinkExpr: direct.sinkExpr, file: filePath, line: lineOf(n), via: [name] }]);
       }
       if (!ts.isCallExpression(n)) return;
-      const calleeName = resolveCallee(n.expression);
+      const calleeName = resolveKnownCallee(n.expression, knownFacts, resolveCallee);
       const facts = calleeName ? knownFacts.get(calleeName) : undefined;
       if (!facts) return;
       for (const f of facts) {
@@ -1568,6 +1697,61 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
   };
   ts.forEachChild(sourceFile, visit);
 
+  // Methods of top-level classes, object literals and `new C()` instances, under QUALIFIED export names
+  // (`UserService.find`, `repo.find`, `userService.find`) -- the call-site half is qualifiedCallKeys. A service
+  // layer (controller -> service -> repository) is otherwise invisible across files: only plain functions
+  // had summaries. Each gets its own entry (the bare-name method entries above keep only the FIRST method of
+  // a given name, file-wide), keyed so no call-site name can ever collide with it.
+  const membersByLocal = new Map<string, Array<{ member: string; fn: LocalFn }>>();
+  const addMember = (local: string, member: string, params: ts.NodeArray<ts.ParameterDeclaration>, body: ts.ConciseBody, publicNames: string[]) => {
+    const fn: LocalFn = { params, body, exportedNames: publicNames.map(p => `${p}.${member}`), isMethod: true };
+    fns.set(` q:${local}.${member}`, fn);
+    const list = membersByLocal.get(local) ?? [];
+    list.push({ member, fn });
+    membersByLocal.set(local, list);
+  };
+  const instances: Array<{ local: string; cls: string; publicNames: string[] }> = [];
+  for (const st of sourceFile.statements) {
+    if (ts.isClassDeclaration(st) && st.name) {
+      const pub = exportedNamesOf(st, st.name.text);
+      for (const mem of st.members) {
+        if (ts.isMethodDeclaration(mem) && mem.body && ts.isIdentifier(mem.name)) addMember(st.name.text, mem.name.text, mem.parameters, mem.body, pub);
+      }
+    }
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name) || !d.initializer) continue;
+      const pub = exportedNamesOf(st, d.name.text);
+      const init = unwrapExpr(d.initializer);
+      if (ts.isObjectLiteralExpression(init)) {
+        for (const p of init.properties) {
+          if (ts.isMethodDeclaration(p) && p.body && ts.isIdentifier(p.name)) addMember(d.name.text, p.name.text, p.parameters, p.body, pub);
+          else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) &&
+                   (ts.isArrowFunction(p.initializer) || ts.isFunctionExpression(p.initializer)) && p.initializer.body) {
+            addMember(d.name.text, p.name.text, p.initializer.parameters, p.initializer.body, pub);
+          }
+        }
+      }
+      const cls = newExprClass(init);
+      if (cls) instances.push({ local: d.name.text, cls, publicNames: pub });
+    }
+  }
+  // `export const userService = new UserService()`: the instance exposes the class's methods under its own name.
+  for (const inst of instances) {
+    for (const { member, fn } of membersByLocal.get(inst.cls) ?? []) {
+      for (const p of inst.publicNames) fn.exportedNames.push(`${p}.${member}`);
+      const list = membersByLocal.get(inst.local) ?? [];
+      list.push({ member, fn });
+      membersByLocal.set(inst.local, list);
+    }
+  }
+  const exportMembersAs = (local: string, publicName: string) => {
+    for (const { member, fn } of membersByLocal.get(local) ?? []) {
+      const q = `${publicName}.${member}`;
+      if (!fn.exportedNames.includes(q)) fn.exportedNames.push(q);
+    }
+  };
+
   // `export { localName as publicName }` -- a named-export list for an
   // already-declared local function (common barrel-file style). Explicitly
   // scoped OUT here: `export { x } from "./y"` (has a moduleSpecifier -- a
@@ -1581,6 +1765,7 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
       const publicName = spec.name.text;
       const fn = fns.get(localName);
       if (fn && !fn.exportedNames.includes(publicName)) fn.exportedNames.push(publicName);
+      exportMembersAs(localName, publicName);
       // `export { foo as default }`
     }
   });
@@ -1597,6 +1782,9 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
     } else if (ts.isIdentifier(expr)) {
       const fn = fns.get(expr.text);
       if (fn && !fn.exportedNames.includes("default")) fn.exportedNames.push("default");
+      exportMembersAs(expr.text, "default");
+    } else if (newExprClass(expr)) {
+      exportMembersAs(newExprClass(expr)!, "default");   // export default new UserService()
     }
   });
 
@@ -2579,7 +2767,7 @@ export function scanAstTaint(
     };
     const checkCrossFileSinks = (call: ts.CallExpression, env: Env) => {
       if (crossFileSinkFacts.size === 0) return;
-      const name = resolveSinkCallee(call.expression);
+      const name = resolveKnownCallee(call.expression, crossFileSinkFacts, resolveSinkCallee);
       const info = name ? crossFileSinkFacts.get(name) : undefined;
       if (!name || !info) return;
       for (const fact of info.sinks) {

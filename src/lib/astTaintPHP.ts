@@ -82,8 +82,8 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  KIND_POSITION_SENSITIVE, type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { assessSqlInjection, type UrlPart } from "./taint/sinkShape";
@@ -111,6 +111,8 @@ export interface AstTaintPHPFinding {
   severityOverride?: "critical" | "high" | "medium";
   // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
   trace?: TraceStep[];
+  /** Set when the sink is inside a function defined in an included file: where it really is. */
+  calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintCSharp.ts's identical docblock) ──
@@ -379,6 +381,9 @@ interface EngineCtx {
   sticky: Map<string, number>;
   stickyDirty: boolean;
   recordSticky: boolean;
+  // Lower-cased function name -> parameter -> sink facts of functions defined in files this one includes
+  // (see computePhpFunctionSinkFacts); a same-file definition always wins.
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
 }
 
 function emit(
@@ -587,6 +592,41 @@ function buildPropagatingMapPHP(localFunctions: Map<string, LocalFunction>, base
     if (!changed) break;
   }
   return propagating;
+}
+
+/** A call whose tainted argument reaches a sink inside a function defined in an included file. */
+function checkCrossFileCallPHP(node: SyntaxNode, name: string, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
+  const list = ctx.crossFileFacts?.get(name.toLowerCase());
+  if (!list) return;
+  const args = argListOfPHP(node);
+  const line = lineOf(node);
+  for (const fact of list) {
+    const bound = fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
+    for (const a of bound) {
+      const m = taintMask(a, env);
+      if (!(m & fact.sinkClass)) {
+        if (wasCleared(m, fact.sinkClass)) ctx.suppressed?.push({ id: fact.id, line });
+        continue;
+      }
+      const dedupKey = `${fact.id}:${line}`;
+      if (ctx.seen.has(dedupKey)) break;
+      ctx.seen.add(dedupKey);
+      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+      const trace = buildBackwardTraceGeneric(ctx.filePath, node, a.text, name, phpTraceResolver);
+      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
+      trace.push(
+        { file: ctx.filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fact.file}${via}`, snippet: `${name}(...)` },
+        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+      );
+      ctx.findings.push({
+        id: fact.id as AstTaintPHPId, line, sourceExpr: a.text, sinkExpr: `${name}() -> ${fact.sinkExpr}`,
+        detail: `Tainted expression '${a.text}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via include${via}] — real data-flow match across files, not a line-pattern guess`,
+        trace,
+        calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
+      });
+      break;
+    }
+  }
 }
 
 function seedLocalFunctionParams(calleeName: string, args: SyntaxNode[], env: Env, ctx: EngineCtx) {
@@ -1530,6 +1570,7 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       const fnNode = node.childForFieldName("function");
       if (fnNode?.type === "name") {
         if (ctx.localFunctions.has(fnNode.text)) seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
+        else if (ctx.crossFileFacts?.size) checkCrossFileCallPHP(node, fnNode.text, ctx, taintMask, env);
         if (fnNode.text === "extract") {
           const args = argListOfPHP(node);
           if (args[0] && (taintMask(args[0], env) & ALL)) env.set(PHP_WILDCARD_VAR, ALL);
@@ -2074,18 +2115,11 @@ export function scanAstTaintPHP(
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer -- see EngineCtx.suppressed.
   suppressedOut?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
 ): AstTaintPHPFinding[] {
   try {
-    const lines = content.split("\n");
-    const localFunctions = collectLocalFunctions(root);
-    const ctx: EngineCtx = {
-      filePath, content, lines, localFunctions, propagatingParams: new Map(), seededParams: new Map(),
-      findings: [], seen: new Set(), varTypes: new Map(), root, suppressed: suppressedOut,
-      globalNames: collectGlobalNamesPHP(root), sticky: new Map(), stickyDirty: false, recordSticky: false,
-    };
-
-    const propagating = buildPropagatingMapPHP(localFunctions, ctx);
-    for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+    const ctx = makePhpCtx(content, filePath, root, suppressedOut, crossFileFacts);
+    const localFunctions = ctx.localFunctions;
 
     ctx.recordSticky = true;
     const scanFunctions = (structural: boolean) => {
@@ -2156,33 +2190,131 @@ export function scanAstTaintPHP(
 
     // Second pass, bounded worklist -- see astTaintCSharp.ts's/astTaintJava.ts's
     // own identical worklist for the full reasoning.
-    const walkedSignatures = new Set<string>();
-    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
-      const toWalk = Array.from(ctx.seededParams.entries());
-      let changed = false;
-      for (const [fnName, idxSet] of toWalk) {
-        const fn = localFunctions.get(fnName);
-        if (!fn?.body) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
-        if (walkedSignatures.has(signature)) continue;
-        walkedSignatures.add(signature);
-        changed = true;
-        const env: Env = new Map();
-        for (const [idx, m] of idxSet) {
-          const shape = fn.paramShapes[idx];
-          if (shape) env.set(shape.name, m);
-        }
-        walkForDeclarationsAndSinks(fn.body, env, ctx);
-      }
-      if (!changed) break;
-    }
+    drainSeededParamsPHP(ctx);
 
-    void filePath;
     return ctx.findings;
   } catch (err) {
     console.error(`[astTaintPHP] threw scanning ${filePath}:`, err);
     return [];
   }
+}
+
+function makePhpCtx(
+  content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): EngineCtx {
+  const localFunctions = collectLocalFunctions(root);
+  const ctx: EngineCtx = {
+    filePath, content, lines: content.split("\n"), localFunctions, propagatingParams: new Map(), seededParams: new Map(),
+    findings: [], seen: new Set(), varTypes: new Map(), root, suppressed,
+    globalNames: collectGlobalNamesPHP(root), sticky: new Map(), stickyDirty: false, recordSticky: false,
+    crossFileFacts,
+  };
+  const propagating = buildPropagatingMapPHP(localFunctions, ctx);
+  for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+  return ctx;
+}
+
+/** Re-walk same-file functions whose parameters a walk seeded (a function handing its argument to a helper
+ * that sinks it), bounded -- so multi-hop chains are found without relying on Map iteration order. */
+function drainSeededParamsPHP(ctx: EngineCtx): void {
+  const walkedSignatures = new Set<string>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    const toWalk = Array.from(ctx.seededParams.entries());
+    let changed = false;
+    for (const [fnName, idxSet] of toWalk) {
+      const fn = ctx.localFunctions.get(fnName);
+      if (!fn?.body) continue;
+      const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+      if (walkedSignatures.has(signature)) continue;
+      walkedSignatures.add(signature);
+      changed = true;
+      const env: Env = new Map();
+      for (const [idx, m] of idxSet) {
+        const shape = fn.paramShapes[idx];
+        if (shape) env.set(shape.name, m);
+      }
+      walkForDeclarationsAndSinks(fn.body, env, ctx);
+    }
+    if (!changed) break;
+  }
+}
+
+/** Findings that are not "this argument reaches that sink" -- a caller doesn't re-raise them. */
+const NON_FLOW_IDS_PHP: ReadonlySet<string> = new Set(["bola-missing-ownership-check", "timing-attack", "jwt-none-alg"]);
+
+/**
+ * Parameter -> sink facts for every named (non-method) function in one file, keyed by lower-cased name (PHP
+ * function names are case-insensitive), computed with the scan's own sink logic: each parameter is walked
+ * alone, plus same-file helpers it reaches and `incoming` facts for functions from files THIS one includes.
+ * Diffed against an unseeded baseline walk, so a function reading `$_GET` itself isn't blamed on a parameter.
+ */
+export function computePhpFunctionSinkFacts(
+  content: string, filePath: string, root: SyntaxNode, incoming: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const out = new Map<string, ParamSinkFact[]>();
+  try {
+    const ctx = makePhpCtx(content, filePath, root, undefined, incoming);
+    const run = (body: SyntaxNode, env: Env): AstTaintPHPFinding[] => {
+      ctx.findings = [];
+      ctx.seen = new Set();
+      ctx.seededParams = new Map();
+      walkForDeclarationsAndSinks(body, env, ctx);
+      drainSeededParamsPHP(ctx);
+      return ctx.findings;
+    };
+    for (const decl of findAllNodes(root, "function_definition")) {
+      const fn = extractFuncInfo(decl);
+      if (!fn?.body || fn.paramShapes.length === 0) continue;
+      const baseline = new Set(run(fn.body, new Map()).map(f => `${f.id}:${f.line}`));
+      const facts: ParamSinkFact[] = [];
+      for (const shape of fn.paramShapes) {
+        for (const f of run(fn.body, new Map([[shape.name, ALL]]))) {
+          if (baseline.has(`${f.id}:${f.line}`) || NON_FLOW_IDS_PHP.has(f.id)) continue;
+          const where = f.calleeSink;
+          mergeSinkFacts(facts, [{
+            index: shape.index, isRest: decl.childForFieldName("parameters")?.namedChildren
+              .filter(p => p?.type === "simple_parameter" || p?.type === "variadic_parameter")[shape.index]?.type === "variadic_parameter",
+            id: f.id, sinkClass: classOf(f.id),
+            sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
+            via: [fn.name, ...(where?.via ?? [])],
+          }]);
+        }
+      }
+      if (facts.length === 0) continue;
+      const key = fn.name.toLowerCase();
+      const list = out.get(key) ?? [];
+      mergeSinkFacts(list, facts);
+      out.set(key, list);
+    }
+  } catch (err) {
+    console.error(`[astTaintPHP] threw computing function sink facts for ${filePath}:`, err);
+  }
+  return out;
+}
+
+/**
+ * Statically resolvable `require`/`include` targets of one file. `anchored` = relative to the including file's
+ * own directory (`__DIR__ . '/x.php'`, `dirname(__FILE__) . '/x.php'`, or a bare relative literal); otherwise the
+ * literal tail after an unknown prefix (`APP_ROOT . 'lib/db.php'`), which the caller may suffix-match.
+ */
+export function staticIncludesPHP(root: SyntaxNode): Array<{ path: string; anchored: boolean }> {
+  const out: Array<{ path: string; anchored: boolean }> = [];
+  const types = ["include_expression", "include_once_expression", "require_expression", "require_once_expression"];
+  for (const node of types.flatMap(t => findAllNodes(root, t))) {
+    let expr = node.namedChildren[0];
+    while (expr?.type === "parenthesized_expression") expr = expr.namedChildren[0];
+    if (!expr) continue;
+    const whole = phpStringValue(expr);
+    if (whole !== null) { if (whole) out.push({ path: whole, anchored: true }); continue; }
+    if (expr.type !== "binary_expression" || expr.childForFieldName("operator")?.text !== ".") continue;
+    const left = expr.childForFieldName("left");
+    const tail = phpStringValue(expr.childForFieldName("right") ?? expr);
+    if (!left || !tail) continue;
+    const anchored = left.text === "__DIR__" || /^dirname\s*\(\s*__FILE__\s*\)$/.test(left.text);
+    out.push({ path: tail, anchored });
+  }
+  return out;
 }
 
 export function astTaintPHPSeverity(id: AstTaintPHPId): "critical" | "high" | "medium" {

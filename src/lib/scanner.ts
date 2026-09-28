@@ -46,6 +46,7 @@ import type { CachedFileResult } from "./incrementalCache";
 import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries } from "./moduleSummaryCache";
 import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
 import type { TraceStep, ParamSinkFact, StoredProvenanceIO } from "./taint/taintCore";
+import { mergeSinkFacts } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
@@ -56,20 +57,20 @@ import {
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import type { SuppressedSink } from "./taint/taintCore";
-import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava } from "./astTaintJava";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
-  parseGoSourceSync, isGoParserReady, scanAstTaintGo,
+  parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts,
   findEnclosingFunctionNameGo, findNodeAtRowGo, astTaintGoSeverity, astTaintGoLabel,
 } from "./astTaintGo";
 import type { Node as GoSyntaxNode } from "web-tree-sitter";
 import {
   parseCSharpSourceSync, isCSharpParserReady, scanAstTaintCSharp,
-  findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel,
+  findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel, computeCSharpMethodSinkFacts,
 } from "./astTaintCSharp";
 import type { Node as CSharpSyntaxNode } from "web-tree-sitter";
 import {
-  parsePhpSourceSync, isPhpParserReady, scanAstTaintPHP,
+  parsePhpSourceSync, isPhpParserReady, scanAstTaintPHP, computePhpFunctionSinkFacts, staticIncludesPHP,
   findEnclosingFunctionNamePHP, findNodeAtRowPHP, astTaintPHPSeverity, astTaintPHPLabel,
 } from "./astTaintPHP";
 import type { Node as PhpSyntaxNode } from "web-tree-sitter";
@@ -6210,8 +6211,11 @@ function findAstTaintPythonFindings(
 // docblock. No warm-cache concern here (java-parser is pure JS,
 // synchronous, no WASM -- this mirrors astTaint.ts's simplicity, not
 // astTaintPython.ts's).
-function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true }).map(f => ({
+function findAstTaintJavaFindings(
+  content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -6228,12 +6232,15 @@ function findAstTaintJavaFindings(content: string, filePath: string, cst: JavaCs
 // this file's raw lines -- "is there an ownership check nearby" is a
 // line-window-context fact, not something the parser alone can answer, the
 // same AST-taint + regex-context hybrid astTaintJava.ts's own BOLA detector uses.
-function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[], suppressed?: SuppressedSink[]): ScanIndicator[] {
+function findAstTaintGoFindings(
+  content: string, filePath: string, rootNode: GoSyntaxNode, lines: string[], suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
   const idorAuthCheckNearby = (line: number) => {
     const windowStart = Math.max(0, line - 1 - 15);
     return lines.slice(windowStart, line).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
   };
-  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed).map(f => ({
+  return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed, { crossFileFacts }).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6242,8 +6249,11 @@ function findAstTaintGoFindings(content: string, filePath: string, rootNode: GoS
 
 // C# taint engine wrapper -- mirrors findAstTaintJavaFindings exactly
 // (severityOverride only ever set by the BOLA detector, same as Java's).
-function findAstTaintCSharpFindings(content: string, filePath: string, root: CSharpSyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
-  return scanAstTaintCSharp(content, filePath, root, suppressed).map(f => ({
+function findAstTaintCSharpFindings(
+  content: string, filePath: string, root: CSharpSyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintCSharp(content, filePath, root, suppressed, crossFileFacts).map(f => ({
     id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6251,8 +6261,11 @@ function findAstTaintCSharpFindings(content: string, filePath: string, root: CSh
 }
 
 // PHP taint engine wrapper -- mirrors findAstTaintCSharpFindings exactly.
-function findAstTaintPHPFindings(content: string, filePath: string, root: PhpSyntaxNode, suppressed?: SuppressedSink[]): ScanIndicator[] {
-  return scanAstTaintPHP(content, filePath, root, suppressed).map(f => ({
+function findAstTaintPHPFindings(
+  content: string, filePath: string, root: PhpSyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintPHP(content, filePath, root, suppressed, crossFileFacts).map(f => ({
     id: f.id, label: astTaintPHPLabel(f.id), severity: f.severityOverride ?? astTaintPHPSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6302,6 +6315,15 @@ export function analyzeFile(
   // ONE object per file (its own modelReceivers, the batch's converged `incoming`) and passes it to
   // BOTH engines below; only the one matching this file's language ever consults it.
   storedProvenance?: StoredProvenanceIO,
+  // Cross-file service-layer facts for Java (see astTaintJava.ts computeJavaMethodSinkFacts), computed by
+  // runScan() over the whole batch, plus the CST it already parsed for this file.
+  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
+  crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
+  crossFileGo?: { tree?: GoSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for PHP functions from files this one includes (see astTaintPHP.ts computePhpFunctionSinkFacts).
+  crossFilePhp?: { tree?: PhpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6371,14 +6393,14 @@ export function analyzeFile(
   // there is nothing to warm up.
   const javaCst: JavaCstNode | null =
     lang === "java" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
-      ? parseJavaSource(content)
+      ? (crossFileJava?.cst ?? parseJavaSource(content))
       : null;
   // Go AST parse (Phase 4 -- see astTaintGo.ts). isGoParserReady() gates on
   // the WASM parser's async warm-up having completed already -- same
   // "no regression, fall back to regex-only" contract as pyTree above.
   const goTree: GoSyntaxNode | null =
     lang === "golang" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isGoParserReady()
-      ? parseGoSourceSync(content, file_path)
+      ? (crossFileGo?.tree ?? parseGoSourceSync(content, file_path))
       : null;
   // C# AST parse -- see astTaintCSharp.ts. Same tree-sitter warm-cache
   // contract as pyTree/goTree above. lang === "csharp" covers BOTH .cs and
@@ -6391,7 +6413,7 @@ export function analyzeFile(
   const csTree: CSharpSyntaxNode | null =
     lang === "csharp" && !file_path.toLowerCase().endsWith(".cshtml")
     && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
-      ? parseCSharpSourceSync(content, file_path)
+      ? (crossFileCSharp?.tree ?? parseCSharpSourceSync(content, file_path))
       : null;
   // PHP AST parse -- see astTaintPHP.ts. Same tree-sitter warm-cache
   // contract as pyTree/goTree/csTree above. This engine parses plain .php
@@ -6400,7 +6422,7 @@ export function analyzeFile(
   // this phase's own documented scope.
   const phpTree: PhpSyntaxNode | null =
     lang === "php" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPhpParserReady()
-      ? parsePhpSourceSync(content, file_path)
+      ? (crossFilePhp?.tree ?? parsePhpSourceSync(content, file_path))
       : null;
 
   const secretIndicators: ScanIndicator[] = [
@@ -6425,10 +6447,10 @@ export function analyzeFile(
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
-    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
-    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks) : []),
-    ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts) : []),
+    ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
+    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
+    ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
   ];
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
@@ -7090,6 +7112,125 @@ function percentile(sorted: number[], p: number): number {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
+// Bounded like taint/crossFile.ts MAX_CROSS_FILE_ROUNDS: each round lets a caller see facts its callees gained.
+const MAX_SERVICE_FACT_ROUNDS = 3;
+
+/** Order-independent digest of a `Type.method` -> sink facts map (convergence check and cache key). */
+function factsDigest(facts: ReadonlyMap<string, readonly ParamSinkFact[]>): string {
+  const entries = [...facts.entries()]
+    .map(([k, list]) => [k, list.map(f => `${f.index}|${f.isRest ? 1 : 0}|${f.id}|${f.file}|${f.line}|${f.sinkExpr}|${f.via.join(">")}`).sort()] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return sha256Hex(JSON.stringify(entries));
+}
+
+/** Batch-wide `Type.method` -> sink facts, converged over MAX_SERVICE_FACT_ROUNDS so each round a caller sees
+ * what its callees learned (controller -> service -> repository). Needs at least two files to matter. */
+function convergeServiceFacts<T>(
+  trees: ReadonlyMap<string, T>, files: readonly { path: string; content: string }[],
+  compute: (content: string, path: string, tree: T, incoming: ReadonlyMap<string, readonly ParamSinkFact[]>) => Map<string, ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  let facts = new Map<string, ParamSinkFact[]>();
+  if (trees.size < 2) return facts;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  for (let round = 0; round < MAX_SERVICE_FACT_ROUNDS; round++) {
+    const next = new Map<string, ParamSinkFact[]>();
+    for (const [path, tree] of trees) {
+      for (const [key, list] of compute(contentOf.get(path)!, path, tree, facts)) {
+        const merged = next.get(key) ?? [];
+        mergeSinkFacts(merged, list);
+        next.set(key, merged);
+      }
+    }
+    const settled = factsDigest(next) === factsDigest(facts);
+    facts = next;
+    if (settled) break;
+  }
+  return facts;
+}
+
+/** `dir` + a relative include literal, with `.`/`..` segments resolved (posix paths, batch-relative). */
+function joinRelPath(dir: string, rel: string): string {
+  const out: string[] = dir ? dir.split("/") : [];
+  for (const seg of rel.replace(/\\/g, "/").split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") out.pop(); else out.push(seg);
+  }
+  return out.join("/");
+}
+
+/**
+ * PHP has no imports: a function is visible once its file is included. For each file, the batch files it
+ * statically includes, transitively. A literal anchored to the including file (`__DIR__ . '/x.php'`) resolves
+ * against its directory; anything else also tries a UNIQUE batch-path suffix match (`APP_ROOT . 'lib/db.php'`),
+ * and an ambiguous suffix resolves to nothing rather than to a guess.
+ */
+function phpIncludeClosure(trees: ReadonlyMap<string, PhpSyntaxNode>): Map<string, string[]> {
+  const paths = [...trees.keys()];
+  const direct = new Map<string, string[]>();
+  for (const [p, root] of trees) {
+    const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+    const targets = new Set<string>();
+    for (const inc of staticIncludesPHP(root)) {
+      const rel = inc.path.replace(/\\/g, "/");
+      let hit: string | undefined = !rel.startsWith("/") || inc.anchored ? joinRelPath(dir, rel) : undefined;
+      if (hit !== undefined && !trees.has(hit)) hit = undefined;
+      if (!hit && !inc.anchored) {
+        const tail = rel.replace(/^(?:\.{1,2}\/|\/)+/, "");
+        const cands = tail ? paths.filter(q => q === tail || q.endsWith(`/${tail}`)) : [];
+        if (cands.length === 1) hit = cands[0];
+      }
+      if (hit && hit !== p) targets.add(hit);
+    }
+    direct.set(p, [...targets]);
+  }
+  const closure = new Map<string, string[]>();
+  for (const p of paths) {
+    const seen = new Set<string>();
+    const stack = [...(direct.get(p) ?? [])];
+    while (stack.length) {
+      const q = stack.pop()!;
+      if (q === p || seen.has(q)) continue;
+      seen.add(q);
+      stack.push(...(direct.get(q) ?? []));
+    }
+    if (seen.size) closure.set(p, [...seen].sort());
+  }
+  return closure;
+}
+
+/** Per-file PHP incoming facts (functions of the files each one includes), converged like convergeServiceFacts. */
+function convergePhpIncludeFacts(
+  trees: ReadonlyMap<string, PhpSyntaxNode>, files: readonly { path: string; content: string }[],
+): Map<string, Map<string, ParamSinkFact[]>> {
+  const incomingByFile = new Map<string, Map<string, ParamSinkFact[]>>();
+  const closure = phpIncludeClosure(trees);
+  if (closure.size === 0) return incomingByFile;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  const providers = new Set([...closure.values()].flat());
+  const union = (paths: readonly string[], factsOf: ReadonlyMap<string, Map<string, ParamSinkFact[]>>) => {
+    const u = new Map<string, ParamSinkFact[]>();
+    for (const q of paths) for (const [k, list] of factsOf.get(q) ?? []) { const m = u.get(k) ?? []; mergeSinkFacts(m, list); u.set(k, m); }
+    return u;
+  };
+  let factsOf = new Map<string, Map<string, ParamSinkFact[]>>();
+  for (let round = 0; round < MAX_SERVICE_FACT_ROUNDS; round++) {
+    const next = new Map<string, Map<string, ParamSinkFact[]>>();
+    for (const p of providers) {
+      next.set(p, computePhpFunctionSinkFacts(contentOf.get(p)!, p, trees.get(p)!, union(closure.get(p) ?? [], factsOf)));
+    }
+    const digestOf = (m: ReadonlyMap<string, Map<string, ParamSinkFact[]>>) =>
+      [...providers].sort().map(p => `${p}:${factsDigest(m.get(p) ?? new Map())}`).join("|");
+    const settled = digestOf(next) === digestOf(factsOf);
+    factsOf = next;
+    if (settled) break;
+  }
+  for (const [p, visible] of closure) {
+    const u = union(visible, factsOf);
+    if (u.size) incomingByFile.set(p, u);
+  }
+  return incomingByFile;
+}
+
 export function runScan(input: ScanInput): ScanOutput {
   const start = Date.now();
 
@@ -7412,6 +7553,57 @@ export function runScan(input: ScanInput): ScanOutput {
     storedProvenanceByFile.set(path, { modelReceivers: receivers, incoming: modelWritesAggregate, writesOut: new Map() });
   }
 
+  // ── Cross-file service layer (Java): Spring controllers call injected services, which call repositories,
+  // each in its own file. Every class's per-parameter sink facts (computeJavaMethodSinkFacts), converged over
+  // a few rounds so controller -> service -> repository chains resolve, then handed to each file's scan.
+  const javaCsts = new Map<string, JavaCstNode>();
+  for (const f of allFiles) {
+    if (detectLanguage(f.path) !== "java" || getFileTypeMeta(f.path).isGenerated) continue;
+    if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+    const cst = parseJavaSource(f.content);
+    if (cst) javaCsts.set(f.path, cst);
+  }
+  const javaFacts = convergeServiceFacts(javaCsts, allFiles, computeJavaMethodSinkFacts);
+  const javaFactsDigest = javaFacts.size > 0 ? factsDigest(javaFacts) : "";
+
+  // Same for C# (ASP.NET controllers -> injected services -> repositories).
+  const csTrees = new Map<string, CSharpSyntaxNode>();
+  if (isCSharpParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "csharp" || f.path.toLowerCase().endsWith(".cshtml") || getFileTypeMeta(f.path).isGenerated) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseCSharpSourceSync(f.content, f.path);
+      if (tree) csTrees.set(f.path, tree);
+    }
+  }
+  const csFacts = convergeServiceFacts(csTrees, allFiles, computeCSharpMethodSinkFacts);
+  const csFactsDigest = csFacts.size > 0 ? factsDigest(csFacts) : "";
+
+  // Same for Go (handler package -> models/store package), keyed `pkg.Func` / `pkg.Type.Method`.
+  const goTrees = new Map<string, GoSyntaxNode>();
+  if (isGoParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "golang" || getFileTypeMeta(f.path).isGenerated || /(?:^|\/)vendor\//.test(f.path)) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseGoSourceSync(f.content, f.path);
+      if (tree) goTrees.set(f.path, tree);
+    }
+  }
+  const goFacts = convergeServiceFacts(goTrees, allFiles, computeGoFuncSinkFacts);
+  const goFactsDigest = goFacts.size > 0 ? factsDigest(goFacts) : "";
+
+  // PHP: functions from statically included files (see convergePhpIncludeFacts).
+  const phpTrees = new Map<string, PhpSyntaxNode>();
+  if (isPhpParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "php" || getFileTypeMeta(f.path).isGenerated || /(?:^|\/)vendor\//.test(f.path)) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parsePhpSourceSync(f.content, f.path);
+      if (tree) phpTrees.set(f.path, tree);
+    }
+  }
+  const phpIncoming = convergePhpIncludeFacts(phpTrees, allFiles);
+
   // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
@@ -7428,6 +7620,8 @@ export function runScan(input: ScanInput): ScanOutput {
       pySinks: pySinksByFile.get(f.path),
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
+      serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : undefined,
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7436,6 +7630,10 @@ export function runScan(input: ScanInput): ScanOutput {
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
+          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts } : undefined,
+          csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts } : undefined,
+          goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
+          phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused

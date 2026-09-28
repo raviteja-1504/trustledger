@@ -498,13 +498,29 @@ export function computeExportSinkSummaryPy(
     const localFns = collectLocalFunctionsPy(root);
     const propagating = buildPropagatingMapPy(localFns, root, incomingShapes);
     const namespaceLocals = new Set(collectImportEdgesPy(root).filter(e => e.namespace).map(e => e.localName));
+    // Class methods get their own entries (localFns keeps one entry per bare name, file-wide) so each class's
+    // methods are summarised on their own; see qualifiedCallKeysPy for the call-site half.
+    const methods = classMethodsPy(root);
+    const withMethods = new Map(localFns);
+    for (const m of methods) withMethods.set(` q:${m.cls}.${m.name}`, m.fn);
     const facts = buildSinkFactsMapPy(
-      localFns, propagating, root, incomingShapes, buildImportMapPy(root), filePath,
+      withMethods, propagating, root, incomingShapes, buildImportMapPy(root), filePath,
       incomingSinks ?? new Map(), makeSinkCalleeResolverPy(namespaceLocals),
     );
     for (const name of moduleLevelFunctionNamesPy(root)) {
       const f = facts.get(name);
       if (f && f.length > 0) summary.set(name, f);
+    }
+    // `svc.find(x)` binds x to `find`'s SECOND parameter (after self/cls): shift instance/class-method facts
+    // so they line up with call-site arguments; a @staticmethod keeps its indices.
+    const instancesOf = moduleLevelInstancesPy(root);
+    for (const m of methods) {
+      const f = facts.get(` q:${m.cls}.${m.name}`);
+      if (!f || f.length === 0) continue;
+      const shifted = m.bound ? f.filter(x => x.index > 0).map(x => ({ ...x, index: x.index - 1 })) : f;
+      if (shifted.length === 0) continue;
+      summary.set(`${m.cls}.${m.name}`, shifted);
+      for (const inst of instancesOf.get(m.cls) ?? []) summary.set(`${inst}.${m.name}`, shifted);
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing export sink summary for ${filePath}:`, err);
@@ -649,9 +665,16 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
       text.endsWith(".HttpResponseRedirect")) {
     return { id: "open-redirect", sinkExpr: text, args };
   }
-  if (tail === "execute" || tail === "executemany" ||
-      (parts.length > 1 && (tail === "raw" || tail === "extra"))) {
-    return { id: "sql-injection", sinkExpr: text, args };
+  if (tail === "execute" || tail === "executemany" || (parts.length > 1 && tail === "raw")) {
+    // Only the SQL TEXT is injectable: `execute(sql, (x,))` / `raw(sql, [x])` send the second argument as bound
+    // parameters, never as SQL.
+    const sql = positional[0] ?? keywordArgPy(args, ["sql", "query", "operation", "raw_query"]);
+    return sql ? { id: "sql-injection", sinkExpr: text, args: [sql] } : null;
+  }
+  if (parts.length > 1 && tail === "extra") {
+    // Django QuerySet.extra(): where/select/tables/order_by are raw SQL fragments; params/select_params are bound.
+    const fragments = ["where", "select", "tables", "order_by"].map(k => keywordArgPy(args, [k])).filter((n): n is SyntaxNode => !!n);
+    return fragments.length ? { id: "sql-injection", sinkExpr: text, args: fragments } : null;
   }
   if (text === "render_template_string" || tail === "from_string") {
     return { id: "ssti", sinkExpr: text, args };
@@ -1544,6 +1567,109 @@ function argsForFactPy<A>(args: readonly A[], f: Pick<ParamSinkFact, "index" | "
  * summaries are out of scope, see moduleLevelFunctionNamesPy), and a module-level function has no `self`, so
  * such a call can never be one that a cross-file summary is about.
  */
+/** The value of the first `name=value` keyword argument whose name is in `names`. */
+function keywordArgPy(args: readonly SyntaxNode[], names: readonly string[]): SyntaxNode | undefined {
+  for (const a of args) {
+    if (a.type === "keyword_argument" && names.includes(a.childForFieldName("name")?.text ?? "")) {
+      return a.childForFieldName("value") ?? undefined;
+    }
+  }
+  return undefined;
+}
+
+const PY_CLASS_NAME_RE = /^[A-Z]\w*$/;
+/** `C` when `n` is `C(...)` with a class-shaped name. */
+function constructedClassPy(n: SyntaxNode | null | undefined): string | null {
+  if (!n || n.type !== "call") return null;
+  const f = n.childForFieldName("function");
+  return f?.type === "identifier" && PY_CLASS_NAME_RE.test(f.text) ? f.text : null;
+}
+/** `C` from a parameter annotation `x: C`. */
+function annotatedClassPy(param: SyntaxNode): string | null {
+  const t = param.childForFieldName("type");
+  return t && PY_CLASS_NAME_RE.test(t.text) ? t.text : null;
+}
+/** The class a local name holds in `scope`: an annotated parameter, or an assignment `name = C(...)`. */
+function classOfNamePy(name: string, from: SyntaxNode): string | null {
+  for (let cur: SyntaxNode | null = from.parent; cur; cur = cur.parent) {
+    if (cur.type === "function_definition") {
+      for (const p of cur.childForFieldName("parameters")?.namedChildren ?? []) {
+        if (p && (p.type === "typed_parameter" || p.type === "typed_default_parameter") &&
+            (p.childForFieldName("name")?.text ?? p.namedChildren.find(c => c?.type === "identifier")?.text) === name) return annotatedClassPy(p);
+      }
+    }
+    if (cur.type === "function_definition" || cur.type === "module") {
+      let found: string | null = null;
+      const visit = (n: SyntaxNode) => {
+        if (found || (n !== cur && (n.type === "function_definition" || n.type === "class_definition"))) return;
+        if (n.type === "assignment" && n.childForFieldName("left")?.text === name) found = constructedClassPy(n.childForFieldName("right"));
+        for (const c of n.namedChildren) if (c) visit(c);
+      };
+      visit(cur);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+/** The class `self.<field>` holds: `self.field = C(...)`, or `self.field = param` for an annotated `__init__`
+ * parameter (constructor injection). */
+function classOfSelfFieldPy(field: string, from: SyntaxNode): string | null {
+  let cls: SyntaxNode | null = from.parent;
+  while (cls && cls.type !== "class_definition") cls = cls.parent;
+  if (!cls) return null;
+  let found: string | null = null;
+  const visit = (n: SyntaxNode) => {
+    if (found || n.type === "class_definition" && n !== cls) return;
+    if (n.type === "assignment" && n.childForFieldName("left")?.text === `self.${field}`) {
+      const right = n.childForFieldName("right");
+      found = constructedClassPy(right);
+      if (!found && right?.type === "identifier") {
+        let fn: SyntaxNode | null = n.parent;
+        while (fn && fn.type !== "function_definition") fn = fn.parent;
+        for (const p of fn?.childForFieldName("parameters")?.namedChildren ?? []) {
+          if (p && (p.type === "typed_parameter" || p.type === "typed_default_parameter") && p.namedChildren.find(c => c?.type === "identifier")?.text === right.text) found = annotatedClassPy(p);
+        }
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(cls);
+  return found;
+}
+
+/** Qualified summary keys a method call can target (`svc.find` -> `svc.find`, `UserService.find`), most specific
+ * first. Matched only against summaries of methods of classes/instances another module actually exports. */
+function qualifiedCallKeysPy(fn: SyntaxNode | null): string[] {
+  if (!fn || fn.type !== "attribute") return [];
+  const { object, attribute } = attributeParts(fn);
+  if (!object || !attribute) return [];
+  const keys: string[] = [];
+  if (object.type === "identifier") {
+    keys.push(`${object.text}.${attribute}`);
+    const c = classOfNamePy(object.text, fn);
+    if (c) keys.push(`${c}.${attribute}`);
+  } else if (object.type === "attribute") {
+    const inner = attributeParts(object);
+    if (inner.object?.type === "identifier" && inner.object.text === "self" && inner.attribute) {
+      const c = classOfSelfFieldPy(inner.attribute, fn);
+      if (c) keys.push(`${c}.${attribute}`);
+    }
+  } else {
+    const c = constructedClassPy(object);
+    if (c) keys.push(`${c}.${attribute}`);
+  }
+  return keys;
+}
+
+function resolveKnownCalleePy(
+  fn: SyntaxNode | null, known: { has(k: string): boolean }, byName: (f: SyntaxNode | null) => string | null,
+): string | null {
+  const n = byName(fn);
+  if (n && known.has(n)) return n;
+  for (const k of qualifiedCallKeysPy(fn)) if (known.has(k)) return k;
+  return null;
+}
+
 function makeSinkCalleeResolverPy(namespaceLocals: ReadonlySet<string>) {
   return (fn: SyntaxNode | null): string | null => {
     if (!fn) return null;
@@ -1618,7 +1744,7 @@ function computeFnSinkFactsPy(
       const direct = directSinkHitPy(node, env, mask, importMap);
       if (direct) record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name]);
       const fnNode = node.childForFieldName("function");
-      const calleeName = resolveCallee(fnNode);
+      const calleeName = resolveKnownCalleePy(fnNode, knownFacts, resolveCallee);
       const facts = calleeName ? knownFacts.get(calleeName) : undefined;
       if (!calleeName || !facts) return;
       const args = argListOf(node);
@@ -2237,6 +2363,42 @@ function sourceLabelPy(node: SyntaxNode): string {
 }
 
 /** Collects every function_definition (module-level and class methods -- more real coverage for the interprocedural/sink engine's own purposes; only findEnclosingFunctionNamePy restricts to module-level for callGraph.ts compatibility). */
+/** Methods of top-level classes: `bound` unless @staticmethod (the first parameter is self/cls). */
+function classMethodsPy(root: SyntaxNode): Array<{ cls: string; name: string; fn: LocalFn; bound: boolean }> {
+  const out: Array<{ cls: string; name: string; fn: LocalFn; bound: boolean }> = [];
+  for (const top of root.namedChildren) {
+    const cls = top?.type === "decorated_definition" ? top.namedChildren.find(c => c?.type === "class_definition") : top;
+    if (cls?.type !== "class_definition") continue;
+    const clsName = cls.childForFieldName("name")?.text;
+    const body = cls.childForFieldName("body");
+    if (!clsName || !body) continue;
+    for (const member of body.namedChildren) {
+      if (!member) continue;
+      const decorators = member.type === "decorated_definition" ? member.namedChildren.filter(c => c?.type === "decorator").map(c => c!.text) : [];
+      const def = member.type === "decorated_definition" ? member.namedChildren.find(c => c?.type === "function_definition") : member;
+      if (def?.type !== "function_definition") continue;
+      const name = def.childForFieldName("name")?.text;
+      const fnBody = def.childForFieldName("body");
+      if (!name || !fnBody || name.startsWith("__")) continue;
+      out.push({ cls: clsName, name, fn: { paramShapes: paramShapesOfPy(def), body: fnBody }, bound: !decorators.some(d => /^@staticmethod\b/.test(d)) });
+    }
+  }
+  return out;
+}
+
+/** `user_service = UserService()` at module level: class name -> the instance names that expose its methods. */
+function moduleLevelInstancesPy(root: SyntaxNode): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const st of root.namedChildren) {
+    const a = st?.type === "expression_statement" ? st.namedChildren[0] : null;
+    if (a?.type !== "assignment") continue;
+    const left = a.childForFieldName("left");
+    const cls = constructedClassPy(a.childForFieldName("right"));
+    if (left?.type === "identifier" && cls) out.set(cls, [...(out.get(cls) ?? []), left.text]);
+  }
+  return out;
+}
+
 function collectLocalFunctionsPy(root: SyntaxNode): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: SyntaxNode) => {
@@ -2480,7 +2642,7 @@ export function scanAstTaintPython(
     };
     const checkCrossFileSinks = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
       if (!crossFileSinks || crossFileSinks.size === 0) return;
-      const name = resolveSinkCallee(node.childForFieldName("function"));
+      const name = resolveKnownCalleePy(node.childForFieldName("function"), crossFileSinks, resolveSinkCallee);
       const info = name ? crossFileSinks.get(name) : undefined;
       if (!name || !info) return;
       const args = argListOf(node);

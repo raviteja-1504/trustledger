@@ -45,7 +45,7 @@ import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
   ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  mergeSinkFacts, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
@@ -70,6 +70,8 @@ export interface AstTaintJavaFinding {
   severityOverride?: "critical" | "high" | "medium";
   // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
   trace?: TraceStep[];
+  // Set when the sink is inside another class's method (a cross-file call): where that sink really is.
+  calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
 }
 
 export function parseJavaSource(content: string): CstNode | null {
@@ -538,6 +540,9 @@ interface EngineCtx {
   htmlEscapers: Set<string>;
   findings: AstTaintJavaFinding[];
   seen: Set<string>;
+  // Parameter -> sink facts for methods of OTHER classes in the batch, keyed `Type.method` (see
+  // computeJavaMethodSinkFacts) -- a call through an injected/typed receiver is checked against these.
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
 }
 
 function emit(
@@ -888,6 +893,8 @@ function walkPrimaryChain(
   const { parts, taint: prefixTaint, rootVar, isNewExprOf } = primaryPrefixInfo(prefix, env, ctx);
   let chainTaint = prefixTaint;
   let nameParts = [...parts];
+  let receiverSoFar: string | undefined;
+  const receiverOf = () => (nameParts.length >= 2 ? nameParts[nameParts.length - 2] : receiverSoFar);
   const isNewURL = isNewExprOf === "URL";
 
   for (const suffix of allNodes(primary, "primarySuffix")) {
@@ -897,6 +904,7 @@ function walkPrimaryChain(
 
     if (hasDot && dotId && !invocation) {
       // A `.identifier` link with no immediate call -- extends the name for the NEXT call.
+      receiverSoFar = nameParts[nameParts.length - 1];
       nameParts = [dotId.image];
       continue;
     }
@@ -919,7 +927,7 @@ function walkPrimaryChain(
       const clears = sanitizerClears("java", calleeName || tail) ?? (ctx.htmlEscapers.has(tail) ? classOf("xss") : null);
       if (clears !== null) {
         chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
-        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf });
+        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf() });
         nameParts = [];
         continue;
       }
@@ -984,7 +992,7 @@ function walkPrimaryChain(
         if (m) chainTaint |= m;
       }
 
-      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf });
+      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf() });
 
       // Generic passthrough: any other call keeps existing chain taint sticky
       // (a normal method's return isn't assumed tainted just because some
@@ -999,6 +1007,8 @@ function walkPrimaryChain(
 interface CallInfo {
   calleeName: string; tail: string; rootVar: string | null; args: CstNode[];
   chainTaintBefore: number; node: CstNode; isNewURL: boolean; isNewOf: string | null;
+  /** The name the method is called ON -- `svc` for `svc.find()` and `this.svc.find()`, `Svc` for `Svc.find()`. */
+  receiverName?: string;
 }
 
 function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
@@ -1084,7 +1094,56 @@ function culpritText(arg: CstNode, env: Env, ctx: EngineCtx): string {
   return tokensText(arg);
 }
 
+/**
+ * A call into ANOTHER class of the batch -- `userService.find(id)` on an injected/typed field, local or
+ * parameter, or a static `UserService.find(id)` -- whose parameter reaches a sink inside that class (see
+ * computeJavaMethodSinkFacts). Reported here, at the caller, with the callee's real sink in the trace.
+ */
+function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
+  const facts = ctx.crossFileFacts;
+  const recv = info.receiverName;
+  if (!facts || facts.size === 0 || !recv || recv === "this" || recv === "super") return;
+  const type = ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined);
+  if (!type) return;
+  const key = `${type.replace(/<.*$/, "")}.${info.tail}`;
+  const list = facts.get(key);
+  if (!list) return;
+  for (const fact of list) {
+    const bound = fact.isRest ? info.args.slice(fact.index) : info.args[fact.index] ? [info.args[fact.index]] : [];
+    for (const a of bound) {
+      const m = taintMask(a, env, ctx);
+      if (!(m & fact.sinkClass)) {
+        if (wasCleared(m, fact.sinkClass)) ctx.suppressed?.push({ id: fact.id, line: lineOf(info.node) });
+        continue;
+      }
+      const line = lineOf(info.node);
+      const dedupKey = `${fact.id}:${line}`;
+      if (ctx.seen.has(dedupKey)) return;
+      ctx.seen.add(dedupKey);
+      const source = culpritText(a, env, ctx);
+      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+      const trace = buildBackwardTraceGeneric(ctx.filePath, info.node, source, key, {
+        enclosingScope: () => ctx.currentBody ?? null, assignmentsIn: assignmentsInJava,
+        position: startOf, line: lineOf, text: tokensText,
+      });
+      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
+      trace.push(
+        { file: ctx.filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: `${recv}.${info.tail}(...)` },
+        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+      );
+      ctx.findings.push({
+        id: fact.id as AstTaintJavaId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
+        detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via ${type}${via}] — real data-flow match across files, not a line-pattern guess`,
+        trace,
+        calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
+      });
+      return;
+    }
+  }
+}
+
 function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
+  checkCrossFileCallJava(info, env, ctx);
   const { tail, rootVar, args, chainTaintBefore, node, calleeName } = info;
   const argMasks = args.map(a => taintMask(a, env, ctx));
   const combined = chainTaintBefore | argMasks.reduce((m, x) => m | x, 0);
@@ -1925,6 +1984,120 @@ function collectClassFieldNames(root: CstNode): Set<string> {
   return fields;
 }
 
+/** Class field name -> declared simple type (`private final UserService users;` -> users: UserService). */
+function collectClassFieldTypes(root: CstNode): Map<string, string> {
+  const types = new Map<string, string>();
+  for (const fd of findAllNodes(root, "fieldDeclaration")) {
+    const unannType = firstNode(fd, "unannType");
+    const classType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
+    const type = classType ? tokenKids(classType, "Identifier").pop()?.image : undefined;
+    if (!type) continue;
+    const vdl = firstNode(fd, "variableDeclaratorList");
+    for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+      const declId = firstNode(vd, "variableDeclaratorId");
+      const nameTok = declId ? firstTok(declId, "Identifier") : undefined;
+      if (nameTok && !types.has(nameTok.image)) types.set(nameTok.image, type);
+    }
+  }
+  return types;
+}
+
+/**
+ * Cross-file SUMMARY: for each non-private method of each class in this file, which parameters reach which
+ * sinks -- keyed `Class.method`, and also `Interface.method` / `Superclass.method` for every type the class
+ * implements or extends (a controller usually injects `UserService`, the interface, while the SQL lives in
+ * `UserServiceImpl`). Computed by walking the method body with ONE parameter seeded at a time through the
+ * very same context and sink logic the main scan uses, so a summary can never disagree with what a direct
+ * finding would report. `incoming` makes it multi-hop: a service method whose parameter reaches a
+ * repository's sink gets that fact too (with the repository's real sink location).
+ */
+export function computeJavaMethodSinkFacts(
+  content: string, filePath: string, cst: CstNode, incoming: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const out = new Map<string, ParamSinkFact[]>();
+  try {
+    const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, undefined, incoming);
+    for (const cls of findAllNodes(cst, "normalClassDeclaration")) {
+      const clsName = firstNode(cls, "typeIdentifier") ? firstTok(firstNode(cls, "typeIdentifier")!, "Identifier")?.image : undefined;
+      if (!clsName) continue;
+      const supers: string[] = [];
+      for (const key of ["classExtends", "classImplements"]) {
+        const n = firstNode(cls, key);
+        for (const ct of n ? findAllNodes(n, "classType") : []) {
+          const id = tokenKids(ct, "Identifier").pop()?.image;
+          if (id) supers.push(id);
+        }
+      }
+      const body = firstNode(cls, "classBody");
+      for (const cbd of body ? allNodes(body, "classBodyDeclaration") : []) {
+        const cmd = firstNode(cbd, "classMemberDeclaration");
+        const md = cmd ? firstNode(cmd, "methodDeclaration") : undefined;
+        const info = md ? extractMethodInfo(md) : null;
+        if (!info?.body || info.isPrivate || info.paramShapes.length === 0) continue;
+        const facts: ParamSinkFact[] = [];
+        info.paramShapes.forEach((shape, i) => {
+          ctx.findings = [];
+          ctx.seen = new Set();
+          ctx.seededParams = new Map();
+          ctx.localNames = localNamesOfMethod(info);
+          ctx.currentParams = new Set(info.paramShapes.map(p => p.name));
+          ctx.currentBody = info.body ?? undefined;
+          ctx.entryLoopVars.length = 0;
+          const env: Env = new Map([[shape.name, ALL]]);
+          walkForDeclarationsAndSinks(info.body!, env, ctx);
+          drainSeededParamsJava(ctx, localMethods);
+          for (const f of ctx.findings) {
+            if (f.id === "bola-missing-ownership-check") continue;
+            const where = f.calleeSink;
+            mergeSinkFacts(facts, [{
+              index: i, isRest: shape.isRest, id: f.id, sinkClass: classOf(f.id),
+              sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
+              via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
+            }]);
+          }
+        });
+        if (facts.length === 0) continue;
+        for (const owner of [clsName, ...supers]) {
+          const key = `${owner}.${info.name}`;
+          const list = out.get(key) ?? [];
+          mergeSinkFacts(list, facts);
+          out.set(key, list);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[astTaintJava] threw computing method sink facts for ${filePath}:`, err);
+  }
+  return out;
+}
+
+/** Re-walk same-file methods whose parameters a walk just seeded (a public method handing its argument to a
+ * private helper that sinks it), bounded -- the summary pass's copy of runJavaScan's second pass. */
+function drainSeededParamsJava(ctx: EngineCtx, localMethods: Map<string, LocalMethod>): void {
+  const walked = new Set<string>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    for (const [methodName, idxSet] of Array.from(ctx.seededParams.entries())) {
+      const method = localMethods.get(methodName);
+      if (!method?.body) continue;
+      const signature = `${methodName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+      if (walked.has(signature)) continue;
+      walked.add(signature);
+      changed = true;
+      ctx.localNames = localNamesOfMethod(method);
+      ctx.currentParams = new Set(method.paramShapes.map(p => p.name));
+      ctx.currentBody = method.body;
+      const env: Env = new Map();
+      for (const [idx, m] of idxSet) {
+        const shape = method.paramShapes[idx];
+        if (shape) env.set(shape.name, m);
+      }
+      walkForDeclarationsAndSinks(method.body, env, ctx);
+    }
+    if (!changed) break;
+  }
+}
+
 /** Method-scoped declared-type / initializer index -- deliberately NOT
  * ctx.varTypes, which is a single flat map populated across the ENTIRE file
  * with no per-method clearing (an accepted imprecision for the existing
@@ -2320,6 +2493,8 @@ export interface JavaScanOptions {
    * Default false: only annotated parameters and request.getParameter()-style calls are sources.
    */
   entryPoints?: boolean;
+  /** Parameter -> sink facts for other classes' methods in the batch (see computeJavaMethodSinkFacts). */
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
 }
 
 export function scanAstTaintJava(
@@ -2329,32 +2504,46 @@ export function scanAstTaintJava(
   suppressedOut?: SuppressedSink[],
   opts?: JavaScanOptions,
 ): AstTaintJavaFinding[] {
-  const strict = runJavaScan(content, filePath, cst, suppressedOut, false);
+  const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts);
   if (!opts?.entryPoints) return strict;
-  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true);
+  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts);
   const have = new Set(strict.map(f => `${f.id}:${f.line}`));
   return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
 }
 
+/** The per-file engine context both the main scan and the cross-file summary pass walk with. */
+function makeJavaCtx(
+  content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined,
+  crossFileFacts: ReadonlyMap<string, readonly ParamSinkFact[]> | undefined,
+): { ctx: EngineCtx; localMethods: Map<string, LocalMethod> } {
+  const lines = content.split("\n");
+  const localMethods = collectLocalMethods(cst);
+  const ctx: EngineCtx = {
+    filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+    varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
+    suppressed: suppressedOut,
+    sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),
+    crossFileFacts,
+  };
+  // structural HTML escapers, and parameter types (so a `HttpServletRequest r` parameter is recognised as the request)
+  for (const [name, m] of localMethods) {
+    if (m.body && isHtmlEscaperBody(m.body)) ctx.htmlEscapers.add(name);
+    for (const p of m.paramShapes) if (!ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, p.type);
+  }
+  // Field types, lowest precedence: an injected service -- `@Autowired UserService users;` or a
+  // constructor-injected `private final UserService users;` -- is how a controller reaches the service layer.
+  for (const [name, type] of collectClassFieldTypes(cst)) if (!ctx.varTypes.has(name)) ctx.varTypes.set(name, type);
+  const propagating = buildPropagatingMapJava(localMethods, ctx);
+  for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+  return { ctx, localMethods };
+}
+
 function runJavaScan(
   content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined, withEntryPoints: boolean,
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
 ): AstTaintJavaFinding[] {
   try {
-    const lines = content.split("\n");
-    const localMethods = collectLocalMethods(cst);
-    const ctx: EngineCtx = {
-      filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
-      suppressed: suppressedOut,
-      sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),
-    };
-    // structural HTML escapers, and parameter types (so a `HttpServletRequest r` parameter is recognised as the request)
-    for (const [name, m] of localMethods) {
-      if (m.body && isHtmlEscaperBody(m.body)) ctx.htmlEscapers.add(name);
-      for (const p of m.paramShapes) if (!ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, p.type);
-    }
-    const propagating = buildPropagatingMapJava(localMethods, ctx);
-    for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+    const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, suppressedOut, crossFileFacts);
 
     // Which local methods are called from elsewhere in the file? The rest are ENTRY POINTS: their
     // String/collection/byte[] parameters are the untrusted input (library/handler code without framework annotations).

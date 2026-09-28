@@ -27,7 +27,7 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * A deploy can also namespace its own cache via ScanInput.cache_namespace (e.g. the commit SHA) so a
  * forgotten bump here can never silently serve stale results across releases.
  */
-export const SCAN_CACHE_VERSION = 2;
+export const SCAN_CACHE_VERSION = 3;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {
@@ -61,6 +61,9 @@ export interface CacheKeyInputs {
    * (from its modelReceivers) paired with their batch-converged mask -- not the whole batch-wide map, so
    * a write to a model this file never touches can't cause a spurious cache miss. */
   storedProvenanceIncoming?: Array<[string, number]>;
+  /** Digest of the batch's cross-file service-layer facts for this file's language (Java/C#): any change to
+   * a service's summary may change a controller's findings, so it invalidates this file's cached result. */
+  serviceFactsDigest?: string;
 }
 
 /** Every field of a sink fact that reaches the emitted finding (its location, expression and via-path all
@@ -111,7 +114,7 @@ export function computeFileCacheKey(inp: CacheKeyInputs): string {
     // toFixed: prPriorBias is a float derived from PR metadata; 6 places is far below any effect on a
     // file's AI% but keeps 0.08 vs 0.0800000000001 (float noise) from causing a spurious miss.
     inp.prPriorBias.toFixed(6),
-    js, reachable, py, pySinks, storedProvenance,
+    js, reachable, py, pySinks, storedProvenance, inp.serviceFactsDigest ?? "",
   ]));
 }
 

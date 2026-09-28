@@ -20,6 +20,19 @@ function run() {
     expect(hits[0].severity).toBe("medium");
   });
 
+  it("does not mistake an index access (`m[1].split()`) for an array literal", () => {
+    const content = `
+function run(m, f) {
+  const a = m[1].split(",");
+  const b = f()[0].trim();
+  const c = rows[i][0].toUpperCase();
+  return [a, b, c];
+}
+`;
+    expect(findings(content)).toEqual([]);
+    expect(findings(`function run() {\n  return foo([1, 2].isEmpty());\n}\n`).length).toBeGreaterThan(0);
+  });
+
   it("flags a non-existent method on a variable assigned from an array literal", () => {
     const content = `
 function run() {

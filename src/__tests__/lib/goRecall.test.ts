@@ -186,7 +186,14 @@ describe("new sinks", () => {
     expect(has(handler(`reflect.ValueOf(&cfg{}).Elem().FieldByName(${SRC()})`), "mass-assignment")).toBe(true);
   });
   it("NoSQL find/update with a request-derived filter", () => {
-    expect(has(handler(`coll.FindOne(map[string]interface{}{"u": ${SRC()}})`), "nosql-injection")).toBe(true);
+    // A decoded map's entry can be an object ({"$ne": ""}); a string from the query string cannot, unless it
+    // lands in a code/pattern operator.
+    const decoded = `var body map[string]interface{}\n\tjson.NewDecoder(r.Body).Decode(&body)\n\t`;
+    expect(has(handler(`${decoded}coll.FindOne(map[string]interface{}{"u": body["u"]})`), "nosql-injection")).toBe(true);
+    expect(has(handler(`${decoded}coll.FindOne(context.TODO(), body)`), "nosql-injection")).toBe(true);
+    expect(has(handler(`coll.FindOne(map[string]interface{}{"u": ${SRC()}})`), "nosql-injection")).toBe(false);
+    expect(has(handler(`coll.Find(ctx, bson.M{"t": bson.M{"$regex": ${SRC()}}}, opts)`), "nosql-injection")).toBe(true);
+    expect(has(handler(`coll.Find(ctx, bson.M{"t": ${SRC()}}, bson.M{"$where": "x"})`), "nosql-injection")).toBe(false);
   });
   it("LDAP and XPath", () => {
     expect(has(handler(`ldap.NewSearchRequest("dc=x", 2, 0, 0, 0, false, "(uid="+${SRC()}+")", nil, nil)`), "ldap-injection")).toBe(true);

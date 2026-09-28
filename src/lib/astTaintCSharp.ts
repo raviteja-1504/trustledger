@@ -62,7 +62,7 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
   ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  mergeSinkFacts, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
@@ -97,6 +97,8 @@ export interface AstTaintCSharpFinding {
   severityOverride?: "critical" | "high" | "medium";
   // Source -> sink trace (best-effort, see taintCore.ts's TraceStep/buildBackwardTraceGeneric docblocks).
   trace?: TraceStep[];
+  // Set when the sink is inside another class's method (a cross-file call): where that sink really is.
+  calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
 }
 
 // ── Parser lifecycle (warm-cache pattern -- see astTaintGo.ts's identical docblock) ──
@@ -592,6 +594,9 @@ interface EngineCtx {
   root?: SyntaxNode;
   findings: AstTaintCSharpFinding[];
   seen: Set<string>;
+  // Parameter -> sink facts for methods of OTHER classes in the batch, keyed `Type.Method` (see
+  // computeCSharpMethodSinkFacts) -- a call through an injected/typed receiver is checked against these.
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer (see astTaint.ts) -- lets scanner.ts drop the
   // regex layer's duplicate for a flow this engine proved safe.
@@ -991,9 +996,61 @@ function lastCallNameCS(call: SyntaxNode | null | undefined): string {
   return fn ? stripGenerics(fn.text.split(".").pop() ?? "") : "";
 }
 
+/**
+ * A call into ANOTHER class of the batch -- `_svc.Find(id)` / `this._svc.Find(id)` on an injected field or
+ * primary-constructor parameter, a typed local/parameter, or a static `SqlUtil.Run(q)` -- whose parameter
+ * reaches a sink inside that class (see computeCSharpMethodSinkFacts). Reported at the caller.
+ */
+function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
+  const facts = ctx.crossFileFacts;
+  if (!facts || facts.size === 0 || fn.type !== "member_access_expression") return;
+  const text = calleeTextCSharp(fn);
+  if (!text) return;
+  const parts = text.split(".");
+  if (parts.length < 2) return;
+  const method = parts[parts.length - 1];
+  const recv = parts[parts.length - 2];
+  if (recv === "this") return;
+  const type = ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined);
+  if (!type) return;
+  const key = `${stripGenerics(type).split(".").pop()}.${method}`;
+  const list = facts.get(key);
+  if (!list) return;
+  for (const fact of list) {
+    const bound = fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
+    for (const a of bound) {
+      const m = taintMask(a, env);
+      if (!(m & fact.sinkClass)) {
+        if (wasCleared(m, fact.sinkClass)) ctx.suppressed?.push({ id: fact.id, line: lineOf(node) });
+        continue;
+      }
+      const line = lineOf(node);
+      const dedup = `${fact.id}:${line}`;
+      if (ctx.seen.has(dedup)) return;
+      ctx.seen.add(dedup);
+      const source = a.text.replace(/\s+/g, " ");
+      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
+      const trace = buildBackwardTraceGeneric(ctx.filePath, node, source, key, csTraceResolver);
+      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
+      trace.push(
+        { file: ctx.filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: `${recv}.${method}(...)` },
+        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
+      );
+      ctx.findings.push({
+        id: fact.id as AstTaintCSharpId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
+        detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via ${type}${via}] — real data-flow match across files, not a line-pattern guess`,
+        trace,
+        calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
+      });
+      return;
+    }
+  }
+}
+
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
+  checkCrossFileCallCS(fn, args, node, env, ctx, taintMask);
   // A call chained off another call (`t.GetMethod(m).Invoke(...)`, `new HttpClient().GetStringAsync(u)`) has no
   // dotted root; it still has a method name to match.
   const text = calleeTextCSharp(fn)
@@ -1976,20 +2033,153 @@ function checkHandRolledJwt(method: LocalMethod, ctx: EngineCtx) {
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
+/** Simple type name of a type node (`IUserService`, `List<X>` -> List, `Ns.Svc` -> Svc). */
+function simpleTypeNameCS(t: SyntaxNode | null | undefined): string | undefined {
+  if (!t) return undefined;
+  if (t.type === "identifier") return t.text;
+  if (t.type === "generic_name") return t.namedChildren.find(c => c?.type === "identifier")?.text;
+  if (t.type === "qualified_name") return simpleTypeNameCS(t.namedChildren[t.namedChildren.length - 1]);
+  if (t.type === "nullable_type") return simpleTypeNameCS(t.namedChildren[0]);
+  return undefined;
+}
+
+/** Declared types of fields, properties, method/constructor parameters and C# 12 primary-constructor
+ * parameters -- where an injected service is held (`private readonly IUserService _svc;`,
+ * `public class C(IUserService svc)`). File-wide and flat, like varTypes itself. */
+function collectMemberTypesCS(root: SyntaxNode): Map<string, string> {
+  const types = new Map<string, string>();
+  const put = (name: string | undefined, t: string | undefined) => { if (name && t && !types.has(name)) types.set(name, t); };
+  for (const fd of findAllNodes(root, "field_declaration")) {
+    const vd = fd.namedChildren.find(c => c?.type === "variable_declaration");
+    const t = simpleTypeNameCS(vd?.childForFieldName("type"));
+    for (const d of vd?.namedChildren ?? []) {
+      if (d?.type === "variable_declarator") put(d.namedChildren.find(c => c?.type === "identifier")?.text, t);
+    }
+  }
+  for (const pd of findAllNodes(root, "property_declaration")) put(pd.childForFieldName("name")?.text, simpleTypeNameCS(pd.childForFieldName("type")));
+  for (const p of findAllNodes(root, "parameter")) put(p.childForFieldName("name")?.text, simpleTypeNameCS(p.childForFieldName("type")));
+  // C# 12 primary constructors (`class UserController(IUserService svc) : ControllerBase`): the bundled grammar
+  // predates them and leaves the parameter list as an ERROR node, but its text is still `(Type name, ...)`.
+  for (const cls of findAllNodes(root, "class_declaration")) {
+    const err = cls.namedChildren.find(c => c?.type === "ERROR");
+    const m = err ? /^\(([^()]*)\)$/.exec(err.text.trim()) : null;
+    for (const part of m ? m[1].split(",") : []) {
+      const pm = /^([A-Za-z_][\w.]*)(?:<[^>]*>)?\??\s+([A-Za-z_]\w*)\s*(?:=.*)?$/.exec(part.replace(/\[[^\]]*\]/g, "").trim());
+      if (pm) put(pm[2], pm[1].split(".").pop());
+    }
+  }
+  return types;
+}
+
+/** The per-file engine context both the main scan and the cross-file summary pass walk with. */
+function makeCSharpCtx(
+  content: string, filePath: string, root: SyntaxNode, suppressedOut: SuppressedSink[] | undefined,
+  crossFileFacts: ReadonlyMap<string, readonly ParamSinkFact[]> | undefined,
+): { ctx: EngineCtx; localMethods: Map<string, LocalMethod> } {
+  const lines = content.split("\n");
+  const localMethods = collectLocalMethods(root);
+  const ctx: EngineCtx = {
+    filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+    varTypes: collectMemberTypesCS(root), root, findings: [], seen: new Set(), suppressed: suppressedOut,
+    sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
+    crossFileFacts,
+  };
+  return { ctx, localMethods };
+}
+
+function drainSeededParamsCS(ctx: EngineCtx, localMethods: Map<string, LocalMethod>): void {
+  const walked = new Set<string>();
+  for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+    let changed = false;
+    for (const [methodName, idxSet] of Array.from(ctx.seededParams.entries())) {
+      const method = localMethods.get(methodName);
+      if (!method?.body) continue;
+      const signature = `${methodName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+      if (walked.has(signature)) continue;
+      walked.add(signature);
+      changed = true;
+      const env: Env = new Map();
+      for (const [idx, m] of idxSet) {
+        const shape = method.paramShapes[idx];
+        if (shape) env.set(shape.name, m);
+      }
+      walkForDeclarationsAndSinks(method.body, env, ctx);
+    }
+    if (!changed) break;
+  }
+}
+
+const CS_CALLABLE_MODIFIERS = new Set(["public", "internal", "protected"]);
+
+/**
+ * Cross-file SUMMARY (C#): for each public/internal/protected method of each class in this file, which
+ * parameters reach which sinks -- keyed `Class.Method`, and also `IInterface.Method` / `Base.Method` for every
+ * type in the class's base list (controllers inject `IUserService`; the SQL lives in `UserService`). Walks
+ * each method with ONE parameter seeded at a time, through the same context and sink logic as the main scan.
+ * `incoming` makes it multi-hop (controller -> service -> repository).
+ */
+export function computeCSharpMethodSinkFacts(
+  content: string, filePath: string, root: SyntaxNode, incoming: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): Map<string, ParamSinkFact[]> {
+  const out = new Map<string, ParamSinkFact[]>();
+  try {
+    const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, undefined, incoming);
+    const propagating = buildPropagatingMapCSharp(localMethods, ctx);
+    for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+    for (const cls of findAllNodes(root, "class_declaration")) {
+      const clsName = cls.childForFieldName("name")?.text;
+      if (!clsName) continue;
+      const supers: string[] = [];
+      const bases = cls.namedChildren.find(c => c?.type === "base_list");
+      for (const b of bases?.namedChildren ?? []) { const n = simpleTypeNameCS(b); if (n) supers.push(n); }
+      const body = cls.childForFieldName("body");
+      for (const decl of body?.namedChildren ?? []) {
+        if (decl?.type !== "method_declaration") continue;
+        const mods = decl.namedChildren.filter(c => c?.type === "modifier").map(c => c!.text);
+        if (!mods.some(m => CS_CALLABLE_MODIFIERS.has(m))) continue;
+        const info = extractMethodInfo(decl);
+        if (!info?.body || info.paramShapes.length === 0) continue;
+        const facts: ParamSinkFact[] = [];
+        info.paramShapes.forEach((shape, i) => {
+          ctx.findings = [];
+          ctx.seen = new Set();
+          ctx.seededParams = new Map();
+          walkForDeclarationsAndSinks(info.body!, new Map([[shape.name, ALL]]), ctx);
+          drainSeededParamsCS(ctx, localMethods);
+          for (const f of ctx.findings) {
+            if (f.id === "bola-missing-ownership-check") continue;
+            const where = f.calleeSink;
+            mergeSinkFacts(facts, [{
+              index: i, isRest: false, id: f.id, sinkClass: classOf(f.id),
+              sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
+              via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
+            }]);
+          }
+        });
+        if (facts.length === 0) continue;
+        for (const owner of [clsName, ...supers]) {
+          const list = out.get(`${owner}.${info.name}`) ?? [];
+          mergeSinkFacts(list, facts);
+          out.set(`${owner}.${info.name}`, list);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[astTaintCSharp] threw computing method sink facts for ${filePath}:`, err);
+  }
+  return out;
+}
+
 export function scanAstTaintCSharp(
   content: string, filePath: string, root: SyntaxNode,
   // Sinks whose argument was tainted for the sink's class but positively
   // cleared by a sanitizer -- see EngineCtx.suppressed.
   suppressedOut?: SuppressedSink[],
+  // Parameter -> sink facts for other classes' methods in the batch (see computeCSharpMethodSinkFacts).
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
 ): AstTaintCSharpFinding[] {
   try {
-    const lines = content.split("\n");
-    const localMethods = collectLocalMethods(root);
-    const ctx: EngineCtx = {
-      filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
-      varTypes: new Map(), root, findings: [], seen: new Set(), suppressed: suppressedOut,
-      sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
-    };
+    const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, suppressedOut, crossFileFacts);
     const sensitiveTypes = collectSensitiveTypesCS(root);
     const methodDecls = new Map<string, SyntaxNode>();
     for (const decl of findAllNodes(root, "method_declaration")) {
