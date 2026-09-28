@@ -138,7 +138,9 @@ describe("response sinks", () => {
   });
   it("execFile / execFileSync / fork are command sinks", () => {
     expect(has(handler(`cp.execFileSync(x, ["a"]);`), "command-injection")).toBe(true);
-    expect(has(handler(`cp.execFile("ls", [x]);`), "command-injection")).toBe(true);
+    // A tainted argv element with no shell can't inject a command -- it can inject an OPTION (a leading "-").
+    expect(ids(handler(`cp.execFile("ls", [x]);`))).toEqual(["argument-injection"]);
+    expect(has(handler(`cp.execFile("ls", [x], { shell: true });`), "command-injection")).toBe(true);
   });
 });
 

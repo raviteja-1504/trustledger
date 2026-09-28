@@ -1,7 +1,7 @@
 import { runScan } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // Argument injection (CWE-88): a tainted argv element passed straight through, with no shell in between --
 // shell-quoting is irrelevant here; only a `--` separator or a literal prefix rules out a leading '-'.

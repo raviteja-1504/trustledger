@@ -73,7 +73,7 @@ export type AstTaintGoId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "idor"
   | "xss" | "header-injection" | "redos" | "ssti" | "eval-exec" | "mass-assignment" | "nosql-injection"
-  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto";
+  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto" | "argument-injection";
 
 export interface AstTaintGoFinding {
   id:         AstTaintGoId;
@@ -478,6 +478,27 @@ const TEMPLATE_PARSE_RE_GO = /^(?:text\/)?template\.(?:New|Must)\b[\s\S]*\.(?:Pa
 const SENSITIVE_FIELD_RE_GO = /^(?:role|roles|admin|is_?admin|permissions?|privileges?|scope|scopes|is_?staff|superuser|is_?superuser|groups?)$/i;
 const SECRET_NAME_RE_GO = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
 
+const SHELL_PROGRAMS_GO = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
+const SHELL_COMMAND_FLAGS_GO = /^(?:-c|\/c|\/k|-command|-encodedcommand)$/i;
+
+/**
+ * exec.Command(name, arg...) / exec.CommandContext(ctx, name, arg...) runs no shell: each arg is passed to the
+ * program verbatim. `command` = what can inject a COMMAND (the program, or everything after an explicit shell's
+ * `-c`); `argv` = the other elements, which can only inject an OPTION (a leading `-`) -- none after a literal `--`.
+ */
+function execCommandArgvGo(call: SyntaxNode): { command: SyntaxNode[]; argv: SyntaxNode[] } | null {
+  const fnText = calleeTextGo(call.childForFieldName("function") ?? call);
+  const all = argListOfGo(call);
+  const list = fnText === "exec.CommandContext" ? all.slice(1) : all;
+  if (!list[0]) return null;
+  const lit = list.map(a => goStringLiteralValue(a));
+  const flagAt = lit[0] !== null && SHELL_PROGRAMS_GO.test(lit[0] ?? "")
+    ? lit.findIndex((s, i) => i > 0 && s !== null && SHELL_COMMAND_FLAGS_GO.test(s)) : -1;
+  if (flagAt > 0) return { command: [list[0], ...list.slice(flagAt + 1)], argv: [] };
+  const endOfOptions = lit.findIndex((s, i) => i > 0 && s === "--");
+  return { command: [list[0]], argv: list.slice(1, endOfOptions > 0 ? endOfOptions : undefined) };
+}
+
 function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -490,12 +511,14 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   const receiverText = parts.slice(0, -1).join(".");
 
   if (text === "exec.Command" || text === "exec.CommandContext") {
-    return { id: "command-injection", sinkExpr: text, args };
+    const cmd = execCommandArgvGo(call);
+    return cmd ? { id: "command-injection", sinkExpr: text, args: cmd.command } : null;
   }
   if (text === "http.Get" || text === "http.Post" || text === "http.Head" || text === "http.PostForm" ||
       (["Get", "Post", "Head", "PostForm"].includes(tail) && /(?:^|\.)(?:client|Client|httpClient|http\.DefaultClient)$/.test(receiverText)) ||
       /^net\.(?:Dial|DialTimeout|DialTCP|DialUDP)$/.test(text)) {
-    return { id: "ssrf", sinkExpr: text, args: /^net\./.test(text) ? args.slice(1, 2) : args };
+    // The URL (or dial address) only: Post's content type and body, PostForm's values, are sent TO it.
+    return { id: "ssrf", sinkExpr: text, args: /^net\./.test(text) ? args.slice(1, 2) : args.slice(0, 1) };
   }
   if ((head === "os" && FS_SINKS_GO.has(tail)) || (head === "ioutil" && (tail === "ReadFile" || tail === "WriteFile" || tail === "ReadDir")) ||
       /^filepath\.Walk(?:Dir)?$/.test(text) || text === "os.DirFS") {
@@ -1135,7 +1158,7 @@ const SEVERITY: Record<AstTaintGoId, "critical" | "high" | "medium"> = {
   "open-redirect": "medium", "idor": "medium",
   "xss": "critical", "header-injection": "high", "redos": "high", "ssti": "critical", "eval-exec": "critical",
   "mass-assignment": "high", "nosql-injection": "critical", "ldap-injection": "critical", "xpath-injection": "critical",
-  "timing-attack": "medium", "jwt-none-alg": "critical", "weak-crypto": "high",
+  "timing-attack": "medium", "jwt-none-alg": "critical", "weak-crypto": "high", "argument-injection": "high",
 };
 const LABEL: Record<AstTaintGoId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -1146,6 +1169,7 @@ const LABEL: Record<AstTaintGoId, string> = {
   "ssti": "Server-Side Template Injection", "eval-exec": "Arbitrary Code Execution", "mass-assignment": "Mass Assignment",
   "nosql-injection": "NoSQL Injection", "ldap-injection": "LDAP Injection", "xpath-injection": "XPath Injection",
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "weak-crypto": "Weak Cryptography",
+  "argument-injection": "Argument Injection",
 };
 
 /** Unwraps short_var_declaration/assignment_statement's left/right fields,
@@ -1851,6 +1875,19 @@ export function scanAstTaintGo(
       if (match) {
         const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
         if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
+        // Tainted data only in arguments that can't be exploited here (a request body, an argv element with
+        // no shell): a positive proof for this sink, so the regex layer's line-level duplicate is dropped.
+        else if (args.some(a => !match.args.some(m => m.startIndex === a.startIndex) && (taintMask(a, env) & ALL))) {
+          suppressedOut?.push({ id: match.id, line: lineOf(node) });
+        }
+      }
+      if (match?.id === "command-injection") {
+        const argv = execCommandArgvGo(node)?.argv ?? [];
+        const hit = argv.length ? sinkHit(node, argv, "argument-injection", env, taintMask) : undefined;
+        if (hit) {
+          emit("argument-injection", node, sourceLabelGo(hit), match.sinkExpr,
+            `Tainted expression '${sourceLabelGo(hit)}' is passed to ${match.sinkExpr}(...) as an argv element with no preceding "--" — no shell runs, but a value starting with "-" is read as an option by the program`);
+        }
       }
 
       const sqlMatch = matchSqlInjectionGo(node);

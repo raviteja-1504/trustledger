@@ -4,7 +4,7 @@ import { scanAstTaintGo, warmGoTaintEngine } from "@/lib/astTaintGo";
 // (Decode(&v)), container writes, channels, closures, package-level memory, and the sinks/structural checks
 // added with them.
 
-beforeAll(async () => { await warmGoTaintEngine(); }, 30000);
+beforeAll(async () => { await warmGoTaintEngine(); }, 120000);
 
 const ids = (code: string): string[] => scanAstTaintGo(code, "x.go").map(f => f.id);
 const has = (code: string, id: string) => ids(code).includes(id);

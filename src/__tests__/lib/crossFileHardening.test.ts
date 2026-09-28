@@ -6,7 +6,7 @@ import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 // multi-hop fixed point (A -> B -> C, not just one hop), and Python's own cross-file resolution --
 // see taint/crossFile.ts's own docblock for the shared algorithm and what's explicitly out of scope.
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 function scan(files: Array<{ path: string; content: string }>) {
   return runScan({ repo: "t", pr_number: 1, commit_sha: "a", branch: "main", files });

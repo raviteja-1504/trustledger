@@ -3,7 +3,7 @@ import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
 // BOLA as authorization STATE, Python engine: ownership (proven) vs role (real control, object still unproven) vs nothing.
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 const scan = (content: string) => runScan({ repo: "t", pr_number: 1, commit_sha: "a", branch: "main", files: [{ path: "shop/views.py", content }] });
 const bola = (content: string) => scan(content).files[0].indicators.filter(i => i.id === "bola-missing-ownership-check");

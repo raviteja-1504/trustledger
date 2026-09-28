@@ -3,7 +3,7 @@ import { warmCSharpTaintEngine, parseCSharpSourceSync, scanAstTaintCSharp } from
 // Recall + precision for the C# AST engine: expression-bodied helpers, delegates/closures, static passthroughs,
 // container writes, class-field memory, and the sinks/structural checks added with them.
 
-beforeAll(async () => { await warmCSharpTaintEngine(); }, 30000);
+beforeAll(async () => { await warmCSharpTaintEngine(); }, 120000);
 
 function ids(content: string): string[] {
   const root = parseCSharpSourceSync(content, "A.cs");

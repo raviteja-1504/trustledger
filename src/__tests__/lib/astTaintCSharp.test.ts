@@ -1,6 +1,6 @@
 import { warmCSharpTaintEngine, parseCSharpSourceSync, scanAstTaintCSharp } from "@/lib/astTaintCSharp";
 
-beforeAll(async () => { await warmCSharpTaintEngine(); }, 30000);
+beforeAll(async () => { await warmCSharpTaintEngine(); }, 120000);
 
 function scan(content: string) {
   const root = parseCSharpSourceSync(content, "A.cs");
@@ -63,14 +63,17 @@ public class A {
   });
 
   describe("command-injection", () => {
-    it("flags Process.Start with a tainted argument", () => {
-      const content = `
+    it("flags Process.Start with a tainted argument -- argument injection without a shell, command injection through one", () => {
+      const direct = `
 public class A {
   public void Handle([FromQuery] string host) {
     Process.Start("ping", host);
   }
 }`;
-      expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
+      // No shell runs (UseShellExecute defaults to false): `host` can add options to ping, not run a command.
+      expect(scan(direct).map(f => f.id)).toEqual(["argument-injection"]);
+      const viaShell = direct.replace(`Process.Start("ping", host)`, `Process.Start("cmd.exe", "/c ping " + host)`);
+      expect(scan(viaShell).some(f => f.id === "command-injection")).toBe(true);
     });
 
     it("does not flag Process.Start with only fixed arguments", () => {

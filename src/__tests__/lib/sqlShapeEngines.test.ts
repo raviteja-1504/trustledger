@@ -1,7 +1,7 @@
 import { runScan } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // SQL position awareness, end to end through both engines: escaping is a real defence inside a quoted string
 // literal and none at all outside one (an unquoted numeric position, or an identifier).

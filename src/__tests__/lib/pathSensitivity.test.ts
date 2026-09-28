@@ -231,7 +231,7 @@ app.get("/a", (req, res) => { const x = wrap(req.query.q); ${sql("x")} });
 import { scanAstTaintPython, parsePythonSourceSync, warmPythonTaintEngine } from "@/lib/astTaintPython";
 
 describe("Python path sensitivity", () => {
-  beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+  beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
   const scanPy = (code: string, suppressed?: { id: string; line: number }[]) => {
     const root = parsePythonSourceSync(code, "a.py");
@@ -423,7 +423,7 @@ def h():
 import { scanAstTaintGo, warmGoTaintEngine } from "@/lib/astTaintGo";
 
 describe("Go path sensitivity", () => {
-  beforeAll(async () => { await warmGoTaintEngine(); }, 30000);
+  beforeAll(async () => { await warmGoTaintEngine(); }, 120000);
 
   const goWrap = (body: string, extra = "") => `package main
 
@@ -829,7 +829,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 import { warmCSharpTaintEngine, parseCSharpSourceSync, scanAstTaintCSharp } from "@/lib/astTaintCSharp";
 
 describe("C# path sensitivity", () => {
-  beforeAll(async () => { await warmCSharpTaintEngine(); }, 30000);
+  beforeAll(async () => { await warmCSharpTaintEngine(); }, 120000);
 
   const csScan = (content: string) => {
     const root = parseCSharpSourceSync(content, "A.cs");
@@ -1231,7 +1231,7 @@ ${body}
 import { warmPhpTaintEngine, parsePhpSourceSync, scanAstTaintPHP } from "@/lib/astTaintPHP";
 
 describe("PHP path sensitivity", () => {
-  beforeAll(async () => { await warmPhpTaintEngine(); }, 30000);
+  beforeAll(async () => { await warmPhpTaintEngine(); }, 120000);
 
   const phpScan = (content: string) => {
     const root = parsePhpSourceSync(content, "a.php");

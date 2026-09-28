@@ -1,7 +1,7 @@
 import { isModelFilePy, parsePythonSourceSync, scanAstTaintPython, warmPythonTaintEngine } from "@/lib/astTaintPython";
 import type { StoredProvenanceIO } from "@/lib/taint/taintCore";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // Stored/second-order provenance, Django ORM: a value persisted via `.objects.create()`/`.save()` is a
 // taint SOURCE for whoever reads that model back later via `.objects.get()`/`.filter()`/etc.

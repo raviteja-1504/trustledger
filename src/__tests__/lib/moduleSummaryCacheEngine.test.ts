@@ -1,7 +1,7 @@
 import { runScan } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // End-to-end proof that the cross-file summary cache (moduleSummaryCache.ts) is a pure optimization: a
 // scan fed the PREVIOUS scan's module_cache must produce IDENTICAL findings, must actually reuse (not

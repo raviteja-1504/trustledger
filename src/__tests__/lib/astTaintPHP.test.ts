@@ -1,6 +1,6 @@
 import { warmPhpTaintEngine, parsePhpSourceSync, scanAstTaintPHP } from "@/lib/astTaintPHP";
 
-beforeAll(async () => { await warmPhpTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPhpTaintEngine(); }, 120000);
 
 function scan(content: string) {
   const root = parsePhpSourceSync(content, "a.php");

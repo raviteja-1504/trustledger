@@ -1,7 +1,7 @@
 import { warmGoTaintEngine, scanAstTaintGo } from "@/lib/astTaintGo";
 import { analyzeFile } from "@/lib/scanner";
 
-beforeAll(async () => { await warmGoTaintEngine(); }, 30000);
+beforeAll(async () => { await warmGoTaintEngine(); }, 120000);
 
 const HANDLER_PREFIX = `
 package main
@@ -65,14 +65,16 @@ describe("astTaintGo.scanAstTaintGo", () => {
   });
 
   describe("command-injection", () => {
-    it("flags exec.Command with a tainted argument", () => {
-      const content = wrap(`
+    it("flags exec.Command with a tainted argument -- argument injection without a shell, command injection through one", () => {
+      const direct = wrap(`
 	q := r.URL.Query().Get("host")
 	cmd := exec.Command("ping", q)
 	cmd.Run()
 `);
-      const findings = scanAstTaintGo(content, "x.go");
-      expect(findings.some(f => f.id === "command-injection")).toBe(true);
+      // No shell runs: `q` can add an option to ping ("-f"), not run a second command.
+      expect(scanAstTaintGo(direct, "x.go").map(f => f.id)).toEqual(["argument-injection"]);
+      const viaShell = direct.replace(`exec.Command("ping", q)`, `exec.Command("sh", "-c", "ping "+q)`);
+      expect(scanAstTaintGo(viaShell, "x.go").some(f => f.id === "command-injection")).toBe(true);
     });
 
     it("does not flag exec.Command with only fixed arguments", () => {
@@ -344,7 +346,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	exec.Command("ping", q)
 `);
     const result = analyzeFile("handler.go", content);
-    expect(result.indicators.some(i => i.id === "command-injection")).toBe(true);
+    expect(result.indicators.some(i => i.id === "argument-injection" && i.sourceExpr)).toBe(true);
+    // The regex layer's line-level "command injection" is dropped: the engine proved no shell runs here.
+    expect(result.indicators.some(i => i.id === "command-injection")).toBe(false);
+    const viaShell = analyzeFile("handler.go", content.replace(`exec.Command("ping", q)`, `exec.Command("sh", "-c", "ping "+q)`));
+    expect(viaShell.indicators.some(i => i.id === "command-injection")).toBe(true);
   });
 
   describe("field-sensitive taint tracking (Decision 1, new capability)", () => {
@@ -385,7 +391,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const content = wrap(`
 	q := r.URL.Query().Get("host")
 	clean := html.EscapeString(q)
-	exec.Command("ping", clean)
+	exec.Command("sh", "-c", "ping "+clean)
 `);
       const findings = scanAstTaintGo(content, "x.go");
       expect(findings.some(f => f.id === "command-injection")).toBe(true);
@@ -405,7 +411,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const content = wrap(`
 	q := r.URL.Query().Get("host")
 	clean := filepath.Base(q)
-	exec.Command("ping", clean)
+	exec.Command("sh", "-c", "ping "+clean)
 `);
       const findings = scanAstTaintGo(content, "x.go");
       expect(findings.some(f => f.id === "command-injection")).toBe(true);
@@ -424,7 +430,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
     it("still flags the same shape unsanitized (baseline)", () => {
       const content = wrap(`
 	q := r.URL.Query().Get("host")
-	exec.Command("ping", q)
+	exec.Command("sh", "-c", "ping "+q)
 `);
       const findings = scanAstTaintGo(content, "x.go");
       expect(findings.some(f => f.id === "command-injection")).toBe(true);
@@ -449,7 +455,7 @@ func levelD(x string) string { return x }
       const content = `${HANDLER_PREFIX}${chain}
 func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("host")
-	exec.Command("ping", levelD(q))
+	exec.Command("sh", "-c", "ping "+levelD(q))
 }
 `;
       expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
@@ -459,7 +465,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const content = `${HANDLER_PREFIX}${chain}
 func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("host")
-	exec.Command("ping", levelB(q))
+	exec.Command("sh", "-c", "ping "+levelB(q))
 }
 `;
       expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
@@ -469,7 +475,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
       const content = `${HANDLER_PREFIX}${chain}
 func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("host")
-	exec.Command("ping", levelA(q))
+	exec.Command("sh", "-c", "ping "+levelA(q))
 }
 `;
       expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(false);

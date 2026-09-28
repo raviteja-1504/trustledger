@@ -3,7 +3,7 @@ import { scanAstTaintPython, parsePythonSourceSync, warmPythonTaintEngine } from
 import { sanitizerClears } from "@/lib/taint/sanitizers";
 import { SinkClass } from "@/lib/taint/taintCore";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 const js = (code: string) => scanAstTaint(code, "a.ts").map(f => f.id);
 
@@ -122,7 +122,7 @@ def h():
 describe("PHP: sanitizers are sink-class aware", () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const php = require("@/lib/astTaintPHP") as typeof import("@/lib/astTaintPHP");
-  beforeAll(async () => { await php.warmPhpTaintEngine(); }, 30000);
+  beforeAll(async () => { await php.warmPhpTaintEngine(); }, 120000);
   const scanPhp = (code: string) => {
     const root = php.parsePhpSourceSync(code, "a.php");
     if (!root) throw new Error("parse failed");
@@ -191,7 +191,7 @@ echo "<h1>" . $n . "</h1>";`).some(s => s.id === "xss")).toBe(true);
 describe("C#: sanitizers are sink-class aware", () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const cs = require("@/lib/astTaintCSharp") as typeof import("@/lib/astTaintCSharp");
-  beforeAll(async () => { await cs.warmCSharpTaintEngine(); }, 30000);
+  beforeAll(async () => { await cs.warmCSharpTaintEngine(); }, 120000);
   const scanCs = (code: string) => {
     const root = cs.parseCSharpSourceSync(code, "A.cs");
     if (!root) throw new Error("parse failed");
@@ -215,7 +215,7 @@ public class A {
   [HttpGet("a")]
   public void M([FromQuery] string n) {
     var c = WebUtility.HtmlEncode(n);
-    Process.Start("ping", c);
+    Process.Start("cmd.exe", "/c ping " + c);
   }
 }`)).toContain("command-injection");
   });

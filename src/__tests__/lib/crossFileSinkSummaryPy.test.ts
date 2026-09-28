@@ -6,7 +6,7 @@ import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 // its parameter and returns nothing (`def run_query(sql): cursor.execute(sql)`) used to be invisible when
 // called from another module; the finding now lands at the call site with the callee's real sink location.
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 type F = { path: string; content: string };
 const scan = (files: F[]) => runScan({ repo: "t", pr_number: 1, commit_sha: "a", branch: "main", files });

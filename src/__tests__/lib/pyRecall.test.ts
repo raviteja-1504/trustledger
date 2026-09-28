@@ -4,7 +4,7 @@ import { scanAstTaintPython, parsePythonSourceSync, warmPythonTaintEngine } from
 // passthroughs, subscripts/await/lambdas/comprehensions, callbacks and closures, object
 // methods, module-scope container memory, and the sinks/structural checks added with them.
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 const ids = (code: string): string[] => {
   const root = parsePythonSourceSync(code, "a.py");

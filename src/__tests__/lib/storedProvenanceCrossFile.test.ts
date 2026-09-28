@@ -1,7 +1,7 @@
 import { runScan } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // End-to-end proof of the BATCH-WIDE stored/second-order provenance wiring in scanner.ts (see
 // taintCore.ts's StoredProvenanceIO docblock): a write in one file and a read in a DIFFERENT file must

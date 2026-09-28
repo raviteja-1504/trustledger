@@ -821,30 +821,39 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     if (mask & cls) emit(ctx, id, node, source, fnName);
     else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
+  // Only the argument that can be exploited (the command, the path, the query text, the header line), with
+  // taint confined to the others recorded as a positive proof so the regex layer's duplicate is dropped too.
+  const fireArg = (id: AstTaintPHPId, idx: number) => {
+    if (!args[idx]) return;
+    fire(id, argMasks[idx], args[idx].text);
+    if (!(argMasks[idx] & classOf(id)) && argMasks.some((m, i) => i !== idx && (m & ALL))) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
 
   if (SQL_FUNCTIONS.has(fnName)) {
     const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
+    // mysqli_query($link, $sql) / pg_query([$conn,] $sql) / mysql_query($sql[, $link])
     if (culprit) emit(ctx, "sql-injection", node, culprit.text, fnName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
-    else fire("sql-injection");
+    else fireArg("sql-injection", fnName === "mysql_query" || args.length < 2 ? 0 : 1);
   } else if (CMD_FUNCTIONS.has(fnName)) {
-    fire("command-injection");
+    // exec($cmd, &$output, &$code) / popen($cmd, $mode) / proc_open($cmd, $spec, &$pipes): the command only.
+    fireArg("command-injection", 0);
   } else if (fnName === "unserialize") {
-    fire("insecure-deserialization");
+    fireArg("insecure-deserialization", 0);
   } else if (fnName === "include" || fnName === "require" || fnName === "include_once" || fnName === "require_once") {
     // Dead in practice -- confirmed directly that plain `include $x;` is a
     // distinct language-construct node (include_expression), never a
     // function_call_expression -- kept as a harmless defensive fallback
     // only, matching checkIncludeExpressionSink below for the real path.
     fire("file-inclusion");
-  } else if (fnName === "fopen" || fnName === "file_get_contents" || fnName === "readfile") {
-    fire("path-traversal");
+  } else if (fnName === "fopen" || fnName === "file_get_contents" || fnName === "readfile" || fnName === "file_put_contents") {
+    // The path only -- not fopen's mode, nor the data file_put_contents writes.
+    fireArg("path-traversal", 0);
   } else if (fnName === "header") {
     // header("Location: " . $tainted) is open-redirect; header("X-Anything:
     // " . $tainted) for any other header name is header-injection -- same
-    // call, discriminated purely by the literal string prefix (read
-    // directly off the tainted arg's raw .text, since that's the whole
-    // concatenation expression here, e.g. `"Location: " . $next`).
-    fire(/^["']?\s*Location\s*:/i.test(sourceExpr) ? "open-redirect" : "header-injection");
+    // call, discriminated purely by the literal string prefix of the header
+    // line (args[0]; $replace and $response_code choose nothing).
+    fireArg(/^["']?\s*Location\s*:/i.test(args[0]?.text ?? "") ? "open-redirect" : "header-injection", 0);
   } else if (fnName === "ldap_search") {
     // ldap_search($link, $base_dn, $filter) -- confirmed 3-arg positional
     // signature; the filter is args[2], not just "any tainted arg" (the
@@ -852,7 +861,7 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // without that being the real vulnerability).
     if (args.length >= 3) fire("ldap-injection", argMasks[2], args[2].text);
   } else if (fnName === "eval") {
-    fire("eval-exec");
+    fireArg("eval-exec", 0);
   } else if (fnName === "curl_init") {
     if (args[0]) fire("ssrf", argMasks[0], args[0].text);
   } else if ((fnName === "preg_match" || fnName === "preg_match_all" || fnName === "preg_replace" || fnName === "preg_replace_callback" || fnName === "preg_split")
@@ -860,14 +869,26 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // The PATTERN itself (not the subject/data being matched) is attacker-controlled.
     fire("redos", argMasks[0], args[0].text);
   } else if (fnName === "curl_setopt") {
-    // curl_setopt($ch, CURLOPT_URL, $tainted) -- always a bare function
-    // call in PHP, never a method call (confirmed: no OOP cURL wrapper in
-    // the standard library). args[0] is the handle, args[1] the CURLOPT_*
-    // constant, args[2] the value -- a tainted match anywhere in args is
-    // close enough given this engine's established "accept some
-    // imprecision" posture.
-    fire("ssrf");
+    // curl_setopt($ch, OPTION, $value): only options that choose WHERE the request goes. POSTFIELDS,
+    // HTTPHEADER, USERAGENT... are sent to that destination, so tainting them is not SSRF.
+    const valueIdx = curlDestinationValueIdx(args, 1);
+    if (valueIdx >= 0) fireArg("ssrf", valueIdx);
+    else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id: "ssrf", line: lineOf(node) });
   }
+}
+
+const CURL_DESTINATION_OPTIONS = /^CURLOPT_(?:URL|PROXY|PROXYPORT|CONNECT_TO|RESOLVE|UNIX_SOCKET_PATH|INTERFACE)$/;
+
+/**
+ * For a curl setopt call whose option is at `optIdx`: the value's index when the option chooses the destination
+ * (or can't be read -- a variable option is treated as one, conservatively); -1 when it is a literal CURLOPT_*
+ * that doesn't (POSTFIELDS, HTTPHEADER, ...); -2 when there is no value argument.
+ */
+function curlDestinationValueIdx(args: SyntaxNode[], optIdx: number): number {
+  if (!args[optIdx + 1]) return -2;
+  const opt = args[optIdx].text.replace(/^\\/, "");
+  if (!/^CURLOPT_[A-Z0-9_]+$/.test(opt)) return optIdx + 1;
+  return CURL_DESTINATION_OPTIONS.test(opt) ? optIdx + 1 : -1;
 }
 
 // `include`/`require` are actual language constructs in PHP's grammar
@@ -897,6 +918,14 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     if (combined & cls) emit(ctx, id, node, sourceExpr, sink);
     else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
+  // Only argument `idx` can be exploited (the query text, the template source, the filter): see
+  // checkFunctionCallSink's fireArg.
+  const fireArg = (id: AstTaintPHPId, idx: number, sink: string = methodName) => {
+    if (!args[idx]) return;
+    const cls = classOf(id);
+    if (argMasks[idx] & cls) emit(ctx, id, node, args[idx].text, sink);
+    else if (wasCleared(argMasks[idx], cls) || argMasks.some((m, i) => i !== idx && (m & ALL))) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
   if (SQL_CALL_TAILS.has(methodName)) {
     // Receiver-type-aware discrimination (mirrors astTaintCSharp.ts's
     // ctx.varTypes-based checkCallSink) -- ->query()/->exec()/->prepare()
@@ -905,23 +934,23 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     const receiver = node.namedChildren[0];
     const receiverName = receiver?.type === "variable_name" ? variableBareName(receiver) : null;
     if (methodName === "query" && receiverName && ctx.varTypes.get(receiverName) === "DOMXPath") {
-      fire("xpath-injection");
+      fireArg("xpath-injection", 0);
     } else {
       const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
+      // ->query($sql[, $fetchMode...]) / ->exec($sql) / ->prepare($sql[, $options]): the SQL text only
       if (culprit) emit(ctx, "sql-injection", node, culprit.text, methodName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
-      else fire("sql-injection");
+      else fireArg("sql-injection", 0);
     }
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
     fire("nosql-injection");
   } else if (methodName === "createTemplate" || methodName === "renderString" || methodName === "fetchFromString") {
-    fire("ssti");
+    // the template SOURCE -- context variables passed alongside are rendered as data
+    fireArg("ssti", 0);
   } else if (methodName === "setopt") {
-    // curl_setopt($ch, CURLOPT_URL, $tainted) -- args[0] is the handle,
-    // args[1] the CURLOPT_* constant, args[2] the value; a tainted MATCH
-    // anywhere in args is close enough given this engine's "accept some
-    // imprecision" posture (matches every other engine's loose arg-tainted
-    // checks elsewhere).
-    fire("ssrf", "curl_setopt");
+    // $curl->setopt(OPTION, $value): the same destination-only rule as curl_setopt($ch, OPTION, $value).
+    const valueIdx = curlDestinationValueIdx(args, 0);
+    if (valueIdx >= 0) fireArg("ssrf", valueIdx, "curl_setopt");
+    else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id: "ssrf", line: lineOf(node) });
   }
 }
 

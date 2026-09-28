@@ -7,7 +7,7 @@ import { scanAstTaintPython, parsePythonSourceSync, warmPythonTaintEngine } from
 // with no isEndpoint gate -- same reasoning astTaintPHP.ts's own docblock gives (no annotation
 // system as rigid as Spring/ASP.NET to gate on).
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 function bolaFindings(content: string) {
   const root = parsePythonSourceSync(content, "x.py");

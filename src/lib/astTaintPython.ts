@@ -605,6 +605,8 @@ const PATH_FUNCS_PY = new Set([
   "shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", "shutil.rmtree", "shutil.copytree",
 ]);
 
+const TWO_PATH_FUNCS_PY = new Set(["rename", "copy", "copyfile", "copy2", "move", "copytree"]);
+
 function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -630,7 +632,9 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
 
   if (text === "os.system" || text === "os.popen" ||
       (resolvedModule === "os" && (tail === "system" || tail === "popen"))) {
-    return { id: "command-injection", sinkExpr: text, args };
+    // The command string only -- popen's mode/buffering arguments pick nothing that runs.
+    const cmd = first ?? keywordArgPy(args, ["command", "cmd"]);
+    return cmd ? { id: "command-injection", sinkExpr: text, args: [cmd] } : null;
   }
   if ((parts[0] === "os" || resolvedModule === "os") && /^(?:exec[lv]p?e?|spawn[lv]p?e?)$/.test(tail)) {
     return { id: "command-injection", sinkExpr: text, args: positional };
@@ -638,32 +642,48 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   if ((parts[0] === "subprocess" || resolvedModule === "subprocess") &&
       ["call", "run", "Popen", "check_output", "check_call"].includes(tail)) {
     // A list/tuple argv (shell=False) is the safe idiom for the ARGUMENTS, but an attacker-chosen
-    // EXECUTABLE (first element) is still command execution. shell=True or a plain string flags everything.
-    const firstIsList = first?.type === "list" || first?.type === "tuple";
-    if (hasShellTrue(args) || !firstIsList) {
-      return { id: "command-injection", sinkExpr: text, args };
+    // EXECUTABLE (first element) is still command execution. shell=True or a plain string flags the whole
+    // command -- only the command itself, though: cwd/env/input/stdin choose nothing that runs.
+    const cmd = first ?? keywordArgPy(args, ["args"]);
+    if (!cmd) return null;
+    const cmdIsList = cmd.type === "list" || cmd.type === "tuple";
+    if (hasShellTrue(args) || !cmdIsList) {
+      return { id: "command-injection", sinkExpr: text, args: [cmd] };
     }
-    const exe = first!.namedChildren.find(c => !!c) ?? null;
+    const exe = cmd.namedChildren.find(c => !!c) ?? null;
     return exe ? { id: "command-injection", sinkExpr: text, args: [exe] } : null;
   }
   if (((parts[0] === "requests" || resolvedModule === "requests") &&
        ["get", "post", "put", "delete", "patch", "request", "head"].includes(tail)) ||
       ((parts[0] === "httpx" || resolvedModule === "httpx") &&
        ["get", "post", "put", "delete", "patch", "request", "head", "stream"].includes(tail))) {
-    return { id: "ssrf", sinkExpr: text, args };
+    // Where the request goes -- the URL, and `proxies` (the request is routed through that host) -- not the
+    // params/data/json/headers/cookies sent there. request()/stream() take (method, url).
+    const url = keywordArgPy(args, ["url"]) ?? positional[tail === "request" || tail === "stream" ? 1 : 0];
+    const target = [url, keywordArgPy(args, ["proxies", "proxy"])].filter((n): n is SyntaxNode => !!n);
+    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
   }
   if (text === "urllib.request.urlopen" || (resolvedModule === "urllib.request" && tail === "urlopen") ||
       (resolvedModule === "urllib" && text.endsWith("urlopen")) || text === "urllib.request.Request" ||
       (resolvedModule === "urllib.request" && tail === "Request")) {
-    return { id: "ssrf", sinkExpr: text, args };
+    const url = first ?? keywordArgPy(args, ["url"]);
+    return url ? { id: "ssrf", sinkExpr: text, args: [url] } : null;
   }
-  if (text === "open" || (resolvedModule === "os.path" && tail === "join") || text === "os.path.join" ||
-      PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file"))) {
-    return { id: "path-traversal", sinkExpr: text, args };
+  if (text === "os.path.join" || (resolvedModule === "os.path" && tail === "join")) {
+    return { id: "path-traversal", sinkExpr: text, args: positional };
+  }
+  if (text === "open" || PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file"))) {
+    // The path(s) only -- not the mode, permissions, mimetype or flags. rename/copy/move take two paths.
+    const paths = TWO_PATH_FUNCS_PY.has(tail) ? positional.slice(0, 2) : positional.slice(0, 1);
+    const kw = keywordArgPy(args, ["file", "path", "src", "dst", "filename_or_fp", "path_or_file"]);
+    const checked = paths.length ? paths : kw ? [kw] : [];
+    return checked.length ? { id: "path-traversal", sinkExpr: text, args: checked } : null;
   }
   if (text === "redirect" || text === "flask.redirect" || text === "HttpResponseRedirect" ||
       text.endsWith(".HttpResponseRedirect")) {
-    return { id: "open-redirect", sinkExpr: text, args };
+    // The location only -- a status code picks no destination.
+    const loc = first ?? keywordArgPy(args, ["location", "redirect_to", "to"]);
+    return loc ? { id: "open-redirect", sinkExpr: text, args: [loc] } : null;
   }
   if (tail === "execute" || tail === "executemany" || (parts.length > 1 && tail === "raw")) {
     // Only the SQL TEXT is injectable: `execute(sql, (x,))` / `raw(sql, [x])` send the second argument as bound
@@ -677,7 +697,9 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     return fragments.length ? { id: "sql-injection", sinkExpr: text, args: fragments } : null;
   }
   if (text === "render_template_string" || tail === "from_string") {
-    return { id: "ssti", sinkExpr: text, args };
+    // The template SOURCE only: context values are rendered as data (autoescaped), never compiled.
+    const source = first ?? keywordArgPy(args, ["source"]);
+    return source ? { id: "ssti", sinkExpr: text, args: [source] } : null;
   }
   // deserialization: pickle & friends always; yaml.load unless a Safe loader is named
   if (DESERIALIZERS_PY.has(text)) return first ? { id: "insecure-deserialization", sinkExpr: text, args: [first] } : null;

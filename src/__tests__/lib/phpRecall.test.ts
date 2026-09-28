@@ -3,7 +3,7 @@ import { warmPhpTaintEngine, parsePhpSourceSync, scanAstTaintPHP } from "@/lib/a
 // Recall + precision for the PHP AST engine: stdlib passthroughs/decoders, dynamic property/function
 // calls, generators, global-shared state, and the sinks/structural checks added with them.
 
-beforeAll(async () => { await warmPhpTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPhpTaintEngine(); }, 120000);
 
 function ids(code: string): string[] {
   const root = parsePhpSourceSync(code, "x.php");

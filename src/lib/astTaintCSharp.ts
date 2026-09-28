@@ -83,7 +83,7 @@ export type AstTaintCSharpId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg"
-  | "eval-exec" | "ssti"
+  | "eval-exec" | "ssti" | "argument-injection"
   | "bola-missing-ownership-check";
 
 export interface AstTaintCSharpFinding {
@@ -548,6 +548,7 @@ const SEVERITY: Record<AstTaintCSharpId, "critical" | "high" | "medium"> = {
   "ldap-injection": "critical", "xpath-injection": "critical", "open-redirect": "medium",
   "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical", "eval-exec": "critical", "ssti": "critical",
+  "argument-injection": "high",
   // Fallback only -- collectBolaFindings always passes a severityOverride
   // (medium for read endpoints, high for write/unknown).
   "bola-missing-ownership-check": "high",
@@ -560,6 +561,7 @@ const LABEL: Record<AstTaintCSharpId, string> = {
   "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection", "mass-assignment": "Mass Assignment",
   "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
+  "argument-injection": "Argument Injection",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
@@ -1073,6 +1075,15 @@ function checkCallSink(
     if (mask & cls) emit(ctx, id, node, source, text);
     else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
+  // Only the argument(s) that can be exploited: the SQL text (not the parameters array), the URL of a
+  // request (not its content), the path(s) of a file operation (not the contents or content type).
+  const fireArgs = (id: AstTaintCSharpId, idxs: readonly number[]) => {
+    const present = idxs.filter(i => i < args.length);
+    if (present.length === 0) return;
+    const mask = present.reduce((m, i) => m | argMasks[i], 0);
+    const culprit = present.find(i => argMasks[i] & ALL) ?? present[0];
+    fire(id, mask, args[culprit].text);
+  };
   const receiver = fn.type === "member_access_expression" ? fn.childForFieldName("expression") : null;
   const reflective = receiver?.type === "invocation_expression" && CS_REFLECTION_LOOKUPS.has(lastCallNameCS(receiver));
 
@@ -1081,7 +1092,8 @@ function checkCallSink(
   // local declaration site, mirroring astTaintJava.ts's ObjectInputStream
   // readObject pattern).
   if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw" || tail === "ExecuteSqlRawAsync" || tail === "SqlQueryRaw") {
-    fire("sql-injection");
+    // (sql, params object[] parameters): the parameters are bound, the parameterised form is the safe one.
+    fireArgs("sql-injection", [0]);
   } else if ((tail === "ExecuteReader" || tail === "ExecuteNonQuery" || tail === "ExecuteScalar" || tail === "ExecuteReaderAsync"
               || tail === "ExecuteNonQueryAsync" || tail === "ExecuteScalarAsync" || tail === "Fill")
              && CS_SQL_COMMAND_TYPES.has(ctx.varTypes.get(rootVar) ?? "")) {
@@ -1089,7 +1101,7 @@ function checkCallSink(
   } else if (CS_DAPPER_TAILS.has(tail) && owner && /conn|db|sql|database/i.test(owner) && args[0]) {
     fire("sql-injection", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Start" && owner === "Process") {
-    fire("command-injection");
+    checkProcessArgsCS(args, argMasks, (id, idx) => fireArgs(id, [idx]));
   } else if (tail === "Raw" && owner === "Html") {
     fire("xss");
   } else if ((tail === "Write" || tail === "WriteAsync") && (owner === "Response" || owner === "Body")) {
@@ -1102,23 +1114,23 @@ function checkCallSink(
     fire("xss", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   } else if (CS_SSRF_TAILS.has(tail) || (tail === "OpenRead" && !CS_FS_CLASSES.has(owner))
              || ((tail === "Create" || tail === "CreateHttp") && (owner === "WebRequest" || owner === "HttpWebRequest"))) {
-    fire("ssrf");
+    fireArgs("ssrf", [0]);
   } else if (tail === "Combine" && owner === "Path") {
     fire("path-traversal");
   } else if (CS_FS_CLASSES.has(owner) && CS_FS_TAILS.has(tail)) {
-    fire("path-traversal");
+    fireArgs("path-traversal", tail === "Copy" || tail === "Move" ? [0, 1] : [0]);
   } else if (tail === "PhysicalFile") {
     // ControllerBase.PhysicalFile(path, contentType) -- ASP.NET Core's
     // file-serving helper, a distinct sink shape from the System.IO.File/
     // Path static-class checks above (an instance-method call with no
     // meaningful rootVar of its own).
-    fire("path-traversal");
+    fireArgs("path-traversal", [0]);
   } else if (tail === "Deserialize") {
-    fire("insecure-deserialization");
+    fireArgs("insecure-deserialization", [0]);
   } else if ((tail === "DeserializeObject" || tail === "PopulateObject") && args.some(a => /TypeNameHandling\s*\.\s*(?:All|Auto|Objects|Arrays)/.test(a.text))) {
     fire("insecure-deserialization", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   } else if (tail === "Redirect" || tail === "RedirectPermanent") {
-    fire("open-redirect");
+    fireArgs("open-redirect", [0]);
   } else if ((tail === "Compile" && owner === "XPathExpression") || tail === "SelectNodes" || tail === "SelectSingleNode"
              || tail === "XPathSelectElements" || tail === "XPathSelectElement" || tail === "XPathEvaluate") {
     fire("xpath-injection");
@@ -1152,6 +1164,27 @@ function checkCallSink(
   }
 }
 
+const SHELL_PROGRAMS_CS = /^(?:.*[\\/])?(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh|pwsh\.exe|sh|bash|zsh)$/i;
+
+/**
+ * Process.Start(fileName[, arguments]) / new ProcessStartInfo(fileName[, arguments]). With the .NET Core default
+ * (UseShellExecute = false) no shell runs: `arguments` is split into argv for the program, so a tainted
+ * arguments string is ARGUMENT injection -- unless the program is itself a shell, whose arguments are a
+ * command. A tainted file name (or a whole ProcessStartInfo) is command injection.
+ */
+function checkProcessArgsCS(
+  args: SyntaxNode[], argMasks: number[], fire: (id: AstTaintCSharpId, idx: number) => void,
+) {
+  if (!args[0]) return;
+  if (argMasks[0] & ALL) { fire("command-injection", 0); return; }
+  if (!args[1] || !(argMasks[1] & ALL)) {
+    if (argMasks[0] || argMasks[1]) fire("command-injection", argMasks[0] ? 0 : 1);   // cleared taint -> suppression
+    return;
+  }
+  const program = /^@?"(.*)"$/.exec(args[0].text)?.[1];
+  fire(program !== undefined && SHELL_PROGRAMS_CS.test(program) ? "command-injection" : "argument-injection", 1);
+}
+
 /** `new ClassName(taintedArg)` -- the constructor-call-itself-is-the-sink
  * shape, mirroring astTaintGo.ts's checkNewExpressionSink. */
 function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
@@ -1170,7 +1203,7 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
     if (m & cls) emit(ctx, id, node, args[idx].text, `new ${className}`);
     else if (wasCleared(m, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
-  if (className === "ProcessStartInfo") fire("command-injection");
+  if (className === "ProcessStartInfo") checkProcessArgsCS(args, argMasks, (id, idx) => fire(id, idx));
   // `new SqlCommand(q, conn).ExecuteScalar()` -- built inline; a declared command is reported at its Execute* call instead.
   else if (CS_SQL_COMMAND_TYPES.has(className) && node.parent?.type !== "equals_value_clause" && node.parent?.type !== "assignment_expression") fire("sql-injection", 0);
   else if (className === "HttpRequestMessage" && args.length >= 2) fire("ssrf", 1);

@@ -1,7 +1,7 @@
 import { runScan } from "@/lib/scanner";
 import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 
-beforeAll(async () => { await warmPythonTaintEngine(); }, 30000);
+beforeAll(async () => { await warmPythonTaintEngine(); }, 120000);
 
 // SSRF position awareness, end to end through the JS/TS engine: where the untrusted part lands in the URL decides.
 

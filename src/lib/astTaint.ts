@@ -383,9 +383,12 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (text === "eval") return { id: "eval-exec", sinkExpr: text, args: call.arguments };
 
   if (CMD_SINK_NAMES.has(tail) && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {
-    return { id: "command-injection", sinkExpr: text, args: call.arguments };
+    return { id: "command-injection", sinkExpr: text, args: commandArgs(call, tail) };
   }
-  if (text === "res.send" || text === "res.write" || text === "res.end" || text === "document.write") {
+  if (text === "res.send" || text === "res.write" || text === "res.end") {
+    return call.arguments[0] ? { id: "xss", sinkExpr: text, args: [call.arguments[0]] } : null;
+  }
+  if (text === "document.write") {
     return { id: "xss", sinkExpr: text, args: call.arguments };
   }
   if (
@@ -393,16 +396,20 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     ((text === "http.get" || text === "http.request" || text === "https.get" || text === "https.request") ) ||
     (resolvedModule === "http" || resolvedModule === "https") && HTTP_SINK_NAMES.has(tail)
   ) {
-    return { id: "ssrf", sinkExpr: text, args: call.arguments };
+    const target = requestTargetArgs(call);
+    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
   }
   if (parts[0] === "fs" && FS_SINK_NAMES.has(tail)) {
-    return { id: "path-traversal", sinkExpr: text, args: call.arguments };
+    // The path only: what writeFile writes, or the options/callback, can't choose which file is touched.
+    return call.arguments[0] ? { id: "path-traversal", sinkExpr: text, args: [call.arguments[0]] } : null;
   }
   if (parts[0] === "path" && (tail === "join" || tail === "resolve")) {
     return { id: "path-traversal", sinkExpr: text, args: call.arguments };
   }
   if (text === "res.redirect" || text === "res.location") {
-    return { id: "open-redirect", sinkExpr: text, args: call.arguments };
+    // res.redirect([status,] url): the location is the LAST argument; a status code picks no destination.
+    const loc = call.arguments[call.arguments.length - 1];
+    return loc ? { id: "open-redirect", sinkExpr: text, args: [loc] } : null;
   }
   if (text === "res.setHeader" || text === "res.set" || text === "res.header" || text === "res.append") {
     return { id: "header-injection", sinkExpr: text, args: call.arguments };
@@ -430,6 +437,51 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return sqlArg ? { id: "sql-injection", sinkExpr: text, args: [sqlArg] } : null;
   }
   return null;
+}
+
+/** Initializer of a literal object's `name` property (`{ url: x }` / `{ url }`), if present. */
+function objectPropInit(obj: ts.Expression, names: readonly string[]): ts.Expression | undefined {
+  obj = unwrapExpr(obj);
+  if (!ts.isObjectLiteralExpression(obj)) return undefined;
+  for (const p of obj.properties) {
+    if (ts.isPropertyAssignment(p) && names.includes(p.name.getText().replace(/^["']|["']$/g, ""))) return p.initializer;
+    if (ts.isShorthandPropertyAssignment(p) && names.includes(p.name.text)) return p.name;
+  }
+  return undefined;
+}
+
+/**
+ * The argument(s) of an HTTP client call that choose WHERE the request goes: the URL (first argument), or --
+ * for a config-object call (`axios({ url })`, `http.request({ host, path })`) -- its destination properties.
+ * The body, headers and other config are sent to that destination, so tainting them is not SSRF.
+ */
+function requestTargetArgs(call: ts.CallExpression): ts.Expression[] {
+  const first = call.arguments[0];
+  if (!first) return [];
+  if (ts.isObjectLiteralExpression(unwrapExpr(first))) {
+    return ["url", "baseURL", "host", "hostname", "path", "socketPath", "proxy"]
+      .map(n => objectPropInit(first, [n])).filter((e): e is ts.Expression => !!e);
+  }
+  // A config object after the URL can still route the request through a chosen proxy.
+  const proxies = call.arguments.slice(1).map(a => objectPropInit(a, ["proxy"])).filter((e): e is ts.Expression => !!e);
+  return [first, ...proxies];
+}
+
+/**
+ * The argument(s) of a child_process call that reach a shell or choose the program: the command string for
+ * exec/execSync, the program for spawn/execFile/fork -- plus the argv array only when the options ask for a
+ * shell (`shell: true`), which joins argv into one command line. Without a shell each argv element is passed
+ * verbatim (argument injection is modelled separately, see findArgumentInjectionCulprit).
+ */
+function commandArgs(call: ts.CallExpression, tail: string): ts.Expression[] {
+  const [program, second, third] = call.arguments;
+  if (!program) return [];
+  if (!ARGV_ARRAY_SINK_NAMES.has(tail)) return [program];
+  const argv = second && ts.isArrayLiteralExpression(unwrapExpr(second)) ? second : undefined;
+  const opts = argv ? third : second;
+  const shell = opts ? objectPropInit(opts, ["shell"]) : undefined;
+  const usesShell = !!shell && shell.kind !== ts.SyntaxKind.FalseKeyword;
+  return argv && usesShell ? [program, argv] : [program];
 }
 
 /**

@@ -54,7 +54,7 @@ export type AstTaintJavaId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "bola-missing-ownership-check"
-  | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg"
+  | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "argument-injection"
   | "weak-crypto" | "eval-exec" | "nosql-injection";
 
 export interface AstTaintJavaFinding {
@@ -470,6 +470,7 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "header-injection": "high", "redos": "high", "ssti": "critical", "mass-assignment": "high", "timing-attack": "medium",
   "jwt-none-alg": "critical", "weak-crypto": "high", "eval-exec": "critical", "nosql-injection": "critical",
+  "argument-injection": "high",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -480,6 +481,7 @@ const LABEL: Record<AstTaintJavaId, string> = {
   "header-injection": "HTTP Header Injection", "redos": "ReDoS — Regex DoS", "ssti": "Server-Side Template Injection",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "weak-crypto": "Weak Cryptography", "eval-exec": "Arbitrary Code Execution", "nosql-injection": "NoSQL Injection",
+  "argument-injection": "Argument Injection",
 };
 
 // lowercase tag names only, and not glued to an identifier: `Map<String, Object>` is a generic, not markup
@@ -1160,21 +1162,38 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
 
+  // Only the argument(s) that can be exploited: the SQL text (never bound parameters -- including the ones
+  // setString() put on a PreparedStatement receiver), the command string, the redirect location, the URL of
+  // a request (not its body), the path of a file operation (not the bytes written).
+  const fireArgs = (id: AstTaintJavaId, idxs: readonly number[]) => {
+    const present = idxs.filter(i => i < args.length);
+    if (present.length === 0) return;
+    const mask = present.reduce((m, i) => m | argMasks[i], 0);
+    const culprit = present.find(i => argMasks[i] & ALL) ?? present[0];
+    fire(id, mask, culpritText(args[culprit], env, ctx));
+    // Tainted data only in an argument that can't be exploited here (a bound parameter, the bytes written):
+    // a positive proof for this sink, so the regex layer's line-level duplicate is dropped too.
+    if (!(mask & classOf(id)) && args.some((_, i) => !present.includes(i) && (argMasks[i] & ALL))) {
+      ctx.suppressed?.push({ id, line: lineOf(node) });
+    }
+  };
+
   if (tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") {
-    fire("sql-injection");
+    fireArgs("sql-injection", [0]);
   } else if ((tail === "query" || tail === "update") && /jdbcTemplate/i.test(rootVar ?? "")) {
-    fire("sql-injection");
+    fireArgs("sql-injection", [0]);
   } else if (tail === "exec" && rootVar !== null) {
-    fire("command-injection");
+    // exec(command[, envp[, dir]]): the environment and working directory choose nothing that runs.
+    fireArgs("command-injection", [0]);
   } else if (tail === "sendRedirect") {
-    fire("open-redirect");
+    fireArgs("open-redirect", [0]);
   } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "")) {
     // Spring's fluent ResponseEntity.status(...).header("Location", next).build()
     // -- a modern REST idiom for redirects, distinct from the classic
     // Servlet response.sendRedirect(...) above but an equally real sink.
     fire("open-redirect", argMasks[1], culpritText(args[1], env, ctx));
   } else if (tail === "getForObject" || tail === "postForObject" || tail === "exchange") {
-    fire("ssrf");
+    fireArgs("ssrf", [0]);
   } else if (tail === "openConnection" || tail === "openStream") {
     // Chained on `new URL(x)`, or on a URL held in a variable (`URL u = new URL(x); u.openConnection()`)
     // whose taint arrives as the receiver's.
@@ -1183,7 +1202,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   } else if (tail === "get" && rootVar === "Paths") {
     fire("path-traversal");
   } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
-    fire("path-traversal");
+    fireArgs("path-traversal", [0]);
   } else if (tail === "search") {
     fire("ldap-injection");
   } else if (tail === "evaluate") {
@@ -1211,7 +1230,9 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   // path traversal: Path.of / Paths.get and the wider java.nio.file.Files surface
   if ((rootVar === "Path" || rootVar === "Paths") && (tail === "of" || tail === "get")) fire("path-traversal");
   if (rootVar === "Files" && ["writeString", "readAllLines", "lines", "copy", "move", "createFile", "createDirectories", "newBufferedReader", "newBufferedWriter", "list", "walk", "deleteIfExists", "exists"].includes(tail)) {
-    fire("path-traversal");
+    // copy/move(source, target) take two paths -- except copy(InputStream, target), whose source is data.
+    const sourceIsStream = tail === "copy" && !!args[0] && /InputStream|getInputStream\s*\(\s*\)|^(?:in|is|input|stream)$/.test(tokensText(args[0]));
+    fireArgs("path-traversal", tail === "copy" || tail === "move" ? (sourceIsStream ? [1] : [0, 1]) : [0]);
   }
   // SSRF: java.net.http, raw sockets / name resolution
   if ((rootVar === "HttpRequest" && (tail === "uri" || tail === "newBuilder")) || (rootVar === "InetAddress" && tail === "getByName")) {
@@ -1270,6 +1291,29 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   }
 }
 
+const SHELL_PROGRAMS_JAVA = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
+const SHELL_COMMAND_FLAGS_JAVA = /^(?:-c|\/c|\/k|-command|-encodedcommand)$/i;
+
+/**
+ * `new ProcessBuilder(program, arg1, ...)` runs no shell: each element is passed to the program verbatim. So:
+ * a tainted PROGRAM (or a single List/array argument, whose contents we can't see) is command injection; a
+ * tainted element after an explicit shell + `-c` is command injection too; any other tainted element is at
+ * most ARGUMENT injection (it can start with `-`), and not even that after a literal `--`.
+ */
+function checkProcessBuilderArgs(
+  args: CstNode[], argMasks: number[], fire: (id: AstTaintJavaId, sink: string, idxs?: readonly number[]) => void,
+) {
+  if (args.length <= 1) { fire("command-injection", "new ProcessBuilder", [0]); return; }
+  const lit = args.map(a => literalStringOf(a));
+  fire("command-injection", "new ProcessBuilder", [0]);
+  const shellAt = lit[0] !== null && SHELL_PROGRAMS_JAVA.test(lit[0] ?? "")
+    ? lit.findIndex((s, i) => i > 0 && s !== null && SHELL_COMMAND_FLAGS_JAVA.test(s)) : -1;
+  if (shellAt > 0) { fire("command-injection", "new ProcessBuilder", args.map((_, i) => i).filter(i => i > shellAt)); return; }
+  const endOfOptions = lit.findIndex((s, i) => i > 0 && s === "--");
+  const exposed = args.map((_, i) => i).filter(i => i > 0 && (endOfOptions < 0 || i < endOfOptions) && (argMasks[i] & ALL));
+  if (exposed.length) fire("argument-injection", "new ProcessBuilder", exposed);
+}
+
 /** `new ProcessBuilder(...)`/`new File(...)`/`new FileInputStream(...)`/`new FileOutputStream(...)` -- the constructor call itself is the sink, no chained method needed. */
 function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, primaryNode: CstNode) {
   const newExpr = firstNode(prefix, "newExpression");
@@ -1285,22 +1329,29 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   // sanitized must still reach `fire` so the suppression gets recorded.
   const firstIdx = argMasks.findIndex(m => m !== 0);
   if (firstIdx < 0) return;
-  const sourceExpr = culpritText(args[firstIdx], env, ctx);
-  const fire = (id: AstTaintJavaId, sink: string) => {
+  // `idxs` = the constructor arguments that can be exploited (all of them when omitted).
+  const fire = (id: AstTaintJavaId, sink: string, idxs?: readonly number[]) => {
     const cls = classOf(id);
-    const combined = argMasks.reduce((m, x) => m | x, 0);
-    if (combined & cls) emit(ctx, id, primaryNode, sourceExpr, sink);
-    else if (wasCleared(combined, cls)) ctx.suppressed?.push({ id, line: lineOf(primaryNode) });
+    const checked = (idxs ?? args.map((_, i) => i)).filter(i => i < args.length);
+    const combined = checked.reduce((m, i) => m | argMasks[i], 0);
+    const culprit = checked.find(i => argMasks[i] & cls) ?? checked[0] ?? firstIdx;
+    if (combined & cls) emit(ctx, id, primaryNode, culpritText(args[culprit], env, ctx), sink);
+    // cleared by a sanitizer, or tainted only in arguments that can't be exploited here (see fireArgs)
+    else if (wasCleared(combined, cls) || args.some((_, i) => !checked.includes(i) && (argMasks[i] & ALL))) {
+      ctx.suppressed?.push({ id, line: lineOf(primaryNode) });
+    }
   };
-  if (className === "ProcessBuilder") fire("command-injection", "new ProcessBuilder");
-  if (className === "File" || className === "FileInputStream" || className === "FileOutputStream" ||
+  if (className === "ProcessBuilder") checkProcessBuilderArgs(args, argMasks, fire);
+  // File(parent, child) takes two path parts; the streams/readers/writers take (file[, append|mode]).
+  if (className === "File") fire("path-traversal", "new File");
+  if (className === "FileInputStream" || className === "FileOutputStream" ||
       className === "FileReader" || className === "FileWriter" || className === "RandomAccessFile") {
-    fire("path-traversal", `new ${className}`);
+    fire("path-traversal", `new ${className}`, [0]);
   }
-  if (className === "Socket") fire("ssrf", "new Socket");
+  if (className === "Socket") fire("ssrf", "new Socket", [0]);
   // auth0 jwks-rsa fetches signing keys from the URL it is given -- fed from a token's own `jku` header,
   // an attacker chooses where the server fetches keys from (and which keys it trusts).
-  if (className === "JwkProviderBuilder" || className === "UrlJwkProvider") fire("ssrf", `new ${className}`);
+  if (className === "JwkProviderBuilder" || className === "UrlJwkProvider") fire("ssrf", `new ${className}`, [0]);
   if (className === "BasicDBObject") fire("nosql-injection", "new BasicDBObject");
 }
 
