@@ -275,7 +275,7 @@ export default function Sidebar() {
         api.dashboard(profile.org_slug || "org", 90),
         authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status"),
         authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
-        authedFetch<{ incidents: { status: string }[] }>("/api/incidents"),
+        authedFetch<{ count: number }>("/api/incidents?count=open"),
         authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200"),
         authedFetch<{ counts: { vulnerable: number } }>("/api/dependencies"),
       ]);
@@ -321,10 +321,8 @@ export default function Sidebar() {
       }
 
       if (incidentsRes.status === "fulfilled") {
-        // Incidents: active + contained.
-        setActiveIncidents((incidentsRes.value.incidents ?? []).filter(i =>
-          i.status === "active" || i.status === "contained"
-        ).length);
+        // Incidents: active + contained, counted server-side.
+        setActiveIncidents(incidentsRes.value.count ?? 0);
       }
 
       if (alertsRes.status === "fulfilled") {

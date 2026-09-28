@@ -23,6 +23,7 @@ import { safeError } from "@/lib/errors";
 import { cached, cacheKeys, TTL } from "@/lib/cache";
 import { deriveFindings, type ScanForDeps, type DepFinding } from "@/lib/dependencyScan";
 import { collectManifestPackages, type ManifestPackage } from "@/lib/manifestPackages";
+import { fetchContentByHash } from "@/lib/contentByHash";
 
 interface DependencyResult { findings: DepFinding[]; manifestPackages: ManifestPackage[] }
 
@@ -81,18 +82,7 @@ async function computeFindings(orgId: string): Promise<DependencyResult> {
   const missingHashes = [...new Set(
     (files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string),
   )];
-  const contentByHash = new Map<string, string>();
-  if (missingHashes.length > 0) {
-    const { data: rows } = await db
-      .from("scan_files")
-      .select("content_hash, content")
-      .eq("org_id", orgId)
-      .in("content_hash", missingHashes)
-      .not("content", "is", null);
-    for (const r of rows ?? []) {
-      if (!contentByHash.has(r.content_hash) && r.content) contentByHash.set(r.content_hash, r.content);
-    }
-  }
+  const contentByHash = missingHashes.length > 0 ? await fetchContentByHash(db, orgId, missingHashes) : new Map<string, string>();
 
   const filesByScan = new Map<string, { file_path: string; content: string | null; ai_percentage: number }[]>();
   for (const f of files ?? []) {

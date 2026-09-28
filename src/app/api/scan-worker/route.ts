@@ -202,7 +202,7 @@ export async function POST(req: NextRequest) {
     type PrevScanFile = {
       file_path: string; language: string; ai_percentage: number;
       risk_score: string; risk_indicators: unknown; content_hash: string;
-      line_count: number; content: string | null; indicators: unknown;
+      line_count: number; indicators: unknown;
       attribution: unknown;
     };
     type PrevScan = { id: string; files: PrevScanFile[] };
@@ -222,7 +222,9 @@ export async function POST(req: NextRequest) {
       if (prevScanRow) {
         const { data: prevFiles } = await db
           .from("scan_files")
-          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
+          // No `content`: inherited rows are stored without it (see below), and pulling every file's source
+          // on every delta scan was pure database egress.
+          .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, indicators, attribution")
           .eq("scan_id", prevScanRow.id);
         prevScan = { id: prevScanRow.id, files: (prevFiles ?? []) as PrevScanFile[] };
       }

@@ -14,18 +14,43 @@ export async function GET(req: NextRequest) {
   const sev    = url.searchParams.get("severity");
 
   const db = createServiceClient();
-  let query = db
-    .from("incidents")
-    .select("*")
-    .eq("org_id", org_id)
-    .order("detected_at", { ascending: false });
 
-  if (status) query = query.eq("status", status);
-  if (sev)    query = query.eq("severity", sev);
+  // ?count=open -- just the number of open (active + contained) incidents, for badges. Rows carry their
+  // whole playbook and timeline (~9 KB each), so a badge must never download the list to count it.
+  if (url.searchParams.get("count") === "open") {
+    const { count } = await db
+      .from("incidents")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org_id)
+      .in("status", OPEN_STATUSES);
+    return NextResponse.json({ count: count ?? 0 });
+  }
 
-  const { data } = await query;
-  return NextResponse.json({ incidents: data ?? [] });
+  const base = () => {
+    let q = db.from("incidents").select("*").eq("org_id", org_id).order("detected_at", { ascending: false });
+    if (sev) q = q.eq("severity", sev);
+    return q;
+  };
+
+  if (status) {
+    const { data } = await base().eq("status", status).limit(MAX_INCIDENTS);
+    return NextResponse.json({ incidents: data ?? [] });
+  }
+
+  // Unfiltered: every open incident, plus the most recent closed ones -- not the org's entire history
+  // on every page load and poll.
+  const [open, closed] = await Promise.all([
+    base().in("status", OPEN_STATUSES).limit(MAX_INCIDENTS),
+    base().not("status", "in", `(${OPEN_STATUSES.join(",")})`).limit(RECENT_CLOSED_INCIDENTS),
+  ]);
+  const incidents = [...(open.data ?? []), ...(closed.data ?? [])]
+    .sort((a, b) => String(b.detected_at).localeCompare(String(a.detected_at)));
+  return NextResponse.json({ incidents });
 }
+
+const OPEN_STATUSES = ["active", "contained"];
+const MAX_INCIDENTS = 1000;
+const RECENT_CLOSED_INCIDENTS = 200;
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);

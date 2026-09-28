@@ -337,8 +337,15 @@ export function useNotifications() {
   useEffect(() => {
     setNotifications(load());
     poll();
-    timerRef.current = setInterval(poll, POLL_MS);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    // A hidden tab doesn't poll (every page mounts this, and a forgotten background tab used to keep
+    // fetching the dashboard aggregate all day); it catches up the moment it becomes visible.
+    timerRef.current = setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
+    const onVisible = () => { if (!document.hidden) poll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [poll]);
 
   // Supabase Realtime — supplement polling with live alerts when connected

@@ -784,7 +784,8 @@ export default function DashboardPage() {
     window.addEventListener("focus",              syncStatuses);
     window.addEventListener("tl:badge",            syncStatuses);
     document.addEventListener("visibilitychange",  onVisible);
-    const id = setInterval(syncStatuses, 30_000);
+    // Skipped while the tab is hidden (becoming visible again re-syncs immediately, see onVisible).
+    const id = setInterval(() => { if (!document.hidden) syncStatuses(); }, 30_000);
     return () => {
       window.removeEventListener("focus",             syncStatuses);
       window.removeEventListener("tl:badge",           syncStatuses);

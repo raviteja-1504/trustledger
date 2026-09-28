@@ -3,7 +3,8 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { analyzeFile, getFixSuggestions } from "@/lib/scanner";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
-import { cached, TTL } from "@/lib/cache";
+import { fetchContentByHash } from "@/lib/contentByHash";
+import { cached, cacheGet, cacheSet, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
 import type { FileIndicator } from "@/types";
 
@@ -53,6 +54,30 @@ async function reanalyze(filePath: string, content: string, contentHash: string)
   });
 }
 
+interface ScanFileRow {
+  file_path: string; language: string | null; ai_percentage: number; risk_score: string;
+  risk_indicators: string[] | null; content_hash: string; line_count: number;
+  content: string | null; indicators: unknown; attribution: unknown;
+}
+
+/** A scan's file rows, with the source of files inherited across incremental scans (stored without their
+ * own `content`, see api/scan-worker/route.ts) backfilled by content_hash -- one copy per hash. */
+async function loadScanFiles(db: ReturnType<typeof createServiceClient>, orgId: string, scanId: string): Promise<ScanFileRow[]> {
+  const { data } = await db
+    .from("scan_files")
+    .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
+    .eq("scan_id", scanId)
+    .eq("org_id", orgId)
+    .order("ai_percentage", { ascending: false });
+  const rows = (data ?? []) as ScanFileRow[];
+  const missing = rows.filter(f => !f.content && f.content_hash).map(f => f.content_hash);
+  if (missing.length > 0) {
+    const byHash = await fetchContentByHash(db, orgId, missing);
+    for (const f of rows) if (!f.content && f.content_hash) f.content = byHash.get(f.content_hash) ?? null;
+  }
+  return rows;
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } },
@@ -71,32 +96,16 @@ export async function GET(
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-  const { data: files } = await db
-    .from("scan_files")
-    .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
-    .eq("scan_id", params.id)
-    .order("ai_percentage", { ascending: false });
-
-  // Unchanged files carried forward across an incremental (delta) scan don't
-  // store their own copy of `content` -- see api/scan-worker/route.ts's
-  // "inherited files" comment -- so backfill it here from whichever row for
-  // this org still has it under the same content_hash. One extra query,
-  // only when needed, instead of storing the same source text N times over
-  // for a file untouched across N pushes to the same PR.
-  const missingHashes = [...new Set(
-    (files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string),
-  )];
-  const contentByHash = new Map<string, string>();
-  if (missingHashes.length > 0) {
-    const { data: rows } = await db
-      .from("scan_files")
-      .select("content_hash, content")
-      .eq("org_id", org_id)
-      .in("content_hash", missingHashes)
-      .not("content", "is", null);
-    for (const r of rows ?? []) {
-      if (!contentByHash.has(r.content_hash) && r.content) contentByHash.set(r.content_hash, r.content);
-    }
+  // A scan's file rows never change after the scan is written (attestation state comes from the
+  // attestations table below, not from these rows), so repeat views of the same PR are served from the
+  // cache instead of re-downloading every file's source from the database each time.
+  // Never caches an empty result: the scan row is written before its files, and a view in between must
+  // not pin an empty file list for the whole TTL.
+  const filesKey = `scanfiles:v1:${params.id}`;
+  let files = await cacheGet<ScanFileRow[]>(filesKey);
+  if (!files) {
+    files = await loadScanFiles(db, org_id, params.id);
+    if (files.length > 0) await cacheSet(filesKey, files, TTL.SCAN);
   }
 
   const { data: attests } = await db
@@ -131,7 +140,7 @@ export async function GET(
       // by ai_percentage desc, so this keeps the highest-signal files live
       // and lets large scans fall back to the persisted snapshot beyond
       // that, rather than paying analysis cost per file with no bound).
-      const content = f.content ?? (f.content_hash ? contentByHash.get(f.content_hash) : undefined) ?? null;
+      const content = f.content ?? null;
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as FileIndicator[]
         : null;
