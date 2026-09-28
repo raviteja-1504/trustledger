@@ -549,3 +549,31 @@ export function walkSwitch(env: TaintEnv, clauses: readonly SwitchClause[]): boo
   assignEnv(env, joined.env);
   return joined.terminated;
 }
+
+// ── Stored/second-order provenance ──────────────────────────────────────────────────────────────────
+//
+// Taint that round-trips through a real database, not through code: a value written via an ORM's
+// create/save call is later read back by a DIFFERENT handler (often a different file, sometimes a
+// different request entirely) via a find/get call on the SAME model. Storage is a genuine taint SOURCE
+// for that reason -- "was ANY attacker-controlled value EVER written to this model in this batch" is
+// the coarsest sound question this can ask (no row/column tracking, an ORM's own runtime object), so it
+// is scoped narrowly: only a model this batch can PROVE is a real ORM model (a Sequelize `extends Model`
+// class, a Mongoose `mongoose.model(...)` call, a Django `class X(models.Model)`) ever becomes a source,
+// and only for classes something ACTUALLY wrote to it, in THIS SAME scan batch -- never a blanket "every
+// DB read is tainted" default, which would defeat the "opaque call stays untainted" contract every other
+// sink in these engines relies on.
+
+/** One file's contribution to (and consumption of) the batch-wide stored-taint map, threaded through a
+ * single engine call (mirrors `suppressedOut`'s "optional out-param, existing callers unaffected" shape).
+ */
+export interface StoredProvenanceIO {
+  /** Local receiver name, AS USED IN THIS FILE, -> the model's own batch-wide key (its declaring file's
+   * path, or "same-file:<name>" when the model is declared and used in the same file). */
+  modelReceivers: ReadonlyMap<string, string>;
+  /** Converged-so-far mask per model key, from every file's writes seen in EARLIER rounds this scan --
+   * the read side. */
+  incoming: ReadonlyMap<string, number>;
+  /** Out-param: masks THIS file's own writes contribute this round -- the caller OR-merges these across
+   * every file into the next round's `incoming` until the batch-wide map stops growing. */
+  writesOut: Map<string, number>;
+}

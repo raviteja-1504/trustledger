@@ -28,7 +28,8 @@
 import * as ts from "typescript";
 import {
   ALL, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
-  SHADOW, mergeSinkFacts, wasCleared, type Arm, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceStep,
+  SHADOW, mergeSinkFacts, wasCleared, type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
+  type SuppressedSink, type TaintEnv, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -408,6 +409,82 @@ const BUILTIN_METHOD_NAMES = new Set([
 ]);
 const MUTATING_METHODS = new Set(["push", "unshift", "add", "set", "append", "splice"]);
 
+// ── Stored/second-order provenance (Sequelize/Mongoose) -- see taintCore.ts's own docblock ─────────
+
+/** Sequelize (`class X extends Model` / `class X extends Sequelize.Model`, or `sequelize.define(name, attrs)`)
+ * or Mongoose (`mongoose.model(name, schema)`) model declaration ANYWHERE in the file -- gates write/read
+ * recognition so an arbitrary imported class/service that happens to share a method name (create/find/save)
+ * never qualifies just by name. Narrow on purpose: a class genuinely named "Model" for something else, or a
+ * `sequelize`-named variable that isn't really Sequelize, is the accepted false-negative/positive edge, the
+ * same "a wrong match only ever taints a value, never crashes" posture the rest of this file already takes. */
+export function isModelFile(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (n: ts.Node) => {
+    if (found) return;
+    if (ts.isClassDeclaration(n) && n.heritageClauses) {
+      for (const h of n.heritageClauses) for (const t of h.types) {
+        const expr = t.expression;
+        const name = ts.isIdentifier(expr) ? expr.text : ts.isPropertyAccessExpression(expr) ? expr.name.text : null;
+        if (name === "Model") { found = true; return; }
+      }
+    } else if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const method = n.expression.name.text;
+      const recv = n.expression.expression;
+      const recvText = ts.isIdentifier(recv) ? recv.text.toLowerCase() : null;
+      if (method === "model" && recvText === "mongoose") { found = true; return; }
+      if (method === "define" && recvText?.includes("sequelize")) { found = true; return; }
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+/** Every locally-declared model's own bound name (the class name, or the variable a
+ * `mongoose.model(...)`/`sequelize.define(...)` call is assigned to) -- lets a caller (scanner.ts) wire
+ * up `StoredProvenanceIO.modelReceivers` for a file that declares AND uses its own model, not just one
+ * that imports another file's. */
+export function modelLocalNamesInFile(sourceFile: ts.SourceFile): string[] {
+  const names = new Set<string>();
+  const visit = (n: ts.Node) => {
+    if (ts.isClassDeclaration(n) && n.name && n.heritageClauses) {
+      for (const h of n.heritageClauses) for (const t of h.types) {
+        const expr = t.expression;
+        const name = ts.isIdentifier(expr) ? expr.text : ts.isPropertyAccessExpression(expr) ? expr.name.text : null;
+        if (name === "Model") names.add(n.name.text);
+      }
+    } else if (
+      ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer &&
+      ts.isCallExpression(n.initializer) && ts.isPropertyAccessExpression(n.initializer.expression)
+    ) {
+      const method = n.initializer.expression.name.text;
+      const recv = n.initializer.expression.expression;
+      const recvText = ts.isIdentifier(recv) ? recv.text.toLowerCase() : null;
+      if ((method === "model" && recvText === "mongoose") || (method === "define" && recvText?.includes("sequelize"))) {
+        names.add(n.name.text);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sourceFile);
+  return [...names];
+}
+
+/** Persists (or stages for `.save()`) an argument's own data. */
+const MODEL_WRITE_METHODS = new Set(["create", "bulkCreate", "insertMany", "build", "findOneAndUpdate", "findByIdAndUpdate", "updateOne", "updateMany"]);
+/** Returns a stored record (or records) -- the read side of stored provenance. */
+const MODEL_READ_METHODS = new Set(["find", "findOne", "findAll", "findByPk", "findById", "aggregate", "findAndCountAll"]);
+/** Persists whatever has been staged on the instance (a `.build()`/`.create()`/prior-read result plus any
+ * field assignments made to it since) -- see `taintMask`'s existing field-sensitive `recv.field` tracking,
+ * reused as-is via a plain identifier read of the receiver at the point of `.save()`. */
+const MODEL_SAVE_METHODS = new Set(["save"]);
+/** Sequelize's instance-level `.update(values)` -- persists like `.save()` (same "known model-instance
+ * variable" gate) but ALSO carries its own data argument, unlike bare `.save()`. Confirmed as the
+ * dominant real-world write shape (OWASP Juice Shop's routes/updateUserProfile.ts: `await
+ * user.update({ username: req.body.username })` on a `findByPk`-obtained instance) during corpus
+ * verification of this feature -- `.save()` alone would have missed it entirely. */
+const MODEL_UPDATE_INSTANCE_METHODS = new Set(["update"]);
+
 const declaredNamesCache = new WeakMap<ts.Node, Set<string>>();
 /** Parameter and local-declaration names of a function-like (nested functions excluded). */
 function declaredNames(fn: ts.Node): Set<string> {
@@ -492,7 +569,7 @@ function calleeFnName(callee: ts.Expression): string | null {
   return null;
 }
 
-function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>) {
+function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO) {
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
     if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
@@ -592,6 +669,15 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     args.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
 
   const callMask = (expr: ts.CallExpression, env: Env): number => {
+    // Stored provenance read: `UserModel.findAll()` etc -- the result is as tainted as anything this
+    // batch ever wrote to that model (see taintCore.ts's StoredProvenanceIO docblock).
+    if (storedProvenance && ts.isPropertyAccessExpression(expr.expression)) {
+      const recv = expr.expression.expression;
+      if (ts.isIdentifier(recv) && MODEL_READ_METHODS.has(expr.expression.name.text)) {
+        const modelKey = storedProvenance.modelReceivers.get(recv.text);
+        if (modelKey !== undefined) return storedProvenance.incoming.get(modelKey) ?? 0;
+      }
+    }
     // Known sanitizer: the argument's taint passes THROUGH minus only the
     // classes this sanitizer actually neutralizes (an HTML escaper leaves
     // SQL/command/path taint intact). Opaque calls stay untainted below.
@@ -605,6 +691,13 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     if (calleeName && PASSTHROUGH_CALLS.has(calleeName)) {
       const m = argsMask(expr.arguments, env);
       return DECODERS.has(calleeName) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
+    }
+    // `<modelReceiver>.build(data)`: a not-yet-persisted instance is as tainted as its constructor data --
+    // both so a later `.save()` picks it up via the ordinary env lookup below, and so using the instance
+    // before saving it is not silently untainted either.
+    if (storedProvenance && ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "build" &&
+        ts.isIdentifier(expr.expression.expression) && storedProvenance.modelReceivers.has(expr.expression.expression.text)) {
+      return expr.arguments[0] ? taintMask(expr.arguments[0], env) : 0;
     }
     // A call to a local (or cross-file-imported) function known to
     // propagate taint from SPECIFIC params to its return value -- e.g.
@@ -2099,6 +2192,10 @@ export function scanAstTaint(
   // there, not just an attribution note) instead of stopping at the import. Read-only, best-effort;
   // absent entries simply stop the trace at that hop rather than throwing.
   crossFileSources?: Map<string, ts.SourceFile>,
+  // Stored/second-order provenance (Sequelize/Mongoose) -- see taintCore.ts's own docblock. Optional, same
+  // "existing callers unaffected" shape as suppressedOut: absent = every model read stays untainted,
+  // exactly today's behavior.
+  storedProvenance?: StoredProvenanceIO,
 ): AstTaintFinding[] {
   try {
     const sourceFile = presparsed ?? parseSourceFile(content, filePath);
@@ -2135,7 +2232,7 @@ export function scanAstTaint(
       ts.forEachChild(n, collectAliases);
     };
     collectAliases(sourceFile);
-    const taintMask = makeTaintMask(propagating, sticky);
+    const taintMask = makeTaintMask(propagating, sticky, storedProvenance);
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
     // Message-attribution only (Tier 2, "assign then use downstream"): the
@@ -2496,6 +2593,60 @@ export function scanAstTaint(
       if (next !== (sticky.get(target.text) ?? 0)) { sticky.set(target.text, next); stickyDirty = true; }
     };
 
+    // Model-instance variable tracking (same-file, one hop): `const x = UserModel.build(data)` / `const x
+    // = await UserModel.findByPk(id)` binds x to the model it came from, so a LATER `x.save()` (with no
+    // receiver text mentioning the model at all) still knows which model to write to.
+    const modelInstanceVars = new Map<string, string>();
+    const recordModelInstanceVar = (n: ts.VariableDeclaration) => {
+      if (!storedProvenance || !ts.isIdentifier(n.name) || !n.initializer) return;
+      let init = unwrapExpr(n.initializer);
+      if (ts.isAwaitExpression(init)) init = unwrapExpr(init.expression);
+      if (!ts.isCallExpression(init) || !ts.isPropertyAccessExpression(init.expression)) return;
+      const recv = init.expression.expression;
+      if (!ts.isIdentifier(recv)) return;
+      const modelKey = storedProvenance.modelReceivers.get(recv.text);
+      const method = init.expression.name.text;
+      if (modelKey !== undefined && (MODEL_WRITE_METHODS.has(method) || MODEL_READ_METHODS.has(method))) {
+        modelInstanceVars.set(n.name.text, modelKey);
+      }
+    };
+
+    /** Persisting a value to a model this batch can name is a taint SOURCE for whoever reads that model
+     * back later -- see taintCore.ts's StoredProvenanceIO docblock for the batch-wide, round-based
+     * convergence this feeds. `.save()` on a known model-instance variable folds in whatever `taintMask`'s
+     * existing field-sensitive tracking already knows about it (its own base mask plus any `recv.field =`
+     * assignments); every other write method's payload is the call's own data argument. */
+    const recordModelWrite = (node: ts.CallExpression, env: Env) => {
+      if (!storedProvenance || !ts.isPropertyAccessExpression(node.expression)) return;
+      const method = node.expression.name.text;
+      const recv = node.expression.expression;
+      const fold = (modelKey: string, mask: number) => {
+        if (!(mask & ALL)) return;
+        storedProvenance.writesOut.set(modelKey, (storedProvenance.writesOut.get(modelKey) ?? 0) | (mask & ALL));
+      };
+      if (MODEL_SAVE_METHODS.has(method) && ts.isIdentifier(recv)) {
+        const modelKey = modelInstanceVars.get(recv.text);
+        if (modelKey !== undefined) fold(modelKey, taintMask(recv, env));
+        return;
+      }
+      if (MODEL_UPDATE_INSTANCE_METHODS.has(method) && ts.isIdentifier(recv)) {
+        const modelKey = modelInstanceVars.get(recv.text);
+        if (modelKey === undefined) return;
+        const dataArg = node.arguments[0];
+        fold(modelKey, taintMask(recv, env) | (dataArg ? taintMask(dataArg, env) : 0));
+        return;
+      }
+      if (!ts.isIdentifier(recv) || !MODEL_WRITE_METHODS.has(method) || method === "build") return;
+      const modelKey = storedProvenance.modelReceivers.get(recv.text);
+      if (modelKey === undefined) return;
+      // updateOne/updateMany/findOneAndUpdate/findByIdAndUpdate carry the write payload in the LAST
+      // argument (a filter/id comes first); create/bulkCreate/insertMany take it as the first (and only
+      // data-bearing) argument.
+      const isUpdateStyle = method === "updateOne" || method === "updateMany" || method === "findOneAndUpdate" || method === "findByIdAndUpdate";
+      const dataArg = isUpdateStyle ? node.arguments[node.arguments.length - 1] : node.arguments[0];
+      if (dataArg) fold(modelKey, taintMask(dataArg, env));
+    };
+
     const checkAssignmentForXSS = (node: ts.BinaryExpression, env: Env) => {
       if (node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
       if (!ts.isPropertyAccessExpression(node.left)) return;
@@ -2541,9 +2692,10 @@ export function scanAstTaint(
           }
         }
       }
-      if (ts.isCallExpression(n)) { checkMassAssignment(n); recordSticky(n, env); }
+      if (ts.isCallExpression(n)) { checkMassAssignment(n); recordSticky(n, env); recordModelWrite(n, env); }
       if (ts.isNewExpression(n)) checkNewExprForSink(n, env);
       if (ts.isBinaryExpression(n)) { checkAssignmentForXSS(n, env); checkTimingCompare(n, env); recordSticky(n, env); }
+      if (ts.isVariableDeclaration(n)) recordModelInstanceVar(n);
     };
 
     const walker = createWalker({

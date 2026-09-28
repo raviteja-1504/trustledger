@@ -50,7 +50,7 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
   ALL, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
-  type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isAuthenticationGuardName, isMutatingLookup, isOwnerField, isPrincipalParamName, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -709,6 +709,61 @@ type PropagatingPy = Map<string, Map<number, number>>;
 // Builtins/stdlib whose RESULT carries the taint of their arguments (string, path, URL, JSON and
 // container plumbing that neither validates nor neutralizes anything). Opaque calls stay untainted --
 // these are curated exceptions, not a default flip. Decoders also RESTORE classes an encoder cleared.
+// ── Stored/second-order provenance (Django ORM) -- see taintCore.ts's own docblock ─────────────────
+
+/** `class X(models.Model):` / `class X(Model):` ANYWHERE in the file -- gates write/read recognition so
+ * an arbitrary class sharing a method name (create/save/filter/get) never qualifies just by name. */
+export function isModelFilePy(root: SyntaxNode): boolean {
+  let found = false;
+  const visit = (n: SyntaxNode) => {
+    if (found) return;
+    if (n.type === "class_definition") {
+      const bases = n.childForFieldName("superclasses");
+      if (bases) for (const b of bases.namedChildren) {
+        if (!b) continue;
+        const name = b.type === "identifier" ? b.text : b.type === "attribute" ? attributeParts(b).attribute : null;
+        if (name === "Model") { found = true; return; }
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(root);
+  return found;
+}
+
+/** Every locally-declared model class's own bound name -- lets a caller (scanner.ts) wire up
+ * `StoredProvenanceIO.modelReceivers` for a file that declares AND uses its own model, not just one
+ * that imports another module's. */
+export function modelLocalNamesInFilePy(root: SyntaxNode): string[] {
+  const names = new Set<string>();
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "class_definition") {
+      const bases = n.childForFieldName("superclasses");
+      let isModel = false;
+      if (bases) for (const b of bases.namedChildren) {
+        if (!b) continue;
+        const name = b.type === "identifier" ? b.text : b.type === "attribute" ? attributeParts(b).attribute : null;
+        if (name === "Model") isModel = true;
+      }
+      if (isModel) {
+        const nameNode = n.childForFieldName("name");
+        if (nameNode) names.add(nameNode.text);
+      }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(root);
+  return [...names];
+}
+
+/** Persists (Django's manager verbs -- `objects.create`/`objects.bulk_create`/`objects.update_or_create`). */
+const MODEL_WRITE_METHODS_PY = new Set(["create", "bulk_create", "update_or_create", "get_or_create"]);
+/** Returns stored record(s) -- the read side of stored provenance (also Django manager verbs). */
+const MODEL_READ_METHODS_PY = new Set(["get", "filter", "all", "first", "last", "get_or_create", "earliest", "latest"]);
+/** Persists whatever has been staged on the instance since it was constructed/loaded -- reuses
+ * taintMask's existing field-sensitive `recv.field` tracking via a plain identifier read of the receiver. */
+const MODEL_SAVE_METHODS_PY = new Set(["save"]);
+
 const PY_PASSTHROUGH = new Set([
   "str", "bytes", "bytearray", "repr", "ascii", "list", "tuple", "set", "frozenset", "dict", "sorted", "reversed",
   "enumerate", "zip", "map", "filter", "iter", "next", "getattr", "copy.copy", "copy.deepcopy",
@@ -854,7 +909,7 @@ function isGlobalsLookupPy(n: SyntaxNode | null): boolean {
 
 function makeTaintMaskPy(
   localFns: Map<string, LocalFn>, propagating: PropagatingPy, inDjangoRequestFn: boolean,
-  sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>,
+  sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>, storedProvenance?: StoredProvenanceIO,
 ) {
   let fnValueDepth = 0;
   const taintMask = (node: SyntaxNode, env: Env): number => {
@@ -964,6 +1019,24 @@ function makeTaintMaskPy(
   const callMask = (node: SyntaxNode, env: Env): number => {
     const fn = node.childForFieldName("function");
     const args = argListOf(node);
+    // Stored provenance read: `UserModel.objects.filter(...)` etc -- the result is as tainted as anything
+    // this batch ever wrote to that model (see taintCore.ts's StoredProvenanceIO docblock).
+    if (storedProvenance && fn?.type === "attribute") {
+      const { object: managerExpr, attribute: method } = attributeParts(fn);
+      if (method && MODEL_READ_METHODS_PY.has(method) && managerExpr?.type === "attribute") {
+        const { object: recv, attribute: manager } = attributeParts(managerExpr);
+        if (manager === "objects" && recv?.type === "identifier") {
+          const modelKey = storedProvenance.modelReceivers.get(recv.text);
+          if (modelKey !== undefined) return storedProvenance.incoming.get(modelKey) ?? 0;
+        }
+      }
+    }
+    // `ModelName(field=value, ...)`: Django constructs an unsaved instance directly by calling the model --
+    // as tainted as its own keyword arguments, both so a later `.save()` picks it up via the ordinary env
+    // lookup below, and so using the instance before saving it is not silently untainted either.
+    if (storedProvenance && fn?.type === "identifier" && storedProvenance.modelReceivers.has(fn.text)) {
+      return args.reduce((m, a) => m | taintMask(a, env), 0);
+    }
     const calleeName = fn ? calleeTextPy(fn) : null;
     if (calleeName) {
       // Known sanitizer: the argument's taint passes THROUGH minus only
@@ -1158,13 +1231,15 @@ interface WalkHooksPy {
   // no LocalFn entry at all, so it needs the self-contained shape instead). See
   // computeExportTaintSummaryPy's docblock for how scanner.ts builds this.
   crossFileShapes?: Map<string, ParamShape[]>;
+  /** Stored/second-order provenance (Django ORM), main scan only -- see taintCore.ts's own docblock. */
+  storedProvenance?: StoredProvenanceIO;
 }
 
 function createWalkerPy(h: WalkHooksPy) {
   const masks = new Map<boolean, TaintMaskFnPy>();
   const maskFor = (django: boolean): TaintMaskFnPy => {
     let m = masks.get(django);
-    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes); masks.set(django, m); }
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance); masks.set(django, m); }
     return m;
   };
 
@@ -2210,6 +2285,9 @@ export function scanAstTaintPython(
   // Parameter -> sink facts for imported names (see ParamSinkFact): a call whose tainted argument reaches a
   // sink INSIDE the imported function's body is reported at the call site.
   crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
+  // Stored/second-order provenance (Django ORM) -- see taintCore.ts's own docblock. Optional, same
+  // "existing callers unaffected" shape as suppressedOut.
+  storedProvenance?: StoredProvenanceIO,
 ): AstTaintPyFinding[] {
   try {
     const root = presparsed ?? parsePythonSourceSync(content, filePath);
@@ -2547,6 +2625,56 @@ export function scanAstTaintPython(
       if (next !== (sticky.get(target.text) ?? 0)) { sticky.set(target.text, next); stickyDirty = true; }
     };
 
+    // Model-instance variable tracking (same-file, one hop): `u = UserModel(name=x)` / `u =
+    // UserModel.objects.get(...)` binds u to the model it came from, so a LATER `u.save()` (with no
+    // receiver text mentioning the model at all) still knows which model to write to.
+    const modelInstanceVarsPy = new Map<string, string>();
+    const recordModelInstanceVarPy = (n: SyntaxNode) => {
+      if (!storedProvenance || n.type !== "assignment") return;
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type !== "identifier" || right?.type !== "call") return;
+      const fn = right.childForFieldName("function");
+      if (fn?.type === "identifier" && storedProvenance.modelReceivers.has(fn.text)) {
+        modelInstanceVarsPy.set(left.text, storedProvenance.modelReceivers.get(fn.text)!);
+        return;
+      }
+      if (fn?.type !== "attribute") return;
+      const { object: managerExpr, attribute: method } = attributeParts(fn);
+      if (!method || managerExpr?.type !== "attribute") return;
+      const { object: recv, attribute: manager } = attributeParts(managerExpr);
+      if (manager !== "objects" || recv?.type !== "identifier") return;
+      if (!MODEL_WRITE_METHODS_PY.has(method) && !MODEL_READ_METHODS_PY.has(method)) return;
+      const modelKey = storedProvenance.modelReceivers.get(recv.text);
+      if (modelKey !== undefined) modelInstanceVarsPy.set(left.text, modelKey);
+    };
+
+    /** Persisting a value to a model this batch can name is a taint SOURCE for whoever reads that model
+     * back later -- see taintCore.ts's StoredProvenanceIO docblock. `.save()` on a known model-instance
+     * variable folds in whatever taintMask's existing field-sensitive tracking already knows about it
+     * (its own base mask plus any `recv.field =` assignments); a direct `objects.create(...)`-style call's
+     * payload is its own arguments. */
+    const recordModelWritePy = (n: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
+      if (!storedProvenance || n.type !== "call") return;
+      const fn = n.childForFieldName("function");
+      if (fn?.type !== "attribute") return;
+      const { object: recv, attribute: method } = attributeParts(fn);
+      const fold = (modelKey: string, mask: number) => {
+        if (!(mask & ALL)) return;
+        storedProvenance.writesOut.set(modelKey, (storedProvenance.writesOut.get(modelKey) ?? 0) | (mask & ALL));
+      };
+      if (method && MODEL_SAVE_METHODS_PY.has(method) && recv?.type === "identifier") {
+        const modelKey = modelInstanceVarsPy.get(recv.text);
+        if (modelKey !== undefined) fold(modelKey, taintMask(recv, env));
+        return;
+      }
+      if (!method || !MODEL_WRITE_METHODS_PY.has(method) || recv?.type !== "attribute") return;
+      const { object: modelRecv, attribute: manager } = attributeParts(recv);
+      if (manager !== "objects" || modelRecv?.type !== "identifier") return;
+      const modelKey = storedProvenance.modelReceivers.get(modelRecv.text);
+      if (modelKey !== undefined) fold(modelKey, argListOf(n).reduce((m, a) => m | taintMask(a, env), 0));
+    };
+
     const onNode = (n: SyntaxNode, env: Env, taintMask: TaintMaskFnPy) => {
       if (n.type === "assignment") {
         const left = n.childForFieldName("left");
@@ -2599,6 +2727,8 @@ export function scanAstTaintPython(
         if (l?.type === "identifier" && r) lastAssigned.set(l.text, r);
       }
       if (n.type === "call" || n.type === "assignment" || n.type === "augmented_assignment") recordSticky(n, env, taintMask);
+      if (n.type === "assignment") recordModelInstanceVarPy(n);
+      if (n.type === "call") recordModelWritePy(n, env, taintMask);
     };
 
     // A request handler's returned string IS the HTML response body (Flask): tainted -> reflected XSS
@@ -2613,7 +2743,7 @@ export function scanAstTaintPython(
       if (m & classOf("xss")) emit("xss", expr, sourceLabelPy(expr), "handler return value");
     };
 
-    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes });
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance });
     const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
 
     walk(root, new Map(), false);

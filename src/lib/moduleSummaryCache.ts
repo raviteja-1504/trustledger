@@ -79,6 +79,11 @@ export interface CachedModuleSummary {
    * own content hash matches. Kept alongside the rest for one round-trip, not a second cache. */
   callGraphEdges?: Array<{ caller: string; callee: string; line: number }>;
   callGraphReachable?: string[];
+  /** isModelFile()'s/isModelFilePy()'s verdict for this file, cached so a scan that reuses this entry
+   * (no re-parse) can still contribute to the batch-wide stored-provenance model registry -- see
+   * taintCore.ts's StoredProvenanceIO docblock. Content-determined alone, so it needs none of the
+   * transitive validity check the summary/sinks fields get: valid whenever the content hash matches. */
+  isModelFile?: boolean;
 }
 
 /** Structural subset of callGraph.ts's own CallEdge -- decoupled so this module doesn't import callGraph.ts

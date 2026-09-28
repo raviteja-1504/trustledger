@@ -57,6 +57,10 @@ export interface CacheKeyInputs {
   pyCrossFile?: Map<string, ShapeLike[]>;
   /** Python incoming parameter -> sink facts: local name -> facts (their location/expression reach the emitted finding). */
   pySinks?: Map<string, { sinks: readonly ParamSinkFact[] }>;
+  /** Stored/second-order provenance (see taintCore.ts's StoredProvenanceIO): THIS file's own model keys
+   * (from its modelReceivers) paired with their batch-converged mask -- not the whole batch-wide map, so
+   * a write to a model this file never touches can't cause a spurious cache miss. */
+  storedProvenanceIncoming?: Array<[string, number]>;
 }
 
 /** Every field of a sink fact that reaches the emitted finding (its location, expression and via-path all
@@ -99,12 +103,15 @@ export function computeFileCacheKey(inp: CacheKeyInputs): string {
         .map(([name, e]) => [name, canonSinks(e.sinks)])
     : [];
   const reachable = inp.crossFileReachable ? [...inp.crossFileReachable].sort() : [];
+  const storedProvenance = inp.storedProvenanceIncoming
+    ? [...inp.storedProvenanceIncoming].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    : [];
   return sha256Hex(JSON.stringify([
     SCAN_CACHE_VERSION, inp.namespace, inp.path, inp.contentHash,
     // toFixed: prPriorBias is a float derived from PR metadata; 6 places is far below any effect on a
     // file's AI% but keeps 0.08 vs 0.0800000000001 (float noise) from causing a spurious miss.
     inp.prPriorBias.toFixed(6),
-    js, reachable, py, pySinks,
+    js, reachable, py, pySinks, storedProvenance,
   ]));
 }
 

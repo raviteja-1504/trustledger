@@ -28,6 +28,7 @@ import type { ReachabilityReport } from "./reachability";
 import {
   parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
   computeExportTaintSummary, computeExportSinkSummary, buildImportBindings, collectReexports,
+  isModelFile, modelLocalNamesInFile,
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
 import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
@@ -44,12 +45,13 @@ import { computeFileCacheKey, cloneAnalysis, sha256Hex } from "./incrementalCach
 import type { CachedFileResult } from "./incrementalCache";
 import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries } from "./moduleSummaryCache";
 import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
-import type { TraceStep, ParamSinkFact } from "./taint/taintCore";
+import type { TraceStep, ParamSinkFact, StoredProvenanceIO } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
   computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy,
+  isModelFilePy, modelLocalNamesInFilePy,
 } from "./astTaintPython";
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
@@ -6176,8 +6178,9 @@ function findAstTaintFindings(
   crossFilePropagating?: Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string; sinks?: ParamSinkFact[] }>,
   suppressed?: SuppressedSink[],
   crossFileSources?: Map<string, ts.SourceFile>,
+  storedProvenance?: StoredProvenanceIO,
 ): ScanIndicator[] {
-  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed, crossFileSources).map(f => ({
+  return scanAstTaint(content, filePath, sourceFile, crossFilePropagating, suppressed, crossFileSources, storedProvenance).map(f => ({
     id: f.id, label: astTaintLabel(f.id), severity: f.severityOverride ?? astTaintSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6190,8 +6193,9 @@ function findAstTaintPythonFindings(
   content: string, filePath: string, rootNode: PySyntaxNode, suppressed?: SuppressedSink[],
   crossFileShapes?: Map<string, PyParamShape[]>,
   crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
+  storedProvenance?: StoredProvenanceIO,
 ): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks).map(f => ({
+  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks, storedProvenance).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: f.severityOverride ?? astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6289,6 +6293,11 @@ export function analyzeFile(
   // Python parameter -> sink facts for imported names (see ParamSinkFact) -- same batch-scoped,
   // runScan()-computed, not-persisted shape as crossFileShapesPy above.
   crossFileSinksPy?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
+  // Stored/second-order provenance (JS/TS + Python, see taintCore.ts's StoredProvenanceIO docblock) --
+  // same batch-scoped, runScan()-computed, not-persisted shape as the params above. runScan() builds
+  // ONE object per file (its own modelReceivers, the batch's converged `incoming`) and passes it to
+  // BOTH engines below; only the one matching this file's language ever consults it.
+  storedProvenance?: StoredProvenanceIO,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6410,8 +6419,8 @@ export function analyzeFile(
   // never filtered here.
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
-    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy) : []),
+    ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks) : []),
@@ -7123,7 +7132,14 @@ export function runScan(input: ScanInput): ScanOutput {
   );
   // Every file's imports/reexports/call-graph as used THIS scan (cached verbatim, or freshly derived) --
   // the raw material module_cache is built from at the end, once summaries/sinks have converged below.
-  const moduleCacheDraft = new Map<string, { imports: CachedImportEdge[]; reexports: CachedReexportEdge[]; callGraphEdges?: CallEdgeLike[]; callGraphReachable?: string[] }>();
+  const moduleCacheDraft = new Map<string, { imports: CachedImportEdge[]; reexports: CachedReexportEdge[]; callGraphEdges?: CallEdgeLike[]; callGraphReachable?: string[]; isModelFile?: boolean }>();
+  // Stored/second-order provenance model registry (see taintCore.ts's StoredProvenanceIO docblock):
+  // a model file's OWN locally-declared name(s), only ever populated for a FRESHLY parsed file this
+  // scan (a cache-valid file's self-usage was already covered whichever earlier scan first parsed it --
+  // an accepted, documented gap, not a correctness issue, since same-file self-usage is the rare case;
+  // real ORM usage is overwhelmingly cross-file, per corpus research).
+  const jsModelLocalNames = new Map<string, string[]>();
+  const pyModelLocalNames = new Map<string, string[]>();
 
   const jsSourceFiles = new Map<string, ts.SourceFile>();
   const jsFileGraphs: FileGraph[] = [];
@@ -7134,6 +7150,7 @@ export function runScan(input: ScanInput): ScanOutput {
       moduleCacheDraft.set(f.path, {
         imports: cached.imports, reexports: cached.reexports,
         callGraphEdges: cached.callGraphEdges, callGraphReachable: cached.callGraphReachable,
+        isModelFile: cached.isModelFile,
       });
       const summary = new Map(cached.summary), sinks = new Map(cached.sinks);
       jsFileGraphs.push({
@@ -7158,9 +7175,12 @@ export function runScan(input: ScanInput): ScanOutput {
       localName: b.localName, importedName: b.importedName, moduleSpecifier: b.moduleSpecifier, namespace: b.namespace,
     }));
     const reexports = collectReexports(sf);
+    const fileIsModel = isModelFile(sf);
+    if (fileIsModel) jsModelLocalNames.set(f.path, modelLocalNamesInFile(sf));
     moduleCacheDraft.set(f.path, {
       imports: imports.map(imp => ({ ...imp, resolvedPath: resolveImportPath(f.path, imp.moduleSpecifier, allScanPaths) })),
       reexports: reexports.map(re => ({ ...re, resolvedPath: resolveImportPath(f.path, re.moduleSpecifier, allScanPaths) })),
+      isModelFile: fileIsModel,
     });
     jsFileGraphs.push({
       path: f.path,
@@ -7238,7 +7258,7 @@ export function runScan(input: ScanInput): ScanOutput {
     if (detectLanguage(f.path) !== "python" || !isPythonParserReady()) continue;
     if (pyValidPaths.has(f.path)) {
       const cached = prevModuleCache[f.path];
-      moduleCacheDraft.set(f.path, { imports: cached.imports, reexports: [] });
+      moduleCacheDraft.set(f.path, { imports: cached.imports, reexports: [], isModelFile: cached.isModelFile });
       const summary = new Map(cached.summary), sinks = new Map(cached.sinks);
       pyFileGraphs.push({
         path: f.path,
@@ -7260,12 +7280,15 @@ export function runScan(input: ScanInput): ScanOutput {
       moduleSpecifier: `${".".repeat(e.dots)}${e.dotted}`,
       namespace: e.namespace,
     }));
+    const fileIsModelPy = isModelFilePy(root);
+    if (fileIsModelPy) pyModelLocalNames.set(f.path, modelLocalNamesInFilePy(root));
     moduleCacheDraft.set(f.path, {
       imports: pyImports.map(imp => {
         const dots = imp.moduleSpecifier.match(/^\.*/)?.[0].length ?? 0;
         return { ...imp, resolvedPath: resolvePythonImportPath(f.path, dots, imp.moduleSpecifier.slice(dots), allScanPaths) };
       }),
       reexports: [],
+      isModelFile: fileIsModelPy,
     });
     pyFileGraphs.push({
       path: f.path,
@@ -7294,6 +7317,7 @@ export function runScan(input: ScanInput): ScanOutput {
       imports: draft.imports, reexports: draft.reexports,
       summary: mapToEntries(summary), sinks: mapToEntries(sinks),
       callGraphEdges: draft.callGraphEdges, callGraphReachable: draft.callGraphReachable,
+      isModelFile: draft.isModelFile,
     };
   }
 
@@ -7312,6 +7336,68 @@ export function runScan(input: ScanInput): ScanOutput {
     pyShapesOnly.set(path, new Map([...entries].map(([name, info]) => [name, info.shapes])));
   }
 
+  // ── Stored/second-order provenance (Sequelize/Mongoose + Django ORM) -- see taintCore.ts's
+  // StoredProvenanceIO docblock. A batch-wide registry, built AFTER the cross-file bridges above so
+  // isModelFile/isModelFilePy verdicts (fresh or cache-carried, via moduleCacheDraft) are settled for
+  // every file first. For each file that imports a name resolving to a model file (or itself declares
+  // one -- jsModelLocalNames/pyModelLocalNames), map that local name to the model's own file path, its
+  // batch-wide key. A batch with no recognized ORM models anywhere leaves this empty and every
+  // downstream step below a no-op, so a scan with no ORM usage pays zero extra cost for this feature.
+  const modelReceiversByFile = new Map<string, Map<string, string>>();
+  for (const [path, draft] of moduleCacheDraft) {
+    const receivers = new Map<string, string>();
+    for (const imp of draft.imports) {
+      if (imp.resolvedPath && moduleCacheDraft.get(imp.resolvedPath)?.isModelFile) {
+        receivers.set(imp.localName, imp.resolvedPath);
+      }
+    }
+    const selfNames = jsModelLocalNames.get(path) ?? pyModelLocalNames.get(path);
+    if (selfNames) for (const name of selfNames) receivers.set(name, path);
+    if (receivers.size > 0) modelReceiversByFile.set(path, receivers);
+  }
+
+  // Batch-wide converged mask per model key ("has this model EVER been written to, and with which sink
+  // classes"). Fixed point over just the files that reference a model (never the whole batch) -- bounded
+  // the same way taint/crossFile.ts's own MAX_CROSS_FILE_ROUNDS is, for a chained write (a value read
+  // from model A, then saved to model B) to converge; the dominant real-world shape (a single write, read
+  // back in another file) already converges in round 1. Re-parses a model-referencing file that was
+  // skipped by the module-summary cache above (jsSourceFiles/pySourceFiles has no entry for it) --
+  // an accepted, bounded extra cost that only ORM-using batches ever pay.
+  const modelWritesAggregate = new Map<string, number>();
+  if (modelReceiversByFile.size > 0) {
+    const fileContentByPath = new Map(allFiles.map(f => [f.path, f.content]));
+    const MAX_STORED_PROVENANCE_ROUNDS = 3;
+    for (let round = 0; round < MAX_STORED_PROVENANCE_ROUNDS; round++) {
+      let grew = false;
+      for (const [path, receivers] of modelReceiversByFile) {
+        const modelContent = fileContentByPath.get(path);
+        if (modelContent === undefined) continue;
+        const spWrite: StoredProvenanceIO = { modelReceivers: receivers, incoming: modelWritesAggregate, writesOut: new Map() };
+        const lang = detectLanguage(path);
+        if (lang === "javascript" || lang === "typescript") {
+          const sf = jsSourceFiles.get(path) ?? (shouldAstParse(modelContent, path) ? parseSourceFile(modelContent, path) : null);
+          if (sf) scanAstTaint(modelContent, path, sf, undefined, undefined, undefined, spWrite);
+        } else if (lang === "python" && isPythonParserReady()) {
+          const root = pySourceFiles.get(path) ?? parsePythonSourceSync(modelContent, path);
+          if (root) scanAstTaintPython(modelContent, path, root, undefined, undefined, undefined, spWrite);
+        }
+        for (const [key, mask] of spWrite.writesOut) {
+          const prev = modelWritesAggregate.get(key) ?? 0;
+          const next = prev | mask;
+          if (next !== prev) { modelWritesAggregate.set(key, next); grew = true; }
+        }
+      }
+      if (!grew) break;
+    }
+  }
+  // One StoredProvenanceIO per file that references a model, sharing the SAME converged `incoming` map
+  // (read-only from here on) -- undefined for every other file, so analyzeFile()'s existing "absent =
+  // today's behavior" contract holds for the overwhelming majority of files even in an ORM-using batch.
+  const storedProvenanceByFile = new Map<string, StoredProvenanceIO>();
+  for (const [path, receivers] of modelReceiversByFile) {
+    storedProvenanceByFile.set(path, { modelReceivers: receivers, incoming: modelWritesAggregate, writesOut: new Map() });
+  }
+
   // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
@@ -7326,6 +7412,8 @@ export function runScan(input: ScanInput): ScanOutput {
       crossFileReachable: crossFileReachableByFile.get(f.path),
       pyCrossFile: pyShapesOnly.get(f.path),
       pySinks: pySinksByFile.get(f.path),
+      storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
+        [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7333,7 +7421,7 @@ export function runScan(input: ScanInput): ScanOutput {
       : analyzeFile(
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
-          pySinksByFile.get(f.path),
+          pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
