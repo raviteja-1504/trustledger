@@ -124,6 +124,30 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
   return false;
 }
 
+const RESPONSE_PARAM_NAMES = new Set(["res", "response", "reply"]);
+const REQUEST_TYPE_RE = /^(?:express\.)?(?:Request|FastifyRequest|IncomingMessage|NextApiRequest)\b/;
+
+/**
+ * A handler whose request parameter is destructured -- `({ query }: Request, res) => ...`,
+ * `({ params, body }, res) => ...`: the names bound from query/body/params/headers/cookies are request input.
+ * The first parameter counts as the request only on positive evidence: a request type annotation, or a
+ * following parameter named like a response. Returns local name -> taint mask.
+ */
+function destructuredRequestSources(f: ts.FunctionLikeDeclaration): Map<string, number> {
+  const out = new Map<string, number>();
+  const [first, second] = f.parameters;
+  if (!first || !ts.isObjectBindingPattern(first.name)) return out;
+  const typed = !!first.type && REQUEST_TYPE_RE.test(first.type.getText());
+  const resNamed = !!second && ts.isIdentifier(second.name) && RESPONSE_PARAM_NAMES.has(second.name.text);
+  if (!typed && !resNamed) return out;
+  for (const el of first.name.elements) {
+    const prop = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text
+      : ts.isIdentifier(el.name) ? el.name.text : null;
+    if (prop && SOURCE_PROPS.has(prop) && ts.isIdentifier(el.name)) out.set(el.name.text, ALL);
+  }
+  return out;
+}
+
 // ── Sink dispatch table ──────────────────────────────────────────────────────
 
 // Sanitizers live in taint/sanitizers.ts, keyed by the sink classes each one
@@ -155,6 +179,11 @@ const NOSQL_TAILS = new Set([
   "deleteOne", "deleteMany", "replaceOne", "aggregate", "countDocuments",
 ]);
 const NOSQL_RECEIVER_RE = /mongo|collection|coll\b|nosql|couch|dynamo|cosmos|\bdb\b|model|users?\b|orders?\b|accounts?\b/i;
+// Legacy Mongo-API verbs (MongoDB driver <4, MarsDB/NeDB, Mongoose Model.update/remove/count). They share names
+// with ORM instance methods -- Sequelize's `user.update({...})` is a normal write -- so they need a receiver
+// that is unmistakably a document collection.
+const NOSQL_LEGACY_TAILS = new Set(["update", "remove", "count", "findAndModify"]);
+const NOSQL_COLLECTION_RE = /mongo|collection|coll\b|nosql|\bdb\.[A-Za-z_$]/i;
 const GLOBAL_OBJECTS = new Set(["globalThis", "window", "global", "self"]);
 
 const isFunctionExpr = (e: ts.Node): e is ts.ArrowFunction | ts.FunctionExpression =>
@@ -324,8 +353,24 @@ function calleeText(expr: ts.Expression): string | null {
   return null;
 }
 
+/** MongoDB driver shape `<x>.collection("name").<verb>(filter, ...)` (also `client.db("app").collection(...)`):
+ * the receiver contains a call, so calleeText can't name it. Returns the query verb when it is one. */
+function mongoCollectionVerb(callee: ts.Expression): string | null {
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const recv = callee.expression;
+  if (!ts.isCallExpression(recv) || !ts.isPropertyAccessExpression(recv.expression)) return null;
+  if (recv.expression.name.text !== "collection" && recv.expression.name.text !== "getCollection") return null;
+  const verb = callee.name.text;
+  return NOSQL_TAILS.has(verb) || NOSQL_LEGACY_TAILS.has(verb) ? verb : null;
+}
+
 function matchSink(call: ts.CallExpression, importMap: Map<string, string>): SinkMatch | null {
   const callee = call.expression;
+  const mongoVerb = mongoCollectionVerb(callee);
+  if (mongoVerb && call.arguments[0] && !isFunctionExpr(call.arguments[0]) && !ts.isStringLiteral(call.arguments[0])) {
+    const recvText = (callee as ts.PropertyAccessExpression).expression.getText().replace(/\s+/g, "");
+    return { id: "nosql-injection", sinkExpr: `${recvText}.${mongoVerb}`, args: [call.arguments[0]] };
+  }
   const text = calleeText(callee) ?? fluentResponseText(callee);
   if (!text) return null;
   const parts = text.split(".");
@@ -374,6 +419,10 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   }
   if (parts.length > 1 && NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) &&
       !ts.isStringLiteral(call.arguments[0]) && NOSQL_RECEIVER_RE.test(parts.slice(0, -1).join("."))) {
+    return { id: "nosql-injection", sinkExpr: text, args: [call.arguments[0]] };
+  }
+  if (parts.length > 1 && NOSQL_LEGACY_TAILS.has(tail) && call.arguments[0] && ts.isObjectLiteralExpression(unwrapExpr(call.arguments[0])) &&
+      NOSQL_COLLECTION_RE.test(parts.slice(0, -1).join("."))) {
     return { id: "nosql-injection", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && DB_SINK_METHODS.has(tail)) {
@@ -618,7 +667,9 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     // deliberately excluded (a tainted condition does not make the chosen
     // constant tainted).
     if (ts.isConditionalExpression(expr)) {
-      return taintMask(expr.whenTrue, env) | taintMask(expr.whenFalse, env);
+      // `ALLOWED.includes(E) ? E : "default"`: the arm the condition proves is a literal member is clean.
+      const proven = literalProvenArms(expr);
+      return (proven.whenTrue ? 0 : taintMask(expr.whenTrue, env)) | (proven.whenFalse ? 0 : taintMask(expr.whenFalse, env));
     }
     if (ts.isTemplateExpression(expr)) return expr.templateSpans.reduce((m, s) => m | taintMask(s.expression, env), 0);
     if (ts.isSpreadElement(expr)) return taintMask(expr.expression, env);
@@ -877,6 +928,44 @@ function isLiteralCollection(e: ts.Expression, sf: ts.SourceFile, depth = 0): bo
 
 const invert = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
 
+/** Expression text of `cond` proven to be a literal when `cond` is true (holds "true") or false ("false"):
+ * `LIST.includes(E)` / `SET.has(E)` against a literal-only collection, or `E === literal`. Same closed guard set
+ * as guardsOfCondition, but for any expression E, compared by exact text. */
+function literalMembership(cond: ts.Expression, sf: ts.SourceFile): Array<{ text: string; holds: "true" | "false" }> {
+  if (ts.isParenthesizedExpression(cond)) return literalMembership(cond.expression, sf);
+  if (ts.isPrefixUnaryExpression(cond) && cond.operator === ts.SyntaxKind.ExclamationToken) {
+    return literalMembership(cond.operand, sf).map(g => ({ text: g.text, holds: g.holds === "true" ? "false" : "true" }));
+  }
+  const norm = (e: ts.Expression) => e.getText(sf).replace(/\s+/g, "");
+  if (ts.isCallExpression(cond) && ts.isPropertyAccessExpression(cond.expression) &&
+      (cond.expression.name.text === "includes" || cond.expression.name.text === "has") &&
+      cond.arguments.length === 1 && isLiteralCollection(cond.expression.expression, sf)) {
+    return [{ text: norm(cond.arguments[0]), holds: "true" }];
+  }
+  if (ts.isBinaryExpression(cond)) {
+    const k = cond.operatorToken.kind;
+    const eq = k === ts.SyntaxKind.EqualsEqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsToken;
+    const neq = k === ts.SyntaxKind.ExclamationEqualsEqualsToken || k === ts.SyntaxKind.ExclamationEqualsToken;
+    if (eq || neq) {
+      const holds = eq ? "true" : "false";
+      if (isLiteralNode(cond.right) && !isLiteralNode(cond.left)) return [{ text: norm(cond.left), holds }];
+      if (isLiteralNode(cond.left) && !isLiteralNode(cond.right)) return [{ text: norm(cond.right), holds }];
+    }
+  }
+  return [];
+}
+
+function literalProvenArms(c: ts.ConditionalExpression): { whenTrue: boolean; whenFalse: boolean } {
+  const sf = c.getSourceFile();
+  const facts = literalMembership(c.condition, sf);
+  const t = c.whenTrue.getText(sf).replace(/\s+/g, "");
+  const f = c.whenFalse.getText(sf).replace(/\s+/g, "");
+  return {
+    whenTrue: facts.some(g => g.holds === "true" && g.text === t),
+    whenFalse: facts.some(g => g.holds === "false" && g.text === f),
+  };
+}
+
 /**
  * The variables a condition PROVES safe, and on which side. Deliberately a
  * closed, unambiguous set -- literal-collection membership, strict
@@ -987,6 +1076,13 @@ function createWalker(h: WalkerHooks) {
   const { taintMask, sf } = h;
 
   const handleExpr = (node: ts.Node, env: Env) => {
+    // The expression may itself BE a function -- `return (req, res) => {...}` (a handler factory) or a curried
+    // arrow's expression body. Walk it as a function; scanning it as a flat expression would skip its
+    // statements, so its locals never enter the environment and taint through them is lost.
+    if (isFunctionLike(node)) {
+      if (h.descendFunctions) walkFunction(node, env);
+      return;
+    }
     const fns: ts.Node[] = [];
     scanExprSkippingFunctions(node, n => h.onVisit?.(n, env), fns);
     if (h.descendFunctions) for (const f of fns) walkFunction(f, env);
@@ -999,6 +1095,7 @@ function createWalker(h: WalkerHooks) {
     // parameters shadow same-named outer ones and start untainted.
     const fenv = cloneEnv(env);
     for (const prm of f.parameters) if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, 0);
+    for (const [name, mask] of destructuredRequestSources(f)) fenv.set(name, mask);
     if (ts.isBlock(f.body)) walkNode(f.body, fenv);
     else handleExpr(f.body, fenv);
   };

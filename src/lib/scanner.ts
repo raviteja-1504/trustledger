@@ -6561,8 +6561,13 @@ export function analyzeFile(
     // real trace a same-line regex/keyword match never has; keeping whichever fired first would
     // silently throw that away whenever a regex detector also happens to fire at the same id+line.
     // supportingDetectors already accumulated above is preserved across the swap either way.
-    if ((i.confidence ?? 0) > (existing.confidence ?? 0)) {
-      byKey.set(k, { ...i, supportingDetectors: existing.supportingDetectors });
+    // On a confidence tie, the record carrying real data-flow evidence (sourceExpr/trace) wins: some regex
+    // detectors also score 95, and keeping theirs would drop the AST path from every downstream surface.
+    const better = (i.confidence ?? 0) > (existing.confidence ?? 0) ||
+      ((i.confidence ?? 0) === (existing.confidence ?? 0) && !!i.sourceExpr && !existing.sourceExpr);
+    if (better) {
+      const supporting = [...(existing.supportingDetectors ?? []), existing.label].filter(l => l !== i.label);
+      byKey.set(k, { ...i, supportingDetectors: [...new Set(supporting)] });
     }
   }
   const indicators = Array.from(byKey.values());

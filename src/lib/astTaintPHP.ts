@@ -82,10 +82,11 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  KIND_POSITION_SENSITIVE, type Branch, type Guard, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { assessSqlInjection, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 
 declare const __non_webpack_require__: NodeJS.Require | undefined;
@@ -450,6 +451,11 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       }
       return m;
     }
+    if (node.type === "subscript_expression") {
+      // A literal-indexed element a guard has proven safe (`is_numeric($octet[0])`) has its own key.
+      const key = elementKeyPHP(node);
+      if (key && env.has(key)) return env.get(key)!;
+    }
     if (node.type === "member_access_expression") {
       // Field-sensitive read: OR the full dotted path composite key (set by
       // the assignment write-side below) with the base's own mask -- pure
@@ -469,7 +475,10 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         // Known sanitizer: the argument's taint passes THROUGH minus only
         // the classes it neutralizes (filter_var depends on its constant).
         const clears = sanitizerClears("php", fnName, args.map(a => a.text));
-        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+        if (clears !== null) {
+          const data = args[sanitizerDataArgPHP(fnName, args.length)];
+          return data ? applySanitizer(taintMask(data, env), clears) : 0;
+        }
       }
       // filter_input(...) -- itself a source call, regardless of args.
       if (fnName === "filter_input") return ALL;
@@ -506,7 +515,9 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       if (methodName) {
         const args = argListOfPHP(node);
         const clears = sanitizerClears("php", calleeTextPHP(node) ?? methodName, args.map(a => a.text));
-        if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+        // PDO::quote() returns a complete quoted literal, safe in any SQL position -- unlike an escaper,
+        // whose output is only safe once placed inside quotes.
+        if (clears !== null) return args[0] ? (methodName === "quote" ? applyClears : applySanitizer)(taintMask(args[0], env), clears) : 0;
       }
       if (methodName && LARAVEL_REQUEST_METHODS.has(methodName)) return ALL;
       // Generic passthrough: a method call on an already-tainted receiver
@@ -679,6 +690,77 @@ const CMD_FUNCTIONS = new Set(["shell_exec", "system", "passthru", "popen", "pro
 // conflict.
 const NOSQL_CALL_TAILS = new Set(["find", "findOne", "findMany", "updateOne", "deleteOne", "remove"]);
 
+/** Which argument a PHP sanitizer actually transforms: procedural mysqli/pg escapers take the connection
+ * FIRST and the value second (`mysqli_real_escape_string($link, $str)`); everything else takes the value first. */
+function sanitizerDataArgPHP(fnName: string, argCount: number): number {
+  if (fnName === "mysqli_real_escape_string") return argCount >= 2 ? 1 : 0;
+  if (fnName === "pg_escape_string" || fnName === "pg_escape_literal" || fnName === "pg_escape_identifier") return argCount >= 2 ? 1 : 0;
+  return 0;
+}
+
+/** Most recent `$name = <expr>` before `at`, within the enclosing function (or the file, for top-level script
+ * code) -- lets a query built in a variable be position-checked where it's executed. */
+function lastAssignmentPHP(name: string, at: SyntaxNode): SyntaxNode | null {
+  let scope: SyntaxNode | null = enclosingScopePHP(at);
+  if (!scope) { scope = at; while (scope.parent) scope = scope.parent; }
+  let best: SyntaxNode | null = null;
+  const visit = (n: SyntaxNode) => {
+    if (n.startIndex >= at.startIndex) return;
+    if (n !== scope && ANY_FUNCTION_NODES_PHP.has(n.type)) return;
+    if (n.type === "assignment_expression") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "variable_name" && variableBareName(left) === name && right) best = right;
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return best;
+}
+
+/** A PHP string expression as literal text and opaque value parts -- "..." with interpolation, '...', and `.`. */
+function decomposeSqlPHP(node: SyntaxNode): UrlPart<SyntaxNode>[] {
+  while (node.type === "parenthesized_expression" && node.namedChildren[0]) node = node.namedChildren[0]!;
+  if (node.type === "string" || node.type === "encapsed_string") {
+    const parts: UrlPart<SyntaxNode>[] = [];
+    for (const c of node.namedChildren) {
+      if (!c) continue;
+      if (c.type === "string_content" || c.type === "string_value" || c.type === "escape_sequence") parts.push({ kind: "literal", text: c.text });
+      else parts.push({ kind: "opaque", node: c });
+    }
+    return parts;
+  }
+  if (node.type === "binary_expression" && node.childForFieldName("operator")?.text === ".") {
+    const l = node.childForFieldName("left"), r = node.childForFieldName("right");
+    if (l && r) return [...decomposeSqlPHP(l), ...decomposeSqlPHP(r)];
+  }
+  return [{ kind: "opaque", node }];
+}
+
+/** SQL position check for a query whose taint was cleared only by ESCAPING: an escaped value is a defence
+ * inside a quoted literal and none outside one (`WHERE id = $id`). See taint/sinkShape.ts. */
+function escapedSqlInWrongPositionPHP(
+  sink: SyntaxNode, args: SyntaxNode[], argMasks: number[], taintMask: TaintMaskFnPHP, env: Env,
+): SyntaxNode | null {
+  const SQL = classOf("sql-injection");
+  if (argMasks.some(m => m & SQL)) return null;   // plainly tainted: the normal sink check reports it
+  for (let i = 0; i < args.length; i++) {
+    const m = argMasks[i];
+    if (!(m & KIND_POSITION_SENSITIVE) || !wasCleared(m, SQL)) continue;
+    let expr = args[i];
+    if (expr.type === "variable_name") {
+      const nm = variableBareName(expr);
+      const rhs = nm ? lastAssignmentPHP(nm, sink) : null;
+      if (rhs) expr = rhs;
+    }
+    const verdict = assessSqlInjection(decomposeSqlPHP(expr), n => taintMask(n, env));
+    if (verdict.verdict === "vulnerable") return verdict.culprit!;
+  }
+  return null;
+}
+const ESCAPED_SQL_DETAIL_PHP = (culprit: string) =>
+  `Escaped value '${culprit}' is placed outside a quoted string literal (an unquoted numeric position or an identifier) — string-escaping only neutralizes characters that break out of a quoted literal`;
+
 function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const fnNode = node.childForFieldName("function");
   const fnName = fnNode?.type === "name" ? fnNode.text : null;
@@ -701,7 +783,9 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
   };
 
   if (SQL_FUNCTIONS.has(fnName)) {
-    fire("sql-injection");
+    const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
+    if (culprit) emit(ctx, "sql-injection", node, culprit.text, fnName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
+    else fire("sql-injection");
   } else if (CMD_FUNCTIONS.has(fnName)) {
     fire("command-injection");
   } else if (fnName === "unserialize") {
@@ -783,7 +867,9 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     if (methodName === "query" && receiverName && ctx.varTypes.get(receiverName) === "DOMXPath") {
       fire("xpath-injection");
     } else {
-      fire("sql-injection");
+      const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
+      if (culprit) emit(ctx, "sql-injection", node, culprit.text, methodName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
+      else fire("sql-injection");
     }
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
     fire("nosql-injection");
@@ -918,6 +1004,29 @@ function invertPHP(g: Guard): Guard {
   return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
 }
 
+/** `$a[0]` / `$a['k']` -> "a[0]" / "a['k']": an environment key for one literal-indexed element. */
+function elementKeyPHP(node: SyntaxNode): string | null {
+  const [base, idx] = node.namedChildren;
+  if (!base || !idx || base.type !== "variable_name") return null;
+  if (idx.type !== "integer" && idx.type !== "string" && idx.type !== "encapsed_string") return null;
+  if (idx.type === "encapsed_string" && idx.namedChildren.some(c => c && c.type !== "string_content")) return null;
+  const name = variableBareName(base);
+  return name ? `${name}[${idx.text}]` : null;
+}
+
+/** Before a condition's guards apply, give each literal-indexed element it mentions its own key (the array's
+ * current taint), so a guard like is_numeric($octet[0]) has something to clear in the arm it protects. */
+function seedElementKeysPHP(cond: SyntaxNode, env: Env, taintMask: TaintMaskFnPHP): void {
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "subscript_expression") {
+      const key = elementKeyPHP(n);
+      if (key && !env.has(key)) { const m = taintMask(n, env); if (m) env.set(key, m); }
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(cond);
+}
+
 function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): Guard[] {
   switch (cond.type) {
     case "parenthesized_expression": {
@@ -955,6 +1064,9 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
       if (!fnName || args.length === 0) return [];
       const a0 = args[0].type === "variable_name" ? variableBareName(args[0]) : null;
       if (NUMERIC_CHECK_FUNCTIONS_PHP.has(fnName) && a0) return [{ name: a0, holds: "true" }];
+      // is_numeric($parts[0]) -- a literal-indexed element (see elementKeyPHP / seedElementKeysPHP)
+      const el0 = args[0].type === "subscript_expression" ? elementKeyPHP(args[0]) : null;
+      if (NUMERIC_CHECK_FUNCTIONS_PHP.has(fnName) && el0) return [{ name: el0, holds: "true" }];
       // in_array($x, ["a","b"], true) -- loose (no/false 3rd arg) needs string-only elements
       if (fnName === "in_array" && a0 && args.length >= 2) {
         const strict = args[2]?.type === "boolean" && args[2].text.toLowerCase() === "true";
@@ -1115,7 +1227,7 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const cond = node.childForFieldName("condition");
         const body = node.childForFieldName("body");
         branches.push({
-          visitCond: (e) => { if (cond) walk(cond, e); },
+          visitCond: (e) => { if (cond) { walk(cond, e); seedElementKeysPHP(cond, e, taintMask); } },
           guards: () => (cond ? guardsOfConditionPHP(cond, root) : []),
           body: (e) => (body ? walk(body, e) : false),
         });
@@ -1125,7 +1237,7 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
           if (alt.type === "else_if_clause") {
             const acond = alt.childForFieldName("condition");
             branches.push({
-              visitCond: (e) => { if (acond) walk(acond, e); },
+              visitCond: (e) => { if (acond) { walk(acond, e); seedElementKeysPHP(acond, e, taintMask); } },
               guards: () => (acond ? guardsOfConditionPHP(acond, root) : []),
               body: (e) => (abody ? walk(abody, e) : false),
             });
@@ -1143,7 +1255,7 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const alt = node.childForFieldName("alternative");
         walkIfChain(env, [
           {
-            visitCond: (e) => { if (cond) walk(cond, e); },
+            visitCond: (e) => { if (cond) { walk(cond, e); seedElementKeysPHP(cond, e, taintMask); } },
             guards: () => (cond ? guardsOfConditionPHP(cond, root) : []),
             body: (e) => { if (cons) walk(cons, e); return false; },
           },
