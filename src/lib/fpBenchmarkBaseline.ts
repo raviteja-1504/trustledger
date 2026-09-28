@@ -54,7 +54,7 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "This line is inside a detector's own pattern-DEFINITION list (e.g. HIGH_RISKS) -- a regex literal used to detect this vulnerability class elsewhere in scanned code, not an actual occurrence of it in this file." },
   { file: "src/lib/compliance.ts", id: "eval-exec", lineHash: "572897493573", line: 137, severity: "critical",
     reason: "UI/catalog/label content describing this vulnerability class to users (a string literal shown in the product's own vulnerability-description, SARIF-rule, or threat-catalog UI) -- not executable code containing the vulnerability itself." },
-  { file: "src/lib/sarif.ts", id: "eval-exec", lineHash: "a86b069f7612", line: 35, severity: "critical",
+  { file: "src/lib/findingCatalog.ts", id: "eval-exec", lineHash: "a86b069f7612", line: 23, severity: "critical",
     reason: "UI/catalog/label content describing this vulnerability class to users (a string literal shown in the product's own vulnerability-description, SARIF-rule, or threat-catalog UI) -- not executable code containing the vulnerability itself." },
   { file: "src/lib/seed.ts", id: "eval-exec", lineHash: "7bc2608ba37f", line: 241, severity: "critical",
     reason: "UI/catalog/label content describing this vulnerability class to users (a string literal shown in the product's own vulnerability-description, SARIF-rule, or threat-catalog UI) -- not executable code containing the vulnerability itself." },

@@ -22,7 +22,10 @@ import {
   updateCheckRun,
   buildCheckSummary,
 } from "@/lib/github";
-import { runScan } from "@/lib/scanner";
+import { runScan, getFixSuggestions } from "@/lib/scanner";
+import { buildCheckAnnotations } from "@/lib/checkAnnotations";
+import { collectFindingReports } from "@/lib/findingReport";
+import type { FileIndicator } from "@/types";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { safeEqual } from "@/lib/safeEqual";
 import { writeAuditLog } from "@/lib/audit";
@@ -673,6 +676,15 @@ export async function POST(req: NextRequest) {
       })),
     ];
     const mergedResult = { ...result, files: mergedFiles };
+    // Unified finding evidence for the check-run annotations and PR comment: freshly scanned files plus
+    // unchanged files carried over from the previous scan (their stored indicators), so a delta push doesn't
+    // drop the inline annotations of files it didn't touch.
+    const evidenceFiles = [
+      ...result.files,
+      ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [] })),
+    ];
+    const fixesById = new Map(getFixSuggestions(evidenceFiles.flatMap(f => f.indicators ?? [])).map(fix => [fix.vuln_id, fix]));
+    const reviewUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/pr/${result.scan_id}`;
 
     // Re-check supersession before finalizing -- the scan itself (fetch +
     // analyze + persist) can take tens of seconds, long enough for another
@@ -713,7 +725,7 @@ export async function POST(req: NextRequest) {
       const { title, summary } = buildCheckSummary(mergedResult);
       await updateCheckRun(token, owner, repoName, checkRunId, {
         name: "TrustLedger AI Governance", status: "completed", conclusion,
-        output: { title, summary },
+        output: { title, summary, annotations: buildCheckAnnotations(evidenceFiles, { fixesById, reviewUrl }) },
       });
     }
 
@@ -727,6 +739,7 @@ export async function POST(req: NextRequest) {
           overall_risk: mergedResult.overall_risk,
           total_ai_percentage: result.total_ai_percentage,
           evidence_breakdown: result.evidence_breakdown,
+          findings: collectFindingReports(evidenceFiles, fixesById),
           files: mergedResult.files.map(f => ({
             file_path: f.file_path, risk_score: f.risk_score,
             ai_percentage: f.ai_percentage, risk_indicators: f.risk_indicators,

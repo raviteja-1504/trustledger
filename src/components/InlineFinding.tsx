@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { FileIndicator, FixSuggestion } from "@/types";
 import { buildFindingEvidence, type CheckTone, type FlowStep, type Part } from "@/lib/findingEvidence";
 import { cweFor } from "@/lib/cweMap";
+import { findingMeta } from "@/lib/findingCatalog";
 import { REACH_DESC, REACH_LABEL, URGENCY_DESC, URGENCY_LABEL } from "@/lib/signalClassification";
 
 export interface FindingMeta { label?: string; desc?: string; security?: boolean }
@@ -178,7 +179,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
   const ev = useMemo(() => buildFindingEvidence(ind, filePath, siblings), [ind, filePath, siblings]);
   const sev = normSev(ind.severity);
   const style = SEV_STYLE[sev];
-  const title = meta?.label ?? ind.label;
+  const title = meta?.label ?? findingMeta(ind.id, ind.label).title;
   const cweId = ind.cwe ?? cweFor(ind.id)?.id;
   const cweTitle = cweFor(ind.id)?.title;
   const cweNum = cweId?.match(/\d+/)?.[0];

@@ -1,54 +1,15 @@
 /**
  * GitHub PR comment builder — shared between webhook route and comment API.
  */
+import { findingMeta } from "./findingCatalog";
+import { inputToSink, partsToText, reportHeading, type FindingReport } from "./findingReport";
 
 const RISK_EMOJI: Record<string, string> = {
   CRITICAL:"🔴", HIGH:"🟠", MEDIUM:"🟡", LOW:"🟢", UNKNOWN:"⚪",
 };
 
-const INDICATOR_LABEL: Record<string, string> = {
-  "hardcoded-secret":   "Hardcoded credential",
-  "sql-injection":      "SQL injection",
-  "eval-exec":          "Code execution (eval/exec)",
-  "jwt-none-alg":       "JWT none-algorithm",
-  "command-injection":  "Command injection",
-  "argument-injection": "Argument injection",
-  "ai-comment-pattern": "AI comment pattern",
-  "hallucinated-method-call": "Hallucinated method call",
-  "license-header-contamination": "License header contamination",
-  "ai-blast-radius": "AI blast radius",
-  "file-inclusion": "PHP file inclusion",
-  "weak-signing-secret": "Hardcoded signing secret",
-  "graphql-introspection-enabled": "GraphQL introspection enabled",
-  "bola-identity-mismatch": "Broken Object Level Authorization",
-  "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
-  "plaintext-password-storage": "Plaintext password storage",
-  "debug-mode-enabled": "Debug mode enabled",
-  "missing-security-headers": "Security header explicitly removed",
-  "iac-s3-public-acl": "Public S3 bucket ACL",
-  "iac-open-ingress": "Open ingress rule (0.0.0.0/0)",
-  "iac-unencrypted-storage": "Unencrypted storage",
-  "iac-iam-wildcard": "Overly permissive IAM policy",
-  "iac-public-db": "Publicly accessible database",
-  "iac-privileged-container": "Privileged container",
-  "iac-container-run-as-root": "Container runs as root",
-  "iac-host-namespace-access": "Host namespace access",
-  "iac-dangerous-capability": "Dangerous Linux capability",
-  "iac-unpinned-image-tag": "Unpinned container image tag",
-  "container-runs-as-root": "Container runs as root",
-  "container-unpinned-base-image": "Unpinned base image",
-  "container-add-remote-url": "ADD from remote URL",
-  "container-piped-shell-exec": "Unverified remote script execution",
-  "container-hardcoded-secret": "Hardcoded secret in Dockerfile",
-  "container-sensitive-file-copy": "Sensitive file copied into image",
-  "container-exposed-sensitive-port": "Sensitive port exposed",
-  "container-compose-privileged": "Privileged container (compose)",
-  "container-compose-docker-socket-mount": "Docker socket mounted into container",
-  "container-compose-host-namespace": "Host namespace access (compose)",
-  "container-compose-dangerous-capability": "Dangerous Linux capability (compose)",
-  "container-compose-hardcoded-secret": "Hardcoded secret in compose file",
-  "container-compose-unpinned-image": "Unpinned container image (compose)",
-};
+const SEV_EMOJI: Record<string, string> = { critical: "🔴", high: "🟠", medium: "🟡", low: "🟢", info: "⚪" };
+const MAX_COMMENT_FINDINGS = 5;
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {
   "Likely Human":               "🟢",
@@ -87,6 +48,9 @@ export function buildPRCommentDirect(scan: {
   }>;
   appUrl:               string;
   evidence_breakdown?:  EvidenceBreakdown;
+  // Most important security findings across the PR (see findingReport.ts collectFindingReports), already
+  // ordered; the comment shows the first MAX_COMMENT_FINDINGS.
+  findings?:            FindingReport[];
 }): string {
   const counts   = scan.files.reduce((acc, f) => { acc[f.risk_score] = (acc[f.risk_score]??0)+1; return acc; }, {} as Record<string,number>);
   const blocked  = scan.overall_risk === "CRITICAL" || scan.overall_risk === "HIGH";
@@ -144,7 +108,7 @@ export function buildPRCommentDirect(scan: {
   if (highRisk.length > 0) {
     lines.push("","**Files requiring attestation:**","");
     highRisk.forEach(f => {
-      const secInds = f.risk_indicators.filter(i => INDICATOR_LABEL[i]).slice(0,2).map(i => INDICATOR_LABEL[i]).join(", ");
+      const secInds = f.risk_indicators.map(i => findingMeta(i)).filter(m => m.cwe).slice(0,2).map(m => m.title).join(", ");
       // Only ever flag confirmed-reachable findings here, never
       // "unreachable"/"unknown" -- this line is already dense (emoji + risk
       // level + up to 2 signal names), and a reviewer only needs the
@@ -154,6 +118,17 @@ export function buildPRCommentDirect(scan: {
         : "";
       lines.push(`- ${f.attested?"✅":"⏳"} \`${f.file_path.split("/").slice(-2).join("/")}\` — ${RISK_EMOJI[f.risk_score]} ${f.risk_score}${secInds ? ` · ${secInds}` : ""}${reachSuffix}`);
     });
+  }
+
+  const findings = scan.findings ?? [];
+  if (findings.length > 0) {
+    lines.push("", `**Security findings** (${findings.length > MAX_COMMENT_FINDINGS ? `top ${MAX_COMMENT_FINDINGS} of ${findings.length}` : findings.length}):`, "");
+    for (const r of findings.slice(0, MAX_COMMENT_FINDINGS)) {
+      const where = `${r.filePath}${r.line ? `:${r.line}` : ""}`;
+      lines.push(`- ${SEV_EMOJI[r.severity] ?? "⚪"} **${reportHeading(r)}** in \`${where}\` — ${partsToText(r.evidence.summary, "markdown")}`);
+      const path = inputToSink(r, "markdown");
+      if (path) lines.push(`  <sub>${path}</sub>`);
+    }
   }
 
   lines.push("","---",`**[📋 Review in TrustLedger](${reviewUrl})** · Scan \`${scan.scan_id.slice(0,8)}\``);

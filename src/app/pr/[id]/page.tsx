@@ -19,6 +19,7 @@ import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
 import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL, URGENCY_DESC } from "@/lib/signalClassification";
 import InfoTooltip from "@/components/InfoTooltip";
+import { findingMeta } from "@/lib/findingCatalog";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -116,7 +117,15 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "identifier-entropy":      { label: "Low Identifier Entropy",    desc: "Generic, predictable naming — AI tends toward low-entropy identifiers",                    sev: "low"  },
 };
 
-const describeSignal = (id: string) => SIGNAL_META[id];
+// A finding's name comes from the shared catalog -- the same name SARIF, check-run annotations and the PR
+// comment use. SIGNAL_META supplies this page's description, severity fallback and security flag.
+function signalMeta(id: string, fallbackLabel?: string): { label: string; desc?: string; sev?: SignalSev; security?: boolean } {
+  const m = SIGNAL_META[id];
+  const label = findingMeta(id, m?.label ?? fallbackLabel).title;
+  return m ? { ...m, label } : { label };
+}
+const describeSignal = (id: string) => signalMeta(id);
+const NO_CURATED_DESC = "No curated description for this finding — see detail below.";
 
 const SEV_COLORS: Record<SignalSev, { badge: string; dot: string }> = {
   critical: { badge: "bg-violet-100 text-violet-800 ring-violet-300", dot: "bg-violet-500" },
@@ -437,7 +446,7 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
 
             const renderSignal = (sig: string) => {
               const instances = (file.indicators ?? []).filter(i => i.id === sig);
-              const meta = SIGNAL_META[sig] ?? { label: instances[0]?.label ?? sig, desc: "No curated description for this finding — see detail below." };
+              const meta = { desc: NO_CURATED_DESC, ...signalMeta(sig, instances[0]?.label) };
               const sev = realSeverity(instances, SIGNAL_META[sig]?.sev);
               const { badge, dot } = SEV_COLORS[sev];
               const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");
@@ -727,7 +736,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                 const aiSigs  = file.risk_indicators.filter(s => !isSecuritySignal(s, file, SIGNAL_META[s]?.security));
                 const renderRowSignal = (sig: string) => {
                   const instances = (file.indicators ?? []).filter(i => i.id === sig);
-                  const meta = SIGNAL_META[sig] ?? { label: instances[0]?.label ?? sig, desc: "No curated description for this finding — see detail below." };
+                  const meta = { desc: NO_CURATED_DESC, ...signalMeta(sig, instances[0]?.label) };
                   const sev = realSeverity(instances, SIGNAL_META[sig]?.sev);
                   const { badge, dot } = SEV_COLORS[sev];
                   const lines = instances.map(i => i.line).filter((l): l is number => typeof l === "number");

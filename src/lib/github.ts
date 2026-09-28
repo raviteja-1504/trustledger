@@ -7,6 +7,8 @@
  */
 
 import crypto from "crypto";
+import type { CheckAnnotation } from "./checkAnnotations";
+import { findingMeta } from "./findingCatalog";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -277,6 +279,7 @@ interface CheckRunPayload {
     title:   string;
     summary: string;
     text?:   string;
+    annotations?: CheckAnnotation[];
   };
 }
 
@@ -323,6 +326,12 @@ export async function updateCheckRun(
   }
 }
 
+/** Reviewer-facing names for a file's finding ids, security findings first. */
+function findingTitles(ids: readonly string[]): string {
+  const metas = [...new Set(ids)].map(id => findingMeta(id));
+  return [...metas.filter(m => m.cwe), ...metas.filter(m => !m.cwe)].map(m => m.title).join(", ");
+}
+
 /** Build a human-readable check-run summary from scan results. */
 export function buildCheckSummary(scan: {
   overall_risk: string;
@@ -347,12 +356,12 @@ export function buildCheckSummary(scan: {
 
   if (critFiles.length > 0) {
     lines.push("### 🔴 CRITICAL Files");
-    critFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${f.risk_indicators.join(", ")}`));
+    critFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${findingTitles(f.risk_indicators)}`));
     lines.push("");
   }
   if (highFiles.length > 0) {
     lines.push("### 🟠 HIGH Risk Files");
-    highFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${f.risk_indicators.join(", ")}`));
+    highFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${findingTitles(f.risk_indicators)}`));
     lines.push("");
   }
 

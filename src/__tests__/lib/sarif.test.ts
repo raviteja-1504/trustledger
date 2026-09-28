@@ -1,4 +1,7 @@
-import { buildSarifReport, SARIF_RULE_META } from "@/lib/sarif";
+import { buildSarifReport } from "@/lib/sarif";
+import { FINDING_CATALOG } from "@/lib/findingCatalog";
+import { analyzeFile, getFixSuggestions } from "@/lib/scanner";
+import { toStoredIndicators } from "@/lib/indicatorStorage";
 
 describe("buildSarifReport", () => {
   it("produces a well-formed SARIF 2.1.0 log", () => {
@@ -44,7 +47,7 @@ describe("buildSarifReport", () => {
 
     const rule = sarif.runs[0].tool.driver.rules[0];
     expect(rule.id).toBe("hardcoded-secret");
-    expect(rule.properties.cwe).toBe(SARIF_RULE_META["hardcoded-secret"].cwe);
+    expect(rule.properties.cwe).toBe(FINDING_CATALOG["hardcoded-secret"].cwe);
   });
 
   it("deduplicates rules across multiple files with the same finding type", () => {
@@ -68,5 +71,64 @@ describe("buildSarifReport", () => {
   it("returns an empty results array for a scan with no findings", () => {
     const sarif = buildSarifReport([{ file_path: "clean.ts", indicators: [] }]) as { runs: [{ results: unknown[] }] };
     expect(sarif.runs[0].results).toHaveLength(0);
+  });
+});
+
+// The export as it actually runs: real scanner output -> stored projection -> SARIF.
+describe("buildSarifReport: unified finding evidence", () => {
+  const PATH = "src/routes/users.ts";
+  const ROUTE = [
+    `function listUsers(req, res) {`,
+    `  const name = req.query.name;`,
+    `  const sql = "SELECT * FROM users WHERE name = '" + name + "'";`,
+    `  db.query(sql);`,
+    `}`,
+    `app.get("/users", listUsers);`,
+    ``,
+  ].join("\n");
+  type Result = {
+    ruleId: string; message: { text: string };
+    partialFingerprints?: Record<string, string>;
+    codeFlows?: Array<{ threadFlows: Array<{ locations: Array<{ location: { physicalLocation: { region: { startLine: number } }; message: { text: string } } }> }> }>;
+    properties: Record<string, unknown>;
+  };
+  type Log = { runs: [{ tool: { driver: { rules: Array<{ id: string; name: string; help: { text: string; markdown: string } }> } }; results: Result[] }] };
+
+  const indicators = toStoredIndicators(analyzeFile(PATH, ROUTE).indicators);
+  const fixes = new Map(getFixSuggestions(indicators).map(f => [f.vuln_id, f]));
+  const sarif = buildSarifReport([{ file_path: PATH, indicators }], {}, fixes) as Log;
+  const flowResult = sarif.runs[0].results.find(r => r.ruleId === "sql-injection" && r.codeFlows)!;
+
+  it("carries the source -> sink path as codeFlows, source first", () => {
+    expect(flowResult).toBeDefined();
+    const steps = flowResult.codeFlows![0].threadFlows[0].locations;
+    expect(steps[0].location.physicalLocation.region.startLine).toBe(2);
+    expect(steps[0].location.message.text).toContain("req.query.name");
+    expect(steps[steps.length - 1].location.physicalLocation.region.startLine).toBe(4);
+  });
+
+  it("uses the unified explanation as the message, not the engine's internal template", () => {
+    expect(flowResult.message.text).toContain("req.query.name");
+    expect(flowResult.message.text).toContain("SQL query");
+    expect(flowResult.message.text).not.toContain("real data-flow match");
+    expect(String(flowResult.properties["trustledger/evidence"])).toContain("Why this was flagged:");
+  });
+
+  it("keeps a stable fingerprint so Code Scanning tracks the alert across runs", () => {
+    const stored = indicators.find(i => i.id === "sql-injection" && i.sourceExpr)!;
+    expect(flowResult.partialFingerprints).toEqual({ "trustledgerFinding/v1": stored.fingerprint });
+  });
+
+  it("puts the recommended fix in the rule help", () => {
+    const rule = sarif.runs[0].tool.driver.rules.find(r => r.id === "sql-injection")!;
+    expect(rule.name).toBe("SQL Injection");
+    expect(rule.help.markdown).toContain("Recommended fix");
+    expect(rule.help.markdown).toContain(fixes.get("sql-injection")!.code_after!);
+  });
+
+  it("a pattern-only result gets no codeFlows", () => {
+    const pattern = sarif.runs[0].results.find(r => r.ruleId === "sql-injection" && !r.codeFlows);
+    expect(pattern).toBeDefined();
+    expect(pattern!.properties["trustledger/analysis"]).toBe("Pattern match");
   });
 });

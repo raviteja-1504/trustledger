@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../../_middleware";
 import { buildSarifReport, type SarifSourceFile } from "@/lib/sarif";
+import { getFixSuggestions } from "@/lib/scanner";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -38,10 +39,12 @@ export async function GET(req: NextRequest) {
     .select("file_path, indicators")
     .eq("scan_id", scanId) as { data: SarifSourceFile[] | null };
 
+  const allIndicators = (files ?? []).flatMap(f => f.indicators ?? []);
+  const fixesById = new Map(getFixSuggestions(allIndicators).map(fix => [fix.vuln_id, fix]));
   const sarif = buildSarifReport(files ?? [], {
     name:           "TrustLedger",
     informationUri: process.env.NEXT_PUBLIC_APP_URL ?? "https://github.com/trustledger",
-  });
+  }, fixesById);
 
   return new NextResponse(JSON.stringify(sarif, null, 2), {
     headers: {
