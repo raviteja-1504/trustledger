@@ -162,6 +162,10 @@ export interface ScanIndicator {
   // enclosing function changes; two findings never share one (an ordinal breaks exact-duplicate ties), so
   // acknowledging one can't silently acknowledge another. For cross-scan tracking, not for display.
   fingerprint?: string;
+  // Name of the function this finding's line sits in (security findings only), from the same
+  // AST-backed resolver fingerprints and reachability use. Absent when it can't be named (top-level
+  // code, an anonymous inline handler, or a language with no parsed tree).
+  functionName?: string;
 }
 
 export interface FixSuggestion {
@@ -5849,7 +5853,7 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
   },
 };
 
-export function getFixSuggestions(indicators: ScanIndicator[]): FixSuggestion[] {
+export function getFixSuggestions(indicators: readonly { id: string }[]): FixSuggestion[] {
   const seen = new Set<string>();
   const out: FixSuggestion[] = [];
   for (const ind of indicators) {
@@ -6710,6 +6714,11 @@ export function analyzeFile(
       ind.exploitability_score = score.exploitability_score;
       ind.remediation_urgency = score.remediation_urgency;
     }
+  }
+  for (const ind of indicators) {
+    if (ind.line == null || AI_SIGNAL_IDS.has(ind.id)) continue;
+    const fn = resolveContainingFunction(ind.line);
+    if (fn && fn !== "unknown" && !fn.startsWith("<")) ind.functionName = fn;
   }
 
   // Compliance evaluation

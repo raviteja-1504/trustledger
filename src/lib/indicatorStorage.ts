@@ -1,5 +1,6 @@
 import type { ScanIndicator } from "./scanner";
 import type { FileIndicator } from "@/types";
+import type { TraceStep } from "./taint/taintCore";
 
 /**
  * The one projection of a scanner indicator into what is persisted in scan_files.indicators (a jsonb
@@ -8,16 +9,36 @@ import type { FileIndicator } from "@/types";
  * four silently dropped `fingerprint` and `confidence`, so the stable identity computed by the scanner was
  * thrown away at the persistence boundary and could never be used to track a finding across scans.
  *
- * Deliberately NOT persisted: `trace` (an array per finding -- bulky, and re-derivable by re-analysis) and
- * `supportingDetectors` (detector labels, display-only). Only line-bearing indicators are stored; line-less
- * ones are aggregate AI signals the UI derives from other columns.
+ * `trace` and `supportingDetectors` are kept because the PR page renders them inline under the flagged
+ * line, and the stored snapshot is what that page falls back to whenever live re-analysis doesn't run
+ * (content unavailable, or past api/scans/[id]'s per-request re-analysis cap). The trace is capped so one
+ * pathological finding can't bloat the row. Only line-bearing indicators are stored; line-less ones are
+ * aggregate AI signals the UI derives from other columns.
  */
+const MAX_STORED_TRACE_STEPS = 12;
+const MAX_TRACE_TEXT = 160;
+
+function capTrace(trace: readonly TraceStep[] | undefined): TraceStep[] | undefined {
+  if (!trace || trace.length === 0) return undefined;
+  // Keep the sink: it is the step that ties the trace back to the flagged line.
+  const kept = trace.length <= MAX_STORED_TRACE_STEPS
+    ? trace
+    : [...trace.slice(0, MAX_STORED_TRACE_STEPS - 1), trace[trace.length - 1]];
+  return kept.map(s => ({
+    file: s.file, line: s.line, kind: s.kind,
+    label: s.label.slice(0, MAX_TRACE_TEXT), snippet: s.snippet.slice(0, MAX_TRACE_TEXT),
+  }));
+}
+
 export function toStoredIndicator(i: ScanIndicator): FileIndicator {
   return {
     id: i.id, label: i.label, severity: i.severity, line: i.line, detail: i.detail,
     codeCategory: i.codeCategory, cwe: i.cwe,
     reachability: i.reachability, exploitability_score: i.exploitability_score, remediation_urgency: i.remediation_urgency,
     fingerprint: i.fingerprint, confidence: i.confidence, sourceExpr: i.sourceExpr, sinkExpr: i.sinkExpr,
+    trace: capTrace(i.trace),
+    supportingDetectors: i.supportingDetectors?.length ? [...i.supportingDetectors] : undefined,
+    functionName: i.functionName,
   };
 }
 

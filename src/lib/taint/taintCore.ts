@@ -257,6 +257,55 @@ export interface TraceStep {
 // buildTrace docblock for why that one stays bespoke).
 const BARE_IDENTIFIER_RE = /^\$?[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Where a request's own input is read, across the supported languages/frameworks. Presentational only:
+// it tells a trace it has reached the origin, and never influences taint itself.
+const REQUEST_INPUT_RE = /^(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|\$?(?:request|req)\s*(?:\.|->|\[)|r\s*\.\s*(?:URL|Form|PostForm|Header|Body|FormValue|PostFormValue|Cookie|MultipartForm)\b|c\s*\.\s*(?:Query|DefaultQuery|Param|PostForm|DefaultPostForm|GetHeader|FormValue|Cookie|QueryParam)\b|ctx\s*\.\s*(?:Query|Param|Request)\b|(?:HttpContext\s*\.\s*)?Request\s*\.\s*(?:Query|Form|Headers|Cookies|Body|RouteValues|QueryString)\b)/;
+const TRACE_LITERAL_RE = /^(?:(["'`])[\s\S]*\1|[0-9][\w.]*|true|false|null|nil|None|True|False)$/;
+const NON_OPERAND_WORDS = new Set([
+  "and", "or", "not", "in", "is", "if", "else", "new", "typeof", "await", "return", "lambda",
+  "true", "false", "null", "nil", "None", "True", "False", "this", "self", "instanceof",
+]);
+// An identifier chain with any trailing member access, indexing or call -- `$x`, `request.GET.get("q")`,
+// `data['name']`, `r.URL.Query().Get("id")`.
+const CHAIN_RE = /\$?[A-Za-z_][\w]*(?:\s*(?:\.|->|::)\s*[A-Za-z_]\w*|\[[^\]]*\]|\((?:[^()]|\([^()]*\))*\))*/g;
+
+/** The operand expressions a composite value's TEXT is built from: identifier chains outside string
+ * literals, plus those inside interpolations (`${...}` in a JS template, `{...}` in a Python f-string,
+ * `$var`/`{$var}` in a PHP double-quoted string). String contents themselves are never operands. */
+function operandCandidates(text: string, depth = 0): string[] {
+  if (depth > 3) return [];
+  const out: string[] = [];
+  // Same-length copy with every string literal blanked out, so chain matching never sees string contents
+  // while match offsets still slice the ORIGINAL text (a string argument like `get("name")` stays intact).
+  let masked = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") { masked += ch; continue; }
+    const fString = ch !== "`" && /[fF]$/.test(masked) && !/\w/.test(masked.charAt(masked.length - 2));
+    let j = i + 1;
+    while (j < text.length && text[j] !== ch) j += text[j] === "\\" ? 2 : 1;
+    const inner = text.slice(i + 1, Math.min(j, text.length));
+    if (ch === "`" || fString) {
+      for (const m of inner.matchAll(/\$?\{([^{}]+)\}/g)) out.push(...operandCandidates(m[1], depth + 1));
+    } else if (ch === '"') {
+      for (const m of inner.matchAll(/\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*/g)) out.push(m[0]);
+    }
+    masked += " ".repeat(Math.min(j, text.length - 1) - i + 1);
+    i = j;
+  }
+  for (const m of masked.matchAll(CHAIN_RE)) {
+    const chain = text.slice(m.index!, m.index! + m[0].length).trim();
+    const root = chain.match(/^\$?[A-Za-z_]\w*/)![0];
+    if (NON_OPERAND_WORDS.has(root)) continue;
+    // A bare function name immediately followed by a call is a callee, not a value -- its arguments are
+    // the operands, found by recursing into them.
+    const call = /^\$?[A-Za-z_]\w*\s*\(([\s\S]*)\)$/.exec(chain);
+    if (call && !REQUEST_INPUT_RE.test(chain)) { out.push(...operandCandidates(call[1], depth + 1)); continue; }
+    out.push(chain);
+  }
+  return out;
+}
+
 /** Balanced-paren extraction of a call expression's FIRST top-level argument, from raw text --
  * language-agnostic (every engine here uses C-family call syntax), so this needs no per-language
  * hook. Returns null when `text` isn't call-shaped (no parens, or something other than a
@@ -292,6 +341,9 @@ function extractFirstCallArg(text: string): string | null {
 export interface TraceResolver<N> {
   /** The function/method-like node lexically enclosing `node`, or null (module/top-level scope). */
   enclosingScope(node: N): N | null;
+  /** The file/module root to search instead when `enclosingScope` is null -- top-level script code
+   * (common in PHP and Python) otherwise has no scope to find its assignments in. Optional. */
+  fileScope?(node: N): N | null;
   /** Every simple `name = expr`-shaped assignment (declarations included) within `scope` -- a
    * destructuring/compound target is simply invisible to this, which only means the trace stops one
    * hop early there, never wrong. */
@@ -325,7 +377,9 @@ export function buildBackwardTraceGeneric<N>(
 ): TraceStep[] {
   const backward: TraceStep[] = [];
   const visited = new Set<string>();
-  const scope = resolver.enclosingScope(sinkNode);
+  const scope = resolver.enclosingScope(sinkNode) ?? resolver.fileScope?.(sinkNode) ?? null;
+  const assignedBefore = (name: string, pos: number) =>
+    scope ? resolver.assignmentsIn(scope).filter(a => a.name === name && a.position < pos) : [];
   let curText = sourceText.trim();
   let curPos = resolver.position(sinkNode);
   let curLine = resolver.line(sinkNode);
@@ -337,7 +391,7 @@ export function buildBackwardTraceGeneric<N>(
     if (BARE_IDENTIFIER_RE.test(curText)) {
       if (visited.has(curText)) break; // a re-assignment cycle -- stop rather than loop
       visited.add(curText);
-      const candidates = scope ? resolver.assignmentsIn(scope).filter(a => a.name === curText && a.position < curPos) : [];
+      const candidates = assignedBefore(curText, curPos);
       if (candidates.length === 0) {
         backward.push({ file: filePath, line: curLine, kind: "source", label: curText, snippet: curText });
         break;
@@ -353,11 +407,30 @@ export function buildBackwardTraceGeneric<N>(
       continue;
     }
 
+    if (REQUEST_INPUT_RE.test(curText)) {
+      backward.push({ file: filePath, line: curLine, kind: "source", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
+      break;
+    }
+
     const firstArg = extractFirstCallArg(curText);
-    if (firstArg !== null) {
+    if (firstArg !== null && !TRACE_LITERAL_RE.test(firstArg)) {
       backward.push({ file: filePath, line: curLine, kind: "call", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
       curText = firstArg;
       continue;
+    }
+
+    // A concatenation, f-string/template, ternary, `obj.field`...: the composite is already shown by the
+    // step that led here (its assignment, or the sink), so continue into the operand carrying the taint --
+    // one that reads request input, else one assigned earlier in scope, else the only operand there is.
+    // Unresolvable (several unrelated operands) -> stop here, as before, rather than guess.
+    if (firstArg === null) {
+      const ops = operandCandidates(curText).filter(o => !TRACE_LITERAL_RE.test(o));
+      const rootOf = (o: string) => o.match(/^\$?[A-Za-z_]\w*/)![0];
+      const roots = ops.map(rootOf);
+      const next = ops.find(o => o !== curText && REQUEST_INPUT_RE.test(o))
+        ?? roots.find(r => assignedBefore(r, curPos).length > 0)
+        ?? (new Set(roots).size === 1 ? roots[0] : undefined);
+      if (next && next !== curText) { curText = next; continue; }
     }
 
     backward.push({ file: filePath, line: curLine, kind: "source", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });

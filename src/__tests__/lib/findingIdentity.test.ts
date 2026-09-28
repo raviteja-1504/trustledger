@@ -216,7 +216,21 @@ describe("persistence projection", () => {
     ]);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ id: "sql-injection", fingerprint: "abcd", confidence: 95, sourceExpr: "id", sinkExpr: "db.execute" });
-    expect(stored[0]).not.toHaveProperty("trace");
+    // An empty trace carries nothing to show, so it isn't stored.
+    expect(stored[0].trace).toBeUndefined();
+  });
+
+  it("keeps the data-flow trace, supporting detectors and enclosing function the PR page renders inline", () => {
+    const trace = [
+      { file: "a.ts", line: 2, kind: "source" as const, label: "req.query.id", snippet: "req.query.id" },
+      { file: "a.ts", line: 3, kind: "sink" as const, label: "db.execute", snippet: "db.execute(id)" },
+    ];
+    const [stored] = toStoredIndicators([
+      ind({ id: "sql-injection", line: 3, trace, supportingDetectors: ["Named-taint SQL"], functionName: "getUser" }),
+    ]);
+    expect(stored.trace).toEqual(trace);
+    expect(stored.supportingDetectors).toEqual(["Named-taint SQL"]);
+    expect(stored.functionName).toBe("getUser");
   });
 
   it("tolerates a missing indicator list", () => {

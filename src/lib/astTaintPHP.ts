@@ -1058,6 +1058,7 @@ function assignmentsInPHP(scope: SyntaxNode): Array<{ name: string; position: nu
 }
 const phpTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope: enclosingScopePHP, assignmentsIn: assignmentsInPHP,
+  fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
   position: n => n.startIndex, line: lineOf, text: n => n.text,
 };
 

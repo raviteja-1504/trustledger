@@ -1,4 +1,8 @@
 import type { AttributionResult } from "@/lib/aiAttribution";
+import type { TraceStep } from "@/lib/taint/taintCore";
+import type { FixSuggestion } from "@/lib/scanner";
+
+export type { TraceStep, FixSuggestion };
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "UNKNOWN";
 
@@ -38,6 +42,12 @@ export interface FileIndicator {
   // The tainted expression and the sink it reaches, verbatim from the AST engine (absent for regex findings).
   sourceExpr?: string;
   sinkExpr?: string;
+  // Source -> sink data-flow path from the AST engine, source first, sink last (absent for regex findings).
+  trace?: TraceStep[];
+  // Other detectors that independently flagged this same id+line.
+  supportingDetectors?: string[];
+  // Function the flagged line sits in, when it could be named.
+  functionName?: string;
 }
 
 // An explicit AI-tooling artifact (a repo config file or a commit/content
@@ -59,6 +69,8 @@ export interface FileResult {
   attested: boolean;
   content?: string;
   attribution?: AttributionResult;
+  // Remediation guidance for the vulnerability ids present in `indicators`, one per id.
+  fix_suggestions?: FixSuggestion[];
 }
 
 export interface EvidenceBreakdown {

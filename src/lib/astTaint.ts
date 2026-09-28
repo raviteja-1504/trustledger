@@ -2296,6 +2296,46 @@ export function scanAstTaint(
      * never throws, and an incomplete slice still returns whatever steps it found rather than none.
      */
     const MAX_TRACE_HOPS = 6;
+    const isLiteralExpr = (e: ts.Expression): boolean =>
+      ts.isStringLiteralLike(e) || ts.isNumericLiteral(e) || e.kind === ts.SyntaxKind.TrueKeyword ||
+      e.kind === ts.SyntaxKind.FalseKeyword || e.kind === ts.SyntaxKind.NullKeyword;
+    /** The sub-expressions a composite value is built from -- where a trace looks next for its taint. */
+    const operandsOf = (e: ts.Expression): ts.Expression[] => {
+      if (ts.isBinaryExpression(e)) return [e.left, e.right];
+      if (ts.isTemplateExpression(e)) return e.templateSpans.map(s => s.expression);
+      if (ts.isConditionalExpression(e)) return [e.whenTrue, e.whenFalse];
+      if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) return [e.expression];
+      if (ts.isAwaitExpression(e) || ts.isTypeOfExpression(e) || ts.isSpreadElement(e)) return [e.expression];
+      if (ts.isArrayLiteralExpression(e)) return [...e.elements];
+      if (ts.isObjectLiteralExpression(e)) {
+        return e.properties.flatMap(p => ts.isPropertyAssignment(p) ? [p.initializer] : ts.isShorthandPropertyAssignment(p) ? [p.name] : []);
+      }
+      if (ts.isCallExpression(e)) {
+        const recv = ts.isPropertyAccessExpression(e.expression) ? [e.expression.expression] : [];
+        return [...e.arguments, ...recv];
+      }
+      return [];
+    };
+    /** Whether `e` provably leads back to a request source through initializers/operands (bounded). */
+    const reachesSource = (e: ts.Expression, depth = 0): boolean => {
+      if (depth > 6) return false;
+      const u = unwrapExpr(e);
+      if (isTaintSourceExpr(u)) return true;
+      if (ts.isIdentifier(u)) {
+        const init = initializerOf.get(u.text);
+        return !!init && init !== e && reachesSource(init, depth + 1);
+      }
+      return operandsOf(u).some(o => reachesSource(o, depth + 1));
+    };
+    /** Which operand of a composite carries the taint: the one that reaches a request source, else the
+     * only non-literal identifier (typically a tainted parameter); undefined when it can't be told apart. */
+    const taintedOperand = (e: ts.Expression): ts.Expression | undefined => {
+      const ops = operandsOf(e).filter(o => !isLiteralExpr(unwrapExpr(o)));
+      const bySource = ops.find(o => reachesSource(o));
+      if (bySource) return bySource;
+      const ids = ops.filter(o => ts.isIdentifier(unwrapExpr(o)));
+      return ids.length === 1 && ops.length === 1 ? ids[0] : undefined;
+    };
     const buildTrace = (sinkNode: ts.Node, taintedArgExpr: ts.Expression | undefined, sinkExpr: string): TraceStep[] => {
       const backward: TraceStep[] = [];
       const visitedIds = new Set<string>();
@@ -2330,11 +2370,25 @@ export function scanAstTaint(
           cur = init;
           continue;
         }
+        if (isTaintSourceExpr(cur)) {
+          backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text });
+          break;
+        }
         if (ts.isCallExpression(cur)) {
-          backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: text, snippet: text });
-          cur = cur.arguments[0]; // best-effort: continue through the first argument
+          const firstArg = cur.arguments[0];
+          // Continue through whichever operand carries the taint (an argument, or the receiver of a
+          // method call like `name.trim()`); the first argument remains the best-effort default. With
+          // nothing to continue into, the call's own result is where the taint first appears.
+          const next = taintedOperand(cur) ?? (firstArg && !isLiteralExpr(firstArg) ? firstArg : undefined);
+          backward.push({ file: filePath, line: lineOf(cur), kind: next ? "call" : "source", label: text, snippet: text });
+          cur = next;
           continue;
         }
+        // A concatenation, template literal, ternary, `obj.field`...: the composite itself is already
+        // shown by the step that led here (its assignment, or the sink), so continue into the operand
+        // that carries the taint rather than presenting the whole expression as the origin.
+        const next = taintedOperand(cur);
+        if (next) { cur = next; continue; }
         backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text });
         break;
       }

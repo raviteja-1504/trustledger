@@ -859,6 +859,7 @@ function assignmentsInPy(scope: SyntaxNode): Array<{ name: string; position: num
 }
 const pyTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope: enclosingFunctionPy, assignmentsIn: assignmentsInPy,
+  fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
   position: n => n.startIndex, line: n => n.startPosition.row + 1, text: n => n.text,
 };
 

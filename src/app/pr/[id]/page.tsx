@@ -116,6 +116,8 @@ const SIGNAL_META: Record<string, { label: string; desc: string; sev: SignalSev;
   "identifier-entropy":      { label: "Low Identifier Entropy",    desc: "Generic, predictable naming — AI tends toward low-entropy identifiers",                    sev: "low"  },
 };
 
+const describeSignal = (id: string) => SIGNAL_META[id];
+
 const SEV_COLORS: Record<SignalSev, { badge: string; dot: string }> = {
   critical: { badge: "bg-violet-100 text-violet-800 ring-violet-300", dot: "bg-violet-500" },
   high:     { badge: "bg-orange-100 text-orange-800 ring-orange-300", dot: "bg-orange-500" },
@@ -376,6 +378,9 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
                 filename={file.file_path}
                 indicators={file.indicators}
                 riskIndicators={file.risk_indicators}
+                fixes={file.fix_suggestions}
+                describe={describeSignal}
+                maxHeight="60vh"
               />
             ) : (
               <div className="flex items-center gap-3 bg-gray-50 border border-dashed border-gray-200 rounded-xl px-4 py-4">
@@ -834,6 +839,9 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                     filename={file.file_path}
                     indicators={file.indicators}
                     riskIndicators={file.risk_indicators}
+                    fixes={file.fix_suggestions}
+                    describe={describeSignal}
+                    maxHeight="640px"
                   />
                 </div>
               ) : (

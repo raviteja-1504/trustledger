@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { analyzeFile } from "@/lib/scanner";
+import { analyzeFile, getFixSuggestions } from "@/lib/scanner";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { cached, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
+import type { FileIndicator } from "@/types";
 
 // Hard bound on worst-case execution time. analyzeFile() is fully
 // synchronous (regex/string analysis, no I/O) -- if one file's content
@@ -22,15 +23,13 @@ export const maxDuration = 60;
 const MAX_LIVE_REANALYSIS_FILES = 60;
 
 interface ReanalysisResult {
-  indicators: {
-    id: string; label: string; severity: string; line?: number; detail?: string;
-    codeCategory?: "application" | "third_party" | "test_code"; cwe?: string;
-    reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
-    exploitability_score?: number;
-    remediation_urgency?: "immediate" | "sprint" | "backlog" | "monitor";
-  }[];
+  indicators: FileIndicator[];
   attribution: AttributionResult;
 }
+
+// Part of the cache key: bump whenever toStoredIndicators() starts carrying new fields, so entries cached
+// before a deploy (which lack them) are not served for the rest of their TTL.
+const REANALYSIS_CACHE_VERSION = 2;
 
 // Re-running analyzeFile() (AST/SSA/semantic-graph/ML-classifier/47-signal
 // analysis) on every page load showed up as sustained high Active CPU for
@@ -45,7 +44,7 @@ interface ReanalysisResult {
 // false-positive fix still reaches the page within the hour without a new
 // scan needing to run.
 async function reanalyze(filePath: string, content: string, contentHash: string): Promise<ReanalysisResult> {
-  return cached(`reanalysis:${contentHash}`, TTL.SCAN, async () => {
+  return cached(`reanalysis:v${REANALYSIS_CACHE_VERSION}:${contentHash}`, TTL.SCAN, async () => {
     const analysis = analyzeFile(filePath, content);
     return {
       indicators: toStoredIndicators(analysis.indicators),
@@ -134,9 +133,9 @@ export async function GET(
       // that, rather than paying analysis cost per file with no bound).
       const content = f.content ?? (f.content_hash ? contentByHash.get(f.content_hash) : undefined) ?? null;
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
-        ? f.indicators as { id: string; label: string; severity: string; line?: number; detail?: string }[]
+        ? f.indicators as FileIndicator[]
         : null;
-      let freshIndicators: { id: string; label: string; severity: string; line?: number; detail?: string }[] | null = null;
+      let freshIndicators: FileIndicator[] | null = null;
       let freshAttribution: AttributionResult | null = null;
       if (content && i < MAX_LIVE_REANALYSIS_FILES) {
         try {
@@ -145,6 +144,7 @@ export async function GET(
           freshAttribution = result.attribution;
         } catch { /* re-analysis threw — freshIndicators/freshAttribution stay null, falls back below */ }
       }
+      const indicators = freshIndicators ?? storedIndicators ?? [];
       return {
         file_path:       f.file_path,
         language:        f.language ?? "text",
@@ -156,7 +156,8 @@ export async function GET(
         // result, not a failure). Only fall back to the stored snapshot if
         // content was unavailable or re-analysis threw (freshIndicators is
         // null in both cases, distinct from a legitimate empty array).
-        indicators:      freshIndicators ?? storedIndicators ?? [],
+        indicators,
+        fix_suggestions: getFixSuggestions(indicators),
         // Same freshness preference as indicators above -- attributeCode()'s
         // patterns can improve over time (see the requiresCoSignal hardening),
         // and this comes free from the same reanalyze() call.

@@ -27,7 +27,7 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * A deploy can also namespace its own cache via ScanInput.cache_namespace (e.g. the commit SHA) so a
  * forgotten bump here can never silently serve stale results across releases.
  */
-export const SCAN_CACHE_VERSION = 1;
+export const SCAN_CACHE_VERSION = 2;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {
