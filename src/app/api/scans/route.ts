@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { runScan } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { validateBody, CreateScanSchema } from "@/lib/validation";
@@ -209,7 +210,8 @@ export async function POST(req: NextRequest) {
       },
     };
   } else {
-    // Run the real scanner on provided content
+    // Run the real scanner on provided content (with the data-flow engines loaded -- see engineWarmup.ts)
+    await ensureTaintEngines();
     result = runScan({
       repo:       body.repo,
       pr_number:  body.pr_number ?? 0,

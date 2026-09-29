@@ -2,6 +2,8 @@ import type { AttributionResult } from "@/lib/aiAttribution";
 import type { TraceStep } from "@/lib/taint/taintCore";
 import type { DataFlowEvidence } from "@/lib/dataFlowEvidence";
 import type { FixSuggestion } from "@/lib/scanner";
+import type { ScanHealth, ScanTelemetry } from "@/lib/scanHealth";
+import type { FindingStatus, TriageDecision, LifecycleSummary, FixedFinding } from "@/lib/findingLifecycle";
 
 export type { TraceStep, FixSuggestion };
 
@@ -38,6 +40,9 @@ export interface FileIndicator {
   // Stable cross-scan identity of this exact finding (see src/lib/findingIdentity.ts) -- what suppression /
   // "new since last scan" tracking should key on, never the line number.
   fingerprint?: string;
+  // Lifecycle in this PR and any triage decision on it (lib/findingLifecycle.ts); set by api/scans/[id].
+  lifecycle_status?: FindingStatus;
+  triage?: TriageDecision;
   // 0-100 evidence strength: 95 = AST data-flow match; lower = pattern/heuristic. NOT severity.
   confidence?: number;
   // The tainted expression and the sink it reaches, verbatim from the AST engine (absent for regex findings).
@@ -117,6 +122,13 @@ export interface ScanResult {
   // failed after a retry (see src/lib/attestation.ts) -- the PR page shows
   // a "GitHub status update failed — Retry" banner when this is non-null.
   check_run_sync_error?: string | null;
+  // Scan health and timing (lib/scanHealth.ts); null before migration 20260930 or for older scans.
+  health?: ScanHealth | null;
+  telemetry?: ScanTelemetry | null;
+  // The engine the server runs now -- a scan whose health.engine_version differs can be rescanned.
+  current_engine_version?: string;
+  // Finding lifecycle for this PR (lib/findingLifecycle.ts).
+  lifecycle?: { summary: LifecycleSummary; fixed: FixedFinding[]; has_previous_scan: boolean };
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

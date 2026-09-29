@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getInstallationToken, getPRFiles, fetchFileContents } from "@/lib/github";
 import { runScan } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { cacheDel, cacheKeys } from "@/lib/cache";
@@ -118,7 +119,8 @@ export async function GET(req: NextRequest) {
 
       if (fileContents.length === 0) continue;
 
-      // Run scanner
+      // Run scanner (with the data-flow engines loaded -- see engineWarmup.ts)
+      await ensureTaintEngines();
       const result = runScan({
         repo,
         pr_number:  0,

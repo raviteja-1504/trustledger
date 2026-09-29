@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { analyzeFile, getFixSuggestions } from "@/lib/scanner";
+import { analyzeFile, getFixSuggestions, CURRENT_ENGINE_VERSION } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
+import { loadTriage } from "@/lib/findingTriageStore";
+import { findingStatus, fixedSincePrevious, summarize, type FindingStatus, type PrHistory } from "@/lib/findingLifecycle";
+import type { ScanHealth, ScanTelemetry } from "@/lib/scanHealth";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { fetchContentByHash } from "@/lib/contentByHash";
 import { filesWithCrossFileContext } from "@/lib/findingCorrelation";
@@ -79,6 +83,61 @@ async function loadScanFiles(db: ReturnType<typeof createServiceClient>, orgId: 
   return rows;
 }
 
+const MAX_HISTORY_SCANS = 6;
+
+type StoredIndicatorLite = { id: string; label: string; line?: number; fingerprint?: string };
+
+/** Fingerprints from this PR's earlier scans (see findingLifecycle.ts PrHistory): the scan just before this
+ * one, and the few before that. Only `file_path` and `indicators` are read -- never file content. */
+async function loadPrHistory(
+  db: ReturnType<typeof createServiceClient>, orgId: string, repo: string, prNumber: number, createdAt: string, scanId: string,
+): Promise<PrHistory & { previousFiles: Array<{ file_path: string; indicators: StoredIndicatorLite[] }> | null }> {
+  const empty = { previous: null, earlier: new Set<string>(), previousFiles: null };
+  try {
+    const { data: prior } = await db
+      .from("scans")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("repo_full_name", repo)
+      .eq("pr_number", prNumber)
+      .lt("created_at", createdAt)
+      .neq("id", scanId)
+      .order("created_at", { ascending: false })
+      .limit(MAX_HISTORY_SCANS);
+    if (!prior?.length) return empty;
+    const { data: rows } = await db
+      .from("scan_files")
+      .select("scan_id, file_path, indicators")
+      .in("scan_id", prior.map(s => s.id));
+    const byScan = new Map<string, Array<{ file_path: string; indicators: StoredIndicatorLite[] }>>();
+    for (const r of rows ?? []) {
+      const list = byScan.get(r.scan_id) ?? [];
+      list.push({ file_path: r.file_path, indicators: Array.isArray(r.indicators) ? r.indicators as StoredIndicatorLite[] : [] });
+      byScan.set(r.scan_id, list);
+    }
+    const fps = (files: Array<{ indicators: StoredIndicatorLite[] }>) => new Set(files.flatMap(f => f.indicators.map(i => i.fingerprint).filter((x): x is string => !!x)));
+    const previousFiles = byScan.get(prior[0].id) ?? [];
+    const earlier = new Set<string>();
+    for (const s of prior.slice(1)) for (const fp of fps(byScan.get(s.id) ?? [])) earlier.add(fp);
+    return { previous: fps(previousFiles), earlier, previousFiles };
+  } catch {
+    return empty;
+  }
+}
+
+/** The scan's health and telemetry columns -- a separate, best-effort read so a database without them yet
+ * (migration 20260930) still serves the scan. */
+async function loadHealth(db: ReturnType<typeof createServiceClient>, scanId: string): Promise<{ health: ScanHealth | null; telemetry: ScanTelemetry | null }> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (db.from("scans") as any).select("health, telemetry").eq("id", scanId).single();
+    if (error || !data) return { health: null, telemetry: null };
+    return { health: (data.health as ScanHealth) ?? null, telemetry: (data.telemetry as ScanTelemetry) ?? null };
+  } catch {
+    return { health: null, telemetry: null };
+  }
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } },
@@ -123,18 +182,11 @@ export async function GET(
     indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [],
   })));
 
-  return NextResponse.json({
-    scan_id:             scan.id,
-    repo:                scan.repo_full_name,
-    pr_number:           scan.pr_number,
-    commit_sha:          scan.commit_sha,
-    overall_risk:        scan.overall_risk,
-    total_ai_percentage: scan.total_ai_percentage,
-    timestamp:           scan.created_at,
-    evidence_breakdown:  scan.evidence_breakdown ?? null,
-    ai_tooling:          scan.ai_tooling ?? [],
-    check_run_sync_error: scan.check_run_sync_error ?? null,
-    files: await Promise.all((files ?? []).map(async (f, i) => {
+  // Live re-analysis below needs the data-flow engines loaded, or a cold instance would show fewer findings
+  // than the scan stored (see engineWarmup.ts).
+  if (files.some((f, i) => f.content && i < MAX_LIVE_REANALYSIS_FILES && !crossFileContext.has(f.file_path))) await ensureTaintEngines();
+
+  const outFiles = await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
       // the snapshot written at scan time — if detection patterns improve
       // later (false-positive fixes, new signals), files scanned before that
@@ -184,6 +236,48 @@ export async function GET(
         attested:        attestedSet.has(f.file_path),
         content:         content ?? undefined,
       };
-    })),
+    }));
+
+  // ── Lifecycle and triage (findingLifecycle.ts) ──────────────────────────────
+  // Each finding's status from this PR's own scan history plus the repo's triage decisions, and the findings
+  // the previous push had that this one no longer does.
+  const [history, triage, extra] = await Promise.all([
+    loadPrHistory(db, org_id, scan.repo_full_name, scan.pr_number, scan.created_at, scan.id),
+    loadTriage(db, org_id, scan.repo_full_name),
+    loadHealth(db, scan.id),
+  ]);
+  const now = new Date();
+  const statuses: FindingStatus[] = [];
+  const currentFps = new Set<string>();
+  const filesWithStatus = outFiles.map(f => ({
+    ...f,
+    indicators: f.indicators.map(ind => {
+      if (ind.fingerprint) currentFps.add(ind.fingerprint);
+      const status = findingStatus(ind.fingerprint, history, triage, now);
+      statuses.push(status);
+      const decision = ind.fingerprint ? triage.get(ind.fingerprint) : undefined;
+      return { ...ind, lifecycle_status: status, ...(decision ? { triage: decision } : {}) };
+    }),
+  }));
+  const fixed = history.previousFiles
+    ? fixedSincePrevious(history.previousFiles, currentFps, new Set(outFiles.map(f => f.file_path)))
+    : [];
+
+  return NextResponse.json({
+    lifecycle: { summary: summarize(statuses, fixed.length), fixed: fixed.slice(0, 100), has_previous_scan: !!history.previous },
+    health: extra.health,
+    telemetry: extra.telemetry,
+    current_engine_version: CURRENT_ENGINE_VERSION,
+    scan_id:             scan.id,
+    repo:                scan.repo_full_name,
+    pr_number:           scan.pr_number,
+    commit_sha:          scan.commit_sha,
+    overall_risk:        scan.overall_risk,
+    total_ai_percentage: scan.total_ai_percentage,
+    timestamp:           scan.created_at,
+    evidence_breakdown:  scan.evidence_breakdown ?? null,
+    ai_tooling:          scan.ai_tooling ?? [],
+    check_run_sync_error: scan.check_run_sync_error ?? null,
+    files: filesWithStatus,
   });
 }

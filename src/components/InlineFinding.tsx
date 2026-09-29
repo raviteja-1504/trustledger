@@ -6,6 +6,7 @@ import { buildFindingEvidence, type CheckTone, type FlowStep, type Part } from "
 import type { CrossFileMark } from "@/lib/dataFlowEvidence";
 import { cweFor } from "@/lib/cweMap";
 import { findingMeta } from "@/lib/findingCatalog";
+import { FindingStatusChip, FindingTriagePanel, isSuppressedFinding, useCanShowTriage } from "./FindingTriage";
 import { REACH_DESC, REACH_LABEL, URGENCY_DESC, URGENCY_LABEL } from "@/lib/signalClassification";
 
 export interface FindingMeta { label?: string; desc?: string; security?: boolean }
@@ -299,6 +300,9 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
   const [fixOpen, setFixOpen] = useState(false);
+  const [triageOpen, setTriageOpen] = useState(false);
+  const showTriage = useCanShowTriage(ind);
+  const suppressed = isSuppressedFinding(ind);
   const ev = useMemo(() => buildFindingEvidence(ind, filePath, siblings), [ind, filePath, siblings]);
   const sev = normSev(ind.severity);
   const style = SEV_STYLE[sev];
@@ -310,8 +314,8 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
   const related = ind.relatedLocations ?? [];
 
   return (
-    <div className={`relative overflow-hidden rounded-xl bg-gradient-to-b from-slate-800/95 to-slate-900/95 font-sans shadow-lg ${style.glow} ring-1 ring-white/10 ${muted ? "opacity-80" : ""}`}>
-      <span className={`absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${muted ? "from-slate-500 to-slate-600" : style.bar}`} aria-hidden />
+    <div className={`relative overflow-hidden rounded-xl bg-gradient-to-b from-slate-800/95 to-slate-900/95 font-sans shadow-lg ${suppressed ? "" : style.glow} ring-1 ring-white/10 ${muted || suppressed ? "opacity-80" : ""}`}>
+      <span className={`absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${muted || suppressed ? "from-slate-500 to-slate-600" : style.bar}`} aria-hidden />
       <div className="space-y-3 py-3.5 pl-5 pr-4">
         {/* Title + metadata */}
         <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
@@ -323,6 +327,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
               <div className="flex flex-wrap items-center gap-2">
                 <h4 className="text-[13.5px] font-semibold leading-snug text-white">{title}</h4>
                 <span className={`${CHIP} uppercase tracking-wide ${style.pill}`}>{sev}</span>
+                <FindingStatusChip ind={ind} />
               </div>
               {ind.functionName && (
                 <p className="mt-0.5 text-[11px] text-slate-400">in <span className="font-mono text-slate-300">{ind.functionName}()</span></p>
@@ -388,6 +393,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
         <div className="flex flex-wrap items-center gap-1.5">
           <Toggle open={open} onClick={() => setOpen(v => !v)} icon={ICON.eye}>{open ? "Hide evidence" : "Show evidence"}</Toggle>
           {fix && <Toggle open={fixOpen} onClick={() => setFixOpen(v => !v)} icon={ICON.wrench}>Recommended fix</Toggle>}
+          {showTriage && <Toggle open={triageOpen} onClick={() => setTriageOpen(v => !v)} icon={ICON.shield}>{suppressed ? "Decision" : "Triage"}</Toggle>}
         </div>
 
         {open && (
@@ -443,6 +449,13 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
           <div className="border-t border-white/[0.07] pt-3.5">
             <SectionLabel icon={ICON.wrench}>Recommended fix</SectionLabel>
             <FixBlock fix={fix} language={language} />
+          </div>
+        )}
+
+        {showTriage && triageOpen && (
+          <div className="border-t border-white/[0.07] pt-3.5">
+            <SectionLabel icon={ICON.shield}>Triage</SectionLabel>
+            <FindingTriagePanel ind={ind} filePath={filePath} />
           </div>
         )}
       </div>

@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { writeAuditLog } from "@/lib/audit";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
@@ -176,6 +177,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
+    await ensureTaintEngines();
     const result = runScan({ repo: repoFull, pr_number: prId, commit_sha: headSha, files });
 
     if (orgId) {

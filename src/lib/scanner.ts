@@ -43,9 +43,10 @@ import type { AiProbability, CalibrationMap } from "./aiCalibration";
 import { DEFAULT_AI_CALIBRATION } from "./aiCalibration.data";
 import { computeCrossFileReachable } from "./crossFileReachability";
 import type { ReachFile } from "./crossFileReachability";
-import { computeFileCacheKey, cloneAnalysis, sha256Hex } from "./incrementalCache";
+import { computeFileCacheKey, cloneAnalysis, sha256Hex, SCAN_CACHE_VERSION } from "./incrementalCache";
 import type { CachedFileResult } from "./incrementalCache";
-import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries } from "./moduleSummaryCache";
+import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries, MODULE_CACHE_VERSION } from "./moduleSummaryCache";
+import { summarizeHealth, slowestFiles, type CoverageGap, type ScanHealth, type ScanTelemetry } from "./scanHealth";
 import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
 import type { TraceStep, ParamSinkFact, StoredProvenanceIO } from "./taint/taintCore";
 import { FIXED_POINT_CAP, mergeSinkFacts } from "./taint/taintCore";
@@ -5375,7 +5376,7 @@ function computeBlastRadiusIndicators(
 
 // ── Risk calculation ───────────────────────────────────────────────────────────
 
-function calculateRisk(indicators: ScanIndicator[], aiPct: number): RiskLevel {
+export function calculateRisk(indicators: ScanIndicator[], aiPct: number): RiskLevel {
   // Third-party/vendored findings (e.g. a pattern match inside jQuery's own
   // minified internals) are preserved as evidence on the file but must not
   // drive the file's own risk level -- they aren't code this repo's authors
@@ -6896,6 +6897,28 @@ export interface ScanInput {
   git_log?:           string;                  // optional: git log --format="%H|%an|%ae|%at|%G?|%s" output
   pr_metadata?:       PRMetadata;              // PR behavior signals (LOC, commits, timing)
   developer_baseline?: DeveloperBaseline;      // author's historical PR patterns (Phase 3)
+  // Paths the caller meant to scan but could not fetch content for -- reported in ScanOutput.health.
+  missing_content_paths?: string[];
+}
+
+/** The analysis engine a scan ran with: changes whenever cached results must not be reused (see
+ * incrementalCache.ts / moduleSummaryCache.ts). A stored scan with an older value can be rescanned. */
+export const CURRENT_ENGINE_VERSION = `${SCAN_CACHE_VERSION}.${MODULE_CACHE_VERSION}`;
+
+const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php"]);
+
+/** Why `path` will NOT get data-flow analysis in this process, or null when it will (or its language has
+ * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
+function coverageGapFor(path: string, content: string): CoverageGap | null {
+  const language = detectLanguage(path);
+  if (!AST_ENGINE_LANGS.has(language) || (language === "csharp" && path.toLowerCase().endsWith(".cshtml"))) return null;
+  const lineCount = content.split("\n").length;
+  const meta = getFileTypeMeta(path);
+  if (meta.isGenerated || (lineCount < 30 && content.length / Math.max(1, lineCount) > 400)) return { file: path, language, reason: "minified-or-generated" };
+  if (lineCount > AST_TAINT_LINE_CAP) return { file: path, language, reason: "too-large" };
+  const ready = language === "python" ? isPythonParserReady() : language === "golang" ? isGoParserReady()
+    : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady() : true;
+  return ready ? null : { file: path, language, reason: "engine-unavailable" };
 }
 
 // ── AI Likelihood Classification ────────────────────────────────────────────
@@ -7130,6 +7153,10 @@ export interface ScanOutput {
   git_provenance:       GitProvenanceSummary | null;
   ai_tooling:           AIToolingArtifact[];
   evidence_breakdown:   EvidenceBreakdown;  // multi-signal evidence buckets
+  // What this scan could NOT fully analyze, and where its time went (see scanHealth.ts). Optional so
+  // hand-built ScanOutputs (api/scans) stay valid.
+  health?:              ScanHealth;
+  telemetry?:           ScanTelemetry;
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -7644,7 +7671,10 @@ export function runScan(input: ScanInput): ScanOutput {
   // what makes an unchanged caller re-analyze when its callee changed.
   const file_cache: Record<string, CachedFileResult> = {};
   let skipped_unchanged = 0;
+  const perFileStart = Date.now();
+  const fileTimings = new Map<string, number>();
   const files = allFiles.map(f => {
+    const t0 = Date.now();
     const cache_key = computeFileCacheKey({
       namespace, path: f.path, contentHash: contentHashByPath.get(f.path)!, prPriorBias,
       jsCrossFile: crossFilePropagatingByFile.get(f.path),
@@ -7673,8 +7703,10 @@ export function runScan(input: ScanInput): ScanOutput {
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
     // file receive those indicators a second time, since the post-passes re-run over the full set each scan.
     file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
+    fileTimings.set(f.path, Date.now() - t0);
     return analysis;
   });
+  const perFileEnd = Date.now();
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────
   // Built early so cross-file taint propagation can inject indicators into
@@ -7956,7 +7988,27 @@ export function runScan(input: ScanInput): ScanOutput {
     return blended > fallback ? blended : fallback;
   })();
 
+  // Coverage gaps: a file reused from the cache was analyzed under the same gates when it was cached.
+  const gaps: CoverageGap[] = [
+    ...allFiles.flatMap(f => { const g = coverageGapFor(f.path, f.content); return g ? [g] : []; }),
+    ...(input.missing_content_paths ?? []).map(p => ({ file: p, language: detectLanguage(p), reason: "content-unavailable" as const })),
+  ];
+  const end = Date.now();
+  const health = summarizeHealth(gaps, CURRENT_ENGINE_VERSION);
+  const telemetry: ScanTelemetry = {
+    engine_version: CURRENT_ENGINE_VERSION,
+    total_ms: end - start,
+    cross_file_ms: perFileStart - start,
+    per_file_ms: perFileEnd - perFileStart,
+    post_ms: end - perFileEnd,
+    files_analyzed: allFiles.length - skipped_unchanged,
+    files_reused: skipped_unchanged,
+    slowest: slowestFiles(fileTimings),
+  };
+
   return {
+    health,
+    telemetry,
     scan_id,
     repo:                 input.repo,
     pr_number:            input.pr_number,

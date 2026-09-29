@@ -19,7 +19,8 @@ export type AuditEventType =
   | "report_generated" | "org_settings_changed"
   | "member_invited" | "member_role_changed" | "member_removed"
   | "exception_created" | "exception_resolved"
-  | "risk_updated" | "evidence_collected";
+  | "risk_updated" | "evidence_collected"
+  | "finding_triaged" | "finding_reopened" | "findings_baselined" | "scan_rescan_requested";
 
 interface AuditEntry {
   org_id:        string;

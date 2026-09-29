@@ -72,6 +72,26 @@ export const ViolationOverrideSchema = z.object({
   escalated:      z.boolean().optional(),
 });
 
+// Finding triage (findingLifecycle.ts): a decision on one finding, keyed by its stable fingerprint.
+const repoFullNameSchema = z.string().min(3).max(300).regex(/^[\w.-]+\/[\w.-]+$/, "Must be owner/repo");
+export const FindingTriageSchema = z.object({
+  repo:        repoFullNameSchema,
+  fingerprint: z.string().min(8).max(200),
+  rule_id:     z.string().min(1).max(200),
+  file_path:   z.string().max(1000).optional(),
+  status:      z.enum(["accepted", "false_positive"]),
+  reason:      z.string().trim().min(3, "Give a reason").max(2000),
+  expires_in_days: z.number().int().min(1).max(3650).nullable().optional(),
+});
+export const FindingReopenSchema = z.object({
+  repo:        repoFullNameSchema,
+  fingerprint: z.string().min(8).max(200),
+});
+export const FindingBaselineSchema = z.object({
+  scan_id: uuidSchema,
+  reason:  z.string().trim().min(3).max(2000).optional(),
+});
+
 export const AlertUpdateSchema = z.object({
   id:            uuidSchema,
   status:        z.enum(["firing","acknowledged","snoozed","resolved"]),

@@ -22,6 +22,10 @@ import AIAttributionBadge from "@/components/AIAttributionBadge";
 import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL, URGENCY_DESC } from "@/lib/signalClassification";
 import InfoTooltip from "@/components/InfoTooltip";
 import { findingMeta } from "@/lib/findingCatalog";
+import ScanStatusPanel from "@/components/ScanStatusPanel";
+import { FindingTriageContext, type FindingTriageContextValue } from "@/components/FindingTriage";
+import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
+import { useRole } from "@/lib/roles";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -1005,6 +1009,32 @@ function PRDetailContent() {
   const [scan,    setScan]    = useState<ScanResult | null>(null);
   const [error,   setError]   = useState<string | null>(null);
   const [syncRetrying, setSyncRetrying] = useState(false);
+  const { role } = useRole();
+  const canTriage = role === "admin" || role === "security_reviewer";
+
+  // Triage decisions update this page's copy of the scan at once; merge gating picks them up on the next scan.
+  const triageContext = useMemo<FindingTriageContextValue | null>(() => scan ? {
+    repo: scan.repo,
+    canTriage,
+    onDecision: (fingerprint, decision) => setScan(s => s ? {
+      ...s,
+      files: s.files.map(f => ({
+        ...f,
+        indicators: (f.indicators ?? []).map(i => i.fingerprint !== fingerprint ? i : {
+          ...i,
+          triage: decision ?? undefined,
+          lifecycle_status: decision ? decision.status : "reopened",
+        }),
+      })),
+    } : s),
+  } : null, [scan, canTriage]);
+
+  // Lifecycle counts from the findings as they are now (so a decision shows immediately).
+  const liveLifecycle = useMemo(() => {
+    if (!scan?.lifecycle) return undefined;
+    const statuses = scan.files.flatMap(f => (f.indicators ?? []).map(i => i.lifecycle_status).filter((s): s is FindingStatus => !!s));
+    return { ...scan.lifecycle, summary: summarizeLifecycle(statuses, scan.lifecycle.fixed.length) };
+  }, [scan]);
 
   // Retries the GitHub check-run flip-to-success after it failed following
   // an attestation (see src/lib/attestation.ts's syncCheckRunToSuccess) --
@@ -1551,6 +1581,7 @@ function PRDetailContent() {
 
   return (
     <AuthGuard>
+      <FindingTriageContext.Provider value={triageContext}>
       <div className="max-w-5xl mx-auto space-y-4 pb-10">
 
         {/* ── Hero header ────────────────────────────────────────────────── */}
@@ -1642,6 +1673,17 @@ function PRDetailContent() {
                   </button>
                 </div>
               )}
+
+              {/* Scan health, lifecycle since the last push, timing, rescan and baseline */}
+              <ScanStatusPanel
+                scanId={scan.scan_id}
+                health={scan.health}
+                telemetry={scan.telemetry}
+                currentEngineVersion={scan.current_engine_version}
+                lifecycle={liveLifecycle}
+                canTriage={canTriage}
+                onChanged={() => { api.getScan(id).then(setScan).catch(() => {}); }}
+              />
 
               {/* Attestation progress bar */}
               {highCount > 0 && (
@@ -1997,6 +2039,7 @@ function PRDetailContent() {
           onClose={() => setAttestTarget(null)}
         />
       )}
+      </FindingTriageContext.Provider>
     </AuthGuard>
   );
 }

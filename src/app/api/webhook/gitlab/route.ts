@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { runScan } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { safeEqual } from "@/lib/safeEqual";
 import { writeAuditLog } from "@/lib/audit";
@@ -172,7 +173,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
-    // Run scanner
+    // Run scanner (with the data-flow engines loaded -- see engineWarmup.ts)
+    await ensureTaintEngines();
     const result = runScan({
       repo:       repoPath,
       pr_number:  mrIid,

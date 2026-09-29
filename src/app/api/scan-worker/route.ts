@@ -22,7 +22,10 @@ import {
   updateCheckRun,
   buildCheckSummary,
 } from "@/lib/github";
-import { runScan, getFixSuggestions } from "@/lib/scanner";
+import { runScan, getFixSuggestions, calculateRisk } from "@/lib/scanner";
+import { ensureTaintEngines } from "@/lib/engineWarmup";
+import { loadTriage } from "@/lib/findingTriageStore";
+import { unsuppressed, type TriageDecision } from "@/lib/findingLifecycle";
 import { buildCheckAnnotations } from "@/lib/checkAnnotations";
 import { collectFindingReports } from "@/lib/findingReport";
 import type { FileIndicator } from "@/types";
@@ -124,6 +127,7 @@ export async function POST(req: NextRequest) {
     pr_commits,
     pr_changed_files,
     pr_created_at,
+    force,
   } = job;
 
   const [owner, repoName] = repoFullName.split("/");
@@ -139,7 +143,8 @@ export async function POST(req: NextRequest) {
     .eq("pr_number", prNumber)
     .maybeSingle();
 
-  if (existing) {
+  // A forced rescan deliberately re-scans a commit that already has a scan (e.g. after an engine upgrade).
+  if (existing && !force) {
     // Scan already persisted — this is a QStash retry after the first
     // invocation timed out. The check run may still show "in_progress" if
     // the previous invocation timed out after persisting the scan but before
@@ -305,8 +310,14 @@ export async function POST(req: NextRequest) {
       created_at:    pr_created_at,
     } : undefined;
 
+    // Load the data-flow engines first: on a cold start they may still be loading (see engineWarmup.ts).
+    const warm = await ensureTaintEngines();
+    if (!warm.ready) console.warn(`[scan-worker] data-flow engines not all ready after ${warm.ms}ms -- scan health will report it`);
+    const fetchedPaths = new Set(fileContents.map(f => f.path));
+
     const result = runScan({
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
+      missing_content_paths: pathsToFetch.filter(p => !fetchedPaths.has(p)),
       pr_metadata:         prMeta,
       developer_baseline:  developerBaseline ?? undefined,
       git_log:             gitLog,
@@ -320,6 +331,8 @@ export async function POST(req: NextRequest) {
       : [];
 
     const autoAttestedPaths = new Set<string>();
+    // Triage decisions for this repo (empty before the migration, or on any read error).
+    const triage: Map<string, TriageDecision> = orgId ? await loadTriage(db, orgId, repoFullName) : new Map();
 
     // ── Persist ───────────────────────────────────────────────────────────────
     if (orgId) {
@@ -347,7 +360,7 @@ export async function POST(req: NextRequest) {
         total_ai_percentage: result.total_ai_percentage,
         file_count:          result.files.length + inheritedFiles.length,
         pr_author:           prAuthor,
-        triggered_by:        "webhook",
+        triggered_by:        force ? "manual" : "webhook",
         duration_ms:         result.duration_ms,
         check_run_id:        checkRunId,
         installation_id:     installationId,
@@ -357,6 +370,15 @@ export async function POST(req: NextRequest) {
 
       if (scan) {
         persistedScanId = scan.id;
+        // Health and telemetry (scanHealth.ts): a separate, best-effort write so a database without the
+        // columns yet (migration 20260930) still records the scan itself.
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (db.from("scans") as any).update({ health: result.health ?? null, telemetry: result.telemetry ?? null }).eq("id", scan.id);
+        } catch { /* best-effort */ }
+        if (result.telemetry) {
+          console.log(`[scan-telemetry] ${JSON.stringify({ scan_id: scan.id, repo: repoFullName, pr: prNumber, health: result.health?.status, engines_warm_ms: warm.ms, ...result.telemetry })}`);
+        }
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
         await cacheDel(cacheKeys.dependencies(orgId));
 
@@ -484,9 +506,13 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const violationFiles = result.files.filter(
-          f => f.risk_score === "CRITICAL" || f.risk_score === "HIGH"
-        );
+        // Merge gating counts only findings not under an active triage decision (accepted risk / false
+        // positive -- findingLifecycle.ts): a file whose HIGH/CRITICAL findings were all accepted no longer
+        // raises a violation. The stored scan_files keep every finding either way.
+        const violationFiles = result.files.filter(f => {
+          const risk = triage.size ? calculateRisk(unsuppressed(f.indicators, triage), f.ai_percentage) : f.risk_score;
+          return risk === "CRITICAL" || risk === "HIGH";
+        });
         if (violationFiles.length > 0) {
           const slaH = overallRisk === "CRITICAL" ? 24 : 48;
           await db.from("violations").insert(violationFiles.map(f => ({
@@ -681,9 +707,10 @@ export async function POST(req: NextRequest) {
     // Unified finding evidence for the check-run annotations and PR comment: freshly scanned files plus
     // unchanged files carried over from the previous scan (their stored indicators), so a delta push doesn't
     // drop the inline annotations of files it didn't touch.
+    // Suppressed findings (active triage decisions) are left out of annotations and the PR comment.
     const evidenceFiles = [
-      ...result.files,
-      ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [] })),
+      ...result.files.map(f => triage.size ? { ...f, indicators: unsuppressed(f.indicators, triage) } : f),
+      ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: unsuppressed(Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [], triage) })),
     ];
     const fixesById = new Map(getFixSuggestions(evidenceFiles.flatMap(f => f.indicators ?? [])).map(fix => [fix.vuln_id, fix]));
     const reviewUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/pr/${result.scan_id}`;

@@ -19,6 +19,9 @@ export interface ScanJob {
   pr_commits?:      number;
   pr_changed_files?: number;
   pr_created_at?:   string;
+  // A user-requested rescan (api/scans/[id]/rescan): run even though this commit was already scanned,
+  // as a full (non-delta) scan with the current engine.
+  force?:           boolean;
 }
 
 /** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */
