@@ -32,7 +32,7 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * "provably still correct" forever, for any file whose own content never changes again -- exactly the
  * silent-stale-cache failure mode SCAN_CACHE_VERSION exists to rule out for the other cache.
  */
-export const MODULE_CACHE_VERSION = 3;
+export const MODULE_CACHE_VERSION = 4;
 
 /**
  * The value to compare (and to store going forward) in place of a bare content hash -- folds in

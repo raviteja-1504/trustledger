@@ -76,7 +76,7 @@ export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti"
   | "xss" | "header-injection" | "nosql-injection" | "ldap-injection" | "xpath-injection" | "redos" | "eval-exec"
   | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check"
-  | "argument-injection";
+  | "argument-injection" | "xxe";
 
 export interface AstTaintPyFinding {
   id:         AstTaintPyId;
@@ -608,6 +608,25 @@ const PATH_FUNCS_PY = new Set([
 
 const TWO_PATH_FUNCS_PY = new Set(["rename", "copy", "copyfile", "copy2", "move", "copytree"]);
 
+/** xml.sax / xml.dom.pulldom / xml.dom.minidom / lxml.etree entry points that parse a document with a parser. */
+const XML_PARSE_TAILS_PY = new Set(["parseString", "parse", "fromstring", "XML", "iterparse"]);
+const SAX_EXTERNAL_ENTITIES_RE = /(?:feature_external_ges|feature_external_pes|["']http:\/\/xml\.org\/sax\/features\/external-(?:general|parameter)-entities["'])\s*,\s*True/;
+
+/**
+ * Does `parserName`, in the function (or module) enclosing `call`, have external entity resolution turned on?
+ * `parser.setFeature(feature_external_ges, True)` (SAX/pulldom), or an lxml `XMLParser(resolve_entities=True |
+ * no_network=False | load_dtd=True)` assigned to it.
+ */
+function xxeEnabledParserPy(call: SyntaxNode, parserName: string): boolean {
+  let scope: SyntaxNode | null = call.parent;
+  while (scope && scope.type !== "function_definition" && scope.parent) scope = scope.parent;
+  const text = scope?.text ?? "";
+  const name = parserName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`\\b${name}\\.setFeature\\(\\s*${SAX_EXTERNAL_ENTITIES_RE.source}`).test(text)) return true;
+  const ctor = new RegExp(`\\b${name}\\s*=\\s*(?:[\\w.]+\\.)?XMLParser\\(([^)]*)\\)`).exec(text);
+  return !!ctor && /\b(?:resolve_entities\s*=\s*True|no_network\s*=\s*False|load_dtd\s*=\s*True)\b/.test(ctor[1]);
+}
+
 function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -704,6 +723,12 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   }
   // deserialization: pickle & friends always; yaml.load unless a Safe loader is named
   if (DESERIALIZERS_PY.has(text)) return first ? { id: "insecure-deserialization", sinkExpr: text, args: [first] } : null;
+  // XML parsed with a parser that was explicitly told to resolve external entities (XXE). Only the explicit
+  // opt-in counts: the defaults of the stdlib parsers and of modern lxml don't fetch external entities.
+  if (XML_PARSE_TAILS_PY.has(tail) && first) {
+    const parser = keywordArgPy(args, ["parser"]) ?? positional[1];
+    if (parser?.type === "identifier" && xxeEnabledParserPy(call, parser.text)) return { id: "xxe", sinkExpr: text, args: [first] };
+  }
   if (text === "yaml.load" || (resolvedModule === "yaml" && tail === "load")) {
     const loader = keywordArg(args, "Loader") ?? positional[1] ?? null;
     if (loader && /Safe/.test(loader.text)) return null;
@@ -2455,7 +2480,7 @@ const SEVERITY: Record<AstTaintPyId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "timing-attack": "medium", "jwt-none-alg": "critical",
   // Fallback only -- collectBolaFindingsPy always passes a severityOverride (medium for a read-shaped
   // function name, high otherwise), same convention as every other engine's BOLA detector.
-  "bola-missing-ownership-check": "high", "argument-injection": "high",
+  "bola-missing-ownership-check": "high", "argument-injection": "high", "xxe": "high",
 };
 const LABEL: Record<AstTaintPyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -2466,6 +2491,7 @@ const LABEL: Record<AstTaintPyId, string> = {
   "eval-exec": "Arbitrary Code Execution", "insecure-deserialization": "Insecure Deserialization",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)", "argument-injection": "Argument Injection",
+  "xxe": "XML External Entity (XXE)",
 };
 
 function isFastApiHandler(fn: SyntaxNode): boolean {

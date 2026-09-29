@@ -47,6 +47,8 @@ const ID_TO_CLASS: Record<string, number> = {
   "path-traversal": SinkClass.PATH,
   "open-redirect": SinkClass.REDIRECT,
   "insecure-deserialization": SinkClass.DESERIAL,
+  // Parsing attacker XML with external entities enabled: like deserialization, no string escaping helps.
+  "xxe": SinkClass.DESERIAL,
   "file-inclusion": SinkClass.INCLUDE,
   "ldap-injection": SinkClass.LDAP,
   "xpath-injection": SinkClass.XPATH,
@@ -235,6 +237,7 @@ export function factStepsFromTrace(
     const at = callLine >= 0 ? fnLine! + callLine : fnLine!;
     const bridge: TraceStep[] = [
       entry,
+      ...assignmentsBetween(local.lines, fnFile, fnLine! + 1, at - 1, paramName),
       { file: fnFile, line: at, kind: "call", label: `passes it to ${helper.name}(…)`, snippet: (local.lines[at - 1] ?? "").trim().slice(0, 100) },
       { file: fnFile, line: helper.start, kind: "parameter", label: `${first.label} — parameter of ${helper.name}`, snippet: `${helper.name}(${first.snippet})` },
     ];
@@ -243,6 +246,30 @@ export function factStepsFromTrace(
   if (first && first.kind === "source") steps[0] = entry;
   else if (first?.kind !== "parameter") steps.unshift(entry);
   return capSteps(steps);
+}
+
+// `x := f(p)` (Go), `$x = f($p);` (PHP), `String x = f(p);` / `var x = f(p);` (Java/C#), `x = f(p)`.
+const SIMPLE_ASSIGNMENT_RE = /^\s*(?:(?:final\s+)?[A-Za-z_][\w.<>\[\]]*\s+)?(\$?[A-Za-z_]\w*)\s*(?::=|=)(?!=)\s*(.+?);?\s*$/;
+
+/**
+ * The single-line assignments in lines [from, to] that derive from `paramName` (directly or through a previous
+ * one) -- the steps a function takes on its parameter before handing it to a same-file helper. Text-level on
+ * purpose: the engine that found the flow re-walked only the helper, so these lines were never in its trace.
+ */
+function assignmentsBetween(lines: readonly string[], file: string, from: number, to: number, paramName?: string): TraceStep[] {
+  if (!paramName || to < from) return [];
+  const tracked = new Set([paramName.replace(/^\$/, "")]);
+  const steps: TraceStep[] = [];
+  for (let n = from; n <= to && steps.length < 4; n++) {
+    const m = SIMPLE_ASSIGNMENT_RE.exec(lines[n - 1] ?? "");
+    if (!m) continue;
+    const [, lhs, rhs] = m;
+    const uses = [...tracked].some(t => new RegExp(`(?:^|[^\\w$])\\$?${t}\\b`).test(rhs));
+    if (!uses) continue;
+    tracked.add(lhs.replace(/^\$/, ""));
+    steps.push({ file, line: n, kind: "assignment", label: `${lhs} = ${rhs}`.slice(0, 100), snippet: rhs.slice(0, 100) });
+  }
+  return steps;
 }
 
 /** A file's functions (1-based line ranges), so a callee path that starts inside a same-file helper can be

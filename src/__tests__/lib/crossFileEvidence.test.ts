@@ -82,18 +82,22 @@ describe("the path continues through every callee, file by file", () => {
       { path: "api/models/m.go", content: `package models\nfunc Chain(db *sql.DB, id string) {\n\tkey := strings.TrimSpace(id)\n\tFind(db, key)\n}\nfunc Find(db *sql.DB, id string) {\n\tq := "SELECT * FROM u WHERE id = " + id\n\tdb.Query(q)\n}\n` },
       { path: "api/c/h.go", content: `package c\nimport "example.com/app/api/models"\nfunc H(w http.ResponseWriter, r *http.Request) {\n\tid := r.URL.Query().Get("id")\n\tmodels.Chain(db, id)\n}\n` },
     ]);
-    expect(hops(flowAt(go, "api/c/h.go")!.trace).slice(2)).toEqual([
-      "parameter@api/models/m.go:2", "call@api/models/m.go:4", "parameter@api/models/m.go:6", "assignment@api/models/m.go:7", "sink@api/models/m.go:8",
+    const goTrace = flowAt(go, "api/c/h.go")!.trace!;
+    expect(hops(goTrace).slice(2)).toEqual([
+      "parameter@api/models/m.go:2", "assignment@api/models/m.go:3", "call@api/models/m.go:4",
+      "parameter@api/models/m.go:6", "assignment@api/models/m.go:7", "sink@api/models/m.go:8",
     ]);
+    expect(goTrace[3].label).toBe("key = strings.TrimSpace(id)");
     const php = scan([
       { path: "lib/db.php", content: `<?php\nfunction find($c, $id) {\n  $q = "SELECT * FROM u WHERE id = " . $id;\n  mysqli_query($c, $q);\n}\nfunction chain($c, $id) {\n  $key = trim($id);\n  find($c, $key);\n}\n` },
       { path: "index.php", content: `<?php\nrequire __DIR__ . '/lib/db.php';\n$id = $_GET['id'];\nchain($c, $id);\n` },
     ]);
     const t = flowAt(php, "index.php")!.trace!;
     expect(hops(t).slice(2)).toEqual([
-      "parameter@lib/db.php:6", "call@lib/db.php:8", "parameter@lib/db.php:2", "assignment@lib/db.php:3", "sink@lib/db.php:4",
+      "parameter@lib/db.php:6", "assignment@lib/db.php:7", "call@lib/db.php:8", "parameter@lib/db.php:2", "assignment@lib/db.php:3", "sink@lib/db.php:4",
     ]);
-    expect(t[3].label).toBe("passes it to find(…)");
+    expect(t[3].label).toBe("$key = trim($id)");
+    expect(t[4].label).toBe("passes it to find(…)");
   });
 });
 

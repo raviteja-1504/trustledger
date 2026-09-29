@@ -382,6 +382,10 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   // eval / new Function is handled separately (NewExpression), this only
   // covers the bare eval(...) call form.
   if (text === "eval") return { id: "eval-exec", sinkExpr: text, args: call.arguments };
+  // node:vm running a code string built from input (a constant string with a sandbox is checkVmSandboxEval's)
+  if (VM_SANDBOX_TAILS.has(tail) && (head === "vm" || resolvedModule === "vm") && call.arguments[0]) {
+    return { id: "eval-exec", sinkExpr: text, args: [call.arguments[0]] };
+  }
 
   if (CMD_SINK_NAMES.has(tail) && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {
     return { id: "command-injection", sinkExpr: text, args: commandArgs(call, tail) };
@@ -549,6 +553,15 @@ const PASSTHROUGH_NEW = new Set(["URL", "URLSearchParams", "Buffer", "String", "
 // Methods whose result also includes their ARGUMENTS (replacement text, appended strings).
 const ARG_CARRYING_METHODS = new Set(["replace", "replaceAll", "concat", "padStart", "padEnd"]);
 const CALLBACK_RESULT_METHODS = new Set(["then", "map", "flatMap"]);
+/** node:vm entry points that run a code string (the sandbox, when any, is the second argument). */
+const VM_SANDBOX_TAILS = new Set(["runInContext", "runInNewContext", "runInThisContext", "compileFunction"]);
+/** JS-in-JS evaluators: whatever they're handed is evaluated as code, sandboxed or not. */
+const EVALUATOR_MODULES = new Set(["notevil", "safe-eval", "static-eval", "eval"]);
+/** Methods whose callback's first parameter is the receiver's value (a promise's result, an element); `reduce`'s
+ * is its second (after the accumulator). `catch` is not here: it receives the error, not the value. */
+const CALLBACK_ELEMENT_METHODS = new Set([
+  "then", "map", "flatMap", "forEach", "filter", "find", "findIndex", "findLast", "findLastIndex", "some", "every", "reduce", "reduceRight",
+]);
 // A local class method sharing one of these names is indistinguishable from the builtin -- not resolved by name.
 const BUILTIN_METHOD_NAMES = new Set([
   "get", "set", "has", "delete", "add", "push", "pop", "shift", "unshift", "map", "filter", "reduce", "forEach", "join",
@@ -945,6 +958,8 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       if (shapes) {
         let m = 0;
         for (const shape of shapes) {
+          // a function that returns request input it reads itself: tainted whatever the arguments are
+          if (shape.index < 0) { m |= shape.mask ?? ALL; continue; }
           for (const a of argsForShape(expr.arguments, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
         }
         if (m) return m;
@@ -1252,6 +1267,9 @@ interface WalkerHooks {
   onStatement?: (n: ts.Node) => void;
   /** Walk nested function bodies (main scan) or ignore them (summaries: their returns aren't this function's). */
   descendFunctions: boolean;
+  /** For a function passed as argument `argIndex` of `call`: the taint its parameters receive when it is called
+   * back (a `.then` callback gets the promise's value, a helper may call it with request input). */
+  callbackParamMasks?: (call: ts.CallExpression, argIndex: number, env: Env) => readonly number[] | undefined;
 }
 
 function createWalker(h: WalkerHooks) {
@@ -1276,7 +1294,10 @@ function createWalker(h: WalkerHooks) {
     // A closure sees captured outer variables (cloned env), but its own
     // parameters shadow same-named outer ones and start untainted.
     const fenv = cloneEnv(env);
-    for (const prm of f.parameters) if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, 0);
+    const parent = f.parent;
+    const seeds = h.callbackParamMasks && parent && ts.isCallExpression(parent)
+      ? h.callbackParamMasks(parent, parent.arguments.indexOf(f as ts.Expression), env) : undefined;
+    f.parameters.forEach((prm, i) => { if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, seeds?.[i] ?? 0); });
     for (const [name, mask] of destructuredRequestSources(f)) fenv.set(name, mask);
     if (ts.isBlock(f.body)) walkNode(f.body, fenv);
     else handleExpr(f.body, fenv);
@@ -1467,7 +1488,28 @@ function computeReturnTaintPropagating(fn: LocalFn, maskFn: TaintMaskFn): Map<nu
     surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
+  // With NO parameter tainted, does the function still return request input? (`getId(req) { return
+  // req.query.id; }` -- `req` isn't tainted at the call site, but reading its query is a source by itself.)
+  // Recorded under RETURNS_INPUT_INDEX, which no argument ever binds to.
+  const own = returnMask(fn, maskFn, new Map()) & ALL;
+  if (own) propagatingIdx.set(RETURNS_INPUT_INDEX, own);
   return propagatingIdx;
+}
+
+/** A propagating-shape index meaning "the return value carries request input read inside the function itself,
+ * whatever the arguments are" (see computeReturnTaintPropagating). */
+const RETURNS_INPUT_INDEX = -1;
+const RETURNS_INPUT_SHAPE: ParamShape = { name: "<returns request input>", index: RETURNS_INPUT_INDEX, isRest: false };
+
+/** The mask at every return of `fn` (path-sensitive, nested functions' returns excluded), under `seed`. */
+function returnMask(fn: LocalFn, maskFn: TaintMaskFn, seed: Env): number {
+  if (!ts.isBlock(fn.body)) return maskFn(fn.body as ts.Expression, seed);
+  let m = 0;
+  createWalker({
+    taintMask: maskFn, sf: fn.body.getSourceFile(), descendFunctions: false,
+    onReturn: (expr, env) => { m |= maskFn(expr, env); },
+  }).walkNode(fn.body, seed);
+  return m;
 }
 
 // Caps every bounded fixed-point loop below (same-file propagating-map
@@ -1505,7 +1547,7 @@ function buildPropagatingMap(localFns: Map<string, LocalFn>, seed?: Map<string, 
       // under OR just as the single bit was).
       const merged = new Map<number, ParamShape>((propagating.get(name) ?? []).map(s => [s.index, s]));
       let grew = false;
-      for (const shape of paramShapesOf(fn)) {
+      for (const shape of [...paramShapesOf(fn), RETURNS_INPUT_SHAPE]) {
         const m = found.get(shape.index);
         if (!m) continue;
         const prev = merged.get(shape.index);
@@ -2947,7 +2989,13 @@ export function scanAstTaint(
 
     const checkNewExprForSink = (node: ts.NewExpression, env: Env) => {
       if (ts.isIdentifier(node.expression) && node.expression.text === "Function") {
-        emit("eval-exec", node, "Function(...)", "new Function");
+        // A data-flow finding needs a tainted argument: `new Function("specifier", "return import(specifier)")`
+        // (constant parameter names and body) evaluates nothing an attacker controls.
+        const args = node.arguments ?? [];
+        const tainted = args.find(a => taintMask(a, env) & classOf("eval-exec"));
+        if (tainted) emit("eval-exec", node, sourceLabel(tainted), "new Function", tainted);
+        // Every part is a constant string: proven safe, so the regex layer's line-level match is dropped too.
+        else if (args.length > 0 && args.every(a => ts.isStringLiteralLike(a))) suppressedOut?.push({ id: "eval-exec", line: lineOf(node) });
       }
       // new RegExp(userInput): regex injection / ReDoS
       if (ts.isIdentifier(node.expression) && node.expression.text === "RegExp" && node.arguments?.[0]) {
@@ -3083,11 +3131,56 @@ export function scanAstTaint(
 
     // Expression-level checks for one node, with the env at that point.
     // (Statement structure, branching and nested functions are the walker's job.)
+    // `vm.runInContext("safeEval(data)", { safeEval, data })`: the code is a constant, but it runs an evaluator
+    // from the sandbox on a sandbox value -- attacker data is evaluated all the same (Juice Shop's b2bOrder).
+    // Evaluators: `eval`/`Function`, or anything imported from a JS-in-JS evaluator package (notevil,
+    // safe-eval, static-eval). A tainted code string itself is the plain vm sink (matchSink).
+    const evaluatorLocals = new Set(buildImportBindings(sourceFile)
+      .filter(b => EVALUATOR_MODULES.has(b.moduleSpecifier) || (b.importedName === "eval" && !b.namespace))
+      .map(b => b.localName));
+    const checkVmSandboxEval = (call: ts.CallExpression, env: Env) => {
+      const text = calleeText(call.expression);
+      const tail = text?.split(".").pop();
+      if (!text || !tail || !VM_SANDBOX_TAILS.has(tail) || !(text.startsWith("vm.") || importMap.get(text.split(".")[0]) === "vm")) return;
+      const [codeArg, sandboxArg] = call.arguments;
+      if (!codeArg || !ts.isStringLiteralLike(codeArg) || !sandboxArg) return;
+      let sandbox: ts.Expression | undefined = unwrapExpr(sandboxArg);
+      if (ts.isIdentifier(sandbox)) sandbox = initializerOf.get(sandbox.text);
+      if (!sandbox || !ts.isObjectLiteralExpression(sandbox)) return;
+      const values = new Map<string, ts.Expression>();
+      for (const p of sandbox.properties) {
+        if (ts.isShorthandPropertyAssignment(p)) values.set(p.name.text, p.name);
+        else if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) values.set(p.name.text, p.initializer);
+      }
+      const isEvaluator = (key: string) => {
+        if (key === "eval" || key === "Function") return true;
+        const v = values.get(key);
+        return !!v && ts.isIdentifier(v) && (evaluatorLocals.has(v.text) || v.text === "eval");
+      };
+      const code = ts.createSourceFile("sandbox.js", codeArg.text, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
+      const visit = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && isEvaluator(node.expression.text)) {
+          for (const a of node.arguments) {
+            if (!ts.isIdentifier(a)) continue;
+            const v = values.get(a.text);
+            if (v && (taintMask(v, env) & classOf("eval-exec"))) {
+              emit("eval-exec", call, sourceLabel(v), text, v,
+                `Untrusted '${sourceLabel(v)}' is passed into a vm sandbox as '${a.text}' and evaluated there by ${node.expression.text}(...) — a sandbox does not make evaluating attacker input safe (sandbox escapes, resource exhaustion)`);
+              return;
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(code);
+    };
+
     const onVisit = (n: ts.Node, env: Env) => {
       if (ts.isCallExpression(n)) {
         checkCallForSink(n, env);
         checkArgumentInjection(n, env);
         checkCrossFileSinks(n, env);
+        checkVmSandboxEval(n, env);
         // Same-file call binding: seed callee params for tainted args, one hop.
         // Matched by INDEX (via paramShapesOf, including rest-param
         // overflow), not by re-deriving positions ad hoc here.
@@ -3121,8 +3214,70 @@ export function scanAstTaint(
       if (ts.isVariableDeclaration(n)) recordModelInstanceVar(n);
     };
 
+    // What a callback's parameters receive when it is called back:
+    //  - `promise.then(v => ...)`, `arr.map(x => ...)` / forEach / filter / find / some / every / reduce: the
+    //    receiver's value (the promise's result, each element);
+    //  - a callback handed to a helper -- in this file, or an imported one whose source is in the batch -- that
+    //    calls it: whatever the helper calls it with, found by walking the helper's body with the caller's
+    //    argument taint (`withId(req, cb) { cb(req.query.id); }`).
+    const importBindings = crossFileSources?.size ? buildImportBindings(sourceFile) : [];
+    const importedSource = (name: string): { sf: ts.SourceFile; importedName: string } | undefined => {
+      const known = crossFilePropagating?.get(name)?.resolvedPath;
+      if (known && crossFileSources?.get(known)) return { sf: crossFileSources.get(known)!, importedName: name };
+      // Not summarized (it returns and sinks nothing itself): resolve the relative import against the batch.
+      const b = importBindings.find(x => x.localName === name && !x.namespace && x.moduleSpecifier.startsWith("."));
+      if (!b || !crossFileSources) return undefined;
+      const base = [...filePath.split("/").slice(0, -1), ...b.moduleSpecifier.split("/")].reduce<string[]>((acc, seg) => {
+        if (seg === "..") acc.pop(); else if (seg !== "." && seg !== "") acc.push(seg);
+        return acc;
+      }, []).join("/");
+      const stem = base.replace(/\.(?:[cm]?js|jsx)$/, "");
+      for (const cand of [base, ...["ts", "tsx", "js", "jsx", "mts", "mjs", "cjs"].flatMap(e => [`${stem}.${e}`, `${stem}/index.${e}`])]) {
+        const sf = crossFileSources.get(cand);
+        if (sf) return { sf, importedName: b.importedName };
+      }
+      return undefined;
+    };
+    const helperBody = (name: string): LocalFn | undefined => {
+      const local = localFns.get(name);
+      if (local) return local;
+      const imp = importedSource(name);
+      if (!imp) return undefined;
+      const fns = collectLocalFunctions(imp.sf);
+      return [...fns.values()].find(f => f.exportedNames.includes(imp.importedName)) ?? fns.get(imp.importedName);
+    };
+    const callbackParamMasks = (call: ts.CallExpression, argIndex: number, env: Env): number[] | undefined => {
+      if (argIndex < 0) return undefined;
+      const callee = call.expression;
+      if (ts.isPropertyAccessExpression(callee) && CALLBACK_ELEMENT_METHODS.has(callee.name.text) && argIndex === 0) {
+        const recv = taintMask(callee.expression, env) & ALL;
+        if (!recv) return undefined;
+        return callee.name.text.startsWith("reduce") ? [0, recv] : [recv];
+      }
+      if (!ts.isIdentifier(callee)) return undefined;
+      const fn = helperBody(callee.text);
+      const cbParam = fn?.params[argIndex];
+      if (!fn || !cbParam || !ts.isIdentifier(cbParam.name)) return undefined;
+      const cbName = cbParam.name.text;
+      const seed: Env = new Map();
+      fn.params.forEach((p, i) => {
+        const a = call.arguments[i];
+        if (i !== argIndex && ts.isIdentifier(p.name) && a && !isFunctionExpr(a)) seed.set(p.name.text, taintMask(a, env) & ALL);
+      });
+      const out: number[] = [];
+      const record = (n: ts.Node, e: Env) => {
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === cbName) {
+          n.arguments.forEach((a, i) => { out[i] = (out[i] ?? 0) | (taintMask(a, e) & ALL); });
+        }
+      };
+      const w = createWalker({ taintMask, sf: fn.body.getSourceFile(), descendFunctions: false, onVisit: record });
+      if (ts.isBlock(fn.body)) w.walkNode(fn.body, seed);
+      else w.handleExpr(fn.body, seed);
+      return out.some(m => m) ? out : undefined;
+    };
+
     const walker = createWalker({
-      taintMask, sf: sourceFile, descendFunctions: true, onVisit,
+      taintMask, sf: sourceFile, descendFunctions: true, onVisit, callbackParamMasks,
       // Tier-2 message-attribution bookkeeping only (see initializerOf's
       // declaration) -- kept separate from applyDeclAndAssign, since the
       // summary builder reuses that function and has no access to this map.
