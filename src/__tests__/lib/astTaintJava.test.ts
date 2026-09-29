@@ -786,14 +786,14 @@ public class A {
   });
 });
 
-describe("Real AST-based taint engine — bounded interprocedural propagation (Decision 3, MAX_PROPAGATION_ROUNDS = 3)", () => {
+describe("Real AST-based taint engine — interprocedural propagation to a fixed point (Decision 3)", () => {
   // Caller-declared-first chain (levelA declared before the levelB it calls,
   // and so on): the fixed-point pre-pass processes methods in declaration
   // order each round, so a method can only see a callee's propagating status
   // from an EARLIER point in the SAME or a PRIOR round, never one declared
   // later in the same round. Traced by hand (and confirmed by running this
   // suite) that levelD resolves round 0, levelC round 1, levelB round 2, and
-  // levelA would only resolve in a would-be round 3 -- one past the cap.
+  // levelA resolves in round 3 -- the loop runs until nothing changes (see taintCore FIXED_POINT_CAP).
   const chain = `
 public class A {
   private String levelA(String x) { return levelB(x); }
@@ -819,13 +819,13 @@ public class A {
     expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
   });
 
-  it("does NOT resolve levelA, the outermost 3-hop caller, proving the round cap is real (not accidentally unbounded)", () => {
+  it("resolves levelA too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
     const content = `${chain}
   public void handler(@RequestParam String input) {
     Runtime.getRuntime().exec(levelA(input));
   }
 }`;
-    expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+    expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
   });
 });
 

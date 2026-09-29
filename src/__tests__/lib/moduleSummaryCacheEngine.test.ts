@@ -132,7 +132,7 @@ describe("JS/TS: reachability's OWN per-file input (call-graph edges/reachable, 
     // If those edges were silently dropped for a cache-valid db.ts, this would regress to "unreachable".
     const SQL_FN = (name: string) => `function ${name}(id) {\n  const sql = "SELECT * FROM t WHERE id = " + id;\n  return db.query(sql);\n}`;
     const DB = `${SQL_FN("helper")}\nfunction runQuery(id) {\n  return helper(id);\n}\nexport { runQuery };\n`;
-    const API = `import { runQuery } from "./db";\nexport function handler(req) {\n  return runQuery(req.query.id);\n}\n`;
+    const API = `import { runQuery } from "./db";\nexport function handler(req) {\n  return runQuery(req.user.id);\n}\n`;
     const files = [{ path: "src/db.ts", content: DB }, { path: "src/api.ts", content: API }];
     const reachOf = (r: ReturnType<typeof scan>) => r.files.find(f => f.file_path === "src/db.ts")!.indicators.find(i => i.id === "sql-injection")?.reachability;
 

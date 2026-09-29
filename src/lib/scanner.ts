@@ -35,7 +35,8 @@ import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
 import { assignFingerprints } from "./findingIdentity";
-import { correlateFindings, linkCrossFileFlows, type FlowOrigin, type RelatedLocation } from "./findingCorrelation";
+import { correlateFindings, linkCrossFileFlows, mergeCrossFileDuplicates, type FlowOrigin, type RelatedLocation } from "./findingCorrelation";
+import { buildDataFlowEvidence, type DataFlowEvidence } from "./dataFlowEvidence";
 import { selectSsaFunctions } from "./ssaSelection";
 import { toAiProbability } from "./aiCalibration";
 import type { AiProbability, CalibrationMap } from "./aiCalibration";
@@ -47,7 +48,7 @@ import type { CachedFileResult } from "./incrementalCache";
 import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries } from "./moduleSummaryCache";
 import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
 import type { TraceStep, ParamSinkFact, StoredProvenanceIO } from "./taint/taintCore";
-import { mergeSinkFacts } from "./taint/taintCore";
+import { FIXED_POINT_CAP, mergeSinkFacts } from "./taint/taintCore";
 import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
@@ -146,6 +147,11 @@ export interface ScanIndicator {
   // Findings in OTHER files of the PR whose confirmed data-flow path runs through this line
   // (findingCorrelation.ts linkCrossFileFlows).
   reachedFrom?: FlowOrigin[];
+  // Canonical data-flow evidence (dataFlowEvidence.ts), built once in analyzeFile from `trace`.
+  flow?: DataFlowEvidence;
+  // The engine seeded the flow's source itself -- a public method's parameter it ASSUMED untrusted, with no
+  // request read or framework binding seen (astTaintJava.ts entryPointSeeded). Feeds flow.source.assumed.
+  sourceAssumed?: boolean;
   // Per-instance call-graph reachability, merged in from the file-level
   // ReachabilityReport (see the scoreExploitability() call below) after it
   // runs. Lives on the individual finding rather than only on the file-level
@@ -6231,6 +6237,7 @@ function findAstTaintJavaFindings(
       : f.detail,
     confidence: f.entryPointSeeded ? 70 : 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+    sourceAssumed: f.entryPointSeeded || undefined,
   }));
 }
 
@@ -6603,6 +6610,12 @@ export function analyzeFile(
   // One issue, one finding: merge findings for the same weakness on the same line, or on one another's
   // data-flow path, that the id+line dedup above can't see (see findingCorrelation.ts).
   const indicators = correlateFindings(Array.from(byKey.values()), file_path);
+  // Canonical evidence for every data-flow finding: exact sink + argument role, files crossed, sanitisers on
+  // the path (their steps are marked in the trace), canonical sink identity. Read by every surface.
+  for (const ind of indicators) {
+    const flow = buildDataFlowEvidence(ind, file_path);
+    if (flow) ind.flow = flow;
+  }
   // (Fingerprints are assigned further down, once EVERY indicator -- AI signals, attribution, watermark,
   // behavioral, supply-chain -- exists and the enclosing-function resolver is defined. See findingIdentity.ts.)
 
@@ -7123,7 +7136,7 @@ function percentile(sorted: number[], p: number): number {
 }
 
 // Bounded like taint/crossFile.ts MAX_CROSS_FILE_ROUNDS: each round lets a caller see facts its callees gained.
-const MAX_SERVICE_FACT_ROUNDS = 3;
+const MAX_SERVICE_FACT_ROUNDS = FIXED_POINT_CAP;
 
 /** Order-independent digest of a `Type.method` -> sink facts map (convergence check and cache key). */
 /** A fact's callee-side path as it reaches the rendered trace (a callee edit that moves a step must invalidate
@@ -7537,7 +7550,7 @@ export function runScan(input: ScanInput): ScanOutput {
   const modelWritesAggregate = new Map<string, number>();
   if (modelReceiversByFile.size > 0) {
     const fileContentByPath = new Map(allFiles.map(f => [f.path, f.content]));
-    const MAX_STORED_PROVENANCE_ROUNDS = 3;
+    const MAX_STORED_PROVENANCE_ROUNDS = FIXED_POINT_CAP;
     for (let round = 0; round < MAX_STORED_PROVENANCE_ROUNDS; round++) {
       let grew = false;
       for (const [path, receivers] of modelReceiversByFile) {
@@ -7698,6 +7711,13 @@ export function runScan(input: ScanInput): ScanOutput {
   // matching findings with where the flow comes from (findingCorrelation.ts). Scan-wide by nature, so it runs
   // here -- after every file (cached or not) is present -- like the passes above.
   linkCrossFileFlows(files);
+  // ...and a finding there with no request input of its own is the same issue, reported where the input enters.
+  for (const path of mergeCrossFileDuplicates(files)) {
+    const f = files.find(x => x.file_path === path);
+    if (!f) continue;
+    f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));
+    f.risk_score = calculateRisk(f.indicators, f.ai_percentage);
+  }
 
   // The two post-passes above append line-less indicators (cross-file-taint-exposure, ai-blast-radius)
   // that analyzeFile never saw. Mint their identities now -- fill-only, so every id assigned during

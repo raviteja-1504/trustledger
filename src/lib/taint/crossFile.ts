@@ -94,12 +94,12 @@ export interface BridgeEntry {
   resolvedPath: string;
 }
 
-import { ALL, mergeSinkFacts } from "./taintCore";
+import { ALL, FIXED_POINT_CAP, mergeSinkFacts } from "./taintCore";
 import type { ParamSinkFact } from "./taintCore";
 
 // Bounded for the same reason astTaint.ts's MAX_PROPAGATION_ROUNDS is: convergence is guaranteed
 // (every merge below is monotonic OR), the cap only bounds worst-case cost on a large batch.
-const MAX_CROSS_FILE_ROUNDS = 3;
+const MAX_CROSS_FILE_ROUNDS = FIXED_POINT_CAP;
 
 /** Per-parameter-index OR-merge of `shapes` into `target.get(name)`. Returns whether anything grew. */
 function mergeShapesInto(target: Map<string, CrossFileShape[]>, name: string, shapes: CrossFileShape[]): boolean {

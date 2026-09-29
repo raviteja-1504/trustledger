@@ -27,7 +27,9 @@ export interface RelatedLocation {
   /** How the merged finding was detected. */
   detector: "data-flow" | "pattern";
   /** Why it is the same issue. */
-  reason: "same-line" | "on-path";
+  reason: "same-line" | "on-path" | "cross-file";
+  /** Set when the merged finding was reported in another file (cross-file correlation). */
+  file?: string;
 }
 
 const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
@@ -54,8 +56,8 @@ const sameFile = (stepFile: string | undefined, filePath: string) =>
 function absorb(kept: ScanIndicator, absorbed: ScanIndicator, reason: RelatedLocation["reason"]): void {
   const related = kept.relatedLocations ?? [];
   const add = (loc: RelatedLocation) => {
-    if (loc.line === kept.line && loc.id === kept.id) return;
-    if (!related.some(r => r.line === loc.line && r.id === loc.id)) related.push(loc);
+    if (!loc.file && loc.line === kept.line && loc.id === kept.id) return;
+    if (!related.some(r => r.line === loc.line && r.id === loc.id && r.file === loc.file)) related.push(loc);
   };
   add({ line: absorbed.line!, id: absorbed.id, label: absorbed.label, detector: absorbed.sourceExpr ? "data-flow" : "pattern", reason });
   for (const r of absorbed.relatedLocations ?? []) add(r);
@@ -80,6 +82,79 @@ export interface FlowOrigin {
   id: string;
   /** Where that flow starts (the request input), when known. */
   source?: string;
+}
+
+/**
+ * The files of a stored scan whose findings depend on OTHER files: one holds a flow whose path leaves it, is
+ * crossed by another file's flow, carries a backlink, or had a finding folded into another file's. Re-analysing
+ * such a file on its own (api/scans/[id]'s live re-analysis) would lose that context -- drop the cross-file
+ * finding, or report a folded duplicate again -- so its stored, full-context result must be used instead.
+ */
+export function filesWithCrossFileContext(files: ReadonlyArray<{
+  file_path: string;
+  indicators?: ReadonlyArray<{ trace?: ReadonlyArray<{ file?: string }>; reachedFrom?: ReadonlyArray<{ file: string }>; relatedLocations?: ReadonlyArray<{ file?: string }> }> | null;
+}>): Set<string> {
+  const out = new Set<string>();
+  for (const f of files) {
+    for (const i of f.indicators ?? []) {
+      for (const s of i.trace ?? []) if (s.file && s.file !== f.file_path) { out.add(f.file_path); out.add(s.file); }
+      for (const o of i.reachedFrom ?? []) { out.add(f.file_path); out.add(o.file); }
+      for (const r of i.relatedLocations ?? []) if (r.file && r.file !== f.file_path) { out.add(f.file_path); out.add(r.file); }
+    }
+  }
+  return out;
+}
+
+/** A finding with no request input of its own: a pattern match, or a flow that starts at an assumed parameter. */
+const lacksOwnSource = (i: ScanIndicator) => !i.sourceExpr || !!i.flow?.source.assumed;
+
+/**
+ * Cross-file deduplication, after linkCrossFileFlows: a finding in file B that is reached by a confirmed flow
+ * from file A (its line is on that flow's path) and has no request input of its own is the SAME issue as A's
+ * finding -- B's view of it. It is folded into A's finding as a cross-file related location (so the PR reports
+ * one issue, where the input enters), instead of being reported again in B. A finding in B with its OWN request
+ * source is a separate entry point and stays. Returns the files whose findings changed.
+ */
+export function mergeCrossFileDuplicates(files: ReadonlyArray<{ file_path: string; indicators: ScanIndicator[] }>): Set<string> {
+  const byPath = new Map(files.map(f => [f.file_path, f]));
+  const findOrigin = (o: FlowOrigin) => byPath.get(o.file)?.indicators.find(i => i.line === o.line && i.id === o.id);
+  // Where each secondary finding goes: the first origin with a real request source that isn't itself folded.
+  const target = new Map<ScanIndicator, { host: ScanIndicator; file: string }>();
+  for (const g of files) {
+    for (const y of g.indicators) {
+      if (!y.reachedFrom?.length || !lacksOwnSource(y)) continue;
+      for (const o of y.reachedFrom) {
+        const x = findOrigin(o);
+        if (x && x !== y && !lacksOwnSource(x)) { target.set(y, { host: x, file: g.file_path }); break; }
+      }
+    }
+  }
+  const touched = new Set<string>();
+  if (target.size === 0) return touched;
+  for (const [y, { host, file }] of target) {
+    const related = host.relatedLocations ?? [];
+    const add = (loc: RelatedLocation) => {
+      if (!related.some(r => r.line === loc.line && r.id === loc.id && r.file === loc.file)) related.push(loc);
+    };
+    add({ file, line: y.line!, id: y.id, label: y.label, detector: y.sourceExpr ? "data-flow" : "pattern", reason: "cross-file" });
+    for (const r of y.relatedLocations ?? []) add({ ...r, file: r.file ?? file, reason: "cross-file" });
+    host.relatedLocations = related.sort((a, b) => (a.file ?? "").localeCompare(b.file ?? "") || a.line - b.line || a.id.localeCompare(b.id));
+    const supporting = new Set([...(host.supportingDetectors ?? []), ...(y.supportingDetectors ?? [])]);
+    if (y.label !== host.label) supporting.add(y.label);
+    supporting.delete(host.label);
+    if (supporting.size) host.supportingDetectors = [...supporting];
+    touched.add(file);
+  }
+  for (const g of files) {
+    if (touched.has(g.file_path)) g.indicators.splice(0, g.indicators.length, ...g.indicators.filter(i => !target.has(i)));
+    // Backlinks may only name findings that are still reported.
+    for (const i of g.indicators) {
+      if (!i.reachedFrom) continue;
+      const live = i.reachedFrom.filter(o => { const x = findOrigin(o); return !!x && !target.has(x); });
+      if (live.length) i.reachedFrom = live; else delete i.reachedFrom;
+    }
+  }
+  return touched;
 }
 
 /**

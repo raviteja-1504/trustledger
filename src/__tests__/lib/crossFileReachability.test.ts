@@ -28,7 +28,7 @@ export { runQuery };
 const API_FILE = `
 import { runQuery } from "./db";
 export function handler(req) {
-  return runQuery(req.query.id);
+  return runQuery(req.user.id);
 }
 `;
 

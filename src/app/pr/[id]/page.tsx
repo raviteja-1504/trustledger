@@ -9,6 +9,7 @@ import RiskBadge from "@/components/RiskBadge";
 import ProgressBar from "@/components/ProgressBar";
 import CodeViewer from "@/components/CodeViewer";
 import type { FileNavigation } from "@/components/InlineFinding";
+import { crossFileMarks, type CrossFileMark } from "@/lib/dataFlowEvidence";
 import { api } from "@/lib/api";
 import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@/lib/policy";
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
@@ -575,12 +576,13 @@ function fileNav(shownFiles: readonly FileResult[]): FileNavigation {
   };
 }
 
-function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav }: {
+function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, crossFileMarks: marks }: {
   file: FileResult;
   reviewerEmail: string;
   reviewerGithub: string;
   onRequestAttest: (f: FileResult) => void;
   nav?: FileNavigation;
+  crossFileMarks?: CrossFileMark[];
 }) {
   const [attested,  setAttested]  = useState(file.attested);
   const [expanded,  setExpanded]  = useState(false);
@@ -879,6 +881,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav }: 
                     maxHeight="640px"
                     nav={nav}
                     jumpRequest={jumpRequest}
+                    crossFileMarks={marks}
                   />
                 </div>
               ) : (
@@ -1529,6 +1532,8 @@ function PRDetailContent() {
 
   // ── Derived stats ───────────────────────────────────────────────────────────
   const allFiles    = scan?.files ?? [];
+  // Lines of each file that another file's data flow passes through (see dataFlowEvidence.ts crossFileMarks).
+  const flowMarks   = crossFileMarks(allFiles, (id, label) => signalMeta(id, label).label);
   const totalFiles  = allFiles.length;
   const highFiles   = allFiles.filter(f => f.risk_score === "HIGH" || f.risk_score === "CRITICAL");
   const highCount   = highFiles.length;
@@ -1936,6 +1941,7 @@ function PRDetailContent() {
                       reviewerGithub={reviewerGithub}
                       onRequestAttest={setAttestTarget}
                       nav={fileNav(filteredFiles)}
+                      crossFileMarks={flowMarks.get(f.file_path)}
                     />
                   ))}
                 </tbody>

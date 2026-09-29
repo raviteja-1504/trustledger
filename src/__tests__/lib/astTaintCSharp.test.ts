@@ -293,7 +293,7 @@ public class A {
     });
   });
 
-  describe("bounded interprocedural propagation (MAX_PROPAGATION_ROUNDS = 3)", () => {
+  describe("interprocedural propagation to a fixed point", () => {
     const chain = `
 public class A {
   private string LevelA(string x) { return LevelB(x); }
@@ -319,13 +319,13 @@ public class A {
       expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
     });
 
-    it("does NOT resolve LevelA, the outermost 3-hop caller, proving the round cap is real", () => {
+    it("resolves LevelA too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
       const content = `${chain}
   public void Handle([FromQuery] string input) {
     Process.Start(LevelA(input));
   }
 }`;
-      expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+      expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
     });
   });
 

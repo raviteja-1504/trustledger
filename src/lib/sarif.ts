@@ -108,8 +108,8 @@ export function buildSarifReport(
         ...(ind.relatedLocations?.length ? {
           relatedLocations: ind.relatedLocations.map((loc, i) => ({
             id: i + 1,
-            physicalLocation: { artifactLocation: { uri: f.file_path }, region: { startLine: Math.max(1, loc.line) } },
-            message: { text: `Same issue: ${loc.label}${loc.reason === "on-path" ? " (on this finding's data-flow path)" : ""}` },
+            physicalLocation: { artifactLocation: { uri: loc.file ?? f.file_path }, region: { startLine: Math.max(1, loc.line) } },
+            message: { text: `Same issue: ${loc.label}${loc.reason === "on-path" ? " (on this finding's data-flow path)" : loc.reason === "cross-file" ? " (reported in another file, on this flow's path)" : ""}` },
           })),
         } : {}),
         properties: {
@@ -117,6 +117,13 @@ export function buildSarifReport(
           "trustledger/analysis": r.evidence.analysisLabel,
           "trustledger/evidence": reportAsPlainText(r),
           ...(ind.confidence != null ? { "trustledger/confidence": ind.confidence } : {}),
+          // Canonical data-flow evidence (dataFlowEvidence.ts): the exact sink and argument, and a sink identity
+          // stable across files -- the same sink reported from two files shares it.
+          ...(ind.flow ? {
+            "trustledger/sinkKey": ind.flow.sinkKey,
+            "trustledger/sinkArgument": ind.flow.sink.role,
+            ...(ind.flow.sanitizers.length ? { "trustledger/sanitizers": ind.flow.sanitizers.map(z => `${z.call} (${z.neutralises.join(", ")})${z.protectsSink ? "" : " — does not protect this sink"}`) } : {}),
+          } : {}),
           ...(ind.reachability ? { "trustledger/reachability": ind.reachability } : {}),
         },
       };

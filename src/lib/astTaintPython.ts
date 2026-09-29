@@ -49,7 +49,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
+  ALL, FIXED_POINT_CAP, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
   crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -657,7 +657,10 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     return cmd ? { id: "command-injection", sinkExpr: text, args: [cmd] } : null;
   }
   if ((parts[0] === "os" || resolvedModule === "os") && /^(?:exec[lv]p?e?|spawn[lv]p?e?)$/.test(tail)) {
-    return { id: "command-injection", sinkExpr: text, args: positional };
+    // No shell runs: what matters is the PROGRAM -- exec*(path, ...) takes it first, spawn*(mode, path, ...)
+    // second. The remaining arguments are its argv, passed verbatim.
+    const program = positional[tail.startsWith("spawn") ? 1 : 0];
+    return program ? { id: "command-injection", sinkExpr: text, args: [program] } : null;
   }
   if ((parts[0] === "subprocess" || resolvedModule === "subprocess") &&
       ["call", "run", "Popen", "check_output", "check_call"].includes(tail)) {
@@ -756,7 +759,13 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   }
   // LDAP
   if (parts.length > 1 && (LDAP_TAILS_PY.has(tail) || (tail === "search" && /ldap|conn/i.test(parts.slice(0, -1).join("."))))) {
-    return { id: "ldap-injection", sinkExpr: text, args: positional };
+    // The filter only (not the base DN, scope or attribute list): ldap3 search(base, filter, ...);
+    // python-ldap search*(base, scope, filterstr, ...) -- told apart by the scope constant.
+    const kw = keywordArgPy(args, ["search_filter", "filterstr"]);
+    const scopeSecond = tail !== "search" || /SCOPE_|SUBTREE|LEVEL|BASE|^\d+$/.test(positional[1]?.text ?? "");
+    const filterAt = scopeSecond ? 2 : 1;
+    const filter = kw ?? positional[filterAt] ?? positional[0];
+    return filter ? { id: "ldap-injection", sinkExpr: text, args: [filter] } : null;
   }
   if (parts.length === 1 && /^ldap_(?:search|query|find|filter\w*)$/i.test(tail) && first) {
     return { id: "ldap-injection", sinkExpr: text, args: [first] };
@@ -1571,7 +1580,7 @@ function computeReturnTaintPropagatingPy(
 // See astTaint.ts's identical constant/function for the full rationale --
 // mirrored here rather than shared, matching this codebase's existing
 // per-engine-file convention (no shared taint-engine base module).
-const MAX_PROPAGATION_ROUNDS_PY = 3;
+const MAX_PROPAGATION_ROUNDS_PY = FIXED_POINT_CAP;
 
 function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode, crossFileShapes?: Map<string, ParamShape[]>): PropagatingPy {
   const propagating: PropagatingPy = new Map();
@@ -2979,7 +2988,7 @@ export function scanAstTaintPython(
     walk(root, new Map(), false);
     // A container written by a function declared AFTER the one that reads it: walk again with what the
     // first pass learned (findings dedupe by id+line).
-    for (let i = 0; i < 2 && stickyDirty; i++) {
+    for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
       stickyDirty = false;
       walk(root, new Map(), false);
     }

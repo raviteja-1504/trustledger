@@ -17,6 +17,7 @@ import { mapWithConcurrency } from "@/lib/github";
 import { isDockerfilePath } from "@/lib/scannableFiles";
 import { extractFromImageRefs } from "@/lib/containerDockerfile";
 import { matchBaseImageProfile, packagesForProfile } from "@/lib/baseImageProfiles";
+import { analyzeDependencyReachability, type DepReachability } from "@/lib/depReachability";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,8 @@ export interface DepFinding {
   is_archived: boolean;
   is_deprecated: boolean;
   health_score: number;
+  /** For a package with a known vulnerability: is its code used, and reachably (see depReachability.ts)? */
+  reachability?: DepReachability;
 }
 
 /** Minimal shape deriveFindings needs — deliberately narrower than the app's
@@ -402,6 +405,30 @@ function liveFindingFor(
   };
 }
 
+/** Reachability of a vulnerable occurrence in its own scan's files: the package itself, with every vulnerable
+ * function its advisories name; a transitive package through the direct dependency that pulls it in. */
+function reachabilityFor(
+  occ: PackageOccurrence, osvResults: Map<string, OsvVulnerability[]>,
+  files: ScanForDeps["files"], memo: Map<string, DepReachability>,
+): DepReachability {
+  const key = `${occ.scanId}|${occ.eco}|${occ.pkg}|${occ.pulledBy ?? ""}|${occ.version}`;
+  const hit = memo.get(key);
+  if (hit) return hit;
+  let result: DepReachability;
+  if (occ.isTransitive && occ.pulledBy) {
+    const parent = analyzeDependencyReachability(occ.pulledBy, occ.eco, files);
+    result = { ...parent, via: occ.pulledBy, summary: `Pulled in by ${occ.pulledBy}: ${parent.summary}` };
+  } else {
+    const osvEco = occ.osvEcosystemOverride ?? OSV_ECOSYSTEM[occ.eco];
+    const vulns = osvEco ? osvResults.get(`${osvEco}|${occ.pkg}|${versionForOsvQuery(occ.version)}`) ?? [] : [];
+    // Symbols only count when EVERY advisory names them: one advisory without a list could be in any function.
+    const symbols = vulns.length && vulns.every(v => v.affectedSymbols?.length) ? vulns.flatMap(v => v.affectedSymbols!) : [];
+    result = analyzeDependencyReachability(occ.pkg, occ.eco, files, symbols);
+  }
+  memo.set(key, result);
+  return result;
+}
+
 /**
  * The live, server-side findings pipeline (api/dependencies/route.ts) --
  * cross-references every declared/imported package against NON_CVE_RISK_DB
@@ -487,9 +514,15 @@ export async function deriveFindings(scans: ScanForDeps[]): Promise<DepFinding[]
 
   const findings: DepFinding[] = [];
   const seen = new Set<string>();
+  const filesByScan = new Map(scans.map(s => [s.scan_id, s.files]));
+  const reachMemo = new Map<string, DepReachability>();
   for (const occ of occurrences) {
     const f = liveFindingFor(occ, osvResults, licenses);
-    if (!seen.has(f.id)) { seen.add(f.id); findings.push(f); }
+    if (seen.has(f.id)) continue;
+    seen.add(f.id);
+    // Only a real advisory makes reachability worth a verdict: it ranks WHICH vulnerable packages to fix first.
+    if (f.cve && f.risk !== "SAFE") f.reachability = reachabilityFor(occ, osvResults, filesByScan.get(occ.scanId) ?? [], reachMemo);
+    findings.push(f);
   }
   return findings;
 }

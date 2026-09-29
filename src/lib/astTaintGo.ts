@@ -52,7 +52,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
@@ -1102,7 +1102,7 @@ function computeReturnTaintPropagatingGo(
 // convergence and the call-site-seeding worklist) -- named and shared for
 // the same reason astTaint.ts's own MAX_PROPAGATION_ROUNDS is, and matching
 // its value exactly.
-const MAX_PROPAGATION_ROUNDS = 3;
+const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
 
 /**
  * Builds the same-file propagating-param map via a bounded fixed-point
@@ -2184,7 +2184,7 @@ export function scanAstTaintGo(
     walker.walk(root, new Map());
     // A container written by a handler declared AFTER the one that reads it: walk again with what the first
     // pass learned (findings dedupe by id+line).
-    for (let i = 0; i < 2 && stickyDirty; i++) {
+    for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
       stickyDirty = false;
       walker.walk(root, new Map());
     }

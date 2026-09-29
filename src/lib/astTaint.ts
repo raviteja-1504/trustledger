@@ -27,7 +27,7 @@
 
 import * as ts from "typescript";
 import {
-  ALL, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
+  ALL, FIXED_POINT_CAP, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
   SHADOW, mergeSinkFacts, wasCleared, buildBackwardTraceGeneric, crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
@@ -1516,7 +1516,7 @@ function returnMask(fn: LocalFn, maskFn: TaintMaskFn, seed: Env): number {
 // convergence and the call-site-seeding worklist) -- named and shared for
 // the same reason AST_TAINT_LINE_CAP is a named constant in scanner.ts:
 // one clear knob, not a magic number repeated at each call site.
-const MAX_PROPAGATION_ROUNDS = 3;
+const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
 
 /**
  * Builds a same-file `propagating` map via a bounded fixed-point iteration
@@ -1899,6 +1899,35 @@ function collectLocalFunctions(sourceFile: ts.SourceFile): Map<string, LocalFn> 
       // `export { foo as default }`
     }
   });
+
+  // CommonJS, the form most Node code uses: functions declared normally, then exported by an object
+  // literal (`module.exports = { runQuery, find: findUser, list(x) {...} }`) or by name
+  // (`exports.runQuery = runQuery`). `exports.x = function () {}` is handled in the main visit above.
+  const exportLocalAs = (localName: string, publicName: string) => {
+    const fn = fns.get(localName);
+    if (fn && !fn.exportedNames.includes(publicName)) fn.exportedNames.push(publicName);
+    exportMembersAs(localName, publicName);
+  };
+  for (const st of sourceFile.statements) {
+    if (!ts.isExpressionStatement(st) || !ts.isBinaryExpression(st.expression) || st.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue;
+    const { left, right } = st.expression;
+    const isModuleExports = (e: ts.Expression) => ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "module" && e.name.text === "exports";
+    const value = unwrapExpr(right);
+    if (isModuleExports(left) && ts.isObjectLiteralExpression(value)) {
+      for (const p of value.properties) {
+        if (ts.isShorthandPropertyAssignment(p)) exportLocalAs(p.name.text, p.name.text);
+        else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ts.isIdentifier(unwrapExpr(p.initializer))) exportLocalAs((unwrapExpr(p.initializer) as ts.Identifier).text, p.name.text);
+        else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && (ts.isArrowFunction(p.initializer) || ts.isFunctionExpression(p.initializer)) && p.initializer.body) {
+          fns.set(`cjs:${p.name.text}`, { params: p.initializer.parameters, body: p.initializer.body, exportedNames: [p.name.text] });
+        } else if (ts.isMethodDeclaration(p) && p.body && ts.isIdentifier(p.name)) {
+          fns.set(`cjs:${p.name.text}`, { params: p.parameters, body: p.body, exportedNames: [p.name.text] });
+        }
+      }
+    } else if (ts.isPropertyAccessExpression(left) && (isModuleExports(left.expression) || (ts.isIdentifier(left.expression) && left.expression.text === "exports"))
+               && ts.isIdentifier(value)) {
+      exportLocalAs(value.text, left.name.text);
+    }
+  }
 
   // `export default function(){}` / `export default (x) => {...}` / `export default identifier;` --
   // an ExportAssignment node (`node.expression` is the default-exported value directly), distinct
@@ -3297,7 +3326,7 @@ export function scanAstTaint(
     walkStatements(sourceFile, new Map());
     // Module-scope containers can be written by a handler declared AFTER the one that reads them:
     // walk again with what the first pass learned (findings dedupe by id+line).
-    for (let i = 0; i < 2 && stickyDirty; i++) {
+    for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
       stickyDirty = false;
       walkStatements(sourceFile, new Map());
     }

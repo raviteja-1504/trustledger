@@ -215,7 +215,7 @@ function handle() {
     });
   });
 
-  describe("bounded interprocedural propagation (MAX_PROPAGATION_ROUNDS = 3)", () => {
+  describe("interprocedural propagation to a fixed point", () => {
     const chain = `
 function levelA($x) { return levelB($x); }
 function levelB($x) { return levelC($x); }
@@ -240,13 +240,13 @@ function handle() {
       expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
     });
 
-    it("does NOT resolve levelA, the outermost 3-hop caller, proving the round cap is real", () => {
+    it("resolves levelA too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
       const content = `<?php${chain}
 function handle() {
   $input = $_GET['input'];
   shell_exec(levelA($input));
 }`;
-      expect(scan(content).some(f => f.id === "command-injection")).toBe(false);
+      expect(scan(content).some(f => f.id === "command-injection")).toBe(true);
     });
   });
 });

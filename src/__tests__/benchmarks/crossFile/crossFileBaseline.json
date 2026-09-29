@@ -1,0 +1,348 @@
+{
+  "byLanguage": {
+    "typescript": {
+      "tp": 10,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    },
+    "python": {
+      "tp": 8,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    },
+    "java": {
+      "tp": 7,
+      "fn": 0,
+      "tn": 4,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    },
+    "csharp": {
+      "tp": 5,
+      "fn": 0,
+      "tn": 4,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    },
+    "go": {
+      "tp": 7,
+      "fn": 0,
+      "tn": 4,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    },
+    "php": {
+      "tp": 8,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "duplicates": 0,
+      "precision": 1,
+      "recall": 1
+    }
+  },
+  "cases": {
+    "typescript: imported function": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: three files: handler -> forward -> sink": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: re-export barrel": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: service -> repository (two hops, methods)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: sink in a private helper of the imported function": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: command injection through a helper module": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: negative: parameterised callee": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "typescript: negative: callee coerces to an integer": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "typescript: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "typescript: negative: array .find is not the service's find": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "python: imported function": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: three modules: view -> forward -> sink": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: namespace import (from . import db)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: service -> repository (two hops, methods)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: command injection through a helper module": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: negative: parameterised callee": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "python: negative: callee coerces to int": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "python: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "python: negative: str.find is not the service's find": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "java: @Autowired service": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: constructor-injected service": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: controller -> service -> repository": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: command injection in a service": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: negative: PreparedStatement service": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "java: negative: same-named method on an unrelated type": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "java: negative: service parses an integer first": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "java: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "csharp: constructor-injected field": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "csharp: interface-typed field": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "csharp: primary-constructor parameter": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "csharp: negative: EF-parameterised service": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "csharp: negative: same-named method on an unrelated type": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "csharp: negative: service parses an integer first": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "csharp: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "go: package function": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: aliased import": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: same-package forwarder in the callee package": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: method through a struct field": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: decoded filter document into a mongo lookup": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: negative: parameterised callee": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "go: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "go: negative: callee converts with strconv.Atoi": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "go: negative: callee sinks its own input, not the caller's argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "php: __DIR__-anchored include": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: relative include + forwarder": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: constant-prefixed include": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: transitive include, case-insensitive call": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: command injection in an included helper": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: negative: file never included": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "php: negative: callee applies intval": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "php: negative: constant argument": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "php: negative: ambiguous include suffix": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "typescript: CommonJS require + module.exports": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: namespace import (import * as db)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: default-exported function, awaited": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: wrong-class sanitiser in the caller (basename before SQL)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "typescript: negative: right-class sanitiser in the caller (basename before a file read)": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "python: renamed import (as rq)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: service injected through __init__": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: wrong-class sanitiser in the caller (html.escape before SQL)": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "python: negative: self.run_query is not the imported function": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "java: static utility method": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: interface field, implementation in another file": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "java: XPath query built in a service": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "csharp: static helper class": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "csharp: command injection in a service": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: method through a typed parameter": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "go: path traversal in a helper package": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: class method from an included file": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: static method from an included file": {
+      "outcome": "tp",
+      "duplicates": 0
+    },
+    "php: negative: a user class's find() is not a MongoDB find()": {
+      "outcome": "tn",
+      "duplicates": 0
+    },
+    "php: wrong-class sanitiser in the caller (htmlspecialchars before SQL)": {
+      "outcome": "tp",
+      "duplicates": 0
+    }
+  }
+}

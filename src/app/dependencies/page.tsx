@@ -11,6 +11,7 @@ import {
   NON_CVE_RISK_DB, buildFinding,
   type DepFinding, type DepRisk, type DepType, type LangEcosystem, type LicenseRisk,
 } from "@/lib/dependencyScan";
+import { REACHABILITY_LABEL, REACHABILITY_RANK, type DepReachabilityTier } from "@/lib/depReachability";
 
 // ── Presentational styles (data/logic lives in lib/dependencyScan.ts) ─────────
 
@@ -33,6 +34,20 @@ const ECO_COLOR: Record<LangEcosystem, { bg:string; text:string }> = {
   php:        { bg:"#f0fdf4", text:"#15803d" },
   docker:     { bg:"#e0f2fe", text:"#0369a1" },
   unknown:    { bg:"#f8fafc", text:"#475569" },
+};
+
+const RISK_RANK: Record<DepRisk, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, SAFE: 4 };
+const reachRank = (f: DepFinding) => f.reachability ? REACHABILITY_RANK[f.reachability.tier] : REACHABILITY_RANK.unknown;
+
+// Reachability of a vulnerable package (lib/depReachability.ts): urgent tiers are warm, de-prioritising ones grey.
+const REACH_STYLE: Record<DepReachabilityTier, { bg:string; text:string; border:string; icon:string }> = {
+  called:         { bg:"#fef2f2", text:"#be123c", border:"#fecdd3", icon:"◉" },
+  reachable:      { bg:"#fff7ed", text:"#c2410c", border:"#fed7aa", icon:"◎" },
+  imported:       { bg:"#fffbeb", text:"#a16207", border:"#fde68a", icon:"○" },
+  unknown:        { bg:"#f8fafc", text:"#64748b", border:"#e2e8f0", icon:"?" },
+  "not-called":   { bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0", icon:"◌" },
+  "test-only":    { bg:"#f8fafc", text:"#475569", border:"#e2e8f0", icon:"◌" },
+  "not-imported": { bg:"#f8fafc", text:"#475569", border:"#e2e8f0", icon:"◌" },
 };
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
@@ -212,7 +227,10 @@ export default function DependenciesPage() {
     if (filterLicense !== "all" && f.license_risk  !== filterLicense) return false;
     if (search) { const q = search.toLowerCase(); const h = [f.package_name, f.description, f.cve??"", f.repo].join(" ").toLowerCase(); if (!h.includes(q)) return false; }
     return true;
-  }), [findings, filterRisk, filterType, filterEco, filterRepo, filterLicense, search]);
+  // Most severe first; within a severity, what the code actually uses first (vulnerable function called,
+  // then reachable, ...). Stable, so the server's order is kept otherwise.
+  }).sort((a, b) => RISK_RANK[a.risk] - RISK_RANK[b.risk] || reachRank(a) - reachRank(b)),
+  [findings, filterRisk, filterType, filterEco, filterRepo, filterLicense, search]);
 
   // Fix-all commands grouped by package manager
   const fixAll = useMemo(() => {
@@ -514,6 +532,12 @@ export default function DependenciesPage() {
                       {dep.is_transitive && (
                         <span className="text-[8px] font-bold text-gray-400 bg-gray-100 px-1 py-0.5 rounded">transitive</span>
                       )}
+                      {dep.reachability && (
+                        <span className="text-[8px] font-bold px-1 py-0.5 rounded border whitespace-nowrap" title={dep.reachability.summary}
+                          style={{ background:REACH_STYLE[dep.reachability.tier].bg, color:REACH_STYLE[dep.reachability.tier].text, borderColor:REACH_STYLE[dep.reachability.tier].border }}>
+                          {REACH_STYLE[dep.reachability.tier].icon} {REACHABILITY_LABEL[dep.reachability.tier]}
+                        </span>
+                      )}
                       {dep.is_archived && (
                         <span className="text-[8px] font-bold text-gray-400 bg-gray-100 px-1 py-0.5 rounded">archived</span>
                       )}
@@ -564,6 +588,30 @@ export default function DependenciesPage() {
                           <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1.5">Description</p>
                           <p className="text-xs text-gray-600 leading-relaxed">{dep.description}</p>
                         </div>
+                        {dep.reachability && (
+                          <div className="rounded-xl border px-3 py-2.5" style={{ borderColor:REACH_STYLE[dep.reachability.tier].border, background:REACH_STYLE[dep.reachability.tier].bg }}>
+                            <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color:REACH_STYLE[dep.reachability.tier].text }}>
+                              Reachability · {REACHABILITY_LABEL[dep.reachability.tier]}
+                            </p>
+                            <p className="text-xs text-gray-700 leading-relaxed">{dep.reachability.summary}</p>
+                            {dep.reachability.evidence.length > 0 && (
+                              <ul className="mt-2 space-y-1">
+                                {dep.reachability.evidence.map((e, i) => (
+                                  <li key={i} className="flex items-baseline gap-2 min-w-0">
+                                    <span className="text-[9px] font-bold uppercase tracking-wide text-gray-400 w-10 shrink-0">{e.kind}</span>
+                                    <span className="text-[10px] font-mono text-gray-600 shrink-0">{e.file}{e.kind !== "entry" ? `:${e.line}` : ""}</span>
+                                    {e.kind !== "entry" && <code className="text-[10px] font-mono text-gray-500 truncate min-w-0">{e.text}</code>}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {dep.reachability.vulnerableSymbols && (
+                              <p className="text-[10px] text-gray-500 mt-2">
+                                Vulnerable functions per the advisory: <span className="font-mono">{dep.reachability.vulnerableSymbols.slice(0, 6).join(", ")}{dep.reachability.vulnerableSymbols.length > 6 ? ", …" : ""}</span>
+                              </p>
+                            )}
+                          </div>
+                        )}
                         {dep.exploit_public && (
                           <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
                             <span className="text-rose-600 text-sm shrink-0">⚡</span>

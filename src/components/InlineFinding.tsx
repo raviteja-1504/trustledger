@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { FileIndicator, FixSuggestion } from "@/types";
 import { buildFindingEvidence, type CheckTone, type FlowStep, type Part } from "@/lib/findingEvidence";
+import type { CrossFileMark } from "@/lib/dataFlowEvidence";
 import { cweFor } from "@/lib/cweMap";
 import { findingMeta } from "@/lib/findingCatalog";
 import { REACH_DESC, REACH_LABEL, URGENCY_DESC, URGENCY_LABEL } from "@/lib/signalClassification";
@@ -445,6 +446,32 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+export type { CrossFileMark };
+
+const MARK_WORDS: Record<CrossFileMark["role"], string> = {
+  parameter: "Enters this file as a parameter —",
+  step: "A step of",
+  sink: "The sink of",
+  merged: "Reported as part of",
+};
+
+/** Under a line of this file: "The sink of the SQL Injection flow reported at users.ts:5". */
+export function InlineCrossFileMark({ marks, filePath, nav }: { marks: CrossFileMark[]; filePath: string; nav?: FileNavigation }) {
+  const [m, ...rest] = marks;
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg bg-violet-500/[0.07] px-3 py-1.5 font-sans ring-1 ring-violet-400/20">
+      <span className={`${CHIP} bg-violet-500/15 text-violet-200 ring-violet-400/30`}>
+        <Icon d={ICON.link} size={10} />Cross-file flow
+      </span>
+      <p className="text-[11.5px] leading-relaxed text-slate-300">
+        {MARK_WORDS[m.role]} the <span className="font-semibold text-slate-100">{m.title}</span> flow reported at{" "}
+        <LineRef line={m.fromLine} file={m.fromFile} filePath={filePath} nav={nav} />
+        {rest.length > 0 && <span className="text-slate-500"> (+{rest.length} more)</span>}
+      </p>
     </div>
   );
 }

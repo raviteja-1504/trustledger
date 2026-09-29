@@ -1,5 +1,6 @@
 import type { AttributionResult } from "@/lib/aiAttribution";
 import type { TraceStep } from "@/lib/taint/taintCore";
+import type { DataFlowEvidence } from "@/lib/dataFlowEvidence";
 import type { FixSuggestion } from "@/lib/scanner";
 
 export type { TraceStep, FixSuggestion };
@@ -47,9 +48,12 @@ export interface FileIndicator {
   // Other detectors that independently flagged this same issue.
   supportingDetectors?: string[];
   // Other locations of this same issue merged into this finding (see src/lib/findingCorrelation.ts).
-  relatedLocations?: Array<{ line: number; id: string; label: string; detector: "data-flow" | "pattern"; reason: "same-line" | "on-path" }>;
+  relatedLocations?: Array<{ line: number; id: string; label: string; detector: "data-flow" | "pattern"; reason: "same-line" | "on-path" | "cross-file"; file?: string }>;
   // Findings in other files of the PR whose confirmed data flow runs through this line.
   reachedFrom?: Array<{ file: string; line: number; id: string; source?: string }>;
+  // Canonical data-flow evidence (src/lib/dataFlowEvidence.ts): source, exact sink + argument role, files
+  // crossed, sanitisers on the path, canonical sink identity. Absent for pattern-only findings.
+  flow?: DataFlowEvidence;
   // Function the flagged line sits in, when it could be named.
   functionName?: string;
 }

@@ -82,7 +82,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -382,8 +382,11 @@ interface EngineCtx {
   stickyDirty: boolean;
   recordSticky: boolean;
   // Lower-cased function name -> parameter -> sink facts of functions defined in files this one includes
-  // (see computePhpFunctionSinkFacts); a same-file definition always wins.
+  // (see computePhpFunctionSinkFacts); a same-file definition always wins. Class methods are keyed
+  // `class::method` and present even with no facts, so a call resolved to one is known to be user code.
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
+  /** Lower-cased `class::method` of every method declared in this file. */
+  localClassMethods: Set<string>;
 }
 
 function emit(
@@ -571,7 +574,7 @@ function computeReturnTaintPropagatingPHP(fn: LocalFunction, ctx: EngineCtx): Ma
   return propagatingIdx;
 }
 
-const MAX_PROPAGATION_ROUNDS = 3;
+const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
 
 function buildPropagatingMapPHP(localFunctions: Map<string, LocalFunction>, baseCtx: EngineCtx): PropagatingPHP {
   const propagating: PropagatingPHP = new Map();
@@ -702,6 +705,42 @@ function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
     functions.set(info.name, info);
   }
   return functions;
+}
+
+/** Every method declared inside a class, with its `class::method` key (lower-cased). */
+function classMethodDeclsPHP(root: SyntaxNode): Array<{ key: string; decl: SyntaxNode }> {
+  const out: Array<{ key: string; decl: SyntaxNode }> = [];
+  for (const cls of findAllNodes(root, "class_declaration")) {
+    const className = cls.childForFieldName("name")?.text;
+    if (!className) continue;
+    for (const decl of findAllNodes(cls, "method_declaration")) {
+      const name = decl.childForFieldName("name")?.text;
+      if (name) out.push({ key: `${className}::${name}`.toLowerCase(), decl });
+    }
+  }
+  return out;
+}
+
+/** `Class::method` for a call whose receiver class is known -- `Repo::find(...)`, `$r->find(...)` after
+ * `$r = new Repo()`, `(new Repo())->find(...)` -- in the source's own casing, or null. */
+function classMethodKeyPHP(node: SyntaxNode, ctx: EngineCtx): string | null {
+  const method = node.childForFieldName("name")?.text;
+  if (!method) return null;
+  if (node.type === "scoped_call_expression") {
+    const scope = node.childForFieldName("scope");
+    return scope?.type === "name" || scope?.type === "qualified_name" ? `${scope.text.replace(/^.*\\/, "")}::${method}` : null;
+  }
+  let recv: SyntaxNode | null = node.childForFieldName("object") ?? node.namedChildren[0] ?? null;
+  while (recv?.type === "parenthesized_expression") recv = recv.namedChildren[0] ?? null;
+  if (recv?.type === "variable_name") {
+    const t = ctx.varTypes.get(variableBareName(recv) ?? "");
+    return t ? `${t.replace(/^.*\\/, "")}::${method}` : null;
+  }
+  if (recv?.type === "object_creation_expression") {
+    const n = recv.namedChildren.find(c => c && (c.type === "name" || c.type === "qualified_name"));
+    return n ? `${n.text.replace(/^.*\\/, "")}::${method}` : null;
+  }
+  return null;
 }
 
 /** Every variable name that appears in a `global $x;` declaration anywhere in the file. */
@@ -940,7 +979,8 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
       else fireArg("sql-injection", 0);
     }
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
-    fire("nosql-injection");
+    // ->find($filter[, $options]): the filter document only -- options (projection, sort, limit) query nothing.
+    fireArg("nosql-injection", 0);
   } else if (methodName === "createTemplate" || methodName === "renderString" || methodName === "fetchFromString") {
     // the template SOURCE -- context variables passed alongside are rendered as data
     fireArg("ssti", 0);
@@ -1606,8 +1646,18 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         checkDynamicCallSink(node, fnNode, ctx, taintMask, env);
       }
     }
+    if (node.type === "scoped_call_expression") {
+      const key = classMethodKeyPHP(node, ctx);
+      if (key && !ctx.localClassMethods.has(key.toLowerCase())) checkCrossFileCallPHP(node, key, ctx, taintMask, env);
+    }
     if (node.type === "member_call_expression") {
-      checkMemberCallSink(node, ctx, taintMask, env);
+      // A method of a class this code declares (here or in an included file) is user code: its own body
+      // decides what is a sink, not a library method that happens to share its name (`->find()`).
+      const key = classMethodKeyPHP(node, ctx);
+      const lower = key?.toLowerCase();
+      const userMethod = !!lower && (ctx.localClassMethods.has(lower) || !!ctx.crossFileFacts?.has(lower));
+      if (!userMethod) checkMemberCallSink(node, ctx, taintMask, env);
+      else if (!ctx.localClassMethods.has(lower!)) checkCrossFileCallPHP(node, key!, ctx, taintMask, env);
       const methodName = node.childForFieldName("name")?.text;
       if (methodName && ctx.localFunctions.has(methodName)) {
         seedLocalFunctionParams(methodName, argListOfPHP(node), env, ctx);
@@ -2162,7 +2212,7 @@ export function scanAstTaintPHP(
     };
     scanFunctions(true);
     // `global $x;` memory one function writes is visible to another: re-walk until it stops growing.
-    for (let round = 0; round < 2 && ctx.stickyDirty; round++) {
+    for (let round = 0; round < FIXED_POINT_CAP && ctx.stickyDirty; round++) {
       ctx.stickyDirty = false;
       scanFunctions(false);
     }
@@ -2235,7 +2285,7 @@ function makePhpCtx(
     filePath, content, lines: content.split("\n"), localFunctions, propagatingParams: new Map(), seededParams: new Map(),
     findings: [], seen: new Set(), varTypes: new Map(), root, suppressed,
     globalNames: collectGlobalNamesPHP(root), sticky: new Map(), stickyDirty: false, recordSticky: false,
-    crossFileFacts,
+    crossFileFacts, localClassMethods: new Set(classMethodDeclsPHP(root).map(m => m.key)),
   };
   const propagating = buildPropagatingMapPHP(localFunctions, ctx);
   for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
@@ -2271,8 +2321,8 @@ function drainSeededParamsPHP(ctx: EngineCtx): void {
 const NON_FLOW_IDS_PHP: ReadonlySet<string> = new Set(["bola-missing-ownership-check", "timing-attack", "jwt-none-alg"]);
 
 /**
- * Parameter -> sink facts for every named (non-method) function in one file, keyed by lower-cased name (PHP
- * function names are case-insensitive), computed with the scan's own sink logic: each parameter is walked
+ * Parameter -> sink facts for every named function in one file, keyed by lower-cased name (PHP function names
+ * are case-insensitive), and for every class method, keyed `class::method`, computed with the scan's own sink logic: each parameter is walked
  * alone, plus same-file helpers it reaches and `incoming` facts for functions from files THIS one includes.
  * Diffed against an unseeded baseline walk, so a function reading `$_GET` itself isn't blamed on a parameter.
  */
@@ -2293,9 +2343,15 @@ export function computePhpFunctionSinkFacts(
     const localFunctionRanges = [...findAllNodes(root, "function_definition"), ...findAllNodes(root, "method_declaration")]
       .map(d => ({ name: d.childForFieldName("name")?.text ?? "", start: d.startPosition.row + 1, end: d.endPosition.row + 1 }))
       .filter(f => f.name);
-    for (const decl of findAllNodes(root, "function_definition")) {
+    const decls: Array<{ key: string; decl: SyntaxNode; method: boolean }> = [
+      ...findAllNodes(root, "function_definition").map(decl => ({ key: (decl.childForFieldName("name")?.text ?? "").toLowerCase(), decl, method: false })),
+      ...classMethodDeclsPHP(root).map(m => ({ ...m, method: true })),
+    ];
+    for (const { key, decl, method } of decls) {
+      // A method is listed even with no facts: callers then know `$x->m()` is user code, not a library call.
+      if (method && !out.has(key)) out.set(key, []);
       const fn = extractFuncInfo(decl);
-      if (!fn?.body || fn.paramShapes.length === 0) continue;
+      if (!key || !fn?.body || fn.paramShapes.length === 0) continue;
       const baseline = new Set(run(fn.body, new Map()).map(f => `${f.id}:${f.line}`));
       const facts: ParamSinkFact[] = [];
       for (const shape of fn.paramShapes) {
@@ -2315,7 +2371,6 @@ export function computePhpFunctionSinkFacts(
         }
       }
       if (facts.length === 0) continue;
-      const key = fn.name.toLowerCase();
       const list = out.get(key) ?? [];
       mergeSinkFacts(list, facts);
       out.set(key, list);

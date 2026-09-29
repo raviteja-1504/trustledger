@@ -322,7 +322,7 @@ def handler():
     expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
   });
 
-  it("does NOT resolve level_a (the outermost caller) in that same chain — the round cap is real, not accidentally unbounded", () => {
+  it("resolves level_a too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
     const content = `
 def level_a(x):
     return level_b(x)
@@ -339,7 +339,7 @@ def level_d(x):
 def handler():
     os.system(level_a(request.args.get("cmd")))
 `;
-    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(false);
+    expect(scanAstTaintPython(content, "app.py").some(f => f.id === "command-injection")).toBe(true);
   });
 });
 

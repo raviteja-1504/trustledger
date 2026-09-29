@@ -4,6 +4,7 @@ import { verifyApiKey } from "../../_middleware";
 import { analyzeFile, getFixSuggestions } from "@/lib/scanner";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { fetchContentByHash } from "@/lib/contentByHash";
+import { filesWithCrossFileContext } from "@/lib/findingCorrelation";
 import { cached, cacheGet, cacheSet, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
 import type { FileIndicator } from "@/types";
@@ -115,6 +116,13 @@ export async function GET(
 
   const attestedSet = new Set((attests ?? []).map(a => a.file_path));
 
+  // Files whose stored findings depend on other files (a flow crosses them, a backlink, a folded duplicate):
+  // they must not be re-analysed in isolation below.
+  const crossFileContext = filesWithCrossFileContext(files.map(f => ({
+    file_path: f.file_path,
+    indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [],
+  })));
+
   return NextResponse.json({
     scan_id:             scan.id,
     repo:                scan.repo_full_name,
@@ -146,7 +154,9 @@ export async function GET(
         : null;
       let freshIndicators: FileIndicator[] | null = null;
       let freshAttribution: AttributionResult | null = null;
-      if (content && i < MAX_LIVE_REANALYSIS_FILES) {
+      // A file tied to other files by a data flow keeps its stored result: re-analysed alone it would lose the
+      // cross-file finding (or re-report a duplicate the scan folded into another file's finding).
+      if (content && i < MAX_LIVE_REANALYSIS_FILES && !crossFileContext.has(f.file_path)) {
         try {
           const result = await reanalyze(f.file_path, content, f.content_hash);
           freshIndicators = result.indicators;

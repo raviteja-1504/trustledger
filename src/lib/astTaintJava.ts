@@ -44,7 +44,7 @@
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -1218,9 +1218,12 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
     fireArgs("path-traversal", [0]);
   } else if (tail === "search") {
-    fire("ldap-injection");
+    // DirContext.search(name, filter[, filterArgs | controls]): the filter only -- filterArgs are the bound
+    // ({0}) form, the safe way to put values in a filter.
+    fireArgs("ldap-injection", args.length >= 2 ? [1] : [0]);
   } else if (tail === "evaluate") {
-    fire("xpath-injection");
+    // XPath.evaluate(expression, item[, returnType]): the expression only.
+    fireArgs("xpath-injection", [0]);
   } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
     fire("xss");
   }
@@ -1419,7 +1422,7 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
 // convergence and the call-site-seeding worklist) -- named and shared for
 // the same reason astTaint.ts's own MAX_PROPAGATION_ROUNDS is, and matching
 // its value exactly.
-const MAX_PROPAGATION_ROUNDS = 3;
+const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
 
 /**
  * Builds the same-file `propagatingParams` map via a bounded fixed-point
@@ -2656,7 +2659,7 @@ function runJavaScan(
     };
     walkAll(true);
     // A field written by a method declared AFTER the one that reads it: walk again with what the first pass learned.
-    for (let i = 0; i < 2 && ctx.stickyDirty; i++) {
+    for (let i = 0; i < FIXED_POINT_CAP && ctx.stickyDirty; i++) {
       ctx.stickyDirty = false;
       walkAll(false);
     }

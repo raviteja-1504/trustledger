@@ -200,6 +200,14 @@ export interface ParamSinkFact {
   steps?: TraceStep[];
 }
 
+/**
+ * Safety cap for every fixed-point / worklist loop in the engines and the cross-file bridge. Those analyses are
+ * monotone over finite domains (taint masks only gain bits, facts only get added, both bounded by parameters x
+ * classes), and every loop stops at the first round that changes nothing -- so they converge on their own and
+ * this only bounds a pathological input's cost. It used to be 3, which silently dropped a 4-hop helper chain.
+ */
+export const FIXED_POINT_CAP = 32;
+
 /** Bound on a fact's callee-side path (a deep forwarding chain keeps its entry and its sink). */
 export const MAX_FACT_STEPS = 16;
 

@@ -117,6 +117,9 @@ describe("computeCrossFileReachable (pure graph algorithm)", () => {
 // ── end to end through runScan: the `reachability` of a real finding ────────────────────────────────
 // Every db-side file exports via a SEPARATE `export { ... }` list, which callGraph.ts's regex does NOT treat as
 // an entry point -- so anything reachable there is reachable only THANKS TO the cross-file bridge.
+// The handlers pass `req.user.id` (set by auth middleware, not request input): with request input the sink would
+// be part of a proven cross-file flow, and its finding folded into the handler's (findingCorrelation.ts) --
+// these tests are about the CALL-GRAPH reachability of a sink no flow is proven to.
 const SQL_FN = (name: string) => `function ${name}(id) {
   const sql = "SELECT * FROM t WHERE id = " + id;
   return db.query(sql);
@@ -131,7 +134,7 @@ describe("multi-hop reachability in a real scan", () => {
     const r = scan([
       { path: "src/c.ts", content: `${SQL_FN("runQuery")}\nexport { runQuery };\n` },
       { path: "src/b.ts", content: `import { runQuery } from "./c";\nfunction forward(id) {\n  return runQuery(id);\n}\nexport { forward };\n` },
-      { path: "src/a.ts", content: `import { forward } from "./b";\nexport function handler(req) {\n  return forward(req.query.id);\n}\n` },
+      { path: "src/a.ts", content: `import { forward } from "./b";\nexport function handler(req) {\n  return forward(req.user.id);\n}\n` },
     ]);
     expect(reach(r, "src/c.ts")).toBe("reachable");
   });
@@ -140,7 +143,7 @@ describe("multi-hop reachability in a real scan", () => {
     const r = scan([
       { path: "src/db.ts", content: `${SQL_FN("runQuery")}\nexport { runQuery };\n` },
       { path: "src/barrel.ts", content: `export { runQuery } from "./db";\n` },
-      { path: "src/api.ts", content: `import { runQuery } from "./barrel";\nexport function handler(req) {\n  return runQuery(req.query.id);\n}\n` },
+      { path: "src/api.ts", content: `import { runQuery } from "./barrel";\nexport function handler(req) {\n  return runQuery(req.user.id);\n}\n` },
     ]);
     expect(reach(r, "src/db.ts")).toBe("reachable");
   });
@@ -148,7 +151,7 @@ describe("multi-hop reachability in a real scan", () => {
   it("the sink sits in a LOCAL helper of the cross-file-reached function (helper itself is never imported)", () => {
     const r = scan([
       { path: "src/db.ts", content: `${SQL_FN("helper")}\nfunction runQuery(id) {\n  return helper(id);\n}\nexport { runQuery };\n` },
-      { path: "src/api.ts", content: `import { runQuery } from "./db";\nexport function handler(req) {\n  return runQuery(req.query.id);\n}\n` },
+      { path: "src/api.ts", content: `import { runQuery } from "./db";\nexport function handler(req) {\n  return runQuery(req.user.id);\n}\n` },
     ]);
     expect(reach(r, "src/db.ts")).toBe("reachable");
   });
@@ -174,7 +177,7 @@ describe("multi-hop reachability in a real scan", () => {
     const r = scan([
       { path: "src/c.ts", content: `${SQL_FN("runQuery")}\nexport { runQuery };\n` },
       { path: "src/b.ts", content: `import { runQuery } from "./c";\nfunction forward(id) {\n  return runQuery(id);\n}\nexport { forward };\n` },
-      { path: "src/a.ts", content: `import { forward } from "./b";\nexport function handler(req) {\n  return forward(req.query.id);\n}\n` },
+      { path: "src/a.ts", content: `import { forward } from "./b";\nexport function handler(req) {\n  return forward(req.user.id);\n}\n` },
     ]);
     expect(reach(r, "src/c.ts")).not.toBe("entry-point");
   });

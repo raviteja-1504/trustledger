@@ -47,6 +47,9 @@ export interface OsvVulnerability {
   summary?: string;
   severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
   fixedIn?: string;
+  /** The vulnerable functions, when the advisory names them (see extractAffectedSymbols) -- what
+   * depReachability.ts looks for a call of. */
+  affectedSymbols?: string[];
 }
 
 interface OsvQueryBatchResult { results: Array<{ vulns?: Array<{ id: string }> }> }
@@ -55,7 +58,34 @@ interface OsvVulnDetail {
   aliases?: string[];
   summary?: string;
   database_specific?: { severity?: string };
-  affected?: Array<{ ranges?: Array<{ events?: Array<{ fixed?: string }> }> }>;
+  affected?: Array<{
+    ranges?: Array<{ events?: Array<{ fixed?: string }> }>;
+    ecosystem_specific?: {
+      /** Go vulndb: the vulnerable package paths and their symbols. */
+      imports?: Array<{ path?: string; symbols?: string[] }>;
+      /** RustSec: fully qualified vulnerable functions. */
+      affects?: { functions?: string[] };
+      affected_functions?: string[];
+    };
+    database_specific?: { affected_functions?: string[] };
+  }>;
+}
+
+const MAX_AFFECTED_SYMBOLS = 50;
+
+/** The vulnerable functions an advisory names, qualified where it qualifies them: `path.Symbol` for Go,
+ * `crate::module::fn` for Rust, as given otherwise. Empty when the advisory names none. */
+export function extractAffectedSymbols(detail: OsvVulnDetail): string[] {
+  const out = new Set<string>();
+  for (const a of detail.affected ?? []) {
+    for (const imp of a.ecosystem_specific?.imports ?? []) {
+      for (const s of imp.symbols ?? []) out.add(imp.path ? `${imp.path}.${s}` : s);
+    }
+    for (const f of a.ecosystem_specific?.affects?.functions ?? []) out.add(f);
+    for (const f of a.ecosystem_specific?.affected_functions ?? []) out.add(f);
+    for (const f of a.database_specific?.affected_functions ?? []) out.add(f);
+  }
+  return [...out].filter(s => typeof s === "string" && s.length > 0).slice(0, MAX_AFFECTED_SYMBOLS);
 }
 
 function mapSeverity(detail: OsvVulnDetail): OsvVulnerability["severity"] {
@@ -86,12 +116,14 @@ async function fetchVulnDetail(id: string): Promise<OsvVulnerability | null> {
       const res = await fetch(`${OSV_API}/v1/vulns/${id}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) return null;
       const detail = await res.json() as OsvVulnDetail;
+      const affectedSymbols = extractAffectedSymbols(detail);
       return {
         id:       detail.id,
         aliases:  detail.aliases ?? [],
         summary:  detail.summary,
         severity: mapSeverity(detail),
         fixedIn:  extractFixedIn(detail),
+        ...(affectedSymbols.length ? { affectedSymbols } : {}),
       };
     } catch {
       // Fail open — same reasoning as github.ts's getPRHeadSha: a transient

@@ -437,13 +437,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
     });
   });
 
-  describe("bounded interprocedural propagation (Decision 3, MAX_PROPAGATION_ROUNDS = 3)", () => {
+  describe("interprocedural propagation to a fixed point (Decision 3)", () => {
     // Caller-declared-first chain (levelA declared before the levelB it
     // calls, and so on) -- mirrors the exact same proven pattern already
     // used for astTaint.ts/astTaintPython.ts/astTaintJava.ts: the
     // fixed-point pre-pass processes functions in declaration order each
     // round, so levelD resolves round 0, levelC round 1, levelB round 2, and
-    // levelA would only resolve in a would-be round 3 -- one past the cap.
+    // levelA resolves in round 3 -- the loop runs until nothing changes (see taintCore FIXED_POINT_CAP).
     const chain = `
 func levelA(x string) string { return levelB(x) }
 func levelB(x string) string { return levelC(x) }
@@ -471,14 +471,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
       expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
     });
 
-    it("does NOT resolve levelA, the outermost 3-hop caller, proving the round cap is real (not accidentally unbounded)", () => {
+    it("resolves levelA too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
       const content = `${HANDLER_PREFIX}${chain}
 func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("host")
 	exec.Command("sh", "-c", "ping "+levelA(q))
 }
 `;
-      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(false);
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "command-injection")).toBe(true);
     });
   });
 

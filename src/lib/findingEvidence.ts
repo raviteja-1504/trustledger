@@ -9,6 +9,7 @@
  * a finding only when taint for the sink's class survives every sanitiser on the path.
  */
 import type { FileIndicator, TraceStep } from "@/types";
+import { classifyInput } from "./dataFlowEvidence";
 
 /** A run of plain text or inline code; rendered as <code> by the UI. Never parsed from backticks, because
  * source expressions routinely contain backticks themselves (JS template literals). */
@@ -69,21 +70,8 @@ const SINK_SEMANTICS: Record<string, SinkSemantics> = {
   "idor":                     { effect: "it selects which record is loaded",                  defense: "an ownership check against the current user" },
 };
 
-// Ordered: first match wins, so the more specific shapes come first.
-const INPUT_KINDS: Array<[RegExp, string]> = [
-  [/\b(?:req|request)\s*\.\s*(?:query|args|GET|query_params)\b|\$_GET\b|\bQuery(?:String)?\s*\[|\bgetQueryParam|\.URL\.Query\(\)|\bc\.Query\(|\bRequest\.Query\b/, "URL query parameter"],
-  [/\b(?:req|request)\s*\.\s*params\b|\bpath_params\b|\bc\.Param\(|\bPathVariable\b|\bRouteValues\b|\bmux\.Vars\(/, "URL path parameter"],
-  [/\b(?:req|request)\s*\.\s*(?:body|form|POST|data|json|files|FILES)\b|\$_POST\b|\$_FILES\b|\bFormValue\(|\bPostForm\b|\bRequest\.Form\b|\bRequestBody\b|\bget_json\(/, "request body"],
-  [/\b(?:req|request)\s*\.\s*(?:headers|META)\b|\bgetHeader\(|\bHeader\.Get\(|\bRequest\.Headers\b|\$_SERVER\b/, "HTTP header"],
-  [/\b(?:req|request)\s*\.\s*(?:cookies|COOKIES)\b|\$_COOKIE\b|\bgetCookies\(|\bRequest\.Cookies\b|\bCookie\(/, "cookie"],
-  [/\$_REQUEST\b|\bgetParameter\(|\bRequest\[/, "request parameter"],
-];
-
-export function classifyInput(expr: string | undefined): string | undefined {
-  if (!expr) return undefined;
-  for (const [re, kind] of INPUT_KINDS) if (re.test(expr)) return kind;
-  return undefined;
-}
+// Where a flow starts is classified by the canonical evidence module (one definition for every surface).
+export { classifyInput };
 
 const KIND_LABEL: Record<TraceStep["kind"], string> = {
   source: "Input", assignment: "Assigned", call: "Passed into", sanitizer: "Sanitiser",
@@ -181,16 +169,28 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
   // ── Why this was flagged ──
   const checks: EvidenceCheck[] = [];
   if (isDataFlow) {
+    const df = ind.flow;
     if (origin) {
       checks.push(inputKind
         ? { tone: "confirmed", parts: [`Starts at untrusted input (${inputKind}): `, { code: origin }] }
-        : { tone: "confirmed", parts: ["Starts at a value the engine tracks as tainted: ", { code: origin }] });
+        : df?.source.assumed
+          ? { tone: "caution", parts: ["Starts at ", { code: origin }, ", a parameter treated as untrusted — no request read was traced to it here"] }
+          : { tone: "confirmed", parts: ["Starts at a value the engine tracks as tainted: ", { code: origin }] });
     }
-    const hops = flow.filter(s => s.kind === "assignment" || s.kind === "call").length;
+    const hops = flow.filter(s => s.kind === "assignment" || s.kind === "call" || s.kind === "sanitizer").length;
     if (hops > 0) checks.push({ tone: "confirmed", parts: [`Carried through ${hops} intermediate step${hops === 1 ? "" : "s"} without losing taint`] });
     for (const s of flow) {
       if (s.kind === "cross-file") checks.push({ tone: "confirmed", parts: ["Crosses a file boundary: ", { code: s.text }] });
-      if (s.kind === "sanitizer") checks.push({ tone: "caution", parts: ["Passes through ", { code: s.text }, ", which does not neutralise this sink"] });
+    }
+    // Sanitisers on the path (canonical evidence), and why each one doesn't stop this finding.
+    for (const z of df?.sanitizers ?? []) {
+      const where = z.file && z.file !== filePath ? ` (${z.file}:${z.line})` : ` (line ${z.line})`;
+      checks.push(z.protectsSink
+        ? { tone: "caution", parts: [{ code: `${z.call}()` }, `${where} neutralises ${z.neutralises.join(", ")}, but the value is used where that escaping does not apply (see explanation)`] }
+        : { tone: "caution", parts: [{ code: `${z.call}()` }, `${where} neutralises ${z.neutralises.join(", ")} — not ${df?.sink.role ?? "this sink"}`] });
+    }
+    if (!df) {
+      for (const s of flow) if (s.kind === "sanitizer") checks.push({ tone: "caution", parts: ["Passes through ", { code: s.text }, ", which does not neutralise this sink"] });
     }
     for (const n of notes) {
       // The path's own crossing steps already say this, file by file.
@@ -198,18 +198,21 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
       else if (/^input assumed untrusted/i.test(n)) checks.push({ tone: "caution", parts: [n.charAt(0).toUpperCase() + n.slice(1)] });
       else checks.push({ tone: "neutral", parts: [n] });
     }
+    // Exact sink: the call, and which of its arguments the value is (canonical evidence's role).
+    const asRole = df ? ` as ${df.sink.role}` : "";
     if (crossFile) {
       const [, , , sinkName, sinkFile, sinkLine] = crossFile;
       checks.push({ tone: "confirmed", parts: sink
-        ? ["Reaches ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}, where ${sink.effect}`]
-        : ["Reaches the sink ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}`] });
+        ? ["Reaches ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}${asRole}, where ${sink.effect}`]
+        : ["Reaches the sink ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}${asRole}`] });
     } else if (ind.sinkExpr) {
       checks.push({ tone: "confirmed", parts: sink
-        ? ["Reaches ", { code: `${ind.sinkExpr}()` }, `, where ${sink.effect}`]
-        : ["Reaches the sink ", { code: `${ind.sinkExpr}()` }] });
+        ? ["Reaches ", { code: `${ind.sinkExpr}()` }, `${asRole}, where ${sink.effect}`]
+        : ["Reaches the sink ", { code: `${ind.sinkExpr}()` }, asRole] });
     }
     if (sink) {
-      checks.push(!generic && !crossFile && PARTIAL_DEFENSE_RE.test(detailText)
+      const protecting = df?.sanitizers.some(z => z.protectsSink);
+      checks.push(protecting || (!df?.sanitizers.length && !generic && !crossFile && PARTIAL_DEFENSE_RE.test(detailText))
         ? { tone: "caution", parts: ["A defence is applied, but not one that protects this position (see explanation)"] }
         : { tone: "absent", parts: [`No ${sink.defense} on this path`] });
     }

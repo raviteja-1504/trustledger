@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileIndicator, FixSuggestion } from "@/types";
-import { InlineSecurityFinding, InlineSignalNote, type FileNavigation, type FindingMeta } from "@/components/InlineFinding";
+import { InlineCrossFileMark, InlineSecurityFinding, InlineSignalNote, type CrossFileMark, type FileNavigation, type FindingMeta } from "@/components/InlineFinding";
 
 interface Props {
   code: string;
@@ -22,6 +22,8 @@ interface Props {
   nav?: FileNavigation;
   // Scroll to and flash this line (e.g. when another file's finding links here). `seq` re-triggers the same line.
   jumpRequest?: { line: number; seq: number };
+  // Lines other files' data flows pass through (dataFlowEvidence.ts crossFileMarks).
+  crossFileMarks?: CrossFileMark[];
 }
 
 type TokType = "keyword" | "string" | "comment" | "number" | "builtin" | "plain" | "operator";
@@ -80,8 +82,13 @@ const SEV_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low:
 const GUTTER_PX = 44;
 const PANEL_WIDTH = `calc(100cqw - ${GUTTER_PX + 24}px)`;
 
-export default function CodeViewer({ code, language = "python", filename, indicators = [], maxHeight = "380px", fixes, describe, nav, jumpRequest }: Props) {
+export default function CodeViewer({ code, language = "python", filename, indicators = [], maxHeight = "380px", fixes, describe, nav, jumpRequest, crossFileMarks }: Props) {
   const lines = useMemo(() => code.split("\n"), [code]);
+  const marksByLine = useMemo(() => {
+    const m = new Map<number, CrossFileMark[]>();
+    for (const mark of crossFileMarks ?? []) m.set(mark.line, [...(m.get(mark.line) ?? []), mark]);
+    return m;
+  }, [crossFileMarks]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<number, HTMLTableRowElement>());
   const [flashLine, setFlashLine] = useState<number | null>(null);
@@ -192,9 +199,11 @@ export default function CodeViewer({ code, language = "python", filename, indica
               const security = found.filter(isSecurity);
               const signals = found.filter(i => !isSecurity(i));
               const hasSecurity = security.length > 0;
+              const marks = marksByLine.get(lineNo) ?? [];
               const rowCls = flashLine === lineNo
                 ? "bg-sky-500/25 transition-colors"
                 : hasSecurity ? "bg-rose-900/30 hover:bg-rose-900/40"
+                : marks.length > 0 ? "bg-violet-900/25 hover:bg-violet-900/35"
                 : signals.length > 0 ? "bg-indigo-900/20 hover:bg-indigo-900/30"
                 : "hover:bg-slate-800/40";
               return [
@@ -216,7 +225,7 @@ export default function CodeViewer({ code, language = "python", filename, indica
                     ))}
                   </td>
                 </tr>,
-                found.length > 0 && (
+                (found.length > 0 || marks.length > 0) && (
                   <tr key={`f${lineNo}`} className="bg-slate-900">
                     <td className={`border-r ${hasSecurity ? "border-rose-500/60" : "border-slate-800/60"}`} style={{ width: GUTTER_PX, minWidth: GUTTER_PX }} />
                     <td className="py-2 pl-3 pr-3 whitespace-normal">
@@ -235,6 +244,7 @@ export default function CodeViewer({ code, language = "python", filename, indica
                             nav={nav}
                           />
                         ))}
+                        {marks.length > 0 && <InlineCrossFileMark marks={marks} filePath={filename ?? ""} nav={nav} />}
                         {signals.map((ind, i) => (
                           <InlineSignalNote key={`${ind.id}:${i}`} ind={ind} meta={describe?.(ind.id)} />
                         ))}

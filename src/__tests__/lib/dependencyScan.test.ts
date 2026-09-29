@@ -192,3 +192,31 @@ describe("dependencyScan.deriveFindings -- base-image CVE lookup (Decision 2, ne
     expect(lookups.some(l => l.ecosystem === "Debian:12" && l.name === "openssl")).toBe(true);
   });
 });
+
+describe("dependencyScan.deriveFindings: reachability of vulnerable packages", () => {
+  const scan = (files: Array<{ file_path: string; content: string }>): ScanForDeps =>
+    ({ repo: "acme/demo", pr_number: 1, scan_id: "scan_1", files: files.map(f => ({ ...f, ai_percentage: 0 })) });
+  const manifest = { file_path: "package.json", content: JSON.stringify({ dependencies: { lodash: "4.17.15", axios: "0.21.0", "left-pad": "1.0.0" } }) };
+  const route = { file_path: "src/routes/t.ts", content: `import _ from "lodash";\napp.get("/t", (req, res) => res.send(_.template(req.query.t)()));\n` };
+  beforeEach(() => {
+    mockLookupNpmLicense.mockReset().mockResolvedValue(null);
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map([
+      ["npm|lodash|4.17.15", [{ id: "GHSA-a", aliases: ["CVE-2021-23337"], severity: "HIGH" as const, affectedSymbols: ["lodash.template"] }]],
+      ["npm|axios|0.21.0", [{ id: "GHSA-b", aliases: ["CVE-2021-3749"], severity: "HIGH" as const }]],
+    ]));
+  });
+
+  it("the vulnerable function called from a route; a vulnerable package never imported; a clean package gets no verdict", async () => {
+    const findings = await deriveFindings([scan([manifest, route])]);
+    const lodash = findings.find(f => f.package_name === "lodash")!;
+    expect(lodash.reachability?.tier).toBe("called");
+    expect(lodash.reachability?.evidence[0]).toMatchObject({ file: "src/routes/t.ts", line: 2, kind: "call" });
+    expect(findings.find(f => f.package_name === "axios")!.reachability?.tier).toBe("not-imported");
+    expect(findings.find(f => f.package_name === "left-pad")!.reachability).toBeUndefined();
+  });
+
+  it("an advisory without a function list makes the verdict import-level, never 'not called'", async () => {
+    const findings = await deriveFindings([scan([manifest, { file_path: "src/routes/h.ts", content: `import axios from "axios";\napp.get("/h", async (req, res) => res.send(await axios.get("https://x")));\n` }])]);
+    expect(findings.find(f => f.package_name === "axios")!.reachability?.tier).toBe("reachable");
+  });
+});

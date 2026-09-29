@@ -108,13 +108,31 @@ describe("the callee file's own findings know what reaches them", () => {
     { path: "src/db/userRepo.ts", content: `export class UserRepo {\n  byId(id) {\n    const sql = "SELECT * FROM users WHERE id = '" + id + "'";\n    return db.query(sql);\n  }\n}\nexport const repo = new UserRepo();\n` },
   ];
 
-  it("the repository's pattern finding links back to the flow, is reachable, and says so", () => {
+  it("the repository's pattern finding is the same issue: folded into the route's finding, not reported twice", () => {
     const r = scan(files);
-    const repoFinding = r.files.find(f => f.file_path === "src/db/userRepo.ts")!.indicators.find(i => i.cwe === "CWE-89" && i.line === 3)!;
-    expect(repoFinding.reachedFrom).toEqual([{ file: "src/routes/users.ts", line: 5, id: "sql-injection", source: "req.query.id" }]);
-    expect(repoFinding.reachability).toBe("tainted-path");
-    const [stored] = toStoredIndicators([repoFinding]);
-    expect(stored.reachedFrom?.[0]).toMatchObject({ file: "src/routes/users.ts", line: 5 });
+    expect(r.files.find(f => f.file_path === "src/db/userRepo.ts")!.indicators.filter(i => i.cwe === "CWE-89")).toEqual([]);
+    const route = flowAt(r, "src/routes/users.ts")!;
+    expect(route.relatedLocations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: "src/db/userRepo.ts", line: 3, reason: "cross-file", detector: "pattern" }),
+    ]));
+  });
+
+  it("a callee finding with request input of its OWN stays, and links back to the flow that also reaches it", () => {
+    const withOwn = files.map(f => f.path !== "src/db/userRepo.ts" ? f : { ...f, content: f.content.replace(
+      "export const repo = new UserRepo();",
+      "export const repo = new UserRepo();\nexport function direct(req) { return db.query(\"SELECT * FROM users WHERE id = '\" + req.query.id + \"'\"); }") });
+    const r = scan(withOwn);
+    const repo = r.files.find(f => f.file_path === "src/db/userRepo.ts")!;
+    expect(repo.indicators.filter(i => i.cwe === "CWE-89" && i.sourceExpr).map(i => i.line)).toEqual([8]);
+    const repoFinding = scan(files).files.find(f => f.file_path === "src/db/userRepo.ts")!;
+    expect(repoFinding.indicators.some(i => i.reachedFrom)).toBe(false);   // the folded one leaves no dangling backlink
+  });
+
+  it("a kept backlinked finding's evidence names what reaches it", () => {
+    const [stored] = toStoredIndicators([{
+      id: "sql-injection", label: "SQL Injection", severity: "critical", line: 3, detail: "Query built with string interpolation", cwe: "CWE-89",
+      reachability: "tainted-path", reachedFrom: [{ file: "src/routes/users.ts", line: 5, id: "sql-injection", source: "req.query.id" }],
+    } as never]);
     const text = buildFindingEvidence(stored, "src/db/userRepo.ts").checks.map(c => c.parts.map(p => (typeof p === "string" ? p : p.code)).join(""));
     expect(text).toContain("Reached by req.query.id through the confirmed data flow reported at src/routes/users.ts:5");
     expect(text.some(t => /Pattern match only|possibly dead code/.test(t))).toBe(false);
@@ -138,7 +156,7 @@ describe("the callee file's own findings know what reaches them", () => {
     expect(summary).toBe("Untrusted input req.query.id (URL query parameter) is passed to userService.find() and reaches db.query() in src/db/userRepo.ts, where it is used to build a SQL query.");
     const checks = ev.checks.map(c => c.parts.map(p => (typeof p === "string" ? p : p.code)).join(""));
     expect(checks.filter(c => /crosses file boundary via/i.test(c))).toEqual([]);
-    expect(checks).toContain("Reaches db.query() at src/db/userRepo.ts:4, where it is used to build a SQL query");
+    expect(checks).toContain("Reaches db.query() at src/db/userRepo.ts:4 as the SQL query text, where it is used to build a SQL query");
   });
 });
 

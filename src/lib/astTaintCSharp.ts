@@ -61,7 +61,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -804,7 +804,7 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
   return propagatingIdx;
 }
 
-const MAX_PROPAGATION_ROUNDS = 3;
+const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
 
 function buildPropagatingMapCSharp(localMethods: Map<string, LocalMethod>, baseCtx: EngineCtx): PropagatingCS {
   const propagating: PropagatingCS = new Map();
@@ -1132,7 +1132,8 @@ function checkCallSink(
     fireArgs("open-redirect", [0]);
   } else if ((tail === "Compile" && owner === "XPathExpression") || tail === "SelectNodes" || tail === "SelectSingleNode"
              || tail === "XPathSelectElements" || tail === "XPathSelectElement" || tail === "XPathEvaluate") {
-    fire("xpath-injection");
+    // (xpath[, namespaceManager | resolver]): the expression only.
+    fireArgs("xpath-injection", [0]);
   } else if (/ldap/i.test(rootVar) && /^(?:Search|FindOne|FindAll)$/i.test(tail)) {
     // Call-shaped LDAP sink -- a custom helper (LdapHelper.Search(filter),
     // Ldap.FindOne(...)), distinct from the DirectorySearcher.Filter
@@ -2253,7 +2254,7 @@ export function scanAstTaintCSharp(
     }
     // Taint written into class fields / static containers by one method is visible to every method:
     // re-walk until that memory stops growing (bounded).
-    for (let round = 0; round < 2 && ctx.stickyDirty; round++) {
+    for (let round = 0; round < FIXED_POINT_CAP && ctx.stickyDirty; round++) {
       ctx.stickyDirty = false;
       scanMethods(false);
     }

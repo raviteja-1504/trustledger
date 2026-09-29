@@ -328,7 +328,7 @@ app.get("/x", (req, res) => {
     expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
   });
 
-  it("does NOT resolve levelA (the outermost caller) in that same chain — the round cap is real, not accidentally unbounded", () => {
+  it("resolves levelA too -- the propagation runs to a fixed point, so a 4-level chain is followed to the end", () => {
     const content = `
 function levelA(x) { return levelB(x); }
 function levelB(x) { return levelC(x); }
@@ -337,7 +337,7 @@ function levelD(x) { return x; }
 app.get("/x", (req, res) => {
   exec(levelA(req.query.cmd));
 });`;
-    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(false);
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
   });
 });
 
