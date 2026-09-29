@@ -181,6 +181,9 @@ export interface ScanIndicator {
   // enclosing function changes; two findings never share one (an ordinal breaks exact-duplicate ties), so
   // acknowledging one can't silently acknowledge another. For cross-scan tracking, not for display.
   fingerprint?: string;
+  // Set by the GitHub scan worker from the PR diff (prDiff.ts): on lines this PR adds/changes, or already
+  // in a file it touches. Absent when unknown.
+  introduced?: boolean;
   // Name of the function this finding's line sits in (security findings only), from the same
   // AST-backed resolver fingerprints and reachability use. Absent when it can't be named (top-level
   // code, an anonymous inline handler, or a language with no parsed tree).

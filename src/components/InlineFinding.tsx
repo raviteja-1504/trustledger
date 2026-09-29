@@ -7,6 +7,7 @@ import type { CrossFileMark } from "@/lib/dataFlowEvidence";
 import { cweFor } from "@/lib/cweMap";
 import { findingMeta } from "@/lib/findingCatalog";
 import { FindingStatusChip, FindingTriagePanel, isSuppressedFinding, useCanShowTriage } from "./FindingTriage";
+import { confidenceLevel, CONFIDENCE_LABEL, CONFIDENCE_DESC } from "@/lib/confidence";
 import { REACH_DESC, REACH_LABEL, URGENCY_DESC, URGENCY_LABEL } from "@/lib/signalClassification";
 
 export interface FindingMeta { label?: string; desc?: string; security?: boolean }
@@ -302,6 +303,7 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
   const [fixOpen, setFixOpen] = useState(false);
   const [triageOpen, setTriageOpen] = useState(false);
   const showTriage = useCanShowTriage(ind);
+  const conf = confidenceLevel({ confidence: ind.confidence, sourceExpr: ind.sourceExpr, sourceAssumed: ind.flow?.source.assumed });
   const suppressed = isSuppressedFinding(ind);
   const ev = useMemo(() => buildFindingEvidence(ind, filePath, siblings), [ind, filePath, siblings]);
   const sev = normSev(ind.severity);
@@ -336,9 +338,15 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
           </div>
           <span className="flex flex-wrap items-center gap-1.5">
             <span className={`${CHIP} ${ev.isDataFlow ? "bg-sky-500/10 text-sky-200 ring-sky-400/30" : "bg-white/5 text-slate-300 ring-white/10"}`}
-              title={ev.isDataFlow ? "Found by tracing the value through the parsed code" : "Found by matching a code pattern on this line"}>
-              {ev.analysisLabel}{ind.confidence != null ? ` · ${ind.confidence}%` : ""}
+              title={`${ev.isDataFlow ? "Found by tracing the value through the parsed code" : "Found by matching a code pattern on this line"}${conf ? `. ${CONFIDENCE_LABEL[conf]}: ${CONFIDENCE_DESC[conf]}` : ""}${ind.confidence != null ? ` (${ind.confidence}%)` : ""}`}>
+              {ev.analysisLabel}{conf ? ` · ${CONFIDENCE_LABEL[conf]}` : ""}
             </span>
+            {ind.introduced != null && (
+              <span className={`${CHIP} ${ind.introduced ? "bg-rose-500/15 text-rose-200 ring-rose-400/30" : "bg-white/5 text-slate-400 ring-white/10"}`}
+                title={ind.introduced ? "On lines this pull request adds or changes" : "Already in the code before this pull request (in a file it touches)"}>
+                {ind.introduced ? "Introduced by this PR" : "Pre-existing"}
+              </span>
+            )}
             {cweId && (
               cweNum
                 ? <a href={`https://cwe.mitre.org/data/definitions/${cweNum}.html`} target="_blank" rel="noopener noreferrer"

@@ -1029,6 +1029,18 @@ function PRDetailContent() {
     } : s),
   } : null, [scan, canTriage]);
 
+  // Security delta: what this PR introduces vs. what was already in the files it touches (prDiff.ts).
+  const delta = useMemo(() => {
+    if (!scan) return undefined;
+    // Security findings carry a CWE (AI-provenance signals don't).
+    const sec = scan.files.flatMap(f => (f.indicators ?? []).filter(i => !!(i.cwe ?? findingMeta(i.id, i.label).cwe)));
+    const known = sec.filter(i => i.introduced != null);
+    if (known.length === 0) return undefined;
+    const introduced = known.filter(i => i.introduced);
+    const sev = (s: string) => introduced.filter(i => i.severity === s).length;
+    return { introduced: introduced.length, critical: sev("critical"), high: sev("high"), preexisting: known.length - introduced.length };
+  }, [scan]);
+
   // Lifecycle counts from the findings as they are now (so a decision shows immediately).
   const liveLifecycle = useMemo(() => {
     if (!scan?.lifecycle) return undefined;
@@ -1681,6 +1693,7 @@ function PRDetailContent() {
                 telemetry={scan.telemetry}
                 currentEngineVersion={scan.current_engine_version}
                 lifecycle={liveLifecycle}
+                delta={delta}
                 canTriage={canTriage}
                 onChanged={() => { api.getScan(id).then(setScan).catch(() => {}); }}
               />

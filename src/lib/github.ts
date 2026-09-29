@@ -165,7 +165,8 @@ export async function fetchFileContents(
 
 // ── Changed files in a PR ──────────────────────────────────────────────────────
 
-export interface PRFile { filename: string; status: string; additions: number; deletions: number }
+// `patch`: the file's unified diff against the PR base, omitted by GitHub for very large or binary diffs.
+export interface PRFile { filename: string; status: string; additions: number; deletions: number; patch?: string }
 
 export async function getPRFiles(
   token: string,

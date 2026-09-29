@@ -43,6 +43,9 @@ export interface FileIndicator {
   // Lifecycle in this PR and any triage decision on it (lib/findingLifecycle.ts); set by api/scans/[id].
   lifecycle_status?: FindingStatus;
   triage?: TriageDecision;
+  // On lines the PR adds/changes (true) or already in a touched file (false); absent when unknown
+  // (non-GitHub scans, or GitHub omitted the file's diff). See lib/prDiff.ts.
+  introduced?: boolean;
   // 0-100 evidence strength: 95 = AST data-flow match; lower = pattern/heuristic. NOT severity.
   confidence?: number;
   // The tainted expression and the sink it reaches, verbatim from the AST engine (absent for regex findings).

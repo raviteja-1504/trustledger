@@ -11,7 +11,7 @@ import {
   NON_CVE_RISK_DB, buildFinding,
   type DepFinding, type DepRisk, type DepType, type LangEcosystem, type LicenseRisk,
 } from "@/lib/dependencyScan";
-import { REACHABILITY_LABEL, REACHABILITY_RANK, type DepReachabilityTier } from "@/lib/depReachability";
+import { REACHABILITY_LABEL, REACHABILITY_RANK, REACHABILITY_DESC, type DepReachabilityTier } from "@/lib/depReachability";
 
 // ── Presentational styles (data/logic lives in lib/dependencyScan.ts) ─────────
 
@@ -311,6 +311,21 @@ export default function DependenciesPage() {
             <p className="text-sm text-gray-400">
               Parses real imports across {ecosystems.length} ecosystems · live OSV.dev vulnerability lookup · license + health checks · transitive deps
             </p>
+            <details className="mt-2 max-w-2xl group">
+              <summary className="text-xs font-semibold text-indigo-600 cursor-pointer select-none">How to read reachability</summary>
+              <div className="mt-2 rounded-xl border border-gray-100 bg-white px-3.5 py-3 space-y-1.5">
+                <p className="text-[11px] text-gray-500">Each vulnerable package is ranked by how your code uses it, based on the files in each repo&apos;s latest scan. The list is ordered by severity, then by this ranking.</p>
+                {(Object.keys(REACHABILITY_RANK) as DepReachabilityTier[]).sort((a, b) => REACHABILITY_RANK[a] - REACHABILITY_RANK[b]).map(t => (
+                  <div key={t} className="flex items-start gap-2">
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 mt-0.5"
+                      style={{ background: REACH_STYLE[t].bg, color: REACH_STYLE[t].text, borderColor: REACH_STYLE[t].border }}>
+                      {REACH_STYLE[t].icon} {REACHABILITY_LABEL[t]}
+                    </span>
+                    <span className="text-[11px] text-gray-600 leading-snug">{REACHABILITY_DESC[t]}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
           </div>
           <div className="flex flex-col items-end gap-0.5">
             <div className="flex items-center gap-2">
@@ -533,7 +548,7 @@ export default function DependenciesPage() {
                         <span className="text-[8px] font-bold text-gray-400 bg-gray-100 px-1 py-0.5 rounded">transitive</span>
                       )}
                       {dep.reachability && (
-                        <span className="text-[8px] font-bold px-1 py-0.5 rounded border whitespace-nowrap" title={dep.reachability.summary}
+                        <span className="text-[8px] font-bold px-1 py-0.5 rounded border whitespace-nowrap" title={`${REACHABILITY_LABEL[dep.reachability.tier]}: ${REACHABILITY_DESC[dep.reachability.tier]}\n\n${dep.reachability.summary}`}
                           style={{ background:REACH_STYLE[dep.reachability.tier].bg, color:REACH_STYLE[dep.reachability.tier].text, borderColor:REACH_STYLE[dep.reachability.tier].border }}>
                           {REACH_STYLE[dep.reachability.tier].icon} {REACHABILITY_LABEL[dep.reachability.tier]}
                         </span>

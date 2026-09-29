@@ -48,6 +48,18 @@ export const REACHABILITY_LABEL: Record<DepReachabilityTier, string> = {
   unknown: "Reachability unknown",
 };
 
+/** What each verdict means and what to do about it. Every verdict is about the files in the repo's latest
+ * scan, not the whole code base. */
+export const REACHABILITY_DESC: Record<DepReachabilityTier, string> = {
+  called: "Your code calls a function the advisory names as vulnerable. Fix this first.",
+  reachable: "Imported by an entry point, or by code an entry point imports. The advisory doesn't name specific functions, so treat the whole package as in use.",
+  imported: "Imported by application code, but no scanned entry point was traced to it. Likely in use; confirm how it's reached.",
+  "not-called": "Imported, but none of the functions the advisory names as vulnerable is called. Lower priority, though still worth upgrading.",
+  "test-only": "Only tests, fixtures or examples import it. It doesn't ship with the application.",
+  "not-imported": "No scanned file imports it. If the scan covers the whole code base, it's declared but unused and can likely be removed.",
+  unknown: "No source import maps to this package (e.g. an OS package from a base image), so its use can't be traced in code.",
+};
+
 export interface SourceFile { file_path: string; content?: string | null }
 
 type Family = "js" | "python" | "go" | "java" | "csharp" | "php" | "rust" | "ruby";

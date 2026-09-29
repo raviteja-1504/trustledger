@@ -24,6 +24,7 @@ import {
 } from "@/lib/github";
 import { runScan, getFixSuggestions, calculateRisk } from "@/lib/scanner";
 import { ensureTaintEngines } from "@/lib/engineWarmup";
+import { addedLinesByPath, markIntroduced } from "@/lib/prDiff";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { unsuppressed, type TriageDecision } from "@/lib/findingLifecycle";
 import { buildCheckAnnotations } from "@/lib/checkAnnotations";
@@ -325,6 +326,10 @@ export async function POST(req: NextRequest) {
       all_file_paths:      prFiles.map(f => f.filename),
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
+
+    // Which findings this PR introduced, from its own diff (prDiff.ts) -- stored with each finding.
+    const addedByPath = addedLinesByPath(prFiles);
+    for (const f of result.files) markIntroduced(f.indicators, f.file_path, addedByPath.get(f.file_path));
 
     const inheritedFiles: PrevScanFile[] = (isDelta && prevScan)
       ? prevScan.files.filter(f => !changedPaths.has(f.file_path))
@@ -712,7 +717,7 @@ export async function POST(req: NextRequest) {
       ...result.files.map(f => triage.size ? { ...f, indicators: unsuppressed(f.indicators, triage) } : f),
       ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: unsuppressed(Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [], triage) })),
     ];
-    const fixesById = new Map(getFixSuggestions(evidenceFiles.flatMap(f => f.indicators ?? [])).map(fix => [fix.vuln_id, fix]));
+    const fixesById = new Map(getFixSuggestions(evidenceFiles.flatMap<{ id: string }>(f => f.indicators ?? [])).map(fix => [fix.vuln_id, fix]));
     const reviewUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/pr/${result.scan_id}`;
 
     // Re-check supersession before finalizing -- the scan itself (fetch +

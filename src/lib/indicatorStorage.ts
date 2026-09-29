@@ -37,6 +37,7 @@ export function toStoredIndicator(i: ScanIndicator): FileIndicator {
     codeCategory: i.codeCategory, cwe: i.cwe,
     reachability: i.reachability, exploitability_score: i.exploitability_score, remediation_urgency: i.remediation_urgency,
     fingerprint: i.fingerprint, confidence: i.confidence, sourceExpr: i.sourceExpr, sinkExpr: i.sinkExpr,
+    ...(i.introduced != null ? { introduced: i.introduced } : {}),
     trace: capTrace(i.trace),
     supportingDetectors: i.supportingDetectors?.length ? [...i.supportingDetectors] : undefined,
     relatedLocations: i.relatedLocations?.length
