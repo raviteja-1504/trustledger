@@ -98,6 +98,9 @@ import "./iacDetectors";
 // containerDetectors.ts's own docblock. Same reasoning as iacDetectors.ts
 // above: import here, not left to another module's import order.
 import "./containerDetectors";
+// Expanded AppSec: Kubernetes hardening, cloud posture from the repo, container hardening, API security.
+import "./appsecDetectors";
+import { APPSEC_FIXES } from "./appsecRules";
 import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination } from "./licenseContamination";
@@ -282,6 +285,7 @@ const LANG_MAP: Record<string, string> = {
   md: "markdown", tf: "terraform",  ex: "elixir",
   xml: "xml",     properties: "properties", gradle: "gradle",
   tfvars: "terraform",
+  bicep: "bicep",   template: "yaml",   // CloudFormation *.template (YAML or JSON; configTree reads either)
 };
 
 export function detectLanguage(path: string): string {
@@ -309,7 +313,7 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
   const base    = lower.split(/[\\/]/).pop() ?? lower;
   const ext     = base.split(".").pop() ?? "";
 
-  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle","tf","tfvars"]);
+  const SKIP_EXTS = new Set(["json","yaml","yml","toml","ini","env","lock","csv","sql","md","txt","xml","svg","png","jpg","ico","woff","woff2","properties","gradle","tf","tfvars","bicep","template"]);
   // Dockerfile is extensionless (base.split(".").pop() only resolves to
   // "dockerfile" for the bare filename, not Dockerfile.prod-style variants)
   // -- docker-compose.yml already skips via the "yaml" entry above.
@@ -5560,6 +5564,7 @@ export function scanSupplyChain(content: string): SupplyChainRisk {
 // ── Security fix suggestions ──────────────────────────────────────────────────
 
 const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
+  ...APPSEC_FIXES,
   "sql-injection": {
     title: "Use parameterised queries",
     description: "Replace string-interpolated SQL with parameterised statements to prevent injection.",

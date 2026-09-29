@@ -98,6 +98,13 @@ function DepsIcon() {
     </svg>
   );
 }
+function ApiSecIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16M4 12h10M4 17h7"/><circle cx="18" cy="16" r="3"/><path d="M20.2 18.2 22 20"/>
+    </svg>
+  );
+}
 function BellAlertIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -197,6 +204,7 @@ const ALL_LINKS: Array<{
   { href: "/scans",           label: "Scan History",    icon: ScansNavIcon,    permission: null                         },
   { href: "/secrets",         label: "Secrets",         icon: SecretsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/dependencies",    label: "Dependencies",    icon: DepsIcon,        permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/api-security",    label: "API Security",    icon: ApiSecIcon,      permission: null,  roles: ["admin","security_reviewer"] },
   // Compliance
   { href: "/compliance",      label: "Compliance",      icon: ComplianceIcon,  permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/sla",             label: "SLA Dashboard",   icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
@@ -512,7 +520,7 @@ export default function Sidebar() {
         {[
           { label:"Overview",    hrefs:["/dashboard","/analytics","/posture"] },
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
-          { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies"] },
+          { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/api-security"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
           { label:"Audit",       hrefs:["/audit","/reports"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },

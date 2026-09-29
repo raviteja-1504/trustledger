@@ -180,8 +180,10 @@ function receiverLooksLikeMock(lines: string[], lineIdx: number, name: string): 
 // Constructor evidence for a bare-identifier receiver, checked within a
 // small backward window (same line + up to 3 non-blank lines above) --
 // string/regex based, not real scope analysis, deliberately conservative.
-const ARRAY_CTOR_RE = /=\s*(?:\[\s*\]|\[[^\]]{0,300}\]|Array\.from\(|Array\(|new\s+Array\()/;
-const OBJECT_CTOR_RE = /=\s*(?:\{\s*\}|Object\.keys\(|Object\.values\(|Object\.entries\(|Object\.assign\()/;
+// Object.keys/values/entries return ARRAYS (so .find/.map/.filter on them are real); Object.assign returns
+// its target object.
+const ARRAY_CTOR_RE = /=\s*(?:\[\s*\]|\[[^\]]{0,300}\]|Array\.from\(|Array\(|new\s+Array\(|Object\.(?:keys|values|entries)\()/;
+const OBJECT_CTOR_RE = /=\s*(?:\{\s*\}|Object\.assign\()/;
 
 type ReceiverKind = "array" | "object" | null;
 

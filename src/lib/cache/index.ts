@@ -116,6 +116,7 @@ export const cacheKeys = {
   orgSettings:(orgId: string)              => `org:${orgId}`,
   billing:    (orgId: string)              => `bill:${orgId}`,
   dependencies:(orgId: string)             => `deps:${orgId}`,
+  apiSecurity: (orgId: string)             => `apisec:${orgId}`,
   autoIncidentState: (orgId: string)       => `aincsync:${orgId}`,
   osvPackage: (ecosystem: string, name: string, version: string) => `osvpkg:${ecosystem}:${name}:${version}`,
   // v2: details now carry the advisory's vulnerable functions (osvClient.ts extractAffectedSymbols).

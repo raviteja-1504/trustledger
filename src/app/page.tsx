@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { FINDING_CATALOG } from "@/lib/findingCatalog";
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 // Scoped to this page only (not a global rebrand): a near-black, cyan-accented
@@ -103,7 +104,6 @@ const RouteIcon = (s = 22) => iconEl(<><circle cx="6" cy="19" r="2" /><circle cx
 const LockIcon = (s = 22) => iconEl(<><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>, s);
 const PackageIcon = (s = 22) => iconEl(<><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" /><polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" /></>, s);
 const FingerprintIcon = (s = 22) => iconEl(<><path d="M12 10a2 2 0 0 0-2 2c0 1.5-.5 2.5-1 3" /><path d="M6 8a6 6 0 0 1 12 0c0 1 0 3-1 5" /><path d="M15 19c1-1 2-3 2-5" /><path d="M4 14c0 2 1 4 2 5" /><path d="M9 14c0 1 0 2-1 3.5" /><path d="M12 4a8 8 0 0 1 8 8c0 2 0 3-.5 4.5" /></>, s);
-const BellIcon = (s = 20) => iconEl(<><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></>, s);
 const IncidentIcon = (s = 20) => iconEl(<><circle cx="12" cy="12" r="10" /><path d="M8 12l2.5 2.5L16 8.5" /></>, s);
 const RadarIcon = (s = 20) => iconEl(<><path d="M12 2a10 10 0 1 0 10 10" /><path d="M12 6v6l4 2" /><circle cx="18" cy="6" r="3" fill="currentColor" stroke="none" /></>, s);
 const GaugeIcon = (s = 20) => iconEl(<><path d="M12 2a10 10 0 1 0 10 10" strokeOpacity="0" /><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></>, s);
@@ -115,6 +115,11 @@ const AlertIcon = (s = 20) => iconEl(<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.
 const WebhookIcon = (s = 20) => iconEl(<><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c0-.9.3-1.72.83-2.38" /><path d="M18.4 15.03a4 4 0 0 0-3.2-6.03h-.46" /><path d="M8.5 8.5a4 4 0 0 1 6.72-1.5" /><circle cx="18" cy="16.98" r="1.5" /><circle cx="2" cy="17" r="1" /></>, s);
 const DownloadIcon = (s = 20) => iconEl(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>, s);
 const CheckCircleIcon = (s = 20) => iconEl(<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></>, s);
+const CloudIcon = (s = 20) => iconEl(<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />, s);
+const ApiIcon = (s = 20) => iconEl(<><path d="M4 7h16M4 12h10M4 17h7" /><circle cx="18" cy="16" r="3" /><path d="M20.2 18.2 22 20" /></>, s);
+const ContainerIcon = (s = 20) => iconEl(<><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M6 7V4h12v3M7 11v6M12 11v6M17 11v6" /></>, s);
+const HelmIcon = (s = 20) => iconEl(<><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>, s);
+const MergeIcon = (s = 20) => iconEl(<><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5v7M8.3 7.2 15.7 11M8.3 16.8l7.4-3.8" /></>, s);
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -147,14 +152,25 @@ const PILLARS: Pillar[] = [
   },
   {
     id: "code-risk", icon: CodeRiskIcon, color: ROSE, name: "Code Risk", tagline: "What's actually in the code — vulnerabilities, secrets, dependencies",
-    desc: "Six real AST-based taint engines trace SQL injection, XSS, SSRF, and seventeen other vulnerability classes from source to sink. The same scan flags hardcoded secrets the moment they land, and checks every dependency manifest against a live CVE feed.",
+    desc: "Six real AST-based taint engines trace SQL injection, XSS, SSRF, and seventeen other vulnerability classes from source to sink — across files, services and includes, not just within one file. The same scan flags hardcoded secrets the moment they land, and ranks every vulnerable dependency by whether your code actually reaches it.",
     bullets: [
-      "Real data-flow taint engines: JS/TS, Python, Java, Go, C#, PHP",
-      "20 vulnerability classes, each with a full source-to-sink trace",
+      "Real data-flow taint engines: JS/TS, Python, Java, Go, C#, PHP — across files in all six",
+      "20 vulnerability classes, each with a source-to-sink trace and the exact sink argument",
       "Secrets detection — API keys, tokens, credentials — before they reach history",
-      "Live CVE lookups (OSV.dev) across 8 ecosystems, plus typosquat detection",
+      "Live CVEs across 8 ecosystems, ranked by reachability: is the vulnerable function called?",
     ],
     pages: ["Scan History", "Secrets", "Dependencies"],
+  },
+  {
+    id: "cloud-api", icon: CloudIcon, color: AMBER, name: "Cloud & API", tagline: "What you deploy and expose, checked before it exists",
+    desc: "The same PR scan reads your infrastructure and your API surface: Kubernetes manifests and Helm charts per container, Terraform for AWS, GCP and Azure, CloudFormation, ARM, Bicep and Serverless templates, Dockerfiles and Compose files — plus every endpoint your code and OpenAPI specs declare. No cloud credentials required.",
+    bullets: [
+      "Kubernetes & Helm: privilege escalation, root users, host paths, RBAC wildcards, committed Secrets",
+      "Cloud posture from code: public buckets, open admin ports, public databases, wildcard IAM",
+      "Containers: end-of-life base images, disabled sandboxing, TLS checks turned off in builds",
+      "API inventory across 6 languages + OpenAPI, flagging the endpoint missing its siblings' auth",
+    ],
+    pages: ["API Security", "Scan History", "PR review"],
   },
   {
     id: "compliance", icon: ComplianceIcon, color: EMERALD, name: "Compliance", tagline: "Evidence that's generated, not maintained",
@@ -218,27 +234,28 @@ const GROUP_COLORS: Record<string, string> = { "Injection": CYAN, "Request forge
 
 interface LangEngine { lang: string; ext: string; note: string; extra: string }
 const LANGUAGES: LangEngine[] = [
-  { lang: "TypeScript / JavaScript", ext: ".ts .tsx .js", note: "Cross-file resolution + source-sink trace", extra: "Named, default, namespace & CommonJS imports" },
-  { lang: "Python", ext: ".py", note: "Cross-file resolution + source-sink trace", extra: "Relative & absolute imports, package modules" },
-  { lang: "Go", ext: ".go", note: "Path-sensitive, BOLA ownership dominance", extra: "Request/writer var tracking, out-parameters" },
-  { lang: "C#", ext: ".cs", note: "Path-sensitive, BOLA ownership dominance", extra: "ASP.NET Core attribute-driven sources" },
-  { lang: "PHP", ext: ".php", note: "Path-sensitive, BOLA ownership dominance", extra: "Global-scope sticky memory across functions" },
-  { lang: "Java", ext: ".java", note: "Spring annotation & entry-point aware", extra: "Two-tier confidence for un-annotated params" },
+  { lang: "TypeScript / JavaScript", ext: ".ts .tsx .js", note: "Cross-file flows through functions, classes & services", extra: "Named, default, namespace & CommonJS imports; NestJS injection" },
+  { lang: "Python", ext: ".py", note: "Cross-module flows through functions & service classes", extra: "Relative & absolute imports, injected services" },
+  { lang: "Go", ext: ".go", note: "Cross-package calls, path-sensitive, BOLA dominance", extra: "Struct-field and typed-parameter method resolution" },
+  { lang: "C#", ext: ".cs", note: "Services across files, path-sensitive, BOLA dominance", extra: "Constructor & primary-constructor dependency injection" },
+  { lang: "PHP", ext: ".php", note: "Functions & classes across includes, path-sensitive", extra: "__DIR__, relative & transitive includes; static calls" },
+  { lang: "Java", ext: ".java", note: "Spring services across files, entry-point aware", extra: "@Autowired & constructor injection, interface → implementation" },
 ];
 
 const PIPELINE_STAGES = [
   { label: "GitHub webhook", detail: "PR opened or updated", color: "#94a3b8", icon: WebhookIcon },
   { label: "File fetch", detail: "Every changed file, async via queue", color: "#7dd3fc", icon: DownloadIcon },
   { label: "AI signal scan", detail: "AST · git provenance · behavioral", color: SKY, icon: AiIntelIcon },
-  { label: "Taint engine", detail: "Per-language AST + data-flow", color: ROSE, icon: CodeRiskIcon },
-  { label: "Secrets + deps", detail: "Credential scan + live CVE lookup", color: AMBER, icon: KeyIcon },
+  { label: "Taint engine", detail: "Per-language AST + cross-file data-flow", color: ROSE, icon: CodeRiskIcon },
+  { label: "Secrets, deps, IaC", detail: "Credentials · CVEs by reachability · cloud, container & API config", color: AMBER, icon: KeyIcon },
   { label: "Policy engine", detail: "Risk score against merge gates", color: VIOLET, icon: ComplianceIcon },
   { label: "Attestation gate", detail: "Blocks until reviewer sign-off", color: EMERALD, icon: UsersIcon },
   { label: "Check run", detail: "Posted to the PR", color: EMERALD, icon: CheckCircleIcon },
 ];
 
 const WHY_ROWS = [
-  { vs: "Point tools (one per risk type)", them: "A SAST tool for vulnerabilities, a separate secrets scanner, a separate SCA tool, and no visibility into what's actually AI-generated — four dashboards, four audit trails, nothing reconciled.", us: "One platform: vulnerabilities, secrets, dependencies, and AI provenance scored together on every PR, with one policy engine and one audit trail behind all of it.", accent: CYAN },
+  { vs: "Point tools (one per risk type)", them: "A SAST tool for vulnerabilities, a separate secrets scanner, an SCA tool, an IaC scanner, an API inventory, and no visibility into what's actually AI-generated — a dashboard and an audit trail for each, nothing reconciled.", us: "One platform: vulnerabilities, secrets, dependencies, cloud and container config, API auth coverage, and AI provenance scored together on every PR, with one policy engine and one audit trail behind all of it.", accent: CYAN },
+  { vs: "SCA that lists every CVE", them: "Every CVE in every declared package, sorted by CVSS — including packages nothing imports and functions nothing calls. Teams learn to ignore the list.", us: "Each vulnerable package is ranked by reachability: the vulnerable function called from a route, imported from reachable code, imported only by tests, or never imported — with the file and line as evidence.", accent: AMBER },
   { vs: "Regex-based scanners", them: "Match a pattern on one line. No concept of whether the value is actually attacker-controlled, whether it was sanitized first, or whether it even reaches a sink.", us: "Real data-flow: a bitmask of sink classes carried from source to sink, cleared only by a sanitizer that actually neutralizes that class.", accent: ROSE },
   { vs: "Manual review + spreadsheets", them: "Reviewers eyeball the diff, chase compliance evidence by hand, and track AI tool usage — if at all — in a doc that's out of date by Friday.", us: "Every PR gets a risk score, a named attestation, and an audit-ready trail. Shadow AI usage, policy exceptions, and SLA breaches live in one system that's always current.", accent: AMBER },
 ];
@@ -252,17 +269,17 @@ const AI_FACTS = [
   { label: "Cross-file semantic graph", desc: "Builds a call graph across the entire PR to catch AI-generated glue code that wires together real modules in unsafe ways — invisible to a per-file tool." },
 ];
 const ENGINE_FACTS = [
-  { label: "Sink-class bitmask model", desc: "A taint value is a bitmask of 15 sink classes, not a boolean. A sanitizer clears only the classes it actually neutralizes — an HTML escaper clears XSS, not SQL injection." },
+  { label: "Sink-class bitmask model", desc: "A taint value is a bitmask of 15 sink classes, not a boolean. A sanitizer clears only the classes it neutralizes — and the trace shows it: htmlspecialchars() before a SQL query is called out, not trusted." },
   { label: "Path-sensitive propagation", desc: "Branches are walked on cloned state and merged with a may-taint join; a value sanitized on one branch and raw on another is tracked correctly on both." },
   { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal. A regex match is deliberately NOT trusted." },
   { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
-  { label: "Bounded call resolution", desc: "Same-file call chains resolve through a fixed-point worklist, capped at 3 rounds, so A calling B calling C converges without an unbounded whole-program solve." },
-  { label: "Cross-file fixed point", desc: "Export summaries recompute across up to 3 rounds so a file that only wraps an imported call still gets credited with propagating it." },
+  { label: "Fixed-point call resolution", desc: "Call summaries iterate until nothing changes — same-file and across files — so an eight-deep helper chain or a five-file flow converges, with a safety cap instead of an arbitrary round limit." },
+  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all six languages. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
 ];
 
 const STEPS = [
   { n: 1, title: "Connect your repos", desc: "Install the GitHub App in under 2 minutes (GitLab and Bitbucket also supported). Every pull request is scanned automatically — no config files, no CI changes." },
-  { n: 2, title: "See every signal in one place", desc: "AI% per file, secrets, vulnerable dependencies, and traced vulnerabilities — each with a real data-flow path, not a guess. One risk score ties it together." },
+  { n: 2, title: "See every signal in one place", desc: "AI% per file, secrets, reachable vulnerable dependencies, traced vulnerabilities, and cloud, container and API misconfigurations — each with real evidence, not a guess. One risk score ties it together." },
   { n: 3, title: "Attest. Gate. Deploy.", desc: "Reviewers sign off on flagged files directly in the dashboard. Policy gates block merges until required attestations and fixes are recorded." },
 ];
 
@@ -289,8 +306,8 @@ function NavBar() {
           <span className="font-bold text-white text-sm tracking-tight">TrustLedger</span>
         </div>
         <nav className="hidden md:flex items-center gap-6">
-          {["Platform", "Vulnerabilities", "How it works"].map(l => (
-            <a key={l} href={`#${l.toLowerCase().replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
+          {["Platform", "Vulnerabilities", "Cloud & API", "How it works"].map(l => (
+            <a key={l} href={`#${l.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
           ))}
         </nav>
         <div className="flex items-center gap-2">
@@ -311,11 +328,13 @@ const SIGNAL_CHIPS = [
   { label: "Secret found", value: "1", color: VIOLET, icon: KeyIcon },
   { label: "Vulnerable dep", value: "CVE-2024", color: AMBER, icon: PackageIcon },
   { label: "SQL injection", value: "traced", color: ROSE, icon: AlertIcon },
+  { label: "SSH open to", value: "0.0.0.0/0", color: ORANGE, icon: CloudIcon },
+  { label: "Endpoint", value: "missing auth", color: EMERALD, icon: ApiIcon },
 ];
 
 function SignalStrip() {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-2xl mx-auto">
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-3xl mx-auto">
       {SIGNAL_CHIPS.map((c, i) => (
         <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl border text-left" style={{ borderColor: `${c.color}33`, background: `${c.color}0f`, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
           <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ color: c.color, background: `${c.color}1c`, border: `1px solid ${c.color}38` }}>{c.icon(15)}</span>
@@ -396,7 +415,7 @@ function HeroSection() {
           One risk score.
         </h1>
         <p className="text-lg sm:text-xl text-white/65 max-w-2xl mx-auto leading-relaxed">
-          TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across six languages, catches secrets and vulnerable dependencies, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
+          TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across files in six languages, catches secrets and the vulnerable dependencies you actually reach, checks your cloud, container and API configuration, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
           <Link href="/login" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
@@ -424,8 +443,8 @@ function HeroSection() {
         <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 w-2/3 h-16 blur-3xl rounded-full pointer-events-none" style={{ background: CYAN, opacity: 0.14 }} />
       </Reveal>
 
-      <Reveal delay={320} className="relative mt-16 w-full max-w-4xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-4">
-        {[{ to: 6, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }].map(s => (
+      <Reveal delay={320} className="relative mt-16 w-full max-w-5xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+        {[{ to: 6, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
           <div key={s.label} className="text-center">
             <p className="text-3xl font-black font-mono" style={{ color: "#67e8f9", textShadow: `0 0 24px ${CYAN}88` }}><CountUp to={s.to} /></p>
             <p className="text-[11px] text-white/50 font-medium mt-1">{s.label}</p>
@@ -455,8 +474,8 @@ function PillarsSection() {
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-12">
           <Eyebrow>The platform</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six pillars. One scan.</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all six — the same structure as the dashboard itself, not a marketing simplification of it.</p>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Seven pillars. One scan.</h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all seven — the same structure as the dashboard itself, not a marketing simplification of it.</p>
         </Reveal>
 
         {/* Tab bar */}
@@ -574,6 +593,67 @@ function LanguageEngineSection() {
   );
 }
 
+// ── Cloud & API coverage, generated from the live rule catalog ──────────────
+
+const IAC_FORMATS = ["Terraform", "CloudFormation / SAM", "ARM templates", "Bicep", "Serverless", "Kubernetes & Helm", "Docker & Compose"];
+
+const LEGACY_K8S = ["iac-privileged-container", "iac-container-run-as-root", "iac-host-namespace-access", "iac-dangerous-capability", "iac-unpinned-image-tag"];
+// Older Terraform-only rules; iac-s3-public-acl and iac-public-db are the same checks as cloud-storage-public
+// and cloud-db-public (for more formats), so they aren't listed twice.
+const LEGACY_CLOUD = ["iac-open-ingress", "iac-unencrypted-storage", "iac-iam-wildcard"];
+const CLOUD_API_GROUPS: Array<{ name: string; color: string; icon: (s?: number) => React.ReactNode; blurb: string; match: (id: string) => boolean }> = [
+  { name: "Kubernetes & Helm", color: SKY, icon: HelmIcon, blurb: "Checked per container, with pod-level settings inherited and Helm values respected.", match: id => id.startsWith("iac-k8s-") || LEGACY_K8S.includes(id) },
+  { name: "Cloud posture", color: AMBER, icon: CloudIcon, blurb: "AWS, GCP and Azure resources as your templates define them — before they're created.", match: id => id.startsWith("cloud-") || LEGACY_CLOUD.includes(id) },
+  { name: "Containers", color: ORANGE, icon: ContainerIcon, blurb: "Dockerfiles and Compose files: what the image is built from and how it runs.", match: id => id.startsWith("container-") },
+  { name: "API security", color: EMERALD, icon: ApiIcon, blurb: "Your code's routes and your OpenAPI specs, with the authentication visible for each.", match: id => id.startsWith("api-") },
+];
+
+function CloudApiSection() {
+  const groups = CLOUD_API_GROUPS.map(g => {
+    const titles = Array.from(new Set(Object.entries(FINDING_CATALOG).filter(([id]) => g.match(id)).map(([, e]) => e.title)));
+    return { ...g, titles };
+  });
+  const total = groups.reduce((n, g) => n + g.titles.length, 0);
+  return (
+    <section id="cloud-api" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0c, transparent 65%), ${INK}` }}>
+      <div className="max-w-6xl mx-auto">
+        <Reveal className="text-center mb-10">
+          <Eyebrow color={AMBER}>Zoom in — Cloud & API</Eyebrow>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">{total} checks for what you deploy and expose</h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Infrastructure, containers and APIs are read from the same pull request as your code — each finding on its exact line, with a fix. No cloud credentials, no agents.</p>
+        </Reveal>
+        <Reveal delay={60} className="flex flex-wrap justify-center gap-2 mb-12">
+          {IAC_FORMATS.map(f => (
+            <span key={f} className="text-[11px] font-mono px-3 py-1.5 rounded-full border text-white/70" style={{ borderColor: `${AMBER}40`, background: `${AMBER}10` }}>{f}</span>
+          ))}
+          <span className="text-[11px] font-mono px-3 py-1.5 rounded-full border text-white/70" style={{ borderColor: `${EMERALD}40`, background: `${EMERALD}10` }}>OpenAPI / Swagger</span>
+        </Reveal>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {groups.map((g, gi) => (
+            <Reveal key={g.name} delay={gi * 70}>
+              <div className="h-full p-6 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ color: g.color, background: `${g.color}1c`, border: `1px solid ${g.color}40` }}>{g.icon(19)}</span>
+                  <div className="min-w-0">
+                    <p className="font-bold text-white">{g.name}</p>
+                    <p className="text-[11px] font-mono" style={{ color: g.color }}>{g.titles.length} checks</p>
+                  </div>
+                </div>
+                <p className="text-[13px] text-white/60 leading-relaxed mb-4">{g.blurb}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {g.titles.map(t => (
+                    <span key={t} className="text-[11px] px-2 py-1 rounded-md text-white/75" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.09)" }}>{t}</span>
+                  ))}
+                </div>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ── Pipeline: what a PR scan actually does ──────────────────────────────────
 
 function PipelineSection() {
@@ -583,7 +663,7 @@ function PipelineSection() {
         <Reveal className="text-center mb-14">
           <Eyebrow>Every PR, every push</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">What one scan actually does</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">All six pillars run on the same scan, in this order, in under a few seconds per file.</p>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">All seven pillars run on the same scan, in this order, in under a few seconds per file.</p>
         </Reveal>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {PIPELINE_STAGES.map((s, i) => (
@@ -610,13 +690,17 @@ function PipelineSection() {
 
 const FEATURES = [
   { icon: RouteIcon, title: "Source → Sink Traces", desc: "Every finding ships with the actual data-flow path, hop by hop, with real file and line numbers — including across a file boundary.", accent: CYAN },
-  { icon: GitBranchIcon, title: "Cross-File Resolution", desc: "Named, default, namespace, and CommonJS imports; re-export chains; a wrapper around an imported call is still recognized as propagating.", accent: CYAN },
+  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all six languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS), Go packages, PHP includes — measured by a 72-case cross-file benchmark on every change.", accent: CYAN },
+  { icon: MergeIcon, title: "One Issue, One Finding", desc: "When the pattern layer, the taint engine and cross-file analysis see the same bug, it becomes one finding listing every location and every detector that agreed.", accent: CYAN },
   { icon: LockIcon, title: "Broken Object-Level Authorization", desc: "Structural ownership-dominance analysis: a resource lookup only clears when a real comparison against the principal dominates every path to the sink.", accent: ROSE },
-  { icon: PackageIcon, title: "Dependency & Supply Chain", desc: "Live CVE lookups across npm, PyPI, Go, Maven, NuGet, Packagist, crates.io, and RubyGems, plus hallucinated-package and typosquat detection.", accent: AMBER },
+  { icon: PackageIcon, title: "Reachable Dependencies", desc: "Live CVEs across 8 ecosystems, ranked by whether the vulnerable function is called, the package is reachable from an entry point, used only in tests, or never imported.", accent: AMBER },
+  { icon: CloudIcon, title: "Cloud & IaC Posture", desc: "Terraform (AWS, GCP, Azure), CloudFormation, ARM, Bicep and Serverless: public storage, open admin ports, public databases, wildcard IAM, hard-coded credentials — no cloud credentials needed.", accent: AMBER },
+  { icon: HelmIcon, title: "Kubernetes & Containers", desc: "Per-container hardening in manifests and Helm charts, RBAC wildcards, committed Secrets; end-of-life base images and disabled sandboxing in Dockerfiles and Compose.", accent: AMBER },
+  { icon: ApiIcon, title: "API Endpoint Inventory", desc: "Every route across Express, Next.js, Flask, FastAPI, Spring, ASP.NET, Go and Laravel plus OpenAPI specs — and the endpoint missing the auth its siblings have.", accent: EMERALD },
   { icon: FingerprintIcon, title: "Stable Finding Fingerprints", desc: "A hash of the flow itself, not the line number — the same finding survives unrelated edits elsewhere in the file across scans.", accent: CYAN },
-  { icon: BellIcon, title: "Policy-Driven Alerting", desc: "Real-time alerts to Slack, email, or PagerDuty on policy breaches, with severity-aware routing.", accent: ORANGE },
   { icon: UsersIcon, title: "Reviewer Attestation", desc: "Named sign-off recorded per file with signature, timestamp, and risk context at review time — an audit trail that answers itself.", accent: VIOLET },
   { icon: KeyIcon, title: "Context-Aware Sanitizers", desc: "An HTML-escaped value dropped into a <script> block or an unquoted attribute is still flagged — encoding for one context doesn't cover another.", accent: ROSE },
+  { icon: AlertIcon, title: "Exact Sink Arguments", desc: "Only the exploitable argument counts: the SQL text, not bound parameters; the LDAP filter, not the base DN; the program, not its arguments.", accent: ROSE },
 ];
 
 function FeaturesSection() {
@@ -767,7 +851,7 @@ function CTASection() {
         <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}1f`, border: `1px solid ${CYAN}44`, boxShadow: `0 0 32px ${CYAN}4d` }}><ShieldIcon size={26} /></div>
         <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
         <p className="text-white/65 text-lg max-w-xl mx-auto leading-relaxed">
-          AI-generated code, leaked secrets, vulnerable dependencies, and broken authorization can all slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
+          AI-generated code, leaked secrets, reachable vulnerable dependencies, a public bucket, an endpoint that forgot its auth check — any of it can slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
           <Link href="/dashboard" className="flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all active:scale-[0.98] text-[#050810]"
@@ -794,7 +878,7 @@ function Footer() {
             <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[#050810]" style={{ background: CYAN }}><ShieldIcon size={14} /></div>
             <span className="font-bold text-white text-sm">TrustLedger</span>
           </div>
-          <p className="text-xs text-white/40 max-w-xs leading-relaxed">AI provenance, real vulnerability scanning, secrets, dependencies, and compliance — scored, traced, gated, and attested — for teams that care about what ships.</p>
+          <p className="text-xs text-white/40 max-w-xs leading-relaxed">AI provenance, real vulnerability scanning, secrets, dependencies, cloud, container and API security, and compliance — scored, traced, gated, and attested — for teams that care about what ships.</p>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-sm">
           <div>
@@ -803,7 +887,7 @@ function Footer() {
           </div>
           <div>
             <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Code Risk</p>
-            <ul className="space-y-2">{[{ label: "Scan History", href: "/scans" }, { label: "Secrets", href: "/secrets" }, { label: "Dependencies", href: "/dependencies" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
+            <ul className="space-y-2">{[{ label: "Scan History", href: "/scans" }, { label: "Secrets", href: "/secrets" }, { label: "Dependencies", href: "/dependencies" }, { label: "API Security", href: "/api-security" }, { label: "Cloud & API checks", href: "#cloud-api" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
           <div>
             <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Compliance</p>
@@ -834,6 +918,7 @@ export default function LandingPage() {
       <PillarsSection />
       <VulnCoverageSection />
       <LanguageEngineSection />
+      <CloudApiSection />
       <PipelineSection />
       <FeaturesSection />
       <ArchSection />

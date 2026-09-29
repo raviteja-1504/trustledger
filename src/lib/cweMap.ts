@@ -16,6 +16,7 @@
  * a CWE, because that's a direct description of the weakness pattern
  * itself.
  */
+import { APPSEC_CWE } from "./appsecRules";
 
 export interface CweEntry {
   id:    string; // e.g. "CWE-89"
@@ -23,6 +24,8 @@ export interface CweEntry {
 }
 
 export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
+  // Expanded AppSec rules (appsecRules.ts, itself dependency-free).
+  ...APPSEC_CWE,
   "sql-injection":              { id: "CWE-89",   title: "SQL Injection" },
   "xss":                        { id: "CWE-79",   title: "Cross-Site Scripting" },
   "hardcoded-secret":           { id: "CWE-798",  title: "Use of Hard-coded Credentials" },

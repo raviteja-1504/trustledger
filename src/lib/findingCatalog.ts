@@ -7,10 +7,13 @@
  * detector emitted.
  */
 import { cweFor } from "./cweMap";
+import { APPSEC_CATALOG } from "./appsecRules";
 
 export interface CatalogEntry { title: string; description: string; cwe?: string }
 
 export const FINDING_CATALOG: Record<string, CatalogEntry> = {
+  // Expanded AppSec rules (appsecRules.ts).
+  ...APPSEC_CATALOG,
   "sql-injection":            { title: "SQL Injection",                 description: "String-interpolated SQL query vulnerable to injection.", cwe: "CWE-89" },
   "xss":                      { title: "Cross-Site Scripting",           description: "Unsanitised content inserted into the DOM.", cwe: "CWE-79" },
   "hardcoded-secret":         { title: "Hardcoded Secret",               description: "Credential or API key committed directly in source.", cwe: "CWE-798" },

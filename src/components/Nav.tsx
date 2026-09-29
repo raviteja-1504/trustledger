@@ -351,6 +351,7 @@ const PAGE_TITLES: Record<string, { title: string; sub: string; icon: ReactNode 
   "/alerts":               { title: "Security Alerts",         sub: "Real-time security incident management",       icon: <BellNavIcon />    },
   "/secrets":              { title: "Secret Scanner",          sub: "Hardcoded credential detection",               icon: <LockIcon />       },
   "/dependencies":         { title: "Dependency Scanner",      sub: "AI-introduced package risk assessment",        icon: <BoxIcon />        },
+  "/api-security":         { title: "API Security",            sub: "Endpoint inventory and authentication coverage", icon: <ListIcon />     },
   "/phantom-deps":         { title: "Phantom Dependencies",    sub: "Hallucinated package detection",               icon: <BoxIcon />        },
   "/scans":                { title: "Scan History",            sub: "All scan runs across repositories",            icon: <ListIcon />       },
   "/reports":              { title: "Audit Reports",           sub: "AI code review evidence assessments",          icon: <DocIcon />        },

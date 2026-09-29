@@ -32,6 +32,8 @@ export const SCANNABLE_EXTS = new Set([
   // scanned repo -- isLikelyK8sManifestPath() below is the narrower gate
   // for those, so this doesn't newly flood every repo's next scan.
   "tf", "tfvars",
+  // Azure Bicep -- unambiguous extension (see iac/cloudPosture.ts).
+  "bicep",
 ]);
 
 const MANIFEST_BASENAMES = new Set([
@@ -85,10 +87,22 @@ export function isDockerComposePath(path: string): boolean {
   return DOCKER_COMPOSE_NAME_RE.test(basename);
 }
 
+// Cloud templates and API specs are YAML/JSON too -- same ambiguity as Kubernetes manifests, so intake is
+// by well-known basename or an infrastructure directory, not every .yaml/.json in the repo (see
+// iac/cloudPosture.ts and api/openapiSpec.ts; each detector also confirms the content before firing).
+const CLOUD_API_NAME_HINTS = /^(?:(?:openapi|swagger|api-?spec|asyncapi)[\w.-]*|(?:template|sam-template|samconfig|cloudformation|cfn|stack)[\w.-]*|serverless|azuredeploy[\w.-]*|maintemplate)\.(?:ya?ml|json)$|\.template(?:\.(?:ya?ml|json))?$/i;
+const CLOUD_DIR_HINTS = /(^|\/)(cloudformation|cfn|arm|bicep|infra|infrastructure|iac|stacks?|openapi|swagger|api-?specs?)\/[^/]+\.(?:ya?ml|json)$/i;
+
+export function isLikelyCloudOrApiConfigPath(path: string): boolean {
+  const basename = path.split("/").pop() ?? "";
+  return CLOUD_API_NAME_HINTS.test(basename) || CLOUD_DIR_HINTS.test(path);
+}
+
 export function isScannablePath(path: string): boolean {
   const basename = path.split("/").pop() ?? "";
   if (MANIFEST_BASENAMES.has(basename)) return true;
   if (isLikelyK8sManifestPath(path)) return true;
+  if (isLikelyCloudOrApiConfigPath(path)) return true;
   if (isDockerfilePath(path)) return true;
   if (isDockerComposePath(path)) return true;
   const ext = basename.split(".").pop()?.toLowerCase() ?? "";
