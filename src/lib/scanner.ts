@@ -35,6 +35,7 @@ import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
 import { assignFingerprints } from "./findingIdentity";
+import { correlateFindings, type RelatedLocation } from "./findingCorrelation";
 import { selectSsaFunctions } from "./ssaSelection";
 import { toAiProbability } from "./aiCalibration";
 import type { AiProbability, CalibrationMap } from "./aiCalibration";
@@ -135,9 +136,13 @@ export interface ScanIndicator {
   // a real leaked key in a vendor bundle or test fixture is still real.
   codeCategory?: "application" | "third_party" | "test_code";
   cwe?:         string;
-  // Which detector(s) independently flagged this same id+line -- populated
-  // when analyzeFile's dedup pass collapses multiple hits into one finding.
+  // Which detector(s) independently flagged this same issue -- populated
+  // when analyzeFile's dedup pass collapses multiple hits into one finding,
+  // and by findingCorrelation.ts when it merges same-issue findings.
   supportingDetectors?: string[];
+  // Other locations of this same issue that were merged into this finding (findingCorrelation.ts): the
+  // same line under another finding id, or an intermediate step of this finding's data-flow path.
+  relatedLocations?: RelatedLocation[];
   // Per-instance call-graph reachability, merged in from the file-level
   // ReachabilityReport (see the scoreExploitability() call below) after it
   // runs. Lives on the individual finding rather than only on the file-level
@@ -6592,7 +6597,9 @@ export function analyzeFile(
       byKey.set(k, { ...i, supportingDetectors: [...new Set(supporting)] });
     }
   }
-  const indicators = Array.from(byKey.values());
+  // One issue, one finding: merge findings for the same weakness on the same line, or on one another's
+  // data-flow path, that the id+line dedup above can't see (see findingCorrelation.ts).
+  const indicators = correlateFindings(Array.from(byKey.values()), file_path);
   // (Fingerprints are assigned further down, once EVERY indicator -- AI signals, attribution, watermark,
   // behavioral, supply-chain -- exists and the enclosing-function resolver is defined. See findingIdentity.ts.)
 

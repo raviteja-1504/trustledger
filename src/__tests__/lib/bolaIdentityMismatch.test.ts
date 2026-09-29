@@ -81,7 +81,11 @@ async function updatePassword(req, res) {
 module.exports = updatePassword;
 `;
     const result = analyzeFile("routes/users.js", content);
-    const finding = result.indicators.find(i => i.id === "bola-identity-mismatch");
+    // Same line and weakness (CWE-639) as the data-flow BOLA finding at this write, so it is reported as one
+    // issue (findingCorrelation.ts) -- the identity-mismatch detection stays attached to it.
+    const finding = result.indicators.find(i =>
+      i.id === "bola-identity-mismatch" || i.relatedLocations?.some(r => r.id === "bola-identity-mismatch"));
     expect(finding).toBeDefined();
+    expect(result.indicators.filter(i => i.cwe === "CWE-639" && i.line === finding!.line)).toHaveLength(1);
   });
 });

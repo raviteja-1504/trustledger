@@ -211,7 +211,8 @@ describe("scanner benchmark — representative vulnerable/safe snippets", () => 
   for (const c of CASES) {
     it(c.name, () => {
       const result = analyzeFile(c.path, c.code.trim());
-      const ids = new Set(result.indicators.map(i => i.id));
+      // An id merged into another finding as the same issue (findingCorrelation.ts) was still detected.
+      const ids = new Set(result.indicators.flatMap(i => [i.id, ...(i.relatedLocations ?? []).map(r => r.id)]));
 
       for (const expected of c.mustDetect) {
         expect(ids.has(expected)).toBe(true);

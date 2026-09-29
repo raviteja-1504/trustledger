@@ -96,10 +96,23 @@ describe("pattern-only finding", () => {
 });
 
 describe("pattern finding on the same flow as a confirmed data-flow finding", () => {
-  it("links to the confirmed finding instead of saying no data flow was traced", () => {
+  it("a fresh scan merges the two into the confirmed finding, which says so", () => {
     const all = storedAll("src/routes/users.ts", SQL_ROUTE);
-    const pattern = all.find(i => i.id === "sql-injection" && !i.sourceExpr)!;
-    const confirmed = all.find(i => i.id === "sql-injection" && !!i.sourceExpr)!;
+    const sql = all.filter(i => i.cwe === "CWE-89");
+    expect(sql).toHaveLength(1);
+    expect(sql[0].sourceExpr).toBeDefined();
+    const buildLine = SQL_ROUTE.split("\n").findIndex(l => l.includes("SELECT")) + 1;
+    expect(sql[0].relatedLocations).toEqual([expect.objectContaining({ line: buildLine, reason: "on-path", detector: "pattern" })]);
+    const ev = buildFindingEvidence(sql[0], "src/routes/users.ts", all);
+    expect(ev.checks.some(c => new RegExp(`Also reported at line ${buildLine}, on this same data-flow path`).test(text(c.parts)))).toBe(true);
+  });
+
+  it("links to the confirmed finding instead of saying no data flow was traced (a scan stored before correlation)", () => {
+    const confirmed = storedAll("src/routes/users.ts", SQL_ROUTE).find(i => i.id === "sql-injection" && !!i.sourceExpr)!;
+    // Scans stored before findingCorrelation.ts still hold the pattern finding as its own row.
+    const buildLine = confirmed.relatedLocations![0].line;
+    const pattern = { id: "sql-injection", label: "SQL Injection", severity: "critical", line: buildLine, detail: "pattern", cwe: "CWE-89" } as FileIndicator;
+    const all = [pattern, { ...confirmed, relatedLocations: undefined }];
     expect(pattern.line).not.toBe(confirmed.line);
     const ev = buildFindingEvidence(pattern, "src/routes/users.ts", all);
     expect(ev.onPathOf?.line).toBe(confirmed.line);

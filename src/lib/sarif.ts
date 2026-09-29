@@ -104,6 +104,14 @@ export function buildSarifReport(
         }],
         ...(ind.fingerprint ? { partialFingerprints: { "trustledgerFinding/v1": ind.fingerprint } } : {}),
         ...(flows ? { codeFlows: flows } : {}),
+        // Other places this same issue was reported, merged into this one result (findingCorrelation.ts).
+        ...(ind.relatedLocations?.length ? {
+          relatedLocations: ind.relatedLocations.map((loc, i) => ({
+            id: i + 1,
+            physicalLocation: { artifactLocation: { uri: f.file_path }, region: { startLine: Math.max(1, loc.line) } },
+            message: { text: `Same issue: ${loc.label}${loc.reason === "on-path" ? " (on this finding's data-flow path)" : ""}` },
+          })),
+        } : {}),
         properties: {
           "security-severity": severityScore(sev),
           "trustledger/analysis": r.evidence.analysisLabel,

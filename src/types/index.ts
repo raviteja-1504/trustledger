@@ -44,8 +44,10 @@ export interface FileIndicator {
   sinkExpr?: string;
   // Source -> sink data-flow path from the AST engine, source first, sink last (absent for regex findings).
   trace?: TraceStep[];
-  // Other detectors that independently flagged this same id+line.
+  // Other detectors that independently flagged this same issue.
   supportingDetectors?: string[];
+  // Other locations of this same issue merged into this finding (see src/lib/findingCorrelation.ts).
+  relatedLocations?: Array<{ line: number; id: string; label: string; detector: "data-flow" | "pattern"; reason: "same-line" | "on-path" }>;
   // Function the flagged line sits in, when it could be named.
   functionName?: string;
 }

@@ -210,6 +210,11 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
     const n = ind.supportingDetectors.length;
     checks.push({ tone: "confirmed", parts: [`Independently flagged by ${n} other detector${n === 1 ? "" : "s"}: ${ind.supportingDetectors.join(", ")}`] });
   }
+  // Findings for this same issue that were merged into this one (findingCorrelation.ts).
+  const onPathLines = (ind.relatedLocations ?? []).filter(r => r.reason === "on-path").map(r => r.line);
+  if (onPathLines.length) {
+    checks.push({ tone: "neutral", parts: [`Also reported at line${onPathLines.length === 1 ? "" : "s"} ${onPathLines.join(", ")}, on this same data-flow path — one issue, merged into this finding`] });
+  }
   switch (ind.reachability) {
     case "entry-point":  checks.push({ tone: "confirmed", parts: ["Runs directly inside a request handler / entry point"] }); break;
     case "tainted-path": checks.push({ tone: "confirmed", parts: ["Call graph confirms tainted data reaches this code from an entry point"] }); break;

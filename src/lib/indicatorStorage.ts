@@ -17,6 +17,7 @@ import type { TraceStep } from "./taint/taintCore";
  */
 const MAX_STORED_TRACE_STEPS = 12;
 const MAX_TRACE_TEXT = 160;
+const MAX_RELATED_LOCATIONS = 12;
 
 function capTrace(trace: readonly TraceStep[] | undefined): TraceStep[] | undefined {
   if (!trace || trace.length === 0) return undefined;
@@ -38,6 +39,9 @@ export function toStoredIndicator(i: ScanIndicator): FileIndicator {
     fingerprint: i.fingerprint, confidence: i.confidence, sourceExpr: i.sourceExpr, sinkExpr: i.sinkExpr,
     trace: capTrace(i.trace),
     supportingDetectors: i.supportingDetectors?.length ? [...i.supportingDetectors] : undefined,
+    relatedLocations: i.relatedLocations?.length
+      ? i.relatedLocations.slice(0, MAX_RELATED_LOCATIONS).map(r => ({ ...r, label: r.label.slice(0, MAX_TRACE_TEXT) }))
+      : undefined,
     functionName: i.functionName,
   };
 }

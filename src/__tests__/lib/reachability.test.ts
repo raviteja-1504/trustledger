@@ -6,6 +6,10 @@ import { warmPythonTaintEngine } from "@/lib/astTaintPython";
 import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
 import { warmPhpTaintEngine } from "@/lib/astTaintPHP";
 
+/** The finding reported at `line` -- flagged there, or merged there as the same issue (findingCorrelation.ts:
+ * the line that builds a query is folded into the finding where it runs). */
+const reportsLine = (i: ScanIndicator, line: number) => i.line === line || !!i.relatedLocations?.some(r => r.line === line);
+
 beforeAll(async () => {
   await warmPythonTaintEngine();
   await warmCSharpTaintEngine();
@@ -208,8 +212,8 @@ public class A {
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM t")) + 1;
     const deadLine = lines.findIndex(l => l.includes("SELECT * FROM logs")) + 1;
-    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
-    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, searchLine));
+    const dead = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, deadLine));
     expect(reachable).toBeDefined();
     expect(dead).toBeDefined();
     expect(reachable?.reachability).not.toBe("unreachable");
@@ -236,8 +240,8 @@ def dead_helper(request):
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM users")) + 1;
     const deadLine = lines.findIndex(l => l.includes("SELECT * FROM logs")) + 1;
-    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
-    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, searchLine));
+    const dead = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, deadLine));
     expect(reachable).toBeDefined();
     expect(dead).toBeDefined();
     // handle_search isn't itself decorated/exported in this fixture, so
@@ -262,7 +266,7 @@ def handle_search(request):
     const result = analyzeFile("app.py", content);
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM users")) + 1;
-    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, searchLine));
     expect(reachable).toBeDefined();
     expect(reachable?.reachability).not.toBe("unreachable");
   });
@@ -295,8 +299,8 @@ public class A {
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM Users")) + 1;
     const deadLine = lines.findIndex(l => l.includes("SELECT * FROM Logs")) + 1;
-    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
-    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, searchLine));
+    const dead = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, deadLine));
     expect(reachable).toBeDefined();
     expect(dead).toBeDefined();
     expect(reachable?.reachability).not.toBe("unreachable");
@@ -334,8 +338,8 @@ Route::get('/search', [UserController::class, 'search']);
     const lines = content.split("\n");
     const searchLine = lines.findIndex(l => l.includes("SELECT * FROM Users")) + 1;
     const deadLine = lines.findIndex(l => l.includes("SELECT * FROM Logs")) + 1;
-    const reachable = result.indicators.find(i => i.id === "sql-injection" && i.line === searchLine);
-    const dead = result.indicators.find(i => i.id === "sql-injection" && i.line === deadLine);
+    const reachable = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, searchLine));
+    const dead = result.indicators.find(i => i.id === "sql-injection" && reportsLine(i, deadLine));
     expect(reachable).toBeDefined();
     expect(dead).toBeDefined();
     expect(reachable?.reachability).not.toBe("unreachable");

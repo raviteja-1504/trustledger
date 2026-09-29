@@ -126,9 +126,20 @@ describe("buildSarifReport: unified finding evidence", () => {
     expect(rule.help.markdown).toContain(fixes.get("sql-injection")!.code_after!);
   });
 
+  it("the pattern match on the line that builds the query is one result with the flow, as a related location", () => {
+    expect(sarif.runs[0].results.filter(r => r.ruleId === "sql-injection")).toHaveLength(1);
+    const related = (flowResult as Result & { relatedLocations?: Array<{ physicalLocation: { region: { startLine: number } }; message: { text: string } }> }).relatedLocations;
+    expect(related?.map(r => r.physicalLocation.region.startLine)).toEqual([3]);
+    expect(related?.[0].message.text).toMatch(/^Same issue: .*data-flow path/);
+  });
+
   it("a pattern-only result gets no codeFlows", () => {
-    const pattern = sarif.runs[0].results.find(r => r.ruleId === "sql-injection" && !r.codeFlows);
+    const path = "src/digest.ts";
+    const content = `import crypto from "crypto";\nexport function digest(data: string) {\n  return crypto.createHash("md5").update(data).digest("hex");\n}\n`;
+    const log = buildSarifReport([{ file_path: path, indicators: toStoredIndicators(analyzeFile(path, content).indicators) }]) as Log;
+    const pattern = log.runs[0].results.find(r => r.ruleId === "weak-crypto");
     expect(pattern).toBeDefined();
+    expect(pattern!.codeFlows).toBeUndefined();
     expect(pattern!.properties["trustledger/analysis"]).toBe("Pattern match");
   });
 });
