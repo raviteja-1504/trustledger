@@ -42,6 +42,9 @@ export function toStoredIndicator(i: ScanIndicator): FileIndicator {
     relatedLocations: i.relatedLocations?.length
       ? i.relatedLocations.slice(0, MAX_RELATED_LOCATIONS).map(r => ({ ...r, label: r.label.slice(0, MAX_TRACE_TEXT) }))
       : undefined,
+    reachedFrom: i.reachedFrom?.length
+      ? i.reachedFrom.slice(0, MAX_RELATED_LOCATIONS).map(o => ({ ...o, source: o.source?.slice(0, MAX_TRACE_TEXT) }))
+      : undefined,
     functionName: i.functionName,
   };
 }

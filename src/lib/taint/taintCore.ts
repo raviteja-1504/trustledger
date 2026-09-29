@@ -192,6 +192,100 @@ export interface ParamSinkFact {
   line: number;
   /** Function names from the summarized function down to the one that contains the sink (attribution only). */
   via: string[];
+  /** The path INSIDE the callee(s): the parameter entering the summarized function, its assignments, each call
+   * forwarding it to a further function (in whatever file), down to the sink -- so a caller's finding can show
+   * every hop, not just "crosses into X". Presentational, like TraceStep; absent when it couldn't be traced. */
+  steps?: TraceStep[];
+}
+
+/** Bound on a fact's callee-side path (a deep forwarding chain keeps its entry and its sink). */
+export const MAX_FACT_STEPS = 16;
+
+function capSteps(steps: TraceStep[]): TraceStep[] {
+  return steps.length <= MAX_FACT_STEPS ? steps : [...steps.slice(0, MAX_FACT_STEPS - 1), steps[steps.length - 1]];
+}
+
+/** A function name as users know it: summary keys can carry an internal marker (` q:Class.method`). */
+export function displayFnName(key: string): string {
+  return key.replace(/^\s*q:/, "").trim();
+}
+
+/**
+ * Callee-side steps for a fact found by walking function `fnName` with one parameter seeded: `trace` is that
+ * walk's source-first, sink-last trace. Its origin is the parameter itself, so the first step becomes a
+ * `parameter` step ("id — parameter of UserRepo.byId"), placed at the function's own line when known.
+ */
+export function factStepsFromTrace(
+  trace: readonly TraceStep[], fnName: string, fnFile: string, fnLine?: number, paramName?: string, local?: LocalHelpers,
+): TraceStep[] {
+  const steps = [...trace];
+  const first = steps[0];
+  const name = displayFnName(fnName);
+  const entry: TraceStep = {
+    file: fnFile, line: fnLine ?? first?.line ?? 1, kind: "parameter",
+    label: `${paramName ?? first?.label ?? "value"} — parameter of ${name}`, snippet: `${name}(${paramName ?? first?.snippet ?? ""})`,
+  };
+  // The engine reached a same-file helper by re-walking it with the parameter seeded, so this trace starts
+  // INSIDE the helper: show the call into it and the helper's own parameter instead of jumping straight there.
+  const helper = first && local && fnLine != null && (first.line < fnLine || first.line > local.fnEnd)
+    ? local.functions.filter(f => first.line >= f.start && first.line <= f.end).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]
+    : undefined;
+  if (helper && local) {
+    const callLine = local.lines.slice(fnLine! - 1, local.fnEnd).findIndex(l => new RegExp(`\\b${helper.name.replace(/[$]/g, "\\$&")}\\s*\\(`).test(l));
+    const at = callLine >= 0 ? fnLine! + callLine : fnLine!;
+    const bridge: TraceStep[] = [
+      entry,
+      { file: fnFile, line: at, kind: "call", label: `passes it to ${helper.name}(…)`, snippet: (local.lines[at - 1] ?? "").trim().slice(0, 100) },
+      { file: fnFile, line: helper.start, kind: "parameter", label: `${first.label} — parameter of ${helper.name}`, snippet: `${helper.name}(${first.snippet})` },
+    ];
+    return capSteps([...bridge, ...(first.kind === "source" ? steps.slice(1) : steps)]);
+  }
+  if (first && first.kind === "source") steps[0] = entry;
+  else if (first?.kind !== "parameter") steps.unshift(entry);
+  return capSteps(steps);
+}
+
+/** A file's functions (1-based line ranges), so a callee path that starts inside a same-file helper can be
+ * bridged back to the summarized function (see factStepsFromTrace). */
+export interface LocalHelpers {
+  /** Last line of the summarized function. */
+  fnEnd: number;
+  functions: ReadonlyArray<{ name: string; start: number; end: number }>;
+  lines: readonly string[];
+}
+
+/**
+ * Callee-side steps for a fact that FORWARDS a parameter to another function which sinks it: this function's
+ * own path up to the forwarding call (`ownTrace`, whose last step is that call), then the callee's steps.
+ */
+export function forwardedFactSteps(ownTrace: readonly TraceStep[], calleeName: string, callee: ParamSinkFact): TraceStep[] {
+  const own = [...ownTrace];
+  const call = own.pop();
+  if (call) own.push({ ...call, kind: "call", label: `passes it to ${displayFnName(calleeName)}(…)` });
+  return capSteps([...own, ...(callee.steps ?? [{ file: callee.file, line: callee.line, kind: "sink" as const, label: callee.sinkExpr, snippet: callee.sinkExpr }])]);
+}
+
+/**
+ * Findings from one summary walk minus those that are an intermediate step of another same-id finding's path
+ * (the SQL string built on one line, the query run on the next): one fact per real sink, pointing where the
+ * value is actually used. See findingCorrelation.ts for the same rule on reported findings.
+ */
+export function dropOnPathDuplicates<T extends { id: string; line: number; trace?: readonly TraceStep[] }>(findings: readonly T[]): T[] {
+  return findings.filter(f => !findings.some(g =>
+    g !== f && g.id === f.id && g.line !== f.line && !!g.trace && g.trace.slice(0, -1).some(s => s.line === f.line)));
+}
+
+/**
+ * The full trace of a finding reported at a call site because the callee sinks the argument: the caller's own
+ * path to the call (`callerTrace`, whose last step is the call itself), the call as the crossing, then the
+ * callee's steps down to the real sink.
+ */
+export function crossFileTrace(callerTrace: readonly TraceStep[], calleeName: string, fact: ParamSinkFact): TraceStep[] {
+  const own = [...callerTrace];
+  const call = own.pop();
+  const where = fact.steps?.find(s => s.kind === "parameter")?.file ?? fact.file;
+  if (call) own.push({ ...call, kind: "cross-file", label: `calls ${displayFnName(calleeName)}(…) in ${where}` });
+  return [...own, ...(fact.steps ?? [{ file: fact.file, line: fact.line, kind: "sink" as const, label: fact.sinkExpr, snippet: fact.sinkExpr }])];
 }
 
 /** Identity of a fact for set-union. `via` is deliberately excluded: two routes to the same sink are the
@@ -213,19 +307,26 @@ export function mergeSinkFacts(into: ParamSinkFact[], add: readonly ParamSinkFac
   const before = new Set(into.map(sinkFactKey));
   const have = new Set(before);
   let pushed = false;
+  let upgraded = false;
   for (const f of add) {
     const k = sinkFactKey(f);
-    if (have.has(k)) continue;
+    if (have.has(k)) {
+      // The same fact found again with a longer callee path (a later round saw deeper hops): keep the longer
+      // one. Monotonic and bounded (MAX_FACT_STEPS), so a fixed point still settles.
+      const cur = into.find(x => sinkFactKey(x) === k);
+      if (cur && (f.steps?.length ?? 0) > (cur.steps?.length ?? 0)) { cur.steps = f.steps; upgraded = true; }
+      continue;
+    }
     have.add(k);
     into.push(f);
     pushed = true;
   }
-  if (!pushed) return false;
+  if (!pushed) return upgraded;
   into.sort((a, b) => { const ka = sinkFactKey(a), kb = sinkFactKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
   if (into.length > MAX_SINK_FACTS_PER_FN) into.length = MAX_SINK_FACTS_PER_FN;
   // "Grew" is judged AFTER the cap: a fact the cap immediately dropped is not growth, and reporting it as
   // such would make a fixed point over a capped summary look perpetually unsettled.
-  return into.some(f => !before.has(sinkFactKey(f)));
+  return upgraded || into.some(f => !before.has(sinkFactKey(f)));
 }
 
 export type TaintEnv = Map<string, number>;
@@ -244,7 +345,9 @@ export type TaintEnv = Map<string, number>;
 export interface TraceStep {
   file: string;
   line: number;
-  kind: "source" | "assignment" | "call" | "sanitizer" | "cross-file" | "sink";
+  /** `parameter`: the value entering a function in another file as one of its parameters (the first callee-side
+   * step of a cross-file flow, see ParamSinkFact.steps). */
+  kind: "source" | "assignment" | "call" | "sanitizer" | "cross-file" | "parameter" | "sink";
   /** Short human label, e.g. "req.query.id" or "crosses into src/db.ts via buildQuery". */
   label: string;
   /** The relevant source snippet at this step (trimmed, not the whole line). */

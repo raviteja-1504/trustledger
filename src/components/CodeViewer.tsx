@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileIndicator, FixSuggestion } from "@/types";
-import { InlineSecurityFinding, InlineSignalNote, type FindingMeta } from "@/components/InlineFinding";
+import { InlineSecurityFinding, InlineSignalNote, type FileNavigation, type FindingMeta } from "@/components/InlineFinding";
 
 interface Props {
   code: string;
@@ -18,6 +18,10 @@ interface Props {
   fixes?: FixSuggestion[];
   // Curated label/description for a finding id, and whether it is a security finding (vs an AI signal).
   describe?: (id: string) => FindingMeta | undefined;
+  // Opening another file of the PR from a cross-file data-flow step (absent: those steps aren't links).
+  nav?: FileNavigation;
+  // Scroll to and flash this line (e.g. when another file's finding links here). `seq` re-triggers the same line.
+  jumpRequest?: { line: number; seq: number };
 }
 
 type TokType = "keyword" | "string" | "comment" | "number" | "builtin" | "plain" | "operator";
@@ -76,7 +80,7 @@ const SEV_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low:
 const GUTTER_PX = 44;
 const PANEL_WIDTH = `calc(100cqw - ${GUTTER_PX + 24}px)`;
 
-export default function CodeViewer({ code, language = "python", filename, indicators = [], maxHeight = "380px", fixes, describe }: Props) {
+export default function CodeViewer({ code, language = "python", filename, indicators = [], maxHeight = "380px", fixes, describe, nav, jumpRequest }: Props) {
   const lines = useMemo(() => code.split("\n"), [code]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<number, HTMLTableRowElement>());
@@ -121,6 +125,14 @@ export default function CodeViewer({ code, language = "python", filename, indica
     container.scrollTo({ top: Math.max(0, row.offsetTop - 48), behavior: "smooth" });
     setFlashLine(line);
   }, []);
+
+  // Another file's finding linked here: bring this viewer into view, then the line.
+  useEffect(() => {
+    if (!jumpRequest) return;
+    scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const t = setTimeout(() => jumpTo(jumpRequest.line), 250);
+    return () => clearTimeout(t);
+  }, [jumpRequest, jumpTo]);
 
   useEffect(() => {
     if (flashLine == null) return;
@@ -220,6 +232,7 @@ export default function CodeViewer({ code, language = "python", filename, indica
                             siblings={indicators}
                             defaultOpen={ind === autoOpen}
                             onJump={jumpTo}
+                            nav={nav}
                           />
                         ))}
                         {signals.map((ind, i) => (

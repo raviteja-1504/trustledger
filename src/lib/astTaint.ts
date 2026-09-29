@@ -28,8 +28,9 @@
 import * as ts from "typescript";
 import {
   ALL, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
-  SHADOW, mergeSinkFacts, wasCleared, type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
-  type SuppressedSink, type TaintEnv, type TraceStep,
+  SHADOW, mergeSinkFacts, wasCleared, buildBackwardTraceGeneric, crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
+  type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
+  type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -1560,7 +1561,7 @@ function makeSinkCalleeResolver(localFns: ReadonlyMap<string, LocalFn>, namespac
  */
 function directSinkHit(
   n: ts.Node, env: Env, maskFn: TaintMaskFn, importMap: Map<string, string>,
-): { id: AstTaintId; sinkExpr: string } | null {
+): { id: AstTaintId; sinkExpr: string; arg?: ts.Expression } | null {
   if (ts.isCallExpression(n)) {
     const match = matchSink(n, importMap);
     if (!match) return null;
@@ -1568,32 +1569,60 @@ function directSinkHit(
     let positionCleared: ts.Expression | undefined;
     if (match.id === "ssrf" && match.args[0]) {
       const url = assessSsrfUrl(decomposeConcatExpr(match.args[0]), x => maskFn(x, env));
-      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (url.verdict === "safe") positionCleared = match.args[0];
     }
     if (match.id === "sql-injection" && match.args[0]) {
       const sql = assessSqlInjection(decomposeConcatExpr(match.args[0]), x => maskFn(x, env));
-      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (sql.verdict === "safe") positionCleared = match.args[0];
     }
     if (match.id === "command-injection") {
       const argInj = findArgumentInjectionCulprit(n, importMap, x => maskFn(x, env));
-      if (argInj) return { id: "argument-injection", sinkExpr: argInj.calleeName };
+      if (argInj) return { id: "argument-injection", sinkExpr: argInj.calleeName, arg: argInj.culprit };
     }
     for (const a of match.args) {
       if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors checkCallForSink)
       if (isFunctionExpr(a)) continue; // a callback is not the data reaching the sink
-      if (maskFn(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
+      if (maskFn(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr, arg: a };
     }
     return null;
   }
   if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(n.left)) {
     const prop = n.left.name.text;
     if ((prop === "innerHTML" || prop === "outerHTML") && (maskFn(n.right, env) & classOf("xss"))) {
-      return { id: "xss", sinkExpr: `.${prop}` };
+      return { id: "xss", sinkExpr: `.${prop}`, arg: n.right };
     }
   }
   return null;
+}
+
+/** A TraceResolver scoped to one function, for the summary walk's callee-side paths (the main scan's buildTrace
+ * is richer but closure-bound to the file under review). Assignments are the function's own declarations and
+ * `x = ...` statements, nested closures excluded. */
+function jsSummaryTraceResolver(fnNode: ts.Node): TraceResolver<ts.Node> {
+  const sf = fnNode.getSourceFile();
+  const lineOf = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  return {
+    enclosingScope: () => fnNode,
+    assignmentsIn: (scope) => {
+      const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
+      const visit = (n: ts.Node) => {
+        if (n !== scope && ts.isFunctionLike(n)) return;
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+          out.push({ name: n.name.text, position: n.getStart(sf), rhsText: n.initializer.getText(sf), line: lineOf(n) });
+        } else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left)) {
+          out.push({ name: n.left.text, position: n.getStart(sf), rhsText: n.right.getText(sf), line: lineOf(n) });
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(scope);
+      return out;
+    },
+    position: n => n.getStart(sf),
+    line: lineOf,
+    text: n => n.getText(sf),
+  };
 }
 
 /**
@@ -1613,13 +1642,19 @@ function computeFnSinkFacts(
   const sf = fn.body.getSourceFile();
   const lineOf = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
   const out: ParamSinkFact[] = [];
+  const fnNode = fn.body.parent ?? fn.body;
+  const resolver = jsSummaryTraceResolver(fnNode);
   for (const shape of paramShapesOf(fn)) {
     const seed: Env = new Map([[shape.name, ALL]]);
     const base = { index: shape.index, isRest: shape.isRest };
+    // The path inside this function from the parameter to `n` (the sink, or a call forwarding it on).
+    const pathTo = (n: ts.Node, arg: ts.Expression | undefined, label: string) => factStepsFromTrace(
+      buildBackwardTraceGeneric(filePath, n, arg ? arg.getText(sf) : shape.name, label, resolver), name, filePath, lineOf(fnNode), shape.name);
     const onVisit = (n: ts.Node, env: Env) => {
       const direct = directSinkHit(n, env, maskFn, importMap);
       if (direct) {
-        mergeSinkFacts(out, [{ ...base, id: direct.id, sinkClass: classOf(direct.id), sinkExpr: direct.sinkExpr, file: filePath, line: lineOf(n), via: [name] }]);
+        mergeSinkFacts(out, [{ ...base, id: direct.id, sinkClass: classOf(direct.id), sinkExpr: direct.sinkExpr, file: filePath, line: lineOf(n), via: [name],
+          steps: pathTo(n, direct.arg, direct.sinkExpr) }]);
       }
       if (!ts.isCallExpression(n)) return;
       const calleeName = resolveKnownCallee(n.expression, knownFacts, resolveCallee);
@@ -1631,7 +1666,8 @@ function computeFnSinkFacts(
           if (maskFn(a, env) & f.sinkClass) {
             // Forwarding: this parameter reaches the SAME original sink (file/line/expr unchanged) one call
             // further out. `via` records the path for attribution only; it is not part of the fact's identity.
-            mergeSinkFacts(out, [{ ...base, id: f.id, sinkClass: f.sinkClass, sinkExpr: f.sinkExpr, file: f.file, line: f.line, via: [name, ...f.via] }]);
+            mergeSinkFacts(out, [{ ...base, id: f.id, sinkClass: f.sinkClass, sinkExpr: f.sinkExpr, file: f.file, line: f.line, via: [name, ...f.via],
+              steps: forwardedFactSteps(pathTo(n, a, calleeName!), calleeName!, f) }]);
           }
         }
       }
@@ -2804,13 +2840,9 @@ export function scanAstTaint(
       if (seen.has(key)) return;
       seen.add(key);
       const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
-      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-      const trace = buildTrace(call, arg, sinkLabel);
-      trace.pop(); // buildTrace closes with a pseudo-"sink" step at THIS call site; the real sink is in the callee
-      trace.push(
-        { file: filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fromModule}${via}`, snippet: call.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) },
-        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-      );
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      // The caller's path to this call (buildTrace closes on the call itself), then the callee's own.
+      const trace = crossFileTrace(buildTrace(call, arg, sinkLabel), name, fact);
       findings.push({
         id: fact.id as AstTaintId, line, sinkExpr: sinkLabel, sourceExpr: sourceLabel(arg),
         detail: `Tainted expression '${sourceLabel(arg)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via "${name}" imported from ${fromModule}${via}] — real data-flow match across files, not a line-pattern guess`,

@@ -50,6 +50,7 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
   ALL, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
+  crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
@@ -1711,7 +1712,7 @@ function makeSinkCalleeResolverPy(namespaceLocals: ReadonlySet<string>) {
  */
 function directSinkHitPy(
   node: SyntaxNode, env: Env, taintMask: TaintMaskFnPy, importMap: Map<string, string>,
-): { id: AstTaintPyId; sinkExpr: string } | null {
+): { id: AstTaintPyId; sinkExpr: string; arg?: SyntaxNode } | null {
   if (node.type === "call") {
     const match = matchSinkPy(node, importMap);
     if (!match) return null;
@@ -1719,12 +1720,12 @@ function directSinkHitPy(
     let positionCleared: SyntaxNode | undefined;
     if (match.id === "ssrf" && match.args[0]) {
       const url = assessSsrfUrl(decomposeConcatExprPy(match.args[0]), x => taintMask(x, env));
-      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (url.verdict === "safe") positionCleared = match.args[0];
     }
     if (match.id === "sql-injection" && match.args[0]) {
       const sql = assessSqlInjection(decomposeConcatExprPy(match.args[0]), x => taintMask(x, env));
-      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr };
+      if (sql.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (sql.verdict === "safe") positionCleared = match.args[0];
     }
     if (match.id === "command-injection") {
@@ -1733,7 +1734,7 @@ function directSinkHitPy(
     }
     for (const a of match.args) {
       if (a === positionCleared) continue;   // host pinned by a literal, or the SQL query text already proved safe (mirrors onCall)
-      if (taintMask(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr };
+      if (taintMask(a, env) & cls) return { id: match.id, sinkExpr: match.sinkExpr, arg: a };
     }
     return null;
   }
@@ -1744,7 +1745,7 @@ function directSinkHitPy(
       const target = left.childForFieldName("value");
       const targetText = target ? calleeTextPy(target) : null;
       if (targetText && (targetText === "headers" || targetText.endsWith(".headers")) && (taintMask(right, env) & classOf("header-injection"))) {
-        return { id: "header-injection", sinkExpr: "response.headers[...]" };
+        return { id: "header-injection", sinkExpr: "response.headers[...]", arg: right };
       }
     }
   }
@@ -1757,14 +1758,21 @@ function computeFnSinkFactsPy(
   knownFacts: ReadonlyMap<string, readonly ParamSinkFact[]>, resolveCallee: (fn: SyntaxNode | null) => string | null,
 ): ParamSinkFact[] {
   const out: ParamSinkFact[] = [];
+  const defLine = (fn.body.parent ?? fn.body).startPosition.row + 1;
   for (const shape of fn.paramShapes) {
     const base = { index: shape.index, isRest: shape.isRest };
-    const record = (id: string, sinkExpr: string, file: string, line: number, via: string[]) => {
-      mergeSinkFacts(out, [{ ...base, id, sinkClass: classOf(id), sinkExpr, file, line, via }]);
+    const record = (id: string, sinkExpr: string, file: string, line: number, via: string[], steps?: TraceStep[]) => {
+      mergeSinkFacts(out, [{ ...base, id, sinkClass: classOf(id), sinkExpr, file, line, via, steps }]);
     };
+    // The path inside this function from the parameter to `node` (the sink, or a call forwarding it on).
+    const pathTo = (node: SyntaxNode, arg: SyntaxNode | undefined, label: string) =>
+      buildBackwardTraceGeneric(filePath, node, arg ? arg.text : shape.name, label, pyTraceResolver);
     const onCall = (node: SyntaxNode, env: Env, mask: TaintMaskFnPy) => {
       const direct = directSinkHitPy(node, env, mask, importMap);
-      if (direct) record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name]);
+      if (direct) {
+        record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name],
+          factStepsFromTrace(pathTo(node, direct.arg, direct.sinkExpr), name, filePath, defLine, shape.name));
+      }
       const fnNode = node.childForFieldName("function");
       const calleeName = resolveKnownCalleePy(fnNode, knownFacts, resolveCallee);
       const facts = calleeName ? knownFacts.get(calleeName) : undefined;
@@ -1774,7 +1782,8 @@ function computeFnSinkFactsPy(
         for (const a of argsForFactPy(args, f)) {
           if (mask(a, env) & f.sinkClass) {
             // Forwarding: this parameter reaches the SAME original sink (file/line/expr unchanged) one call further out.
-            record(f.id, f.sinkExpr, f.file, f.line, [name, ...f.via]);
+            const own = factStepsFromTrace(pathTo(node, a, calleeName), name, filePath, defLine, shape.name);
+            record(f.id, f.sinkExpr, f.file, f.line, [name, ...f.via], forwardedFactSteps(own, calleeName, f));
           }
         }
       }
@@ -1782,7 +1791,10 @@ function computeFnSinkFactsPy(
     const onNode = (node: SyntaxNode, env: Env, mask: TaintMaskFnPy) => {
       if (node.type !== "assignment") return;
       const direct = directSinkHitPy(node, env, mask, importMap);
-      if (direct) record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name]);
+      if (direct) {
+        record(direct.id, direct.sinkExpr, filePath, node.startPosition.row + 1, [name],
+          factStepsFromTrace(pathTo(node, direct.arg, direct.sinkExpr), name, filePath, defLine, shape.name));
+      }
     };
     const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: false, crossFileShapes, onCall, onNode });
     const env: Env = new Map([[shape.name, ALL]]);
@@ -2649,13 +2661,11 @@ export function scanAstTaintPython(
       if (seen.has(key)) return;
       seen.add(key);
       const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
-      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-      const trace = buildBackwardTraceGeneric(filePath, node, sourceLabelPy(arg), sinkLabel, pyTraceResolver);
-      trace.pop(); // the generic trace closes with a pseudo-"sink" step at THIS call site; the real sink is in the callee
-      trace.push(
-        { file: filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fromModule}${via}`, snippet: node.text.replace(/\s+/g, " ").slice(0, 100) },
-        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-      );
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      const callerTrace = buildBackwardTraceGeneric(filePath, node, sourceLabelPy(arg), sinkLabel, pyTraceResolver);
+      callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: node.text.replace(/\s+/g, " ").slice(0, 100) };
+      const trace = crossFileTrace(callerTrace, name, fact);
       findings.push({
         id: fact.id as AstTaintPyId, line, sinkExpr: sinkLabel, sourceExpr: sourceLabelPy(arg),
         detail: `Tainted expression '${sourceLabelPy(arg)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via "${name}" imported from ${fromModule}${via}] — real data-flow match across files, not a line-pattern guess`,

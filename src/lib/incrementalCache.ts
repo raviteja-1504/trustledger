@@ -27,7 +27,7 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * A deploy can also namespace its own cache via ScanInput.cache_namespace (e.g. the commit SHA) so a
  * forgotten bump here can never silently serve stale results across releases.
  */
-export const SCAN_CACHE_VERSION = 3;
+export const SCAN_CACHE_VERSION = 4;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {
@@ -71,7 +71,8 @@ export interface CacheKeyInputs {
  * when the callee's own return shapes are identical. */
 function canonSinks(sinks: readonly ParamSinkFact[]): unknown[] {
   return sinks
-    .map(f => [f.index, f.isRest ? 1 : 0, f.id, f.sinkClass, f.sinkExpr, f.file, f.line, f.via.join(">")])
+    .map(f => [f.index, f.isRest ? 1 : 0, f.id, f.sinkClass, f.sinkExpr, f.file, f.line, f.via.join(">"),
+      (f.steps ?? []).map(s => `${s.file}:${s.line}:${s.kind}:${s.label}`).join(">")])
     .sort((a, b) => { const x = JSON.stringify(a), y = JSON.stringify(b); return x < y ? -1 : x > y ? 1 : 0; });
 }
 

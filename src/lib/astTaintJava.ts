@@ -45,7 +45,8 @@ import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
   ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  mergeSinkFacts, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
+  type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
@@ -143,6 +144,21 @@ function leftmostToken(node: CstNode): IToken | null {
 }
 function lineOf(node: CstNode): number {
   return leftmostToken(node)?.startLine ?? 0;
+}
+
+/** Last line any token of `node` reaches (a method's closing brace). */
+function lastLineOf(node: CstNode): number {
+  let max = 0;
+  const visit = (n: CstNode) => {
+    for (const kids of Object.values(n.children)) {
+      for (const c of kids as Array<CstNode | IToken>) {
+        if ("image" in c) max = Math.max(max, c.endLine ?? c.startLine ?? 0);
+        else visit(c);
+      }
+    }
+  };
+  visit(node);
+  return max;
 }
 
 function nodeText(node: CstNode): string {
@@ -1123,16 +1139,14 @@ function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
       if (ctx.seen.has(dedupKey)) return;
       ctx.seen.add(dedupKey);
       const source = culpritText(a, env, ctx);
-      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-      const trace = buildBackwardTraceGeneric(ctx.filePath, info.node, source, key, {
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      const callerTrace = buildBackwardTraceGeneric(ctx.filePath, info.node, source, key, {
         enclosingScope: () => ctx.currentBody ?? null, assignmentsIn: assignmentsInJava,
         position: startOf, line: lineOf, text: tokensText,
       });
-      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
-      trace.push(
-        { file: ctx.filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: `${recv}.${info.tail}(...)` },
-        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-      );
+      callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${recv}.${info.tail}(...)` };
+      const trace = crossFileTrace(callerTrace, key, fact);
       ctx.findings.push({
         id: fact.id as AstTaintJavaId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
         detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via ${type}${via}] — real data-flow match across files, not a line-pattern guess`,
@@ -2068,6 +2082,9 @@ export function computeJavaMethodSinkFacts(
   const out = new Map<string, ParamSinkFact[]>();
   try {
     const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, undefined, incoming);
+    const localFunctionRanges = findAllNodes(cst, "methodDeclaration")
+      .map(m => ({ name: extractMethodInfo(m)?.name ?? "", start: lineOf(m), end: lastLineOf(m) }))
+      .filter(f => f.name);
     for (const cls of findAllNodes(cst, "normalClassDeclaration")) {
       const clsName = firstNode(cls, "typeIdentifier") ? firstTok(firstNode(cls, "typeIdentifier")!, "Identifier")?.image : undefined;
       if (!clsName) continue;
@@ -2097,13 +2114,17 @@ export function computeJavaMethodSinkFacts(
           const env: Env = new Map([[shape.name, ALL]]);
           walkForDeclarationsAndSinks(info.body!, env, ctx);
           drainSeededParamsJava(ctx, localMethods);
-          for (const f of ctx.findings) {
+          // One fact per real sink: a SQL string built on one line and executed on the next is one flow, and
+          // the fact should point at where it runs (dropOnPathDuplicates).
+          for (const f of dropOnPathDuplicates(ctx.findings)) {
             if (f.id === "bola-missing-ownership-check") continue;
             const where = f.calleeSink;
             mergeSinkFacts(facts, [{
               index: i, isRest: shape.isRest, id: f.id, sinkClass: classOf(f.id),
               sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
               via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
+              steps: f.trace?.length ? factStepsFromTrace(f.trace, `${clsName}.${info.name}`, filePath, lineOf(md!), shape.name,
+                { fnEnd: lastLineOf(md!), functions: localFunctionRanges, lines: ctx.lines }) : undefined,
             }]);
           }
         });

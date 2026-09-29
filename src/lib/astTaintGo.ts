@@ -52,7 +52,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
@@ -1845,13 +1845,11 @@ export function scanAstTaintGo(
           if (seen.has(dedupKey)) break;
           seen.add(dedupKey);
           const source = sourceLabelGo(a);
-          const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-          const trace = buildBackwardTraceGeneric(filePath, node, source, key, traceResolver);
-          trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
-          trace.push(
-            { file: filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: fn.text },
-            { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-          );
+          const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+          // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+          const callerTrace = buildBackwardTraceGeneric(filePath, node, source, key, traceResolver);
+          callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: fn.text };
+          const trace = crossFileTrace(callerTrace, key, fact);
           findings.push({
             id: fact.id as AstTaintGoId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
             detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses package boundary${via}] — real data-flow match across files, not a line-pattern guess`,
@@ -2264,17 +2262,25 @@ export function computeGoFuncSinkFacts(
     scanAstTaintGo(content, filePath, root, undefined, undefined, opts);
     const results = opts.seedResults ?? [];
     let r = 0;
+    const lines = content.split("\n");
+    const localFunctionRanges = root.namedChildren
+      .filter((c): c is SyntaxNode => c?.type === "function_declaration" || c?.type === "method_declaration")
+      .map(c => ({ name: c.childForFieldName("name")?.text ?? "", start: c.startPosition.row + 1, end: c.endPosition.row + 1 }))
+      .filter(f => f.name);
     for (const d of decls) {
       const baseline = new Set((results[r++] ?? []).map(f => `${f.id}:${f.line}`));
       const facts: ParamSinkFact[] = [];
       for (const shape of d.shapes) {
-        for (const f of results[r++] ?? []) {
+        // One fact per real sink, with the path inside this function (see astTaintJava.ts's twin).
+        for (const f of dropOnPathDuplicates(results[r++] ?? [])) {
           if (baseline.has(`${f.id}:${f.line}`) || NON_FLOW_IDS_GO.has(f.id)) continue;
           const where = f.calleeSink;
           mergeSinkFacts(facts, [{
             index: shape.index, isRest: false, id: f.id, sinkClass: classOf(f.id),
             sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
             via: [d.key, ...(where?.via ?? [])],
+            steps: f.trace?.length ? factStepsFromTrace(f.trace, d.key, filePath, d.decl.startPosition.row + 1, shape.name,
+              { fnEnd: d.decl.endPosition.row + 1, functions: localFunctionRanges, lines }) : undefined,
           }]);
         }
       }

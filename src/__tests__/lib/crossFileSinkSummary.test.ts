@@ -46,12 +46,15 @@ describe("core: a wrapper that sinks its parameter and returns nothing", () => {
     const trace = ast(r, "src/route.ts", "sql-injection")[0].trace!;
     const kinds = trace.map(s => s.kind);
     expect(kinds[0]).toBe("source");
-    expect(kinds.slice(-2)).toEqual(["cross-file", "sink"]);
+    // caller's crossing, then the callee's own path: its parameter, down to the real sink
+    const crossing = kinds.indexOf("cross-file");
+    expect(trace[crossing].file).toBe("src/route.ts");
+    expect(trace[crossing + 1]).toMatchObject({ kind: "parameter", file: "src/db.ts" });
+    expect(kinds[kinds.length - 1]).toBe("sink");
     const sink = trace[trace.length - 1];
     expect(sink.file).toBe("src/db.ts");
     expect(sink.line).toBe(2);                                  // `db.execute(sql);` is line 2 of the callee
     expect(sink.label).toBe("db.execute");
-    expect(trace[trace.length - 2].file).toBe("src/route.ts");
   });
 
   it("the detail names the sink's file:line and the module it crossed into", () => {

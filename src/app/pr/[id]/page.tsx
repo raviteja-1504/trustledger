@@ -8,6 +8,7 @@ import AuthGuard from "@/components/AuthGuard";
 import RiskBadge from "@/components/RiskBadge";
 import ProgressBar from "@/components/ProgressBar";
 import CodeViewer from "@/components/CodeViewer";
+import type { FileNavigation } from "@/components/InlineFinding";
 import { api } from "@/lib/api";
 import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@/lib/policy";
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
@@ -563,14 +564,39 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
 
 // ── File Row ──────────────────────────────────────────────────────────────────
 
-function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
+const OPEN_FILE_EVENT = "tl:open-file";
+
+/** Cross-file data-flow steps link to the other file's row on this page: it expands and scrolls to the line. */
+function fileNav(shownFiles: readonly FileResult[]): FileNavigation {
+  const openable = new Set(shownFiles.filter(f => f.content).map(f => f.file_path));
+  return {
+    canOpenFile: file => openable.has(file),
+    openFile: (file, line) => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file, line } })),
+  };
+}
+
+function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav }: {
   file: FileResult;
   reviewerEmail: string;
   reviewerGithub: string;
   onRequestAttest: (f: FileResult) => void;
+  nav?: FileNavigation;
 }) {
   const [attested,  setAttested]  = useState(file.attested);
   const [expanded,  setExpanded]  = useState(false);
+  const [jumpRequest, setJumpRequest] = useState<{ line: number; seq: number }>();
+
+  // Another file's finding links into this file: open it and scroll to the line.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const { file: target, line } = (e as CustomEvent<{ file: string; line: number }>).detail;
+      if (target !== file.file_path) return;
+      setExpanded(true);
+      setJumpRequest(r => ({ line, seq: (r?.seq ?? 0) + 1 }));
+    };
+    window.addEventListener(OPEN_FILE_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_FILE_EVENT, onOpen);
+  }, [file.file_path]);
 
   // Keep attested in sync when parent marks the file via attestedSet
   useEffect(() => { setAttested(file.attested); }, [file.attested]);
@@ -851,6 +877,8 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest }: {
                     fixes={file.fix_suggestions}
                     describe={describeSignal}
                     maxHeight="640px"
+                    nav={nav}
+                    jumpRequest={jumpRequest}
                   />
                 </div>
               ) : (
@@ -1907,6 +1935,7 @@ function PRDetailContent() {
                       reviewerEmail={reviewerEmail}
                       reviewerGithub={reviewerGithub}
                       onRequestAttest={setAttestTarget}
+                      nav={fileNav(filteredFiles)}
                     />
                   ))}
                 </tbody>

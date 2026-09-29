@@ -71,6 +71,58 @@ function absorb(kept: ScanIndicator, absorbed: ScanIndicator, reason: RelatedLoc
   if (atLeastAsStrong && (SEVERITY_RANK[absorbed.severity] ?? 0) > (SEVERITY_RANK[kept.severity] ?? 0)) kept.severity = absorbed.severity;
 }
 
+const URGENCY_RANK: Record<string, number> = { monitor: 0, backlog: 1, sprint: 2, immediate: 3 };
+
+/** A finding in another file whose confirmed data-flow path runs through this finding's line. */
+export interface FlowOrigin {
+  file: string;
+  line: number;
+  id: string;
+  /** Where that flow starts (the request input), when known. */
+  source?: string;
+}
+
+/**
+ * Cross-file backlinks: a data-flow finding reported at a call site in file A whose path runs into file B
+ * (ParamSinkFact.steps) proves that B's matching lines are reached by that flow. B's own finding for the
+ * same weakness on such a line -- typically a pattern match that could not see the input, or a callee-side
+ * finding that thinks the flow starts at its own parameter -- records the origin, so it can say what actually
+ * reaches it instead of "no data flow was traced" / "possibly dead code". Scan-wide, so it runs after every
+ * file has been analyzed (see runScan).
+ */
+export function linkCrossFileFlows(files: ReadonlyArray<{ file_path: string; indicators: ScanIndicator[] }>): void {
+  const byPath = new Map(files.map(f => [f.file_path, f]));
+  const resolve = (p: string) => byPath.get(p) ?? files.find(f => f.file_path.endsWith(`/${p}`) || p.endsWith(`/${f.file_path}`));
+  for (const f of files) {
+    for (const x of f.indicators) {
+      if (!x.trace?.length || !x.cwe || x.line == null) continue;
+      for (const s of x.trace) {
+        if (!s.file || s.file === f.file_path) continue;
+        const g = resolve(s.file);
+        if (!g || g === f) continue;
+        for (const y of g.indicators) {
+          if (y.cwe !== x.cwe || y.line !== s.line) continue;
+          const origins = y.reachedFrom ?? [];
+          if (!origins.some(o => o.file === f.file_path && o.line === x.line && o.id === x.id)) {
+            origins.push({ file: f.file_path, line: x.line, id: x.id, source: x.trace[0]?.kind === "source" ? x.trace[0].label : x.sourceExpr });
+          }
+          y.reachedFrom = origins;
+          // Its own file's call graph can't see the caller, so it may have judged this line unreachable. The
+          // proven flow says otherwise: it is as reachable, exploitable and urgent as the flow that reaches it.
+          // Only corrects "unreachable"/unknown: a cross-file tier the call graph already gave it is left alone.
+          if (x.reachability && x.reachability !== "unreachable" && (!y.reachability || y.reachability === "unreachable")) {
+            y.reachability = "tainted-path";
+          }
+          if ((x.exploitability_score ?? 0) > (y.exploitability_score ?? 0)) y.exploitability_score = x.exploitability_score;
+          if (x.remediation_urgency && URGENCY_RANK[x.remediation_urgency] > URGENCY_RANK[y.remediation_urgency ?? "monitor"]) {
+            y.remediation_urgency = x.remediation_urgency;
+          }
+        }
+      }
+    }
+  }
+}
+
 export function correlateFindings(indicators: ScanIndicator[], filePath: string): ScanIndicator[] {
   const candidates = indicators.filter(correlatable);
   if (candidates.length < 2) return indicators;

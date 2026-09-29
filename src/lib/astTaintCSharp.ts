@@ -62,7 +62,8 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
   ALL, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  mergeSinkFacts, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
+  type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
@@ -1031,13 +1032,11 @@ function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNo
       if (ctx.seen.has(dedup)) return;
       ctx.seen.add(dedup);
       const source = a.text.replace(/\s+/g, " ");
-      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-      const trace = buildBackwardTraceGeneric(ctx.filePath, node, source, key, csTraceResolver);
-      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
-      trace.push(
-        { file: ctx.filePath, line, kind: "cross-file", label: `${key}(...) passes it into ${fact.file}${via}`, snippet: `${recv}.${method}(...)` },
-        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-      );
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, source, key, csTraceResolver);
+      callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${recv}.${method}(...)` };
+      const trace = crossFileTrace(callerTrace, key, fact);
       ctx.findings.push({
         id: fact.id as AstTaintCSharpId, line, sourceExpr: source, sinkExpr: `${key}() -> ${fact.sinkExpr}`,
         detail: `Tainted expression '${source}' is passed to ${key}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via ${type}${via}] — real data-flow match across files, not a line-pattern guess`,
@@ -2159,6 +2158,9 @@ export function computeCSharpMethodSinkFacts(
     const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, undefined, incoming);
     const propagating = buildPropagatingMapCSharp(localMethods, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
+    const localFunctionRanges = findAllNodes(root, "method_declaration")
+      .map(m => ({ name: m.childForFieldName("name")?.text ?? "", start: m.startPosition.row + 1, end: m.endPosition.row + 1 }))
+      .filter(f => f.name);
     for (const cls of findAllNodes(root, "class_declaration")) {
       const clsName = cls.childForFieldName("name")?.text;
       if (!clsName) continue;
@@ -2179,13 +2181,16 @@ export function computeCSharpMethodSinkFacts(
           ctx.seededParams = new Map();
           walkForDeclarationsAndSinks(info.body!, new Map([[shape.name, ALL]]), ctx);
           drainSeededParamsCS(ctx, localMethods);
-          for (const f of ctx.findings) {
+          // One fact per real sink, with the path inside this method (see astTaintJava.ts's twin).
+          for (const f of dropOnPathDuplicates(ctx.findings)) {
             if (f.id === "bola-missing-ownership-check") continue;
             const where = f.calleeSink;
             mergeSinkFacts(facts, [{
               index: i, isRest: false, id: f.id, sinkClass: classOf(f.id),
               sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
               via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
+              steps: f.trace?.length ? factStepsFromTrace(f.trace, `${clsName}.${info.name}`, filePath, lineOf(decl), shape.name,
+                { fnEnd: decl.endPosition.row + 1, functions: localFunctionRanges, lines: ctx.lines }) : undefined,
             }]);
           }
         });

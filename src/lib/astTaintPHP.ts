@@ -82,7 +82,7 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit } from "./treeSitterRuntime";
 import {
-  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -611,13 +611,11 @@ function checkCrossFileCallPHP(node: SyntaxNode, name: string, ctx: EngineCtx, t
       const dedupKey = `${fact.id}:${line}`;
       if (ctx.seen.has(dedupKey)) break;
       ctx.seen.add(dedupKey);
-      const via = fact.via.length > 1 ? ` (${fact.via.join(" -> ")})` : "";
-      const trace = buildBackwardTraceGeneric(ctx.filePath, node, a.text, name, phpTraceResolver);
-      trace.pop();   // the generic builder closes on THIS call; the real sink is in the callee
-      trace.push(
-        { file: ctx.filePath, line, kind: "cross-file", label: `${name}(...) passes it into ${fact.file}${via}`, snippet: `${name}(...)` },
-        { file: fact.file, line: fact.line, kind: "sink", label: fact.sinkExpr, snippet: fact.sinkExpr },
-      );
+      const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, a.text, name, phpTraceResolver);
+      callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${name}(...)` };
+      const trace = crossFileTrace(callerTrace, name, fact);
       ctx.findings.push({
         id: fact.id as AstTaintPHPId, line, sourceExpr: a.text, sinkExpr: `${name}() -> ${fact.sinkExpr}`,
         detail: `Tainted expression '${a.text}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary via include${via}] — real data-flow match across files, not a line-pattern guess`,
@@ -2292,13 +2290,17 @@ export function computePhpFunctionSinkFacts(
       drainSeededParamsPHP(ctx);
       return ctx.findings;
     };
+    const localFunctionRanges = [...findAllNodes(root, "function_definition"), ...findAllNodes(root, "method_declaration")]
+      .map(d => ({ name: d.childForFieldName("name")?.text ?? "", start: d.startPosition.row + 1, end: d.endPosition.row + 1 }))
+      .filter(f => f.name);
     for (const decl of findAllNodes(root, "function_definition")) {
       const fn = extractFuncInfo(decl);
       if (!fn?.body || fn.paramShapes.length === 0) continue;
       const baseline = new Set(run(fn.body, new Map()).map(f => `${f.id}:${f.line}`));
       const facts: ParamSinkFact[] = [];
       for (const shape of fn.paramShapes) {
-        for (const f of run(fn.body, new Map([[shape.name, ALL]]))) {
+        // One fact per real sink, with the path inside this function (see astTaintJava.ts's twin).
+        for (const f of dropOnPathDuplicates(run(fn.body, new Map([[shape.name, ALL]])))) {
           if (baseline.has(`${f.id}:${f.line}`) || NON_FLOW_IDS_PHP.has(f.id)) continue;
           const where = f.calleeSink;
           mergeSinkFacts(facts, [{
@@ -2307,6 +2309,8 @@ export function computePhpFunctionSinkFacts(
             id: f.id, sinkClass: classOf(f.id),
             sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
             via: [fn.name, ...(where?.via ?? [])],
+            steps: f.trace?.length ? factStepsFromTrace(f.trace, fn.name, filePath, decl.startPosition.row + 1, `$${shape.name}`,
+              { fnEnd: decl.endPosition.row + 1, functions: localFunctionRanges, lines: ctx.lines }) : undefined,
           }]);
         }
       }

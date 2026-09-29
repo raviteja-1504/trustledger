@@ -44,12 +44,15 @@ describe("core: a wrapper that sinks its parameter and returns nothing", () => {
   it("the trace ends with a cross-file step and the callee's REAL sink location", () => {
     const r = scan([{ path: "pkg/db.py", content: SQL_WRAPPER }, { path: "pkg/views.py", content: VIEW("run_query(value)") }]);
     const trace = ast(r, "pkg/views.py", "sql-injection")[0].trace!;
-    expect(trace.map(s => s.kind).slice(-2)).toEqual(["cross-file", "sink"]);
+    const kinds = trace.map(s => s.kind);
+    const crossing = kinds.indexOf("cross-file");
+    expect(trace[crossing].file).toBe("pkg/views.py");
+    expect(trace[crossing + 1]).toMatchObject({ kind: "parameter", file: "pkg/db.py" });
+    expect(kinds[kinds.length - 1]).toBe("sink");
     const sink = trace[trace.length - 1];
     expect(sink.file).toBe("pkg/db.py");
     expect(sink.line).toBe(2);
     expect(sink.label).toBe("cursor.execute");
-    expect(trace[trace.length - 2].file).toBe("pkg/views.py");
   });
 
   it("the detail names the sink's file:line and the module it crossed into", () => {

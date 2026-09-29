@@ -87,11 +87,13 @@ export function classifyInput(expr: string | undefined): string | undefined {
 
 const KIND_LABEL: Record<TraceStep["kind"], string> = {
   source: "Input", assignment: "Assigned", call: "Passed into", sanitizer: "Sanitiser",
-  "cross-file": "Crosses file", sink: "Sink",
+  "cross-file": "Calls into", parameter: "Enters as", sink: "Sink",
 };
 
 const BOILERPLATE_RE = /\s*—\s*real data-flow match(?: across files)?, not a line-pattern guess/g;
 const GENERIC_DETAIL_RE = /^Tainted expression '([\s\S]+)' flows into ([\s\S]+?)\(\.\.\.\)$/;
+// The engines' template for a finding reported at a call whose callee (in another file) sinks the argument.
+const CROSS_FILE_DETAIL_RE = /^Tainted expression '([\s\S]+?)' is passed to ([\s\S]+?)\(\.\.\.\), which reaches ([\s\S]+?)\(\.\.\.\) at (\S+?):(\d+)$/;
 // Engine-specific explanations that mention a defence which IS present but does not protect this position.
 const PARTIAL_DEFENSE_RE = /\b(?:encod|escap|saniti[sz]|quot)/i;
 
@@ -140,7 +142,16 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
   // ── One-sentence explanation ──
   let summary: Part[];
   const generic = GENERIC_DETAIL_RE.exec(detailText);
-  if (isDataFlow && (generic || !detailText)) {
+  const crossFile = isDataFlow ? CROSS_FILE_DETAIL_RE.exec(detailText) : null;
+  const crossesFiles = flow.some(s => s.kind === "cross-file");
+  if (crossFile) {
+    const [, arg, callee, sinkName, sinkFile] = crossFile;
+    const shown = origin ?? arg;
+    summary = [inputKind ? "Untrusted input " : "Tainted value ", { code: shown }];
+    if (inputKind) summary.push(` (${inputKind})`);
+    summary.push(" is passed to ", { code: `${callee}()` }, " and reaches ", { code: `${sinkName}()` }, ` in ${sinkFile}`);
+    summary.push(sink ? `, where ${sink.effect}.` : ".");
+  } else if (isDataFlow && (generic || !detailText)) {
     // Name where the value came from (the trace origin), not the expression that finally hit the sink --
     // that is often a local like `sql`, or the whole concatenation built from the input.
     const arg = generic?.[1] ?? ind.sourceExpr ?? "";
@@ -182,17 +193,23 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
       if (s.kind === "sanitizer") checks.push({ tone: "caution", parts: ["Passes through ", { code: s.text }, ", which does not neutralise this sink"] });
     }
     for (const n of notes) {
-      if (/^crosses file boundary/i.test(n)) checks.push({ tone: "confirmed", parts: [n.charAt(0).toUpperCase() + n.slice(1)] });
+      // The path's own crossing steps already say this, file by file.
+      if (/^crosses (?:file|package) boundary/i.test(n)) { if (!crossesFiles) checks.push({ tone: "confirmed", parts: [n.charAt(0).toUpperCase() + n.slice(1)] }); }
       else if (/^input assumed untrusted/i.test(n)) checks.push({ tone: "caution", parts: [n.charAt(0).toUpperCase() + n.slice(1)] });
       else checks.push({ tone: "neutral", parts: [n] });
     }
-    if (ind.sinkExpr) {
+    if (crossFile) {
+      const [, , , sinkName, sinkFile, sinkLine] = crossFile;
+      checks.push({ tone: "confirmed", parts: sink
+        ? ["Reaches ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}, where ${sink.effect}`]
+        : ["Reaches the sink ", { code: `${sinkName}()` }, ` at ${sinkFile}:${sinkLine}`] });
+    } else if (ind.sinkExpr) {
       checks.push({ tone: "confirmed", parts: sink
         ? ["Reaches ", { code: `${ind.sinkExpr}()` }, `, where ${sink.effect}`]
         : ["Reaches the sink ", { code: `${ind.sinkExpr}()` }] });
     }
     if (sink) {
-      checks.push(!generic && PARTIAL_DEFENSE_RE.test(detailText)
+      checks.push(!generic && !crossFile && PARTIAL_DEFENSE_RE.test(detailText)
         ? { tone: "caution", parts: ["A defence is applied, but not one that protects this position (see explanation)"] }
         : { tone: "absent", parts: [`No ${sink.defense} on this path`] });
     }
@@ -201,9 +218,15 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
     for (const n of notes) checks.push({ tone: "neutral", parts: [n] });
     if (onPathOf) {
       checks.push({ tone: "confirmed", parts: [`This line is step ${onPathOf.step} of ${onPathOf.steps} on the confirmed data-flow path of the finding at line ${onPathOf.line}`] });
-    } else {
+    } else if (!ind.reachedFrom?.length) {
       checks.push({ tone: "caution", parts: ["Pattern match only — no source-to-sink data flow was traced for this finding"] });
     }
+  }
+  // A confirmed flow from another file of the PR runs through this line (findingCorrelation.ts linkCrossFileFlows).
+  for (const o of (ind.reachedFrom ?? []).slice(0, 3)) {
+    checks.push({ tone: "confirmed", parts: o.source
+      ? ["Reached by ", { code: o.source }, ` through the confirmed data flow reported at ${o.file}:${o.line}`]
+      : [`Reached by the confirmed data flow reported at ${o.file}:${o.line}`] });
   }
 
   if (ind.supportingDetectors?.length) {
@@ -219,7 +242,10 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
     case "entry-point":  checks.push({ tone: "confirmed", parts: ["Runs directly inside a request handler / entry point"] }); break;
     case "tainted-path": checks.push({ tone: "confirmed", parts: ["Call graph confirms tainted data reaches this code from an entry point"] }); break;
     case "reachable":    checks.push({ tone: "confirmed", parts: ["Reachable from an entry point via the call graph"] }); break;
-    case "unreachable":  checks.push({ tone: "caution",   parts: ["No call path from an entry point was found — possibly dead code"] }); break;
+    case "unreachable":
+      // The call graph only sees this file; a flow proven from another file's request handler overrides it.
+      if (!ind.reachedFrom?.length) checks.push({ tone: "caution", parts: ["No call path from an entry point was found — possibly dead code"] });
+      break;
   }
 
   return {

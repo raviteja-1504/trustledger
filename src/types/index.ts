@@ -48,6 +48,8 @@ export interface FileIndicator {
   supportingDetectors?: string[];
   // Other locations of this same issue merged into this finding (see src/lib/findingCorrelation.ts).
   relatedLocations?: Array<{ line: number; id: string; label: string; detector: "data-flow" | "pattern"; reason: "same-line" | "on-path" }>;
+  // Findings in other files of the PR whose confirmed data flow runs through this line.
+  reachedFrom?: Array<{ file: string; line: number; id: string; source?: string }>;
   // Function the flagged line sits in, when it could be named.
   functionName?: string;
 }

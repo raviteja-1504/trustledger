@@ -35,7 +35,7 @@ import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
 import { assignFingerprints } from "./findingIdentity";
-import { correlateFindings, type RelatedLocation } from "./findingCorrelation";
+import { correlateFindings, linkCrossFileFlows, type FlowOrigin, type RelatedLocation } from "./findingCorrelation";
 import { selectSsaFunctions } from "./ssaSelection";
 import { toAiProbability } from "./aiCalibration";
 import type { AiProbability, CalibrationMap } from "./aiCalibration";
@@ -143,6 +143,9 @@ export interface ScanIndicator {
   // Other locations of this same issue that were merged into this finding (findingCorrelation.ts): the
   // same line under another finding id, or an intermediate step of this finding's data-flow path.
   relatedLocations?: RelatedLocation[];
+  // Findings in OTHER files of the PR whose confirmed data-flow path runs through this line
+  // (findingCorrelation.ts linkCrossFileFlows).
+  reachedFrom?: FlowOrigin[];
   // Per-instance call-graph reachability, merged in from the file-level
   // ReachabilityReport (see the scoreExploitability() call below) after it
   // runs. Lives on the individual finding rather than only on the file-level
@@ -7123,9 +7126,15 @@ function percentile(sorted: number[], p: number): number {
 const MAX_SERVICE_FACT_ROUNDS = 3;
 
 /** Order-independent digest of a `Type.method` -> sink facts map (convergence check and cache key). */
+/** A fact's callee-side path as it reaches the rendered trace (a callee edit that moves a step must invalidate
+ * callers' cached results, not just one that moves the sink). */
+function stepsDigestPart(f: ParamSinkFact): string {
+  return (f.steps ?? []).map(s => `${s.file}:${s.line}:${s.kind}:${s.label}`).join(">");
+}
+
 function factsDigest(facts: ReadonlyMap<string, readonly ParamSinkFact[]>): string {
   const entries = [...facts.entries()]
-    .map(([k, list]) => [k, list.map(f => `${f.index}|${f.isRest ? 1 : 0}|${f.id}|${f.file}|${f.line}|${f.sinkExpr}|${f.via.join(">")}`).sort()] as const)
+    .map(([k, list]) => [k, list.map(f => `${f.index}|${f.isRest ? 1 : 0}|${f.id}|${f.file}|${f.line}|${f.sinkExpr}|${f.via.join(">")}|${stepsDigestPart(f)}`).sort()] as const)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return sha256Hex(JSON.stringify(entries));
 }
@@ -7684,6 +7693,11 @@ export function runScan(input: ScanInput): ScanOutput {
     f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));
     f.risk_score = calculateRisk(f.indicators, f.ai_percentage);
   }
+
+  // Cross-file backlinks: a finding whose confirmed path runs into another file of this PR marks that file's
+  // matching findings with where the flow comes from (findingCorrelation.ts). Scan-wide by nature, so it runs
+  // here -- after every file (cached or not) is present -- like the passes above.
+  linkCrossFileFlows(files);
 
   // The two post-passes above append line-less indicators (cross-file-taint-exposure, ai-blast-radius)
   // that analyzeFile never saw. Mint their identities now -- fill-only, so every id assigned during
