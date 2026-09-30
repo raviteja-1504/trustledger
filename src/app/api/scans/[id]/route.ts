@@ -215,6 +215,16 @@ export async function GET(
           freshAttribution = result.attribution;
         } catch { /* re-analysis threw — freshIndicators/freshAttribution stay null, falls back below */ }
       }
+      // Facts only the scan itself knew (the PR diff behind `introduced`) survive live re-analysis: carried over
+      // from the stored finding with the same fingerprint, or failing that the same rule on the same line.
+      if (freshIndicators && storedIndicators) {
+        const byFp = new Map(storedIndicators.filter(s => s.fingerprint).map(s => [s.fingerprint!, s]));
+        const byLoc = new Map(storedIndicators.map(s => [`${s.id}:${s.line}`, s]));
+        freshIndicators = freshIndicators.map(fi => {
+          const prev = (fi.fingerprint && byFp.get(fi.fingerprint)) || byLoc.get(`${fi.id}:${fi.line}`);
+          return prev?.introduced != null && fi.introduced == null ? { ...fi, introduced: prev.introduced } : fi;
+        });
+      }
       const indicators = freshIndicators ?? storedIndicators ?? [];
       return {
         file_path:       f.file_path,

@@ -1,6 +1,10 @@
 /** @type {import('jest').Config} */
 const config = {
   testEnvironment: "jsdom",
+  // Recycle a test worker once its heap passes this after a suite. Scanner suites load six parsers and scan
+  // whole corpora; a long-lived worker accumulated enough to crash on heap exhaustion in a DIFFERENT suite
+  // each full run (a flake, not a test failure). A fresh worker per heavy run keeps the full suite green.
+  workerIdleMemoryLimit: "900MB",
   transform: {
     "^.+\\.(ts|tsx)$": ["ts-jest", {
       tsconfig: { jsx: "react-jsx" },
