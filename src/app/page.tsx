@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { FINDING_CATALOG } from "@/lib/findingCatalog";
+import { BrandLogo, BrandMark, BrandWordmark } from "@/components/BrandLogo";
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 // Scoped to this page only (not a global rebrand): a near-black, cyan-accented
@@ -76,13 +77,6 @@ function CountUp({ to, suffix = "", duration = 1100 }: { to: number; suffix?: st
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 
-function ShieldIcon({ size = 20, className = "" }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" />
-    </svg>
-  );
-}
 function ArrowRightIcon({ size = 16 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>;
 }
@@ -299,12 +293,9 @@ function NavBar() {
   return (
     <header className="fixed top-0 inset-x-0 z-50 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(5,8,16,0.82)", backdropFilter: "blur(16px) saturate(160%)" }}>
       <div className="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[#050810]" style={{ background: CYAN, boxShadow: `0 0 20px ${CYAN}55` }}>
-            <ShieldIcon size={14} />
-          </div>
-          <span className="font-bold text-white text-sm tracking-tight">TrustLedger</span>
-        </div>
+        <Link href="/" aria-label="TrustLedger home" className="flex items-center">
+          <BrandWordmark height={32} />
+        </Link>
         <nav className="hidden md:flex items-center gap-6">
           {["Platform", "Vulnerabilities", "Cloud & API", "How it works"].map(l => (
             <a key={l} href={`#${l.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
@@ -848,7 +839,7 @@ function CTASection() {
     <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}16, transparent 65%), ${SURFACE}` }}>
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] rounded-full blur-[140px] pointer-events-none" style={{ background: CYAN, opacity: 0.06 }} />
       <Reveal className="relative max-w-3xl mx-auto text-center space-y-6">
-        <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center" style={{ color: CYAN, background: `${CYAN}1f`, border: `1px solid ${CYAN}44`, boxShadow: `0 0 32px ${CYAN}4d` }}><ShieldIcon size={26} /></div>
+<BrandMark size={84} className="mx-auto" />
         <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
         <p className="text-white/65 text-lg max-w-xl mx-auto leading-relaxed">
           AI-generated code, leaked secrets, reachable vulnerable dependencies, a public bucket, an endpoint that forgot its auth check — any of it can slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
@@ -874,10 +865,7 @@ function Footer() {
     <footer className="py-12 px-5 border-t" style={{ borderColor: "rgba(255,255,255,0.09)", background: INK }}>
       <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-start justify-between gap-8">
         <div>
-          <div className="flex items-center gap-2.5 mb-3">
-            <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[#050810]" style={{ background: CYAN }}><ShieldIcon size={14} /></div>
-            <span className="font-bold text-white text-sm">TrustLedger</span>
-          </div>
+          <BrandLogo height={52} className="mb-3" />
           <p className="text-xs text-white/40 max-w-xs leading-relaxed">AI provenance, real vulnerability scanning, secrets, dependencies, cloud, container and API security, and compliance — scored, traced, gated, and attested — for teams that care about what ships.</p>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-sm">

@@ -10,6 +10,7 @@ import type { DashboardData } from "@/types";
 import { api } from "@/lib/api";
 import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { BrandWordmark } from "@/components/BrandLogo";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1043,10 +1044,7 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
                 style={{ background:def.gradientCss, boxShadow:`0 2px 12px ${def.color}60` }}>
                 {def.icon}
               </div>
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">TrustLedger</p>
-                <p className="text-[10px] text-white/30">AI Code Provenance Platform</p>
-              </div>
+              <BrandWordmark height={26} />
             </div>
 
             {/* Report title */}

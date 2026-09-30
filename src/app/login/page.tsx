@@ -5,17 +5,9 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase"; // used in handleSetPassword
+import { BrandLogo, BrandMark } from "@/components/BrandLogo";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
-
-function ShieldIcon() {
-  return (
-    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      <polyline points="9 12 11 14 15 10"/>
-    </svg>
-  );
-}
 
 const DEMO_ROLES = [
   {
@@ -88,12 +80,7 @@ function DemoLoginPage() {
 
         {/* Logo */}
         <div className="flex flex-col items-center mb-10">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white mb-4"
-            style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-            <ShieldIcon />
-          </div>
-          <h1 className="text-2xl font-black text-white tracking-tight">TrustLedger</h1>
-          <p className="text-sm mt-1" style={{ color: "rgba(165,180,252,0.7)" }}>AI Code Governance Platform</p>
+          <h1><BrandLogo height={84} /></h1>
         </div>
 
         {/* Demo mode notice */}
@@ -279,10 +266,7 @@ function ProductionLoginPage() {
         <BackHomeLink />
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center mb-8">
-            <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-4"
-              style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-              <ShieldIcon />
-            </div>
+            <BrandMark size={64} className="mb-4" />
             <h1 className="text-2xl font-black text-white tracking-tight">Set your password</h1>
             <p className="text-sm mt-1" style={{ color: "rgba(165,180,252,0.6)" }}>Choose a password to secure your account</p>
           </div>
@@ -317,12 +301,7 @@ function ProductionLoginPage() {
 
         {/* Branding */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-white mb-4"
-            style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-            <ShieldIcon />
-          </div>
-          <h1 className="text-2xl font-black text-white tracking-tight">TrustLedger</h1>
-          <p className="text-sm mt-1" style={{ color: "rgba(165,180,252,0.6)" }}>AI Code Governance</p>
+          <h1><BrandLogo height={78} /></h1>
         </div>
 
         {/* Sign in / Sign up toggle */}

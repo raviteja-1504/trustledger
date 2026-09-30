@@ -5,16 +5,9 @@ import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 
-const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
+import { BrandLogo } from "./BrandLogo";
 
-function ShieldIcon() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <polyline points="9 12 11 14 15 10" />
-    </svg>
-  );
-}
+const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
 function GitHubIcon() {
   return (
@@ -121,12 +114,7 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
             {/* Header */}
             <div className="px-8 pt-8 pb-6 text-center"
               style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%)" }}>
-              <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 text-indigo-300"
-                style={{ background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.35)" }}>
-                <ShieldIcon />
-              </div>
-              <h1 className="text-lg font-black text-white tracking-tight">TrustLedger</h1>
-              <p className="text-sm text-white/45 mt-1">AI Code Provenance Platform</p>
+              <h1 className="flex justify-center"><BrandLogo height={66} /></h1>
             </div>
 
             {/* Body */}

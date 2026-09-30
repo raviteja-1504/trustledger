@@ -12,16 +12,9 @@ import { countOpenViolations } from "@/lib/violations";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { api } from "@/lib/api";
 import type { DashboardData } from "@/types";
+import { BrandMark, BrandWordmark } from "./BrandLogo";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
-
-function ShieldIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M12 1.5L3 6v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V6L12 1.5z" />
-    </svg>
-  );
-}
 
 function OverviewIcon() {
   return (
@@ -494,16 +487,9 @@ export default function Sidebar() {
       {/* Logo + collapse toggle */}
       <div className="h-14 flex items-center shrink-0 px-3 gap-2"
         style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0"
-          style={{ background:"linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow:"0 4px 16px rgba(99,102,241,0.45)" }}>
-          <ShieldIcon />
-        </div>
-        {!collapsed && (
-          <div className="leading-tight flex-1 min-w-0">
-            <p className="font-bold text-white text-sm tracking-tight truncate">TrustLedger</p>
-            <p className="text-[10px] font-medium truncate" style={{ color:"rgba(165,180,252,0.7)" }}>AI Provenance</p>
-          </div>
-        )}
+        {collapsed
+          ? <BrandMark size={34} />
+          : <div className="flex-1 min-w-0"><BrandWordmark height={30} /></div>}
         <button
           onClick={toggle}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}

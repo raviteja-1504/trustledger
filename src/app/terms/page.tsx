@@ -5,14 +5,7 @@
  * Accessible at /terms.
  */
 
-function ShieldIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <polyline points="9 12 11 14 15 10" />
-    </svg>
-  );
-}
+import { BrandMark } from "@/components/BrandLogo";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -31,9 +24,8 @@ export default function TermsOfServicePage() {
         {/* Header */}
         <div className="mb-12">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white"
-              style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)" }}>
-              <ShieldIcon />
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "#050810" }}>
+              <BrandMark size={30} />
             </div>
             <div>
               <h1 className="text-2xl font-black text-gray-900">Terms of Service</h1>

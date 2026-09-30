@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
+import { BrandMark } from "@/components/BrandLogo";
 
 // ── Step definitions ──────────────────────────────────────────────────────────
 
@@ -20,15 +21,6 @@ const STEPS: { key: Step; label: string }[] = [
 const PROGRESS_KEY = "tl_onboarding_step";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
-
-function ShieldIcon() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      <polyline points="9 12 11 14 15 10"/>
-    </svg>
-  );
-}
 
 function GithubIcon() {
   return (
@@ -67,9 +59,9 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   const { profile } = useAuth();
   return (
     <div className="text-center space-y-6">
-      <div className="w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-white"
-        style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-        <ShieldIcon />
+      <div className="w-20 h-20 rounded-3xl flex items-center justify-center mx-auto"
+        style={{ background: "#050810", boxShadow: "0 8px 32px rgba(15,23,42,0.25)" }}>
+        <BrandMark size={58} />
       </div>
       <div>
         <h2 className="text-2xl font-black text-gray-900">

@@ -3,15 +3,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
-
-function ShieldIcon() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      <polyline points="9 12 11 14 15 10"/>
-    </svg>
-  );
-}
+import { BrandMark } from "@/components/BrandLogo";
 
 function GitHubIcon() {
   return (
@@ -87,10 +79,7 @@ export default function CreateOrgPage() {
       <div style={pageStyle}>
         <div className="w-full max-w-md">
           <div className="text-center mb-8">
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-white"
-              style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-              <ShieldIcon />
-            </div>
+            <BrandMark size={72} className="mx-auto mb-4" />
             <h1 className="text-2xl font-black text-white">Create your organisation</h1>
             <p className="text-sm mt-2" style={{ color: "rgba(165,180,252,0.7)" }}>
               Sign in first, then set up your TrustLedger organisation.
@@ -128,9 +117,9 @@ export default function CreateOrgPage() {
     <div style={{ ...pageStyle, background: "linear-gradient(135deg,#f8fafc 0%,#eff6ff 50%,#f8fafc 100%)" }}>
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-white"
-            style={{ background: "linear-gradient(135deg,#6366f1,#7c3aed)", boxShadow: "0 8px 32px rgba(99,102,241,0.4)" }}>
-            <ShieldIcon />
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4"
+            style={{ background: "#050810", boxShadow: "0 8px 32px rgba(15,23,42,0.25)" }}>
+            <BrandMark size={46} />
           </div>
           <h1 className="text-2xl font-black text-gray-900">Create your organisation</h1>
           <p className="text-sm text-gray-500 mt-2">

@@ -7,8 +7,9 @@
 
 import React from "react";
 import {
-  Document, Page, Text, View, StyleSheet,
+  Document, Page, Text, View, StyleSheet, Image,
 } from "@react-pdf/renderer";
+import { WORDMARK_PNG_DATA_URI, WORDMARK_ASPECT } from "./brandAssets";
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 
@@ -18,7 +19,6 @@ const S = StyleSheet.create({
   // Cover
   coverBg:    { position:"absolute", top:0, left:0, right:0, height:200, backgroundColor:"#0f172a" },
   logo:       { marginTop:60, marginBottom:8 },
-  logoText:   { fontSize:22, fontFamily:"Helvetica-Bold", color:"#ffffff", letterSpacing:1 },
   coverTitle: { fontSize:14, color:"rgba(255,255,255,0.7)", marginBottom:4 },
   coverOrg:   { fontSize:11, color:"rgba(165,180,252,0.9)", marginBottom:40 },
 
@@ -260,7 +260,8 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         <View style={S.coverBg} fixed />
 
         <View style={S.logo}>
-          <Text style={S.logoText}>TrustLedger</Text>
+          {/* eslint-disable-next-line jsx-a11y/alt-text -- react-pdf Image has no alt */}
+          <Image src={WORDMARK_PNG_DATA_URI} style={{ width: 170, height: 170 / WORDMARK_ASPECT, marginBottom: 10 }} />
           <Text style={S.coverTitle}>{meta.full} Evidence Assessment</Text>
           <Text style={S.coverOrg}>{data.org.name}  ·  {data.org.github_org ?? data.org.slug}</Text>
         </View>
