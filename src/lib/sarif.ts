@@ -16,6 +16,7 @@
 import type { FileIndicator, FixSuggestion } from "@/types";
 import { findingMeta } from "./findingCatalog";
 import { confidenceLevel } from "./confidence";
+import { isActive } from "./findingLifecycle";
 import { buildFindingReport, reportAsPlainText, partsToText, type FindingReport } from "./findingReport";
 
 export type SarifIndicator = FileIndicator;
@@ -104,6 +105,14 @@ export function buildSarifReport(
           },
         }],
         ...(ind.fingerprint ? { partialFingerprints: { "trustledgerFinding/v1": ind.fingerprint } } : {}),
+        // An active triage decision (findingLifecycle.ts) is a SARIF suppression, so Code Scanning shows the
+        // finding as dismissed with the same reason the dashboard shows.
+        ...(isActive(ind.triage) ? {
+          suppressions: [{
+            kind: "external", status: "accepted",
+            justification: `${ind.triage.status === "false_positive" ? "False positive" : "Risk accepted"}${ind.triage.reason ? `: ${ind.triage.reason}` : ""}${ind.triage.set_by_email ? ` (${ind.triage.set_by_email})` : ""}`,
+          }],
+        } : {}),
         ...(flows ? { codeFlows: flows } : {}),
         // Other places this same issue was reported, merged into this one result (findingCorrelation.ts).
         ...(ind.relatedLocations?.length ? {

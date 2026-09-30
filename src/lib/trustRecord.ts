@@ -111,3 +111,37 @@ export function verifyTrustRecord(doc: { record: TrustRecord; signature: { algor
   const given = Buffer.from(doc.signature.value ?? "", "hex");
   return expected.length === given.length && crypto.timingSafeEqual(expected, given);
 }
+
+/** Identifies a signing key without revealing it: the first 16 hex chars of SHA-256(key). Lets a verifier tell
+ * "tampered" apart from "signed with a key this server doesn't have" (e.g. after key rotation). */
+export function signingKeyId(key: string): string {
+  return crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
+}
+
+export type TrustRecordCheck =
+  | "valid"            // signed with this server's key, unchanged since
+  | "tampered"         // signed with this server's key, but the record was changed afterwards
+  | "unknown_key"      // signed with a different key (another deployment, or a rotated key)
+  | "unsigned"         // exported without a signature
+  | "malformed"        // not a Trust Record
+  | "not_configured";  // this server has no signing key to verify against
+
+export const CHECK_MESSAGE: Record<TrustRecordCheck, string> = {
+  valid: "Valid. This record was produced by TrustLedger with this server's key and hasn't been changed since.",
+  tampered: "Tampered. The signature doesn't match the content: the record was edited after it was exported.",
+  unknown_key: "Unknown key. The record was signed with a key this server doesn't have (another deployment, or a key that has since been rotated), so it can't be checked here.",
+  unsigned: "Unsigned. This record was exported without a signature, so its integrity can't be checked.",
+  malformed: "Not a Trust Record. The file isn't in the trustledger.trust-record format.",
+  not_configured: "Can't verify. This server has no export signing key configured.",
+};
+
+/** Check an uploaded Trust Record document against `key` (this server's signing key, if any). */
+export function checkTrustRecord(doc: unknown, key: string | undefined): TrustRecordCheck {
+  const d = doc as { record?: { schema?: unknown }; signature?: { algorithm?: string; value?: string; key_id?: string } | null } | null;
+  if (!d || typeof d !== "object" || !d.record || typeof d.record !== "object" || d.record.schema !== TRUST_RECORD_SCHEMA) return "malformed";
+  if (!d.signature) return "unsigned";
+  if (!key) return "not_configured";
+  if (d.signature.key_id && d.signature.key_id !== signingKeyId(key)) return "unknown_key";
+  if (typeof d.signature.value !== "string" || !/^[0-9a-f]{64}$/.test(d.signature.value)) return "tampered";
+  return verifyTrustRecord(d as { record: TrustRecord; signature: { algorithm: string; value: string } }, key) ? "valid" : "tampered";
+}

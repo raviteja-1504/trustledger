@@ -12,7 +12,7 @@ import { verifyApiKey } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
-import { buildTrustRecord, signTrustRecord } from "@/lib/trustRecord";
+import { buildTrustRecord, signTrustRecord, signingKeyId } from "@/lib/trustRecord";
 import type { ScanHealth } from "@/lib/scanHealth";
 import type { FileIndicator } from "@/types";
 
@@ -63,7 +63,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
     const key = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
     const signature = key
-      ? { algorithm: "HMAC-SHA256", value: signTrustRecord(record, key), signed_content: "canonical JSON of `record`: object keys sorted, no whitespace" }
+      ? { algorithm: "HMAC-SHA256", value: signTrustRecord(record, key), key_id: signingKeyId(key), signed_content: "canonical JSON of `record`: object keys sorted, no whitespace" }
       : null;
 
     await writeAuditLog(db, {

@@ -20,6 +20,11 @@ interface Props {
   /** Security findings this PR introduced vs. ones already in the files it touches (prDiff.ts). */
   delta?: { introduced: number; critical: number; high: number; preexisting: number };
   canTriage: boolean;
+  /** Paste-ready markdown summary of this scan (lib/prSecuritySummary.ts). */
+  summaryMarkdown?: string;
+  /** Open a file's row on the page (scan-health list click-through). */
+  canOpenFile?: (path: string) => boolean;
+  onOpenFile?: (path: string) => void;
   /** Called after a baseline so the page can reload statuses. */
   onChanged: () => void;
 }
@@ -35,7 +40,19 @@ const CHIP: Record<keyof LifecycleSummary, string> = {
   fixed: "text-emerald-200 bg-emerald-500/15 border-emerald-400/30",
 };
 
-export default function ScanStatusPanel({ scanId, health, telemetry, currentEngineVersion, lifecycle, delta, canTriage, onChanged }: Props) {
+export default function ScanStatusPanel({ scanId, health, telemetry, currentEngineVersion, lifecycle, delta, canTriage, summaryMarkdown, canOpenFile, onOpenFile, onChanged }: Props) {
+  const [copied, setCopied] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
+  async function copySummary() {
+    if (!summaryMarkdown) return;
+    try {
+      await navigator.clipboard.writeText(summaryMarkdown);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setShowSummary(true);                                   // clipboard refused: show it to copy by hand
+    }
+  }
   const [busy, setBusy] = useState<"rescan" | "baseline" | "record" | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [showGaps, setShowGaps] = useState(false);
@@ -84,7 +101,7 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
     } finally { setBusy(null); }
   }
 
-  if (!health && !telemetry && !lifecycle && !delta) return null;
+  if (!health && !telemetry && !lifecycle && !delta && !summaryMarkdown) return null;
 
   return (
     <div className="mt-4 space-y-2.5">
@@ -108,7 +125,16 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
         <div className={`rounded-xl border px-4 py-2.5 ${health.status === "degraded" ? "border-amber-700/50 bg-amber-950/40" : "border-slate-700/60 bg-slate-800/40"}`}>
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <p className={`text-xs leading-relaxed min-w-0 ${health.status === "degraded" ? "text-amber-200" : "text-slate-300"}`}>
-              <span className="font-bold">{health.status === "degraded" ? "Incomplete scan: " : "Partial coverage: "}</span>
+              <button type="button" onClick={() => {
+                  // One affected file: go straight to it. Several: list them all (never jump past the others).
+                  const only = health.gaps.length === 1 ? health.gaps[0] : undefined;
+                  if (only && onOpenFile && canOpenFile?.(only.file)) onOpenFile(only.file);
+                  else setShowGaps(true);
+                }}
+                className="font-bold underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:decoration-solid"
+                title="Show the affected files">
+                {health.status === "degraded" ? "Incomplete scan:" : "Partial coverage:"}
+              </button>{" "}
               {describeHealth(health)}
               {health.status === "degraded" && " A rescan normally fixes this."}
             </p>
@@ -122,7 +148,10 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
             <ul className="mt-2 space-y-1 max-h-48 overflow-auto">
               {health.gaps.map(g => (
                 <li key={`${g.file}:${g.reason}`} className="text-[11px] flex gap-2 min-w-0">
-                  <code className="font-mono text-slate-200 truncate">{g.file}</code>
+                  {onOpenFile && canOpenFile?.(g.file)
+                    ? <button type="button" onClick={() => onOpenFile(g.file)} title={`Open ${g.file}`}
+                        className="font-mono text-sky-300 hover:text-sky-200 hover:underline truncate focus:outline-none focus-visible:underline">{g.file}</button>
+                    : <code className="font-mono text-slate-200 truncate">{g.file}</code>}
                   <span className="text-slate-400 shrink-0">{languageName(g.language)} · {GAP_REASON_TEXT[g.reason]}</span>
                 </li>
               ))}
@@ -161,6 +190,13 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
           className="text-[11px] font-bold text-indigo-100 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors">
           {busy === "rescan" ? "Queuing…" : "Rescan"}
         </button>
+        {summaryMarkdown && (
+          <button onClick={copySummary}
+            className="text-[11px] font-bold text-slate-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2.5 py-1 transition-colors"
+            title="Copy a markdown security summary to paste into the pull request">
+            {copied ? "Copied ✓" : "Copy summary"}
+          </button>
+        )}
         <button onClick={downloadTrustRecord} disabled={busy !== null}
           className="text-[11px] font-bold text-emerald-100 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors"
           title="A signed JSON record of this scan: findings, decisions, attestations and the merge-gate outcome.">
@@ -220,6 +256,15 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {showSummary && summaryMarkdown && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] text-slate-400">Your browser blocked the clipboard. Select the text below and copy it.</p>
+          <label htmlFor={`summary-${scanId}`} className="sr-only">Security summary</label>
+          <textarea id={`summary-${scanId}`} readOnly value={summaryMarkdown} rows={8} onFocus={e => e.currentTarget.select()}
+            className="w-full rounded-lg bg-slate-950/60 ring-1 ring-white/10 px-2.5 py-1.5 font-mono text-[11px] text-slate-100" />
         </div>
       )}
 

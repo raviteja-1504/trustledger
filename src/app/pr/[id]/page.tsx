@@ -1,6 +1,6 @@
 "use client"; // v2
 
-import { useEffect, useState, useMemo, Suspense } from "react";
+import { useEffect, useState, useMemo, useRef, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
@@ -26,6 +26,7 @@ import ScanStatusPanel from "@/components/ScanStatusPanel";
 import { FindingTriageContext, type FindingTriageContextValue } from "@/components/FindingTriage";
 import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
 import { useRole } from "@/lib/roles";
+import { buildPrSecuritySummary } from "@/lib/prSecuritySummary";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -592,13 +593,16 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, cr
   const [expanded,  setExpanded]  = useState(false);
   const [jumpRequest, setJumpRequest] = useState<{ line: number; seq: number }>();
 
-  // Another file's finding links into this file: open it and scroll to the line.
+  const rowRef = useRef<HTMLTableRowElement>(null);
+  // Another file's finding (or the scan-health list) links into this file: open it, and scroll to the line
+  // -- or, without a line, bring the file itself into view.
   useEffect(() => {
     const onOpen = (e: Event) => {
-      const { file: target, line } = (e as CustomEvent<{ file: string; line: number }>).detail;
+      const { file: target, line } = (e as CustomEvent<{ file: string; line?: number }>).detail;
       if (target !== file.file_path) return;
       setExpanded(true);
-      setJumpRequest(r => ({ line, seq: (r?.seq ?? 0) + 1 }));
+      if (line != null) setJumpRequest(r => ({ line, seq: (r?.seq ?? 0) + 1 }));
+      else requestAnimationFrame(() => rowRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     };
     window.addEventListener(OPEN_FILE_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_FILE_EVENT, onOpen);
@@ -625,7 +629,8 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, cr
     <>
       {/* ── Main row ── */}
       <tr
-        className={`transition-colors cursor-pointer hover:bg-indigo-50/30 ${rowBg} ${expanded ? "!bg-indigo-50/40" : ""}`}
+        ref={rowRef}
+        className={`transition-colors cursor-pointer hover:bg-indigo-50/30 scroll-mt-20 ${rowBg} ${expanded ? "!bg-indigo-50/40" : ""}`}
         onClick={() => setExpanded(v => !v)}
       >
         {/* File path */}
@@ -1591,6 +1596,15 @@ function PRDetailContent() {
     })
     .sort((a, b) => riskOrder(b.risk_score) - riskOrder(a.risk_score));
 
+  // Open a file's row from elsewhere on the page (the scan-health list): widen the filter first if the file is
+  // hidden by it, then let the row mount before asking it to open.
+  function revealFile(path: string) {
+    const visible = filteredFiles.some(f => f.file_path === path);
+    if (!visible) setRiskFilter("all");
+    setTimeout(() => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file: path } })), visible ? 0 : 80);
+  }
+  const openableGapFiles = new Set(allFiles.map(f => f.file_path));
+
   return (
     <AuthGuard>
       <FindingTriageContext.Provider value={triageContext}>
@@ -1695,6 +1709,12 @@ function PRDetailContent() {
                 lifecycle={liveLifecycle}
                 delta={delta}
                 canTriage={canTriage}
+                summaryMarkdown={buildPrSecuritySummary(scan, {
+                  lifecycle: liveLifecycle?.summary,
+                  reviewUrl: typeof window !== "undefined" ? `${window.location.origin}/pr/${scan.scan_id}` : undefined,
+                })}
+                canOpenFile={path => openableGapFiles.has(path)}
+                onOpenFile={revealFile}
                 onChanged={() => { api.getScan(id).then(setScan).catch(() => {}); }}
               />
 

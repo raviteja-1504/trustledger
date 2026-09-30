@@ -11,6 +11,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../../_middleware";
 import { buildSarifReport, type SarifSourceFile } from "@/lib/sarif";
+import { loadTriage } from "@/lib/findingTriageStore";
+import { attachTriage } from "@/lib/findingLifecycle";
 import { getFixSuggestions } from "@/lib/scanner";
 
 export async function GET(req: NextRequest) {
@@ -39,9 +41,11 @@ export async function GET(req: NextRequest) {
     .select("file_path, indicators")
     .eq("scan_id", scanId) as { data: SarifSourceFile[] | null };
 
-  const allIndicators = (files ?? []).flatMap(f => f.indicators ?? []);
+  // Same triage decisions the dashboard and Trust Record apply, as SARIF suppressions.
+  const withTriage = attachTriage(files ?? [], await loadTriage(db, org_id, scan.repo_full_name));
+  const allIndicators = withTriage.flatMap(f => f.indicators ?? []);
   const fixesById = new Map(getFixSuggestions(allIndicators).map(fix => [fix.vuln_id, fix]));
-  const sarif = buildSarifReport(files ?? [], {
+  const sarif = buildSarifReport(withTriage, {
     name:           "TrustLedger",
     informationUri: process.env.NEXT_PUBLIC_APP_URL ?? "https://github.com/trustledger",
   }, fixesById);

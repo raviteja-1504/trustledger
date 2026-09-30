@@ -25,6 +25,7 @@ import {
 import { runScan, getFixSuggestions, calculateRisk } from "@/lib/scanner";
 import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { addedLinesByPath, markIntroduced } from "@/lib/prDiff";
+import { securityRegression, regressionMarkdown } from "@/lib/securityRegression";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { unsuppressed, type TriageDecision } from "@/lib/findingLifecycle";
 import { buildCheckAnnotations } from "@/lib/checkAnnotations";
@@ -712,6 +713,11 @@ export async function POST(req: NextRequest) {
     // Unified finding evidence for the check-run annotations and PR comment: freshly scanned files plus
     // unchanged files carried over from the previous scan (their stored indicators), so a delta push doesn't
     // drop the inline annotations of files it didn't touch.
+    // Every finding (suppressed ones included) of this scan -- what the regression check compares.
+    const evidenceFilesWithSuppressed = [
+      ...result.files.map(f => ({ file_path: f.file_path, indicators: f.indicators })),
+      ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [] })),
+    ];
     // Suppressed findings (active triage decisions) are left out of annotations and the PR comment.
     const evidenceFiles = [
       ...result.files.map(f => triage.size ? { ...f, indicators: unsuppressed(f.indicators, triage) } : f),
@@ -756,7 +762,21 @@ export async function POST(req: NextRequest) {
         const { conclusion: c } = buildCheckSummary(mergedResult);
         conclusion = c === "action_required" ? "action_required" : c === "neutral" ? "neutral" : "success";
       }
-      const { title, summary } = buildCheckSummary(mergedResult);
+      const { title, summary: baseSummary } = buildCheckSummary(mergedResult);
+      // Regression check after every scan: new security findings since this PR's previous scan (securityRegression.ts).
+      let summary = baseSummary;
+      if (orgId) {
+        try {
+          const { data: prior } = await db.from("scans").select("id")
+            .eq("org_id", orgId).eq("repo_full_name", repoFullName).eq("pr_number", prNumber).neq("id", result.scan_id)
+            .order("created_at", { ascending: false }).limit(1);
+          const previous = prior?.[0]
+            ? ((await db.from("scan_files").select("file_path, indicators").eq("scan_id", prior[0].id)).data ?? [])
+                .map(f => ({ file_path: f.file_path as string, indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [] }))
+            : null;
+          summary += regressionMarkdown(securityRegression(evidenceFilesWithSuppressed, previous, triage));
+        } catch { /* best-effort: the check run still completes without the section */ }
+      }
       await updateCheckRun(token, owner, repoName, checkRunId, {
         name: "TrustLedger AI Governance", status: "completed", conclusion,
         output: { title, summary, annotations: buildCheckAnnotations(evidenceFiles, { fixesById, reviewUrl }) },

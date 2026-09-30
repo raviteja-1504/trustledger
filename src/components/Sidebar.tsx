@@ -212,6 +212,8 @@ const ALL_LINKS: Array<{
   // Audit
   { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
+  { href: "/verify-record",   label: "Verify Record",   icon: AuditIcon,       permission: null                         },
+  { href: "/rules",           label: "Rule Catalog",    icon: ReportsIcon,     permission: null                         },
   // AI Intel
   { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/shadow-ai",       label: "Shadow AI",       icon: VulnIcon,        permission: "canManageSettings" as const },
@@ -522,7 +524,7 @@ export default function Sidebar() {
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
           { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/api-security"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
-          { label:"Audit",       hrefs:["/audit","/reports"] },
+          { label:"Audit",       hrefs:["/audit","/reports","/verify-record","/rules"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
           { label:"Config",      hrefs:["/settings/team","/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {

@@ -87,6 +87,21 @@ export function unsuppressed<T extends { fingerprint?: string }>(indicators: rea
   return indicators.filter(i => !i.fingerprint || !isActive(triage.get(i.fingerprint), now));
 }
 
+/** Attach each finding's triage decision (by fingerprint) -- the one step every view and export shares, so the
+ * dashboard, SARIF and the Trust Record agree on which findings are suppressed. Returns new objects. */
+export function attachTriage<F extends { indicators?: ReadonlyArray<{ fingerprint?: string }> | null }>(
+  files: readonly F[], triage: ReadonlyMap<string, TriageDecision>,
+): F[] {
+  if (!triage.size) return [...files];
+  return files.map(f => ({
+    ...f,
+    indicators: (f.indicators ?? []).map(i => {
+      const d = i.fingerprint ? triage.get(i.fingerprint) : undefined;
+      return d ? { ...i, triage: d } : i;
+    }),
+  }));
+}
+
 /** Allowed expiry choices for a decision, in days (null = no expiry). */
 export const EXPIRY_CHOICES: ReadonlyArray<{ label: string; days: number | null }> = [
   { label: "30 days", days: 30 }, { label: "90 days", days: 90 }, { label: "1 year", days: 365 }, { label: "No expiry", days: null },

@@ -144,6 +144,20 @@ function LineRef({ line, file, filePath, onJump, nav, emphasis }: {
   );
 }
 
+/** A file the flow passes through: opens that file at the flow's first line in it (or scrolls, in this file). */
+function FileChip({ file, line, filePath, onJump, nav }: { file: string; line?: number; filePath: string; onJump?: (line: number) => void; nav?: FileNavigation }) {
+  const cls = "inline-flex items-center gap-1 rounded-lg bg-violet-500/10 px-2 py-1 font-mono text-[10.5px] text-violet-200 ring-1 ring-violet-400/25";
+  const body = <><Icon d={ICON.file} size={10} className="text-violet-300" />{baseName(file)}</>;
+  const here = file === filePath;
+  if (line != null && here && onJump) {
+    return <button type="button" onClick={() => onJump(line)} title={`Jump to line ${line}`} className={`${cls} hover:bg-violet-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400`}>{body}</button>;
+  }
+  if (line != null && !here && nav?.canOpenFile(file)) {
+    return <button type="button" onClick={() => nav.openFile(file, line)} title={`Open ${file} at line ${line}`} className={`${cls} hover:bg-violet-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400`}>{body}</button>;
+  }
+  return <span className={cls} title={here ? file : `${file} — not among this PR's changed files`}>{body}</span>;
+}
+
 interface FileGroup { file: string; steps: FlowStep[] }
 
 /** Consecutive steps in the same file, in path order. */
@@ -182,9 +196,7 @@ function FlowRibbon({ flow, filePath, onJump, nav }: { flow: FlowStep[]; filePat
         groups.slice(1, -1).map(g => (
           <span key={g.file} className="inline-flex items-center gap-1.5">
             {arrow}
-            <span className="inline-flex items-center gap-1 rounded-lg bg-violet-500/10 px-2 py-1 font-mono text-[10.5px] text-violet-200 ring-1 ring-violet-400/25" title={g.file}>
-              <Icon d={ICON.file} size={10} className="text-violet-300" />{baseName(g.file)}
-            </span>
+            <FileChip file={g.file} line={g.steps.find(s => s.line != null)?.line} filePath={filePath} onJump={onJump} nav={nav} />
           </span>
         ))
       ) : middle > 0 ? (
@@ -219,7 +231,15 @@ function FlowPath({ flow, filePath, fromEndpointsOnly, onJump, nav }: {
           <div key={`${g.file}-${gi}`} className={`rounded-lg ring-1 ${here ? "bg-white/[0.025] ring-white/[0.07]" : "bg-violet-500/[0.05] ring-violet-400/15"}`}>
             <div className="flex items-center gap-1.5 border-b border-white/[0.06] px-2.5 py-1.5">
               <Icon d={ICON.file} size={11} className={here ? "text-slate-500" : "text-violet-300"} />
-              <span className={`truncate font-mono text-[10.5px] ${here ? "text-slate-300" : "text-violet-200"}`} title={g.file}>{g.file || "this file"}</span>
+              {(() => {
+                const first = g.steps.find(s => s.line != null)?.line;
+                const cls = `truncate font-mono text-[10.5px] ${here ? "text-slate-300" : "text-violet-200"}`;
+                if (!here && first != null && nav?.canOpenFile(g.file)) {
+                  return <button type="button" onClick={() => nav.openFile(g.file, first)} title={`Open ${g.file} at line ${first}`}
+                    className={`${cls} hover:underline focus:outline-none focus-visible:underline`}>{g.file}</button>;
+                }
+                return <span className={cls} title={g.file}>{g.file || "this file"}</span>;
+              })()}
               {here && <span className="ml-auto text-[9.5px] font-semibold uppercase tracking-wider text-slate-500">this file</span>}
             </div>
             <ol className="space-y-2 px-2.5 py-2">
@@ -391,8 +411,8 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
             <Icon d={ICON.link} size={11} className="text-slate-500" />
             <span>Same issue also reported at</span>
             {related.map(r => (
-              <span key={`${r.line}-${r.id}`} title={`${r.label} (${r.reason === "on-path" ? "on this data-flow path" : "same line"})`}>
-                <LineRef line={r.line} filePath={filePath} onJump={onJump} />
+              <span key={`${r.file ?? ""}:${r.line}-${r.id}`} title={`${r.label} (${r.reason === "on-path" ? "on this data-flow path" : r.reason === "cross-file" ? "reported in another file, on this flow's path" : "same line"})`}>
+                <LineRef line={r.line} file={r.file} filePath={filePath} onJump={onJump} nav={nav} />
               </span>
             ))}
           </p>

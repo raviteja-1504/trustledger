@@ -742,7 +742,9 @@ const SQL_INJECTION_RE = [
   /f["'][^"']*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\{/i,
   // String concatenation + SQL clause pair, in either order
   // ("SELECT ... FROM " + var or var + " WHERE id = " + var + "...").
-  /(?=[\s\S]*["']\s*\+\s*\w+)(?=[\s\S]*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b))/i,
+  // Anchored: a pure "both appear on the line" check. Unanchored, the engine re-ran both lookaheads from
+  // every position -- quadratic, and minutes on a single minified line.
+  /^(?=[\s\S]*["']\s*\+\s*\w+)(?=[\s\S]*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b))/i,
   /cursor\.execute\s*\(\s*(?:f["']|["'][^?])/i,
   /db\.query\s*\(\s*(?:`[^`]*\$\{|['"][^?][^'"]*\+)/i,
   /(?:execute|query)\s*\(\s*["'].*\+\s*\w/i,
@@ -761,7 +763,7 @@ const SQL_INJECTION_RE = [
   // the opening quote -- SQL string literals routinely wrap the interpolated
   // value in single quotes first (as in the real example above), which a
   // strict adjacency match would miss.
-  /(?=[\s\S]*\.(?:where|find_by_sql|order|group|having|pluck|select|calculate)\s*\()(?=[\s\S]*#\{)/,
+  /^(?=[\s\S]*\.(?:where|find_by_sql|order|group|having|pluck|select|calculate)\s*\()(?=[\s\S]*#\{)/,   // anchored, see above
   // C# — SqlCommand/SqlDataAdapter constructed with concatenated SQL, or
   // .CommandText set via concatenation. Already incidentally matched by the
   // generic "..." + var concatenation entry above (verified) -- made
