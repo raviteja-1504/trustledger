@@ -8,8 +8,8 @@
  */
 /* eslint-disable @next/next/no-img-element */
 
-const WORDMARK_RATIO = 900 / 228;
-const LOGO_RATIO = 1200 / 306;
+const WORDMARK_RATIO = 900 / 267;
+const LOGO_RATIO = 1200 / 358;
 
 export function BrandMark({ size = 32, className = "" }: { size?: number; className?: string }) {
   return <img src="/brand/trustledger-mark.png" alt="TrustLedger" width={size} height={size} className={`shrink-0 ${className}`} />;

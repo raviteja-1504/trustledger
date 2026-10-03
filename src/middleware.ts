@@ -47,6 +47,10 @@ function isPublic(pathname: string): boolean {
   if (pathname.startsWith("/_next/"))          return true;
   if (pathname.startsWith("/static/"))         return true;
   if (pathname === "/favicon.ico")             return true;
+  // Files served from public/ (logo artwork, favicons, PWA icons, og-image, manifest) must load
+  // for signed-out visitors too — the landing and login pages show them.
+  if (pathname.startsWith("/brand/"))          return true;
+  if (/^\/[\w.-]+\.(?:png|ico|json|webmanifest)$/.test(pathname)) return true;
   if (pathname === "/")                        return true;
   if (pathname === "/onboarding")              return true;
   if (pathname === "/create-org")              return true;
