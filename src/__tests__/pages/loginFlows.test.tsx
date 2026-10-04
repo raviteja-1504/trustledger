@@ -175,6 +175,17 @@ describe("sign in / sign up forms", () => {
     expect(screen.getByRole("tab", { name: "Sign Up" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("Forgot password is a link from Sign In (not a third tab), with a way back", () => {
+    render(<LoginPage />);
+    expect(screen.getAllByRole("tab").map(t => t.textContent)).toEqual(["Sign In", "Sign Up"]);
+    fireEvent.click(screen.getByRole("button", { name: "Forgot your password?" }));
+    expect(screen.getByRole("heading", { name: "Reset your password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send reset link" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to sign in" }));
+    expect(screen.getByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
+  });
+
   it("sign-up still checks the two passwords match", async () => {
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("tab", { name: "Sign Up" }));

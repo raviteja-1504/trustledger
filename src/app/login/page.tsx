@@ -177,7 +177,7 @@ function GitHubIcon({ size = 18 }: { size?: number }) {
 
 function Eyebrow({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.14em] px-3 py-1.5 rounded-full border font-mono"
+    <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] px-3.5 py-1.5 rounded-full border font-mono"
       style={{ color: CYAN, background: `${CYAN}1c`, borderColor: `${CYAN}4d` }}>
       <span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />
       {children}
@@ -202,9 +202,9 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
         <div className="absolute bottom-0 inset-x-0 h-52" style={{ background: `linear-gradient(to top, ${INK}, transparent)` }} />
       </div>
 
-      <header className="relative z-10 max-w-6xl mx-auto px-5 h-16 flex items-center justify-between">
-        <Link href="/" aria-label="TrustLedger home" className="flex items-center"><BrandWordmark height={30} /></Link>
-        <Link href="/" className="flex items-center gap-1.5 text-xs font-medium text-white/50 hover:text-white/85 transition-colors">
+      <header className="relative z-10 max-w-6xl mx-auto px-5 h-20 flex items-center justify-between">
+        <Link href="/" aria-label="TrustLedger home" className="flex items-center"><BrandWordmark height={38} /></Link>
+        <Link href="/" className="flex items-center gap-1.5 text-sm font-medium text-white/55 hover:text-white/85 transition-colors">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
           </svg>
@@ -212,10 +212,10 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
         </Link>
       </header>
 
-      {/* One fixed top offset at every size: a 38rem block (the tallest form, Sign Up) centred in the space
+      {/* One fixed top offset at every size: a 44rem block (the tallest form, Sign Up) centred in the space
           under the header. Fixed rather than centring the live content, so switching tabs never moves anything.
           Below xl (phones, tablets either way up) a single centred column; from xl two top-aligned columns. */}
-      <main style={{ paddingTop: "max(1.5rem, calc((100svh - 4rem - 38rem) / 2))" }} className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 grid gap-12 items-start justify-items-center ${aside ? "xl:grid-cols-[1.05fr_minmax(0,440px)] xl:gap-20 xl:justify-items-stretch" : ""}`}>
+      <main style={{ paddingTop: "max(1.5rem, calc((100svh - 5rem - 44rem) / 2))" }} className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 grid gap-12 items-start justify-items-center ${aside ? "xl:grid-cols-[1fr_minmax(0,520px)] xl:gap-20 xl:justify-items-stretch" : ""}`}>
         {aside && (
           <section className="hidden xl:block space-y-7" aria-label="Why TrustLedger">
             <Eyebrow>Code security with proof</Eyebrow>
@@ -223,22 +223,22 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
               Know what ships.<br />
               <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Prove it was reviewed.</span>
             </h2>
-            <ul className="space-y-5 max-w-md">
+            <ul className="space-y-6 max-w-lg">
               {VALUE_POINTS.map(p => (
                 <li key={p.title} className="flex gap-3.5">
-                  <span className="mt-1 w-5 h-5 shrink-0 rounded-md flex items-center justify-center" style={{ background: `${CYAN}1f`, border: `1px solid ${CYAN}55`, color: CYAN }}>
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+                  <span className="mt-1 w-6 h-6 shrink-0 rounded-md flex items-center justify-center" style={{ background: `${CYAN}1f`, border: `1px solid ${CYAN}55`, color: CYAN }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
                   </span>
                   <span>
-                    <span className="block text-sm font-bold text-white/90">{p.title}</span>
-                    <span className="block text-sm text-white/55 leading-relaxed mt-0.5">{p.body}</span>
+                    <span className="block text-base font-bold text-white/90">{p.title}</span>
+                    <span className="block text-base text-white/60 leading-relaxed mt-0.5">{p.body}</span>
                   </span>
                 </li>
               ))}
             </ul>
           </section>
         )}
-        <div className="w-full max-w-[440px]">{children}</div>
+        <div className="w-full max-w-[520px]">{children}</div>
       </main>
     </div>
   );
@@ -247,7 +247,7 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
 /** The glass card the forms sit in — the landing page's card treatment. */
 function AuthCard({ children }: { children: React.ReactNode }) {
   return (
-    <div className="relative rounded-2xl p-7 sm:p-8 space-y-5 border backdrop-blur-xl"
+    <div className="relative rounded-3xl p-5 sm:p-10 space-y-6 border backdrop-blur-xl"
       style={{ background: "rgba(10,15,28,0.72)", borderColor: "rgba(255,255,255,0.09)", boxShadow: `0 24px 80px rgba(0,0,0,0.55), 0 0 0 1px ${CYAN}0d inset` }}>
       <div className="absolute -top-px left-10 right-10 h-px" style={{ background: `linear-gradient(90deg, transparent, ${CYAN}88, transparent)` }} aria-hidden="true" />
       {children}
@@ -390,18 +390,18 @@ function ProductionLoginPage() {
 
   if (loading) return null;
 
-  const inputCls = "w-full px-4 py-3 rounded-xl text-sm text-white placeholder-white/30 border outline-none transition-colors bg-white/[0.04] border-white/10 hover:border-white/20 focus:border-cyan-400/70 focus:bg-white/[0.06] focus:ring-2 focus:ring-cyan-400/20";
-  const errBox = formErr && <div role="alert" className="px-3.5 py-2.5 rounded-xl text-sm text-rose-200 bg-rose-500/10 border border-rose-400/30">{formErr}</div>;
-  const okBox  = formOk && <div role="status" className="px-3.5 py-2.5 rounded-xl text-sm text-emerald-200 bg-emerald-500/10 border border-emerald-400/30">{formOk}</div>;
+  const inputCls = "w-full px-4 py-3.5 rounded-xl text-base text-white placeholder-white/35 border outline-none transition-colors bg-white/[0.04] border-white/10 hover:border-white/20 focus:border-cyan-400/70 focus:bg-white/[0.06] focus:ring-2 focus:ring-cyan-400/20";
+  const errBox = formErr && <div role="alert" className="px-4 py-3 rounded-xl text-[15px] text-rose-200 bg-rose-500/10 border border-rose-400/30">{formErr}</div>;
+  const okBox  = formOk && <div role="status" className="px-4 py-3 rounded-xl text-[15px] text-emerald-200 bg-emerald-500/10 border border-emerald-400/30">{formOk}</div>;
   const primaryBtn = (label: string, busyLabel: string) => (
     <button type="submit" disabled={busy}
-      className="w-full py-3 rounded-xl font-bold text-sm transition-all active:scale-[0.98] disabled:opacity-70 hover:-translate-y-px"
+      className="w-full py-3.5 rounded-xl font-bold text-base transition-all active:scale-[0.98] disabled:opacity-70 hover:-translate-y-px"
       style={{ color: INK, background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 28px ${CYAN}55` }}>
       {busy ? busyLabel : label}
     </button>
   );
   const quietLink = (label: string, onClick: () => void) => (
-    <button type="button" onClick={onClick} className="w-full text-center text-xs text-white/45 hover:text-white/80 underline underline-offset-4 transition-colors">{label}</button>
+    <button type="button" onClick={onClick} className="w-full text-center text-sm text-white/50 hover:text-white/80 underline underline-offset-4 transition-colors">{label}</button>
   );
 
   // Password recovery and the 2FA step — focused, single card, no tabs
@@ -411,21 +411,21 @@ function ProductionLoginPage() {
       <AuthShell>
         <AuthCard>
           <div className="flex flex-col items-center text-center gap-3">
-            <BrandMark size={56} />
+            <BrandMark size={68} />
             <Eyebrow>{isMfa ? "Step 2 of 2" : "Account recovery"}</Eyebrow>
-            <h1 className="text-2xl font-black tracking-tight">{isMfa ? "Two-factor authentication" : "Set your password"}</h1>
-            <p className="text-sm text-white/55 leading-relaxed">
+            <h1 className="text-3xl font-black tracking-tight">{isMfa ? "Two-factor authentication" : "Set your password"}</h1>
+            <p className="text-base text-white/60 leading-relaxed">
               {isMfa ? "Enter the 6-digit code from your authenticator app, or one of your backup codes." : "Choose a new password for your TrustLedger account."}
             </p>
           </div>
           {errBox}
           {okBox}
-          {newPassOk && <div role="status" className="px-3.5 py-2.5 rounded-xl text-sm text-emerald-200 bg-emerald-500/10 border border-emerald-400/30">{newPassOk}</div>}
+          {newPassOk && <div role="status" className="px-4 py-3 rounded-xl text-[15px] text-emerald-200 bg-emerald-500/10 border border-emerald-400/30">{newPassOk}</div>}
           {isMfa ? (
             <form onSubmit={handleMfa} className="space-y-3">
               <input type="text" inputMode="numeric" autoComplete="one-time-code" placeholder="123 456" aria-label="Two-factor code"
                 value={mfaCode} onChange={e => setMfaCode(e.target.value)} required autoFocus maxLength={12}
-                className={`${inputCls} text-center text-lg font-mono tracking-[0.35em]`} />
+                className={`${inputCls} text-center text-xl font-mono tracking-[0.35em]`} />
               {primaryBtn("Verify", "Verifying…")}
               {quietLink("Use a different account", async () => { await signOut(); setMode("signin"); setMfaCode(""); setFormErr(null); setFormOk(null); })}
             </form>
@@ -454,34 +454,37 @@ function ProductionLoginPage() {
     <AuthShell aside>
       <AuthCard>
         <div className="space-y-1.5 text-center">
-          <h1 className="text-2xl font-black tracking-tight">{heading}</h1>
-          <p className="text-sm text-white/55">{sub}</p>
+          <h1 className="text-3xl font-black tracking-tight">{heading}</h1>
+          <p className="text-base text-white/60">{sub}</p>
         </div>
 
-        {/* Sign in / Sign up / Forgot toggle */}
-        <div className="grid grid-cols-3 gap-1 rounded-xl p-1 border" role="tablist" aria-label="Account"
-          style={{ background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.08)" }}>
-          {(["signin","signup","forgot"] as const).map(m => (
-            <button key={m} role="tab" aria-selected={mode === m} onClick={() => switchMode(m)}
-              className="py-2 px-1 rounded-lg text-[11px] sm:text-xs font-bold whitespace-nowrap transition-all"
-              style={mode === m
-                ? { color: INK, background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 14px ${CYAN}44` }
-                : { color: "rgba(255,255,255,0.5)" }}>
-              {m === "signin" ? "Sign In" : m === "signup" ? "Sign Up" : "Forgot Password"}
-            </button>
-          ))}
-        </div>
+        {/* Sign in / Sign up. "Forgot password" is a link under the sign-in options, not a third tab: a
+            third label didn't reliably fit the bar on narrower screens. */}
+        {mode !== "forgot" && (
+          <div className="grid grid-cols-2 gap-1 rounded-xl p-1 border" role="tablist" aria-label="Account"
+            style={{ background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.08)" }}>
+            {(["signin","signup"] as const).map(m => (
+              <button key={m} role="tab" aria-selected={mode === m} onClick={() => switchMode(m)}
+                className="py-2.5 rounded-lg text-sm font-bold whitespace-nowrap transition-all"
+                style={mode === m
+                  ? { color: INK, background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 14px ${CYAN}44` }
+                  : { color: "rgba(255,255,255,0.55)" }}>
+                {m === "signin" ? "Sign In" : "Sign Up"}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Errors / success — the ?error= code is mapped to our own text, never shown as-is */}
         {paramMessage && !formErr && !formOk && (
-          <div role="alert" className="px-3.5 py-2.5 rounded-xl text-sm text-rose-200 bg-rose-500/10 border border-rose-400/30">
+          <div role="alert" className="px-4 py-3 rounded-xl text-[15px] text-rose-200 bg-rose-500/10 border border-rose-400/30">
             <p>{paramMessage}</p>
           </div>
         )}
         {errBox}
         {needsConfirmation && mode === "signin" && (
           <button type="button" onClick={handleResend} disabled={busy || !email}
-            className="w-full py-2.5 rounded-xl text-xs font-bold transition-colors border hover:bg-cyan-400/10"
+            className="w-full py-3 rounded-xl text-sm font-bold transition-colors border hover:bg-cyan-400/10"
             style={{ color: "#a5f3fc", borderColor: `${CYAN}55` }}>
             Resend confirmation email
           </button>
@@ -493,20 +496,20 @@ function ProductionLoginPage() {
           <button
             onClick={handleGitHub}
             disabled={githubBusy}
-            className="w-full flex items-center justify-center gap-2.5 py-3 rounded-xl font-semibold text-sm text-white/90 transition-all border disabled:opacity-70 hover:border-white/30 hover:bg-white/[0.09]"
+            className="w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl font-semibold text-base text-white/90 transition-all border disabled:opacity-70 hover:border-white/30 hover:bg-white/[0.09]"
             style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.16)" }}
           >
             {githubBusy ? (
               <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
                 <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
               </svg>
-            ) : <GitHubIcon />}
+            ) : <GitHubIcon size={20} />}
             {githubBusy ? "Redirecting to GitHub…" : "Continue with GitHub"}
           </button>
         )}
 
         {mode === "signin" && (showEmail ? (
-          <div className="flex items-center gap-3 text-[11px] font-mono uppercase tracking-[0.14em] text-white/35" aria-hidden="true">
+          <div className="flex items-center gap-3 text-xs font-mono uppercase tracking-[0.14em] text-white/35" aria-hidden="true">
             <span className="h-px flex-1 bg-white/10" />or with email<span className="h-px flex-1 bg-white/10" />
           </div>
         ) : null)}
@@ -542,21 +545,37 @@ function ProductionLoginPage() {
         ) : (
           <button
             onClick={() => setShowEmail(true)}
-            className="w-full py-3 rounded-xl text-sm font-medium transition-colors border text-white/55 hover:text-white/85 hover:border-white/20"
+            className="w-full py-3.5 rounded-xl text-base font-medium transition-colors border text-white/60 hover:text-white/85 hover:border-white/20"
             style={{ borderColor: "rgba(255,255,255,0.09)" }}
           >
             Sign in with email instead
           </button>
         )}
 
+        {mode === "signin" && (
+          <button type="button" onClick={() => switchMode("forgot")}
+            className="block mx-auto text-sm font-semibold text-cyan-300/90 hover:text-cyan-200 underline-offset-4 hover:underline transition-colors">
+            Forgot your password?
+          </button>
+        )}
+        {mode === "forgot" && (
+          <button type="button" onClick={() => switchMode("signin")}
+            className="flex items-center gap-1.5 mx-auto text-sm font-semibold text-white/60 hover:text-white/90 transition-colors">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>
+            </svg>
+            Back to sign in
+          </button>
+        )}
+
         {mode === "signup" && (
-          <p className="text-xs text-white/40 text-center leading-relaxed" style={{ textWrap: "balance" }}>
+          <p className="text-sm text-white/45 text-center leading-relaxed" style={{ textWrap: "balance" }}>
             Joining your team? Ask an admin to invite you — invites put you straight into their organisation.
           </p>
         )}
       </AuthCard>
 
-      <p className="mt-6 text-center text-xs text-white/35 leading-relaxed" style={{ textWrap: "balance" }}>
+      <p className="mt-6 text-center text-sm text-white/40 leading-relaxed" style={{ textWrap: "balance" }}>
         By continuing you agree to our{" "}
         <Link href="/terms" className="underline underline-offset-2 hover:text-white/70">Terms of Service</Link>
         {" "}and{" "}
