@@ -9,28 +9,43 @@
 
 import { createServiceClient } from "@/lib/supabase";
 
-export async function fetchDashboard(org_id: string, days: number, prAuthorFilter: string | null) {
+/** An explicit period (custom date range); otherwise the last `days` days up to now. */
+export interface DashboardPeriod { start: string; end: string }
+
+// The project's PostgREST max_rows silently caps every response at 1000 rows, whatever .limit() asks for —
+// so anything that can exceed it is read page by page (exact, rather than quietly truncated).
+const PAGE = 1000;
+const MAX_PAGES = 50;
+async function fetchAllRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const { data } = await page(i * PAGE, i * PAGE + PAGE - 1);
+    const rows = data ?? [];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+}
+
+export async function fetchDashboard(org_id: string, days: number, prAuthorFilter: string | null, period?: DashboardPeriod) {
   const db    = createServiceClient();
-  const since = new Date(Date.now() - days * 86400_000).toISOString();
+  const since = period ? new Date(`${period.start}T00:00:00.000Z`).toISOString() : new Date(Date.now() - days * 86400_000).toISOString();
+  const until = period ? new Date(`${period.end}T23:59:59.999Z`).toISOString() : new Date().toISOString();
 
-  // Aggregate per-repo stats from scans
-  // When prAuthorFilter is set (developer role), restrict to that author's PRs.
-  let scansQuery = db
-    .from("scans")
-    .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
-    .eq("org_id", org_id)
-    .gte("created_at", since)
-    .order("created_at", { ascending: false });
-  if (prAuthorFilter) scansQuery = scansQuery.eq("pr_author", prAuthorFilter);
-  const { data: scansRaw } = await scansQuery;
-
-  // All scans for this org (no date filter) — used for violation dedup.
-  let allScansQuery = db
-    .from("scans")
-    .select("id, repo_full_name, created_at")
-    .eq("org_id", org_id);
-  if (prAuthorFilter) allScansQuery = allScansQuery.eq("pr_author", prAuthorFilter);
-  const { data: allScansRaw } = await allScansQuery;
+  // Per-repo stats from the period's scans. When prAuthorFilter is set (developer role), only that author's PRs.
+  type ScanRow = { id: string; repo_full_name: string; overall_risk: string; total_ai_percentage: number; file_count: number; created_at: string };
+  const scansRaw = await fetchAllRows<ScanRow>((from, to) => {
+    let q = db
+      .from("scans")
+      .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
+      .eq("org_id", org_id)
+      .gte("created_at", since)
+      .lte("created_at", until)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true });
+    if (prAuthorFilter) q = q.eq("pr_author", prAuthorFilter);
+    return q.range(from, to) as unknown as PromiseLike<{ data: ScanRow[] | null }>;
+  });
 
   // Exclude repos with no corresponding active `repositories` row. Under
   // normal operation every scan's repo has one (the webhook handler upserts
@@ -45,8 +60,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     .eq("org_id", org_id)
     .eq("is_active", true);
   const activeRepoNames = new Set((activeRepoRows ?? []).map(r => r.repo_full_name));
-  const scans    = (scansRaw ?? []).filter(s => activeRepoNames.has(s.repo_full_name));
-  const allScans = (allScansRaw ?? []).filter(s => activeRepoNames.has(s.repo_full_name));
+  const scans    = scansRaw.filter(s => activeRepoNames.has(s.repo_full_name));
 
   // Compute the latest scan per repo (from date-filtered scans, not allScans
   // which would pull in repos scanned months ago and cause ghost banners).
@@ -94,14 +108,16 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     .in("scan_id", latestScanIdPerRepo)
     .in("risk_score", ["CRITICAL", "HIGH"]);
 
-  const { data: riskFiles } = latestScanIdPerRepo.length === 0 ? { data: null } : await db
+  type RiskFileRow = { scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null };
+  const riskFiles: RiskFileRow[] = latestScanIdPerRepo.length === 0 ? [] : await fetchAllRows<RiskFileRow>((from, to) => db
     .from("scan_files")
     .select("scan_id, file_path, ai_percentage, risk_score, risk_indicators, created_at, scans(repo_full_name, pr_number)")
     .eq("org_id", org_id)
     .in("risk_score", ["CRITICAL", "HIGH"])
     .in("scan_id", latestScanIdPerRepo)
     .order("ai_percentage", { ascending: false })
-    .limit(1000) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
+    .order("file_path", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: RiskFileRow[] | null }>);
 
 
   // Build repo stats
@@ -128,13 +144,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     repoMap.set(s.repo_full_name, r);
   });
 
-  // Count attested files per repo by joining attestations → scans → repo
   const scanToRepo = new Map(scans.map(s => [s.id, s.repo_full_name]));
-  const attestedPerRepo = new Map<string, number>();
-  (attests ?? []).forEach(a => {
-    const repo = scanToRepo.get(a.scan_id);
-    if (repo) attestedPerRepo.set(repo, (attestedPerRepo.get(repo) ?? 0) + 1);
-  });
 
   // Denominator for attestation rate must be CRITICAL/HIGH files in the
   // latest scan (same scope as `attests` above and the app-wide formula:
@@ -145,16 +155,24 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // large, so every repo showed ~0% even when 100% of its actual CRITICAL/
   // HIGH files were attested. riskFiles is already fetched (CRITICAL/HIGH,
   // scoped to latestScanIdPerRepo) for top_risk_files -- reuse it here.
+  // Distinct CRITICAL/HIGH files per repo (latest scan), and how many of THOSE have at least one attestation.
+  // Counted per file, so a second reviewer's sign-off on the same file doesn't count it twice.
   const highCritPerRepo = new Map<string, number>();
-  (riskFiles ?? []).forEach(f => {
+  const attestedPerRepo = new Map<string, number>();
+  const countedFiles = new Set<string>();
+  riskFiles.forEach(f => {
     const repo = f.scans?.repo_full_name;
-    if (repo) highCritPerRepo.set(repo, (highCritPerRepo.get(repo) ?? 0) + 1);
+    const key  = `${f.scan_id}::${f.file_path}`;
+    if (!repo || countedFiles.has(key)) return;
+    countedFiles.add(key);
+    highCritPerRepo.set(repo, (highCritPerRepo.get(repo) ?? 0) + 1);
+    if (attestedFileSet.has(key)) attestedPerRepo.set(repo, (attestedPerRepo.get(repo) ?? 0) + 1);
   });
 
   const repos = Array.from(repoMap.entries()).map(([repo, r]) => {
     const attested    = attestedPerRepo.get(repo) ?? 0;
     const highCrit     = highCritPerRepo.get(repo) ?? 0;
-    const attestRate  = highCrit === 0 ? 1 : Math.min(1, attested / highCrit);
+    const attestRate  = highCrit === 0 ? 1 : attested / highCrit;
     return {
       repo,
       ai_pct:           r.ai_count === 0 ? 0 : r.ai_sum / r.ai_count,
@@ -251,7 +269,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // Top risk files — dedupe by repo+file_path, keeping each file's most
   // recent scan (riskFiles is ordered created_at desc), then rank by AI%.
   const seenFiles = new Set<string>();
-  const top_risk_files = (riskFiles ?? [])
+  const top_risk_files = riskFiles
     .filter(f => {
       const scan = f.scans as { repo_full_name: string; pr_number: number } | null;
       const key  = `${scan?.repo_full_name ?? ""}::${f.file_path}`;
@@ -279,14 +297,23 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     });
 
   const totalFiles   = scans.reduce((s, sc) => s + sc.file_count, 0);
-  const avgAI        = scans.length === 0 ? 0 : scans.reduce((s, sc) => s + sc.total_ai_percentage, 0) / scans.length;
+  // Per-file share of AI-written code: each scan's AI% weighted by how many files it analysed (a 2-file scan
+  // used to count as much as a 200-file one). Falls back to the plain mean if no scan recorded a file count.
+  const weightedFiles = scans.reduce((s, sc) => s + Math.max(0, sc.file_count ?? 0), 0);
+  const avgAI = scans.length === 0 ? 0
+    : weightedFiles > 0 ? scans.reduce((s, sc) => s + sc.total_ai_percentage * Math.max(0, sc.file_count ?? 0), 0) / weightedFiles
+    : scans.reduce((s, sc) => s + sc.total_ai_percentage, 0) / scans.length;
+  const totalHighCrit = [...highCritPerRepo.values()].reduce((a, b) => a + b, 0);
+  const totalAttested = [...attestedPerRepo.values()].reduce((a, b) => a + b, 0);
 
   // Dedupe violations by repo+file_path, keeping only the most recent scan's
   // violation for that file. A still-open violation from an earlier scan is
   // superseded once a later scan (and possibly its attestation) exists for
   // the same file — only the latest scan's status should drive SLA breaches.
-  const scanCreatedAtAll = new Map((allScans ?? []).map(s => [s.id, s.created_at]));
-  const scanToRepoAll    = new Map((allScans ?? []).map(s => [s.id, s.repo_full_name]));
+  // Violations and attestations are fetched only for each repo's latest scan, which is in `scans` — so the
+  // period's scans are the complete lookup (a separate unpaged "all scans" query could drop rows past 1000).
+  const scanCreatedAtAll = new Map(scans.map(s => [s.id, s.created_at]));
+  const scanToRepoAll    = scanToRepo;
   const latestViolationByFile = new Map<string, NonNullable<typeof violations>[number]>();
   (violations ?? []).forEach(v => {
     const repo = scanToRepoAll.get(v.scan_id);
@@ -305,7 +332,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // Use scanToRepoAll (no date filter) so attestations on older scans outside
   // the current period window still suppress false SLA breaches.
   const attestedRepoFiles = new Set(
-    (attests ?? []).map(a => `${scanToRepoAll.get(a.scan_id) ?? scanToRepo.get(a.scan_id) ?? ""}::${a.file_path}`)
+    (attests ?? []).map(a => `${scanToRepoAll.get(a.scan_id) ?? ""}::${a.file_path}`)
   );
 
   const currentViolations = Array.from(latestViolationByFile.values())
@@ -339,7 +366,13 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   return {
     repos,
     overall_ai_pct:          avgAI,
-    attestation_rate:        repos.length === 0 ? 0 : repos.reduce((s, r) => s + r.attestation_rate, 0) / repos.length,
+    // attested HIGH/CRITICAL files ÷ all HIGH/CRITICAL files (it used to average the repos' rates, counting a repo
+    // with nothing to review as 100%). Nothing to review at all → 100%; no repos → 0.
+    attestation_rate:        repos.length === 0 ? 0 : totalHighCrit === 0 ? 1 : totalAttested / totalHighCrit,
+    attested_high_crit:      totalAttested,
+    total_high_crit:         totalHighCrit,
+    connected_repo_count:    activeRepoNames.size,
+    period:                  { start: since.slice(0, 10), end: until.slice(0, 10) },
     unattested_deploy_count: unattested,
     risk_trend,
     risk_totals,

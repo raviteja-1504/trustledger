@@ -286,7 +286,7 @@ function buildRecommendations(domains: DomainScore[], data: DashboardData): Reco
   if (data.unattested_deploy_count > 0) {
     recs.push({
       id:"r2", priority:"critical",
-      title:`Unblock ${data.unattested_deploy_count} deployment${data.unattested_deploy_count>1?"s":""} — ${highUnatt.length} HIGH files still pending review`,
+      title:`Sign off ${data.unattested_deploy_count} unattested HIGH/CRITICAL file${data.unattested_deploy_count>1?"s":""} — ${highUnatt.length} HIGH still pending review`,
       impact:6, effort:"low",
       domain:"attestation", link:"/violations", action:"View violations",
     });
@@ -612,10 +612,10 @@ export default function PosturePage() {
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {[
-                  { label:"AI Code Coverage",  value:`${(patchedData.attestation_rate*100).toFixed(0)}%`, good: patchedData.attestation_rate > 0.85,
-                    info:{ title:"Attestation Rate", description:"Percentage of AI-generated files that have been reviewed and attested by a security engineer." } },
-                  { label:"Unreviewed Deploys", value:String(patchedData.unattested_deploy_count), good: patchedData.unattested_deploy_count === 0,
-                    info:{ title:"Unattested Deploys", description:"Deployments that went live without full attestation coverage — each represents a policy violation." } },
+                  { label:"Attestation",       value:`${(patchedData.attestation_rate*100).toFixed(0)}%`, good: patchedData.attestation_rate > 0.85,
+                    info:{ title:"Attestation Rate", description:"Share of HIGH and CRITICAL files (in each repo's latest scan) that a reviewer has attested." } },
+                  { label:"Awaiting Sign-off",  value:String(patchedData.unattested_deploy_count), good: patchedData.unattested_deploy_count === 0,
+                    info:{ title:"Repos Awaiting Sign-off", description:"Repositories whose latest scan has HIGH or CRITICAL files no reviewer has attested yet; their pull requests stay held at the merge gate." } },
                   { label:"Critical Issues",   value:String(patchedData.top_risk_files.filter(f=>f.risk_score==="CRITICAL"&&!f.attested).length), good: patchedData.top_risk_files.filter(f=>f.risk_score==="CRITICAL"&&!f.attested).length === 0,
                     info:{ title:"Critical Unattested Files", description:"Files with CRITICAL risk score that have not yet been reviewed by a security engineer." } },
                   { label:"AI % of Codebase",  value:`${(data.overall_ai_pct*100).toFixed(0)}%`, good: data.overall_ai_pct < 0.5,

@@ -2,7 +2,7 @@
 
 import InfoTooltip from "@/components/InfoTooltip";
 
-/** The three inputs the score is built from (see healthScoreParts). */
+/** The three inputs the score is built from (see healthScoreParts). blocked_deploys = repos awaiting sign-off. */
 export interface HealthInputs { attestation_rate: number; ai_pct: number; blocked_deploys: number }
 
 interface Props { score: number; inputs: HealthInputs }
@@ -42,7 +42,7 @@ export default function HealthScoreGauge({ score, inputs }: Props) {
   const factors = [
     { label: "Attestation",   value: `${Math.round(inputs.attestation_rate * 100)}% attested`, points: parts.attestation, max: 60, color: g.color },
     { label: "Human-written", value: `${Math.round((1 - Math.min(1, inputs.ai_pct)) * 100)}% of code`, points: parts.human, max: 25, color: "#f59e0b" },
-    { label: "Clean deploys", value: inputs.blocked_deploys === 0 ? "none blocked" : `${inputs.blocked_deploys} blocked`, points: parts.deploys, max: 15, color: "#6366f1" },
+    { label: "Sign-off backlog", value: inputs.blocked_deploys === 0 ? "none waiting" : `${inputs.blocked_deploys} repo${inputs.blocked_deploys !== 1 ? "s" : ""} waiting`, points: parts.deploys, max: 15, color: "#6366f1" },
   ];
 
   return (
@@ -99,7 +99,7 @@ export default function HealthScoreGauge({ score, inputs }: Props) {
         <InfoTooltip
           title="Health Score"
           description="Composite score (0–100) representing the overall security posture of your AI code governance."
-          formula={"Attestation rate × 60\n+ (1 − AI%) × 25\n+ max(0, 15 − deploys_blocked × 3)"}
+          formula={"Attestation rate × 60\n+ (1 − AI%) × 25\n+ max(0, 15 − repos_awaiting_sign_off × 3)"}
           position="top"
         />
       </div>

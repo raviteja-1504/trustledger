@@ -29,6 +29,7 @@ import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
 import type { DashboardData, RepoStat, RiskLevel, ActivityEvent } from "@/types";
 import AttentionPanel from "@/components/dashboard/AttentionPanel";
+import { applyLiveReviewState } from "@/lib/dashboardLiveState";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
@@ -120,8 +121,8 @@ function ExecSummary({ data }: { data: DashboardData }) {
                 : score >= 60 ? { label:"FAIR",   color:"#b45309", bg:"#fffbeb", border:"#fde68a" }
                 :               { label:"AT RISK", color:"#be123c", bg:"#fef2f2", border:"#fecdd3" };
   const summary = crit > 0
-    ? `${crit} CRITICAL file${crit > 1 ? "s" : ""} need${crit > 1 ? "" : "s"} immediate attestation · ${blocked} deploy${blocked !== 1 ? "s" : ""} blocked`
-    : `Attestation coverage at ${attPct}% · ${blocked} deploy${blocked !== 1 ? "s" : ""} blocked`;
+    ? `${crit} CRITICAL file${crit > 1 ? "s" : ""} need${crit > 1 ? "" : "s"} immediate attestation · ${blocked} repo${blocked !== 1 ? "s" : ""} awaiting sign-off`
+    : `Attestation coverage at ${attPct}% · ${blocked} repo${blocked !== 1 ? "s" : ""} awaiting sign-off`;
 
   // Repos / attestation / AI% / blocked used to be repeated here; the stat cards below show them.
   return (
@@ -838,94 +839,8 @@ export default function DashboardPage() {
   // Recompute unattested_deploy_count from which scan IDs still have unresolved files.
   // This way attesting ALL visible files always drives the counter to 0.
   // Unresolved scan IDs + first unresolved scan link — both derived together
-  const { effectiveData, firstUnresolvedScanId, unresolvedRepoScans } = useMemo<{
-    effectiveData: DashboardData | null;
-    firstUnresolvedScanId: string | null;
-    unresolvedRepoScans: { repo: string; repoName: string; scanId: string }[];
-  }>(() => {
-    if (!data) return { effectiveData: null, firstUnresolvedScanId: null, unresolvedRepoScans: [] };
-
-    // Only CRITICAL and HIGH files gate a deploy — MEDIUM/LOW don't block merges
-    const riskPrefix = (r: string) =>
-      r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
-
-    const unresolvedFiles = data.top_risk_files.filter(f => {
-      if (f.attested) return false;
-      if (f.risk_score !== "CRITICAL" && f.risk_score !== "HIGH") return false;
-      const pfx    = riskPrefix(f.risk_score);
-      const status = violationStatuses[`${pfx}::${f.scan_id}::${f.file_path}`];
-      const handled = status === "resolved" || status === "in_review";
-      return !handled;
-    });
-
-    // Group by REPO — a repo clears once all its CRITICAL/HIGH files are attested.
-    const unresolvedRepos = new Set(unresolvedFiles.map(f => f.repo));
-
-    // "Review now →" links to the first scan from the first repo that still has work to do
-    const firstUnresolvedScanId = unresolvedFiles[0]?.scan_id ?? null;
-
-    // One chip per unresolved repo — preserve order of first occurrence in unresolvedFiles
-    const seenRepos = new Map<string, string>();
-    for (const f of unresolvedFiles) {
-      if (!seenRepos.has(f.repo)) seenRepos.set(f.repo, f.scan_id);
-    }
-    const unresolvedRepoScans = Array.from(seenRepos.entries()).map(([repo, scanId]) => ({
-      repo,
-      repoName: repo.split("/").pop() ?? repo,
-      scanId,
-    }));
-
-    // Use the client-side count directly — it's derived from top_risk_files
-    // (a direct scan_files query) which is more reliable than the server's
-    // unattested_deploy_count (derived from the separate violations table).
-    // Previously this was capped via Math.min(data.unattested_deploy_count, ...),
-    // which could suppress the banner entirely right after a new PR is raised:
-    // if the scan-worker's violations insert lags behind its scan_files insert
-    // (async QStash timing), the server count could read 0 while top_risk_files
-    // already shows the new unattested CRITICAL/HIGH file — Math.min(0, N) = 0
-    // hid both the banner and its repo-name chips even though real data existed.
-    const adjusted = unresolvedRepos.size;
-
-    // Patch top_risk_files: mark any file as effectively attested when its violation status is handled
-    const patchedTopRisk = data.top_risk_files.map(f => {
-      if (f.attested) return f;
-      const pfx    = riskPrefix(f.risk_score);
-      const status = violationStatuses[`${pfx}::${f.scan_id}::${f.file_path}`];
-      const handled = status === "resolved" || status === "in_review";
-      return handled ? { ...f, attested: true } : f;
-    });
-
-    // Recalculate per-repo attestation_rate based on patched top_risk_files
-    const patchedRepos = data.repos.map(repo => {
-      const repoFiles = patchedTopRisk.filter(f =>
-        f.repo === repo.repo && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")
-      );
-      if (repoFiles.length === 0) return repo;
-      const nowAttested = repoFiles.filter(f => f.attested).length;
-      const newRate = nowAttested / repoFiles.length;
-      // Blend: at least the original rate, boosted by local attestations
-      const blended = Math.max(repo.attestation_rate, newRate);
-      return blended === repo.attestation_rate ? repo : { ...repo, attestation_rate: blended };
-    });
-
-    // Recompute global attestation_rate from patched files so trust score reacts
-    const critHighAll = patchedTopRisk.filter(f => f.risk_score === "CRITICAL" || f.risk_score === "HIGH");
-    const patchedAttRate = critHighAll.length > 0
-      ? critHighAll.filter(f => f.attested).length / critHighAll.length
-      : data.attestation_rate;
-
-    return {
-      effectiveData: {
-        ...data,
-        attestation_rate:        Math.max(data.attestation_rate, patchedAttRate),
-        unattested_deploy_count: adjusted,
-        top_risk_files:          patchedTopRisk,
-        repos:                   patchedRepos,
-      },
-      firstUnresolvedScanId,
-      unresolvedRepoScans,
-    };
-  }, [data, violationStatuses]);
+  const { effectiveData, firstUnresolvedScanId, unresolvedRepoScans } = useMemo(
+    () => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
 
   // Merge local attestations (always fresh from state) with base activity — newest first
   const displayActivity = useMemo(() => {
@@ -949,7 +864,9 @@ export default function DashboardPage() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
     return r.last_scan >= sevenDaysAgo; // ISO date string comparison is lexicographically safe
   }).length ?? 0;
-  const coverageRate = effectiveData && effectiveData.repos.length > 0 ? recentlyCovered / effectiveData.repos.length : 0;
+  // Over every connected repo — a connected repo with no scans in the period is exactly what coverage should catch.
+  const coverageTotal = Math.max(effectiveData?.connected_repo_count ?? 0, effectiveData?.repos.length ?? 0);
+  const coverageRate = coverageTotal > 0 ? recentlyCovered / coverageTotal : 0;
 
   // Risk velocity: compare second half of trend period to first half
   const riskVelocity = useMemo(() => {
@@ -1321,21 +1238,18 @@ export default function DashboardPage() {
                 sub="avg across repos"
                 icon={<BrainIcon />} color="violet"
                 ringValue={effectiveData.overall_ai_pct}
-                info={{ title:"Average AI Content %", description:"Weighted average probability that files in your codebase were AI-generated, computed across all scanned files.", formula:"sum(ai_percentage per file) ÷ total_files_scanned" }}
-                trend={
-                  riskVelocity
-                    ? { direction: riskVelocity.direction === "up" ? "up" : "down", label: `${riskVelocity.direction === "up" ? "+" : "-"}${riskVelocity.delta}% vs prev` }
-                    : effectiveData.overall_ai_pct > 0.5
-                      ? { direction: "up", label: "above threshold" }
-                      : { direction: "down", label: "within threshold" }
-                }
+                info={{ title:"Average AI Content %", description:"Share of AI-generated code across the files scanned in this period: each scan's AI% weighted by the number of files it analysed.", formula:"Σ(scan AI% × files in scan) ÷ Σ files scanned" }}
+                // (Its "vs prev" used to be the HIGH/CRITICAL risk-file trend — a different metric.)
+                trend={effectiveData.overall_ai_pct > 0.5
+                  ? { direction: "up", label: "above threshold" }
+                  : { direction: "down", label: "within threshold" }}
               />
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 animate-fade-up [&>*:last-child]:col-span-2 lg:[&>*:last-child]:col-span-1">
               <StatsCard
                 label="Attestation"
                 value={`${(effectiveData.attestation_rate * 100).toFixed(0)}%`}
-                sub="HIGH/CRIT reviewed"
+                sub={effectiveData.total_high_crit != null ? `${effectiveData.attested_high_crit ?? 0}/${effectiveData.total_high_crit} HIGH/CRIT files` : "HIGH/CRIT reviewed"}
                 icon={<ShieldCheckIcon />} color="emerald"
                 ringValue={effectiveData.attestation_rate}
                 info={{ title:"Attestation Rate", description:"Percentage of HIGH and CRITICAL-risk files that have been reviewed and signed off by a named human reviewer. Target ≥ 80%.", formula:"attested_high_crit_files ÷ total_high_crit_files × 100" }}
@@ -1344,12 +1258,12 @@ export default function DashboardPage() {
                   : { direction: "down", label: "needs review" }}
               />
               <StatsCard
-                label="Unattested Deploys"
+                label="Awaiting Sign-off"
                 value={effectiveData.unattested_deploy_count}
-                sub={rangeMode === "custom" ? "in range" : `last ${rangeMode} days`}
+                sub={`repo${effectiveData.unattested_deploy_count !== 1 ? "s" : ""} with unattested HIGH/CRIT files`}
                 icon={<AlertIcon />}
                 color={effectiveData.unattested_deploy_count > 0 ? "rose" : "emerald"}
-                info={{ title:"Unattested Deploys", description:"PRs currently blocked from merging because they contain HIGH or CRITICAL-risk AI files that have not yet been reviewed and attested. Zero is the goal." }}
+                info={{ title:"Awaiting Sign-off", description:"Repositories whose latest scan has HIGH or CRITICAL files that nobody has attested or started reviewing yet. Their pull requests are held by the merge gate until a reviewer signs off. Zero is the goal." }}
                 trend={effectiveData.unattested_deploy_count > 0
                   ? { direction: "up",      label: "action needed" }
                   : { direction: "neutral", label: "all clear" }}
@@ -1357,10 +1271,10 @@ export default function DashboardPage() {
               <StatsCard
                 label="7-day Coverage"
                 value={`${Math.round(coverageRate * 100)}%`}
-                sub={`${recentlyCovered}/${effectiveData.repos.length} repos`}
+                sub={`${recentlyCovered}/${coverageTotal} repos`}
                 icon={<CoverageIcon />} color="emerald"
                 ringValue={coverageRate}
-                info={{ title:"7-day Scan Coverage", description:"Percentage of connected repositories that have had at least one scan in the last 7 days. Low coverage means some repos may have ungoverned AI code changes.", formula:"repos_scanned_last_7d ÷ total_repos × 100" }}
+                info={{ title:"7-day Scan Coverage", description:"Percentage of connected repositories that have had at least one scan in the last 7 days, including connected repos with no scans in this period. Low coverage means some repos may have ungoverned AI code changes.", formula:"repos_scanned_last_7d ÷ connected_repos × 100" }}
                 trend={coverageRate >= 0.8
                   ? { direction: "up",   label: "good coverage" }
                   : { direction: "down", label: "stale repos" }}

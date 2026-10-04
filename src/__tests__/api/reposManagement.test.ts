@@ -9,6 +9,8 @@ import { fakeSupabase } from "../helpers/fakeSupabase";
 let db: ReturnType<typeof fakeSupabase>;
 let role = "admin";
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
+const cacheDel = jest.fn(async () => {});
+jest.mock("@/lib/cache", () => ({ cacheDel: (k: string) => cacheDel(k as never), cacheKeys: { dashboard: (o: string, d: number) => `dash:${o}:${d}` } }));
 jest.mock("@/app/api/_middleware", () => ({
   ...jest.requireActual("@/app/api/_middleware"),
   verifyApiKey: async () => ({ org_id: "org-1", user_id: "u1", role }),
@@ -79,6 +81,14 @@ describe("import from GitHub", () => {
     expect(res.status).toBe(403);
     expect(gh.listInstallationRepos).not.toHaveBeenCalled();
   });
+});
+
+it("switching a repository clears the cached dashboard numbers right away", async () => {
+  await PATCH(req("/api/repos", "PATCH", { id: "r1", is_active: false }));
+  expect(cacheDel.mock.calls.map(c => c[0]).sort()).toEqual(["dash:org-1:30", "dash:org-1:7", "dash:org-1:90"]);
+  cacheDel.mockClear();
+  await POST(req("/api/repos?import=github", "POST"));
+  expect(cacheDel).toHaveBeenCalledTimes(3);
 });
 
 describe("switch on / off", () => {

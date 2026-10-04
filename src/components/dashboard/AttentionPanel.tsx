@@ -23,7 +23,7 @@ function SLAIcon() {
 export type SlaCounts = { crit: number; high: number; total: number };
 
 /**
- * One "Needs attention" panel: deploys waiting for sign-off, attestation SLA breaches, and the other open
+ * One "Needs attention" panel: repos whose HIGH/CRITICAL files await sign-off (unattested_deploy_count counts repos), attestation SLA breaches, and the other open
  * queues (secrets, risky packages, violations). These used to be two stacked banners plus a chip row that
  * repeated the same counts three times.
  */
@@ -85,13 +85,13 @@ export default function AttentionPanel({ data, violationStatuses, openSecrets, u
         )}
       </div>
 
-      {/* Deploys waiting for sign-off */}
+      {/* Repos waiting for sign-off */}
       {deploys > 0 && (
         <div className="flex items-start gap-3 px-4 sm:px-5 py-3 bg-rose-50/60 border-b border-rose-100 last:border-b-0">
           <div className="w-8 h-8 rounded-lg bg-rose-100 flex items-center justify-center text-rose-600 shrink-0"><AlertIcon /></div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold text-rose-800">{deploys} deploy{deploys !== 1 ? "s" : ""} pending attestation</p>
-            <p className="text-xs text-rose-600 mt-0.5">HIGH or CRITICAL files were deployed without reviewer sign-off. Review and attest to clear.</p>
+            <p className="text-sm font-bold text-rose-800">{deploys} repo{deploys !== 1 ? "s" : ""} awaiting sign-off</p>
+            <p className="text-xs text-rose-600 mt-0.5">The latest scan has HIGH or CRITICAL files no reviewer has attested yet; their pull requests stay held at the merge gate. Review and attest to clear.</p>
             {unresolvedRepoScans.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {unresolvedRepoScans.map(({ repoName, scanId }) => (

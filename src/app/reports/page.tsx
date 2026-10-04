@@ -232,7 +232,7 @@ function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
 
   if (fw === "SOC2") return [
     { label:"Attestation Rate",    value:`${att}%`,                      sub:"CC8.1 change control",         status: att>=80?"good":att>=60?"warn":"bad"  },
-    { label:"Unattested Deploys",  value:String(d.unattested_deploy_count), sub:`Org-wide HIGH/CRITICAL pending review — ${slaBreached} past SLA deadline`, status: d.unattested_deploy_count===0?"good":"warn" },
+    { label:"Unattested HIGH/CRIT files", value:String(d.unattested_deploy_count), sub:`Org-wide HIGH/CRITICAL pending review — ${slaBreached} past SLA deadline`, status: d.unattested_deploy_count===0?"good":"warn" },
     { label:"Critical Files",      value:String(crit),                   sub:"Require immediate review",     status: crit===0?"good":crit<=2?"warn":"bad" },
     { label:"Scans Completed",     value:String(d.scan_count),           sub:`${d.file_count} files reviewed`, status:"info" },
   ];
@@ -373,7 +373,7 @@ function criterionEvidence(id: string, data: DashboardData, real?: RealEvidenceP
     "CC6.1": { text:`${attested} of ${total} changes reviewed by authorised personnel`, pct:att },
     "CC6.2": { text:`${data.scan_count} reviewer sessions verified via GitHub OAuth`, pct:data.scan_count>0?100:0 },
     "CC7.2": { text:`${data.scan_count} automated scans · ${data.file_count} files continuously monitored`, pct:data.scan_count>0?100:0 },
-    "CC8.1": { text:`${att}% attestation coverage · ${data.unattested_deploy_count} deploys blocked from merge`, pct:att },
+    "CC8.1": { text:`${att}% attestation coverage · ${data.unattested_deploy_count} HIGH/CRITICAL file${data.unattested_deploy_count !== 1 ? "s" : ""} awaiting sign-off`, pct:att },
     "A1.2":  { text:`Audit trail retained across ${data.repos.length} repos · ${data.file_count} records`, pct:100 },
     "Art.9":  { text:`${crit+high} risk items tracked · ${attested} remediated via attestation workflow`, pct:crit+high===0?100:Math.max(att,50) },
     "Art.10": { text:`Provenance captured for ${data.file_count} files across ${data.repos.length} repositories`, pct:100 },
@@ -508,7 +508,7 @@ function RiskOverview({ data, color }: { data: DashboardData; color: string }) {
             <p className="text-xs font-semibold text-gray-600">
               {data.top_risk_files.filter(f => f.attested).length} of {data.top_risk_files.length} files attested
             </p>
-            <p className="text-[10px] text-gray-400">{data.unattested_deploy_count} unattested deploys blocked</p>
+            <p className="text-[10px] text-gray-400">{data.unattested_deploy_count} HIGH/CRITICAL file{data.unattested_deploy_count !== 1 ? "s" : ""} awaiting sign-off</p>
           </div>
         </div>
         <div className="mt-3 h-3 rounded-full overflow-hidden" style={{ background:"rgba(0,0,0,0.06)" }}>

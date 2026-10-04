@@ -13,6 +13,12 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
 import { getInstallationToken, listInstallationRepos } from "@/lib/github";
 import { safeError } from "@/lib/errors";
+import { cacheDel, cacheKeys } from "@/lib/cache";
+
+/** Repos switched on/off or added change what the dashboard counts — drop its cached numbers right away. */
+async function invalidateDashboard(orgId: string) {
+  await Promise.all([7, 30, 90].map(d => cacheDel(cacheKeys.dashboard(orgId, d)))).catch(() => {});
+}
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -68,6 +74,7 @@ export async function POST(req: NextRequest) {
           .upsert(fresh.map(([name, branch]) => ({ org_id, repo_full_name: name, default_branch: branch || "main", is_active: true })),
             { onConflict: "org_id,repo_full_name", ignoreDuplicates: true });
         if (insErr) throw insErr;
+        await invalidateDashboard(org_id);
       }
       return NextResponse.json({ added: fresh.length, already_connected: found.size - fresh.length, total: found.size });
     } catch (err) {
@@ -87,6 +94,7 @@ export async function POST(req: NextRequest) {
     .single() as { data: unknown; error: unknown };
 
   if (insErr) return NextResponse.json({ error: "insert_failed" }, { status: 500 });
+  await invalidateDashboard(org_id);
   return NextResponse.json({ repo: data });
 }
 
@@ -103,5 +111,6 @@ export async function PATCH(req: NextRequest) {
   const { data } = await db.from("repositories").update({ is_active: body.is_active }).eq("id", body.id).eq("org_id", auth.org_id)
     .select("id, is_active") as { data: unknown[] | null };
   if (!data || data.length === 0) return NextResponse.json({ error: "repo_not_found" }, { status: 404 });
+  await invalidateDashboard(auth.org_id);
   return NextResponse.json({ ok: true });
 }

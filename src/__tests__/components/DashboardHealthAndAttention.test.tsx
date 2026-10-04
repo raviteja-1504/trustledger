@@ -19,7 +19,7 @@ describe("health score", () => {
     expect(screen.getByText("43/60")).toBeInTheDocument();
     expect(screen.getByText("· 40% of code")).toBeInTheDocument();
     expect(screen.getByText("10/25")).toBeInTheDocument();
-    expect(screen.getByText("· 9 blocked")).toBeInTheDocument();
+    expect(screen.getByText("· 9 repos waiting")).toBeInTheDocument();
     expect(screen.getByText("0/15")).toBeInTheDocument();
     expect(screen.queryByText("88%")).not.toBeInTheDocument();
   });
@@ -48,7 +48,7 @@ describe("Needs attention panel", () => {
       unresolvedRepoScans={[{ repoName: "api", scanId: "s1" }]}
       sla={{ crit: 1, high: 1, total: 2 }} showQueues />);
     const panel = screen.getByRole("region", { name: "Needs attention" });
-    expect(panel).toHaveTextContent("2 deploys pending attestation");
+    expect(panel).toHaveTextContent("2 repos awaiting sign-off");
     expect(screen.getByRole("link", { name: "api →" })).toHaveAttribute("href", "/pr/s1");
     expect(panel).toHaveTextContent("Attestation SLA breached");
     expect(panel).toHaveTextContent("1 CRITICAL · 24 h");
@@ -57,7 +57,7 @@ describe("Needs attention panel", () => {
     expect(screen.getByRole("link", { name: /3 open secrets/ })).toHaveAttribute("href", "/secrets");
     // The deploy count is a row, not repeated again as a chip.
     expect(screen.queryByRole("link", { name: /deploys blocked/ })).not.toBeInTheDocument();
-    expect(screen.getAllByText(/deploys? pending attestation/)).toHaveLength(1);
+    expect(screen.getAllByText(/repos? awaiting sign-off/)).toHaveLength(1);
   });
 
   it("lists the first three overdue files and expands to the rest", () => {
@@ -71,7 +71,7 @@ describe("Needs attention panel", () => {
   it("developers see their deploys and SLA rows, without the org-wide queues", () => {
     render(<AttentionPanel data={data({ unattested_deploy_count: 1, top_risk_files: [risky("CRITICAL")] as never })} violationStatuses={{}} openSecrets={4}
       unresolvedRepoScans={[]} sla={null} showQueues={false} />);
-    expect(screen.getByText("1 deploy pending attestation")).toBeInTheDocument();
+    expect(screen.getByText("1 repo awaiting sign-off")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /open secrets/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /CRITICAL unattested/ })).not.toBeInTheDocument();
   });

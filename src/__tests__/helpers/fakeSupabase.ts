@@ -11,13 +11,14 @@ class FakeQuery implements PromiseLike<unknown> {
   private countMode = false;
   private head = false;
   private one: "single" | "maybe" | null = null;
-  private orderBy: [string, boolean] | null = null;
+  private orderBy: Array<[string, boolean]> = [];
   private max: number | null = null;
+  private window: [number, number] | null = null;
   private write: string | null = null;
   private payload: unknown = undefined;
   private returning = false;
 
-  constructor(private rows: Row[], private writes: Array<{ table: string; op: string; payload?: unknown }>, private table: string) {}
+  constructor(private rows: Row[], private writes: Array<{ table: string; op: string; payload?: unknown }>, private table: string, private cap: number | null = null) {}
 
   select(_cols?: string, opts?: { count?: string; head?: boolean }) {
     if (this.write) { this.returning = true; return this; }
@@ -43,8 +44,12 @@ class FakeQuery implements PromiseLike<unknown> {
   is(c: string, v: unknown) { this.filters.push(r => (v === null ? r[c] == null : r[c] === v)); return this; }
   in(c: string, vs: unknown[]) { this.filters.push(r => vs.includes(r[c])); return this; }
   lt(c: string, v: string) { this.filters.push(r => String(r[c]) < v); return this; }
-  order(c: string, o?: { ascending?: boolean }) { this.orderBy = [c, o?.ascending ?? true]; return this; }
+  gte(c: string, v: string) { this.filters.push(r => String(r[c]) >= v); return this; }
+  lte(c: string, v: string) { this.filters.push(r => String(r[c]) <= v); return this; }
+  order(c: string, o?: { ascending?: boolean }) { this.orderBy.push([c, o?.ascending ?? true]); return this; }
   limit(n: number) { this.max = n; return this; }
+  /** Inclusive row window, like PostgREST's Range header. */
+  range(from: number, to: number) { this.window = [from, to]; return this; }
   single() { this.one = "single"; return this; }
   maybeSingle() { this.one = "maybe"; return this; }
   insert(payload: unknown) { this.write = "insert"; this.payload = payload; this.writes.push({ table: this.table, op: "insert", payload }); return this; }
@@ -61,11 +66,16 @@ class FakeQuery implements PromiseLike<unknown> {
   private result() {
     if (this.write) return (this.applied ??= this.applyWrite());
     let rows = this.rows.filter(r => this.filters.every(f => f(r)));
-    if (this.orderBy) {
-      const [c, asc] = this.orderBy;
-      rows = [...rows].sort((a, b) => (String(a[c]) < String(b[c]) ? -1 : String(a[c]) > String(b[c]) ? 1 : 0) * (asc ? 1 : -1));
+    if (this.orderBy.length > 0) {
+      const cmp = (x: unknown, y: unknown) => typeof x === "number" && typeof y === "number" ? x - y : String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0;
+      rows = [...rows].sort((a, b) => {
+        for (const [c, asc] of this.orderBy) { const d = cmp(a[c], b[c]); if (d !== 0) return asc ? d : -d; }
+        return 0;
+      });
     }
+    if (this.window) rows = rows.slice(this.window[0], this.window[1] + 1);
     if (this.max != null) rows = rows.slice(0, this.max);
+    if (this.cap != null && !this.head) rows = rows.slice(0, this.cap);
     if (this.countMode) return { data: this.head ? null : rows, count: rows.length, error: null };
     if (this.one) return rows[0] ? { data: rows[0], error: null } : { data: null, error: this.one === "single" ? { message: "no rows" } : null };
     return { data: rows, error: null };
@@ -89,10 +99,18 @@ class FakeQuery implements PromiseLike<unknown> {
   }
 }
 
-export function fakeSupabase(tables: Record<string, Row[]>) {
+/**
+ * `maxRows` mimics the project's PostgREST max_rows cap (every response silently truncated to that many rows),
+ * so tests can prove a query pages through instead of quietly losing data. `rpc` returns canned results.
+ */
+export function fakeSupabase(tables: Record<string, Row[]>, opts: { maxRows?: number; rpc?: Record<string, (args: Record<string, unknown>) => unknown> } = {}) {
   const writes: Array<{ table: string; op: string; payload?: unknown }> = [];
+  const from = (table: string) => new FakeQuery((tables[table] ??= []), writes, table, opts.maxRows ?? null);
   return {
     writes,
-    client: { from: (table: string) => new FakeQuery((tables[table] ??= []), writes, table) },
+    client: {
+      from,
+      rpc: async (fn: string, args: Record<string, unknown>) => ({ data: opts.rpc?.[fn] ? opts.rpc[fn](args) : [], error: null }),
+    },
   };
 }

@@ -220,6 +220,15 @@ export interface DashboardData {
     scan_id: string;
     sla_deadline: string;
   }>;
+  // Connected (switched-on) repositories, scanned in the period or not — the
+  // denominator for 7-day coverage. Optional for older cached/seed payloads.
+  connected_repo_count?: number;
+  // attestation_rate = attested_high_crit ÷ total_high_crit (distinct files in
+  // each repo's latest scan). Optional for older cached/seed payloads.
+  attested_high_crit?: number;
+  total_high_crit?: number;
+  // The period actually covered (custom range or the last N days).
+  period?: { start: string; end: string };
 }
 
 // ── Activity ──────────────────────────────────────────────────────────────────
