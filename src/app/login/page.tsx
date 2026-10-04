@@ -212,7 +212,7 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
         </Link>
       </header>
 
-      <main className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 pt-6 lg:pt-12 grid gap-12 items-center ${aside ? "lg:grid-cols-[1.05fr_minmax(0,440px)] lg:gap-20" : "justify-items-center"}`}>
+      <main className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 pt-6 sm:pt-10 lg:pt-[9vh] grid gap-12 items-start ${aside ? "lg:grid-cols-[1.05fr_minmax(0,440px)] lg:gap-20" : "justify-items-center"}`}>
         {aside && (
           <section className="hidden lg:block space-y-7" aria-label="Why TrustLedger">
             <Eyebrow>Code security with proof</Eyebrow>
@@ -450,7 +450,7 @@ function ProductionLoginPage() {
   return (
     <AuthShell aside>
       <AuthCard>
-        <div className="space-y-1.5">
+        <div className="space-y-1.5 text-center">
           <h1 className="text-2xl font-black tracking-tight">{heading}</h1>
           <p className="text-sm text-white/55">{sub}</p>
         </div>
@@ -460,7 +460,7 @@ function ProductionLoginPage() {
           style={{ background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.08)" }}>
           {(["signin","signup","forgot"] as const).map(m => (
             <button key={m} role="tab" aria-selected={mode === m} onClick={() => switchMode(m)}
-              className="py-2 rounded-lg text-xs font-bold transition-all"
+              className="py-2 px-1 rounded-lg text-[11px] sm:text-xs font-bold whitespace-nowrap transition-all"
               style={mode === m
                 ? { color: INK, background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 14px ${CYAN}44` }
                 : { color: "rgba(255,255,255,0.5)" }}>
@@ -547,13 +547,13 @@ function ProductionLoginPage() {
         )}
 
         {mode === "signup" && (
-          <p className="text-xs text-white/40 text-center">
+          <p className="text-xs text-white/40 text-center leading-relaxed" style={{ textWrap: "balance" }}>
             Joining your team? Ask an admin to invite you — invites put you straight into their organisation.
           </p>
         )}
       </AuthCard>
 
-      <p className="mt-6 text-center text-xs text-white/35">
+      <p className="mt-6 text-center text-xs text-white/35 leading-relaxed" style={{ textWrap: "balance" }}>
         By continuing you agree to our{" "}
         <Link href="/terms" className="underline underline-offset-2 hover:text-white/70">Terms of Service</Link>
         {" "}and{" "}
