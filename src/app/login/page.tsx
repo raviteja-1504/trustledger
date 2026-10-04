@@ -212,9 +212,12 @@ function AuthShell({ children, aside = false }: { children: React.ReactNode; asi
         </Link>
       </header>
 
-      <main className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 pt-6 sm:pt-10 lg:pt-[9vh] grid gap-12 items-start ${aside ? "lg:grid-cols-[1.05fr_minmax(0,440px)] lg:gap-20" : "justify-items-center"}`}>
+      {/* One fixed top offset at every size: a 38rem block (the tallest form, Sign Up) centred in the space
+          under the header. Fixed rather than centring the live content, so switching tabs never moves anything.
+          Below xl (phones, tablets either way up) a single centred column; from xl two top-aligned columns. */}
+      <main style={{ paddingTop: "max(1.5rem, calc((100svh - 4rem - 38rem) / 2))" }} className={`relative z-10 max-w-6xl mx-auto px-5 pb-16 grid gap-12 items-start justify-items-center ${aside ? "xl:grid-cols-[1.05fr_minmax(0,440px)] xl:gap-20 xl:justify-items-stretch" : ""}`}>
         {aside && (
-          <section className="hidden lg:block space-y-7" aria-label="Why TrustLedger">
+          <section className="hidden xl:block space-y-7" aria-label="Why TrustLedger">
             <Eyebrow>Code security with proof</Eyebrow>
             <h2 className="text-5xl font-black tracking-tight leading-[1.05]" style={{ textShadow: "0 4px 40px rgba(0,0,0,0.7)" }}>
               Know what ships.<br />
