@@ -3,7 +3,8 @@
 import { ReactNode, useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { authedFetch } from "@/lib/useRealData";
+import { authedFetch, handleSessionError } from "@/lib/useRealData";
+import { fullPageReplace } from "@/lib/authFlow";
 
 import { BrandLogo } from "./BrandLogo";
 
@@ -44,7 +45,7 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
           }).catch(() => {});
           return;
         }
-        window.location.replace("/onboarding");
+        fullPageReplace("/onboarding");
       })
       .catch(() => {}); // if check fails, allow access
   }, [loading, user, profile, pathname]);
@@ -72,7 +73,7 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
     if (typeof window !== "undefined") {
       import("@/lib/supabase").then(({ supabase }) =>
         supabase.auth.getSession().then(({ data: { session } }) => {
-          if (!session?.access_token) { window.location.replace("/create-org"); return; }
+          if (!session?.access_token) { fullPageReplace("/login"); return; }
           fetch("/api/me", { headers: { Authorization: `Bearer ${session.access_token}` } })
             .then(async res => {
               if (res.ok) {
@@ -81,15 +82,19 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
               } else {
                 const body = await res.json().catch(() => ({}));
                 // Only redirect to create-org if truly no membership
-                if (res.status === 404 && body.error === "no_org_membership") {
-                  window.location.replace("/create-org");
+                // /api/me answers "no org" both as 404 and (via verifyApiKey) as 401 — key on the code.
+                if (body.error === "no_org_membership") {
+                  fullPageReplace("/create-org");
+                } else if (body.error === "mfa_required" || body.error === "session_revoked") {
+                  // Needs the 2FA code / signed in elsewhere — retrying would loop forever.
+                  handleSessionError(body.error);
                 } else {
                   // Auth/server error — retry in 2s
                   setTimeout(() => window.location.reload(), 2000);
                 }
               }
             })
-            .catch(() => window.location.replace("/create-org"));
+            .catch(() => fullPageReplace("/create-org"));
         })
       );
     }

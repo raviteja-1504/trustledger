@@ -6,6 +6,7 @@ import {
 import type { User, Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import { authedFetch } from "./useRealData";
+import { authLinkErrorCode, fullPageReplace, hasAuthCallbackParams } from "./authFlow";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -28,12 +29,20 @@ interface AuthContextValue {
   loading:          boolean;
   passwordRecovery: boolean;
   clearPasswordRecovery: () => void;
-  signInWithGitHub:   () => Promise<void>;
+  /** Leave a half-finished password reset: forget the reset state and sign the reset session out. */
+  cancelPasswordRecovery: () => Promise<void>;
+  /** Set the new password from a reset link and make this session the active one. */
+  completePasswordReset:  (password: string) => Promise<{ error: string | null; mfaRequired: boolean }>;
+  signInWithGitHub:   () => Promise<{ error: string | null }>;
   signInWithEmail:    (email: string, password: string) => Promise<{ error: string | null }>;
   signUpWithEmail:    (email: string, password: string, name: string) => Promise<{ error: string | null }>;
+  resendConfirmation: (email: string) => Promise<{ error: string | null }>;
   resetPassword:      (email: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
 }
+
+/** POST /api/auth/bootstrap's answer. */
+export interface BootstrapResult { has_org: boolean; is_new_user: boolean; mfa_required: boolean }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -111,7 +120,10 @@ function makeDemoAuth(): AuthContextValue {
     loading: false,
     passwordRecovery:      false,
     clearPasswordRecovery: () => {},
-    signInWithGitHub:      async () => {},
+    cancelPasswordRecovery: async () => {},
+    completePasswordReset: async () => ({ error: null, mfaRequired: false }),
+    signInWithGitHub:      async () => ({ error: null }),
+    resendConfirmation:    async () => ({ error: null }),
     signInWithEmail:       async () => ({ error: null }),
     signUpWithEmail:       async () => ({ error: null }),
     resetPassword:         async () => ({ error: null }),
@@ -152,6 +164,21 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     setPasswordRecovery(false);
   }
 
+  async function cancelPasswordRecovery() {
+    clearPasswordRecovery();
+    await signOut();
+  }
+
+  async function completePasswordReset(password: string) {
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return { error: error.message, mfaRequired: false };
+    clearPasswordRecovery();
+    // The reset link signed in a new session; make it the active one (otherwise the next API call is
+    // refused as session_revoked). With 2FA on, it only becomes active after the 2FA step.
+    const result = await registerSession();
+    return { error: null, mfaRequired: !!result?.mfa_required };
+  }
+
   // Load org profile via the service-role API — bypasses RLS completely.
   async function loadProfile(_userId: string) {
     try {
@@ -175,6 +202,21 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Emailed links (confirm sign-up, password reset) that Supabase couldn't complete — expired, already
+  // used, or opened in a different browser than the one that requested them — otherwise fail silently on
+  // whatever page they land on. Send the user to the login page with an explanation instead.
+  useEffect(() => {
+    if (typeof window === "undefined" || window.location.pathname.startsWith("/auth/callback")) return;
+    const landedOn = window.location.href;
+    if (!hasAuthCallbackParams(window.location.search, window.location.hash)) return;
+    const init = (supabase.auth as { initialize?: () => Promise<{ error: unknown }> }).initialize;
+    if (typeof init !== "function") return;
+    init.call(supabase.auth).then(({ error }) => {
+      const code = authLinkErrorCode(error, landedOn);
+      if (code) fullPageReplace(`/login?error=${code}`);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -194,8 +236,13 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
         if (typeof window !== "undefined") {
           localStorage.setItem("tl_password_recovery", "1");
           setPasswordRecovery(true);
+          // Keep the reset session in state too: the login page tells "reset in progress" apart from
+          // "stale reset flag, nobody signed in" by whether there's a user.
+          syncSessionCookie(session);
+          setSession(session);
+          setUser(session?.user ?? null);
           if (!window.location.pathname.startsWith("/login")) {
-            window.location.replace("/login");
+            fullPageReplace("/login");
           }
         }
         return;
@@ -220,13 +267,14 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function signInWithGitHub() {
-    await supabase.auth.signInWithOAuth({
+    const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
         scopes: "read:user user:email read:org",
       },
     });
+    return { error: error?.message ?? null };
   }
 
   async function signInWithEmail(email: string, password: string) {
@@ -241,12 +289,18 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   async function signUpWithEmail(email: string, password: string, name: string) {
     const { data, error } = await supabase.auth.signUp({
       email, password,
-      options: { data: { name } },
+      // full_name too: the GitHub provider fills full_name, and the app reads it for every user.
+      options: { data: { name, full_name: name } },
     });
     if (!error && data.session) {
       syncSessionCookie(data.session);
       await registerSession();
     }
+    return { error: error?.message ?? null };
+  }
+
+  async function resendConfirmation(email: string) {
+    const { error } = await supabase.auth.resend({ type: "signup", email });
     return { error: error?.message ?? null };
   }
 
@@ -260,16 +314,18 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 
   // Record this session as the user's sole active session (kicks out any
   // previously issued token — see verifyApiKey's session_revoked check).
-  async function registerSession() {
+  async function registerSession(): Promise<BootstrapResult | null> {
     try {
-      await authedFetch("/api/auth/bootstrap", { method: "POST" });
-    } catch { /* best-effort */ }
+      return await authedFetch<BootstrapResult>("/api/auth/bootstrap", { method: "POST" });
+    } catch { return null; /* best-effort */ }
   }
 
   async function signOut() {
     await supabase.auth.signOut();
     syncSessionCookie(null);
     setProfile(null);
+    if (typeof window !== "undefined") localStorage.removeItem("tl_password_recovery");
+    setPasswordRecovery(false);
   }
 
   // Auto sign-out after IDLE_TIMEOUT_MS with no user activity.
@@ -301,7 +357,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, clearPasswordRecovery, signInWithGitHub, signInWithEmail, signUpWithEmail, resetPassword, signOut }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -313,7 +369,10 @@ const _noopAuth: AuthContextValue = {
   user: null, session: null, profile: null, loading: false,
   passwordRecovery:      false,
   clearPasswordRecovery: () => {},
-  signInWithGitHub:      async () => {},
+  cancelPasswordRecovery: async () => {},
+  completePasswordReset: async () => ({ error: null, mfaRequired: false }),
+  signInWithGitHub:      async () => ({ error: null }),
+  resendConfirmation:    async () => ({ error: null }),
   signInWithEmail:       async () => ({ error: null }),
   signUpWithEmail:       async () => ({ error: null }),
   resetPassword:         async () => ({ error: null }),

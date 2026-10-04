@@ -13,74 +13,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import crypto from "crypto";
+import { generateTOTPSecret, verifyTOTP, buildOtpAuthUri } from "@/lib/totp";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
-
-// ── TOTP implementation (no dependencies — pure stdlib) ──────────────────────
-
-function base32Decode(encoded: string): Buffer {
-  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const cleaned  = encoded.replace(/=+$/, "").toUpperCase();
-  let bits = "";
-  for (const c of cleaned) {
-    const idx = ALPHABET.indexOf(c);
-    if (idx === -1) continue;
-    bits += idx.toString(2).padStart(5, "0");
-  }
-  const bytes: number[] = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) {
-    bytes.push(parseInt(bits.slice(i, i + 8), 2));
-  }
-  return Buffer.from(bytes);
-}
-
-function base32Encode(buf: Buffer): string {
-  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let bits = "";
-  Array.from(buf).forEach(byte => { bits += byte.toString(2).padStart(8, "0"); });
-  while (bits.length % 5 !== 0) bits += "0";
-  let out = "";
-  for (let i = 0; i < bits.length; i += 5) out += ALPHABET[parseInt(bits.slice(i, i + 5), 2)];
-  while (out.length % 8 !== 0) out += "=";
-  return out;
-}
-
-function generateTOTPSecret(): string {
-  return base32Encode(crypto.randomBytes(20));
-}
-
-function generateTOTP(secret: string, t?: number): string {
-  const counter = Math.floor((t ?? Date.now() / 1000) / 30);
-  const key     = base32Decode(secret);
-  const msg     = Buffer.alloc(8);
-  msg.writeBigInt64BE(BigInt(counter), 0);
-  const hmac = crypto.createHmac("sha1", key).update(msg).digest();
-  const offset= hmac[19] & 0x0f;
-  const code  = ((hmac[offset] & 0x7f) << 24 |
-                  hmac[offset+1] << 16 |
-                  hmac[offset+2] << 8  |
-                  hmac[offset+3]) % 1_000_000;
-  return code.toString().padStart(6, "0");
-}
-
-function verifyTOTP(secret: string, code: string, window = 1): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  for (let i = -window; i <= window; i++) {
-    if (generateTOTP(secret, now + i * 30) === code.replace(/\s/g, "")) return true;
-  }
-  return false;
-}
-
-function buildOtpAuthUri(secret: string, email: string, issuer: string): string {
-  const params = new URLSearchParams({
-    secret,
-    issuer,
-    algorithm: "SHA1",
-    digits:    "6",
-    period:    "30",
-  });
-  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(email)}?${params.toString()}`;
-}
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 

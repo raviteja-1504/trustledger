@@ -86,7 +86,7 @@ describe("verifyApiKey", () => {
     // invited users whose org_members row predates their first login) ->
     // select-by-user_id again. All three must resolve to "not found" here.
     const chain: Record<string, unknown> = {};
-    for (const m of ["select", "update", "eq", "neq"]) chain[m] = jest.fn(() => chain);
+    for (const m of ["select", "update", "eq", "neq", "or"]) chain[m] = jest.fn(() => chain);
     chain.single      = jest.fn().mockResolvedValue({ data: null });
     chain.maybeSingle = jest.fn().mockResolvedValue({ data: null });
 
@@ -98,6 +98,48 @@ describe("verifyApiKey", () => {
     expect(result.error).toBe("no_org_membership");
   });
 
+  it("links a pending invite by email only when the email is confirmed", async () => {
+    process.env.NEXT_PUBLIC_SKIP_AUTH = "false";
+    const chain: Record<string, unknown> = {};
+    for (const m of ["select", "update", "eq", "neq", "or"]) chain[m] = jest.fn(() => chain);
+    chain.single      = jest.fn().mockResolvedValue({ data: null });
+    chain.maybeSingle = jest.fn().mockResolvedValue({ data: { org_id: "org-inv", role: "developer", email: "a@b.com", active_session_id: null } });
+    const getUser = jest.fn();
+    (createServiceClient as jest.Mock).mockReturnValue({ auth: { getUser }, from: jest.fn(() => chain) });
+
+    getUser.mockResolvedValue({ data: { user: { id: "u1", email: "a@b.com", email_confirmed_at: null } }, error: null });
+    expect((await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).error).toBe("no_org_membership");
+    expect(chain.update).not.toHaveBeenCalled();
+
+    getUser.mockResolvedValue({ data: { user: { id: "u1", email: "a@b.com", email_confirmed_at: "2026-10-01T00:00:00Z" } }, error: null });
+    expect(await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).toMatchObject({ org_id: "org-inv", user_id: "u1" });
+    expect(chain.update).toHaveBeenCalledWith({ user_id: "u1" });
+  });
+
+  it("refuses a 2FA user's session until the sign-in code step made it the active one", async () => {
+    process.env.NEXT_PUBLIC_SKIP_AUTH = "false";
+    const member = { org_id: "org-1", role: "admin", email: "a@b.com", active_session_id: "verified-session" };
+    (createServiceClient as jest.Mock).mockReturnValue({
+      auth: { getUser: jest.fn().mockResolvedValue({ data: { user: { id: "u1", email: "a@b.com" } }, error: null }) },
+      from: jest.fn((table: string) => ({
+        select: () => ({ eq: () => ({
+          single: jest.fn().mockResolvedValue({ data: member }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: table === "user_2fa" ? { enabled: true } : null }),
+        }) }),
+      })),
+    });
+    (getJwtSessionId as jest.Mock).mockReturnValue("fresh-password-session");
+    expect((await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).error).toBe("mfa_required");
+    (getJwtSessionId as jest.Mock).mockReturnValue(null);
+    expect((await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).error).toBe("mfa_required");
+    (getJwtSessionId as jest.Mock).mockReturnValue("verified-session");
+    expect(await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).toMatchObject({ org_id: "org-1", user_id: "u1" });
+    // Even with no active session recorded yet, 2FA users are refused (a fresh member row has null).
+    member.active_session_id = null as unknown as string;
+    (getJwtSessionId as jest.Mock).mockReturnValue("any-session");
+    expect((await verifyApiKey(fakeRequest({ Authorization: "Bearer t" }))).error).toBe("mfa_required");
+  });
+
   it("authenticates a valid user with an org membership and returns org_id/role", async () => {
     process.env.NEXT_PUBLIC_SKIP_AUTH = "false";
     const single = jest.fn().mockResolvedValue({
@@ -105,8 +147,9 @@ describe("verifyApiKey", () => {
     });
     (createServiceClient as jest.Mock).mockReturnValue({
       auth: { getUser: jest.fn().mockResolvedValue({ data: { user: { id: "u1", email: "a@b.com" } }, error: null }) },
+      // org_members → single(); user_2fa → maybeSingle() (no 2FA record)
       from: jest.fn(() => ({
-        select: () => ({ eq: () => ({ single }) }),
+        select: () => ({ eq: () => ({ single, maybeSingle: jest.fn().mockResolvedValue({ data: null }) }) }),
       })),
     });
     const result = await verifyApiKey(fakeRequest({ Authorization: "Bearer sometoken" }));
@@ -121,8 +164,9 @@ describe("verifyApiKey", () => {
     });
     (createServiceClient as jest.Mock).mockReturnValue({
       auth: { getUser: jest.fn().mockResolvedValue({ data: { user: { id: "u1", email: "a@b.com" } }, error: null }) },
+      // org_members → single(); user_2fa → maybeSingle() (no 2FA record)
       from: jest.fn(() => ({
-        select: () => ({ eq: () => ({ single }) }),
+        select: () => ({ eq: () => ({ single, maybeSingle: jest.fn().mockResolvedValue({ data: null }) }) }),
       })),
     });
     const result = await verifyApiKey(fakeRequest({ Authorization: "Bearer sometoken" }));

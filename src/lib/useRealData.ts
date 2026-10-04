@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabase";
+import { fullPageNavigate } from "./authFlow";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -32,6 +33,22 @@ export async function getAuthHeader(): Promise<Record<string, string>> {
   }
 }
 
+/**
+ * Session-level API errors, handled the same way wherever a request is made:
+ *   session_revoked → signed in somewhere newer: sign out, explain on the login page
+ *   mfa_required    → 2FA on and this session hasn't entered its code: go to the code step (still signed in)
+ * Does nothing on the login page itself (it handles both states in place).
+ */
+export async function handleSessionError(code: string | undefined): Promise<void> {
+  if (typeof window === "undefined" || window.location.pathname.startsWith("/login")) return;
+  if (code === "session_revoked") {
+    await supabase.auth.signOut();
+    fullPageNavigate("/login?error=session_revoked");
+  } else if (code === "mfa_required") {
+    fullPageNavigate(`/login?step=2fa&next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+  }
+}
+
 export async function authedFetch<T>(
   path: string,
   init?: RequestInit,
@@ -48,12 +65,7 @@ export async function authedFetch<T>(
     // "detail" fields could carry raw DB/exception text that shouldn't reach
     // the client at all.
     const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
-    if (body.error === "session_revoked") {
-      await supabase.auth.signOut();
-      if (typeof window !== "undefined") {
-        window.location.href = "/login?error=session_revoked";
-      }
-    }
+    await handleSessionError(body.error);
     throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
   }
   return res.json() as Promise<T>;

@@ -9,6 +9,7 @@ import type {
   ScanRequest, AttestRequest, AttestResponse, ActivityResponse,
 } from "@/types";
 import { supabase } from "./supabase";
+import { handleSessionError } from "./useRealData";
 
 // ── Auth token helper ──────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // generic status-based message so nothing ever surfaces raw JS/HTTP
     // internals (e.g. "TypeError: Failed to fetch") to the user.
     const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    await handleSessionError?.(body.error); // optional call: some tests mock useRealData without it
     throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
   }
   return res.json() as Promise<T>;

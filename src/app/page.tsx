@@ -303,7 +303,7 @@ function NavBar() {
         </nav>
         <div className="flex items-center gap-2">
           <Link href="/login" className="text-sm font-semibold text-white/70 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
-          <Link href="/login" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
+          <Link href="/login?mode=signup" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
             Get started <ArrowRightIcon size={13} />
           </Link>
         </div>
@@ -409,7 +409,7 @@ function HeroSection() {
           TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across files in six languages, catches secrets and the vulnerable dependencies you actually reach, checks your cloud, container and API configuration, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-          <Link href="/login" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
+          <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
             style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
             onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
             onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>

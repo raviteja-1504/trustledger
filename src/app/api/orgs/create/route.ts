@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyJWT } from "../../_middleware";
 import { safeError } from "@/lib/errors";
+import { getJwtSessionId } from "@/lib/jwt";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyJWT(req);
@@ -74,7 +75,11 @@ export async function POST(req: NextRequest) {
       org_id:   org.id,
       user_id:  auth.user_id,
       email:    auth.email,
+      name:     auth.name ?? null,
       role:     "admin",
+      // This session is the creator's active one (single-session enforcement in verifyApiKey).
+      active_session_id: getJwtSessionId((req.headers.get("Authorization") ?? "").slice(7)),
+      active_session_at: new Date().toISOString(),
     });
 
   if (memberErr) {

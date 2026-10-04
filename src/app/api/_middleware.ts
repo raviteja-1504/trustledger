@@ -64,6 +64,7 @@ export interface AuthResult {
 export interface JWTResult {
   user_id:  string;
   email:    string;
+  name?:    string | null;
   error?:   string;
 }
 
@@ -79,7 +80,8 @@ export async function verifyJWT(req: NextRequest): Promise<JWTResult> {
   const db = createServiceClient();
   const { data: { user }, error } = await db.auth.getUser(token);
   if (error || !user) return { user_id: "", email: "", error: "invalid_token" };
-  return { user_id: user.id, email: user.email ?? "" };
+  const meta = user.user_metadata ?? {};
+  return { user_id: user.id, email: user.email ?? "", name: (meta.full_name ?? meta.name ?? null) as string | null };
 }
 
 const ROLE_RANK: Record<string, number> = { developer: 0, security_reviewer: 1, admin: 2 };
@@ -120,12 +122,15 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
     // previous invite flow where inviteUserByEmail stored a different auth
     // UID than the one the user actually logged in with. Fix both cases by
     // matching on email and updating to the current auth user's ID.
-    if (!member && user.email) {
+    // Only a CONFIRMED email may claim an invite — otherwise anyone could sign up with an invited
+    // address and inherit that seat before the owner of the address ever sees the invite.
+    if (!member && user.email && user.email_confirmed_at) {
       const { data: linked } = await db
         .from("org_members")
         .update({ user_id: user.id })
         .eq("email", user.email)
-        .neq("user_id", user.id)   // covers both null and wrong-UID cases
+        // null OR a different id — a bare .neq() would skip the null rows (SQL: NULL <> x is not true)
+        .or(`user_id.is.null,user_id.neq.${user.id}`)
         .select("org_id, role, email, active_session_id")
         .maybeSingle();
       // maybeSingle returns null (not error) when 0 rows matched
@@ -143,8 +148,18 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
 
     if (!member) return { org_id: "", error: "no_org_membership" };
 
-    // ── Single active session enforcement ─────────────────────────────────
     const tokenSessionId = getJwtSessionId(token);
+
+    // ── Two-factor enforcement ─────────────────────────────────────────────
+    // With 2FA on, a session becomes the active one only after the sign-in 2FA step
+    // (POST /api/auth/2fa/login), so any other session — a fresh password/GitHub/reset-link
+    // sign-in included — is refused until the code is entered.
+    const { data: twoFa } = await db.from("user_2fa").select("enabled").eq("user_id", user.id).maybeSingle() as { data: { enabled?: boolean } | null };
+    if (twoFa?.enabled && (!tokenSessionId || member.active_session_id !== tokenSessionId)) {
+      return { org_id: "", error: "mfa_required" };
+    }
+
+    // ── Single active session enforcement ─────────────────────────────────
     if (member.active_session_id && tokenSessionId && member.active_session_id !== tokenSessionId) {
       return { org_id: "", error: "session_revoked" };
     }

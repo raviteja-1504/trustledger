@@ -2,9 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getJwtSessionId } from "@/lib/jwt";
 
-// Called once by the client right after exchangeCodeForSession() succeeds.
-// Ensures org membership exists, and records this session as the user's sole
-// active session — any previously issued token is rejected by verifyApiKey().
+/**
+ * POST /api/auth/bootstrap — called right after every sign-in (GitHub, email, reset link).
+ *
+ * → { has_org, is_new_user, mfa_required }
+ *
+ * - Never creates or joins an organisation on its own. A user reaches an org only by being invited
+ *   (an org_members row for their confirmed email) or by creating one at /create-org. Auto-joining by
+ *   GitHub login / a shared "default" slug used to put unrelated users into the same org.
+ * - Records this session as the user's sole active session (any older token is then rejected by
+ *   verifyApiKey) — except for users with 2FA on: their session becomes active only after the 2FA
+ *   step at POST /api/auth/2fa/login, so signing in with a password alone grants nothing.
+ */
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
@@ -18,64 +27,40 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_token" }, { status: 401 });
   }
 
-  const sessionId = getJwtSessionId(token);
-
-  const { data: existing } = await db
+  let { data: member } = await db
     .from("org_members")
     .select("id")
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle() as { data: { id: string } | null };
 
-  if (existing) {
-    if (sessionId) {
-      await db
-        .from("org_members")
-        .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
-        .eq("user_id", user.id);
-    }
-    return NextResponse.json({ is_new_user: false });
-  }
-
-  // Look up org by GitHub user/org association
-  const githubLogin  = user.user_metadata?.user_name as string | undefined;
-  const githubOrgStr = user.user_metadata?.preferred_username as string | undefined;
-  const orgSlug      = process.env.NEXT_PUBLIC_ORG ?? githubOrgStr ?? githubLogin ?? "default";
-
-  let { data: org } = await db
-    .from("organizations")
-    .select("id")
-    .eq("slug", orgSlug)
-    .single();
-
-  if (!org) {
-    // Create the org on first sign-in
-    const { data: newOrg } = await db
-      .from("organizations")
-      .insert({ slug: orgSlug, name: orgSlug, github_org: githubLogin ?? null })
-      .select("id")
-      .single() as { data: { id: string } | null };
-    org = newOrg;
-  }
-
-  if (org) {
-    // Count existing members to assign role
-    const { count } = await db
+  // A pending invite (row added by an admin before this person had an account) is claimed by
+  // a confirmed email only.
+  if (!member && user.email && user.email_confirmed_at) {
+    const { data: linked } = await db
       .from("org_members")
-      .select("*", { count: "exact", head: true })
-      .eq("org_id", org.id);
-
-    await db.from("org_members").insert({
-      org_id:       org.id,
-      user_id:      user.id,
-      email:        user.email ?? "",
-      name:         (user.user_metadata?.full_name as string) ?? null,
-      role:         count === 0 ? "admin" : "developer",
-      github_login: githubLogin ?? null,
-      avatar_url:   (user.user_metadata?.avatar_url as string) ?? null,
-      active_session_id: sessionId,
-      active_session_at: new Date().toISOString(),
-    });
+      .update({ user_id: user.id })
+      .eq("email", user.email)
+      .is("user_id", null)
+      .select("id")
+      .maybeSingle() as { data: { id: string } | null };
+    member = linked;
   }
 
-  return NextResponse.json({ is_new_user: true });
+  if (!member) {
+    return NextResponse.json({ has_org: false, is_new_user: true, mfa_required: false });
+  }
+
+  const { data: twoFa } = await db.from("user_2fa").select("enabled").eq("user_id", user.id).maybeSingle() as { data: { enabled?: boolean } | null };
+  if (twoFa?.enabled) {
+    return NextResponse.json({ has_org: true, is_new_user: false, mfa_required: true });
+  }
+
+  const sessionId = getJwtSessionId(token);
+  if (sessionId) {
+    await db
+      .from("org_members")
+      .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
+      .eq("user_id", user.id);
+  }
+  return NextResponse.json({ has_org: true, is_new_user: false, mfa_required: false });
 }
