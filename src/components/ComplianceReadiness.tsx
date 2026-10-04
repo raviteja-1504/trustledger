@@ -104,14 +104,14 @@ export default function ComplianceReadiness({ data }: Props) {
   return (
     <div className="section-card overflow-hidden">
       {/* Header */}
-      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3">
+      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
         <div>
           <p className="font-bold text-gray-900 text-sm">Compliance Readiness</p>
           <p className="text-xs text-gray-400 mt-0.5">Live framework scores derived from scan &amp; attestation data</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {fws.map(fw => (
-            <span key={fw.id} className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+            <span key={fw.id} className={`text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${
               fw.status === "pass"    ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200" :
               fw.status === "partial" ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200" :
                                         "bg-rose-50 text-rose-700 ring-1 ring-rose-200"
@@ -119,14 +119,14 @@ export default function ComplianceReadiness({ data }: Props) {
               {fw.shortName}: {fw.score}%
             </span>
           ))}
-          <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 bg-gray-50 border border-gray-100 px-2 py-1 rounded-lg">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 bg-gray-50 border border-gray-100 px-2 py-1 rounded-lg whitespace-nowrap">
             {passing}/{fws.length} ready
           </span>
         </div>
       </div>
 
       {/* Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+      <div className="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-gray-100">
         {fws.map(fw => (
           <div key={fw.id} className="p-5 space-y-4">
             {/* Title row */}

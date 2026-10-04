@@ -14,6 +14,7 @@ import RiskBadge from "@/components/RiskBadge";
 // Heavy components — lazy loaded to reduce initial bundle size
 const RiskTrendChart     = dynamic(() => import("@/components/RiskTrendChart"),    { ssr:false });
 const HealthScoreGauge   = dynamic(() => import("@/components/HealthScoreGauge"),  { ssr:false });
+import { healthScoreParts } from "@/components/HealthScoreGauge";
 const TopRiskFilesPanel  = dynamic(() => import("@/components/TopRiskFilesPanel"), { ssr:false });
 const ComplianceReadiness= dynamic(() => import("@/components/ComplianceReadiness"),{ ssr:false });
 const ActionItemsPanel   = dynamic(() => import("@/components/ActionItemsPanel"),  { ssr:false });
@@ -27,7 +28,7 @@ import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/roles";
 import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
 import type { DashboardData, RepoStat, RiskLevel, ActivityEvent } from "@/types";
-import { countOpenViolations } from "@/lib/violations";
+import AttentionPanel from "@/components/dashboard/AttentionPanel";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
@@ -111,66 +112,41 @@ function ExecSummary({ data }: { data: DashboardData }) {
 
   if (dismissed) return null;
 
-  const score  = Math.round(Math.min(100,
-    data.attestation_rate * 60 +
-    (1 - Math.min(data.overall_ai_pct, 1)) * 25 +
-    Math.max(0, 15 - data.unattested_deploy_count * 3),
-  ));
+  const score   = healthScore(data);
   const attPct  = Math.round(data.attestation_rate * 100);
-  const aiPct   = Math.round(data.overall_ai_pct * 100);
   const crit    = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested).length;
+  const blocked = data.unattested_deploy_count;
   const posture = score >= 80 ? { label:"STRONG", color:"#15803d", bg:"#f0fdf4", border:"#bbf7d0" }
                 : score >= 60 ? { label:"FAIR",   color:"#b45309", bg:"#fffbeb", border:"#fde68a" }
                 :               { label:"AT RISK", color:"#be123c", bg:"#fef2f2", border:"#fecdd3" };
+  const summary = crit > 0
+    ? `${crit} CRITICAL file${crit > 1 ? "s" : ""} need${crit > 1 ? "" : "s"} immediate attestation · ${blocked} deploy${blocked !== 1 ? "s" : ""} blocked`
+    : `Attestation coverage at ${attPct}% · ${blocked} deploy${blocked !== 1 ? "s" : ""} blocked`;
 
+  // Repos / attestation / AI% / blocked used to be repeated here; the stat cards below show them.
   return (
     <div className="animate-fade-up rounded-2xl border overflow-hidden"
       style={{ background:"linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%)", borderColor:"rgba(255,255,255,0.08)" }}>
-      <div className="flex items-start justify-between px-6 py-4">
-        <div className="flex items-center gap-4">
-          {/* Big score */}
-          <div className="text-center shrink-0">
-            <p className="text-5xl font-black text-white tabular-nums leading-none">{score}</p>
-            <p className="text-[10px] text-white/30 mt-1 font-semibold uppercase tracking-wider">Health Score</p>
-          </div>
-          <div className="w-px h-12 bg-white/10" />
-          {/* Posture */}
-          <div>
-            <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full"
-              style={{ background:posture.bg, color:posture.color, border:`1px solid ${posture.border}` }}>
-              {posture.label}
-            </span>
-            <p className="text-xs text-white/40 mt-2 max-w-xs leading-relaxed">
-              {crit > 0
-                ? `${crit} CRITICAL file${crit > 1 ? "s" : ""} need immediate attestation · ${data.unattested_deploy_count} deploy${data.unattested_deploy_count !== 1 ? "s" : ""} blocked`
-                : `Attestation coverage at ${attPct}% · ${data.unattested_deploy_count} deploy${data.unattested_deploy_count !== 1 ? "s" : ""} blocked`
-              }
-            </p>
-          </div>
+      <div className="flex items-center gap-4 sm:gap-5 px-5 sm:px-6 py-4">
+        <div className="text-center shrink-0">
+          <p className="text-4xl sm:text-5xl font-black text-white tabular-nums leading-none">{score}</p>
+          <p className="text-[10px] text-white/40 mt-1 font-semibold uppercase tracking-wider whitespace-nowrap">Health score</p>
         </div>
-
-        {/* Right: mini KPIs */}
-        <div className="flex items-center gap-6 shrink-0">
-          {[
-            { label:"Repos",       value:data.repos.length,   color:"#818cf8" },
-            { label:"Attestation", value:`${attPct}%`,         color: attPct>=80?"#34d399":"#fbbf24" },
-            { label:"Avg AI%",     value:`${aiPct}%`,          color: aiPct>70?"#f87171":"#a5b4fc" },
-            { label:"Blocked",     value:data.unattested_deploy_count, color:data.unattested_deploy_count>0?"#f87171":"#34d399" },
-          ].map(k => (
-            <div key={k.label} className="text-center">
-              <p className="text-xl font-black tabular-nums" style={{ color:k.color }}>{k.value}</p>
-              <p className="text-[9px] text-white/30 font-semibold uppercase tracking-wider mt-0.5">{k.label}</p>
-            </div>
-          ))}
-          <button onClick={() => { localStorage.setItem("tl_exec_dismissed","1"); setDismissed(true); }}
-            className="text-white/20 hover:text-white/50 transition-colors ml-2" aria-label="Dismiss">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
+        <div className="w-px self-stretch bg-white/10" />
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <span className="inline-block whitespace-nowrap text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full"
+            style={{ background:posture.bg, color:posture.color, border:`1px solid ${posture.border}` }}>
+            {posture.label}
+          </span>
+          <p className="text-sm text-white/70 leading-snug">{summary}</p>
         </div>
+        <button onClick={() => { localStorage.setItem("tl_exec_dismissed","1"); setDismissed(true); }}
+          className="self-start text-white/30 hover:text-white/60 transition-colors shrink-0" aria-label="Dismiss health summary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
-      {/* Bar at the bottom */}
       <div className="h-1 w-full bg-white/5">
         <div className="h-full rounded-full transition-all duration-1000"
           style={{ width:`${score}%`, background:`linear-gradient(90deg,#6366f1,${score>=80?"#10b981":score>=60?"#f59e0b":"#ef4444"})` }} />
@@ -181,13 +157,14 @@ function ExecSummary({ data }: { data: DashboardData }) {
 
 // ── Score ─────────────────────────────────────────────────────────────────────
 
+function healthInputs(data: DashboardData) {
+  return { attestation_rate: data.attestation_rate, ai_pct: data.overall_ai_pct, blocked_deploys: data.unattested_deploy_count };
+}
+
+/** Health score (0–100) — the one formula used by the summary banner and the Security Health gauge. */
 function healthScore(data: DashboardData): number {
   if (data.repos.length === 0) return 100;
-  return Math.round(Math.min(100,
-    data.attestation_rate * 60 +
-    (1 - Math.min(data.overall_ai_pct, 1)) * 25 +
-    Math.max(0, 15 - data.unattested_deploy_count * 3),
-  ));
+  return healthScoreParts(healthInputs(data)).total;
 }
 
 // ── Sparkline ─────────────────────────────────────────────────────────────────
@@ -262,13 +239,6 @@ function KeyboardIcon() {
     </svg>
   );
 }
-function SLAIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-    </svg>
-  );
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -280,64 +250,6 @@ function repoRiskLevel(r: RepoStat): RiskLevel {
 }
 
 // ── Security Inbox (compact strip below stats) ───────────────────────────────
-
-function SecurityInbox({ data, violationStatuses, openSecrets }: {
-  data: DashboardData; violationStatuses: Record<string, string>; openSecrets: number;
-}) {
-  const crit    = data.top_risk_files.filter(f => !f.attested && f.risk_score === "CRITICAL").length;
-  const high    = data.top_risk_files.filter(f => !f.attested && f.risk_score === "HIGH").length;
-  const deploys = data.unattested_deploy_count;
-
-  // Hallucinated/typosquatting packages — published by the /dependencies page
-  // (tl_dep_risky_count) from live scan data.
-  const critDepCount = (() => {
-    try {
-      const count = parseInt(localStorage.getItem("tl_dep_risky_count") ?? "0", 10);
-      return isNaN(count) ? 0 : count;
-    } catch { return 0; }
-  })();
-
-  // Total open policy violations — same list shown on /violations and counted
-  // in the Sidebar nav badge (src/lib/violations.ts), so this stays in sync
-  // with those views instead of re-deriving its own subset/sum. Status now
-  // comes from the server (violationStatuses prop) instead of localStorage.
-  const violationsCount = countOpenViolations(data, violationStatuses);
-
-  type Chip = { label: string; count: number; href: string; bg: string; text: string; border: string; dot: string };
-
-  const chips: Chip[] = [
-    ...(crit > 0           ? [{ label:`${crit} CRITICAL unattested`, count:crit,           href:"/violations",   bg:"#ede9fe", text:"#5b21b6", border:"#c4b5fd", dot:"#7c3aed" }] : []),
-    ...(high > 0           ? [{ label:`${high} HIGH unattested`,      count:high,           href:"/violations",   bg:"#ffedd5", text:"#7c2d12", border:"#fed7aa", dot:"#f97316" }] : []),
-    ...(deploys > 0        ? [{ label:`${deploys} deploys blocked`,   count:deploys,        href:"/violations",   bg:"#fef2f2", text:"#be123c", border:"#fecdd3", dot:"#ef4444" }] : []),
-    ...(openSecrets > 0    ? [{ label:`${openSecrets} open secrets`,  count:openSecrets,    href:"/secrets",      bg:"#f3e8ff", text:"#6b21a8", border:"#ddd6fe", dot:"#9333ea" }] : []),
-    ...(critDepCount > 0   ? [{ label:`${critDepCount} risky packages`, count:critDepCount, href:"/dependencies", bg:"#ede9fe", text:"#5b21b6", border:"#c4b5fd", dot:"#7c3aed" }] : []),
-    ...(violationsCount > 0? [{ label:`${violationsCount} violations`, count:violationsCount, href:"/violations", bg:"#fef3c7", text:"#78350f", border:"#fde68a", dot:"#f59e0b" }] : []),
-  ];
-
-  if (chips.length === 0) return null;
-
-  return (
-    <div className="animate-fade-up flex items-center gap-2 flex-wrap py-1">
-      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest shrink-0">
-        Needs attention:
-      </span>
-      {chips.map(chip => (
-        <Link key={chip.label} href={chip.href}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all hover:-translate-y-px hover:shadow-sm active:scale-[0.97]"
-          style={{ background: chip.bg, color: chip.text, borderColor: chip.border }}>
-          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: chip.dot }} />
-          {chip.label}
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="opacity-50">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-        </Link>
-      ))}
-      <Link href="/alerts" className="ml-auto text-[10px] font-bold text-indigo-500 hover:text-indigo-700 shrink-0">
-        All alerts →
-      </Link>
-    </div>
-  );
-}
 
 function securityScore(r: RepoStat): number {
   const attest  = r.attestation_rate * 40;
@@ -730,7 +642,6 @@ export default function DashboardPage() {
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
   const [watchlist,     setWatchlistState]= useState<Set<string>>(new Set());
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [slaExpanded,   setSlaExpanded]   = useState(false);
   const [pulseCount,    setPulseCount]    = useState(0);
   const [reloadKey,     setReloadKey]     = useState(0);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
@@ -1181,7 +1092,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setShowShortcuts(true)}
-              className="flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-xl transition-colors"
+              className="hidden lg:flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-xl transition-colors"
               title="Keyboard shortcuts (?)"
             >
               <KeyboardIcon />
@@ -1250,30 +1161,21 @@ export default function DashboardPage() {
           <button
             onClick={clearCache}
             disabled={clearingCache}
-            title="Bypass server cache and fetch fresh data"
-            className="flex items-center gap-1 text-[10px] font-semibold text-gray-500 hover:text-indigo-600 bg-gray-100 hover:bg-indigo-50 px-2 py-0.5 rounded-full transition-colors disabled:opacity-50"
+            title="Refresh — fetch fresh data now"
+            aria-label="Refresh data"
+            className="flex items-center justify-center w-5 h-5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors disabled:opacity-50"
           >
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={clearingCache ? "animate-spin" : ""}>
               <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
             </svg>
-            {clearingCache ? "Refreshing…" : "Clear Cache"}
           </button>
           <Link
             href="/settings"
             className="flex items-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200 hover:bg-emerald-100 transition-colors"
           >
             <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-            {policyName} Policy
+            {/policy/i.test(policyName) ? policyName : `${policyName} policy`}
           </Link>
-          {sla && sla.total > 0 && (
-            <Link
-              href="/sla"
-              className="flex items-center gap-1 text-xs font-semibold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full ring-1 ring-rose-200 hover:bg-rose-100 transition-colors"
-            >
-              <SLAIcon />
-              {sla.total} SLA breach{sla.total > 1 ? "es" : ""}
-            </Link>
-          )}
           {repoFilter === "watchlist" && (
             <span className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full ring-1 ring-amber-200">
               <StarIcon filled /> Watchlist
@@ -1392,131 +1294,17 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* ── Urgent action banner ─────────────────────────────────── */}
-            {effectiveData.unattested_deploy_count > 0 && (
-              <div className="animate-fade-up bg-rose-50 border border-rose-200 rounded-xl px-4 py-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-rose-100 flex items-center justify-center text-rose-600 shrink-0">
-                    <AlertIcon />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-rose-800">
-                      {effectiveData.unattested_deploy_count} deploy{effectiveData.unattested_deploy_count !== 1 ? "s" : ""} pending attestation
-                    </p>
-                    <p className="text-xs text-rose-600 mt-0.5">
-                      HIGH or CRITICAL files were deployed without reviewer sign-off. Review and attest to clear.
-                    </p>
-                  </div>
-                </div>
-                {unresolvedRepoScans.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-2.5 ml-11">
-                    {unresolvedRepoScans.map(({ repoName, scanId }) => (
-                      <Link
-                        key={scanId}
-                        href={`/pr/${scanId}`}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-rose-700 bg-white hover:bg-rose-100 rounded-lg border border-rose-200 transition-colors whitespace-nowrap"
-                      >
-                        {repoName} →
-                      </Link>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── SLA Breach tracker ─────────────────────────────────── */}
-            {sla && sla.total > 0 && (() => {
-              const breachFiles = effectiveData.sla_breach_files ?? [];
-              const SHOW_INIT = 3;
-              const visible = slaExpanded ? breachFiles : breachFiles.slice(0, SHOW_INIT);
-              const hidden  = breachFiles.length - SHOW_INIT;
-              return (
-                <div className="animate-fade-up bg-amber-50 border border-amber-200 rounded-xl overflow-hidden">
-                  {/* Header row */}
-                  <div className="flex items-center gap-3 px-4 py-3 border-b border-amber-200/60 flex-wrap">
-                    <div className="flex items-center gap-2 shrink-0">
-                      <SLAIcon />
-                      <p className="text-sm font-bold text-amber-800">Attestation SLA breached</p>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap flex-1">
-                      {sla.crit > 0 && (
-                        <span className="text-[11px] font-bold bg-violet-100 text-violet-800 px-2 py-0.5 rounded-full ring-1 ring-violet-200">
-                          {sla.crit} CRITICAL · 24 h
-                        </span>
-                      )}
-                      {sla.high > 0 && (
-                        <span className="text-[11px] font-bold bg-orange-100 text-orange-800 px-2 py-0.5 rounded-full ring-1 ring-orange-200">
-                          {sla.high} HIGH · 72 h
-                        </span>
-                      )}
-                      <span className="text-[11px] text-amber-700">
-                        {sla.total} file{sla.total !== 1 ? "s" : ""} missed attestation deadline
-                      </span>
-                    </div>
-                    <Link href="/sla" className="text-xs font-bold text-amber-700 hover:text-amber-900 whitespace-nowrap shrink-0">
-                      Full SLA dashboard →
-                    </Link>
-                  </div>
-                  {/* File rows */}
-                  {breachFiles.length > 0 && (
-                    <div className="divide-y divide-amber-100">
-                      {visible.map(f => {
-                        const hoursOverdue = f.sla_deadline
-                          ? Math.max(0, Math.round((Date.now() - new Date(f.sla_deadline).getTime()) / 3600000))
-                          : null;
-                        const isCrit = f.risk_score === "CRITICAL";
-                        return (
-                          <Link
-                            key={`${f.scan_id}::${f.file_path}`}
-                            href={`/pr/${f.scan_id}`}
-                            className="flex items-center gap-3 px-4 py-2.5 hover:bg-amber-100/60 transition-colors group"
-                          >
-                            <span className={`w-2 h-2 rounded-full shrink-0 ${isCrit ? "bg-violet-500" : "bg-orange-400"}`} />
-                            <div className="flex-1 min-w-0">
-                              <p className="text-xs font-semibold text-gray-800 truncate">
-                                {f.file_path.split("/").pop()}
-                              </p>
-                              <p className="text-[10px] text-gray-400 truncate">{f.repo} · {f.file_path}</p>
-                            </div>
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${isCrit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>
-                              {isCrit ? "CRITICAL" : "HIGH"}
-                            </span>
-                            {hoursOverdue !== null && (
-                              <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full shrink-0 whitespace-nowrap">
-                                {hoursOverdue}h overdue
-                              </span>
-                            )}
-                            <svg className="w-3.5 h-3.5 text-amber-400 group-hover:text-amber-600 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M9 18l6-6-6-6"/></svg>
-                          </Link>
-                        );
-                      })}
-                      {!slaExpanded && hidden > 0 && (
-                        <button
-                          onClick={() => setSlaExpanded(true)}
-                          className="w-full px-4 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100/60 transition-colors text-left"
-                        >
-                          Show {hidden} more file{hidden !== 1 ? "s" : ""} →
-                        </button>
-                      )}
-                      {slaExpanded && hidden > 0 && (
-                        <button
-                          onClick={() => setSlaExpanded(false)}
-                          className="w-full px-4 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100/60 transition-colors text-left"
-                        >
-                          Show less ↑
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
             {/* ── Executive Summary — admin/security_reviewer only ─────── */}
-            {!isDeveloperView && <ExecSummary data={effectiveData} />}
+            {!isDeveloperView && hasData && <ExecSummary data={effectiveData} />}
+
+            {/* ── Needs attention: deploys awaiting sign-off, SLA breaches, open queues ── */}
+            <AttentionPanel data={effectiveData} violationStatuses={violationStatuses} openSecrets={openSecretsCount}
+              unresolvedRepoScans={unresolvedRepoScans} sla={sla} showQueues={!isDeveloperView} />
+
 
             {/* ── Stats grid ───────────────────────────────────────────── */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7 gap-4 animate-fade-up">
+            {/* Two even rows: activity (4) and review (3) — seven cards in one grid left a gap */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-fade-up">
               <StatsCard label="Repositories" value={effectiveData.repos.length} sub="scanned" icon={<RepoIcon />} color="indigo"
                 info={{ title:"Repositories", description:"Total number of GitHub repositories connected to TrustLedger and actively scanned for AI-generated code." }} />
               <StatsCard
@@ -1542,6 +1330,8 @@ export default function DashboardPage() {
                       : { direction: "down", label: "within threshold" }
                 }
               />
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 animate-fade-up [&>*:last-child]:col-span-2 lg:[&>*:last-child]:col-span-1">
               <StatsCard
                 label="Attestation"
                 value={`${(effectiveData.attestation_rate * 100).toFixed(0)}%`}
@@ -1577,8 +1367,6 @@ export default function DashboardPage() {
               />
             </div>
 
-            {/* ── Security Inbox strip — admin/security_reviewer only ──── */}
-            {!isDeveloperView && <SecurityInbox data={effectiveData} violationStatuses={violationStatuses} openSecrets={openSecretsCount} />}
 
 
             {/* ── Empty state ──────────────────────────────────────────── */}
@@ -1623,9 +1411,9 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 animate-fade-up delay-200">
                   <div className="section-card p-5 flex flex-col items-center justify-center gap-1">
                     <p className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-1">Security Health</p>
-                    <HealthScoreGauge score={score} />
+                    <HealthScoreGauge score={score} inputs={healthInputs(effectiveData)} />
                   </div>
-                  <div className="section-card p-5 lg:col-span-3">
+                  <div className="section-card p-5 lg:col-span-3 flex flex-col">
                     <p className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-4">Compliance Breakdown</p>
                     <div className="grid grid-cols-3 gap-3 mb-4">
                       {[
@@ -1657,13 +1445,33 @@ export default function DashboardPage() {
                       </div>
                       <span className="text-xs text-gray-400 tabular-nums shrink-0">{effectiveData.repos.length} repos</span>
                     </div>
-                    <div className="flex items-center gap-4 mt-2">
-                      {[{ label: "Compliant", color: "bg-emerald-500" }, { label: "Under Review", color: "bg-amber-400" }, { label: "Needs Action", color: "bg-rose-500" }].map(l => (
-                        <span key={l.label} className="flex items-center gap-1.5 text-[10px] text-gray-400">
-                          <span className={`w-2 h-2 rounded-full ${l.color}`} />
-                          {l.label}
-                        </span>
-                      ))}
+                    {/* Which repositories are in each bucket (lowest attestation first) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 flex-1">
+                      {([
+                        { label: "Needs action",  dot: "bg-rose-500",    test: (a: number) => a < 0.5 },
+                        { label: "Under review",  dot: "bg-amber-400",   test: (a: number) => a >= 0.5 && a < 0.8 },
+                        { label: "Compliant",     dot: "bg-emerald-500", test: (a: number) => a >= 0.8 },
+                      ]).map(b => {
+                        const list = effectiveData.repos.filter(r => b.test(r.attestation_rate)).sort((x, y) => x.attestation_rate - y.attestation_rate);
+                        return (
+                          <div key={b.label} className="min-w-0">
+                            <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1.5">
+                              <span className={`w-2 h-2 rounded-full ${b.dot}`} />{b.label}
+                            </p>
+                            {list.length === 0 ? <p className="text-xs text-gray-300">None</p> : (
+                              <ul className="space-y-1">
+                                {list.slice(0, 4).map(r => (
+                                  <li key={r.repo} className="flex items-center justify-between gap-2 text-xs">
+                                    <Link href={`/repo/${r.repo}`} className="font-mono text-gray-700 hover:text-indigo-600 truncate">{r.repo.split("/").pop()}</Link>
+                                    <span className="tabular-nums text-gray-400 shrink-0">{Math.round(r.attestation_rate * 100)}%</span>
+                                  </li>
+                                ))}
+                                {list.length > 4 && <li className="text-[11px] text-gray-400">+{list.length - 4} more</li>}
+                              </ul>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>

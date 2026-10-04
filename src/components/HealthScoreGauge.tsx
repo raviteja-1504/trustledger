@@ -2,7 +2,18 @@
 
 import InfoTooltip from "@/components/InfoTooltip";
 
-interface Props { score: number }
+/** The three inputs the score is built from (see healthScoreParts). */
+export interface HealthInputs { attestation_rate: number; ai_pct: number; blocked_deploys: number }
+
+interface Props { score: number; inputs: HealthInputs }
+
+/** Points each input earns: attestation up to 60, human-written share up to 25, clean deploys up to 15. */
+export function healthScoreParts(i: HealthInputs) {
+  const attestation = Math.max(0, Math.min(1, i.attestation_rate)) * 60;
+  const human       = (1 - Math.max(0, Math.min(1, i.ai_pct))) * 25;
+  const deploys     = Math.max(0, 15 - i.blocked_deploys * 3);
+  return { attestation, human, deploys, total: Math.round(Math.min(100, attestation + human + deploys)) };
+}
 
 type Grade = { letter: string; color: string; trackColor: string; label: string; gradient: string };
 
@@ -14,7 +25,7 @@ function grade(score: number): Grade {
   return               { letter: "F", color: "#ef4444", trackColor: "#fee2e2", label: "Critical",   gradient: "linear-gradient(135deg, #f87171, #ef4444, #dc2626)" };
 }
 
-export default function HealthScoreGauge({ score }: Props) {
+export default function HealthScoreGauge({ score, inputs }: Props) {
   const clamped = Math.min(Math.max(score, 0), 100);
   const g = grade(clamped);
 
@@ -25,10 +36,13 @@ export default function HealthScoreGauge({ score }: Props) {
   const arcLen  = circ * 0.75;
   const filled  = arcLen * (clamped / 100);
 
+  // The real inputs, each with the points it earns toward the score (they used to be back-derived from the
+  // total, so "Attestation 88%" could sit next to an actual attestation rate of 71%).
+  const parts = healthScoreParts(inputs);
   const factors = [
-    { label: "Attestation",  pct: Math.round(Math.min(100, (clamped / 60) * 100)),                            color: g.color },
-    { label: "AI content",   pct: Math.round(Math.max(0, Math.min(100, ((clamped - 35) / 25) * 100))),        color: "#f59e0b" },
-    { label: "Clean deploys",pct: Math.round(Math.max(0, Math.min(100, ((clamped - 85) / 15) * 100))),        color: "#6366f1" },
+    { label: "Attestation",   value: `${Math.round(inputs.attestation_rate * 100)}% attested`, points: parts.attestation, max: 60, color: g.color },
+    { label: "Human-written", value: `${Math.round((1 - Math.min(1, inputs.ai_pct)) * 100)}% of code`, points: parts.human, max: 25, color: "#f59e0b" },
+    { label: "Clean deploys", value: inputs.blocked_deploys === 0 ? "none blocked" : `${inputs.blocked_deploys} blocked`, points: parts.deploys, max: 15, color: "#6366f1" },
   ];
 
   return (
@@ -94,17 +108,17 @@ export default function HealthScoreGauge({ score }: Props) {
       <div className="w-full space-y-2 px-1">
         {factors.map(f => (
           <div key={f.label}>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] text-gray-400 font-medium">{f.label}</span>
-              <span className="text-[10px] font-black tabular-nums" style={{ color: f.color }}>
-                {Math.max(0, f.pct)}%
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[11px] text-gray-500 font-medium">{f.label} <span className="text-gray-400">· {f.value}</span></span>
+              <span className="text-[11px] font-black tabular-nums shrink-0" style={{ color: f.color }}>
+                {Math.round(f.points)}/{f.max}
               </span>
             </div>
             <div className="h-1.5 w-full rounded-full overflow-hidden" style={{ background: "rgba(226,232,240,0.7)" }}>
               <div
                 className="h-full rounded-full transition-all duration-1000"
                 style={{
-                  width: `${Math.max(0, f.pct)}%`,
+                  width: `${(f.points / f.max) * 100}%`,
                   background: f.color,
                   boxShadow: `0 0 6px ${f.color}60`,
                 }}

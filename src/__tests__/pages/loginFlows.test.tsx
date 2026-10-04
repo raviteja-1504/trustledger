@@ -20,6 +20,10 @@ jest.mock("@/lib/auth", () => ({ useAuth: () => auth }));
 
 import LoginPage from "@/app/login/page";
 
+// Several flows wait on real timers (e.g. the 1.5 s "Password set!" pause); under a loaded full run the
+// 5 s default was too tight.
+jest.setTimeout(20000);
+
 function baseAuth(over: Auth = {}): Auth {
   return {
     user: null, loading: false, passwordRecovery: false,
