@@ -653,11 +653,11 @@ export default function ViolationsPage() {
         {/* Recent scan origin banner — explains why violations re-appeared */}
         {recentScans.length > 0 && (() => {
           const latest = recentScans[0];
+          const pr = latest.pr_number ? `PR #${latest.pr_number}` : null;
           const triggeredByLabel =
-            latest.triggered_by === "scheduled" ? "Scheduled scan"
-            : latest.triggered_by === "webhook"  ? `PR #${latest.pr_number ?? "webhook"}`
-            : latest.triggered_by ?? "Manual scan";
-          const isScheduled = latest.triggered_by === "scheduled";
+            latest.triggered_by === "webhook" ? (pr ?? "Pull request")
+            : latest.triggered_by === "manual" ? (pr ? `${pr} (started from the dashboard)` : "Dashboard scan")
+            : pr ?? "API scan";
           const ago = (() => {
             const m = Math.floor((Date.now() - new Date(latest.created_at).getTime()) / 60000);
             if (m < 1) return "just now";
@@ -667,26 +667,15 @@ export default function ViolationsPage() {
             return `${Math.floor(h / 24)}d ago`;
           })();
           return (
-            <div className={`animate-fade-up flex items-start gap-3 px-4 py-3 rounded-xl border text-xs ${isScheduled ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-200"}`}>
-              <svg width="14" height="14" className={`shrink-0 mt-0.5 ${isScheduled ? "text-blue-500" : "text-gray-400"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <div className="animate-fade-up flex items-start gap-3 px-4 py-3 rounded-xl border text-xs bg-gray-50 border-gray-200">
+              <svg width="14" height="14" className="shrink-0 mt-0.5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
               <div className="flex-1 min-w-0">
-                <span className={`font-bold ${isScheduled ? "text-blue-800" : "text-gray-700"}`}>
-                  Latest scan: {triggeredByLabel}
-                </span>
-                <span className={`ml-1 ${isScheduled ? "text-blue-600" : "text-gray-500"}`}>
-                  · {latest.repo_full_name} · {latest.file_count} files · {ago}
-                </span>
-                {isScheduled && (
-                  <p className="mt-0.5 text-blue-600">
-                    A scheduled scan ran automatically and may have created new violations.
-                    Files with unchanged content are now auto-attested from previous attestations.
-                    Only files that actually changed since your last attestation need review.
-                  </p>
-                )}
+                <span className="font-bold text-gray-700">Latest scan: {triggeredByLabel}</span>
+                <span className="ml-1 text-gray-500">· {latest.repo_full_name} · {latest.file_count} files · {ago}</span>
               </div>
-              <Link href="/scans" className={`shrink-0 font-semibold hover:underline ${isScheduled ? "text-blue-600" : "text-gray-500"}`}>
+              <Link href="/scans" className="shrink-0 font-semibold hover:underline text-gray-500">
                 All scans →
               </Link>
             </div>

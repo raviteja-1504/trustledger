@@ -377,3 +377,52 @@ export function buildCheckSummary(scan: {
     conclusion: blocked ? "action_required" : "success",
   };
 }
+
+export interface PullRequestSummary {
+  number:     number;
+  title:      string;
+  author:     string | null;
+  branch:     string;
+  head_sha:   string;
+  draft:      boolean;
+  state:      string;
+  updated_at: string;
+  additions?:     number;
+  deletions?:     number;
+  commits?:       number;
+  changed_files?: number;
+  created_at?:    string;
+}
+
+type GhPull = {
+  number: number; title: string; draft?: boolean; state: string; updated_at: string; created_at?: string;
+  user?: { login?: string } | null; head: { ref: string; sha: string };
+  additions?: number; deletions?: number; commits?: number; changed_files?: number;
+};
+
+function toSummary(p: GhPull): PullRequestSummary {
+  return {
+    number: p.number, title: p.title, author: p.user?.login ?? null, branch: p.head.ref, head_sha: p.head.sha,
+    draft: !!p.draft, state: p.state, updated_at: p.updated_at, created_at: p.created_at,
+    additions: p.additions, deletions: p.deletions, commits: p.commits, changed_files: p.changed_files,
+  };
+}
+
+/** One pull request (head commit, branch, author, size), or null when GitHub says it doesn't exist. */
+export async function getPullRequest(token: string, owner: string, repo: string, prNumber: number): Promise<PullRequestSummary | null> {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}`, {
+    headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub GET pull ${owner}/${repo}#${prNumber} failed: ${res.status}`);
+  return toSummary(await res.json() as GhPull);
+}
+
+/** The repository's open pull requests, most recently updated first. */
+export async function listOpenPullRequests(token: string, owner: string, repo: string, perPage = 30): Promise<PullRequestSummary[]> {
+  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=${perPage}`, {
+    headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+  });
+  if (!res.ok) throw new Error(`GitHub GET pulls ${owner}/${repo} failed: ${res.status}`);
+  return (await res.json() as GhPull[]).map(toSummary);
+}

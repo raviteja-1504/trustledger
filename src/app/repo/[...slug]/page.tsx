@@ -261,9 +261,9 @@ export default function RepoDetailPage() {
                   : sc.overall_risk === "MEDIUM"   ? "#f59e0b" : "#10b981";
                 const isLatest     = idx === 0;
                 const absDate      = formatDateTime(sc.timestamp, tz);
-                const triggerLabel = sc.triggered_by === "webhook" || sc.triggered_by === "github-app" ? "GitHub" : sc.triggered_by === "scheduled" ? "Scheduled" : "API";
+                const triggerLabel = sc.triggered_by === "webhook" || sc.triggered_by === "github-app" ? "GitHub" : sc.triggered_by === "manual" ? "Dashboard" : "API";
                 const triggerColor = triggerLabel === "GitHub" ? "text-violet-600 bg-violet-50 border-violet-200"
-                  : triggerLabel === "Scheduled" ? "text-sky-600 bg-sky-50 border-sky-200"
+                  : triggerLabel === "Dashboard" ? "text-sky-600 bg-sky-50 border-sky-200"
                   : "text-gray-500 bg-gray-50 border-gray-200";
 
                 return (

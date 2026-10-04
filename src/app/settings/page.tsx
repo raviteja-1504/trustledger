@@ -1873,148 +1873,6 @@ function WebhooksTab() {
   );
 }
 
-// ── Tab: Scan Schedules ──────────────────────────────────────────────────────
-
-const CRON_PRESETS = [
-  { label:"Every hour",     value:"0 * * * *"    },
-  { label:"Daily at 02:00 UTC", value:"0 2 * * *" },
-  { label:"Daily at 06:00 UTC", value:"0 6 * * *" },
-  { label:"Every 6 hours",  value:"0 */6 * * *"  },
-  { label:"Weekdays only",  value:"0 2 * * 1-5"  },
-  { label:"Custom…",        value:"custom"        },
-];
-
-function cronDescription(expr: string): string {
-  const preset = CRON_PRESETS.find(p => p.value === expr);
-  if (preset && preset.value !== "custom") return preset.label;
-  const parts = expr.split(" ");
-  if (parts.length !== 5) return expr;
-  return expr;
-}
-
-function SchedulesTab() {
-  const tz = useTimezone();
-  const { profile } = useAuth();
-  type Schedule = { id: string; repo_id: string; repo_full_name?: string; branch: string; cron_expression: string; enabled: boolean; last_run_at: string | null };
-  const [schedules,  setSchedules]  = useState<Schedule[]>([]);
-  const [repos,      setRepos]      = useState<{ id: string; repo_full_name: string }[]>([]);
-  const [newRepo,    setNewRepo]    = useState("");
-  const [newBranch,  setNewBranch]  = useState("main");
-  const [newCron,    setNewCron]    = useState("0 2 * * *");
-  const [customCron, setCustomCron] = useState("");
-  const [adding,     setAdding]     = useState(false);
-
-  useEffect(() => {
-    if (!profile?.org_id) return;
-    authedFetch<{ repos: typeof repos }>("/api/repos")
-      .then(r => setRepos(r.repos ?? []))
-      .catch(() => {});
-    // Fetch schedules via Supabase direct call (no dedicated route yet)
-    import("@/lib/supabase").then(({ supabase }) => {
-      supabase.from("scan_schedules")
-        .select("id, repo_id, branch, cron_expression, enabled, last_run_at, repositories(repo_full_name)")
-        .eq("org_id", profile.org_id)
-        .then(({ data }) => {
-          setSchedules((data ?? []).map((s: Record<string,unknown>) => ({
-            id: s.id as string, repo_id: s.repo_id as string,
-            repo_full_name: ((s.repositories as Record<string,string>|null)?.repo_full_name) ?? "",
-            branch: s.branch as string, cron_expression: s.cron_expression as string,
-            enabled: s.enabled as boolean, last_run_at: s.last_run_at as string | null,
-          })));
-        });
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.org_id]);
-
-  async function addSchedule() {
-    if (!newRepo) return;
-    setAdding(true);
-    try {
-      const { supabase } = await import("@/lib/supabase");
-      const repo = repos.find(r => r.repo_full_name === newRepo);
-      if (!repo) { setAdding(false); return; }
-      const cronExpr = newCron === "custom" ? customCron || "0 2 * * *" : newCron;
-      const { data } = await supabase.from("scan_schedules").insert({
-        org_id: profile!.org_id, repo_id: repo.id, branch: newBranch,
-        cron_expression: cronExpr, enabled: true,
-      }).select("id, repo_id, branch, cron_expression, enabled, last_run_at").single();
-      if (data) setSchedules(prev => [...prev, { ...(data as unknown as Schedule), repo_full_name: newRepo }]);
-      setNewRepo(""); setNewBranch("main");
-    } catch { /* */ } finally { setAdding(false); }
-  }
-
-  async function toggleSchedule(id: string, enabled: boolean) {
-    const { supabase } = await import("@/lib/supabase");
-    await supabase.from("scan_schedules").update({ enabled }).eq("id", id);
-    setSchedules(prev => prev.map(s => s.id === id ? { ...s, enabled } : s));
-  }
-
-  return (
-    <div className="space-y-5">
-      <SectionCard title="Scheduled Repository Scans" subtitle="Automatically scan repositories on a schedule. TrustLedger fetches changed files and runs the scanner hourly.">
-        <div className="space-y-3">
-          <div className="grid grid-cols-3 gap-2">
-            <label className="block col-span-2">
-              <span className="text-xs font-semibold text-gray-600 block mb-1">Repository</span>
-              <select value={newRepo} onChange={e => setNewRepo(e.target.value)}
-                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 focus:outline-none bg-white">
-                <option value="">Select repo…</option>
-                {repos.map(r => <option key={r.id} value={r.repo_full_name}>{r.repo_full_name}</option>)}
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-xs font-semibold text-gray-600 block mb-1">Branch</span>
-              <input value={newBranch} onChange={e => setNewBranch(e.target.value)} placeholder="main"
-                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-            </label>
-          </div>
-          {/* Cron preset selector */}
-          <div>
-            <span className="text-xs font-semibold text-gray-600 block mb-1.5">Schedule frequency</span>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {CRON_PRESETS.map(p => (
-                <button key={p.value} onClick={() => setNewCron(p.value)}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${newCron===p.value?"bg-indigo-600 text-white":"bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-                  {p.label}
-                </button>
-              ))}
-            </div>
-            {newCron === "custom" && (
-              <input value={customCron} onChange={e => setCustomCron(e.target.value)}
-                placeholder="e.g. 0 */4 * * * (every 4 hours)"
-                className="w-full text-sm font-mono border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-            )}
-            <p className="text-[10px] text-gray-400 mt-1">
-              {newCron !== "custom" ? `Cron: ${newCron}` : "Enter a valid cron expression (5 fields)"}
-            </p>
-          </div>
-          <button onClick={addSchedule} disabled={adding || !newRepo}
-            className="px-5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors">
-            {adding ? "Adding…" : `Add schedule (${cronDescription(newCron === "custom" ? customCron || "…" : newCron)})`}
-          </button>
-        </div>
-        {schedules.length > 0 && (
-          <div className="mt-4 space-y-2">
-            {schedules.map(s => (
-              <div key={s.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
-                <div onClick={() => toggleSchedule(s.id, !s.enabled)}
-                  className={`w-9 h-5 rounded-full relative cursor-pointer transition-colors ${s.enabled ? "bg-indigo-500" : "bg-gray-200"}`}>
-                  <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${s.enabled ? "right-0.5" : "left-0.5"}`} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-800 truncate">{s.repo_full_name}</p>
-                  <p className="text-[10px] text-gray-400">{s.branch} · {cronDescription(s.cron_expression)} · {s.last_run_at ? `Last run ${formatDateOnly(new Date(s.last_run_at), tz)}` : "Never run"}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-        {schedules.length === 0 && <p className="text-xs text-gray-400 mt-2 text-center py-4">No schedules configured. Add one above.</p>}
-      </SectionCard>
-    </div>
-  );
-}
-
 // ── Tab: Branding ─────────────────────────────────────────────────────────────
 
 function BrandingTab() {
@@ -2264,13 +2122,12 @@ function GitLabIntegration() {
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 
-type Tab = "policies" | "integrations" | "notifications" | "team" | "api" | "sso" | "privacy" | "webhooks" | "schedules" | "branding" | "roles";
+type Tab = "policies" | "integrations" | "notifications" | "team" | "api" | "sso" | "privacy" | "webhooks" | "branding" | "roles";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "policies",      label: "Policies"      },
   { key: "integrations",  label: "Integrations"  },
   { key: "webhooks",      label: "Webhooks"       },
-  { key: "schedules",     label: "Schedules"      },
   { key: "notifications", label: "Notifications" },
   { key: "team",          label: "Team & Roles"  },
   { key: "roles",         label: "Custom Roles"  },
@@ -2394,7 +2251,6 @@ export default function SettingsPage() {
         {tab === "sso"           && <SSOTab />}
         {tab === "privacy"       && <PrivacyTab />}
         {tab === "webhooks"      && <WebhooksTab />}
-        {tab === "schedules"     && <SchedulesTab />}
         {tab === "branding"      && <BrandingTab />}
         {tab === "roles"         && <CustomRolesTab />}
 
