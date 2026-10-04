@@ -9,8 +9,8 @@ import { fakeSupabase } from "../helpers/fakeSupabase";
 let db: ReturnType<typeof fakeSupabase>;
 let role = "admin";
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
-const cacheDel = jest.fn(async () => {});
-jest.mock("@/lib/cache", () => ({ cacheDel: (k: string) => cacheDel(k as never), cacheKeys: { dashboard: (o: string, d: number) => `dash:${o}:${d}` } }));
+const cacheDel = jest.fn(async (_key: string) => {});
+jest.mock("@/lib/cache", () => ({ cacheDel: (k: string) => cacheDel(k), cacheKeys: { dashboard: (o: string, d: number) => `dash:${o}:${d}` } }));
 jest.mock("@/app/api/_middleware", () => ({
   ...jest.requireActual("@/app/api/_middleware"),
   verifyApiKey: async () => ({ org_id: "org-1", user_id: "u1", role }),

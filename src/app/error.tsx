@@ -10,9 +10,12 @@ export default function ErrorPage({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Log to Sentry if configured
+    // Log it, and report it to Sentry (when configured) with the digest shown below, so support can find it.
     import("@/lib/observability").then(({ captureError }) => {
       captureError(error, { digest: error.digest });
+    }).catch(() => {});
+    import("@/lib/clientErrors").then(({ captureClientError }) => {
+      captureClientError(error, { digest: error.digest ?? "", page: window.location.pathname });
     }).catch(() => {});
 
     // Stale JS chunks (e.g. mid-navigation after a deploy, or a transient
@@ -40,7 +43,11 @@ export default function ErrorPage({
             An unexpected error occurred. Our team has been notified.
           </p>
           {error.digest && (
-            <p className="text-white/20 font-mono text-[10px] mt-2">Error ID: {error.digest}</p>
+            <p className="text-white/40 font-mono text-xs mt-3 flex items-center justify-center gap-2">
+              Reference: {error.digest}
+              <button type="button" onClick={() => navigator.clipboard?.writeText(error.digest!).catch(() => {})}
+                className="text-[10px] underline underline-offset-2 hover:text-white/70">copy</button>
+            </p>
           )}
         </div>
         <div className="flex items-center justify-center gap-3">

@@ -11,6 +11,8 @@ import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { collectEvidence } from "@/lib/evidenceEngine";
 import crypto from "crypto";
+import { logger } from "@/lib/logger";
+import { reportServerError } from "@/lib/serverErrors";
 
 export async function POST(req: NextRequest) {
   const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
@@ -197,7 +199,8 @@ export async function POST(req: NextRequest) {
     // silent) because a silent catch here means the client still gets a
     // 200 and force-downloads the JSON body as "*.pdf" -- a file that
     // can't be opened, with no trace of why in the response.
-    console.error("report PDF render failed", { org_id, framework: body.framework, err });
+    logger.error("Report PDF render failed", { org_id, framework: body.framework, detail: err instanceof Error ? err.message : String(err) });
+    reportServerError(err, { code: "report_render_failed", framework: body.framework });
     return NextResponse.json({ ...reportData, signature, pdf_render_failed: true });
   }
 }

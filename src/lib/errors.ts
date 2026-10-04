@@ -7,15 +7,17 @@
  * values, file paths, occasionally a fragment of a query -- and isn't
  * actually more useful to a real user than a clear plain-language sentence.
  *
- * safeError() logs the full error server-side (Vercel logs, structured JSON,
- * grep-able by ref_id) and returns only a stable machine-readable code, a
- * human-readable message safe to display as-is, and that ref_id so a user
- * can hand it to support and an operator can find the matching log line.
+ * safeError() records the full error server-side and returns only a stable machine-readable code, a
+ * human-readable message safe to display as-is, and a ref_id. That ref_id finds everything about the failure:
+ * the structured log line, the "api.error" event on the Trace page (with its trace ID), and — for server faults —
+ * the Sentry report with the stack trace.
  */
 
 import { NextResponse } from "next/server";
-import { logger } from "./logger";
 import crypto from "crypto";
+import { recordEvent } from "./opsEvents";
+import { reportServerError } from "./serverErrors";
+import { currentTrace } from "./trace";
 
 export interface SafeErrorOptions {
   /** Stable machine-readable code, e.g. "attestation_failed". Safe to key UI copy off of. */
@@ -41,17 +43,25 @@ export function safeError(err: unknown, opts: SafeErrorOptions): NextResponse {
   const status = opts.status ?? 500;
   const refId  = crypto.randomBytes(4).toString("hex");
 
-  logger.error(opts.code, {
+  // The log line and the Trace-page event (recordEvent writes both) …
+  void recordEvent({
+    kind: "api.error",
+    message: opts.code,
     ref_id: refId,
-    status,
-    detail: extractDetail(err),
-    ...(err instanceof Error && err.stack ? { stack: err.stack.split("\n").slice(0, 4).join(" | ") } : {}),
-    ...opts.context,
+    data: {
+      status,
+      detail: extractDetail(err),
+      ...(err instanceof Error && err.stack ? { stack: err.stack.split("\n").slice(0, 4).join(" | ") } : {}),
+      ...opts.context,
+    },
   });
+  // … and, for a server fault with an actual error, the Sentry report with the full stack.
+  if (status >= 500 && err !== undefined) reportServerError(err, { code: opts.code, ref_id: refId, status });
 
+  const trace = currentTrace()?.trace_id;
   return NextResponse.json(
     { error: opts.code, message: opts.message, ref_id: refId },
-    { status },
+    { status, headers: { "X-Ref-Id": refId, ...(trace ? { "X-Trace-Id": trace } : {}) } },
   );
 }
 

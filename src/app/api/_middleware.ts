@@ -16,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getJwtSessionId } from "@/lib/jwt";
+import { annotateTrace } from "@/lib/trace";
 import crypto from "crypto";
 
 /** Add standard API response headers (version, timing, request ID). */
@@ -164,6 +165,7 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
       return { org_id: "", error: "session_revoked" };
     }
 
+    annotateTrace({ org_id: member.org_id });   // events recorded later in this request belong to this org
     return { org_id: member.org_id, user_id: user.id, actor_email: member.email, role: member.role };
   }
 

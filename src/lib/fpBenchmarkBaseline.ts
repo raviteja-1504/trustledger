@@ -28,6 +28,8 @@
 import type { FpBaselineEntry } from "./fpBenchmark";
 
 export const FP_BASELINE: FpBaselineEntry[] = [
+  { file: "src/app/api/scans/pr/route.ts", id: "ssrf", lineHash: "c11c9f0dc884", line: 36, severity: "critical",
+    reason: "Regex proximity heuristic: the flagged line is an error response (NextResponse.json invalid_pr_number), not an outbound request; it only fires because the trace wrapper reads x-request-id within 10 lines. The route's outbound GitHub calls go to fixed api.github.com URLs built from an allow-listed owner/name." },
   { file: "src/lib/seedFileSamples.ts", id: "command-injection", lineHash: "e5aa10162c73", line: 450, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
   { file: "src/app/pr/[id]/page.tsx", id: "eval-exec", lineHash: "007720b07a0e", line: 32, severity: "critical",

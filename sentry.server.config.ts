@@ -1,20 +1,18 @@
+// Sentry for API routes and server rendering (Node runtime). Loaded by src/instrumentation.ts.
+// Does nothing until NEXT_PUBLIC_SENTRY_DSN is set.
 import * as Sentry from "@sentry/nextjs";
+import { scrubEvent, sentryCommon } from "./src/lib/sentryScrub";
 
-const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN;
-
-if (SENTRY_DSN) {
+if (sentryCommon.dsn) {
   Sentry.init({
-    dsn: SENTRY_DSN,
-    environment: process.env.NODE_ENV,
-    tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
-
-    // Tag every server error with org context when available
+    ...sentryCommon,
     beforeSend(event, hint) {
       const err = hint.originalException;
       if (err instanceof Error && err.message.includes("supabaseUrl is required")) {
         return null; // Suppress "Supabase not configured" errors
       }
-      return event;
+      return scrubEvent(event);
     },
+    beforeSendTransaction: event => scrubEvent(event),
   });
 }

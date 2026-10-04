@@ -8,6 +8,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { sendEmailAlert } from "@/lib/alertDelivery";
+import { logger } from "@/lib/logger";
+import { reportServerError } from "@/lib/serverErrors";
 
 export async function GET(req: NextRequest) {
   const auth = req.headers.get("authorization");
@@ -139,7 +141,8 @@ export async function GET(req: NextRequest) {
       }
 
     } catch (e) {
-      console.error(`Weekly report failed for org ${org.id}:`, e);
+      logger.error("Weekly report failed", { org_id: org.id, detail: e instanceof Error ? e.message : String(e) });
+      reportServerError(e, { code: "weekly_report_failed", org_id: org.id });
     }
   }
 

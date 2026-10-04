@@ -16,8 +16,17 @@ import { createServiceClient } from "@/lib/supabase";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { verifyWebhookSignature, getInstallationToken, createCheckRun, updateCheckRun } from "@/lib/github";
 import { enqueueScan } from "@/lib/queue";
+import { runWithTrace, annotateTrace, traceIdFrom, currentTrace } from "@/lib/trace";
+import { recordEvent } from "@/lib/opsEvents";
+import { reportServerError } from "@/lib/serverErrors";
 
+// Trace ID = GitHub's delivery GUID (X-GitHub-Delivery), the same ID shown under the App's "Recent Deliveries",
+// so a delivery seen on GitHub can be looked up on the Trace page and vice versa.
 export async function POST(req: NextRequest) {
+  return runWithTrace({ trace_id: traceIdFrom(req.headers.get("x-github-delivery") ?? req.headers.get("x-request-id")) }, () => handle(req));
+}
+
+async function handle(req: NextRequest) {
   const rawBody = await req.text();
   const sig     = req.headers.get("x-hub-signature-256");
   const event   = req.headers.get("x-github-event");
@@ -72,6 +81,8 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     const orgId = orgRecord?.id ?? null;
+    annotateTrace({ org_id: orgId, repo: repoFullName, pr_number: prNumber });
+    void recordEvent({ kind: "webhook.received", message: `pull_request.${action}`, data: { head_sha: headSha, branch, author: prAuthor, installation_id: installationId ?? null, org_matched: !!orgId } });
 
     let checkRunId: number | null = null;
 
@@ -90,7 +101,7 @@ export async function POST(req: NextRequest) {
         });
         checkRunId = check.id;
       } catch (err) {
-        console.error("[webhook] check run creation failed:", err);
+        void recordEvent({ kind: "checkrun.failed", message: "Couldn't create the in-progress check run", data: { error: err instanceof Error ? err.message : String(err) } });
       }
     }
 
@@ -108,6 +119,7 @@ export async function POST(req: NextRequest) {
       signature_ok:    true,
       processed:       false,
     }).select("id").single();
+    annotateTrace({ delivery_id: deliveryRow?.id ?? null });
 
     // ── 4. Enqueue scan job ────────────────────────────────────────────────
     // Deferred via waitUntil rather than awaited: the response below doesn't
@@ -139,7 +151,11 @@ export async function POST(req: NextRequest) {
         pr_commits:       prCommits,
         pr_changed_files: prChangedFiles,
         pr_created_at:    prCreatedAt,
-      }).catch(err => console.error("[webhook] enqueueScan failed:", err)),
+        trace_id:         currentTrace()?.trace_id,
+      }).then(
+        () => recordEvent({ kind: "scan.queued", data: { head_sha: headSha, check_run_id: checkRunId, action } }),
+        err => { reportServerError(err, { code: "enqueue_failed" }); return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the scan", data: { error: err instanceof Error ? err.message : String(err) } }); },
+      ),
     );
 
     return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });
@@ -165,6 +181,7 @@ export async function POST(req: NextRequest) {
     const repoFullName = repo.full_name as string;
 
     const db = createServiceClient();
+    annotateTrace({ repo: repoFullName });
     const { data: scan } = await db
       .from("scans")
       .select("org_id, pr_number, installation_id, repo_full_name")
@@ -178,6 +195,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, skipped: true, reason: "scan_not_found" });
     }
 
+    annotateTrace({ org_id: scan.org_id, pr_number: scan.pr_number });
+    void recordEvent({ kind: "webhook.received", message: "check_run.rerequested", data: { head_sha: headSha, check_run_id: checkRunId } });
     const [owner, repoName] = repoFullName.split("/");
     try {
       const { token } = await getInstallationToken(scan.installation_id);
@@ -190,7 +209,7 @@ export async function POST(req: NextRequest) {
         },
       });
     } catch (err) {
-      console.error("[webhook] check run re-run update failed:", err);
+      void recordEvent({ kind: "checkrun.failed", message: "Couldn't mark the check run as re-running", data: { error: err instanceof Error ? err.message : String(err) } });
     }
 
     waitUntil(
@@ -206,7 +225,11 @@ export async function POST(req: NextRequest) {
         action:           "rerequested",
         check_run_id:     checkRunId,
         delivery_id:      null,
-      }).catch(err => console.error("[webhook] enqueueScan (rerequested) failed:", err)),
+        trace_id:         currentTrace()?.trace_id,
+      }).then(
+        () => recordEvent({ kind: "scan.queued", data: { head_sha: headSha, check_run_id: checkRunId, action: "rerequested" } }),
+        err => { reportServerError(err, { code: "enqueue_failed" }); return recordEvent({ kind: "scan.enqueue_failed", message: "Couldn't queue the re-run", data: { error: err instanceof Error ? err.message : String(err) } }); },
+      ),
     );
 
     return NextResponse.json({ ok: true, queued: true, check_run_id: checkRunId });

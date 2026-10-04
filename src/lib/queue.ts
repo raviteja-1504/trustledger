@@ -22,6 +22,8 @@ export interface ScanJob {
   // A user-requested rescan (api/scans/[id]/rescan): run even though this commit was already scanned,
   // as a full (non-delta) scan with the current engine.
   force?:           boolean;
+  // Follows the job from webhook / dashboard request through the worker (lib/trace.ts, Trace page).
+  trace_id?:        string;
 }
 
 /** Strip UTF-8 BOM and whitespace that Windows CLI piping adds to env vars. */

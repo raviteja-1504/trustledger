@@ -15,10 +15,16 @@ import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { enqueueScan } from "@/lib/queue";
 import { getInstallationToken, getPRHeadSha, createCheckRun } from "@/lib/github";
+import { runWithTrace, traceIdFrom, currentTrace } from "@/lib/trace";
+import { recordEvent } from "@/lib/opsEvents";
 
 const MIN_INTERVAL_MS = 60_000;
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
+  return runWithTrace({ trace_id: traceIdFrom(req.headers.get("x-request-id")) }, () => handle(req, ctx));
+}
+
+async function handle(req: NextRequest, { params }: { params: { id: string } }) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   const db = createServiceClient();
@@ -65,7 +71,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       org_id: auth.org_id, installation_id: scan.installation_id, repo_full_name: scan.repo_full_name,
       pr_number: scan.pr_number, head_sha: headSha, branch: scan.branch ?? "main", pr_author: scan.pr_author ?? null,
       before_sha: null, action: "rescan", check_run_id: checkRunId, delivery_id: null, force: true,
+      trace_id: currentTrace()?.trace_id,
     });
+    await recordEvent({ kind: "scan.queued", org_id: auth.org_id, repo: scan.repo_full_name, pr_number: scan.pr_number, message: "Rescan requested", data: { head_sha: headSha, check_run_id: checkRunId, previous_scan_id: scan.id } });
 
     await writeAuditLog(db, {
       org_id: auth.org_id, event_type: "scan_rescan_requested",

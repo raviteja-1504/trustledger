@@ -36,6 +36,9 @@ function AnalyticsInit() {
 
 function GlobalErrorHandler() {
   useEffect(() => {
+    // Initialise browser Sentry (no-op without NEXT_PUBLIC_SENTRY_DSN); its global handlers then report
+    // uncaught errors and rejections themselves. The listeners below keep the console log line.
+    import("@/lib/clientErrors").catch(() => {});
     function onError(event: ErrorEvent) {
       import("@/lib/observability").then(({ captureError }) => {
         captureError(event.error ?? new Error(event.message), {

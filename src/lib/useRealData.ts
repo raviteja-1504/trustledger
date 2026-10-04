@@ -64,9 +64,11 @@ export async function authedFetch<T>(
     // "attestation_failed", not meant to be shown as-is, and older routes'
     // "detail" fields could carry raw DB/exception text that shouldn't reach
     // the client at all.
-    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string; ref_id?: string };
     await handleSessionError(body.error);
-    throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
+    // The ref finds this failure on the Trace page, in the logs and in Sentry.
+    const text = body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`;
+    throw new Error(body.ref_id ? `${text} (ref ${body.ref_id})` : text);
   }
   return res.json() as Promise<T>;
 }

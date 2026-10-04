@@ -40,6 +40,10 @@ import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
 import type { ScanJob } from "@/lib/queue";
+import { runWithTrace, newTraceId, adoptTraceId, annotateTrace } from "@/lib/trace";
+import { recordEvent } from "@/lib/opsEvents";
+import { reportServerError } from "@/lib/serverErrors";
+import { logger } from "@/lib/logger";
 
 // The "300s timeout budget" this file's own header comment describes was
 // never actually configured anywhere -- without this export, the route ran
@@ -65,7 +69,7 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
   const currentSigningKey = (process.env.QSTASH_CURRENT_SIGNING_KEY ?? "").replace(/^﻿/, "").replace(/\r/g, "").trim();
   const nextSigningKey    = (process.env.QSTASH_NEXT_SIGNING_KEY ?? "").replace(/^﻿/, "").replace(/\r/g, "").trim();
   if (currentSigningKey && nextSigningKey) {
-    console.log("[scan-worker] signing key fingerprint:", currentSigningKey.length, currentSigningKey.slice(0, 6), currentSigningKey.slice(-4));
+    logger.debug("QStash signing key loaded", { key_length: currentSigningKey.length });
     try {
       const receiver = new Receiver({
         currentSigningKey,
@@ -80,7 +84,7 @@ async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean
         url:       req.url,
       });
     } catch (err) {
-      console.error("[scan-worker] QStash signature verification failed:", err);
+      logger.warn("QStash signature verification failed", { detail: err instanceof Error ? err.message : String(err) });
       return false;
     }
   }
@@ -104,7 +108,13 @@ async function markDelivery(
   } catch { /* best-effort */ }
 }
 
+// Each job runs inside its trace (the ID the webhook / dashboard request put on the job), so every log line and
+// event below joins that PR's timeline on the Trace page.
 export async function POST(req: NextRequest) {
+  return runWithTrace({ trace_id: newTraceId() }, () => handle(req));
+}
+
+async function handle(req: NextRequest) {
   const rawBody = await req.text();
 
   if (!await verifyRequest(req, rawBody)) {
@@ -131,6 +141,11 @@ export async function POST(req: NextRequest) {
     pr_created_at,
     force,
   } = job;
+
+  if (job.trace_id) adoptTraceId(job.trace_id);
+  annotateTrace({ org_id: orgId, repo: repoFullName, pr_number: prNumber, delivery_id: deliveryId });
+  const startedAt = Date.now();
+  void recordEvent({ kind: "scan.started", data: { head_sha: headSha, action, force: !!force, check_run_id: checkRunId } });
 
   const [owner, repoName] = repoFullName.split("/");
   const db = createServiceClient();
@@ -170,6 +185,7 @@ export async function POST(req: NextRequest) {
       } catch { /* best-effort — don't block the 200 response */ }
     }
     await markDelivery(db, deliveryId, { processed: true, scan_id: existing.id });
+    await recordEvent({ kind: "scan.skipped", scan_id: existing.id, message: "This commit was already scanned", data: { head_sha: headSha } });
     return NextResponse.json({ ok: true, skipped: true, reason: "already_scanned" });
   }
 
@@ -190,7 +206,7 @@ export async function POST(req: NextRequest) {
     // over a transient GitHub blip.
     const currentHeadSha = await getPRHeadSha(token, owner, repoName, prNumber);
     if (currentHeadSha && currentHeadSha !== headSha) {
-      console.log(`[scan-worker] superseded: queued for ${headSha}, PR is now at ${currentHeadSha} — skipping`);
+      void recordEvent({ kind: "scan.superseded", message: "A newer commit was pushed before the scan started", data: { queued_for: headSha, pr_head_now: currentHeadSha } });
       if (checkRunId) {
         try {
           await updateCheckRun(token, owner, repoName, checkRunId, {
@@ -252,9 +268,11 @@ export async function POST(req: NextRequest) {
       ? allScannablePaths.filter(p => changedPaths.has(p))
       : allScannablePaths;
 
+    const fetchStarted = Date.now();
     const fileContents = pathsToFetch.length > 0
       ? await fetchFileContents(token, owner, repoName, headSha, pathsToFetch)
       : [];
+    void recordEvent({ kind: "scan.files_fetched", duration_ms: Date.now() - fetchStarted, data: { pr_files: prFiles.length, scannable: allScannablePaths.length, requested: pathsToFetch.length, fetched: fileContents.length, delta: isDelta } });
 
     if (fileContents.length === 0 && (!prevScan || allScannablePaths.length === 0)) {
       if (checkRunId) {
@@ -264,6 +282,7 @@ export async function POST(req: NextRequest) {
         });
       }
       await markDelivery(db, deliveryId, { processed: true });
+      await recordEvent({ kind: "scan.completed", duration_ms: Date.now() - startedAt, message: "No scannable files in this PR", data: { files_scanned: 0 } });
       return NextResponse.json({ ok: true, files_scanned: 0 });
     }
 
@@ -314,7 +333,7 @@ export async function POST(req: NextRequest) {
 
     // Load the data-flow engines first: on a cold start they may still be loading (see engineWarmup.ts).
     const warm = await ensureTaintEngines();
-    if (!warm.ready) console.warn(`[scan-worker] data-flow engines not all ready after ${warm.ms}ms -- scan health will report it`);
+    if (!warm.ready) logger.warn("Data-flow engines not all ready; scan health will report it", { engines_warm_ms: warm.ms });
     const fetchedPaths = new Set(fileContents.map(f => f.path));
 
     const result = runScan({
@@ -376,6 +395,7 @@ export async function POST(req: NextRequest) {
 
       if (scan) {
         persistedScanId = scan.id;
+        annotateTrace({ scan_id: scan.id });
         // Health and telemetry (scanHealth.ts): a separate, best-effort write so a database without the
         // columns yet (migration 20260930) still records the scan itself.
         try {
@@ -383,7 +403,7 @@ export async function POST(req: NextRequest) {
           await (db.from("scans") as any).update({ health: result.health ?? null, telemetry: result.telemetry ?? null }).eq("id", scan.id);
         } catch { /* best-effort */ }
         if (result.telemetry) {
-          console.log(`[scan-telemetry] ${JSON.stringify({ scan_id: scan.id, repo: repoFullName, pr: prNumber, health: result.health?.status, engines_warm_ms: warm.ms, ...result.telemetry })}`);
+          logger.info("Scan telemetry", { event: "scan_telemetry", health: result.health?.status, engines_warm_ms: warm.ms, ...result.telemetry });
         }
         await Promise.all(DASHBOARD_CACHE_DAYS.map(days => cacheDel(cacheKeys.dashboard(orgId, days))));
         await cacheDel(cacheKeys.dependencies(orgId));
@@ -426,7 +446,7 @@ export async function POST(req: NextRequest) {
                 }))
             ),
           );
-          if (secretErr) console.error("[scan-worker] secret_findings insert failed:", scan.id, secretErr.message);
+          if (secretErr) logger.error("secret_findings insert failed", { detail: secretErr.message });
           else await invalidateSecretsCache(orgId);
         }
 
@@ -735,7 +755,7 @@ export async function POST(req: NextRequest) {
     // already in flight or about to be.
     const headAtFinish = await getPRHeadSha(token, owner, repoName, prNumber);
     if (headAtFinish && headAtFinish !== headSha) {
-      console.log(`[scan-worker] superseded before finalizing: queued for ${headSha}, PR is now at ${headAtFinish} — skipping check/comment`);
+      void recordEvent({ kind: "scan.superseded", message: "A newer commit was pushed while scanning; result kept, check run skipped", data: { queued_for: headSha, pr_head_now: headAtFinish } });
       if (checkRunId) {
         try {
           await updateCheckRun(token, owner, repoName, checkRunId, {
@@ -781,6 +801,7 @@ export async function POST(req: NextRequest) {
         name: "TrustLedger AI Governance", status: "completed", conclusion,
         output: { title, summary, annotations: buildCheckAnnotations(evidenceFiles, { fixesById, reviewUrl }) },
       });
+      void recordEvent({ kind: "checkrun.updated", data: { check_run_id: checkRunId, conclusion, title } });
     }
 
     // ── Post PR comment ───────────────────────────────────────────────────────
@@ -834,6 +855,10 @@ export async function POST(req: NextRequest) {
     }
 
     await markDelivery(db, deliveryId, { processed: true, scan_id: persistedScanId });
+    await recordEvent({
+      kind: "scan.completed", scan_id: persistedScanId, duration_ms: Date.now() - startedAt,
+      data: { files_scanned: result.files.length, files_inherited: inheritedFiles.length, delta: isDelta, overall_risk: mergedResult.overall_risk, health: result.health?.status ?? null },
+    });
     return NextResponse.json({
       ok:              true,
       scan_id:         result.scan_id,
@@ -843,7 +868,11 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (err) {
-    console.error("[scan-worker] error:", err);
+    reportServerError(err, { code: "scan_failed" });
+    await recordEvent({
+      kind: "scan.failed", scan_id: persistedScanId, duration_ms: Date.now() - startedAt, message: err instanceof Error ? err.message : String(err),
+      data: { head_sha: headSha, stack: err instanceof Error ? err.stack?.split("\n").slice(0, 5).join(" | ") : undefined, persisted: !!persistedScanId },
+    });
     await markDelivery(db, deliveryId, { processed: true, scan_id: persistedScanId, error: String(err).slice(0, 500) });
     // Best-effort: mark the check run as failed so the PR isn't left stuck
     // in "Scanning…" indefinitely. Do this before returning 500 (which

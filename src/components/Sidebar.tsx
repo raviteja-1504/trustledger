@@ -204,6 +204,7 @@ const ALL_LINKS: Array<{
   { href: "/risk-register",   label: "Risk Register",   icon: RiskRegIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   // Audit
   { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/trace",           label: "Trace",           icon: ScansNavIcon,    permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
   { href: "/verify-record",   label: "Verify Record",   icon: AuditIcon,       permission: null                         },
   { href: "/rules",           label: "Rule Catalog",    icon: ReportsIcon,     permission: null                         },

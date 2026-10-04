@@ -57,8 +57,29 @@ function isPublic(pathname: string): boolean {
   return false;
 }
 
+/**
+ * Every request gets an ID (kept if the caller sent a sane x-request-id). It's passed to the route handler as the
+ * x-request-id request header — API routes use it as their trace ID (lib/trace.ts) — and echoed on the response,
+ * so a failing request can be matched to its log lines and Trace-page events.
+ */
+function requestIdFor(req: NextRequest): string {
+  const incoming = req.headers.get("x-request-id");
+  if (incoming && /^[A-Za-z0-9-]{8,64}$/.test(incoming)) return incoming;
+  const uuid = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.()
+    ?? `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;   // (Node 18 test runs lack Web Crypto)
+  return uuid.replace(/-/g, "").slice(0, 16);
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const requestId = requestIdFor(req);
+  const forwarded = new Headers(req.headers);
+  forwarded.set("x-request-id", requestId);
+  const pass = () => {
+    const res = NextResponse.next({ request: { headers: forwarded } });
+    res.headers.set("x-request-id", requestId);
+    return res;
+  };
 
   // Block dev-only routes in production
   if (IS_PROD && DEV_ONLY_PATHS.has(pathname)) {
@@ -75,14 +96,14 @@ export async function middleware(req: NextRequest) {
 
   // Demo / dev mode — no auth required
   if (SKIP_AUTH) {
-    const res = NextResponse.next();
+    const res = pass();
     addSecurityHeaders(res, pathname);
     return res;
   }
 
   // Public paths — always allow (but still add security headers)
   if (isPublic(pathname)) {
-    const res = NextResponse.next();
+    const res = pass();
     addSecurityHeaders(res, pathname);
     return res;
   }
@@ -102,7 +123,7 @@ export async function middleware(req: NextRequest) {
         );
       }
     }
-    return NextResponse.next();
+    return pass();
   }
 
   // Check Supabase session from cookie
@@ -111,7 +132,7 @@ export async function middleware(req: NextRequest) {
 
   if (!supabaseUrl || !supabaseKey) {
     // Supabase not configured — allow through
-    return NextResponse.next();
+    return pass();
   }
 
   // Read auth token from cookies
@@ -143,7 +164,7 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  const response = NextResponse.next();
+  const response = pass();
   addSecurityHeaders(response, pathname);
   return response;
 }

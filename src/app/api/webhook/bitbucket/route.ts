@@ -21,6 +21,8 @@ import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { cacheDel, cacheKeys, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath } from "@/lib/scannableFiles";
 import crypto from "crypto";
+import { logger } from "@/lib/logger";
+import { reportServerError } from "@/lib/serverErrors";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -248,7 +250,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, scan_id: result.scan_id, overall_risk: result.overall_risk });
   } catch (err) {
     if (bbToken) await postBitbucketBuildStatus(bbToken, workspace, repoSlug, headSha, "FAILED", "TrustLedger: Error — retry");
-    console.error("Bitbucket webhook error:", err);
+    logger.error("Bitbucket webhook failed", { detail: err instanceof Error ? err.message : String(err) });
+    reportServerError(err, { code: "bitbucket_webhook_failed" });
     return NextResponse.json({ error: "scan_failed" }, { status: 500 });
   }
 }

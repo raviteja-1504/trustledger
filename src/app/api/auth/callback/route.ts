@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getInstallationAccount } from "@/lib/github";
+import { logger } from "@/lib/logger";
 
 function authCookieName(): string {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -61,7 +62,7 @@ export async function GET(req: NextRequest) {
   try {
     githubOrg = await getInstallationAccount(Number(installationId));
   } catch (err) {
-    console.error("[auth/callback] failed to fetch installation account:", err);
+    logger.error("GitHub App installation account lookup failed", { installation_id: installationId, detail: err instanceof Error ? err.message : String(err) });
   }
 
   const { error: upsertErr } = await db
@@ -72,7 +73,7 @@ export async function GET(req: NextRequest) {
     );
 
   if (upsertErr) {
-    console.error("[auth/callback] failed to save installation:", upsertErr);
+    logger.error("Saving the GitHub App installation failed", { installation_id: installationId, detail: upsertErr.message });
     return NextResponse.redirect(new URL("/settings?error=installation_save_failed", req.url));
   }
 

@@ -24,6 +24,7 @@
     }
   ],
   "crons": [
-    { "path": "/api/cron/webhook-retry", "schedule": "0 12 * * *" }
+    { "path": "/api/cron/webhook-retry", "schedule": "0 12 * * *" },
+    { "path": "/api/cron/pipeline-health", "schedule": "0 6 * * *" }
   ]
 }

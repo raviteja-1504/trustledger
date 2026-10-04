@@ -15,6 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { logger } from "@/lib/logger";
+import { reportServerError } from "@/lib/serverErrors";
 
 export async function GET(req: NextRequest) {
   const url    = new URL(req.url);
@@ -127,7 +129,8 @@ async function handleConversion(code: string, origin: string): Promise<NextRespo
 
     return new NextResponse(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
   } catch (e) {
-    console.error("GitHub App manifest exchange failed:", e);
+    logger.error("GitHub App manifest exchange failed", { detail: e instanceof Error ? e.message : String(e) });
+    reportServerError(e, { code: "github_manifest_failed" });
     return NextResponse.redirect(`${origin}/settings?error=github_app_exchange_failed`);
   }
 }

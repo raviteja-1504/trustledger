@@ -5,7 +5,15 @@
  */
 
 export async function register() {
+  // Error tracking first, so anything that fails during start-up is reported too. Both configs do nothing until
+  // NEXT_PUBLIC_SENTRY_DSN is set. (They were never loaded before, so no server errors reached Sentry.)
+  if (process.env.NEXT_RUNTIME === "nodejs") await import("../sentry.server.config");
+  if (process.env.NEXT_RUNTIME === "edge") await import("../sentry.edge.config");
+
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Every log line written inside a trace carries the trace ID (lib/trace.ts registers itself with the logger).
+    await import("./lib/trace");
+
     // 1. Validate environment variables (throws in production if missing)
     const { validateEnv } = await import("./lib/env");
     validateEnv();

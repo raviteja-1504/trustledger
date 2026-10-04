@@ -17,10 +17,16 @@ import { getInstallationToken, getPullRequest, createCheckRun } from "@/lib/gith
 import { enqueueScan } from "@/lib/queue";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
+import { runWithTrace, traceIdFrom, currentTrace } from "@/lib/trace";
+import { recordEvent } from "@/lib/opsEvents";
 
 const MIN_INTERVAL_MS = 60_000;
 
 export async function POST(req: NextRequest) {
+  return runWithTrace({ trace_id: traceIdFrom(req.headers.get("x-request-id")) }, () => handle(req));
+}
+
+async function handle(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
 
@@ -69,6 +75,7 @@ export async function POST(req: NextRequest) {
     } catch { /* the scan still runs; only the check run is missing */ }
 
     await enqueueScan({
+      trace_id: currentTrace()?.trace_id,
       org_id: auth.org_id, installation_id: target.installationId, repo_full_name: target.repo,
       pr_number: prNumber, head_sha: pr.head_sha, branch: pr.branch, pr_author: pr.author,
       before_sha: null, action: "manual", check_run_id: checkRunId, delivery_id: null,
@@ -85,6 +92,7 @@ export async function POST(req: NextRequest) {
       payload: { kind: "dashboard_scan", repo: target.repo, pr_number: prNumber, head_sha: pr.head_sha, force },
     });
 
+    await recordEvent({ kind: "scan.queued", org_id: auth.org_id, repo: target.repo, pr_number: prNumber, message: "Scan started from the dashboard", data: { head_sha: pr.head_sha, check_run_id: checkRunId, force } });
     return NextResponse.json({ status: "queued", repo: target.repo, pr_number: prNumber, head_sha: pr.head_sha });
   } catch (err) {
     return safeError(err, { code: "scan_start_failed", message: "We couldn't start that scan. Check that the TrustLedger GitHub App can access this repository." });

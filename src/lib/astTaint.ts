@@ -503,6 +503,9 @@ function sqlTextArg(call: ts.CallExpression): ts.Expression | undefined {
       if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && ["sql", "text", "query"].includes(p.name.text)) return p.initializer;
       if (ts.isShorthandPropertyAssignment(p) && ["sql", "text", "query"].includes(p.name.text)) return p.name;
     }
+    // An object with no sql/text/query field carries no SQL text: drivers take a string or a { sql | text } config.
+    // `als.run({ traceId }, fn)` (AsyncLocalStorage), `job.run({ ... })`, `tx.execute({ id })` are not queries.
+    return undefined;
   }
   return first;
 }

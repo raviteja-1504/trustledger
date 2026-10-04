@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { safeError } from "@/lib/errors";
+import { logger } from "@/lib/logger";
 
 /**
  * POST /api/sync-check-run
@@ -211,7 +212,7 @@ export async function POST(req: NextRequest) {
     try {
       await db.from("scans").update({ check_run_sync_error: null }).eq("id", scan.id);
     } catch (err) {
-      console.error("Failed to clear check_run_sync_error (non-fatal, diagnostic only):", err);
+      logger.warn("Failed to clear check_run_sync_error (non-fatal)", { detail: err instanceof Error ? err.message : String(err) });
     }
 
     return NextResponse.json({

@@ -366,3 +366,25 @@ function parseLine(pattern, line) {
     expect(() => scanAstTaint(content, "app.ts")).not.toThrow();
   });
 });
+
+describe("SQL sinks: an object argument is SQL only when it carries sql / text / query", () => {
+  it("AsyncLocalStorage.run({ ... }, fn) and similar config objects are not queries", () => {
+    const content = `
+import { AsyncLocalStorage } from "async_hooks";
+const storage = new AsyncLocalStorage();
+export function handle(req: any) {
+  return storage.run({ trace_id: req.headers.get("x-request-id") }, () => 1);
+}
+export function job(req: any) {
+  return worker.run({ id: req.query.id });
+}`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "sql-injection")).toBe(false);
+  });
+
+  it("still flags SQL text — as a string, or in a { text } / { sql } config", () => {
+    const str = `export function a(req: any) { return db.run(\`SELECT * FROM t WHERE id = \${req.query.id}\`); }`;
+    const cfg = `export function b(req: any) { return pool.query({ text: "SELECT * FROM t WHERE id = " + req.query.id }); }`;
+    const sql = `export function c(req: any) { return conn.execute({ sql: "DELETE FROM t WHERE id = " + req.body.id }); }`;
+    for (const c of [str, cfg, sql]) expect(scanAstTaint(c, "app.ts").some(f => f.id === "sql-injection")).toBe(true);
+  });
+});

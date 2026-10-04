@@ -1,11 +1,11 @@
+// Sentry for edge middleware. Loaded by src/instrumentation.ts. Does nothing until NEXT_PUBLIC_SENTRY_DSN is set.
 import * as Sentry from "@sentry/nextjs";
+import { scrubEvent, sentryCommon } from "./src/lib/sentryScrub";
 
-const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN;
-
-if (SENTRY_DSN) {
+if (sentryCommon.dsn) {
   Sentry.init({
-    dsn: SENTRY_DSN,
-    environment: process.env.NODE_ENV,
-    tracesSampleRate: 0.1,
+    ...sentryCommon,
+    beforeSend: event => scrubEvent(event),
+    beforeSendTransaction: event => scrubEvent(event),
   });
 }

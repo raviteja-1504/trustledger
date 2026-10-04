@@ -39,9 +39,11 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // older/simple routes only set error; fall back to that, then to a
     // generic status-based message so nothing ever surfaces raw JS/HTTP
     // internals (e.g. "TypeError: Failed to fetch") to the user.
-    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string; ref_id?: string };
     await handleSessionError?.(body.error); // optional call: some tests mock useRealData without it
-    throw new Error(body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`);
+    // The ref finds this failure on the Trace page, in the logs and in Sentry.
+    const text = body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`;
+    throw new Error(body.ref_id ? `${text} (ref ${body.ref_id})` : text);
   }
   return res.json() as Promise<T>;
 }

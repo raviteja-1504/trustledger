@@ -25,6 +25,8 @@ import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { cacheDel, cacheKeys, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import crypto from "crypto";
+import { logger } from "@/lib/logger";
+import { reportServerError } from "@/lib/serverErrors";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
@@ -281,7 +283,8 @@ export async function POST(req: NextRequest) {
     if (gitlabToken && headSha) {
       await postGitLabStatus(gitlabToken, projectId, headSha, "failed", "TrustLedger: Scan error — retry");
     }
-    console.error("GitLab webhook error:", err);
+    logger.error("GitLab webhook failed", { detail: err instanceof Error ? err.message : String(err) });
+    reportServerError(err, { code: "gitlab_webhook_failed" });
     return NextResponse.json({ error: "scan_failed" }, { status: 500 });
   }
 }
