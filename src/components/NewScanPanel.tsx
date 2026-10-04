@@ -452,8 +452,8 @@ export default function NewScanPanel({ open, onClose }: Props) {
                 ) : noRepos ? (
                   <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 space-y-1">
                     <p className="font-bold">{reposError ? "Couldn't load your repositories" : "No repositories connected yet"}</p>
-                    <p>{reposError ?? "Install the TrustLedger GitHub App and add repositories, then scan their pull requests here."}</p>
-                    <a href="/settings" className="inline-block font-bold underline underline-offset-2">Go to Settings →</a>
+                    <p>{reposError ?? "Install the TrustLedger GitHub App and import your repositories, then scan their pull requests here."}</p>
+                    <a href="/settings?tab=repositories" className="inline-block font-bold underline underline-offset-2">Go to Settings → Repositories</a>
                   </div>
                 ) : (
                   <select id="ns-repo" value={repo} onChange={e => setRepo(e.target.value)} className={`${inputCls} font-mono`}>

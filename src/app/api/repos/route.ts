@@ -1,15 +1,20 @@
 /**
  * Repository Management API
- * GET  /api/repos              → list monitored repos
- * POST /api/repos              → add single repo
- * POST /api/repos?import=github → bulk import all repos from GitHub org
- * PATCH /api/repos             → toggle repo active/inactive
+ * GET   /api/repos              → list the org's repositories (connected or switched off)
+ * POST  /api/repos?import=github → add every repo the org's GitHub App installations can read   (admin)
+ * POST  /api/repos              → add one repo by owner/name (API / CLI use)                     (admin)
+ * PATCH /api/repos              → switch a repo on or off { id, is_active }                       (admin)
+ *
+ * Import only ADDS repositories that aren't connected yet: one an admin switched off stays off.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
-import { getInstallationToken } from "@/lib/github";
+import { verifyApiKey, requireRole } from "../_middleware";
+import { getInstallationToken, listInstallationRepos } from "@/lib/github";
+import { safeError } from "@/lib/errors";
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -26,88 +31,77 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr, message: "Only admins can add repositories." }, { status: 403 });
+  const { org_id } = auth;
+  const db = createServiceClient();
 
-  const url     = new URL(req.url);
-  const isImport = url.searchParams.get("import") === "github";
-  const db      = createServiceClient();
-
-  if (isImport) {
-    // ── Bulk import from GitHub org ─────────────────────────────────────────
-    const { data: installation } = await db
+  if (req.nextUrl.searchParams.get("import") === "github") {
+    // ── Import from every GitHub App installation this org has ──────────────
+    const { data: installs } = await db
       .from("github_installations")
       .select("installation_id, github_org")
       .eq("org_id", org_id)
-      .single() as { data: { installation_id: number; github_org: string } | null };
-
-    if (!installation) {
-      return NextResponse.json({ error:"github_app_not_installed", hint:"Install the TrustLedger GitHub App first" }, { status: 422 });
+      .limit(20) as { data: Array<{ installation_id: number; github_org: string | null }> | null };
+    if (!installs || installs.length === 0) {
+      return NextResponse.json({ error: "github_app_not_installed", message: "Install the TrustLedger GitHub App first." }, { status: 422 });
     }
 
-    // Get installation token
-    const { token } = await getInstallationToken(installation.installation_id);
+    try {
+      const found = new Map<string, string>();
+      for (const i of installs) {
+        const { token } = await getInstallationToken(i.installation_id);
+        for (const r of await listInstallationRepos(token)) found.set(r.full_name, r.default_branch);
+      }
+      if (found.size === 0) {
+        return NextResponse.json({ error: "no_repos_found", message: "The GitHub App can't see any repositories. On GitHub, give it access to the repositories you want scanned." }, { status: 422 });
+      }
 
-    // Fetch all repos for the installation
-    const githubRepos: Array<{ full_name: string; default_branch: string; private: boolean }> = [];
-    let page = 1;
-    while (true) {
-      const res = await fetch(
-        `https://api.github.com/installation/repositories?per_page=100&page=${page}`,
-        { headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } },
-      );
-      if (!res.ok) break;
-      const data = await res.json() as { repositories: typeof githubRepos; total_count: number };
-      githubRepos.push(...data.repositories);
-      if (githubRepos.length >= data.total_count || data.repositories.length < 100) break;
-      page++;
+      const { data: existing } = await db.from("repositories").select("repo_full_name").eq("org_id", org_id) as { data: Array<{ repo_full_name: string }> | null };
+      const known = new Set((existing ?? []).map(r => r.repo_full_name));
+      const fresh = [...found].filter(([name]) => !known.has(name));
+      if (fresh.length > 0) {
+        const { error: insErr } = await db
+          .from("repositories")
+          .upsert(fresh.map(([name, branch]) => ({ org_id, repo_full_name: name, default_branch: branch || "main", is_active: true })),
+            { onConflict: "org_id,repo_full_name", ignoreDuplicates: true });
+        if (insErr) throw insErr;
+      }
+      return NextResponse.json({ added: fresh.length, already_connected: found.size - fresh.length, total: found.size });
+    } catch (err) {
+      return safeError(err, { code: "import_failed", message: "We couldn't import repositories from GitHub. Check that the TrustLedger GitHub App is still installed." });
     }
-
-    if (githubRepos.length === 0) {
-      return NextResponse.json({ error:"no_repos_found", hint:"Check GitHub App installation permissions" }, { status: 422 });
-    }
-
-    // Upsert all repos
-    const { data: inserted, error: insErr } = await db
-      .from("repositories")
-      .upsert(
-        githubRepos.map(r => ({
-          org_id,
-          repo_full_name:  r.full_name,
-          default_branch:  r.default_branch,
-          is_active:       true,
-        })),
-        { onConflict: "org_id,repo_full_name" },
-      )
-      .select("id, repo_full_name") as { data: unknown[] | null; error: unknown };
-
-    if (insErr) return NextResponse.json({ error:"import_failed" }, { status: 500 });
-    return NextResponse.json({ imported: (inserted ?? []).length, total: githubRepos.length });
   }
 
-  // ── Add single repo ──────────────────────────────────────────────────────
-  const body = await req.json() as { repo_full_name: string; default_branch?: string };
-  if (!body.repo_full_name) return NextResponse.json({ error:"missing_repo" }, { status:400 });
+  // ── Add a single repo ────────────────────────────────────────────────────
+  const body = await req.json().catch(() => ({})) as { repo_full_name?: string; default_branch?: string };
+  const name = (body.repo_full_name ?? "").trim();
+  if (!REPO_RE.test(name)) return NextResponse.json({ error: "invalid_repo", message: "Use the owner/name form, e.g. my-org/payments-api." }, { status: 400 });
 
   const { data, error: insErr } = await db
     .from("repositories")
-    .upsert({ org_id, repo_full_name: body.repo_full_name, default_branch: body.default_branch ?? "main" },
-      { onConflict: "org_id,repo_full_name" })
+    .upsert({ org_id, repo_full_name: name, default_branch: body.default_branch ?? "main" }, { onConflict: "org_id,repo_full_name" })
     .select("id, repo_full_name, default_branch, is_active, created_at")
     .single() as { data: unknown; error: unknown };
 
-  if (insErr) return NextResponse.json({ error:"insert_failed" }, { status:500 });
+  if (insErr) return NextResponse.json({ error: "insert_failed" }, { status: 500 });
   return NextResponse.json({ repo: data });
 }
 
 export async function PATCH(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const roleErr = requireRole(auth, "admin");
+  if (roleErr) return NextResponse.json({ error: roleErr, message: "Only admins can switch repositories on or off." }, { status: 403 });
 
-  const body = await req.json() as { id: string; is_active: boolean };
-  if (!body.id) return NextResponse.json({ error:"missing_id" }, { status:400 });
+  const body = await req.json().catch(() => ({})) as { id?: string; is_active?: unknown };
+  if (!body.id || typeof body.is_active !== "boolean") return NextResponse.json({ error: "missing_fields", message: "Send the repository id and is_active (true/false)." }, { status: 400 });
 
   const db = createServiceClient();
-  await db.from("repositories").update({ is_active: body.is_active }).eq("id", body.id).eq("org_id", org_id);
+  const { data } = await db.from("repositories").update({ is_active: body.is_active }).eq("id", body.id).eq("org_id", auth.org_id)
+    .select("id, is_active") as { data: unknown[] | null };
+  if (!data || data.length === 0) return NextResponse.json({ error: "repo_not_found" }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

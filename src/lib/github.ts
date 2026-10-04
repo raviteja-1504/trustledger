@@ -426,3 +426,32 @@ export async function listOpenPullRequests(token: string, owner: string, repo: s
   if (!res.ok) throw new Error(`GitHub GET pulls ${owner}/${repo} failed: ${res.status}`);
   return (await res.json() as GhPull[]).map(toSummary);
 }
+
+let appInfoCache: { slug: string; html_url: string } | null = null;
+/** The GitHub App's public slug and page (for "Install on GitHub" links). Cached for the process. */
+export async function getAppPublicInfo(): Promise<{ slug: string; html_url: string; install_url: string }> {
+  if (!appInfoCache) {
+    const res = await fetch(`${GITHUB_API}/app`, {
+      headers: { Authorization: `Bearer ${buildAppJWT()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!res.ok) throw new Error(`GitHub app lookup failed: ${res.status}`);
+    const data = await res.json() as { slug: string; html_url: string };
+    appInfoCache = { slug: data.slug, html_url: data.html_url };
+  }
+  return { ...appInfoCache, install_url: `https://github.com/apps/${appInfoCache.slug}/installations/new` };
+}
+
+/** Every repository an installation of the App can read. */
+export async function listInstallationRepos(token: string): Promise<Array<{ full_name: string; default_branch: string; private: boolean }>> {
+  const repos: Array<{ full_name: string; default_branch: string; private: boolean }> = [];
+  for (let page = 1; page <= 20; page++) {
+    const res = await fetch(`${GITHUB_API}/installation/repositories?per_page=100&page=${page}`, {
+      headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!res.ok) throw new Error(`GitHub installation repositories failed: ${res.status}`);
+    const data = await res.json() as { repositories: typeof repos; total_count: number };
+    repos.push(...data.repositories);
+    if (repos.length >= data.total_count || data.repositories.length < 100) break;
+  }
+  return repos;
+}

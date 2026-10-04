@@ -132,8 +132,6 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "new URL(req.url) parses the INBOUND Next.js request's own URL to read query params/pathname/origin via url.searchParams.get(...) etc. -- never used as an outbound fetch/request target. Uniform pattern confirmed across every sampled route handler in this corpus." },
   { file: "src/app/api/report/history/route.ts", id: "ssrf", lineHash: "2993b049c663", line: 19, severity: "critical",
     reason: "new URL(req.url) parses the INBOUND Next.js request's own URL to read query params/pathname/origin via url.searchParams.get(...) etc. -- never used as an outbound fetch/request target. Uniform pattern confirmed across every sampled route handler in this corpus." },
-  { file: "src/app/api/repos/route.ts", id: "ssrf", lineHash: "f24484f95a04", line: 32, severity: "critical",
-    reason: "new URL(req.url) parses the INBOUND Next.js request's own URL to read query params/pathname/origin via url.searchParams.get(...) etc. -- never used as an outbound fetch/request target. Uniform pattern confirmed across every sampled route handler in this corpus." },
   { file: "src/app/api/retention/route.ts", id: "ssrf", lineHash: "5ae001042f4e", line: 67, severity: "critical",
     reason: "new URL(req.url) parses the INBOUND Next.js request's own URL to read query params/pathname/origin via url.searchParams.get(...) etc. -- never used as an outbound fetch/request target. Uniform pattern confirmed across every sampled route handler in this corpus." },
   { file: "src/app/api/retention/route.ts", id: "ssrf", lineHash: "5ae001042f4e-1", line: 162, severity: "critical",

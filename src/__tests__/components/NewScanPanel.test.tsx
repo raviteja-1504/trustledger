@@ -94,7 +94,7 @@ it("with no connected repositories, explains how to connect one instead of offer
   backend({ "/api/repos": () => ({ repos: [] }) });
   render(<NewScanPanel open onClose={() => {}} />);
   expect(await screen.findByText("No repositories connected yet")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /Go to Settings/ })).toHaveAttribute("href", "/settings");
+  expect(screen.getByRole("link", { name: /Settings → Repositories/ })).toHaveAttribute("href", "/settings?tab=repositories");
   expect(screen.getByRole("button", { name: "Scan PR" })).toBeDisabled();
 });
 

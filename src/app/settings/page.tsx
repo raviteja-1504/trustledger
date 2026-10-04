@@ -15,6 +15,7 @@ import {
   loadPolicy,
   savePolicy,
 } from "@/lib/policy";
+import RepositoriesTab from "@/components/settings/RepositoriesTab";
 import {
   useRole,
   useTeamMembers,
@@ -2122,10 +2123,11 @@ function GitLabIntegration() {
 
 // ── Page ───────────────────────────────────────────────────────────────────────
 
-type Tab = "policies" | "integrations" | "notifications" | "team" | "api" | "sso" | "privacy" | "webhooks" | "branding" | "roles";
+type Tab = "policies" | "repositories" | "integrations" | "notifications" | "team" | "api" | "sso" | "privacy" | "webhooks" | "branding" | "roles";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "policies",      label: "Policies"      },
+  { key: "repositories",  label: "Repositories"  },
   { key: "integrations",  label: "Integrations"  },
   { key: "webhooks",      label: "Webhooks"       },
   { key: "notifications", label: "Notifications" },
@@ -2144,6 +2146,12 @@ export default function SettingsPage() {
   const [saved,  setSaved]  = useState(false);
   const { profile } = useAuth();
   const orgName = useOrgName();
+
+  // Deep link: /settings?tab=repositories (New Scan links here)
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t && TABS.some(x => x.key === t)) setTab(t as Tab);
+  }, []);
 
   useEffect(() => {
     setPolicy(loadPolicy());
@@ -2210,7 +2218,7 @@ export default function SettingsPage() {
               </span>
             </div>
             <p className="text-sm text-gray-400">
-              Policies · Integrations · Team · Notifications · API keys
+              Policies · Repositories · Integrations · Team · Notifications · API keys
             </p>
           </div>
           <button
@@ -2244,6 +2252,7 @@ export default function SettingsPage() {
 
         {/* Tab content */}
         {tab === "policies"      && <PoliciesTab      policy={policy} setPolicy={setPolicy} />}
+        {tab === "repositories"  && <RepositoriesTab />}
         {tab === "integrations"  && <IntegrationsTab  policy={policy} setPolicy={setPolicy} />}
         {tab === "notifications" && <NotificationsTab policy={policy} setPolicy={setPolicy} />}
         {tab === "team"          && <TeamTab />}
