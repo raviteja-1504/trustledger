@@ -17,7 +17,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type R = Record<string, any>;
@@ -162,11 +162,17 @@ export async function GET(req: NextRequest) {
 // ── POST /api/zapier?action=... ───────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   const url    = new URL(req.url);
   const action = url.searchParams.get("action");
+  const needs  = action === "resolve_violation" ? "can_resolve_violations" : action === "create_incident" ? "can_manage_incidents" : null;
+  if (needs) {
+    const permErr = await requirePermission(auth, needs);
+    if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
+  }
   const body   = await req.json() as Record<string, unknown>;
   const db     = createServiceClient();
 

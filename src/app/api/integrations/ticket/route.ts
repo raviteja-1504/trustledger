@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
+import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 
@@ -143,8 +143,11 @@ async function createLinearTicket(config: {
 // ── Route handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_resolve_violations");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const payload = await req.json() as TicketPayload;
   if (!payload.provider || !payload.title) {

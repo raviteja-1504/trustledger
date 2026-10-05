@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, permissionsFor } from "../_middleware";
 import { validateBody, AttestSchema } from "@/lib/validation";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { safeError } from "@/lib/errors";
 import { performAttestation } from "@/lib/attestation";
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   const rl = await checkRateLimit(org_id, RATE_LIMITS.attest);
@@ -25,11 +26,16 @@ export async function POST(req: NextRequest) {
     user_id,
     scan_id:         body.scan_id,
     file_path:       body.file_path,
-    reviewer_email:  body.reviewer_email,
+    // A signed-in reviewer attests as themselves, whatever the body says.
+    reviewer_email:  auth.actor_email ?? body.reviewer_email,
     reviewer_github: body.reviewer_github,
+    permissions:     await permissionsFor(auth),
   });
 
   if (!result.ok) {
+    if (result.reason === "forbidden") {
+      return NextResponse.json({ error: "insufficient_permissions", risk_score: result.risk_score }, { status: 403 });
+    }
     if (result.reason === "scan_not_found") {
       return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
     }

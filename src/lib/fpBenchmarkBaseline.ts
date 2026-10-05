@@ -28,8 +28,6 @@
 import type { FpBaselineEntry } from "./fpBenchmark";
 
 export const FP_BASELINE: FpBaselineEntry[] = [
-  { file: "src/app/api/scans/pr/route.ts", id: "ssrf", lineHash: "c11c9f0dc884", line: 36, severity: "critical",
-    reason: "Regex proximity heuristic: the flagged line is an error response (NextResponse.json invalid_pr_number), not an outbound request; it only fires because the trace wrapper reads x-request-id within 10 lines. The route's outbound GitHub calls go to fixed api.github.com URLs built from an allow-listed owner/name." },
   { file: "src/lib/seedFileSamples.ts", id: "command-injection", lineHash: "e5aa10162c73", line: 450, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
   { file: "src/app/pr/[id]/page.tsx", id: "eval-exec", lineHash: "007720b07a0e", line: 32, severity: "critical",
@@ -108,6 +106,8 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "This line is inside an intentionally-vulnerable code SAMPLE embedded as product demo content in NewScanPanel.tsx (shown to users to illustrate what the scanner detects) -- never executed." },
   { file: "src/lib/seedFileSamples.ts", id: "sql-injection", lineHash: "d93a626aea03", line: 69, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
+  { file: "src/app/api/custom-roles/route.ts", id: "ssrf", lineHash: "44ed02815ff5", line: 128, severity: "critical",
+    reason: "new URL(req.url).searchParams.get(\"id\") reads the DELETE request's own query string; the id only filters a custom_roles query (scoped to the caller's org). The route makes no outbound request." },
   { file: "src/app/api/alerts/route.ts", id: "ssrf", lineHash: "5ae001042f4e", line: 60, severity: "critical",
     reason: "new URL(req.url) parses the INBOUND Next.js request's own URL to read query params/pathname/origin via url.searchParams.get(...) etc. -- never used as an outbound fetch/request target. Uniform pattern confirmed across every sampled route handler in this corpus." },
   { file: "src/app/api/analytics/trends/route.ts", id: "ssrf", lineHash: "6d987564a156", line: 37, severity: "critical",

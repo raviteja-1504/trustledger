@@ -7,6 +7,9 @@ import { authedFetch } from "@/lib/useRealData";
 import { useRole } from "@/lib/roles";
 import { useAuth } from "@/lib/auth";
 import { ROLE_LABELS, ROLE_COLORS, ROLE_DESCRIPTIONS, type UserRole } from "@/lib/roles";
+import { BUILTIN_PERMISSIONS, PERMISSION_KEYS, PERMISSION_LABELS } from "@/lib/permissions";
+
+interface CustomRole { id: string; name: string }
 
 interface Member {
   id:           string;
@@ -56,6 +59,11 @@ export default function TeamPage() {
   const [removing,     setRemoving]     = useState<string | null>(null);
   const [resending,    setResending]    = useState<string | null>(null);
   const [resendLink,   setResendLink]   = useState<{ email: string; link: string } | null>(null);
+  const [actionError,  setActionError]  = useState<string | null>(null);
+
+  // Custom roles (Settings → Custom Roles) and who holds which
+  const [customRoles,  setCustomRoles]  = useState<CustomRole[]>([]);
+  const [assignments,  setAssignments]  = useState<Record<string, string>>({});
 
   async function load() {
     setLoading(true);
@@ -70,6 +78,28 @@ export default function TeamPage() {
   }
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    authedFetch<{ roles: CustomRole[]; assignments: Record<string, string> }>("/api/custom-roles")
+      .then(d => { setCustomRoles(d.roles ?? []); setAssignments(d.assignments ?? {}); })
+      .catch(() => { /* custom roles are optional; the built-in roles still work */ });
+  }, [isAdmin]);
+
+  async function changeCustomRole(userId: string, customRoleId: string | null) {
+    setChangingRole(userId);
+    setActionError(null);
+    try {
+      await authedFetch("/api/team", { method: "PATCH", body: JSON.stringify({ user_id: userId, custom_role_id: customRoleId }) });
+      setAssignments(prev => {
+        const next = { ...prev };
+        if (customRoleId) next[userId] = customRoleId; else delete next[userId];
+        return next;
+      });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Couldn't change that member's custom role.");
+    } finally { setChangingRole(null); }
+  }
 
   async function invite(e: React.FormEvent) {
     e.preventDefault();
@@ -103,7 +133,9 @@ export default function TeamPage() {
         body: JSON.stringify({ user_id: userId, role: newRole }),
       });
       setMembers(prev => prev.map(m => m.user_id === userId ? { ...m, role: newRole } : m));
-    } catch { /* ignore */ }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Couldn't change that member's role.");
+    }
     finally { setChangingRole(null); }
   }
 
@@ -203,6 +235,13 @@ export default function TeamPage() {
           </form>
         )}
 
+        {actionError && (
+          <div className="section-card px-5 py-3 text-sm text-rose-600 flex items-center justify-between gap-3">
+            <span>{actionError}</span>
+            <button onClick={() => setActionError(null)} className="text-xs text-gray-400 hover:text-gray-600">Dismiss</button>
+          </div>
+        )}
+
         {/* Member list grouped by role */}
         {loading ? (
           <div className="section-card p-5 space-y-3">
@@ -252,6 +291,12 @@ export default function TeamPage() {
                               {!m.user_id && (
                                 <span className="text-[9px] font-bold text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full">PENDING</span>
                               )}
+                              {m.user_id && assignments[m.user_id] && (
+                                <span className="text-[9px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded-full truncate max-w-[10rem]"
+                                  title="Custom role: its permissions replace the built-in role's">
+                                  {customRoles.find(r => r.id === assignments[m.user_id!])?.name ?? "Custom role"}
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-gray-400 truncate">
                               {m.email}
@@ -273,6 +318,20 @@ export default function TeamPage() {
                               {ROLE_ORDER.map(r => (
                                 <option key={r} value={r}>{ROLE_LABELS[r]}</option>
                               ))}
+                            </select>
+                          )}
+
+                          {/* Custom role — replaces the built-in role's permissions */}
+                          {isAdmin && !isCurrentUser && m.user_id && customRoles.length > 0 && (
+                            <select
+                              aria-label={`Custom role for ${m.email}`}
+                              value={assignments[m.user_id] ?? ""}
+                              disabled={changingRole === m.user_id}
+                              onChange={e => changeCustomRole(m.user_id!, e.target.value || null)}
+                              className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:opacity-50 shrink-0 max-w-[9rem]"
+                            >
+                              <option value="">No custom role</option>
+                              {customRoles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                             </select>
                           )}
 
@@ -309,18 +368,13 @@ export default function TeamPage() {
 
         {/* Role reference */}
         <div className="animate-fade-up section-card p-5">
-          <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Role permissions</p>
+          <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Role permissions</p>
+          <p className="text-[11px] text-gray-400 mb-3">A member with a custom role gets exactly that role&apos;s permissions instead. Create custom roles under Settings → Custom Roles.</p>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {ROLE_ORDER.map(r => {
               const colors = ROLE_COLORS[r];
-              const rows = [
-                ["Attest files",       r !== "developer"],
-                ["View all reports",   true],
-                ["Export data",        r !== "developer"],
-                ["Manage settings",    r === "admin"],
-                ["Manage team",        r === "admin"],
-                ["Billing & API keys", r === "admin"],
-              ];
+              // Straight from the table the server enforces (lib/permissions.ts).
+              const rows: Array<[string, boolean]> = PERMISSION_KEYS.map(k => [PERMISSION_LABELS[k].label, BUILTIN_PERMISSIONS[r][k]]);
               return (
                 <div key={r} className={`rounded-xl p-4 border ${colors.bg} border-opacity-50`} style={{ borderColor: "rgba(0,0,0,0.06)" }}>
                   <p className={`text-xs font-bold mb-2 ${colors.text}`}>{ROLE_LABELS[r]}</p>

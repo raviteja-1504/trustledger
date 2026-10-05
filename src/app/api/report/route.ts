@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import { collectEvidence } from "@/lib/evidenceEngine";
@@ -15,8 +15,11 @@ import { logger } from "@/lib/logger";
 import { reportServerError } from "@/lib/serverErrors";
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_create_reports");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const rl = await checkRateLimit(org_id, RATE_LIMITS.report);
   if (!rl.success) {

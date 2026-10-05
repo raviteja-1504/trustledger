@@ -18,6 +18,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { getJwtSessionId } from "@/lib/jwt";
 import { annotateTrace } from "@/lib/trace";
 import crypto from "crypto";
+export { permissionsFor, requirePermission } from "@/lib/permissionResolver";
 
 /** Add standard API response headers (version, timing, request ID). */
 export function addApiHeaders(res: NextResponse, startMs?: number): NextResponse {
@@ -86,6 +87,11 @@ export async function verifyJWT(req: NextRequest): Promise<JWTResult> {
 }
 
 const ROLE_RANK: Record<string, number> = { developer: 0, security_reviewer: 1, admin: 2 };
+
+/** Platform-wide operations (MSP: create client orgs). platform_admin is never grantable by an org admin. */
+export function requirePlatformAdmin(result: AuthResult): string | null {
+  return result.role === "platform_admin" ? null : "insufficient_permissions";
+}
 
 /** Returns an error string if caller's role is below the required minimum, null if allowed. */
 export function requireRole(

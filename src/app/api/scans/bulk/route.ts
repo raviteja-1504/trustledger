@@ -9,7 +9,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
+import { verifyApiKey, permissionsFor, requirePermission } from "../../_middleware";
+import { attestPermissionFor, canAttestAny } from "@/lib/permissions";
 import { buildAttestationHash } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
@@ -17,7 +18,8 @@ import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   const url = new URL(req.url);
@@ -40,6 +42,10 @@ export async function POST(req: NextRequest) {
     if (!body.scan_id || !body.reviewer_email) {
       return NextResponse.json({ error:"scan_id and reviewer_email required" }, { status:400 });
     }
+    const perms = await permissionsFor(auth);
+    if (!canAttestAny(perms)) return NextResponse.json({ error: "insufficient_permissions" }, { status: 403 });
+    // A signed-in reviewer attests as themselves, whatever the body says.
+    body.reviewer_email = actor_email ?? body.reviewer_email;
 
     // Get all un-attested files in this scan
     const { data: files } = await db
@@ -59,7 +65,10 @@ export async function POST(req: NextRequest) {
       .eq("scan_id", body.scan_id) as { data: Array<{ file_path: string }> | null };
 
     const attestedPaths = new Set((existing ?? []).map(a => a.file_path));
-    const toAttest      = files.filter(f => !attestedPaths.has(f.file_path));
+    const pending       = files.filter(f => !attestedPaths.has(f.file_path));
+    // Files above what this role may sign off (e.g. CRITICAL for a HIGH-only reviewer) are left for someone who can.
+    const toAttest      = pending.filter(f => perms[attestPermissionFor(f.risk_score)]);
+    const notPermitted  = pending.length - toAttest.length;
 
     const results: Array<{ file_path: string; attestation_id: string }> = [];
 
@@ -113,11 +122,13 @@ export async function POST(req: NextRequest) {
       data: { scan_id: body.scan_id, bulk: true, files_attested: results.length, reviewer: body.reviewer_email },
     });
 
-    return NextResponse.json({ ok: true, attested: results.length, results });
+    return NextResponse.json({ ok: true, attested: results.length, not_permitted: notPermitted, results });
   }
 
   // ── Bulk resolve violations ────────────────────────────────────────────────
   if (op === "resolve") {
+    const permErr = await requirePermission(auth, "can_resolve_violations");
+    if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
     const ids = body.violation_ids ?? [];
     if (ids.length === 0 && !body.scan_id) {
       return NextResponse.json({ error:"violation_ids or scan_id required" }, { status:400 });

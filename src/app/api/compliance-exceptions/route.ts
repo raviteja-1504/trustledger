@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "security_reviewer");
+  const roleErr = await requirePermission(auth, "can_resolve_violations");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   const body = await req.json() as {
@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "security_reviewer");
+  const roleErr = await requirePermission(auth, "can_resolve_violations");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   const body = await req.json() as { id: string; status: string };

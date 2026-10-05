@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 
 const DEFAULT_RETENTION = {
@@ -35,8 +35,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_policies");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const raw  = await req.json().catch(() => ({})) as Record<string, unknown>;
   // Clamp all numeric values to sane bounds (1 day – 2555 days / ~7 years)
@@ -61,8 +64,11 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_policies");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const url    = new URL(req.url);
   const scope  = url.searchParams.get("scope");   // scans | violations | secrets | all
@@ -156,11 +162,16 @@ export async function DELETE(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   const url    = new URL(req.url);
   const action = url.searchParams.get("action");
+  // Erasing the whole org's data is an admin decision no permission flag can grant; a full export needs export rights.
+  const permErr = action === "delete_account" ? requireRole(auth, "admin")
+    : action === "export_all" ? await requirePermission(auth, "can_export_data") : null;
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
   const db     = createServiceClient();
 
   if (action === "export_all") {

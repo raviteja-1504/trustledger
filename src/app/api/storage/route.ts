@@ -11,7 +11,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 
@@ -68,8 +68,11 @@ export async function GET(req: NextRequest) {
 // ── POST — upload file ────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_export_data");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const formData = await req.formData();
   const file     = formData.get("file") as File | null;
@@ -116,8 +119,11 @@ export async function POST(req: NextRequest) {
 // ── DELETE — remove file ──────────────────────────────────────────────────────
 
 export async function DELETE(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_export_data");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const url      = new URL(req.url);
   const filePath = url.searchParams.get("path");

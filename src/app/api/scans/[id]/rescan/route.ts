@@ -10,7 +10,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../../_middleware";
+import { verifyApiKey, requirePermission } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { enqueueScan } from "@/lib/queue";
@@ -27,6 +27,8 @@ export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
 async function handle(req: NextRequest, { params }: { params: { id: string } }) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_trigger_scans");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
   const db = createServiceClient();
 
   const { data: scan } = await db

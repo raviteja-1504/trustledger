@@ -9,6 +9,7 @@
 
 import type { createServiceClient } from "@/lib/supabase";
 import { performAttestation } from "@/lib/attestation";
+import { permissionsForMemberEmail } from "@/lib/permissionResolver";
 
 function slackText(text: string) {
   return { response_type: "ephemeral", text };
@@ -53,11 +54,19 @@ export async function handleAttest(
     return slackError("Couldn't resolve your email from Slack — TrustLedger's Slack app may not have a bot token configured, or this workspace restricts email visibility. Attest from the dashboard instead.");
   }
 
+  // The Slack user must be a member of this org, and their role decides what they may sign off.
+  const member = await permissionsForMemberEmail(orgId, email);
+  if (!member) {
+    return slackError(`${email} isn't a member of this TrustLedger organisation, so it can't attest.`);
+  }
+
   const result = await performAttestation(db, {
-    org_id: orgId, scan_id: scanId, file_path: filePath, reviewer_email: email,
+    org_id: orgId, user_id: member.user_id, scan_id: scanId, file_path: filePath, reviewer_email: email,
+    permissions: member.permissions,
   });
 
   if (!result.ok) {
+    if (result.reason === "forbidden") return slackError(`Your role can't attest ${result.risk_score} files.`);
     if (result.reason === "scan_not_found") return slackError("Scan not found — check the scan_id and try again.");
     return slackError("Couldn't record that attestation. Please try again or use the dashboard.");
   }

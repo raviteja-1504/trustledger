@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 import crypto from "crypto";
@@ -8,7 +8,7 @@ import crypto from "crypto";
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_integrations");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
   const { org_id } = auth;
 
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_integrations");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
   const { org_id, user_id, actor_email } = auth;
 
@@ -66,8 +66,11 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_integrations");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const body = await req.json() as { id: string };
   if (!body.id) return NextResponse.json({ error: "missing_id" }, { status: 400 });

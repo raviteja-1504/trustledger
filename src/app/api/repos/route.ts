@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { getInstallationToken, listInstallationRepos } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { cacheDel, cacheKeys } from "@/lib/cache";
@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_integrations");
   if (roleErr) return NextResponse.json({ error: roleErr, message: "Only admins can add repositories." }, { status: 403 });
   const { org_id } = auth;
   const db = createServiceClient();
@@ -101,7 +101,7 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_integrations");
   if (roleErr) return NextResponse.json({ error: roleErr, message: "Only admins can switch repositories on or off." }, { status: 403 });
 
   const body = await req.json().catch(() => ({})) as { id?: string; is_active?: unknown };

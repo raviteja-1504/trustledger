@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { deliverWebhook, type WebhookEventType } from "@/lib/outboundWebhook";
 import crypto from "crypto";
 
@@ -35,8 +35,11 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_integrations");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const url  = new URL(req.url);
   const body = await req.json() as {
@@ -105,8 +108,11 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_integrations");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const body = await req.json() as { id:string; url?:string; events?:WebhookEventType[]; enabled?:boolean; secret?:string };
   if (!body.id) return NextResponse.json({ error:"missing_id" }, { status:400 });
@@ -123,8 +129,11 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_integrations");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return NextResponse.json({ error:"missing_id" }, { status:400 });

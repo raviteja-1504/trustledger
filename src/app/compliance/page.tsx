@@ -935,7 +935,7 @@ export default function CompliancePage() {
                 <p className="text-sm font-bold text-gray-900">Exception Register — {fw.shortName}</p>
                 <p className="text-xs text-gray-400 mt-0.5">Formally tracked control gaps, risk acceptances, and remediation plans</p>
               </div>
-              {permissions.canAttest && (
+              {permissions.canTriage && (
                 <button onClick={() => setShowExcForm(v=>!v)}
                   className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -1060,7 +1060,7 @@ export default function CompliancePage() {
                         </div>
                       )}
                     </div>
-                    {exc.status !== "resolved" && permissions.canAttest && (
+                    {exc.status !== "resolved" && permissions.canTriage && (
                       <button onClick={() => closeException(exc.id)}
                         className="shrink-0 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap">
                         Mark Resolved

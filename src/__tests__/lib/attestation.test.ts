@@ -13,6 +13,7 @@ jest.mock("@/lib/github", () => ({
 }));
 
 import { performAttestation } from "@/lib/attestation";
+import { ALL_PERMISSIONS } from "@/lib/permissions";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 
 const mockGetInstallationToken = getInstallationToken as jest.MockedFunction<typeof getInstallationToken>;
@@ -67,6 +68,7 @@ function makeMockDb(config: MockDbConfig) {
 const BASE_PARAMS = {
   org_id: "org-1", user_id: "user-1", scan_id: "scan-1",
   file_path: "src/app.ts", reviewer_email: "reviewer@acme.com",
+  permissions: ALL_PERMISSIONS,
 };
 
 function baseReads(overrides: Partial<MockDbConfig["reads"]> = {}): MockDbConfig["reads"] {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
@@ -20,7 +20,8 @@ import { logger } from "@/lib/logger";
  *   force_neutral: true  — mark the check run "neutral" (scan failed, no result)
  */
 export async function POST(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   let body: {
@@ -34,6 +35,13 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
+  }
+
+  // A plain sync only re-derives the check from attestations. Forcing it to "neutral" lifts the merge block
+  // without anyone attesting, so it is a triage decision.
+  if (body.force_neutral) {
+    const permErr = await requirePermission(auth, "can_resolve_violations");
+    if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
   }
 
   if (!body.scan_id && !(body.repo_full_name && body.pr_number)) {

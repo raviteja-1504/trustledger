@@ -17,6 +17,7 @@ jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
 jest.mock("@/app/api/_middleware", () => ({
   verifyApiKey: async () => ({ org_id: "org-1", user_id: "u-1", actor_email: "lead@acme.dev", role: "admin" }),
   requireRole: () => null,
+  requirePermission: async () => null,
 }));
 jest.mock("@/lib/audit", () => ({ writeAuditLog: async () => {} }));
 jest.mock("@/lib/cache", () => {

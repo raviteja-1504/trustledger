@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert } from "@/lib/alertDelivery";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "@/lib/incidentPlaybooks";
@@ -53,8 +53,11 @@ const MAX_INCIDENTS = 1000;
 const RECENT_CLOSED_INCIDENTS = 200;
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_incidents");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const body = await req.json() as {
     title:          string;
@@ -143,8 +146,11 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_manage_incidents");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const body = await req.json() as {
     id:               string;

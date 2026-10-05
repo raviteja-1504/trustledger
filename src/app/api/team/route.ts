@@ -9,10 +9,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES as VALID_ROLES, type AssignableRole as MemberRole } from "@/lib/memberRoles";
+import { checkGrantable } from "@/lib/permissionResolver";
+import { permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 
 // ── GET — list members (any authenticated member of the org) ──────────────────
 export async function GET(req: NextRequest) {
@@ -33,7 +35,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_team");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   let body: { email?: string; role?: string; name?: string };
@@ -49,6 +51,8 @@ export async function POST(req: NextRequest) {
   if (!role || !VALID_ROLES.includes(role)) {
     return NextResponse.json({ error: "invalid_role", valid: VALID_ROLES }, { status: 400 });
   }
+  const grantErr = await checkGrantable(auth, { role });
+  if (grantErr) return NextResponse.json({ error: grantErr }, { status: 403 });
 
   const db = createServiceClient();
 
@@ -111,35 +115,62 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ member }, { status: 201 });
 }
 
-// ── PATCH — change role ────────────────────────────────────────────────────────
+// ── PATCH — change role and/or custom role ─────────────────────────────────────
+// Body: { user_id, role?, custom_role_id? }. custom_role_id null clears it (back to the built-in role's permissions).
 export async function PATCH(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_team");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
-  let body: { user_id?: string; role?: string };
+  let body: { user_id?: string; role?: string; custom_role_id?: string | null };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "invalid_json" }, { status: 400 }); }
 
   if (!body.user_id) return NextResponse.json({ error: "user_id_required" }, { status: 400 });
-  if (!body.role || !VALID_ROLES.includes(body.role as MemberRole)) {
+  const changesRole       = body.role !== undefined;
+  const changesCustomRole = body.custom_role_id !== undefined;
+  if (!changesRole && !changesCustomRole) return NextResponse.json({ error: "nothing_to_change" }, { status: 400 });
+  if (changesRole && !VALID_ROLES.includes(body.role as MemberRole)) {
     return NextResponse.json({ error: "invalid_role", valid: VALID_ROLES }, { status: 400 });
   }
 
   // Prevent admin from demoting themselves (would lock them out)
-  if (body.user_id === auth.user_id && body.role !== "admin") {
+  if (body.user_id === auth.user_id && changesRole && body.role !== "admin") {
     return NextResponse.json({ error: "cannot_demote_self" }, { status: 400 });
+  }
+  // ...or narrowing their own permissions through a custom role, for the same reason.
+  if (body.user_id === auth.user_id && changesCustomRole) {
+    return NextResponse.json({ error: "cannot_change_own_permissions" }, { status: 400 });
   }
 
   const db = createServiceClient();
-  const { data: member, error: updateErr } = await db
-    .from("org_members")
-    .update({ role: body.role })
+  if (changesRole) {
+    const grantErr = await checkGrantable(auth, { role: body.role });
+    if (grantErr) return NextResponse.json({ error: grantErr }, { status: 403 });
+  }
+  if (changesCustomRole && body.custom_role_id !== null) {
+    if (typeof body.custom_role_id !== "string") return NextResponse.json({ error: "invalid_custom_role" }, { status: 400 });
+    const { data: customRole } = await db
+      .from("custom_roles").select("*").eq("id", body.custom_role_id).eq("org_id", auth.org_id).maybeSingle();
+    if (!customRole) return NextResponse.json({ error: "custom_role_not_found" }, { status: 404 });
+    const grantErr = await checkGrantable(auth, { permissions: permissionsFromRow(customRole as Partial<Record<PermissionKey, unknown>>) });
+    if (grantErr) return NextResponse.json({ error: grantErr }, { status: 403 });
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (changesRole) updates.role = body.role;
+  if (changesCustomRole) updates.custom_role_id = body.custom_role_id;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: member, error: updateErr } = await (db.from("org_members") as any)
+    .update(updates)
     .eq("org_id", auth.org_id)
     .eq("user_id", body.user_id)
     .select("id, email, role")
-    .single();
+    .single() as { data: { id: string; email: string; role: string } | null; error: { code?: string; message?: string } | null };
 
+  if (updateErr && (updateErr.code === "42703" || /custom_role_id/.test(updateErr.message ?? ""))) {
+    return NextResponse.json({ error: "custom_roles_not_set_up", message: "Custom roles need database migration 005_advanced_rbac." }, { status: 422 });
+  }
   if (updateErr || !member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
 
   await writeAuditLog(db, {
@@ -149,17 +180,17 @@ export async function PATCH(req: NextRequest) {
     actor_email:   auth.actor_email ?? "unknown",
     resource_type: "org_member",
     resource_id:   member.id,
-    payload:       { target_user_id: body.user_id, new_role: body.role },
+    payload:       { target_user_id: body.user_id, ...(changesRole ? { new_role: body.role } : {}), ...(changesCustomRole ? { custom_role_id: body.custom_role_id } : {}) },
   });
 
-  return NextResponse.json({ member });
+  return NextResponse.json({ member: { ...member, ...(changesCustomRole ? { custom_role_id: body.custom_role_id } : {}) } });
 }
 
 // ── DELETE — remove member (by user_id for active members, member_id for pending) ──
 export async function DELETE(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_team");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   const params   = new URL(req.url).searchParams;
@@ -187,6 +218,11 @@ export async function DELETE(req: NextRequest) {
   );
 
   if (!member) return NextResponse.json({ error: "member_not_found" }, { status: 404 });
+
+  // Only an admin may remove an admin (a custom role with team management can't remove its way up).
+  if (member.role === "admin" && auth.role !== "admin" && auth.role !== "platform_admin") {
+    return NextResponse.json({ error: "cannot_remove_admin" }, { status: 403 });
+  }
 
   // Prevent removing the last admin
   if (member.role === "admin") {
@@ -219,7 +255,7 @@ export async function DELETE(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "admin");
+  const roleErr = await requirePermission(auth, "can_manage_team");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   let body: { email?: string };

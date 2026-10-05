@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePermission } from "../_middleware";
 import { verifyAuditChain } from "@/lib/audit";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_view_audit_log");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const url   = new URL(req.url);
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
@@ -24,8 +27,11 @@ export async function GET(req: NextRequest) {
 
 /** Verify the audit log hash chain integrity */
 export async function POST(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_view_audit_log");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const db = createServiceClient();
   const result = await verifyAuditChain(db, org_id);

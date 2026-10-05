@@ -1,4 +1,7 @@
 jest.mock("@/lib/attestation", () => ({ performAttestation: jest.fn() }));
+const memberLookup = jest.fn();
+jest.mock("@/lib/permissionResolver", () => ({ permissionsForMemberEmail: (...a: unknown[]) => memberLookup(...a) }));
+import { ALL_PERMISSIONS } from "@/lib/permissions";
 
 import { handleAttest, resolveSlackUserEmail } from "@/lib/slackAttest";
 import { performAttestation } from "@/lib/attestation";
@@ -10,6 +13,11 @@ const fakeDb = {} as SupabaseClient;
 describe("slack/commands.handleAttest", () => {
   const originalToken = process.env.SLACK_BOT_TOKEN;
   const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    memberLookup.mockReset();
+    memberLookup.mockResolvedValue({ user_id: "u-dev", permissions: ALL_PERMISSIONS });
+  });
 
   afterEach(() => {
     process.env.SLACK_BOT_TOKEN = originalToken;
@@ -42,7 +50,30 @@ describe("slack/commands.handleAttest", () => {
 
     expect(mockPerformAttestation).toHaveBeenCalledWith(fakeDb, expect.objectContaining({
       scan_id: "scan-1", file_path: "src/some file.ts", reviewer_email: "dev@acme.com",
+      user_id: "u-dev", permissions: ALL_PERMISSIONS,
     }));
+    expect(memberLookup).toHaveBeenCalledWith("org-1", "dev@acme.com");
+  });
+
+  it("refuses a Slack user whose email isn't a member of the org", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    global.fetch = jest.fn().mockResolvedValue({
+      json: async () => ({ ok: true, user: { profile: { email: "stranger@else.com" } } }),
+    }) as unknown as typeof fetch;
+    memberLookup.mockResolvedValue(null);
+    const result = await handleAttest(fakeDb, "org-1", ["scan-1", "src/app.ts"], "U9") as { text: string };
+    expect(result.text).toContain("isn't a member");
+    expect(mockPerformAttestation).not.toHaveBeenCalled();
+  });
+
+  it("explains when the member's role can't attest that file's risk", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    global.fetch = jest.fn().mockResolvedValue({
+      json: async () => ({ ok: true, user: { profile: { email: "dev@acme.com" } } }),
+    }) as unknown as typeof fetch;
+    mockPerformAttestation.mockResolvedValue({ ok: false, reason: "forbidden", risk_score: "CRITICAL" });
+    const result = await handleAttest(fakeDb, "org-1", ["scan-1", "src/app.ts"], "U123") as { text: string };
+    expect(result.text).toContain("can't attest CRITICAL files");
   });
 
   it("fails open with a dashboard-pointer message when SLACK_BOT_TOKEN is not configured", async () => {

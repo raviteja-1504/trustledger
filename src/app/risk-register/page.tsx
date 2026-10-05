@@ -483,7 +483,7 @@ export default function RiskRegisterPage() {
       // human-set workflow field -- see /api/risk-register/sync. Skipped
       // entirely in seed/offline mode, where there's no real org to persist
       // against.
-      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && derived.length > 0) {
+      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && derived.length > 0 && permissions.canTriage) {
         authedFetch("/api/risk-register/sync", {
           method: "POST",
           body: JSON.stringify({
@@ -497,7 +497,7 @@ export default function RiskRegisterPage() {
       }
     }
     setLoading(false); if (spinner) setRefreshing(false);
-  }, [profile?.org_id]);
+  }, [profile?.org_id, permissions.canTriage]);
 
   // No auto-poll interval: fetchData fans out to one scan fetch per repo with
   // no cap, the heaviest per-tick cost of any page in the app. The Refresh
@@ -678,7 +678,7 @@ export default function RiskRegisterPage() {
           </div>
           <div className="flex flex-col items-end gap-0.5">
             <div className="flex items-center gap-2">
-              {permissions.canAttest && (
+              {permissions.canTriage && (
                 <button onClick={() => setShowAddForm(v=>!v)}
                   className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition-all shadow-sm ${showAddForm?"text-indigo-800 bg-indigo-100 border-indigo-300":"text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100"}`}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -1009,38 +1009,38 @@ export default function RiskRegisterPage() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</p>
-                        <select value={r.status} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{status:e.target.value as RiskStatus})}
+                        <select value={r.status} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{status:e.target.value as RiskStatus})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed">
                           {(["open","mitigating","accepted","closed"] as const).map(s=><option key={s} value={s}>{STATUS_STYLE[s].label}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Treatment</p>
-                        <select value={r.treatment} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{treatment:e.target.value as TreatmentType})}
+                        <select value={r.treatment} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{treatment:e.target.value as TreatmentType})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
                           {(["mitigate","accept","transfer","avoid"] as const).map(t=><option key={t} value={t}>{TREATMENT_STYLE[t].label}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Owner</p>
-                        <select value={r.owner} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
+                        <select value={r.owner} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
                           {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
                         </select>
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Due Date</p>
-                        <input type="date" value={r.due_date??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{due_date:e.target.value})}
+                        <input type="date" value={r.due_date??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{due_date:e.target.value})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" />
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual L</p>
-                        <input type="number" min={1} max={5} value={r.residual_likelihood??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{residual_likelihood:Number(e.target.value) as 1|2|3|4|5})}
+                        <input type="number" min={1} max={5} value={r.residual_likelihood??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{residual_likelihood:Number(e.target.value) as 1|2|3|4|5})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
                       </div>
                       <div>
                         <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual I</p>
-                        <input type="number" min={1} max={5} value={r.residual_impact??""} disabled={!permissions.canAttest} onChange={e=>updateOverride(r.id,{residual_impact:Number(e.target.value) as 1|2|3|4|5})}
+                        <input type="number" min={1} max={5} value={r.residual_impact??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{residual_impact:Number(e.target.value) as 1|2|3|4|5})}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
                       </div>
                     </div>
@@ -1055,7 +1055,7 @@ export default function RiskRegisterPage() {
                           ))}
                         </div>
                       )}
-                      {permissions.canAttest && (
+                      {permissions.canTriage && (
                         <div className="flex gap-2">
                           <input value={noteInput[r.id]??""} onChange={e=>setNoteInput(p=>({...p,[r.id]:e.target.value}))}
                             onKeyDown={e=>{if(e.key==="Enter")addNote(r.id);}}
@@ -1083,7 +1083,7 @@ export default function RiskRegisterPage() {
                       })()}
                       {r.related_link&&<Link href={r.related_link} className="text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-lg hover:bg-gray-100">View Evidence ↗</Link>}
                       <span className="text-[9px] text-gray-400 ml-auto">Identified {fmtDate(r.identified_at)}</span>
-                      {!r.auto_derived&&permissions.canAttest&&(
+                      {!r.auto_derived&&permissions.canTriage&&(
                         <button onClick={()=>{if(confirm("Delete this risk?"))deleteManual(r.id);}}
                           className="text-[10px] font-bold text-rose-600 hover:text-rose-800 px-2.5 py-1 rounded-lg hover:bg-rose-50 transition-colors">
                           Delete

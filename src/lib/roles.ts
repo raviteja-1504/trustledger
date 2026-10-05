@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/lib/auth";
+import { builtinPermissions, canAttestAny, attestPermissionFor, type Permissions } from "@/lib/permissions";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
@@ -9,6 +10,8 @@ export type UserRole = "developer" | "security_reviewer" | "admin";
 
 export interface RolePermissions {
   canAttest: boolean;
+  /** Resolve violations, triage findings, edit the risk register and compliance exceptions. */
+  canTriage: boolean;
   canScan: boolean;
   canViewReports: boolean;
   canManageSettings: boolean;
@@ -37,6 +40,7 @@ export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
 export const PERMISSIONS: Record<UserRole, RolePermissions> = {
   developer: {
     canAttest:         false,
+    canTriage:         false,
     canScan:           true,
     canViewReports:    true,
     canManageSettings: false,
@@ -45,6 +49,7 @@ export const PERMISSIONS: Record<UserRole, RolePermissions> = {
   },
   security_reviewer: {
     canAttest:         true,
+    canTriage:         true,
     canScan:           true,
     canViewReports:    true,
     canManageSettings: false,
@@ -53,6 +58,7 @@ export const PERMISSIONS: Record<UserRole, RolePermissions> = {
   },
   admin: {
     canAttest:         true,
+    canTriage:         true,
     canScan:           true,
     canViewReports:    true,
     canManageSettings: true,
@@ -94,7 +100,22 @@ export function useRole() {
   // Guard against unexpected DB values (null, empty string, unknown role name)
   const role: UserRole = (rawRole in PERMISSIONS) ? (rawRole as UserRole) : "developer";
 
-  return { role, permissions: PERMISSIONS[role], setRole, isDemo: SKIP_AUTH };
+  // The server's effective permissions (built-in role, or the custom role an admin assigned) -- what every
+  // API route enforces. Falls back to the built-in role's set until /api/me has answered, and in demo mode.
+  const perms: Permissions = (!SKIP_AUTH && profile?.permissions) ? profile.permissions : builtinPermissions(role);
+  const permissions: RolePermissions = {
+    canAttest:         canAttestAny(perms),
+    canTriage:         perms.can_resolve_violations,
+    canScan:           perms.can_trigger_scans,
+    canViewReports:    true,
+    canManageSettings: role === "admin",
+    canManageUsers:    perms.can_manage_team,
+    canExportData:     perms.can_export_data,
+  };
+  /** Whether this user may sign off a file of the given risk score. */
+  const canAttestRisk = (risk: string | null | undefined) => perms[attestPermissionFor(risk)];
+
+  return { role, permissions, perms, canAttestRisk, setRole, isDemo: SKIP_AUTH };
 }
 
 // ── Team roster (localStorage-backed for demo; swap for API call in production) ─

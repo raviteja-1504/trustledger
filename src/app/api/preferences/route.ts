@@ -40,7 +40,8 @@ export async function PATCH(req: NextRequest) {
   const db = createServiceClient();
   await db
     .from("notification_preferences")
-    .upsert({ user_id, org_id, ...body, updated_at: new Date().toISOString() },
+    // Identity last: the body must never be able to pick whose preferences these are.
+    .upsert({ ...body, user_id, org_id, updated_at: new Date().toISOString() },
       { onConflict: "user_id,org_id" });
 
   return NextResponse.json({ ok: true });

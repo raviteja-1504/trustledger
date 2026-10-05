@@ -68,7 +68,8 @@ export async function authedFetch<T>(
     await handleSessionError(body.error);
     // The ref finds this failure on the Trace page, in the logs and in Sentry.
     const text = body.message ?? body.error ?? `Something went wrong (${res.status}). Please try again.`;
-    throw new Error(body.ref_id ? `${text} (ref ${body.ref_id})` : text);
+    // status/code let callers tell "not allowed" (403) apart from a failure worth retrying.
+    throw Object.assign(new Error(body.ref_id ? `${text} (ref ${body.ref_id})` : text), { status: res.status, code: body.error });
   }
   return res.json() as Promise<T>;
 }

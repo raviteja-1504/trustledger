@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../../_middleware";
+import { verifyApiKey, requirePermission } from "../../_middleware";
 import { buildSarifReport, type SarifSourceFile } from "@/lib/sarif";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { attachTriage } from "@/lib/findingLifecycle";
@@ -18,7 +18,7 @@ import { getFixSuggestions } from "@/lib/scanner";
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "security_reviewer");
+  const roleErr = await requirePermission(auth, "can_export_data");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
   const { org_id } = auth;
 

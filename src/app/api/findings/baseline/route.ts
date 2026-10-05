@@ -10,7 +10,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../../_middleware";
+import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, FindingBaselineSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
@@ -21,7 +21,7 @@ const MAX_BASELINE = 5000;
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
-  const roleErr = requireRole(auth, "security_reviewer");
+  const roleErr = await requirePermission(auth, "can_resolve_violations");
   if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
   const v = await validateBody(req, FindingBaselineSchema);

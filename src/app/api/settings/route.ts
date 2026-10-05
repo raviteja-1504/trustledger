@@ -1,10 +1,11 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey, requireRole } from "../_middleware";
+import { verifyApiKey, requireRole, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES, isAssignableRole } from "@/lib/memberRoles";
+import { checkGrantable } from "@/lib/permissionResolver";
 
 // â”€â”€ GET org settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -108,14 +109,12 @@ export async function PATCH(req: NextRequest) {
 // â”€â”€ POST â€” invite team member â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function POST(req: NextRequest) {
-  const { org_id, user_id, actor_email, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { org_id, user_id, actor_email, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
 
-  // Only admins may manage team membership
-  const db0 = createServiceClient();
-  const { data: caller } = await db0.from("org_members")
-    .select("role").eq("org_id", org_id).eq("user_id", user_id ?? "").single();
-  if (!caller || !["admin", "owner", "platform_admin"].includes(caller.role)) {
+  // Team membership: admins, or a custom role with team management.
+  if (await requirePermission(auth, "can_manage_team")) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
@@ -132,6 +131,10 @@ export async function POST(req: NextRequest) {
   // reads every organisation's data.
   if (body.role !== undefined && !isAssignableRole(body.role)) {
     return NextResponse.json({ error: "invalid_role", valid: ASSIGNABLE_ROLES }, { status: 400 });
+  }
+  if (body.action === "invite_member" || body.action === "update_member_role") {
+    const grantErr = await checkGrantable(auth, { role: body.role ?? "developer" });
+    if (grantErr) return NextResponse.json({ error: grantErr }, { status: 403 });
   }
 
   if (body.action === "invite_member") {

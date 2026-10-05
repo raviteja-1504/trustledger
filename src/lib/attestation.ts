@@ -12,6 +12,7 @@ import { cacheDel, cacheKeys } from "@/lib/cache";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
+import { attestPermissionFor, type Permissions } from "@/lib/permissions";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = SupabaseClient<any>;
@@ -23,11 +24,14 @@ export interface AttestParams {
   file_path:       string;
   reviewer_email:  string;
   reviewer_github?: string;
+  /** The attester's effective permissions; the file's risk score decides which attest flag is needed. */
+  permissions:     Permissions;
 }
 
 export type AttestOutcome =
   | { ok: true; attestation_id: string; payload_hash: string; attested_at: string }
-  | { ok: false; reason: "scan_not_found" | "insert_failed"; detail?: unknown };
+  | { ok: false; reason: "scan_not_found" | "insert_failed"; detail?: unknown }
+  | { ok: false; reason: "forbidden"; risk_score: string };
 
 /**
  * Retries the check-run-to-success flip once before giving up — a
@@ -87,7 +91,7 @@ async function syncCheckRunToSuccess(
 }
 
 export async function performAttestation(db: Db, params: AttestParams): Promise<AttestOutcome> {
-  const { org_id, user_id, scan_id, file_path, reviewer_email, reviewer_github } = params;
+  const { org_id, user_id, scan_id, file_path, reviewer_email, reviewer_github, permissions } = params;
   const now = new Date().toISOString();
 
   const { data: scan } = await db
@@ -105,6 +109,11 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     .eq("scan_id", scan_id)
     .eq("file_path", file_path)
     .single();
+
+  // Checked against the file's stored risk, not anything the client sends: a role may sign off HIGH files
+  // but not CRITICAL ones. A file with no row is treated as lower-risk (UNKNOWN), as it is recorded below.
+  const risk = (file?.risk_score as string | undefined) ?? "UNKNOWN";
+  if (!permissions[attestPermissionFor(risk)]) return { ok: false, reason: "forbidden", risk_score: risk };
 
   const payloadHash = buildAttestationHash(scan_id, file_path, reviewer_email, now);
 

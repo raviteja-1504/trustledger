@@ -13,6 +13,7 @@ import { verifyApiKey } from "../_middleware";
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  if (!auth.user_id) return NextResponse.json({ error: "user_required" }, { status: 400 });   // not for API keys
 
   const db = createServiceClient();
 

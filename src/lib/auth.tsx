@@ -20,6 +20,9 @@ export interface OrgProfile {
   github_login:         string | null;
   avatar_url:           string | null;
   onboarding_complete?: boolean;
+  /** Effective permissions from /api/me (built-in role or assigned custom role). */
+  permissions?:         import("@/lib/permissions").Permissions;
+  custom_role_name?:    string | null;
 }
 
 interface AuthContextValue {

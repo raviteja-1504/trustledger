@@ -581,8 +581,10 @@ function fileNav(shownFiles: readonly FileResult[]): FileNavigation {
   };
 }
 
-function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, crossFileMarks: marks }: {
+function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAttest, nav, crossFileMarks: marks }: {
   file: FileResult;
+  /** Whether the viewer's role may sign off this file's risk level. */
+  canAttest: boolean;
   reviewerEmail: string;
   reviewerGithub: string;
   onRequestAttest: (f: FileResult) => void;
@@ -612,7 +614,8 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, cr
   useEffect(() => { setAttested(file.attested); }, [file.attested]);
 
   const isHigh      = file.risk_score === "HIGH" || file.risk_score === "CRITICAL";
-  const needsAttest = !attested && isHigh;
+  const pendingAttest = !attested && isHigh;
+  const needsAttest = pendingAttest && canAttest;
 
   const fileShort = file.file_path.split("/").slice(-1)[0];
   const fileDir   = file.file_path.includes("/")
@@ -699,6 +702,9 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, nav, cr
             >
               <ShieldIcon size={12} /> Attest
             </button>
+          )}
+          {pendingAttest && !canAttest && (
+            <span className="text-[11px] font-semibold text-gray-400" title={`Your role can't sign off ${file.risk_score} files`}>Needs reviewer</span>
           )}
         </td>
       </tr>
@@ -1014,8 +1020,9 @@ function PRDetailContent() {
   const [scan,    setScan]    = useState<ScanResult | null>(null);
   const [error,   setError]   = useState<string | null>(null);
   const [syncRetrying, setSyncRetrying] = useState(false);
-  const { role } = useRole();
-  const canTriage = role === "admin" || role === "security_reviewer";
+  const { permissions: rolePerms, canAttestRisk } = useRole();
+  const canTriage = rolePerms.canTriage;
+  const [attestError, setAttestError] = useState<string | null>(null);
 
   // Triage decisions update this page's copy of the scan at once; merge gating picks them up on the next scan.
   const triageContext = useMemo<FindingTriageContextValue | null>(() => scan ? {
@@ -1246,7 +1253,12 @@ function PRDetailContent() {
         }),
       });
       return true;
-    } catch {
+    } catch (e) {
+      if ((e as { status?: number }).status === 403) {
+        setAttestedSet(s => { const n = new Set(s); n.delete(path); return n; });
+        setAttestError("Your role can't attest this file's risk level — ask a security reviewer or admin to sign it off.");
+        return false;
+      }
       // Save to retry queue — will be flushed on next load
       try {
         const queue = JSON.parse(localStorage.getItem("tl_attest_retry_queue") ?? "[]");
@@ -1404,7 +1416,7 @@ function PRDetailContent() {
     if (!reviewerEmail || !reviewerGithub) saveReviewer(email, github);
     const toAttest = scan.files.filter(
       f => (f.risk_score === "HIGH" || f.risk_score === "CRITICAL") &&
-           !f.attested && !attestedSet.has(f.file_path)
+           !f.attested && !attestedSet.has(f.file_path) && canAttestRisk(f.risk_score)
     );
     // Run all attestations in parallel so the whole batch completes in ~1s
     // instead of N × ~750ms sequentially. This means navigation away mid-attest
@@ -1586,6 +1598,7 @@ function PRDetailContent() {
   const highCount   = highFiles.length;
   const highAttested = highFiles.filter(f => f.attested || attestedSet.has(f.file_path)).length;
   const unattested   = highFiles.filter(f => !f.attested && !attestedSet.has(f.file_path)).length;
+  const attestableNow = highFiles.filter(f => !f.attested && !attestedSet.has(f.file_path) && canAttestRisk(f.risk_score)).length;
   const allClear     = highCount > 0 && unattested === 0;
 
   const filteredFiles = allFiles
@@ -1876,15 +1889,21 @@ function PRDetailContent() {
               <p className="text-sm font-bold text-rose-800">
                 {unattested} file{unattested !== 1 ? "s" : ""} pending attestation
               </p>
-              <p className="text-xs text-rose-600 mt-0.5">HIGH and CRITICAL files require reviewer sign-off before deployment</p>
+              <p className="text-xs text-rose-600 mt-0.5">
+                HIGH and CRITICAL files require reviewer sign-off before deployment
+                {attestableNow < unattested && (attestableNow === 0
+                  ? " — your role can't sign these off; a security reviewer or admin needs to."
+                  : ` — you can sign off ${attestableNow} of them.`)}
+              </p>
+              {attestError && <p className="text-xs font-semibold text-rose-700 mt-1">{attestError}</p>}
             </div>
-            <button
+            {attestableNow > 0 && <button
               onClick={attestAll}
               disabled={attestingAll}
               className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold rounded-lg bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-60 transition-colors shadow-sm"
             >
               {attestingAll ? <><SpinnerIcon /> Attesting…</> : <><ShieldIcon size={12} /> Attest All</>}
-            </button>
+            </button>}
           </div>
         )}
 
@@ -2015,6 +2034,7 @@ function PRDetailContent() {
                       reviewerEmail={reviewerEmail}
                       reviewerGithub={reviewerGithub}
                       onRequestAttest={setAttestTarget}
+                      canAttest={canAttestRisk(f.risk_score)}
                       nav={fileNav(filteredFiles)}
                       crossFileMarks={flowMarks.get(f.file_path)}
                     />

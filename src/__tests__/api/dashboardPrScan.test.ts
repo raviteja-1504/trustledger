@@ -8,7 +8,7 @@ import { fakeSupabase } from "../helpers/fakeSupabase";
 
 let db: ReturnType<typeof fakeSupabase>;
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
-jest.mock("@/app/api/_middleware", () => ({ verifyApiKey: async () => ({ org_id: "org-1", user_id: "u1", actor_email: "dev@acme.dev", role: "developer" }) }));
+jest.mock("@/app/api/_middleware", () => ({ ...jest.requireActual("@/app/api/_middleware"), verifyApiKey: async () => ({ org_id: "org-1", user_id: "u1", actor_email: "dev@acme.dev", role: "developer" }) }));
 jest.mock("@/lib/audit", () => ({ writeAuditLog: jest.fn(async () => {}) }));
 const enqueueScan = jest.fn(async () => {});
 jest.mock("@/lib/queue", () => ({ enqueueScan: (...a: unknown[]) => enqueueScan(...(a as [])) }));

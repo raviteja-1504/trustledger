@@ -11,7 +11,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
+import { verifyApiKey, requirePermission } from "../../_middleware";
 import { resolveConnectedRepo } from "@/lib/connectedRepo";
 import { getInstallationToken, getPullRequest, createCheckRun } from "@/lib/github";
 import { enqueueScan } from "@/lib/queue";
@@ -29,6 +29,8 @@ export async function POST(req: NextRequest) {
 async function handle(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  const permErr = await requirePermission(auth, "can_trigger_scans");
+  if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const body = await req.json().catch(() => ({})) as { repo?: string; pr_number?: unknown; force?: unknown };
   const prNumber = Number(body.pr_number);

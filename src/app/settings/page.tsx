@@ -24,6 +24,7 @@ import {
   ROLE_COLORS,
   ROLE_DESCRIPTIONS,
 } from "@/lib/roles";
+import { PERMISSION_KEYS, PERMISSION_LABELS, type PermissionKey } from "@/lib/permissions";
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
 
@@ -1960,89 +1961,151 @@ function BrandingTab() {
 // ── Tab: Custom Roles ─────────────────────────────────────────────────────────
 
 function CustomRolesTab() {
-  const { profile } = useAuth();
-  type CRole = { id: string; name: string; description: string | null; can_attest_critical: boolean; can_attest_high: boolean; can_view_secrets: boolean; can_export_data: boolean; can_manage_policies: boolean };
-  const [roles, setRoles] = useState<CRole[]>([]);
-  const [newRole, setNewRole] = useState({ name:"", description:"", can_attest_critical:false, can_attest_high:true, can_view_secrets:false, can_export_data:false, can_manage_policies:false });
-  const [adding, setAdding] = useState(false);
-  const [saved,  setSaved]  = useState(false);
+  const { permissions: rolePerms } = useRole();
+  type CRole = { id: string; name: string; description: string | null } & Partial<Record<PermissionKey, boolean>>;
+  type Draft = { name: string; description: string } & Record<PermissionKey, boolean>;
+  const blank = (): Draft => ({ name: "", description: "", ...Object.fromEntries(PERMISSION_KEYS.map(k => [k, false])) }) as Draft;
+  const [roles,     setRoles]     = useState<CRole[]>([]);
+  const [counts,    setCounts]    = useState<Record<string, number>>({});
+  const [draft,     setDraft]     = useState<Draft>(blank);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [busy,      setBusy]      = useState(false);
+  const [message,   setMessage]   = useState<{ ok: boolean; text: string } | null>(null);
+  const [notSetUp,  setNotSetUp]  = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!profile?.org_id) return;
-    import("@/lib/supabase").then(({ supabase }) => {
-      supabase.from("custom_roles")
-        .select("id, name, description, can_attest_critical, can_attest_high, can_view_secrets, can_export_data, can_manage_policies")
-        .eq("org_id", profile.org_id)
-        .then(({ data }) => setRoles((data ?? []) as CRole[]));
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.org_id]);
-
-  async function addRole() {
-    if (!newRole.name.trim()) return;
-    setAdding(true);
+  async function load() {
     try {
-      const { supabase } = await import("@/lib/supabase");
-      const { data } = await supabase.from("custom_roles").insert({ org_id: profile!.org_id, ...newRole }).select("*").single();
-      if (data) { setRoles(prev => [...prev, data as CRole]); setSaved(true); setTimeout(() => setSaved(false), 2000); }
-      setNewRole({ name:"", description:"", can_attest_critical:false, can_attest_high:true, can_view_secrets:false, can_export_data:false, can_manage_policies:false });
-    } catch { /* */ } finally { setAdding(false); }
+      const d = await authedFetch<{ roles: CRole[]; assignments: Record<string, string>; set_up?: boolean; message?: string }>("/api/custom-roles");
+      setRoles(d.roles ?? []);
+      const c: Record<string, number> = {};
+      for (const id of Object.values(d.assignments ?? {})) c[id] = (c[id] ?? 0) + 1;
+      setCounts(c);
+      setNotSetUp(d.set_up === false ? (d.message ?? "Custom roles aren't set up on this database yet.") : null);
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : "Couldn't load custom roles." });
+    }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (rolePerms.canManageUsers) load(); }, [rolePerms.canManageUsers]);
+
+  function startEdit(r: CRole) {
+    setEditingId(r.id);
+    setDraft({ name: r.name, description: r.description ?? "", ...Object.fromEntries(PERMISSION_KEYS.map(k => [k, r[k] === true])) } as Draft);
+    setMessage(null);
+  }
+  function cancelEdit() { setEditingId(null); setDraft(blank()); }
+
+  async function save() {
+    if (!draft.name.trim()) return;
+    setBusy(true); setMessage(null);
+    try {
+      const body = { ...draft, name: draft.name.trim(), description: draft.description.trim() || null };
+      if (editingId) await authedFetch("/api/custom-roles", { method: "PATCH", body: JSON.stringify({ id: editingId, ...body }) });
+      else await authedFetch("/api/custom-roles", { method: "POST", body: JSON.stringify(body) });
+      setMessage({ ok: true, text: editingId ? `Saved "${body.name}".` : `Created "${body.name}". Assign it to people under Settings → Team.` });
+      cancelEdit();
+      await load();
+    } catch (e) {
+      const text = e instanceof Error ? e.message : "Couldn't save that role.";
+      setMessage({ ok: false, text: text === "duplicate_name" ? "A role with that name already exists."
+        : text === "cannot_grant_more_than_own_permissions" ? "A role can't include permissions you don't have yourself." : text });
+    } finally { setBusy(false); }
   }
 
-  const PERMS = [
-    { key:"can_attest_critical", label:"Attest CRITICAL files" },
-    { key:"can_attest_high",     label:"Attest HIGH files" },
-    { key:"can_view_secrets",    label:"View secrets" },
-    { key:"can_export_data",     label:"Export data" },
-    { key:"can_manage_policies", label:"Manage policies" },
-  ] as const;
+  async function remove(r: CRole) {
+    setConfirmDelete(null);
+    setBusy(true); setMessage(null);
+    try {
+      await authedFetch(`/api/custom-roles?id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
+      if (editingId === r.id) cancelEdit();
+      setMessage({ ok: true, text: `Deleted "${r.name}".` });
+      await load();
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : "Couldn't delete that role." });
+    } finally { setBusy(false); }
+  }
+
+  if (!rolePerms.canManageUsers) {
+    return (
+      <SectionCard title="Custom Roles" subtitle="Granular permission sets for your team.">
+        <p className="text-sm text-gray-500">Only people who can manage the team can create or assign custom roles.</p>
+      </SectionCard>
+    );
+  }
 
   return (
     <div className="space-y-5">
-      <SectionCard title="Custom Roles" subtitle="Create granular permission sets beyond the built-in admin/security_reviewer/developer roles.">
+      <SectionCard title={editingId ? "Edit custom role" : "Custom Roles"}
+        subtitle="A custom role replaces a member's built-in permissions with exactly the ones ticked here. Every API action checks them.">
+        {notSetUp && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">{notSetUp}</p>}
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
               <span className="text-xs font-semibold text-gray-600 block mb-1">Role name *</span>
-              <input value={newRole.name} onChange={e => setNewRole(p => ({ ...p, name: e.target.value }))}
+              <input value={draft.name} maxLength={60} onChange={e => setDraft(p => ({ ...p, name: e.target.value }))}
                 placeholder="e.g. Junior Reviewer" className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
             </label>
             <label className="block">
               <span className="text-xs font-semibold text-gray-600 block mb-1">Description</span>
-              <input value={newRole.description} onChange={e => setNewRole(p => ({ ...p, description: e.target.value }))}
-                placeholder="What this role can do" className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+              <input value={draft.description} maxLength={200} onChange={e => setDraft(p => ({ ...p, description: e.target.value }))}
+                placeholder="What this role is for" className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
             </label>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            {PERMS.map(({ key, label }) => (
-              <label key={key} className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={newRole[key]}
-                  onChange={e => setNewRole(p => ({ ...p, [key]: e.target.checked }))}
-                  className="rounded accent-indigo-600" />
-                <span className="text-sm text-gray-700">{label}</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+            {PERMISSION_KEYS.map(key => (
+              <label key={key} className="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" checked={draft[key]} onChange={e => setDraft(p => ({ ...p, [key]: e.target.checked }))}
+                  className="mt-0.5 rounded accent-indigo-600" />
+                <span>
+                  <span className="text-sm text-gray-800 block">{PERMISSION_LABELS[key].label}</span>
+                  <span className="text-[11px] text-gray-400">{PERMISSION_LABELS[key].detail}</span>
+                </span>
               </label>
             ))}
           </div>
-          <button onClick={addRole} disabled={adding || !newRole.name.trim()}
-            className={`px-5 py-2 text-sm font-bold rounded-xl transition-all ${saved?"bg-emerald-500 text-white":"bg-indigo-600 text-white hover:bg-indigo-700"} disabled:opacity-60`}>
-            {adding ? "Creating…" : saved ? "✓ Created" : "Create role"}
-          </button>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={save} disabled={busy || !draft.name.trim()}
+              className="px-5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors">
+              {busy ? "Saving…" : editingId ? "Save changes" : "Create role"}
+            </button>
+            {editingId && <button onClick={cancelEdit} className="text-sm text-gray-500 hover:text-gray-700">Cancel</button>}
+            {message && <p className={`text-xs font-medium ${message.ok ? "text-emerald-600" : "text-rose-600"}`}>{message.text}</p>}
+          </div>
         </div>
         {roles.length > 0 && (
-          <div className="mt-4 space-y-2">
-            {roles.map(r => (
-              <div key={r.id} className="flex items-start gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
-                <div className="flex-1">
-                  <p className="text-sm font-bold text-gray-900">{r.name}</p>
-                  {r.description && <p className="text-xs text-gray-500">{r.description}</p>}
-                  <div className="flex flex-wrap gap-1 mt-1.5">
-                    {PERMS.filter(p => r[p.key]).map(p => (
-                      <span key={p.key} className="text-[9px] font-bold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">{p.label}</span>
-                    ))}
+          <div className="mt-5 space-y-2">
+            {roles.map(r => {
+              const n = counts[r.id] ?? 0;
+              return (
+                <div key={r.id} className="flex items-start gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-bold text-gray-900">
+                      {r.name}
+                      <span className="ml-2 text-[11px] font-medium text-gray-400">{n} member{n === 1 ? "" : "s"}</span>
+                    </p>
+                    {r.description && <p className="text-xs text-gray-500">{r.description}</p>}
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {PERMISSION_KEYS.filter(k => r[k]).map(k => (
+                        <span key={k} className="text-[10px] font-bold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">{PERMISSION_LABELS[k].label}</span>
+                      ))}
+                      {!PERMISSION_KEYS.some(k => r[k]) && <span className="text-[10px] text-gray-400">No permissions (read-only)</span>}
+                    </div>
+                    {confirmDelete === r.id && (
+                      <div className="mt-2 flex items-center gap-3 text-xs">
+                        <span className="text-rose-700">Delete &ldquo;{r.name}&rdquo;?{n ? ` ${n} member${n === 1 ? "" : "s"} will go back to their built-in role.` : ""}</span>
+                        <button onClick={() => remove(r)} disabled={busy} className="font-bold text-rose-600 hover:text-rose-800">Delete</button>
+                        <button onClick={() => setConfirmDelete(null)} className="text-gray-500 hover:text-gray-700">Keep</button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-3 shrink-0">
+                    <button onClick={() => startEdit(r)} disabled={busy} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Edit</button>
+                    <button onClick={() => setConfirmDelete(r.id)} disabled={busy} className="text-xs font-semibold text-rose-500 hover:text-rose-700">Delete</button>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </SectionCard>

@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../_middleware";
+import { verifyApiKey, requirePlatformAdmin } from "../_middleware";
 
 export async function GET(req: NextRequest) {
   const { org_id, user_id, error } = await verifyApiKey(req);
@@ -79,8 +79,13 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { user_id, error } = await verifyApiKey(req);
+  const auth = await verifyApiKey(req);
+  const { user_id, error } = auth;
   if (error) return NextResponse.json({ error }, { status: 401 });
+  // Creating client orgs is the MSP / platform-admin feature. For anyone else it would hand out an admin seat
+  // (and any plan) in a fresh org -- and a second membership breaks their sign-in, which expects one.
+  const adminErr = requirePlatformAdmin(auth);
+  if (adminErr) return NextResponse.json({ error: adminErr }, { status: 403 });
 
   const body = await req.json() as { slug: string; name: string; github_org?: string; plan?: string };
   if (!body.slug || !body.name) return NextResponse.json({ error: "missing_fields" }, { status: 400 });

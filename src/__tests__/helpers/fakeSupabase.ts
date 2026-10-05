@@ -43,6 +43,10 @@ class FakeQuery implements PromiseLike<unknown> {
   }
   is(c: string, v: unknown) { this.filters.push(r => (v === null ? r[c] == null : r[c] === v)); return this; }
   in(c: string, vs: unknown[]) { this.filters.push(r => vs.includes(r[c])); return this; }
+  not(c: string, op: string, v: unknown) {
+    if (op !== "is" || v !== null) throw new Error(`fakeSupabase: not(${op}, ${String(v)}) unsupported`);
+    this.filters.push(r => r[c] != null); return this;
+  }
   lt(c: string, v: string) { this.filters.push(r => String(r[c]) < v); return this; }
   gte(c: string, v: string) { this.filters.push(r => String(r[c]) >= v); return this; }
   lte(c: string, v: string) { this.filters.push(r => String(r[c]) <= v); return this; }
