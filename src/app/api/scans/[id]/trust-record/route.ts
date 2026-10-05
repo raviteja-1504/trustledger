@@ -16,7 +16,8 @@ import { buildTrustRecord, signTrustRecord, signingKeyId } from "@/lib/trustReco
 import type { ScanHealth } from "@/lib/scanHealth";
 import type { FileIndicator } from "@/types";
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params;
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   const db = createServiceClient();

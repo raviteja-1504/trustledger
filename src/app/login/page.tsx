@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -635,5 +635,6 @@ function ProductionLoginPage() {
 // ── Entry point — show correct page based on mode ─────────────────────────────
 
 export default function LoginPage() {
-  return SKIP_AUTH ? <DemoLoginPage /> : <ProductionLoginPage />;
+  // useSearchParams() needs a Suspense boundary (a build error since Next 15).
+  return <Suspense fallback={null}>{SKIP_AUTH ? <DemoLoginPage /> : <ProductionLoginPage />}</Suspense>;
 }

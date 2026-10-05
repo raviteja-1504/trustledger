@@ -20,11 +20,12 @@ import { recordEvent } from "@/lib/opsEvents";
 
 const MIN_INTERVAL_MS = 60_000;
 
-export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   return runWithTrace({ trace_id: traceIdFrom(req.headers.get("x-request-id")) }, () => handle(req, ctx));
 }
 
-async function handle(req: NextRequest, { params }: { params: { id: string } }) {
+async function handle(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params;
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   const permErr = await requirePermission(auth, "can_trigger_scans");

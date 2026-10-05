@@ -22,7 +22,6 @@ const nextConfig = {
   compress:                    true,     // gzip/brotli responses
   poweredByHeader:             false,    // remove X-Powered-By header
   reactStrictMode:             true,     // catch subtle bugs
-  swcMinify:                   true,     // faster minification
 
   // ── Image optimization: disabled ─────────────────────────────────────────────
   // next/image is not used anywhere in this app (avatars render via plain
@@ -39,70 +38,72 @@ const nextConfig = {
   },
 
   // ── Experimental ─────────────────────────────────────────────────────────────
+  // (instrumentation.ts runs without a flag since Next 15.)
   experimental: {
-    instrumentationHook: true,
     optimizePackageImports: [
       "recharts",
       "@supabase/supabase-js",
       "@supabase/auth-helpers-nextjs",
     ],
-    // @react-pdf/renderer needs the full "react" package (React.Component,
-    // full reconciler) for its own custom renderer. Left in the normal
-    // webpack bundle, the App Router's build graph resolves react through
-    // the restricted "react-server" condition for anything under app/**
-    // (route handlers included), which is missing what react-pdf needs --
-    // it crashed in production with "X.Component is not a constructor".
-    // Marking it external makes Next require() it directly from
-    // node_modules at runtime instead, getting the full React build.
-    // web-tree-sitter (Phase 2 Python AST taint engine, astTaintPython.ts)
-    // is external for a related but distinct reason: it does its own
-    // runtime environment sniffing (typeof window, module-relative WASM
-    // asset resolution) to decide how to instantiate its .wasm module --
-    // webpack rewriting its require()/fs calls at bundle time risks making
-    // that sniffing lie about the runtime environment, the same failure
-    // class as the react-pdf crash above. tree-sitter-wasms (the separate
-    // package holding the actual prebuilt tree-sitter-python.wasm binary)
-    // must be external too, for a harder reason: without this, webpack
-    // statically resolves astTaintPython.ts's
-    // require.resolve("tree-sitter-wasms/out/tree-sitter-python.wasm") and
-    // tries to bundle the .wasm file as a JS module, which fails the build
-    // outright ("Module parse failed... WebAssembly is not enabled by
+  },
+
+  // ── Server bundling (stable options since Next 15) ──────────────────────────
+  // @react-pdf/renderer needs the full "react" package (React.Component,
+  // full reconciler) for its own custom renderer. Left in the normal
+  // webpack bundle, the App Router's build graph resolves react through
+  // the restricted "react-server" condition for anything under app/**
+  // (route handlers included), which is missing what react-pdf needs --
+  // it crashed in production with "X.Component is not a constructor".
+  // Marking it external makes Next require() it directly from
+  // node_modules at runtime instead, getting the full React build.
+  // web-tree-sitter (Phase 2 Python AST taint engine, astTaintPython.ts)
+  // is external for a related but distinct reason: it does its own
+  // runtime environment sniffing (typeof window, module-relative WASM
+  // asset resolution) to decide how to instantiate its .wasm module --
+  // webpack rewriting its require()/fs calls at bundle time risks making
+  // that sniffing lie about the runtime environment, the same failure
+  // class as the react-pdf crash above. tree-sitter-wasms (the separate
+  // package holding the actual prebuilt tree-sitter-python.wasm binary)
+  // must be external too, for a harder reason: without this, webpack
+  // statically resolves astTaintPython.ts's
+  // require.resolve("tree-sitter-wasms/out/tree-sitter-python.wasm") and
+  // tries to bundle the .wasm file as a JS module, which fails the build
+  // outright ("Module parse failed... WebAssembly is not enabled by
     // default") since this project has no webpack WASM experiment enabled
-    // (and doesn't need one -- the file is only ever read as raw bytes via
-    // fs.readFileSync, never executed as a webpack module).
-    serverComponentsExternalPackages: ["@react-pdf/renderer", "web-tree-sitter", "tree-sitter-wasms"],
-    // web-tree-sitter needs its own runtime binary plus one grammar binary
-    // PER LANGUAGE at runtime, all of which Next's @vercel/nft build tracer
-    // (active because output:"standalone" is set above) needs an explicit
-    // hint to copy into each deployed serverless function's bundle, since
-    // none of these are a plain JS import the tracer's static analysis is
-    // guaranteed to follow:
-    //   1. web-tree-sitter's OWN internal runtime binary (tree-sitter.wasm,
-    //      shipped inside the web-tree-sitter package itself) -- required by
-    //      Parser.init() before any language grammar is even loaded, and
-    //      shared across every language (not per-grammar).
-    //   2. tree-sitter-wasms' prebuilt tree-sitter-python.wasm grammar (Phase 2).
-    //   3. tree-sitter-wasms' prebuilt tree-sitter-go.wasm grammar (Phase 4).
-    // Confirmed via a real production deployment that #1 was originally
-    // missed (it was assumed the language grammar file was the only binary
-    // involved) -- Parser.init() failed with ENOENT for tree-sitter.wasm on
-    // EVERY route that cold-started a Node.js lambda (/healthz, /api/me,
-    // /api/dashboard, not just the scan-related routes), because
-    // instrumentation.ts's register() -- which calls warmPythonTaintEngine()
-    // (and now warmGoTaintEngine()) -- runs on any Node.js serverless
-    // function's cold start, not only scan-specific ones. So this is scoped
-    // to every route ("/**"), not just the handful that call
-    // runScan()/analyzeFile() directly -- and a new language's grammar
-    // binary must always be added here too, or it silently reproduces the
-    // exact same ENOENT failure for every route, not just that language's
-    // own scans.
-    outputFileTracingIncludes: {
-      "/**": [
-        "./node_modules/web-tree-sitter/tree-sitter.wasm",
-        "./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm",
-        "./node_modules/tree-sitter-wasms/out/tree-sitter-go.wasm",
-      ],
-    },
+  // (and doesn't need one -- the file is only ever read as raw bytes via
+  // fs.readFileSync, never executed as a webpack module).
+  serverExternalPackages: ["@react-pdf/renderer", "web-tree-sitter", "tree-sitter-wasms"],
+  // web-tree-sitter needs its own runtime binary plus one grammar binary
+  // PER LANGUAGE at runtime, all of which Next's @vercel/nft build tracer
+  // (active because output:"standalone" is set above) needs an explicit
+  // hint to copy into each deployed serverless function's bundle, since
+  // none of these are a plain JS import the tracer's static analysis is
+  // guaranteed to follow:
+  //   1. web-tree-sitter's OWN internal runtime binary (tree-sitter.wasm,
+  //      shipped inside the web-tree-sitter package itself) -- required by
+  //      Parser.init() before any language grammar is even loaded, and
+  //      shared across every language (not per-grammar).
+  //   2. tree-sitter-wasms' prebuilt tree-sitter-python.wasm grammar (Phase 2).
+  //   3. tree-sitter-wasms' prebuilt tree-sitter-go.wasm grammar (Phase 4).
+  // Confirmed via a real production deployment that #1 was originally
+  // missed (it was assumed the language grammar file was the only binary
+  // involved) -- Parser.init() failed with ENOENT for tree-sitter.wasm on
+  // EVERY route that cold-started a Node.js lambda (/healthz, /api/me,
+  // /api/dashboard, not just the scan-related routes), because
+  // instrumentation.ts's register() -- which calls warmPythonTaintEngine()
+  // (and now warmGoTaintEngine()) -- runs on any Node.js serverless
+  // function's cold start, not only scan-specific ones. So this is scoped
+  // to every route ("/**"), not just the handful that call
+  // runScan()/analyzeFile() directly -- and a new language's grammar
+  // binary must always be added here too, or it silently reproduces the
+  // exact same ENOENT failure for every route, not just that language's
+  // own scans.
+  outputFileTracingIncludes: {
+    "/**": [
+      "./node_modules/web-tree-sitter/tree-sitter.wasm",
+      "./node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm",
+      "./node_modules/tree-sitter-wasms/out/tree-sitter-go.wasm",
+    ],
   },
 
   // ── Security headers (supplements middleware.ts) ─────────────────────────────

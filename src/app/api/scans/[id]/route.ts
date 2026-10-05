@@ -140,8 +140,9 @@ async function loadHealth(db: ReturnType<typeof createServiceClient>, scanId: st
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } },
+  ctx: { params: Promise<{ id: string }> },
 ) {
+  const params = await ctx.params;
   const { org_id, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
 

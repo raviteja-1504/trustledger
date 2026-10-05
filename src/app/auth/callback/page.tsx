@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { syncSessionCookie, type BootstrapResult } from "@/lib/auth";
@@ -15,7 +15,20 @@ import { fullPageNavigate, safeNextPath } from "@/lib/authFlow";
 // when the client did NOT pick it up do we exchange it ourselves.
 //
 // Then: no org → /create-org; 2FA on → the code step on /login; otherwise `next` (same-site paths only).
+// useSearchParams() needs a Suspense boundary (a build error since Next 15).
 export default function AuthCallbackPage() {
+  return <Suspense fallback={<SigningIn />}><AuthCallback /></Suspense>;
+}
+
+function SigningIn() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <p className="text-sm text-gray-500">Signing you in…</p>
+    </div>
+  );
+}
+
+function AuthCallback() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const ran = useRef(false);
@@ -68,9 +81,5 @@ export default function AuthCallbackPage() {
     })();
   }, [router, searchParams]);
 
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <p className="text-sm text-gray-500">Signing you in…</p>
-    </div>
-  );
+  return <SigningIn />;
 }

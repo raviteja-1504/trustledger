@@ -39,7 +39,8 @@ async function getMember(db: ReturnType<typeof createServiceClient>, orgId: stri
   return data;
 }
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params;
   const auth = verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
@@ -52,7 +53,8 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   });
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params;
   const auth = verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
@@ -70,7 +72,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   if (deactivate) {
     // Remove org membership (de-provision)
     await db.from("org_members").delete().eq("user_id", params.id).eq("org_id", auth.org_id);
-    return new NextResponse("", { status: 204 });
+    return new NextResponse(null, { status: 204 });   // a 204 must have no body (an empty string throws)
   }
 
   const member = await getMember(db, auth.org_id, params.id);
@@ -81,12 +83,13 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   });
 }
 
-export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params;
   const auth = verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const db = createServiceClient();
   await db.from("org_members").delete().eq("user_id", params.id).eq("org_id", auth.org_id);
 
-  return new NextResponse("", { status: 204 });
+  return new NextResponse(null, { status: 204 });   // a 204 must have no body (an empty string throws)
 }

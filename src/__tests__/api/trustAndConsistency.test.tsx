@@ -69,7 +69,7 @@ describe("Trust Record: valid -> modify one byte -> tampered -> unknown key", ()
   it("through the real download and verify endpoints", async () => {
     seed();
     process.env.EXPORT_SIGNING_KEY = "deployment-A-key";
-    const res = await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: { id: SCAN_ID } });
+    const res = await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: Promise.resolve({ id: SCAN_ID }) });
     expect(res.headers.get("content-disposition")).toContain("trust-record-acme-shop-pr7-abcdef12.json");
     const text = await res.text();
     const doc = JSON.parse(text);
@@ -106,7 +106,7 @@ describe("cross-surface smoke test: one finding, five surfaces, one story", () =
     process.env.EXPORT_SIGNING_KEY = "k";
 
     // PR page data (what the dashboard renders).
-    const scan = await (await getScan(req(`/api/scans/${SCAN_ID}`), { params: { id: SCAN_ID } })).json() as ScanResult;
+    const scan = await (await getScan(req(`/api/scans/${SCAN_ID}`), { params: Promise.resolve({ id: SCAN_ID }) })).json() as ScanResult;
     const apiInds = scan.files[0].indicators as FileIndicator[];
     const apiSqli = apiInds.find(i => i.id === "sql-injection")!;
     const apiRedirect = apiInds.find(i => i.id === "open-redirect")!;
@@ -116,7 +116,7 @@ describe("cross-surface smoke test: one finding, five surfaces, one story", () =
     const sarifOf = (id: string) => sarif.runs[0].results.find(r => r.ruleId === id)!;
 
     // Trust Record.
-    const record = (await (await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: { id: SCAN_ID } })).json()).record as { findings: Array<{ rule: string; line: number; severity: string; confidence: string; introduced_by_pr: boolean | null; decision: { status: string; reason: string } | null }> };
+    const record = (await (await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: Promise.resolve({ id: SCAN_ID }) })).json()).record as { findings: Array<{ rule: string; line: number; severity: string; confidence: string; introduced_by_pr: boolean | null; decision: { status: string; reason: string } | null }> };
     const recOf = (id: string) => record.findings.find(f => f.rule === id)!;
 
     // PR summary (built from the PR page data, as the Copy summary button does).
