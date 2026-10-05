@@ -212,7 +212,8 @@ export async function POST(req: NextRequest) {
         .from("violations")
         .select("notes")
         .eq("id", payload.violation_id)
-        .single() as { data: { notes: unknown[] } | null };
+        .eq("org_id", org_id)
+        .maybeSingle() as { data: { notes: unknown[] } | null };
 
       const notes = (Array.isArray(viol?.notes) ? viol.notes : []) as unknown[];
       notes.push({
@@ -220,7 +221,8 @@ export async function POST(req: NextRequest) {
         by:   actor_email ?? "system",
         at:   new Date().toISOString(),
       });
-      await db.from("violations").update({ notes }).eq("id", payload.violation_id);
+      // Scoped to the caller's org: violation_id comes from the request body.
+      if (viol) await db.from("violations").update({ notes }).eq("id", payload.violation_id).eq("org_id", org_id);
     }
 
     await writeAuditLog(db, {

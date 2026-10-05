@@ -32,16 +32,16 @@ const MAX_TIMELINE_ENTRIES = 50;
 
 /** Change an auto-incident's status and append one timeline entry (reading only that row's timeline). */
 async function transitionIncident(
-  db: SupabaseClient<Database>, id: string, now: string,
+  db: SupabaseClient<Database>, orgId: string, id: string, now: string,
   fields: { status: string; resolved_at: string | null }, action: string,
 ): Promise<void> {
-  const { data } = await db.from("incidents").select("timeline").eq("id", id).single() as { data: { timeline: unknown } | null };
+  const { data } = await db.from("incidents").select("timeline").eq("id", id).eq("org_id", orgId).single() as { data: { timeline: unknown } | null };
   const timeline = Array.isArray(data?.timeline) ? data.timeline : [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await (db.from("incidents") as any).update({
     ...fields,
     timeline: [...timeline, { time: now, action, actor: "TrustLedger" }].slice(-MAX_TIMELINE_ENTRIES),
-  }).eq("id", id);
+  }).eq("id", id).eq("org_id", orgId);
 }
 
 export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
@@ -84,13 +84,13 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     //    latest scan (attested, fixed, or that scan is now of another PR -- not necessarily "reviewed").
     for (const row of rowByKey.values()) {
       if (row.status !== "active" || stillOpenKeys.has(fileKey(row.affected_repo, row.affected_file))) continue;
-      await transitionIncident(db, row.id, now, { status: "resolved", resolved_at: now },
+      await transitionIncident(db, orgId, row.id, now, { status: "resolved", resolved_at: now },
         "Auto-resolved: no longer an unattested CRITICAL file in the repository's latest scan");
     }
 
     // 2. Auto-resolve the deploy-backlog incident once the count clears.
     if (backlogRow?.status === "active" && data.unattested_deploy_count <= 3) {
-      await transitionIncident(db, backlogRow.id, now, { status: "resolved", resolved_at: now },
+      await transitionIncident(db, orgId, backlogRow.id, now, { status: "resolved", resolved_at: now },
         `Auto-resolved: unattested deploy count is now ${data.unattested_deploy_count}`);
     }
 
@@ -98,7 +98,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     for (const f of openFiles) {
       const row = rowByKey.get(fileKey(f.repo, f.file_path));
       if (!row || row.status !== "resolved") continue;
-      await transitionIncident(db, row.id, now, { status: "active", resolved_at: null },
+      await transitionIncident(db, orgId, row.id, now, { status: "active", resolved_at: null },
         "Re-opened: CRITICAL file is unattested again in the latest scan");
     }
 
@@ -142,7 +142,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
 
     // 4. Create a P2 backlog incident once the unattested deploy count is high.
     if (data.unattested_deploy_count > 3 && backlogRow?.status === "resolved") {
-      await transitionIncident(db, backlogRow.id, now, { status: "active", resolved_at: null },
+      await transitionIncident(db, orgId, backlogRow.id, now, { status: "active", resolved_at: null },
         `Re-opened: ${data.unattested_deploy_count} CRITICAL/HIGH files unattested`);
     } else if (data.unattested_deploy_count > 3 && !backlogRow) {
       const repos = data.repos;

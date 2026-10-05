@@ -151,10 +151,12 @@ async function handle(req: NextRequest) {
   const db = createServiceClient();
   let persistedScanId: string | null = null;
 
-  // Idempotency: if a scan for this commit already exists, skip (QStash retry safety)
+  // Idempotency: if a scan for this commit already exists, skip (QStash retry safety). Scoped to this job's
+  // org: the same repo connected to two orgs must never have one org's scan count as the other's.
   const { data: existing } = await db
     .from("scans")
     .select("id")
+    .eq("org_id", orgId)
     .eq("repo_full_name", repoFullName)
     .eq("commit_sha", headSha)
     .eq("pr_number", prNumber)

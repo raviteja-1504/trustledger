@@ -120,11 +120,12 @@ export async function PATCH(req: NextRequest) {
       .from("violations")
       .select("notes")
       .eq("id", body.id)
+      .eq("org_id", org_id)
       .single();
 
     const notes = (Array.isArray(current?.notes) ? current.notes : []) as unknown[];
     notes.push({ text: body.note, by: actor_email ?? "reviewer", at: now });
-    await db.from("violations").update({ notes }).eq("id", body.id);
+    await db.from("violations").update({ notes }).eq("id", body.id).eq("org_id", org_id);
   }
 
   await writeAuditLog(db, {

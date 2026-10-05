@@ -12,9 +12,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
-
-const VALID_ROLES = ["developer", "security_reviewer", "admin"] as const;
-type MemberRole = typeof VALID_ROLES[number];
+import { ASSIGNABLE_ROLES as VALID_ROLES, type AssignableRole as MemberRole } from "@/lib/memberRoles";
 
 // ── GET — list members (any authenticated member of the org) ──────────────────
 export async function GET(req: NextRequest) {

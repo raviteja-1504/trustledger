@@ -4,6 +4,7 @@ import { verifyApiKey, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { safeError } from "@/lib/errors";
+import { ASSIGNABLE_ROLES, isAssignableRole } from "@/lib/memberRoles";
 
 // â”€â”€ GET org settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -127,6 +128,12 @@ export async function POST(req: NextRequest) {
 
   const db = createServiceClient();
 
+  // An unchecked role here let an org admin make anyone -- themselves included -- platform_admin, which
+  // reads every organisation's data.
+  if (body.role !== undefined && !isAssignableRole(body.role)) {
+    return NextResponse.json({ error: "invalid_role", valid: ASSIGNABLE_ROLES }, { status: 400 });
+  }
+
   if (body.action === "invite_member") {
     if (!body.email) return NextResponse.json({ error: "missing_email" }, { status: 400 });
     // Rate-limit invitations: max 10 per org per hour to prevent email spam
@@ -167,6 +174,15 @@ export async function POST(req: NextRequest) {
   if (body.action === "update_member_role") {
     if (!body.user_id || !body.role) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
     await db.from("org_members").update({ role: body.role }).eq("user_id", body.user_id).eq("org_id", org_id);
+    await writeAuditLog(db, {
+      org_id,
+      event_type:    "member_role_changed",
+      actor_id:      user_id ?? null,
+      actor_email:   actor_email ?? null,
+      resource_type: "user",
+      resource_id:   body.user_id,
+      payload: { new_role: body.role },
+    });
     return NextResponse.json({ ok: true });
   }
 

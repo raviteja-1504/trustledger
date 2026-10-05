@@ -174,6 +174,7 @@ export async function PATCH(req: NextRequest) {
       .from("incidents")
       .select("timeline")
       .eq("id", body.id)
+      .eq("org_id", org_id)
       .single() as { data: { timeline: unknown[] } | null };
 
     const timeline = (Array.isArray(current?.timeline) ? current.timeline : []) as unknown[];
