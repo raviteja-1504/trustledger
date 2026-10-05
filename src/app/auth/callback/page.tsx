@@ -53,6 +53,12 @@ export default function AuthCallbackPage() {
       let destination = next;
       try {
         const result = await authedFetch<BootstrapResult>("/api/auth/bootstrap", { method: "POST" });
+        if (result.sso_status) {
+          // An SSO sign-in its organisation didn't accept: don't leave that session behind.
+          await supabase.auth.signOut();
+          fullPageNavigate(`/login?error=${encodeURIComponent(result.sso_status)}`);
+          return;
+        }
         if (!result.has_org) destination = "/create-org";
         else if (result.mfa_required) destination = `/login?step=2fa&next=${encodeURIComponent(next)}`;
       } catch { /* fall back to `next`; AuthGuard sorts out a missing org */ }

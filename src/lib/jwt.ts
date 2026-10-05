@@ -21,6 +21,14 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | null 
   }
 }
 
+/** The SSO provider id if this session was established through SAML SSO (amr[0] = sso/saml), else null. */
+export function getJwtSsoProviderId(token: string): string | null {
+  const amr = decodeJwtPayload(token)?.amr;
+  if (!Array.isArray(amr)) return null;
+  const sso = amr.find(e => e && typeof e === "object" && (e as { method?: unknown }).method === "sso/saml") as { provider?: unknown } | undefined;
+  return sso && typeof sso.provider === "string" ? sso.provider : null;
+}
+
 export function getJwtSessionId(token: string): string | null {
   const payload = decodeJwtPayload(token);
   const sessionId = payload?.session_id;

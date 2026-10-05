@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
-import { LINK_ERROR_CODES, fullPageNavigate, loginErrorMessage, safeNextPath } from "@/lib/authFlow";
+import { LINK_ERROR_CODES, fullPageNavigate, loginErrorMessage, safeNextPath, ssoDomainOf } from "@/lib/authFlow";
+import { supabase } from "@/lib/supabase";
 import { BrandLogo, BrandMark, BrandWordmark } from "@/components/BrandLogo";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
@@ -270,6 +271,9 @@ function ProductionLoginPage() {
   const errorParam   = searchParams?.get("error") ?? null;
   const next         = safeNextPath(searchParams?.get("next"));
   const [githubBusy, setGithubBusy] = useState(false);
+  const [ssoOpen,    setSsoOpen]    = useState(false);
+  const [ssoEmail,   setSsoEmail]   = useState("");
+  const [ssoBusy,    setSsoBusy]    = useState(false);
 
   const [mode, setMode] = useState<Mode>(() =>
     errorParam && LINK_ERROR_CODES.has(errorParam) ? "forgot"
@@ -379,6 +383,26 @@ function ProductionLoginPage() {
       setBusy(false);
       setFormErr(err instanceof Error ? err.message : "That code didn't match. Try again.");
     }
+  }
+
+  // SAML SSO: the work email's domain picks the organisation's identity provider (Supabase Auth), which sends
+  // the browser back through /auth/callback like any other sign-in.
+  async function handleSso(e: React.FormEvent) {
+    e.preventDefault();
+    setFormErr(null); setFormOk(null);
+    const domain = ssoDomainOf(ssoEmail);
+    if (!domain) { setFormErr("Enter your work email address, like you@company.com."); return; }
+    setSsoBusy(true);
+    const { data, error } = await supabase.auth.signInWithSSO({
+      domain,
+      options: { redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}` },
+    });
+    if (error || !data?.url) {
+      setSsoBusy(false);
+      setFormErr(loginErrorMessage(/no sso provider|not found|identity provider/i.test(error?.message ?? "") ? "sso_no_provider" : "sso_failed"));
+      return;
+    }
+    fullPageNavigate(data.url);
   }
 
   async function handleGitHub() {
@@ -492,7 +516,7 @@ function ProductionLoginPage() {
         {okBox}
 
         {/* GitHub — only for sign in */}
-        {mode === "signin" && (
+        {mode === "signin" && !ssoOpen && (
           <button
             onClick={handleGitHub}
             disabled={githubBusy}
@@ -508,14 +532,37 @@ function ProductionLoginPage() {
           </button>
         )}
 
-        {mode === "signin" && (showEmail ? (
+        {/* SSO — work email → the organisation's identity provider */}
+        {mode === "signin" && (ssoOpen ? (
+          <form onSubmit={handleSso} className="space-y-3" aria-label="Sign in with SSO">
+            <input type="email" placeholder="Work email" aria-label="Work email for single sign-on" value={ssoEmail}
+              onChange={e => setSsoEmail(e.target.value)} required autoFocus autoComplete="email" className={inputCls} />
+            <button type="submit" disabled={ssoBusy}
+              className="w-full py-3.5 rounded-xl font-semibold text-base text-white/90 transition-all border disabled:opacity-70 hover:border-white/30 hover:bg-white/[0.09]"
+              style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.16)" }}>
+              {ssoBusy ? "Redirecting to your identity provider…" : "Continue with SSO"}
+            </button>
+            {quietLink("Other sign-in options", () => { setSsoOpen(false); setSsoEmail(""); setFormErr(null); })}
+          </form>
+        ) : (
+          <button type="button" onClick={() => { setSsoOpen(true); setShowEmail(false); setFormErr(null); }}
+            className="w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl font-semibold text-base text-white/90 transition-all border hover:border-white/30 hover:bg-white/[0.09]"
+            style={{ background: "rgba(255,255,255,0.06)", borderColor: "rgba(255,255,255,0.16)" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            Sign in with SSO
+          </button>
+        ))}
+
+        {mode === "signin" && !ssoOpen && (showEmail ? (
           <div className="flex items-center gap-3 text-xs font-mono uppercase tracking-[0.14em] text-white/35" aria-hidden="true">
             <span className="h-px flex-1 bg-white/10" />or with email<span className="h-px flex-1 bg-white/10" />
           </div>
         ) : null)}
 
         {/* Email form */}
-        {mode === "signup" || mode === "forgot" || showEmail ? (
+        {mode === "signin" && ssoOpen ? null : mode === "signup" || mode === "forgot" || showEmail ? (
           <form onSubmit={handleEmail} className="space-y-3">
             {mode === "signup" && (
               <input type="text" placeholder="Full name" aria-label="Full name" value={name}

@@ -1400,189 +1400,255 @@ trustledger scan \\
 
 // ── Tab: SSO / SAML ─────────────────────────────────────────────────────────────
 
-const SSO_PROVIDERS = [
-  {
-    id:      "okta",
-    name:    "Okta",
-    logo:    "🔵",
-    desc:    "Connect via Okta SAML 2.0. All SSO users are provisioned automatically.",
-    docs:    "https://help.okta.com/en-us/content/topics/apps/apps_app_integration_wizard_saml.htm",
-    fields:  ["SSO URL", "Entity ID / Issuer", "X.509 Certificate"],
-  },
-  {
-    id:      "azure",
-    name:    "Azure Active Directory",
-    logo:    "🟦",
-    desc:    "Use Microsoft Entra ID (formerly Azure AD) as your identity provider.",
-    docs:    "https://learn.microsoft.com/en-us/azure/active-directory/saas-apps/tutorial-list",
-    fields:  ["Login URL", "Azure AD Identifier", "Certificate (Base64)"],
-  },
-  {
-    id:      "google",
-    name:    "Google Workspace",
-    logo:    "🔴",
-    desc:    "Authenticate with Google Workspace SAML app for your domain.",
-    docs:    "https://support.google.com/a/answer/6087519",
-    fields:  ["SSO URL", "Entity ID", "Certificate"],
-  },
-  {
-    id:      "onelogin",
-    name:    "OneLogin",
-    logo:    "🟢",
-    desc:    "Integrate with OneLogin SAML 2.0 for enterprise SSO.",
-    docs:    "https://www.onelogin.com/connector/saml",
-    fields:  ["SAML 2.0 Endpoint (HTTP)", "Issuer URL", "X.509 Certificate"],
-  },
+const IDP_GUIDES = [
+  { name: "Okta",             url: "https://help.okta.com/en-us/content/topics/apps/apps_app_integration_wizard_saml.htm" },
+  { name: "Microsoft Entra",  url: "https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/add-application-portal-setup-sso" },
+  { name: "Google Workspace", url: "https://support.google.com/a/answer/6087519" },
+  { name: "OneLogin",         url: "https://onelogin.service-now.com/support?id=kb_article&sys_id=8a1f3d501b392510c12a41d5ec4bcbcc" },
 ];
+
+type SsoState = {
+  set_up: boolean;
+  message?: string;
+  availability: { available: boolean; reason?: string };
+  sp: { entity_id: string; acs_url: string; metadata_url: string } | null;
+  connection: { provider_id: string | null; idp_entity_id: string | null; metadata_url: string | null; jit_enabled: boolean; jit_role: string; enforce_sso: boolean } | null;
+  domains: Array<{ domain: string; verified: boolean; record: { name: string; value: string } }>;
+};
+
+function CopyValue({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-start gap-2 min-w-0">
+      <span className="text-gray-400 shrink-0 w-28">{label}</span>
+      <code className="flex-1 min-w-0 break-all select-all text-gray-700">{value}</code>
+      <button type="button" className="shrink-0 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800"
+        onClick={() => { navigator.clipboard.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {}); }}>
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
 
 function SSOTab() {
   const { profile } = useAuth();
-  const [provider,    setProvider]    = useState<string | null>(null);
-  const [fields,      setFields]      = useState<Record<string, string>>({});
-  const [saved,       setSaved]       = useState(false);
-  const [testing,     setTesting]     = useState(false);
-  const [testOk,      setTestOk]      = useState<boolean | null>(null);
-  const [jitEnabled,  setJitEnabled]  = useState(true);
-  const [appUrl,      setAppUrl]      = useState("https://app.trustledger.dev");
-  useEffect(() => {
-    try { setJitEnabled(localStorage.getItem("tl_jit_provisioning") !== "false"); } catch { /* */ }
-    setAppUrl(window.location.origin);
-  }, []);
+  const isAdmin = profile?.role === "admin";
+  const [state,       setState]       = useState<SsoState | null>(null);
+  const [loadErr,     setLoadErr]     = useState<string | null>(null);
+  const [newDomain,   setNewDomain]   = useState("");
+  const [useXml,      setUseXml]      = useState(false);
+  const [metadataUrl, setMetadataUrl] = useState("");
+  const [metadataXml, setMetadataXml] = useState("");
+  const [busy,        setBusy]        = useState<string | null>(null);
+  const [msg,         setMsg]         = useState<{ ok: boolean; text: string } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [appUrl,      setAppUrl]      = useState("");
+  useEffect(() => { setAppUrl(window.location.origin); }, []);
 
-  const selectedProvider = SSO_PROVIDERS.find(p => p.id === provider);
-
-  async function saveSSO() {
-    if (!selectedProvider) return;
-    // In production, POST to Supabase Management API to configure SAML provider
-    // For now, store config in org settings and show setup instructions
+  async function load() {
     try {
-      await authedFetch("/api/settings", {
-        method: "PATCH",
-        body:   JSON.stringify({ sso_provider: provider, sso_config: fields }),
-      });
-      setSaved(true); setTimeout(() => setSaved(false), 3000);
-    } catch { setSaved(true); setTimeout(() => setSaved(false), 3000); }
+      const s = await authedFetch<SsoState>("/api/sso");
+      setState(s);
+      if (s.connection?.metadata_url) setMetadataUrl(s.connection.metadata_url);
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : "Couldn't load SSO settings.");
+    }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (isAdmin) load(); }, [isAdmin]);
+
+  async function run(key: string, fn: () => Promise<string | void>) {
+    setBusy(key); setMsg(null);
+    try {
+      const ok = await fn();
+      if (ok) setMsg({ ok: true, text: ok });
+      await load();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : "Something went wrong. Please try again." });
+    } finally { setBusy(null); }
   }
 
-  async function testSSO() {
-    setTesting(true); setTestOk(null);
-    await new Promise(r => setTimeout(r, 1500)); // Simulate test
-    setTestOk(Object.values(fields).every(v => v.trim().length > 0));
-    setTesting(false);
+  const addDomain = () => run("add", async () => {
+    await authedFetch("/api/sso/domains", { method: "POST", body: JSON.stringify({ domain: newDomain }) });
+    setNewDomain("");
+    return "Domain added. Publish the TXT record below, then click Verify.";
+  });
+  const verifyDomain = (domain: string) => run(`verify:${domain}`, async () => {
+    const r = await authedFetch<{ verified: boolean; message?: string }>("/api/sso/domains", { method: "PATCH", body: JSON.stringify({ domain }) });
+    if (!r.verified) throw new Error(r.message ?? "Not verified yet.");
+    return `${domain} is verified.`;
+  });
+  const removeDomain = (domain: string) => run(`remove:${domain}`, async () => {
+    await authedFetch(`/api/sso/domains?domain=${encodeURIComponent(domain)}`, { method: "DELETE" });
+  });
+  const saveIdp = () => run("idp", async () => {
+    await authedFetch("/api/sso", { method: "PUT", body: JSON.stringify(useXml ? { metadata_xml: metadataXml } : { metadata_url: metadataUrl.trim() }) });
+    setMetadataXml("");
+    return "Identity provider connected. Test it from a private window with “Sign in with SSO”.";
+  });
+  const saveOptions = (patch: Record<string, unknown>) => run("options", async () => {
+    await authedFetch("/api/sso", { method: "PUT", body: JSON.stringify(patch) });
+  });
+  const removeSso = () => run("remove-sso", async () => {
+    setConfirmRemove(false);
+    await authedFetch("/api/sso", { method: "DELETE" });
+    return "SSO removed. Members sign in with their other methods again.";
+  });
+
+  if (!isAdmin) {
+    return (
+      <SectionCard title="Single Sign-On (SSO)" subtitle="SAML 2.0 single sign-on for your organisation.">
+        <p className="text-sm text-gray-500">Only admins can configure single sign-on.</p>
+      </SectionCard>
+    );
   }
+  if (loadErr) return <SectionCard title="Single Sign-On (SSO)"><p className="text-sm text-rose-600">{loadErr}</p></SectionCard>;
+  if (!state) return <SectionCard title="Single Sign-On (SSO)"><div className="h-24 bg-gray-100 rounded-xl animate-pulse" /></SectionCard>;
+
+  const verified = state.domains.filter(d => d.verified);
+  const connected = !!state.connection?.provider_id;
+  const unavailableText = !state.set_up ? (state.message ?? "SSO isn't set up on this database yet.")
+    : !state.availability.available
+      ? (state.availability.reason === "management_token_missing"
+        ? "SSO isn't switched on for this TrustLedger deployment yet: the server needs SUPABASE_MANAGEMENT_TOKEN (and a Supabase plan with SAML 2.0 enabled)."
+        : "SSO isn't switched on for this TrustLedger deployment yet: the Supabase project couldn't be identified (set SUPABASE_PROJECT_REF).")
+      : null;
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <SectionCard
-        title="Single Sign-On (SSO)"
-        subtitle="Configure SAML 2.0 SSO to let your team sign in with their corporate identity provider."
-      >
-        <div className="bg-indigo-50 rounded-xl p-4 border border-indigo-100 text-xs text-indigo-800 leading-relaxed">
-          <strong>TrustLedger SP Details</strong> — enter these into your identity provider:<br/>
-          <div className="mt-2 space-y-1 font-mono bg-white rounded-lg p-3 border border-indigo-100 text-gray-700">
-            <div><span className="text-gray-400 mr-2">ACS URL:</span>{appUrl}/api/auth/saml/callback</div>
-            <div><span className="text-gray-400 mr-2">Entity ID:</span>{appUrl}/saml</div>
-            <div><span className="text-gray-400 mr-2">Name ID:</span>EmailAddress</div>
+      <SectionCard title="Single Sign-On (SSO)"
+        subtitle="Let your team sign in with your company's identity provider (SAML 2.0) — Okta, Microsoft Entra, Google Workspace, OneLogin and others.">
+        <div className="flex items-center gap-2 flex-wrap text-sm">
+          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${connected ? (state.connection?.enforce_sso ? "bg-emerald-50 text-emerald-700" : "bg-indigo-50 text-indigo-700") : "bg-gray-100 text-gray-500"}`}>
+            {connected ? (state.connection?.enforce_sso ? "SSO required" : "SSO available") : "Not connected"}
+          </span>
+          {connected && state.connection?.idp_entity_id && <span className="text-xs text-gray-500 break-all">IdP: {state.connection.idp_entity_id}</span>}
+        </div>
+        {unavailableText && <p className="mt-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{unavailableText}</p>}
+        {msg && <p className={`mt-3 text-xs font-medium ${msg.ok ? "text-emerald-600" : "text-rose-600"}`}>{msg.text}</p>}
+      </SectionCard>
+
+      {/* Step 1 — domains */}
+      <SectionCard title={`${verified.length > 0 ? "✓" : "1."} Verify your email domain`}
+        subtitle="Prove you own the domain your team's work emails use. Only verified domains can sign in through your identity provider.">
+        <div className="space-y-3">
+          {state.domains.map(d => (
+            <div key={d.domain} className="rounded-xl border border-gray-100 bg-gray-50 p-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-bold text-gray-900">{d.domain}</span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${d.verified ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{d.verified ? "Verified" : "Pending DNS"}</span>
+                <span className="flex-1" />
+                {!d.verified && (
+                  <button onClick={() => verifyDomain(d.domain)} disabled={!!busy} className="text-xs font-bold text-indigo-600 hover:text-indigo-800 disabled:opacity-50">
+                    {busy === `verify:${d.domain}` ? "Checking…" : "Verify"}
+                  </button>
+                )}
+                <button onClick={() => removeDomain(d.domain)} disabled={!!busy} className="text-xs font-semibold text-rose-500 hover:text-rose-700 disabled:opacity-50">Remove</button>
+              </div>
+              {!d.verified && (
+                <div className="text-xs font-mono bg-white rounded-lg border border-gray-100 p-2.5 space-y-1.5">
+                  <p className="font-sans text-gray-500">Add this TXT record at your DNS provider:</p>
+                  <CopyValue label="Name / host" value={d.record.name} />
+                  <CopyValue label="Value" value={d.record.value} />
+                </div>
+              )}
+            </div>
+          ))}
+          <form onSubmit={e => { e.preventDefault(); if (newDomain.trim()) addDomain(); }} className="flex gap-2 flex-wrap">
+            <input value={newDomain} onChange={e => setNewDomain(e.target.value)} placeholder="acme.com" aria-label="Email domain"
+              className="flex-1 min-w-[12rem] text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            <button type="submit" disabled={!!busy || !newDomain.trim() || !state.set_up}
+              className="px-4 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+              {busy === "add" ? "Adding…" : "Add domain"}
+            </button>
+          </form>
+        </div>
+      </SectionCard>
+
+      {/* Step 2 — identity provider */}
+      <SectionCard title={`${connected ? "✓" : "2."} Connect your identity provider`}
+        subtitle={<>Create a SAML app in your IdP with these details, then give us its metadata. Guides: {IDP_GUIDES.map((g, i) => (
+          <span key={g.name}>{i > 0 && " · "}<a href={g.url} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">{g.name}</a></span>
+        ))}</>}>
+        <div className="space-y-4">
+          {state.sp && (
+            <div className="text-xs font-mono bg-indigo-50/60 rounded-xl border border-indigo-100 p-3 space-y-1.5">
+              <CopyValue label="Entity ID" value={state.sp.entity_id} />
+              <CopyValue label="ACS URL" value={state.sp.acs_url} />
+              <CopyValue label="SP metadata" value={state.sp.metadata_url} />
+              <CopyValue label="Name ID" value="EmailAddress" />
+              {appUrl && <CopyValue label="Start URL" value={`${appUrl}/login`} />}
+            </div>
+          )}
+          <div className="flex gap-4 text-xs font-semibold">
+            <label className="flex items-center gap-1.5 cursor-pointer"><input type="radio" checked={!useXml} onChange={() => setUseXml(false)} /> Metadata URL</label>
+            <label className="flex items-center gap-1.5 cursor-pointer"><input type="radio" checked={useXml} onChange={() => setUseXml(true)} /> Paste metadata XML</label>
+          </div>
+          {useXml ? (
+            <textarea rows={6} value={metadataXml} onChange={e => setMetadataXml(e.target.value)} aria-label="IdP metadata XML"
+              placeholder={"<EntityDescriptor …>…</EntityDescriptor>"}
+              className="w-full text-xs font-mono border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-y" />
+          ) : (
+            <input type="url" value={metadataUrl} onChange={e => setMetadataUrl(e.target.value)} aria-label="IdP metadata URL"
+              placeholder="https://your-company.okta.com/app/…/sso/saml/metadata"
+              className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+          )}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={saveIdp}
+              disabled={!!busy || verified.length === 0 || !state.availability.available || (useXml ? !metadataXml.trim() : !metadataUrl.trim())}
+              className="px-5 py-2 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+              {busy === "idp" ? "Connecting…" : connected ? "Update identity provider" : "Connect identity provider"}
+            </button>
+            {verified.length === 0 && <span className="text-xs text-gray-400">Verify a domain first.</span>}
           </div>
         </div>
       </SectionCard>
 
-      {/* Provider selection */}
-      <SectionCard title="Identity Provider" subtitle="Choose your SSO provider.">
-        <div className="grid grid-cols-2 gap-3">
-          {SSO_PROVIDERS.map(p => (
-            <button
-              key={p.id}
-              onClick={() => { setProvider(p.id); setFields({}); }}
-              className={`flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${
-                provider === p.id
-                  ? "border-indigo-500 bg-indigo-50"
-                  : "border-gray-200 hover:border-indigo-300 bg-white"
-              }`}
-            >
-              <span className="text-2xl shrink-0">{p.logo}</span>
-              <div>
-                <p className="text-sm font-bold text-gray-900">{p.name}</p>
-                <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">{p.desc}</p>
-              </div>
-            </button>
-          ))}
-        </div>
-      </SectionCard>
-
-      {/* Config fields */}
-      {selectedProvider && (
-        <SectionCard
-          title={`Configure ${selectedProvider.name}`}
-          subtitle={<>Paste values from your IdP. <a href={selectedProvider.docs} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">Setup guide →</a></>}
-        >
-          <div className="space-y-4">
-            {selectedProvider.fields.map(fieldName => (
-              <label key={fieldName} className="block">
-                <span className="text-xs font-semibold text-gray-700 block mb-1.5">{fieldName}</span>
-                {fieldName.toLowerCase().includes("certificate") ? (
-                  <textarea
-                    rows={5}
-                    value={fields[fieldName] ?? ""}
-                    onChange={e => setFields(prev => ({ ...prev, [fieldName]: e.target.value }))}
-                    placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
-                    className="w-full text-xs font-mono border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none"
-                  />
-                ) : (
-                  <input
-                    type={
-                      // Entity ID / Issuer / Identifier fields accept URN format (e.g. urn:dev-xxx.okta.com)
-                      // so must use type="text" even when the label also contains "url"
-                      fieldName.toLowerCase().includes("entity") ||
-                      fieldName.toLowerCase().includes("issuer") ||
-                      fieldName.toLowerCase().includes("identifier")
-                        ? "text"
-                        : (fieldName.toLowerCase().includes("url") ||
-                           fieldName.toLowerCase().includes("endpoint") ||
-                           fieldName.toLowerCase().includes("login"))
-                          ? "url"
-                          : "text"
-                    }
-                    value={fields[fieldName] ?? ""}
-                    onChange={e => setFields(prev => ({ ...prev, [fieldName]: e.target.value }))}
-                    placeholder={fieldName.toLowerCase().includes("entity") || fieldName.toLowerCase().includes("issuer") || fieldName.toLowerCase().includes("identifier") ? "urn:… or https://…" : "https://…"}
-                    className="w-full text-sm border border-gray-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                  />
-                )}
-              </label>
-            ))}
-
-            {testOk !== null && (
-              <div className={`text-xs font-semibold px-3 py-2.5 rounded-xl border ${
-                testOk
-                  ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-                  : "text-rose-700 bg-rose-50 border-rose-200"
-              }`}>
-                {testOk ? "✓ Configuration looks valid — save to activate SSO." : "✗ Missing required fields — fill in all values above."}
-              </div>
-            )}
-
-            <div className="flex items-center gap-3 pt-1">
-              <button
-                onClick={testSSO}
-                disabled={testing}
-                className="px-4 py-2 text-sm font-semibold rounded-xl border border-gray-200 hover:border-indigo-300 text-gray-700 transition-colors disabled:opacity-60"
-              >
-                {testing ? "Testing…" : "Test connection"}
-              </button>
-              <button
-                onClick={saveSSO}
-                className={`px-5 py-2 text-sm font-bold rounded-xl transition-all shadow-sm ${
-                  saved ? "bg-emerald-500 text-white" : "bg-indigo-600 text-white hover:bg-indigo-700"
-                }`}
-              >
-                {saved ? "✓ Saved" : "Save SSO configuration"}
-              </button>
+      {/* Step 3 — options */}
+      <SectionCard title="3. Sign-in options"
+        subtitle="How people from your identity provider get into TrustLedger.">
+        <div className="space-y-4">
+          <div className="flex items-start gap-3">
+            <Toggle checked={state.connection?.jit_enabled ?? true} onChange={v => saveOptions({ jit_enabled: v })} />
+            <div className="text-sm">
+              <p className="font-medium text-gray-800">Add new people automatically</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Anyone your identity provider signs in (with an email at a verified domain) joins as{" "}
+                <select value={state.connection?.jit_role ?? "developer"} disabled={!!busy}
+                  onChange={e => saveOptions({ jit_role: e.target.value })}
+                  className="text-xs border border-gray-200 rounded-md px-1.5 py-0.5">
+                  <option value="developer">Developer</option>
+                  <option value="security_reviewer">Security Reviewer</option>
+                </select>.
+                {" "}Off: only people you&apos;ve invited can sign in with SSO.
+              </p>
             </div>
           </div>
-        </SectionCard>
-      )}
+          <div className="flex items-start gap-3">
+            <Toggle checked={!!state.connection?.enforce_sso} onChange={v => { if (connected) saveOptions({ enforce_sso: v }); }} />
+            <div className="text-sm">
+              <p className={`font-medium ${connected ? "text-gray-800" : "text-gray-400"}`}>Require SSO</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Members must sign in through your identity provider — password and GitHub sign-ins are refused, including for direct API use.
+                Admins can still sign in another way, so an identity-provider outage can&apos;t lock everyone out.
+              </p>
+            </div>
+          </div>
+          {connected && (
+            <div className="pt-2 border-t border-gray-100">
+              {confirmRemove ? (
+                <div className="flex items-center gap-3 text-xs flex-wrap">
+                  <span className="text-rose-700">Disconnect your identity provider? People will sign in with their other methods.</span>
+                  <button onClick={removeSso} disabled={!!busy} className="font-bold text-rose-600 hover:text-rose-800">Disconnect</button>
+                  <button onClick={() => setConfirmRemove(false)} className="text-gray-500 hover:text-gray-700">Keep</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmRemove(true)} className="text-xs font-semibold text-rose-500 hover:text-rose-700">Disconnect SSO</button>
+              )}
+            </div>
+          )}
+        </div>
+      </SectionCard>
 
       {/* SCIM provisioning */}
       <SectionCard
@@ -1601,28 +1667,6 @@ function SSOTab() {
           </span>
         </div>
       </SectionCard>
-
-      {/* JIT provisioning */}
-      {profile && (
-        <SectionCard
-          title="Just-in-Time Provisioning"
-          subtitle="Automatically create TrustLedger accounts when new users sign in via SSO."
-        >
-          <div className="flex items-center gap-3">
-            <Toggle
-              checked={jitEnabled}
-              onChange={v => {
-                setJitEnabled(v);
-                try { localStorage.setItem("tl_jit_provisioning", String(v)); } catch {}
-              }}
-            />
-            <span className="text-sm font-medium text-gray-700">
-              {jitEnabled ? <>Enabled — new SSO users are auto-provisioned as <strong>developer</strong></> : "Disabled — new SSO users must be invited manually"}
-            </span>
-          </div>
-          <p className="text-xs text-gray-400 mt-2">Admins can promote users to Security Reviewer or Admin after provisioning.</p>
-        </SectionCard>
-      )}
     </div>
   );
 }

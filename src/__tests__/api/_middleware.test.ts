@@ -13,6 +13,12 @@ jest.mock("@/lib/supabase", () => ({
 }));
 jest.mock("@/lib/jwt", () => ({
   getJwtSessionId: jest.fn(() => null),
+  getJwtSsoProviderId: jest.fn(() => null),
+}));
+// No SSO connection for these orgs (lib/ssoMembership.ts has its own tests).
+jest.mock("@/lib/ssoMembership", () => ({
+  ...jest.requireActual("@/lib/ssoMembership"),
+  ssoEnforcement: async () => ({ enforce: false, provider_id: null }),
 }));
 
 import { requireRole, verifyApiKey } from "@/app/api/_middleware";

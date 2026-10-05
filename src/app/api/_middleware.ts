@@ -15,7 +15,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { getJwtSessionId } from "@/lib/jwt";
+import { getJwtSessionId, getJwtSsoProviderId } from "@/lib/jwt";
+import { resolveSsoMembership, ssoEnforcement, ssoRequiredError } from "@/lib/ssoMembership";
 import { annotateTrace } from "@/lib/trace";
 import crypto from "crypto";
 export { permissionsFor, requirePermission } from "@/lib/permissionResolver";
@@ -124,32 +125,43 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
       .eq("user_id", user.id)
       .single();
 
-    // Invited users sign up after being added — their org_members row has
-    // user_id = null until first login, OR may be a stale UID from a
-    // previous invite flow where inviteUserByEmail stored a different auth
-    // UID than the one the user actually logged in with. Fix both cases by
-    // matching on email and updating to the current auth user's ID.
-    // Only a CONFIRMED email may claim an invite — otherwise anyone could sign up with an invited
-    // address and inherit that seat before the owner of the address ever sees the invite.
-    if (!member && user.email && user.email_confirmed_at) {
-      const { data: linked } = await db
+    const ssoProviderId = getJwtSsoProviderId(token);
+    const memberCols = "org_id, role, email, active_session_id";
+
+    if (!member && ssoProviderId) {
+      // An SSO identity joins only the org that owns its IdP, and only for that org's verified domains
+      // (lib/ssoMembership.ts) -- never by matching an email, which an IdP can assert freely.
+      const sso = await resolveSsoMembership(db, user, ssoProviderId);
+      if (sso.status !== "member") return { org_id: "", error: sso.status };
+      const { data: joined } = await db.from("org_members").select(memberCols).eq("user_id", user.id).eq("org_id", sso.org_id!).maybeSingle();
+      member = joined;
+    }
+
+    // A pending invite (user_id still null) is claimed by the person who confirms that email address. A seat
+    // recorded against a different account is claimed only if that account no longer exists (an older invite
+    // flow stored a UID that was never used) -- never from another live account, e.g. the same person's
+    // SSO identity.
+    if (!member && !ssoProviderId && user.email && user.email_confirmed_at) {
+      const { data: seat } = await db
         .from("org_members")
-        .update({ user_id: user.id })
+        .select("id, user_id")
         .eq("email", user.email)
         // null OR a different id — a bare .neq() would skip the null rows (SQL: NULL <> x is not true)
         .or(`user_id.is.null,user_id.neq.${user.id}`)
-        .select("org_id, role, email, active_session_id")
-        .maybeSingle();
-      // maybeSingle returns null (not error) when 0 rows matched
-      if (linked) member = linked;
-      // If still not found, try once more by user_id (update may have raced)
-      if (!member) {
-        const { data: refetch } = await db
+        .maybeSingle() as { data: { id: string; user_id: string | null } | null };
+      let claimable = !!seat && !seat.user_id;
+      if (seat?.user_id) {
+        const { data: holder, error: holderErr } = await db.auth.admin.getUserById(seat.user_id);
+        claimable = !holder?.user && /not.?found|404/i.test(String(holderErr?.message ?? holderErr?.status ?? ""));
+      }
+      if (seat && claimable) {
+        const { data: linked } = await db
           .from("org_members")
-          .select("org_id, role, email, active_session_id")
-          .eq("user_id", user.id)
-          .single();
-        if (refetch) member = refetch;
+          .update({ user_id: user.id })
+          .eq("id", seat.id)
+          .select(memberCols)
+          .maybeSingle();
+        if (linked) member = linked;
       }
     }
 
@@ -170,6 +182,10 @@ export async function verifyApiKey(req: NextRequest): Promise<AuthResult> {
     if (member.active_session_id && tokenSessionId && member.active_session_id !== tokenSessionId) {
       return { org_id: "", error: "session_revoked" };
     }
+
+    // ── SSO enforcement ────────────────────────────────────────────────────
+    const ssoErr = ssoRequiredError(await ssoEnforcement(db, member.org_id), member.role, ssoProviderId);
+    if (ssoErr) return { org_id: "", error: ssoErr };
 
     annotateTrace({ org_id: member.org_id });   // events recorded later in this request belong to this org
     return { org_id: member.org_id, user_id: user.id, actor_email: member.email, role: member.role };

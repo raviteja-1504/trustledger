@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { getJwtSessionId } from "@/lib/jwt";
+import { getJwtSessionId, getJwtSsoProviderId } from "@/lib/jwt";
+import { resolveSsoMembership } from "@/lib/ssoMembership";
 
 /**
  * POST /api/auth/bootstrap — called right after every sign-in (GitHub, email, reset link).
  *
  * → { has_org, is_new_user, mfa_required }
  *
- * - Never creates or joins an organisation on its own. A user reaches an org only by being invited
+ * - SSO sign-ins join the org that owns their identity provider (invite, existing seat, or just-in-time
+ *   provisioning -- lib/ssoMembership.ts); { sso_status } explains a refusal.
+ * - Otherwise never creates or joins an organisation on its own. A user reaches an org only by being invited
  *   (an org_members row for their confirmed email) or by creating one at /create-org. Auto-joining by
  *   GitHub login / a shared "default" slug used to put unrelated users into the same org.
  * - Records this session as the user's sole active session (any older token is then rejected by
@@ -33,9 +36,18 @@ export async function POST(req: NextRequest) {
     .eq("user_id", user.id)
     .maybeSingle() as { data: { id: string } | null };
 
+  const ssoProviderId = getJwtSsoProviderId(token);
+  if (!member && ssoProviderId) {
+    const sso = await resolveSsoMembership(db, user, ssoProviderId);
+    if (sso.status !== "member") {
+      return NextResponse.json({ has_org: false, is_new_user: false, mfa_required: false, sso_status: sso.status });
+    }
+    member = { id: "sso" };
+  }
+
   // A pending invite (row added by an admin before this person had an account) is claimed by
   // a confirmed email only.
-  if (!member && user.email && user.email_confirmed_at) {
+  if (!member && !ssoProviderId && user.email && user.email_confirmed_at) {
     const { data: linked } = await db
       .from("org_members")
       .update({ user_id: user.id })

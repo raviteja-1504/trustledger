@@ -26,7 +26,11 @@ export type TenantScopeReason =
    *  from the record itself or from the signed job. */
   | "system-job"
   /** Insert/upsert whose payload is a variable that sets org_id. */
-  | "payload-has-org";
+  | "payload-has-org"
+  /** Found through the SSO provider id in the caller's verified session: the provider IS the org's (ssoMembership.ts). */
+  | "sso-identity"
+  /** Asks only whether ANOTHER org already holds something globally unique (a verified SSO domain). */
+  | "uniqueness-check";
 
 export interface TenantScopeException {
   file: string;
@@ -99,8 +103,12 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/sync-check-run/route.ts", table: "scans", op: "update", keys: ["id"], why: "parent-verified" },
   { file: "src/app/api/violations/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/webhook/github/route.ts", table: "scans", op: "select", keys: ["check_run_id","repo_full_name"], why: "system-job" },
-  { file: "src/app/api/_middleware.ts", table: "org_members", op: "select", keys: ["user_id"], count: 2, why: "own-membership" },
-  { file: "src/app/api/_middleware.ts", table: "org_members", op: "update", keys: ["email","or(`user_id.is.null,user_id.neq.${user.id}`)"], why: "own-membership" },
+  { file: "src/app/api/_middleware.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
+  { file: "src/app/api/_middleware.ts", table: "org_members", op: "select", keys: ["email","or(`user_id.is.null,user_id.neq.${user.id}`)"], why: "own-membership" },
+  { file: "src/app/api/_middleware.ts", table: "org_members", op: "update", keys: ["id"], why: "own-membership" },
+  { file: "src/lib/ssoMembership.ts", table: "sso_connections", op: "select", keys: ["provider_id"], why: "sso-identity" },
+  { file: "src/lib/ssoMembership.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
+  { file: "src/app/api/sso/domains/route.ts", table: "sso_domains", op: "select", keys: ["domain"], why: "uniqueness-check" },
   { file: "src/app/api/_middleware.ts", table: "api_keys", op: "select", keys: ["key_hash"], why: "credential-lookup" },
   { file: "src/app/api/_middleware.ts", table: "api_keys", op: "update", keys: ["key_hash"], why: "credential-lookup" },
   { file: "src/lib/attestation.ts", table: "scans", op: "update", keys: ["id"], why: "parent-verified" },

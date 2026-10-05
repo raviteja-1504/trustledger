@@ -17,12 +17,25 @@ export const LOGIN_ERROR_MESSAGES: Record<string, string> = {
   link_expired:       "That email link has expired or was already used. Request a new one below.",
   link_other_browser: "That email link has to be opened in the same browser you requested it from. Request a new one here, or open the link in that browser.",
   link_invalid:       "That email link isn't valid any more. Request a new one below.",
+  sso_required:        "Your organisation requires single sign-on. Use “Sign in with SSO” with your work email.",
+  sso_no_provider:     "Single sign-on isn't set up for that email domain. Sign in another way, or ask your admin.",
+  sso_not_configured:  "Your organisation's single sign-on was removed or changed. Ask your admin, then try again.",
+  sso_domain_mismatch: "Your identity provider signed you in with an email outside your organisation's verified domains. Ask your admin to check the SSO setup.",
+  sso_other_org:       "That SSO account already belongs to a different TrustLedger organisation.",
+  sso_not_invited:     "Your organisation doesn't add new SSO users automatically. Ask an admin to invite you, then sign in with SSO again.",
+  sso_failed:          "Single sign-on didn't complete. Please try again.",
 };
 export const GENERIC_LOGIN_ERROR = "Sign-in didn't complete. Please try again.";
 
 export function loginErrorMessage(code: string | null | undefined): string | null {
   if (!code) return null;
   return LOGIN_ERROR_MESSAGES[code] ?? GENERIC_LOGIN_ERROR;
+}
+
+/** The domain "Sign in with SSO" looks up for a work email ("Ann@Acme.com " → "acme.com"); null if it isn't one. */
+export function ssoDomainOf(email: string): string | null {
+  const m = /^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,63})$/i.exec(email.trim());
+  return m ? m[1].toLowerCase().replace(/\.$/, "") : null;
 }
 
 /** Codes whose fix is "request a new email link" — the login page opens the Forgot Password tab for them. */

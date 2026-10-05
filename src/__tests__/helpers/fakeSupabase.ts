@@ -58,7 +58,8 @@ class FakeQuery implements PromiseLike<unknown> {
   maybeSingle() { this.one = "maybe"; return this; }
   insert(payload: unknown) { this.write = "insert"; this.payload = payload; this.writes.push({ table: this.table, op: "insert", payload }); return this; }
   update(payload: unknown) { this.write = "update"; this.payload = payload; this.writes.push({ table: this.table, op: "update", payload }); return this; }
-  upsert(payload: unknown) { this.write = "upsert"; this.payload = payload; this.writes.push({ table: this.table, op: "upsert", payload }); return this; }
+  upsert(payload: unknown, opts?: { onConflict?: string }) { this.write = "upsert"; this.payload = payload; this.conflict = opts?.onConflict?.split(",").map(c => c.trim()) ?? null; this.writes.push({ table: this.table, op: "upsert", payload }); return this; }
+  private conflict: string[] | null = null;
   delete() { this.write = "delete"; this.writes.push({ table: this.table, op: "delete" }); return this; }
 
   then<A, B>(ok?: ((v: unknown) => A | PromiseLike<A>) | null, bad?: ((e: unknown) => B | PromiseLike<B>) | null): PromiseLike<A | B> {
@@ -87,7 +88,13 @@ class FakeQuery implements PromiseLike<unknown> {
 
   private applyWrite(): { data: unknown; error: null } {
     let affected: Row[] = [];
-    if (this.write === "insert" || this.write === "upsert") {
+    if (this.write === "upsert" && this.conflict) {
+      // ON CONFLICT (cols) DO UPDATE: merge into the row with the same key, insert otherwise
+      for (const p of (Array.isArray(this.payload) ? this.payload : [this.payload]) as Row[]) {
+        const hit = this.rows.find(r => this.conflict!.every(c => r[c] === p[c]));
+        if (hit) { Object.assign(hit, p); affected.push(hit); } else { const row = { ...p }; this.rows.push(row); affected.push(row); }
+      }
+    } else if (this.write === "insert" || this.write === "upsert") {
       affected = (Array.isArray(this.payload) ? this.payload : [this.payload]).map(p => ({ ...(p as Row) }));
       this.rows.push(...affected);
     } else if (this.write === "update") {

@@ -39,11 +39,18 @@ export async function getAuthHeader(): Promise<Record<string, string>> {
  *   mfa_required    → 2FA on and this session hasn't entered its code: go to the code step (still signed in)
  * Does nothing on the login page itself (it handles both states in place).
  */
+/** verifyApiKey refusals tied to SSO (as opposed to an admin's SSO settings errors, which stay on the page). */
+const SESSION_SSO_ERRORS = new Set(["sso_required", "sso_not_configured", "sso_domain_mismatch", "sso_other_org", "sso_not_invited"]);
+
 export async function handleSessionError(code: string | undefined): Promise<void> {
   if (typeof window === "undefined" || window.location.pathname.startsWith("/login")) return;
   if (code === "session_revoked") {
     await supabase.auth.signOut();
     fullPageNavigate("/login?error=session_revoked");
+  } else if (code && SESSION_SSO_ERRORS.has(code)) {
+    // Not allowed in with this session (SSO enforced, or the IdP's org refused it): start over on the login page.
+    await supabase.auth.signOut();
+    fullPageNavigate(`/login?error=${encodeURIComponent(code)}`);
   } else if (code === "mfa_required") {
     fullPageNavigate(`/login?step=2fa&next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
   }

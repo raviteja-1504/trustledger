@@ -45,7 +45,7 @@ interface AuthContextValue {
 }
 
 /** POST /api/auth/bootstrap's answer. */
-export interface BootstrapResult { has_org: boolean; is_new_user: boolean; mfa_required: boolean }
+export interface BootstrapResult { has_org: boolean; is_new_user: boolean; mfa_required: boolean; sso_status?: string }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
