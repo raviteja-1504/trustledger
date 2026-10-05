@@ -106,6 +106,8 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "This line is inside an intentionally-vulnerable code SAMPLE embedded as product demo content in NewScanPanel.tsx (shown to users to illustrate what the scanner detects) -- never executed." },
   { file: "src/lib/seedFileSamples.ts", id: "sql-injection", lineHash: "d93a626aea03", line: 69, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
+  { file: "src/app/api/scim-token/route.ts", id: "ssrf", lineHash: "f5d3b91b6b3a", line: 44, severity: "critical",
+    reason: "new URL(req.url).origin only builds the SCIM base URL shown back to the admin who made the request (display text). No outbound request is made with it." },
   { file: "src/app/api/sso/domains/route.ts", id: "ssrf", lineHash: "51a3fb808ac7", line: 114, severity: "critical",
     reason: "new URL(req.url).searchParams.get(\"domain\") reads the DELETE request's own query string; the value is normalised to a bare domain name and only filters an org-scoped sso_domains delete. No outbound request is made with it." },
   { file: "src/lib/supabaseSso.ts", id: "ssrf", lineHash: "84ddcbb2b387", line: 127, severity: "critical",

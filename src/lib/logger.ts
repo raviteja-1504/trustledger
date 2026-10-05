@@ -33,7 +33,7 @@ export function setLogContextProvider(fn: () => LogContext | undefined): void { 
 
 // Values that must never reach a log line, whatever key they hide under.
 const SECRET_KEY = /(^|_|-)(token|secret|password|passwd|authorization|cookie|api[_-]?key|private[_-]?key|signature|dsn)($|_|-)/i;
-const SECRET_VALUE = /\b(gh[pousr]_[A-Za-z0-9]{20,}|tl_live_[A-Za-z0-9]{16,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/g;
+const SECRET_VALUE = /\b(gh[pousr]_[A-Za-z0-9]{20,}|tl_(?:live|scim)_[A-Za-z0-9_-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/g;
 
 /** Masks secrets in log context: by key name anywhere in the object, and by recognisable token shape in strings. */
 export function redact(value: unknown, depth = 0): unknown {

@@ -105,6 +105,8 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/lib/ssoMembership.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/sso/domains/route.ts", table: "sso_domains", op: "select", keys: ["domain"], why: "uniqueness-check" },
   { file: "src/app/api/_middleware.ts", table: "api_keys", op: "select", keys: ["key_hash"], why: "credential-lookup" },
+  { file: "src/lib/scimAuth.ts", table: "scim_tokens", op: "select", keys: ["token_hash"], why: "credential-lookup" },
+  { file: "src/lib/scimAuth.ts", table: "scim_tokens", op: "update", keys: ["token_hash"], why: "credential-lookup" },
   { file: "src/app/api/_middleware.ts", table: "api_keys", op: "update", keys: ["key_hash"], why: "credential-lookup" },
   { file: "src/lib/attestation.ts", table: "scans", op: "update", keys: ["id"], why: "parent-verified" },
   { file: "src/lib/attestation.ts", table: "scan_files", op: "select", keys: ["scan_id","file_path"], why: "parent-verified" },

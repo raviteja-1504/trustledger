@@ -1,9 +1,12 @@
 "use client";
 /**
  * PostHog product analytics.
- * Tracks feature usage to guide product decisions — never sends PII or code content.
+ * Tracks feature usage to guide product decisions — never sends PII or code content: every event passes
+ * through sanitizeAnalyticsProperties (lib/analyticsPrivacy.ts), and users are identified by opaque id only.
  * Initialised lazily; no-ops when NEXT_PUBLIC_POSTHOG_KEY is not set.
  */
+
+import { sanitizeAnalyticsProperties } from "@/lib/analyticsPrivacy";
 
 let _posthog: { capture: (event: string, props?: Record<string, unknown>) => void; identify: (id: string, props?: Record<string, unknown>) => void } | null = null;
 
@@ -18,7 +21,12 @@ async function getPostHog() {
   try {
     const posthog = await import("posthog-js").then(m => m.default);
     if (!posthog.__loaded) {
-      posthog.init(key, { api_host: host, persistence: "localStorage", autocapture: false, capture_pageview: false });
+      posthog.init(key, {
+        api_host: host, persistence: "localStorage", autocapture: false, capture_pageview: false,
+        disable_session_recording: true,
+        // Also scrubs PostHog's own automatic properties ($current_url, $referrer, ...), not just ours.
+        sanitize_properties: (props: Record<string, unknown>) => sanitizeAnalyticsProperties(props),
+      });
     }
     _posthog = posthog;
     return posthog;

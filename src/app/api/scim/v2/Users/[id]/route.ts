@@ -5,16 +5,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { verifyScimRequest } from "@/lib/scimAuth";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
-function verifySCIMToken(req: NextRequest): { org_id: string } | null {
-  const token    = (req.headers.get("Authorization") ?? "").replace("Bearer ", "").trim();
-  const expected = process.env.SCIM_TOKEN ?? "";
-  if (!expected || token !== expected) return null;
-  const orgId = process.env.SCIM_ORG_ID ?? "";
-  if (!orgId) return null;
-  return { org_id: orgId };
+function verifySCIMToken(req: NextRequest): Promise<{ org_id: string } | null> {
+  return verifyScimRequest(req, createServiceClient());
 }
 
 function scimUser(member: Record<string, unknown>, host: string) {
@@ -41,7 +37,7 @@ async function getMember(db: ReturnType<typeof createServiceClient>, orgId: stri
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const params = await ctx.params;
-  const auth = verifySCIMToken(req);
+  const auth = await verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const db     = createServiceClient();
@@ -55,7 +51,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const params = await ctx.params;
-  const auth = verifySCIMToken(req);
+  const auth = await verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const body = await req.json() as {
@@ -85,7 +81,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const params = await ctx.params;
-  const auth = verifySCIMToken(req);
+  const auth = await verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const db = createServiceClient();

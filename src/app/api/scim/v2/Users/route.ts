@@ -19,19 +19,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { logger } from "@/lib/logger";
 import crypto from "crypto";
+import { verifyScimRequest, scimMayProvision } from "@/lib/scimAuth";
 
 const SCIM_CONTENT_TYPE = "application/scim+json";
 
-// ── SCIM Bearer token auth ────────────────────────────────────────────────────
-function verifySCIMToken(req: NextRequest): { org_id: string } | null {
-  const auth  = req.headers.get("Authorization") ?? "";
-  const token = auth.replace("Bearer ", "").trim();
-  const expected = process.env.SCIM_TOKEN ?? "";
-  if (!expected || token !== expected) return null;
-
-  const orgId = process.env.SCIM_ORG_ID ?? "";
-  if (!orgId) return null;
-  return { org_id: orgId };
+// ── SCIM Bearer token auth: the org's own token (lib/scimAuth.ts) ─────────────
+function verifySCIMToken(req: NextRequest): Promise<{ org_id: string } | null> {
+  return verifyScimRequest(req, createServiceClient());
 }
 
 function scimUser(member: Record<string, unknown>, host: string) {
@@ -54,7 +48,7 @@ function scimUser(member: Record<string, unknown>, host: string) {
 
 // ── GET — list or filter users ────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
-  const auth = verifySCIMToken(req);
+  const auth = await verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const url    = new URL(req.url);
@@ -94,7 +88,7 @@ export async function GET(req: NextRequest) {
 
 // ── POST — provision new user ─────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  const auth = verifySCIMToken(req);
+  const auth = await verifySCIMToken(req);
   if (!auth) return new NextResponse("Unauthorized", { status: 401 });
 
   const body = await req.json() as {
@@ -117,6 +111,15 @@ export async function POST(req: NextRequest) {
   }
 
   const db = createServiceClient();
+
+  // SCIM creates a confirmed account: only for addresses at this org's verified domains.
+  if (!(await scimMayProvision(db, auth.org_id, email))) {
+    return NextResponse.json({
+      schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+      status:  "403",
+      detail:  "userName must be an email address at one of your organisation's verified domains (Settings → SSO).",
+    }, { status: 403, headers: { "Content-Type": SCIM_CONTENT_TYPE } });
+  }
 
   // Create user in Supabase Auth
   const { data: authUser, error: authErr } = await db.auth.admin.createUser({

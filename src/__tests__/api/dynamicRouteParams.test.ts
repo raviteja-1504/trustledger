@@ -6,6 +6,9 @@
  */
 import { NextRequest } from "next/server";
 import { fakeSupabase } from "../helpers/fakeSupabase";
+import { hashScimToken } from "@/lib/scimAuth";
+
+const SCIM_TOKEN = "tl_scim_test-token-for-org-1";
 
 let db: ReturnType<typeof fakeSupabase>;
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
@@ -36,9 +39,8 @@ beforeEach(() => {
       { org_id: "org-1", user_id: "u-1", email: "one@acme.test", name: "One", role: "developer" },
       { org_id: "org-2", user_id: "u-2", email: "two@other.test", name: "Two", role: "developer" },
     ],
+    scim_tokens: [{ org_id: "org-1", token_hash: hashScimToken(SCIM_TOKEN), token_prefix: "tl_scim_test-t" }],
   });
-  process.env.SCIM_TOKEN = "scim-test";
-  process.env.SCIM_ORG_ID = "org-1";
 });
 
 describe("POST /api/scans/[id]/rescan", () => {
@@ -55,7 +57,7 @@ describe("POST /api/scans/[id]/rescan", () => {
 });
 
 describe("/api/scim/v2/Users/[id]", () => {
-  const auth = { Authorization: "Bearer scim-test" };
+  const auth = { Authorization: `Bearer ${SCIM_TOKEN}` };
 
   it("GET returns the user named in params, in the SCIM org only", async () => {
     const res = await scimGET(req("/api/scim/v2/Users/u-1", "GET", undefined, auth), ctx("u-1"));

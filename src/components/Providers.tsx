@@ -27,8 +27,9 @@ function AnalyticsInit() {
       setUserContext(user.id, profile.email, profile.org_id);
     }).catch(() => {});
     // Set PostHog identity
-    import("@/lib/analytics").then(({ identify }) => {
-      identify(user.id, { email: profile.email, org: profile.org_slug, role: profile.role });
+    Promise.all([import("@/lib/analytics"), import("@/lib/analyticsPrivacy")]).then(([{ identify }, { identityProperties }]) => {
+      // Opaque ids and role only -- no email or org name leaves for PostHog (lib/analyticsPrivacy.ts).
+      identify(user.id, identityProperties(profile));
     }).catch(() => {});
   }, [user?.id, profile?.org_id]); // eslint-disable-line react-hooks/exhaustive-deps
   return null;

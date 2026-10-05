@@ -1430,6 +1430,96 @@ function CopyValue({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ScimCard() {
+  type Scim = { set_up: boolean; message?: string; exists: boolean; prefix: string | null; created_at: string | null; last_used_at: string | null; base_url: string; verified_domains: string[] };
+  const [scim,    setScim]    = useState<Scim | null>(null);
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [busy,    setBusy]    = useState(false);
+  const [err,     setErr]     = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<"rotate" | "revoke" | null>(null);
+
+  async function load() {
+    try { setScim(await authedFetch<Scim>("/api/scim-token")); }
+    catch (e) { setErr(e instanceof Error ? e.message : "Couldn't load SCIM settings."); }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
+
+  async function create() {
+    setBusy(true); setErr(null); setConfirm(null);
+    try {
+      const r = await authedFetch<{ token: string }>("/api/scim-token", { method: "POST" });
+      setNewToken(r.token);
+      await load();
+    } catch (e) { setErr(e instanceof Error ? e.message : "Couldn't create a SCIM token."); }
+    finally { setBusy(false); }
+  }
+  async function revoke() {
+    setBusy(true); setErr(null); setConfirm(null); setNewToken(null);
+    try { await authedFetch("/api/scim-token", { method: "DELETE" }); await load(); }
+    catch (e) { setErr(e instanceof Error ? e.message : "Couldn't revoke the SCIM token."); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <SectionCard title="SCIM User Provisioning"
+      subtitle="Let your identity provider add and remove people automatically (SCIM 2.0). New people join as Developer.">
+      {!scim ? (err ? <p className="text-sm text-rose-600">{err}</p> : <div className="h-16 bg-gray-100 rounded-xl animate-pulse" />) : (
+        <div className="space-y-3 text-sm">
+          {!scim.set_up && <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{scim.message}</p>}
+          <div className="text-xs font-mono bg-gray-50 rounded-xl border border-gray-100 p-3 space-y-1.5">
+            <CopyValue label="Base URL" value={scim.base_url} />
+            <CopyValue label="Auth" value="HTTP header — Authorization: Bearer <token>" />
+          </div>
+          {scim.verified_domains.length === 0 && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              Verify your email domain above first — SCIM only provisions addresses at your verified domains.
+            </p>
+          )}
+          {newToken && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-1.5">
+              <p className="text-xs font-bold text-emerald-800">Copy this token into your identity provider now — it won't be shown again.</p>
+              <div className="text-xs font-mono bg-white rounded-lg border border-emerald-100 p-2"><CopyValue label="Token" value={newToken} /></div>
+            </div>
+          )}
+          <div className="flex items-center gap-3 flex-wrap">
+            {scim.exists ? (
+              <span className="text-xs text-gray-600">
+                Active token <code className="font-mono">{scim.prefix}…</code>
+                {scim.last_used_at ? ` · last used ${new Date(scim.last_used_at).toLocaleString()}` : " · not used yet"}
+              </span>
+            ) : <span className="text-xs text-gray-500">No SCIM token yet.</span>}
+            <span className="flex-1" />
+            {!scim.exists && (
+              <button onClick={create} disabled={busy || !scim.set_up} className="px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+                {busy ? "Creating…" : "Generate token"}
+              </button>
+            )}
+            {scim.exists && !confirm && (
+              <>
+                <button onClick={() => setConfirm("rotate")} disabled={busy} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Rotate</button>
+                <button onClick={() => setConfirm("revoke")} disabled={busy} className="text-xs font-semibold text-rose-500 hover:text-rose-700">Revoke</button>
+              </>
+            )}
+          </div>
+          {confirm && (
+            <div className="flex items-center gap-3 text-xs flex-wrap">
+              <span className="text-rose-700">
+                {confirm === "rotate" ? "The current token stops working immediately; you'll need to paste the new one into your identity provider." : "Your identity provider will no longer be able to provision anyone."}
+              </span>
+              <button onClick={confirm === "rotate" ? create : revoke} disabled={busy} className="font-bold text-rose-600 hover:text-rose-800">
+                {confirm === "rotate" ? "Rotate" : "Revoke"}
+              </button>
+              <button onClick={() => setConfirm(null)} className="text-gray-500 hover:text-gray-700">Cancel</button>
+            </div>
+          )}
+          {err && <p className="text-xs text-rose-600">{err}</p>}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 function SSOTab() {
   const { profile } = useAuth();
   const isAdmin = profile?.role === "admin";
@@ -1650,23 +1740,7 @@ function SSOTab() {
         </div>
       </SectionCard>
 
-      {/* SCIM provisioning */}
-      <SectionCard
-        title="SCIM User Provisioning"
-        subtitle="Auto-provision and de-provision users via SCIM 2.0 (requires Enterprise plan)."
-      >
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <p className="text-xs font-mono text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-100 select-all">
-              {appUrl}/api/scim/v2
-            </p>
-            <p className="text-xs text-gray-400 mt-1.5">SCIM token: configure in Settings → API Access</p>
-          </div>
-          <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-3 py-1.5 rounded-lg ring-1 ring-amber-200">
-            Enterprise plan
-          </span>
-        </div>
-      </SectionCard>
+      <ScimCard />
     </div>
   );
 }
