@@ -1,36 +1,29 @@
 /**
  * Data Retention Policy API
- * GET  /api/retention  → get current policy
- * PATCH /api/retention → update retention settings
- * DELETE /api/retention?scope=scans&before=2025-01-01 → delete data
+ * GET  /api/retention  → the org's policy (lib/retention.ts), with the last automatic run
+ * PATCH /api/retention → update periods / switch automatic enforcement on or off
+ * DELETE /api/retention?scope=scans&before=2025-01-01 → delete data now (manual; includes open records)
  * POST  /api/retention?action=export_all → GDPR full data export
  * POST  /api/retention?action=delete_account → GDPR right to erasure
+ *
+ * Automatic enforcement runs daily from /api/cron/pipeline-health for orgs that switched it on.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission, requireRole } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
-
-const DEFAULT_RETENTION = {
-  scans_days:         365,   // Keep scan records
-  audit_log_days:     2555,  // 7 years (SOC 2 requirement)
-  secret_findings_days: 365,
-  violations_days:    365,
-  incidents_days:     2555,
-};
+import { safeError } from "@/lib/errors";
+import { loadRetention, normalizeRetention, purgeScansBefore, purgeTableBefore, MIN_DAYS, MAX_DAYS } from "@/lib/retention";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
-
-  const db = createServiceClient();
-
-  // Try to get from org metadata (stored as JSON in organizations table)
-  // For now, return defaults — in production store in a retention_policies table
+  const policy = await loadRetention(createServiceClient(), org_id);
   return NextResponse.json({
-    policy:   DEFAULT_RETENTION,
-    note:     "Data retention periods in days. SOC 2 requires 7-year audit log retention.",
+    policy,
+    bounds: { min_days: MIN_DAYS, max_days: MAX_DAYS },
+    note:   "Retention periods in days. Automatic enforcement never deletes attested scans, open items, or the audit log.",
   });
 }
 
@@ -41,15 +34,17 @@ export async function PATCH(req: NextRequest) {
   const permErr = await requirePermission(auth, "can_manage_policies");
   if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
-  const raw  = await req.json().catch(() => ({})) as Record<string, unknown>;
-  // Clamp all numeric values to sane bounds (1 day – 2555 days / ~7 years)
-  const body: Partial<typeof DEFAULT_RETENTION> = {};
-  for (const [k, v] of Object.entries(raw)) {
-    if (typeof v === "number" && isFinite(v)) {
-      (body as Record<string, number>)[k] = Math.min(Math.max(Math.round(v), 1), 2555);
-    }
-  }
-  const db   = createServiceClient();
+  const raw = await req.json().catch(() => ({})) as Record<string, unknown>;
+  const db  = createServiceClient();
+  const current = await loadRetention(db, org_id);
+  // Only the periods and the switch are settable; the last-run fields are written by the cron alone.
+  const { last_enforced_at: _a, last_result: _b, ...settable } = raw;
+  const next = normalizeRetention({ ...current, ...settable }, current);
+  next.last_enforced_at = current.last_enforced_at ?? null;
+  next.last_result = current.last_result ?? null;
+
+  const { error: saveErr } = await db.from("organizations").update({ retention_policy: next }).eq("id", org_id);
+  if (saveErr) return safeError(saveErr, { code: "retention_save_failed", message: "We couldn't save the retention policy. Please try again." });
 
   await writeAuditLog(db, {
     org_id,
@@ -57,10 +52,10 @@ export async function PATCH(req: NextRequest) {
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "retention_policy",
-    payload:       body,
+    payload:       { from: { ...current, last_result: undefined }, to: { ...next, last_result: undefined } },
   });
 
-  return NextResponse.json({ ok: true, updated: body });
+  return NextResponse.json({ ok: true, policy: next });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -71,7 +66,7 @@ export async function DELETE(req: NextRequest) {
   if (permErr) return NextResponse.json({ error: permErr }, { status: 403 });
 
   const url    = new URL(req.url);
-  const scope  = url.searchParams.get("scope");   // scans | violations | secrets | all
+  const scope  = url.searchParams.get("scope");   // scans | violations | secrets | incidents | alerts | all
   const before = url.searchParams.get("before");  // ISO date
 
   const VALID_SCOPES = new Set(["scans", "violations", "secrets", "incidents", "alerts", "all"]);
@@ -96,57 +91,23 @@ export async function DELETE(req: NextRequest) {
   let deleted = 0;
   const skipped: Record<string, string> = {};
 
-  // scans, violations, secret_findings, and alerts all reference `scans`
-  // with NO ACTION (not CASCADE) -- deleting an old scan while any of those
-  // still point at it fails outright, and attestations reference it too but
-  // can NEVER be deleted (immutable by DB rule -- see 001_initial.sql's
-  // attestations_no_delete rule, a deliberate "reviewer sign-off is a
-  // permanent record" guarantee). So an attested scan can never actually be
-  // purged through this endpoint, by design -- only scans nobody ever
-  // reviewed are eligible. This used to attempt the delete anyway (with the
-  // error never checked), which silently did nothing for almost every real
-  // org instead of cleaning up what it safely could.
+  // Attested scans can never be deleted (attestations are immutable by DB rule): only unreviewed scans go.
   if (scope === "scans" || scope === "all") {
-    const { data: oldScans } = await db
-      .from("scans").select("id").eq("org_id", org_id).lt("created_at", cutoff);
-    const oldScanIds = (oldScans ?? []).map(s => s.id);
-
-    if (oldScanIds.length > 0) {
-      const { data: attested } = await db
-        .from("attestations").select("scan_id").in("scan_id", oldScanIds);
-      const attestedSet = new Set((attested ?? []).map(a => a.scan_id));
-      const eligibleIds = oldScanIds.filter(id => !attestedSet.has(id));
-
-      if (eligibleIds.length > 0) {
-        // Clear FK-dependent rows first -- scan_files cascades automatically.
-        await db.from("violations").delete().in("scan_id", eligibleIds);
-        await db.from("secret_findings").delete().in("scan_id", eligibleIds);
-        await db.from("alerts").delete().in("scan_id", eligibleIds);
-        const { count, error: delErr } = await db
-          .from("scans").delete({ count: "exact" }).in("id", eligibleIds) as { count: number | null; error: unknown };
-        if (delErr) skipped.scans = "delete failed";
-        else deleted += count ?? 0;
-      }
-      if (eligibleIds.length < oldScanIds.length) {
-        skipped.scans = `${oldScanIds.length - eligibleIds.length} attested scan(s) retained (cannot be deleted)`;
-      }
-    }
+    const r = await purgeScansBefore(db, org_id, cutoff, 1000);
+    deleted += r.deleted;
+    if (r.failed) skipped.scans = "delete failed";
+    else if (r.retained_attested > 0) skipped.scans = `${r.retained_attested} attested scan(s) retained (cannot be deleted)`;
   }
 
-  // The remaining scopes don't have anything referencing them with NO ACTION,
-  // so a plain per-org, per-cutoff delete is safe on its own.
+  // A manual delete is an explicit decision, so it includes records that are still open.
   const otherTables: Record<string, string> = {
     violations: "violations", secrets: "secret_findings", incidents: "incidents", alerts: "alerts",
   };
   const targetOther = scope === "all" ? Object.values(otherTables) : [otherTables[scope]].filter(Boolean);
   for (const table of targetOther) {
-    const { count, error: delErr } = await db
-      .from(table)
-      .delete({ count: "exact" })
-      .eq("org_id", org_id)
-      .lt("created_at", cutoff) as { count: number | null; error: unknown };
-    if (delErr) skipped[table] = "delete failed";
-    else deleted += count ?? 0;
+    const r = await purgeTableBefore(db, org_id, table, cutoff, true);
+    if (r.failed) skipped[table] = "delete failed";
+    else deleted += r.deleted;
   }
 
   await writeAuditLog(db, {

@@ -20,7 +20,12 @@ async function checkDatabase(): Promise<ServiceCheck> {
   try {
     const db = createServiceClient();
     const { error: e2 } = await db.from("organizations").select("id").limit(1);
-    return { status: e2 ? "degraded" : "ok", latency_ms: Date.now() - t0 };
+    if (!e2) return { status: "ok", latency_ms: Date.now() - t0 };
+    // Public endpoint: only the short error code goes out (e.g. 42501 permission denied, PGRST301 bad JWT);
+    // the full message is in the server logs.
+    const err = e2 as { code?: string; message?: string; hint?: string };
+    logger.error("healthz_db_query_failed", { code: err.code, detail: err.message, hint: err.hint });
+    return { status: "degraded", latency_ms: Date.now() - t0, detail: `query failed${err.code ? ` (${err.code})` : ""}` };
   } catch (e) {
     // Public, unauthenticated endpoint -- never echo raw DB errors here.
     logger.error("healthz_db_check_failed", { detail: e instanceof Error ? e.message : String(e) });

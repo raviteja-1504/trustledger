@@ -1676,16 +1676,32 @@ function SSOTab() {
 function PrivacyTab() {
   const { profile } = useAuth();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToastHelpers();
-  const [retentionDays, setRetentionDays] = useState({ scans_days: 365, audit_log_days: 2555, violations_days: 365 });
+  type Retention = {
+    scans_days: number; violations_days: number; secret_findings_days: number; incidents_days: number; alerts_days: number;
+    audit_log_days: number; auto_enforce: boolean; last_enforced_at?: string | null;
+    last_result?: { at: string; deleted: Record<string, number>; attested_scans_kept: number; failed: string[] } | null;
+  };
+  const [retention, setRetention] = useState<Retention | null>(null);
   const [saved,   setSaved]   = useState(false);
+  const [retErr,  setRetErr]  = useState<string | null>(null);
+  const [confirmAuto, setConfirmAuto] = useState(false);
+  useEffect(() => {
+    authedFetch<{ policy: Retention }>("/api/retention").then(r => setRetention(r.policy)).catch(e => setRetErr(e instanceof Error ? e.message : "Couldn't load the retention policy."));
+  }, []);
   const [delScope, setDelScope] = useState("scans");
   const [delBefore, setDelBefore] = useState("");
   const [deleting,  setDeleting] = useState(false);
   const [delResult, setDelResult] = useState<string | null>(null);
 
-  async function saveRetention() {
-    await authedFetch("/api/retention", { method:"PATCH", body: JSON.stringify(retentionDays) }).catch(() => {});
-    setSaved(true); setTimeout(() => setSaved(false), 2500);
+  async function saveRetention(patch?: Partial<Retention>) {
+    if (!retention) return;
+    setRetErr(null);
+    const { last_enforced_at: _a, last_result: _b, ...settable } = { ...retention, ...patch };
+    try {
+      const r = await authedFetch<{ policy: Retention }>("/api/retention", { method:"PATCH", body: JSON.stringify(settable) });
+      setRetention(r.policy);
+      setSaved(true); setTimeout(() => setSaved(false), 2500);
+    } catch (e) { setRetErr(e instanceof Error ? e.message : "Couldn't save the retention policy."); }
   }
 
   async function deleteData() {
@@ -1700,32 +1716,67 @@ function PrivacyTab() {
 
   return (
     <div className="space-y-5">
-      <SectionCard title="Data Retention" subtitle="Configure how long TrustLedger retains your security data. SOC 2 requires audit log retention for 7 years.">
+      <SectionCard title="Data Retention" subtitle="How long TrustLedger keeps your security data. With automatic enforcement on, older data is deleted every day.">
+        {!retention ? (
+          retErr ? <p className="text-sm text-rose-600">{retErr}</p> : <div className="h-24 bg-gray-100 rounded-xl animate-pulse" />
+        ) : (
         <div className="space-y-4">
-          {[
-            { key:"scans_days",     label:"Scan records",    note:"365 days recommended" },
-            { key:"audit_log_days", label:"Audit log",       note:"2555 days (7yr) — SOC 2 requirement" },
-            { key:"violations_days",label:"Violation records",note:"365 days recommended" },
-          ].map(({ key, label, note }) => (
+          {([
+            { key:"scans_days",           label:"Scan records",       note:"Unattested scans only — attested scans are kept as a permanent record" },
+            { key:"violations_days",      label:"Violations",         note:"Resolved or accepted ones" },
+            { key:"secret_findings_days", label:"Secret findings",    note:"Resolved ones" },
+            { key:"incidents_days",       label:"Incidents",          note:"Resolved or closed ones" },
+            { key:"alerts_days",          label:"Alerts",             note:"Resolved ones" },
+            { key:"audit_log_days",       label:"Audit log",          note:"Kept for this long, never deleted automatically (tamper-evident chain); 7 years suits SOC 2" },
+          ] as const).map(({ key, label, note }) => (
             <label key={key} className="flex items-center justify-between gap-4">
               <div>
                 <p className="text-sm font-semibold text-gray-800">{label}</p>
                 <p className="text-xs text-gray-400">{note}</p>
               </div>
-              <div className="flex items-center gap-2">
-                <input type="number" min={30} max={3650}
-                  value={retentionDays[key as keyof typeof retentionDays]}
-                  onChange={e => setRetentionDays(p => ({ ...p, [key]: parseInt(e.target.value) }))}
+              <div className="flex items-center gap-2 shrink-0">
+                <input type="number" min={key === "audit_log_days" ? 365 : 30} max={key === "audit_log_days" ? 3650 : 2555}
+                  value={retention[key]}
+                  onChange={e => setRetention(p => p && ({ ...p, [key]: parseInt(e.target.value) || 0 }))}
                   className="w-24 text-sm border border-gray-200 rounded-xl px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-400" />
                 <span className="text-xs text-gray-400">days</span>
               </div>
             </label>
           ))}
-          <button onClick={saveRetention}
-            className={`px-5 py-2 text-sm font-bold rounded-xl transition-all ${saved ? "bg-emerald-500 text-white" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
-            {saved ? "✓ Saved" : "Save retention policy"}
-          </button>
+
+          <div className="flex items-start gap-3 pt-3 border-t border-gray-100">
+            <Toggle checked={retention.auto_enforce} onChange={v => { if (v) setConfirmAuto(true); else saveRetention({ auto_enforce: false }); }} />
+            <div className="text-sm">
+              <p className="font-medium text-gray-800">Apply automatically</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Every day, delete data older than these periods. Only closed items and unattested scans are removed; nothing younger than 30 days ever is.
+              </p>
+              {retention.last_result && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Last run {new Date(retention.last_result.at).toLocaleString()}: deleted {Object.values(retention.last_result.deleted).reduce((a, b) => a + b, 0)} record(s)
+                  {retention.last_result.attested_scans_kept > 0 && `, kept ${retention.last_result.attested_scans_kept} attested scan(s)`}
+                  {retention.last_result.failed.length > 0 && <span className="text-rose-600"> — failed: {retention.last_result.failed.join(", ")}</span>}.
+                </p>
+              )}
+              {confirmAuto && (
+                <div className="mt-2 flex items-center gap-3 text-xs flex-wrap">
+                  <span className="text-rose-700">From tomorrow, data older than these periods will be deleted permanently. Turn this on?</span>
+                  <button onClick={() => { setConfirmAuto(false); saveRetention({ auto_enforce: true }); }} className="font-bold text-rose-600 hover:text-rose-800">Turn on</button>
+                  <button onClick={() => setConfirmAuto(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button onClick={() => saveRetention()}
+              className={`px-5 py-2 text-sm font-bold rounded-xl transition-all ${saved ? "bg-emerald-500 text-white" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
+              {saved ? "✓ Saved" : "Save retention policy"}
+            </button>
+            {retErr && <p className="text-xs text-rose-600">{retErr}</p>}
+          </div>
         </div>
+        )}
       </SectionCard>
 
       <SectionCard title="Data Deletion" subtitle="Permanently delete data before a specific date. This action is irreversible.">

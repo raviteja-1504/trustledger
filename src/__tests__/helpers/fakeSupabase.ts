@@ -86,7 +86,7 @@ class FakeQuery implements PromiseLike<unknown> {
     return { data: rows, error: null };
   }
 
-  private applyWrite(): { data: unknown; error: null } {
+  private applyWrite(): { data: unknown; error: null; count?: number } {
     let affected: Row[] = [];
     if (this.write === "upsert" && this.conflict) {
       // ON CONFLICT (cols) DO UPDATE: merge into the row with the same key, insert otherwise
@@ -104,7 +104,7 @@ class FakeQuery implements PromiseLike<unknown> {
       affected = this.rows.filter(r => this.filters.every(f => f(r)));
       for (const r of affected) this.rows.splice(this.rows.indexOf(r), 1);
     }
-    if (!this.returning) return { data: null, error: null };
+    if (!this.returning) return { data: null, error: null, count: affected.length };
     if (this.one) return { data: affected[0] ?? null, error: null };
     return { data: affected, error: null };
   }

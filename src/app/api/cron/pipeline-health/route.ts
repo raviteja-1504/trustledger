@@ -5,6 +5,8 @@
  *    "pipeline" alert — at most one per organisation per day, so a lasting problem doesn't flood the alerts list.
  *    Alerts go wherever the org's alert channels (Slack, email) already send.
  *  - Deletes ops_events older than 30 days (the Trace page's retention).
+ *  - Applies each organisation's data-retention policy if it switched automatic enforcement on
+ *    (lib/retention.ts: closed records and unattested scans only; never the audit log).
  *
  * The Trace page shows the same checks live; this job makes sure someone is told even if nobody looks.
  */
@@ -14,6 +16,8 @@ import { pipelineHealth } from "@/lib/pipelineHealth";
 import { recordEvent } from "@/lib/opsEvents";
 import { runWithTrace, newTraceId } from "@/lib/trace";
 import { logger } from "@/lib/logger";
+import { writeAuditLog } from "@/lib/audit";
+import { enforceRetention, normalizeRetention, totalDeleted } from "@/lib/retention";
 
 export const maxDuration = 120;
 const RETENTION_DAYS = 30;
@@ -28,7 +32,7 @@ export async function GET(req: NextRequest) {
 async function run() {
   const db = createServiceClient();
   const now = Date.now();
-  const { data: orgs } = await db.from("organizations").select("id") as { data: Array<{ id: string }> | null };
+  const { data: orgs } = await db.from("organizations").select("id, retention_policy") as { data: Array<{ id: string; retention_policy?: unknown }> | null };
 
   let alertsRaised = 0;
   for (const org of orgs ?? []) {
@@ -59,9 +63,30 @@ async function run() {
     }
   }
 
+  // Data retention, for orgs that chose automatic enforcement. One org failing doesn't stop the others.
+  let retentionOrgs = 0, retentionDeleted = 0;
+  for (const org of orgs ?? []) {
+    const policy = normalizeRetention(org.retention_policy);
+    if (!policy.auto_enforce) continue;
+    try {
+      const result = await enforceRetention(db, org.id, policy, now);
+      retentionOrgs++;
+      retentionDeleted += totalDeleted(result);
+      await db.from("organizations").update({ retention_policy: { ...policy, last_enforced_at: result.at, last_result: result } }).eq("id", org.id);
+      if (totalDeleted(result) > 0 || result.failed.length > 0) {
+        await writeAuditLog(db, {
+          org_id: org.id, event_type: "org_settings_changed", actor_id: null, actor_email: "system",
+          resource_type: "data_deletion", payload: { automatic: true, ...result },
+        });
+      }
+    } catch (err) {
+      logger.error("Retention enforcement failed for org", { org_id: org.id, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   const cutoff = new Date(now - RETENTION_DAYS * 86400_000).toISOString();
   const { error: purgeErr } = await db.from("ops_events").delete().lt("created_at", cutoff);
 
-  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message });
-  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised });
+  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted });
+  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted });
 }
