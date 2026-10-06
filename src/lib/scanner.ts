@@ -106,6 +106,7 @@ import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination } from "./licenseContamination";
 import { isDockerfilePath } from "./scannableFiles";
+import { findKotlinTaintFindings } from "./kotlinTaint";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -282,7 +283,7 @@ const LANG_MAP: Record<string, string> = {
   py: "python",   ts: "typescript", tsx: "typescript",
   js: "javascript", jsx: "javascript",
   rb: "ruby",     go: "golang",     rs: "rust",
-  java: "java",   kt: "kotlin",     cs: "csharp",   cshtml: "csharp",
+  java: "java",   kt: "kotlin",     kts: "kotlin",  cs: "csharp",   cshtml: "csharp",
   php: "php",     cpp: "cpp",       c:   "c",
   swift: "swift", yaml: "yaml",     yml: "yaml",
   json: "json",   sh: "shell",      sql: "sql",
@@ -6499,6 +6500,8 @@ export function analyzeFile(
     ...findSQLInjectionJavaTainted(lines),
     ...findSQLInjectionGoSprintf(lines),
     ...findSQLInjectionCSharpTainted(lines),
+    // Kotlin: input as annotated parameters and string templates (the Java engine can't parse Kotlin)
+    ...(lang === "kotlin" ? findKotlinTaintFindings(lines) : []),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
