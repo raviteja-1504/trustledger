@@ -187,7 +187,7 @@ function Eyebrow({ children }: { children: React.ReactNode }) {
 }
 
 const VALUE_POINTS = [
-  { title: "Every PR, scored", body: "How much is AI-written, and the real vulnerabilities traced across files in six languages." },
+  { title: "Every PR, scored", body: "How much is AI-written, and the real vulnerabilities traced across files in nine languages." },
   { title: "Secrets, dependencies, cloud & API", body: "Leaked keys, reachable vulnerable packages, IaC and endpoint checks — in the same review." },
   { title: "Proof, not promises", body: "A named reviewer signs off every file, and each scan exports a signed Trust Record." },
 ];

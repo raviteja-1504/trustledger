@@ -146,9 +146,9 @@ const PILLARS: Pillar[] = [
   },
   {
     id: "code-risk", icon: CodeRiskIcon, color: ROSE, name: "Code Risk", tagline: "What's actually in the code — vulnerabilities, secrets, dependencies",
-    desc: "Six real AST-based taint engines trace SQL injection, XSS, SSRF, and seventeen other vulnerability classes from source to sink — across files, services and includes, not just within one file. The same scan flags hardcoded secrets the moment they land, and ranks every vulnerable dependency by whether your code actually reaches it.",
+    desc: "Nine real AST-based taint engines trace SQL injection, XSS, SSRF, and seventeen other vulnerability classes from source to sink — across files, services and includes, not just within one file. The same scan flags hardcoded secrets the moment they land, and ranks every vulnerable dependency by whether your code actually reaches it.",
     bullets: [
-      "Real data-flow taint engines: JS/TS, Python, Java, Go, C#, PHP — across files in all six",
+      "Real data-flow taint engines: JS/TS, Python, Java, Kotlin, Go, C#, PHP, Ruby, Rust — across files in all nine",
       "20 vulnerability classes, each with a source-to-sink trace and the exact sink argument",
       "Secrets detection — API keys, tokens, credentials — before they reach history",
       "Live CVEs across 8 ecosystems, ranked by reachability: is the vulnerable function called?",
@@ -234,6 +234,9 @@ const LANGUAGES: LangEngine[] = [
   { lang: "C#", ext: ".cs", note: "Services across files, path-sensitive, BOLA dominance", extra: "Constructor & primary-constructor dependency injection" },
   { lang: "PHP", ext: ".php", note: "Functions & classes across includes, path-sensitive", extra: "__DIR__, relative & transitive includes; static calls" },
   { lang: "Java", ext: ".java", note: "Spring services across files, entry-point aware", extra: "@Autowired & constructor injection, interface → implementation" },
+  { lang: "Kotlin", ext: ".kt .kts", note: "Spring, Ktor & Servlet; shares cross-file evidence with Java", extra: "Kotlin controllers resolve Java services, and Java resolves Kotlin" },
+  { lang: "Ruby", ext: ".rb", note: "Rails & Sinatra controllers to services and models", extra: "Strong params, before_action state, service objects, scopes" },
+  { lang: "Rust", ext: ".rs", note: "Axum, Actix & Rocket handlers, format! traced per argument", extra: "State<Arc<T>> services, trait objects, module functions via use" },
 ];
 
 const PIPELINE_STAGES = [
@@ -268,7 +271,7 @@ const ENGINE_FACTS = [
   { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal. A regex match is deliberately NOT trusted." },
   { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
   { label: "Fixed-point call resolution", desc: "Call summaries iterate until nothing changes — same-file and across files — so an eight-deep helper chain or a five-file flow converges, with a safety cap instead of an arbitrary round limit." },
-  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all six languages. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
+  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all nine languages, including Rails autoloading, Kotlin↔Java calls and Rust modules. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
 ];
 
 const STEPS = [
@@ -406,7 +409,7 @@ function HeroSection() {
           One risk score.
         </h1>
         <p className="text-lg sm:text-xl text-white/65 max-w-2xl mx-auto leading-relaxed">
-          TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across files in six languages, catches secrets and the vulnerable dependencies you actually reach, checks your cloud, container and API configuration, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
+          TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across files in nine languages, catches secrets and the vulnerable dependencies you actually reach, checks your cloud, container and API configuration, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
           <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
@@ -435,7 +438,7 @@ function HeroSection() {
       </Reveal>
 
       <Reveal delay={320} className="relative mt-16 w-full max-w-5xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-        {[{ to: 6, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
+        {[{ to: 9, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
           <div key={s.label} className="text-center">
             <p className="text-3xl font-black font-mono" style={{ color: "#67e8f9", textShadow: `0 0 24px ${CYAN}88` }}><CountUp to={s.to} /></p>
             <p className="text-[11px] text-white/50 font-medium mt-1">{s.label}</p>
@@ -560,10 +563,10 @@ function LanguageEngineSection() {
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Six languages. Six real parsers.</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across six syntaxes.</p>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Nine languages. Nine real parsers.</h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across nine syntaxes.</p>
         </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {LANGUAGES.map((l, i) => (
             <Reveal key={l.lang} delay={i * 70}>
               <div className="group p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
@@ -681,7 +684,7 @@ function PipelineSection() {
 
 const FEATURES = [
   { icon: RouteIcon, title: "Source → Sink Traces", desc: "Every finding ships with the actual data-flow path, hop by hop, with real file and line numbers — including across a file boundary.", accent: CYAN },
-  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all six languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS), Go packages, PHP includes — measured by a 72-case cross-file benchmark on every change.", accent: CYAN },
+  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all nine languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS, Axum state), Go packages, PHP includes, Rails autoloading, Rust modules — measured by a 72-case cross-file benchmark on every change.", accent: CYAN },
   { icon: MergeIcon, title: "One Issue, One Finding", desc: "When the pattern layer, the taint engine and cross-file analysis see the same bug, it becomes one finding listing every location and every detector that agreed.", accent: CYAN },
   { icon: LockIcon, title: "Broken Object-Level Authorization", desc: "Structural ownership-dominance analysis: a resource lookup only clears when a real comparison against the principal dominates every path to the sink.", accent: ROSE },
   { icon: PackageIcon, title: "Reachable Dependencies", desc: "Live CVEs across 8 ecosystems, ranked by whether the vulnerable function is called, the package is reachable from an entry point, used only in tests, or never imported.", accent: AMBER },
