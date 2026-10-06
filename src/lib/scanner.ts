@@ -87,6 +87,11 @@ import {
   findEnclosingFunctionNameKotlin, findNodeAtRowKotlin, astTaintKotlinSeverity, astTaintKotlinLabel,
 } from "./astTaintKotlin";
 import type { Node as KotlinSyntaxNode } from "web-tree-sitter";
+import {
+  parseRustSourceSync, isRustParserReady, scanAstTaintRust, computeRustFnSinkFacts,
+  findEnclosingFunctionNameRust, findNodeAtRowRust, astTaintRustSeverity, astTaintRustLabel,
+} from "./astTaintRust";
+import type { Node as RustSyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -6338,6 +6343,23 @@ function findAstTaintKotlinFindings(
   }));
 }
 
+// Rust: same contract and confidence split as Java/Kotlin (entry-point-seeded findings are lower confidence).
+function findAstTaintRustFindings(
+  content: string, filePath: string, root: RustSyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintRust(content, filePath, root, suppressed, { entryPoints: true, crossFileFacts }).map(f => ({
+    id: f.id, label: astTaintRustLabel(f.id), severity: f.severityOverride ?? astTaintRustSeverity(f.id),
+    line: f.line,
+    detail: f.entryPointSeeded
+      ? `${f.detail} [input assumed untrusted: parameter of a public function with no in-file caller and no handler extractor]`
+      : f.detail,
+    confidence: f.entryPointSeeded ? 70 : 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+    sourceAssumed: f.entryPointSeeded || undefined,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -6394,6 +6416,8 @@ export function analyzeFile(
   crossFileRuby?: { tree?: RubySyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Kotlin shares the JVM fact namespace with Java (Class.method), so this carries Java facts too.
   crossFileKotlin?: { tree?: KotlinSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for Rust (handlers -> services / repositories / free functions in other modules).
+  crossFileRust?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6503,6 +6527,10 @@ export function analyzeFile(
     lang === "kotlin" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isKotlinParserReady()
       ? (crossFileKotlin?.tree ?? parseKotlinSourceSync(content, file_path))
       : null;
+  const rustTree: RustSyntaxNode | null =
+    lang === "rust" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRustParserReady()
+      ? (crossFileRust?.tree ?? parseRustSourceSync(content, file_path))
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6532,6 +6560,7 @@ export function analyzeFile(
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
     ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
     ...(kotlinTree ? findAstTaintKotlinFindings(content, file_path, kotlinTree, suppressedSinks, crossFileKotlin?.facts) : []),
+    ...(rustTree ? findAstTaintRustFindings(content, file_path, rustTree, suppressedSinks, crossFileRust?.facts) : []),
   ];
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
@@ -6812,6 +6841,9 @@ export function analyzeFile(
     if (kotlinTree) {
       return findEnclosingFunctionNameKotlin(findNodeAtRowKotlin(kotlinTree, Math.max(0, line - 1)));
     }
+    if (rustTree) {
+      return findEnclosingFunctionNameRust(findNodeAtRowRust(rustTree, Math.max(0, line - 1)));
+    }
     return "unknown";
   };
   // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
@@ -6975,7 +7007,7 @@ export interface ScanInput {
  * incrementalCache.ts / moduleSummaryCache.ts). A stored scan with an older value can be rescanned. */
 export const CURRENT_ENGINE_VERSION = `${SCAN_CACHE_VERSION}.${MODULE_CACHE_VERSION}`;
 
-const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby", "kotlin"]);
+const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby", "kotlin", "rust"]);
 
 /** Why `path` will NOT get data-flow analysis in this process, or null when it will (or its language has
  * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
@@ -6988,7 +7020,8 @@ function coverageGapFor(path: string, content: string): CoverageGap | null {
   if (lineCount > AST_TAINT_LINE_CAP) return { file: path, language, reason: "too-large" };
   const ready = language === "python" ? isPythonParserReady() : language === "golang" ? isGoParserReady()
     : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady()
-    : language === "ruby" ? isRubyParserReady() : language === "kotlin" ? isKotlinParserReady() : true;
+    : language === "ruby" ? isRubyParserReady() : language === "kotlin" ? isKotlinParserReady()
+    : language === "rust" ? isRustParserReady() : true;
   return ready ? null : { file: path, language, reason: "engine-unavailable" };
 }
 
@@ -7765,6 +7798,19 @@ export function runScan(input: ScanInput): ScanOutput {
     }
   }
   const rubyFacts = convergeServiceFacts(rubyTrees, allFiles, computeRubyMethodSinkFacts);
+
+  // Rust: handlers call services, repositories and free functions in other modules of the crate.
+  const rustTrees = new Map<string, RustSyntaxNode>();
+  if (isRustParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "rust" || getFileTypeMeta(f.path).isGenerated || /(?:^|\/)(?:target|vendor)\//.test(f.path)) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseRustSourceSync(f.content, f.path);
+      if (tree) rustTrees.set(f.path, tree);
+    }
+  }
+  const rustFacts = convergeServiceFacts(rustTrees, allFiles, computeRustFnSinkFacts);
+  const rustFactsDigest = rustFacts.size > 0 ? factsDigest(rustFacts) : "";
   const rubyFactsDigest = rubyFacts.size > 0 ? factsDigest(rubyFacts) : "";
 
   // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
@@ -7787,7 +7833,7 @@ export function runScan(input: ScanInput): ScanOutput {
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
       serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
-        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : undefined,
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : rustTrees.has(f.path) ? rustFactsDigest : undefined,
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7802,6 +7848,7 @@ export function runScan(input: ScanInput): ScanOutput {
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
           rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,
           kotlinTrees.has(f.path) ? { tree: kotlinTrees.get(f.path), facts: javaFacts } : undefined,
+          rustTrees.has(f.path) ? { tree: rustTrees.get(f.path), facts: rustFacts } : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused

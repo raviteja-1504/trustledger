@@ -15,7 +15,7 @@
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
 
-export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt";
+export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs";
 
 /** A fixed mask, or a function of the callee text and argument source texts
  * (for entries whose effect depends on a receiver or a flag argument). */
@@ -161,6 +161,24 @@ const TABLES: Record<SanitizerLang, Table> = {
       encodeForSQL: C.SQL, encodeForOS: C.CMD, encodeForLDAP: C.LDAP, encodeForXPath: C.XPATH,
       parseInt: NUMERIC, parseLong: NUMERIC, parseDouble: NUMERIC, parseBoolean: NUMERIC,
     },
+  },
+  // Rust: path-style calls, matched on their last two segments (`html_escape::encode_text`, `Uuid::parse_str`).
+  // Method conversions (x.parse::<i64>(), path.file_name()) are modelled in astTaintRust.ts.
+  rs: {
+    exact: {
+      "html_escape::encode_text": XSS, "html_escape::encode_safe": XSS, "html_escape::encode_double_quoted_attribute": XSS,
+      "html_escape::encode_single_quoted_attribute": XSS, "ammonia::clean": XSS, "askama_escape::escape": XSS,
+      "v_htmlescape::escape": XSS, "maud::Escaper": XSS,
+      "urlencoding::encode": URL_SAFE, "percent_encoding::utf8_percent_encode": URL_SAFE, "utf8_percent_encode": URL_SAFE,
+      "form_urlencoded::byte_serialize": URL_SAFE,
+      "shell_escape::escape": C.CMD, "shell_words::quote": C.CMD, "shlex::quote": C.CMD, "shlex::try_quote": C.CMD,
+      "sanitize_filename::sanitize": C.PATH,
+      "Uuid::parse_str": NUMERIC, "Uuid::from_str": NUMERIC, "i64::from_str": NUMERIC, "i32::from_str": NUMERIC,
+      "u64::from_str": NUMERIC, "u32::from_str": NUMERIC, "usize::from_str": NUMERIC, "f64::from_str": NUMERIC,
+      "bool::from_str": NUMERIC, "NaiveDate::parse_from_str": NUMERIC,
+      "regex::escape": 0, "fancy_regex::escape": 0,
+    },
+    tail: {},
   },
 };
 
