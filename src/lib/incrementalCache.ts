@@ -27,7 +27,8 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * A deploy can also namespace its own cache via ScanInput.cache_namespace (e.g. the commit SHA) so a
  * forgotten bump here can never silently serve stale results across releases.
  */
-export const SCAN_CACHE_VERSION = 6;
+// 7: Kotlin taint pass (kotlinTaint.ts), Ruby taint pass + Ruby AST engine (astTaintRuby.ts).
+export const SCAN_CACHE_VERSION = 7;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

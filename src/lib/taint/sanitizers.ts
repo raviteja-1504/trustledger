@@ -15,7 +15,7 @@
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
 
-export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php";
+export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb";
 
 /** A fixed mask, or a function of the callee text and argument source texts
  * (for entries whose effect depends on a receiver or a flag argument). */
@@ -122,6 +122,25 @@ const TABLES: Record<SanitizerLang, Table> = {
     },
     // Receiver-style sanitizers: mysqli->real_escape_string, PDO->quote.
     tail: { real_escape_string: C.SQL, quote: C.SQL },
+  },
+  // Ruby: function-style calls only. Method-on-receiver conversions (x.to_i, x.shellescape) are modelled in
+  // astTaintRuby.ts, where the receiver -- not an argument -- is the value being cleared.
+  rb: {
+    exact: {
+      "ERB::Util.html_escape": XSS, "ERB::Util.h": XSS, "CGI.escapeHTML": XSS, "Rack::Utils.escape_html": XSS,
+      "h": XSS, "html_escape": XSS, "sanitize": XSS, "strip_tags": XSS, "escape_javascript": XSS, "j": XSS,
+      "Loofah.fragment": XSS, "Rails::Html::FullSanitizer.new.sanitize": XSS,
+      "Shellwords.escape": C.CMD, "Shellwords.shellescape": C.CMD, "Shellwords.join": C.CMD,
+      "File.basename": C.PATH,
+      "CGI.escape": URL_SAFE, "ERB::Util.url_encode": URL_SAFE, "ERB::Util.u": URL_SAFE, "URI.encode_www_form_component": URL_SAFE,
+      "Rack::Utils.escape": URL_SAFE, "Rack::Utils.escape_path": URL_SAFE,
+      "Integer": NUMERIC, "Float": NUMERIC, "Rational": NUMERIC, "Complex": NUMERIC, "BigDecimal": NUMERIC,
+      // These return a complete, safely quoted SQL fragment (a literal, not an escaped substring).
+      "ActiveRecord::Base.sanitize_sql": C.SQL, "ActiveRecord::Base.sanitize_sql_array": C.SQL,
+      "sanitize_sql": C.SQL, "sanitize_sql_array": C.SQL, "sanitize_sql_for_conditions": C.SQL,
+    },
+    // connection.quote / ActiveRecord::Base.connection.quote / conn.quote_string
+    tail: { quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL },
   },
 };
 

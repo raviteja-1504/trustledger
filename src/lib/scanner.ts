@@ -77,6 +77,11 @@ import {
   findEnclosingFunctionNamePHP, findNodeAtRowPHP, astTaintPHPSeverity, astTaintPHPLabel,
 } from "./astTaintPHP";
 import type { Node as PhpSyntaxNode } from "web-tree-sitter";
+import {
+  parseRubySourceSync, isRubyParserReady, scanAstTaintRuby, computeRubyMethodSinkFacts,
+  findEnclosingFunctionNameRuby, findNodeAtRowRuby, astTaintRubySeverity, astTaintRubyLabel,
+} from "./astTaintRuby";
+import type { Node as RubySyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -107,6 +112,7 @@ import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
 import { scanLicenseContamination } from "./licenseContamination";
 import { isDockerfilePath } from "./scannableFiles";
 import { findKotlinTaintFindings } from "./kotlinTaint";
+import { findRubyTaintFindings } from "./rubyTaint";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -6299,6 +6305,17 @@ function findAstTaintPHPFindings(
   }));
 }
 
+function findAstTaintRubyFindings(
+  content: string, filePath: string, root: RubySyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintRuby(content, filePath, root, suppressed, crossFileFacts).map(f => ({
+    id: f.id, label: astTaintRubyLabel(f.id), severity: f.severityOverride ?? astTaintRubySeverity(f.id),
+    line: f.line, detail: f.detail, confidence: 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -6351,6 +6368,8 @@ export function analyzeFile(
   crossFileGo?: { tree?: GoSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for PHP functions from files this one includes (see astTaintPHP.ts computePhpFunctionSinkFacts).
   crossFilePhp?: { tree?: PhpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Same, for Ruby (Rails controllers -> services/models in other files), keyed Class.method / Class#method.
+  crossFileRuby?: { tree?: RubySyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6451,6 +6470,11 @@ export function analyzeFile(
     lang === "php" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPhpParserReady()
       ? (crossFilePhp?.tree ?? parsePhpSourceSync(content, file_path))
       : null;
+  // Ruby AST parse (astTaintRuby.ts) -- same contract as the other tree-sitter engines above.
+  const rubyTree: RubySyntaxNode | null =
+    lang === "ruby" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRubyParserReady()
+      ? (crossFileRuby?.tree ?? parseRubySourceSync(content, file_path))
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6478,6 +6502,7 @@ export function analyzeFile(
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
+    ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
   ];
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
@@ -6502,6 +6527,8 @@ export function analyzeFile(
     ...findSQLInjectionCSharpTainted(lines),
     // Kotlin: input as annotated parameters and string templates (the Java engine can't parse Kotlin)
     ...(lang === "kotlin" ? findKotlinTaintFindings(lines) : []),
+    // Ruby: input read into variables, calls without parentheses, backticks, Rails-specific sinks
+    ...(lang === "ruby" ? findRubyTaintFindings(lines) : []),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
     ...findWeakSigningSecret(lines),
@@ -6750,6 +6777,9 @@ export function analyzeFile(
     if (phpTree) {
       return findEnclosingFunctionNamePHP(findNodeAtRowPHP(phpTree, Math.max(0, line - 1)));
     }
+    if (rubyTree) {
+      return findEnclosingFunctionNameRuby(findNodeAtRowRuby(rubyTree, Math.max(0, line - 1)));
+    }
     return "unknown";
   };
   // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
@@ -6913,7 +6943,7 @@ export interface ScanInput {
  * incrementalCache.ts / moduleSummaryCache.ts). A stored scan with an older value can be rescanned. */
 export const CURRENT_ENGINE_VERSION = `${SCAN_CACHE_VERSION}.${MODULE_CACHE_VERSION}`;
 
-const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php"]);
+const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby"]);
 
 /** Why `path` will NOT get data-flow analysis in this process, or null when it will (or its language has
  * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
@@ -6925,7 +6955,8 @@ function coverageGapFor(path: string, content: string): CoverageGap | null {
   if (meta.isGenerated || (lineCount < 30 && content.length / Math.max(1, lineCount) > 400)) return { file: path, language, reason: "minified-or-generated" };
   if (lineCount > AST_TAINT_LINE_CAP) return { file: path, language, reason: "too-large" };
   const ready = language === "python" ? isPythonParserReady() : language === "golang" ? isGoParserReady()
-    : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady() : true;
+    : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady()
+    : language === "ruby" ? isRubyParserReady() : true;
   return ready ? null : { file: path, language, reason: "engine-unavailable" };
 }
 
@@ -7673,6 +7704,20 @@ export function runScan(input: ScanInput): ScanOutput {
   }
   const phpIncoming = convergePhpIncludeFacts(phpTrees, allFiles);
 
+  // Ruby: Rails resolves classes by name across the app (autoloading), so -- like Java/C#/Go -- every Ruby file's
+  // method facts are converged together (controller -> service object / model method / scope in another file).
+  const rubyTrees = new Map<string, RubySyntaxNode>();
+  if (isRubyParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "ruby" || getFileTypeMeta(f.path).isGenerated || /(?:^|\/)(?:vendor|db\/migrate)\//.test(f.path)) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseRubySourceSync(f.content, f.path);
+      if (tree) rubyTrees.set(f.path, tree);
+    }
+  }
+  const rubyFacts = convergeServiceFacts(rubyTrees, allFiles, computeRubyMethodSinkFacts);
+  const rubyFactsDigest = rubyFacts.size > 0 ? factsDigest(rubyFacts) : "";
+
   // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
@@ -7693,7 +7738,7 @@ export function runScan(input: ScanInput): ScanOutput {
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
       serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
-        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : undefined,
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : undefined,
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7706,6 +7751,7 @@ export function runScan(input: ScanInput): ScanOutput {
           csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts } : undefined,
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
+          rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused

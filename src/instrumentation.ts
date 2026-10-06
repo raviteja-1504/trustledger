@@ -45,6 +45,10 @@ export async function register() {
     const { warmPhpTaintEngine } = await import("./lib/astTaintPHP");
     warmPhpTaintEngine().catch(() => { /* already logged inside astTaintPHP.ts */ });
 
+    // 3e. Same warm-up for the Ruby AST taint engine -- see astTaintRuby.ts.
+    const { warmRubyTaintEngine } = await import("./lib/astTaintRuby");
+    warmRubyTaintEngine().catch(() => { /* already logged inside astTaintRuby.ts */ });
+
     // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
     const org    = process.env.NEXT_PUBLIC_ORG ?? "unknown";

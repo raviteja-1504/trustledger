@@ -24,9 +24,15 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 
-let initPromise: Promise<void> | null = null;
+// The memo lives on globalThis, not in this module: Next.js compiles instrumentation.ts (which warms every engine
+// at cold start) and the route handlers as SEPARATE bundles, each with its own copy of this module, while
+// web-tree-sitter itself is one external package shared by the whole process. A module-level memo therefore let
+// each bundle call Parser.init() on the same runtime -- the exact concurrent-init race described above. It showed
+// up only in production (one module graph locally and under Jest): C#, the largest grammar and the last to
+// finish loading, failed every cold start with "Incompatible language version 0".
+const shared = globalThis as typeof globalThis & { __trustledgerTreeSitterInit?: Promise<void> };
 
 export function ensureTreeSitterInit(): Promise<void> {
-  if (!initPromise) initPromise = Parser.init();
-  return initPromise;
+  if (!shared.__trustledgerTreeSitterInit) shared.__trustledgerTreeSitterInit = Parser.init();
+  return shared.__trustledgerTreeSitterInit;
 }

@@ -128,7 +128,7 @@ describe("rule catalog", () => {
   });
   it("languages, severity, detection and remediation come from the engines and rules themselves", () => {
     expect(byId.get("sql-injection")).toMatchObject({ detection: "data-flow", severity: "critical", cwe: "CWE-89" });
-    expect(byId.get("sql-injection")!.appliesTo).toEqual(["JavaScript/TypeScript", "Python", "Java", "Go", "C#", "PHP"]);
+    expect(byId.get("sql-injection")!.appliesTo).toEqual(["JavaScript/TypeScript", "Python", "Java", "Go", "C#", "PHP", "Ruby"]);
     expect(byId.get("xxe")!.appliesTo).toEqual(["Python"]);
     expect(byId.get("prototype-pollution")!.appliesTo).toEqual(["JavaScript/TypeScript"]);
     expect(byId.get("cloud-open-admin-port")).toMatchObject({ detection: "configuration", severity: "high" });
