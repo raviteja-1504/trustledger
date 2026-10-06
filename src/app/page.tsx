@@ -226,17 +226,37 @@ const VULN_CLASSES: VulnClass[] = [
 ];
 const GROUP_COLORS: Record<string, string> = { "Injection": CYAN, "Request forgery": ORANGE, "Filesystem": AMBER, "Data handling": VIOLET, "Authorization": ROSE, "Availability": EMERALD };
 
-interface LangEngine { lang: string; ext: string; note: string; extra: string }
+/** `mono` / `color`: the monogram badge each language gets on the page (its community color, not a logo). */
+interface LangEngine { lang: string; short: string; mono: string; color: string; ext: string; note: string; extra: string }
 const LANGUAGES: LangEngine[] = [
-  { lang: "TypeScript / JavaScript", ext: ".ts .tsx .js", note: "Cross-file flows through functions, classes & services", extra: "Named, default, namespace & CommonJS imports; NestJS injection" },
-  { lang: "Python", ext: ".py", note: "Cross-module flows through functions & service classes", extra: "Relative & absolute imports, injected services" },
-  { lang: "Go", ext: ".go", note: "Cross-package calls, path-sensitive, BOLA dominance", extra: "Struct-field and typed-parameter method resolution" },
-  { lang: "C#", ext: ".cs", note: "Services across files, path-sensitive, BOLA dominance", extra: "Constructor & primary-constructor dependency injection" },
-  { lang: "PHP", ext: ".php", note: "Functions & classes across includes, path-sensitive", extra: "__DIR__, relative & transitive includes; static calls" },
-  { lang: "Java", ext: ".java", note: "Spring services across files, entry-point aware", extra: "@Autowired & constructor injection, interface → implementation" },
-  { lang: "Kotlin", ext: ".kt .kts", note: "Spring, Ktor & Servlet; shares cross-file evidence with Java", extra: "Kotlin controllers resolve Java services, and Java resolves Kotlin" },
-  { lang: "Ruby", ext: ".rb", note: "Rails & Sinatra controllers to services and models", extra: "Strong params, before_action state, service objects, scopes" },
-  { lang: "Rust", ext: ".rs", note: "Axum, Actix & Rocket handlers, format! traced per argument", extra: "State<Arc<T>> services, trait objects, module functions via use" },
+  { lang: "TypeScript / JavaScript", short: "TypeScript", mono: "TS", color: "#3b82f6", ext: ".ts .tsx .js", note: "Cross-file flows through functions, classes & services", extra: "Named, default, namespace & CommonJS imports; NestJS injection" },
+  { lang: "Python", short: "Python", mono: "Py", color: "#facc15", ext: ".py", note: "Cross-module flows through functions & service classes", extra: "Relative & absolute imports, injected services" },
+  { lang: "Java", short: "Java", mono: "Jv", color: "#f97316", ext: ".java", note: "Spring services across files, entry-point aware", extra: "@Autowired & constructor injection, interface → implementation" },
+  { lang: "Kotlin", short: "Kotlin", mono: "Kt", color: "#a78bfa", ext: ".kt .kts", note: "Spring, Ktor & Servlet; shares cross-file evidence with Java", extra: "Kotlin controllers resolve Java services, and Java resolves Kotlin" },
+  { lang: "Go", short: "Go", mono: "Go", color: "#22d3ee", ext: ".go", note: "Cross-package calls, path-sensitive, BOLA dominance", extra: "Struct-field and typed-parameter method resolution" },
+  { lang: "C#", short: "C#", mono: "C#", color: "#c084fc", ext: ".cs", note: "Services across files, path-sensitive, BOLA dominance", extra: "Constructor & primary-constructor dependency injection" },
+  { lang: "PHP", short: "PHP", mono: "PHP", color: "#818cf8", ext: ".php", note: "Functions & classes across includes, path-sensitive", extra: "__DIR__, relative & transitive includes; static calls" },
+  { lang: "Ruby", short: "Ruby", mono: "Rb", color: "#f43f5e", ext: ".rb", note: "Rails & Sinatra controllers to services and models", extra: "Strong params, before_action state, service objects, scopes" },
+  { lang: "Rust", short: "Rust", mono: "Rs", color: "#fb923c", ext: ".rs", note: "Axum, Actix & Rocket handlers, format! traced per argument", extra: "State<Arc<T>> services, trait objects, module functions via use" },
+];
+/** Frameworks the engines model by name (sources, sinks, injection) -- each one appears in an engine. */
+const FRAMEWORKS = ["Express", "NestJS", "Next.js", "Flask", "FastAPI", "Spring", "JAX-RS", "Ktor", "ASP.NET", "Laravel", "Rails", "Sinatra", "Axum", "Actix", "Rocket"];
+
+/** The hero's example PR check -- illustrative, labelled as such on the page. */
+const MOCK_FINDINGS = [
+  { sev: "Critical", color: ROSE, icon: AlertIcon, title: "SQL injection", detail: "req.body.email → db/users.ts:18", tag: "2 files" },
+  { sev: "High", color: VIOLET, icon: KeyIcon, title: "AWS access key committed", detail: "config/deploy.ts:7", tag: "secret" },
+  { sev: "High", color: AMBER, icon: PackageIcon, title: "lodash 4.17.20 · CVE-2021-23337", detail: "template() called from routes/email.ts", tag: "reachable" },
+  { sev: "Medium", color: EMERALD, icon: ApiIcon, title: "POST /reset has no auth check", detail: "its 6 sibling routes do", tag: "API" },
+];
+
+const FAQS = [
+  { q: "Do I need to change my CI pipeline?", a: "No. TrustLedger installs as a GitHub App — GitLab and Bitbucket are supported too — and scans every pull request automatically, with no config files and no CI changes. If you'd rather drive it yourself, scans can also be submitted through the REST API." },
+  { q: "Which languages and frameworks are covered?", a: "Nine languages have their own AST parser and taint engine: TypeScript/JavaScript, Python, Java, Kotlin, Go, C#, PHP, Ruby and Rust, tuned to frameworks such as Express, NestJS, Flask, FastAPI, Spring, Ktor, ASP.NET, Laravel, Rails, Axum, Actix and Rocket. Infrastructure checks cover Terraform, CloudFormation, ARM, Bicep, Serverless, Kubernetes, Helm, Docker and OpenAPI." },
+  { q: "How is this different from a regex-based scanner?", a: "A vulnerability is reported only when an attacker-controlled value is traced to a real sink — through assignments, branches, helper functions and other files — and a sanitizer clears only the vulnerability classes it actually neutralizes. Every finding ships with its source-to-sink trace, so reviewers can check it in seconds." },
+  { q: "What does AI provenance measure?", a: "47 signals across code structure, git history and behavior estimate how much of each file is AI-generated and attribute it to the tool that wrote it — Copilot, Cursor, Claude, Windsurf and more — and flag tools that aren't on your approved list." },
+  { q: "Can it block a merge?", a: "Yes. Policy gates hold a pull request until the required fixes or a named reviewer's attestation are recorded, and the result is posted back to the PR as a check run." },
+  { q: "Does it help with compliance?", a: "Attestations, exceptions and findings land in an immutable audit trail and export as signed evidence packages mapped to SOC 2, the EU AI Act and PCI-DSS, along with SBOMs in SPDX and CycloneDX." },
 ];
 
 const PIPELINE_STAGES = [
@@ -268,7 +288,7 @@ const AI_FACTS = [
 const ENGINE_FACTS = [
   { label: "Sink-class bitmask model", desc: "A taint value is a bitmask of 15 sink classes, not a boolean. A sanitizer clears only the classes it neutralizes — and the trace shows it: htmlspecialchars() before a SQL query is called out, not trusted." },
   { label: "Path-sensitive propagation", desc: "Branches are walked on cloned state and merged with a may-taint join; a value sanitized on one branch and raw on another is tracked correctly on both." },
-  { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal. A regex match is deliberately NOT trusted." },
+  { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal, a fully anchored digits-only or character-class pattern. A loose regex match is deliberately NOT trusted." },
   { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
   { label: "Fixed-point call resolution", desc: "Call summaries iterate until nothing changes — same-file and across files — so an eight-deep helper chain or a five-file flow converges, with a safety cap instead of an arbitrary round limit." },
   { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all nine languages, including Rails autoloading, Kotlin↔Java calls and Rust modules. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
@@ -299,8 +319,8 @@ function NavBar() {
         <Link href="/" aria-label="TrustLedger home" className="flex items-center">
           <BrandWordmark height={32} />
         </Link>
-        <nav className="hidden md:flex items-center gap-6">
-          {["Platform", "Vulnerabilities", "Cloud & API", "How it works"].map(l => (
+        <nav className="hidden lg:flex items-center gap-6">
+          {["Platform", "Languages", "Vulnerabilities", "Cloud & API", "How it works", "FAQ"].map(l => (
             <a key={l} href={`#${l.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
           ))}
         </nav>
@@ -315,29 +335,79 @@ function NavBar() {
   );
 }
 
-// ── Hero: multi-signal strip + trace visual ─────────────────────────────────
+// ── Hero: what a PR check looks like + trace visual ─────────────────────────
 
-const SIGNAL_CHIPS = [
-  { label: "AI-generated", value: "92%", color: SKY, icon: AiIntelIcon },
-  { label: "Secret found", value: "1", color: VIOLET, icon: KeyIcon },
-  { label: "Vulnerable dep", value: "CVE-2024", color: AMBER, icon: PackageIcon },
-  { label: "SQL injection", value: "traced", color: ROSE, icon: AlertIcon },
-  { label: "SSH open to", value: "0.0.0.0/0", color: ORANGE, icon: CloudIcon },
-  { label: "Endpoint", value: "missing auth", color: EMERALD, icon: ApiIcon },
-];
-
-function SignalStrip() {
+/** A risk gauge that fills to `value` once visible. */
+function RiskGauge({ value, color }: { value: number; color: string }) {
+  const { ref, shown } = useReveal<HTMLDivElement>();
+  const r = 26, c = 2 * Math.PI * r;
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-3xl mx-auto">
-      {SIGNAL_CHIPS.map((c, i) => (
-        <Reveal key={c.label} delay={i * 90} className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl border text-left" style={{ borderColor: `${c.color}33`, background: `${c.color}0f`, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
-          <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ color: c.color, background: `${c.color}1c`, border: `1px solid ${c.color}38` }}>{c.icon(15)}</span>
-          <div className="min-w-0">
-            <p className="text-[10px] font-mono uppercase tracking-wide text-white/50 truncate">{c.label}</p>
-            <p className="text-sm font-bold font-mono truncate" style={{ color: c.color }}>{c.value}</p>
+    <div ref={ref} className="relative w-[72px] h-[72px] shrink-0">
+      <svg width="72" height="72" viewBox="0 0 72 72" className="-rotate-90">
+        <circle cx="36" cy="36" r={r} fill="none" stroke="rgba(255,255,255,0.09)" strokeWidth="7" />
+        <circle cx="36" cy="36" r={r} fill="none" stroke={color} strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={shown ? c * (1 - value / 100) : c}
+          style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(0.16,1,0.3,1) 0.3s", filter: `drop-shadow(0 0 6px ${color}88)` }} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-xl font-black text-white leading-none"><CountUp to={value} /></span>
+        <span className="text-[8px] font-bold uppercase tracking-wider mt-0.5" style={{ color }}>risk</span>
+      </div>
+    </div>
+  );
+}
+
+function PrCheckMock() {
+  return (
+    <div className="relative">
+      <div className="absolute -inset-6 rounded-[2rem] blur-3xl pointer-events-none" style={{ background: `linear-gradient(135deg, ${CYAN}26, ${VIOLET}1f, ${ROSE}1a)` }} />
+      <div className="relative rounded-2xl overflow-hidden border text-left" style={{ borderColor: "rgba(255,255,255,0.13)", background: "linear-gradient(180deg, rgba(13,19,34,0.96), rgba(7,11,20,0.98))", boxShadow: "0 40px 100px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04)" }}>
+        {/* pull request header */}
+        <div className="px-4 sm:px-5 py-3 flex items-center gap-2.5 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.03)" }}>
+          <span className="text-white/60"><GitHubIcon size={15} /></span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-semibold text-white truncate">Add password reset flow <span className="text-white/35 font-normal">#482</span></p>
+            <p className="text-[10.5px] font-mono text-white/40 truncate">acme/api · feature/reset → main · 14 files</p>
           </div>
-        </Reveal>
-      ))}
+          <span className="text-[10px] font-bold px-2 py-1 rounded-md shrink-0" style={{ color: ROSE, background: `${ROSE}1a`, border: `1px solid ${ROSE}40` }}>Merge blocked</span>
+        </div>
+        {/* score */}
+        <div className="px-4 sm:px-5 py-4 flex items-center gap-4 border-b" style={{ borderColor: "rgba(255,255,255,0.07)" }}>
+          <RiskGauge value={82} color={ROSE} />
+          <div className="min-w-0 flex-1 space-y-2.5">
+            <div>
+              <div className="flex items-center justify-between text-[11px] mb-1"><span className="text-white/55">AI-generated</span><span className="font-mono font-bold" style={{ color: SKY }}>68% · Cursor</span></div>
+              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}><div className="h-full rounded-full" style={{ width: "68%", background: `linear-gradient(90deg, ${SKY}, ${CYAN})` }} /></div>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {[["1 critical", ROSE], ["2 high", AMBER], ["1 medium", EMERALD]].map(([t, c]) => (
+                <span key={t} className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}1a` }}>{t}</span>
+              ))}
+            </div>
+          </div>
+        </div>
+        {/* findings */}
+        <div className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          {MOCK_FINDINGS.map((f, i) => (
+            <Reveal key={f.title} delay={300 + i * 110} className="px-4 sm:px-5 py-2.5 flex items-center gap-3" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+              <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0" style={{ color: f.color, background: `${f.color}1a`, border: `1px solid ${f.color}38` }}>{f.icon(13)}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] font-semibold text-white/90 truncate">{f.title}</p>
+                <p className="text-[10.5px] font-mono text-white/40 truncate">{f.detail}</p>
+              </div>
+              <span className="text-[9.5px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0 hidden sm:inline" style={{ color: "rgba(255,255,255,0.6)", background: "rgba(255,255,255,0.07)" }}>{f.tag}</span>
+              <span className="text-[10px] font-bold w-14 text-right shrink-0" style={{ color: f.color }}>{f.sev}</span>
+            </Reveal>
+          ))}
+        </div>
+        {/* gate */}
+        <div className="px-4 sm:px-5 py-3 flex items-center gap-3 border-t" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.03)" }}>
+          <span className="relative flex w-2 h-2 shrink-0"><span className="absolute inset-0 rounded-full animate-ping" style={{ background: AMBER, opacity: 0.6 }} /><span className="relative w-2 h-2 rounded-full" style={{ background: AMBER }} /></span>
+          <p className="text-[11.5px] text-white/60 flex-1 min-w-0 truncate">Waiting for a named reviewer to attest <span className="font-mono text-white/80">auth/reset.ts</span></p>
+          <span className="text-[11px] font-bold px-2.5 py-1 rounded-md shrink-0 text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})` }}>Review &amp; attest</span>
+        </div>
+      </div>
+      <p className="relative text-center text-[10.5px] font-mono text-white/35 mt-3">Example PR check · illustrative</p>
     </div>
   );
 }
@@ -393,7 +463,7 @@ function TraceVisual() {
 
 function HeroSection() {
   return (
-    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-32 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 55% at 50% 0%, ${CYAN}16, transparent 58%), ${INK}` }}>
+    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-28 lg:pt-36 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 55% at 50% 0%, ${CYAN}16, transparent 58%), ${INK}` }}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute -top-40 -left-24 w-[30rem] h-[30rem] rounded-full blur-[140px]" style={{ background: CYAN, opacity: 0.08 }} />
         <div className="absolute -top-24 -right-24 w-[26rem] h-[26rem] rounded-full blur-[140px]" style={{ background: VIOLET, opacity: 0.06 }} />
@@ -401,43 +471,45 @@ function HeroSection() {
         <div className="absolute bottom-0 left-0 right-0 h-52" style={{ background: `linear-gradient(to top, ${INK}, transparent)` }} />
       </div>
 
-      <Reveal className="relative max-w-4xl mx-auto space-y-6">
-        <Eyebrow><span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />One platform for everything that touches a PR</Eyebrow>
-        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black text-white tracking-tight leading-[1.05]" style={{ textShadow: "0 4px 40px rgba(0,0,0,0.7)" }}>
-          AI provenance.<br />
-          <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
-          One risk score.
-        </h1>
-        <p className="text-lg sm:text-xl text-white/65 max-w-2xl mx-auto leading-relaxed">
-          TrustLedger scores how much of a PR is AI-generated, traces real vulnerabilities across files in nine languages, catches secrets and the vulnerable dependencies you actually reach, checks your cloud, container and API configuration, and gates the merge on policy — with a named reviewer's sign-off recorded on every file.
-        </p>
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-          <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
-            style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
-            onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
-            onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
-            Get started free <ArrowRightIcon size={15} />
-          </Link>
-          <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm transition-all border hover:text-white/95"
-            style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.32)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.18)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)"; }}>
-            <GitHubIcon size={15} /> Explore the dashboard
-          </Link>
-        </div>
-        <p className="text-xs text-white/40 font-medium pt-1">No credit card required to start</p>
-      </Reveal>
+      <div className="relative w-full max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-[1.12fr_1fr] gap-12 lg:gap-12 xl:gap-16 items-center">
+        <Reveal className="min-w-0 space-y-6 lg:text-left">
+          <Eyebrow><span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />One platform for everything that touches a PR</Eyebrow>
+          <h1 className="text-[2.6rem] min-[400px]:text-5xl sm:text-6xl lg:text-[3.25rem] xl:text-[3.85rem] font-black text-white tracking-tight leading-[1.05]" style={{ textShadow: "0 4px 40px rgba(0,0,0,0.7)" }}>
+            AI provenance.<br />
+            <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
+            One risk score.
+          </h1>
+          <p className="text-lg sm:text-xl text-white/65 max-w-xl mx-auto lg:mx-0 leading-relaxed">
+            Every pull request scored for AI-generated code, real vulnerabilities traced across files in nine languages, leaked secrets, reachable vulnerable dependencies and cloud misconfigurations — and held until a named reviewer signs off.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-3 pt-1">
+            <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
+              style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
+              onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
+              onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
+              Get started free <ArrowRightIcon size={15} />
+            </Link>
+            <Link href="/dashboard" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm transition-all border hover:text-white/95"
+              style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.32)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.18)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)"; }}>
+              <GitHubIcon size={15} /> Explore the dashboard
+            </Link>
+          </div>
+          <ul className="flex flex-wrap justify-center lg:justify-start gap-x-5 gap-y-2 pt-1">
+            {["Free to start — no credit card", "Installs as a GitHub App in ~2 minutes", "No CI changes or config files"].map(t => (
+              <li key={t} className="flex items-center gap-1.5 text-[12.5px] text-white/55">
+                <span style={{ color: EMERALD }}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg></span>{t}
+              </li>
+            ))}
+          </ul>
+        </Reveal>
+        <Reveal delay={150} className="min-w-0 w-full max-w-xl mx-auto lg:max-w-none">
+          <PrCheckMock />
+        </Reveal>
+      </div>
 
-      <Reveal delay={120} className="relative mt-10">
-        <SignalStrip />
-      </Reveal>
-
-      <Reveal delay={200} className="relative mt-10 w-full max-w-xl mx-auto">
-        <TraceVisual />
-        <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 w-2/3 h-16 blur-3xl rounded-full pointer-events-none" style={{ background: CYAN, opacity: 0.14 }} />
-      </Reveal>
-
-      <Reveal delay={320} className="relative mt-16 w-full max-w-5xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+      <Reveal delay={320} className="relative mt-20 w-full max-w-5xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 pt-10 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
         {[{ to: 9, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
           <div key={s.label} className="text-center">
             <p className="text-3xl font-black font-mono" style={{ color: "#67e8f9", textShadow: `0 0 24px ${CYAN}88` }}><CountUp to={s.to} /></p>
@@ -445,6 +517,121 @@ function HeroSection() {
           </div>
         ))}
       </Reveal>
+    </section>
+  );
+}
+
+// ── Stack band: "does it support us?", answered right under the hero ────────
+
+function Monogram({ l, size = 34 }: { l: LangEngine; size?: number }) {
+  return (
+    <span className="rounded-lg flex items-center justify-center shrink-0 font-black font-mono" style={{ width: size, height: size, fontSize: l.mono.length > 2 ? size * 0.3 : size * 0.36, color: l.color, background: `${l.color}1f`, border: `1px solid ${l.color}55`, boxShadow: `inset 0 1px 0 rgba(255,255,255,0.06)` }}>{l.mono}</span>
+  );
+}
+
+function StackBand() {
+  return (
+    <section className="relative py-14 px-5 border-y overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.07)", background: SURFACE }}>
+      <Reveal className="max-w-6xl mx-auto text-center">
+        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/45 font-mono">Works with the stack you already ship</p>
+        <div className="mt-6 flex flex-wrap justify-center gap-2.5">
+          {LANGUAGES.map(l => (
+            <a key={l.lang} href="#languages" className="flex items-center gap-2 pl-1.5 pr-3.5 py-1.5 rounded-xl border transition-all hover:-translate-y-0.5"
+              style={{ borderColor: "rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.035)" }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = `${l.color}66`; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.1)"; }}>
+              <Monogram l={l} size={28} />
+              <span className="text-sm font-semibold text-white/85">{l.short}</span>
+            </a>
+          ))}
+        </div>
+      </Reveal>
+      {/* a scrolling row (two copies for a seamless loop); with reduced motion, one static wrapped list */}
+      <div className="tl-marquee-mask relative mt-7 max-w-5xl mx-auto overflow-hidden">
+        <div className="tl-marquee flex w-max gap-8">
+          {[0, 1].flatMap(copy => [...FRAMEWORKS, "GitHub", "GitLab", "Bitbucket"].map(f => (
+            <span key={`${f}-${copy}`} aria-hidden={copy === 1 || undefined} className={`text-[13px] font-semibold text-white/40 whitespace-nowrap font-mono${copy === 1 ? " tl-dup" : ""}`}>{f}</span>
+          )))}
+        </div>
+      </div>
+      <style>{`
+        .tl-marquee-mask { mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
+        .tl-marquee { animation: tlMarquee 38s linear infinite; }
+        @keyframes tlMarquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+        @media (prefers-reduced-motion: reduce) {
+          .tl-marquee-mask { mask-image: none; -webkit-mask-image: none; }
+          .tl-marquee { animation: none; flex-wrap: wrap; justify-content: center; width: auto; row-gap: 0.6rem; }
+          .tl-dup { display: none; }
+        }
+      `}</style>
+    </section>
+  );
+}
+
+// ── Proof: the trace next to "them vs us" ───────────────────────────────────
+
+function ProofSection() {
+  return (
+    <section id="why" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}0a, transparent 65%), ${INK}` }}>
+      <div className="max-w-6xl mx-auto">
+        <Reveal className="text-center mb-14">
+          <Eyebrow color={ROSE}>Why TrustLedger</Eyebrow>
+          <h2 className="text-4xl sm:text-5xl font-black text-white mt-4 tracking-tight">Proof, <span style={{ color: ROSE }}>not a pattern match</span></h2>
+          <p className="text-white/60 mt-3 text-lg max-w-2xl mx-auto">Every finding comes with the path an attacker's value takes to the dangerous call — so reviewers spend their time on judgment calls, not on re-deriving whether it's real.</p>
+        </Reveal>
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.05fr] gap-8 items-start">
+          <Reveal className="min-w-0 lg:sticky lg:top-24">
+            <TraceVisual />
+          </Reveal>
+          <div className="min-w-0 space-y-3.5">
+            {WHY_ROWS.map((row, i) => (
+              <Reveal key={row.vs} delay={i * 70}>
+                <div className="rounded-2xl border p-5" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.035)" }}>
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-white/40 font-mono mb-3">vs {row.vs}</p>
+                  <div className="flex gap-2.5 mb-2.5">
+                    <span className="mt-0.5 shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-black" style={{ color: "rgba(255,255,255,0.45)", background: "rgba(255,255,255,0.07)" }}>✕</span>
+                    <p className="text-[13px] text-white/50 leading-relaxed">{row.them}</p>
+                  </div>
+                  <div className="flex gap-2.5">
+                    <span className="mt-0.5 shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-black" style={{ color: row.accent, background: `${row.accent}22` }}>✓</span>
+                    <p className="text-[13.5px] text-white/85 leading-relaxed">{row.us}</p>
+                  </div>
+                </div>
+              </Reveal>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── FAQ ──────────────────────────────────────────────────────────────────────
+
+function FaqSection() {
+  return (
+    <section id="faq" className="py-24 px-5" style={{ background: SURFACE }}>
+      <div className="max-w-3xl mx-auto">
+        <Reveal className="text-center mb-12">
+          <Eyebrow>FAQ</Eyebrow>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Questions teams ask first</h2>
+        </Reveal>
+        <div className="space-y-3">
+          {FAQS.map((f, i) => (
+            <Reveal key={f.q} delay={i * 50}>
+              <details className="group rounded-2xl border transition-colors open:bg-white/[0.045]" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.03)" }}>
+                <summary className="flex items-center justify-between gap-4 px-5 py-4 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                  <span className="font-semibold text-white/90 text-[15px]">{f.q}</span>
+                  <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-transform duration-200 group-open:rotate-45" style={{ color: CYAN, background: `${CYAN}14`, border: `1px solid ${CYAN}33` }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                  </span>
+                </summary>
+                <p className="px-5 pb-5 -mt-1 text-sm text-white/65 leading-relaxed">{f.a}</p>
+              </details>
+            </Reveal>
+          ))}
+        </div>
+      </div>
     </section>
   );
 }
@@ -519,7 +706,7 @@ function PillarsSection() {
 function VulnCoverageSection() {
   const groups = Array.from(new Set(VULN_CLASSES.map(v => v.group)));
   return (
-    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}0c, transparent 65%), ${INK}` }}>
+    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}0c, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
@@ -559,22 +746,26 @@ function VulnCoverageSection() {
 
 function LanguageEngineSection() {
   return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${SURFACE}` }}>
+    <section id="languages" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${INK}` }}>
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Nine languages. Nine real parsers.</h2>
+          <h2 className="text-4xl sm:text-5xl font-black text-white mt-4 tracking-tight">Nine languages. <span style={{ color: "#67e8f9" }}>Nine real parsers.</span></h2>
           <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across nine syntaxes.</p>
         </Reveal>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {LANGUAGES.map((l, i) => (
             <Reveal key={l.lang} delay={i * 70}>
-              <div className="group p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
-                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${ROSE}55`; el.style.background = "rgba(255,255,255,0.06)"; }}
-                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; }}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold text-white text-sm">{l.lang}</span>
-                  <span className="text-[10px] font-mono text-white/40">{l.ext}</span>
+              <div className="group relative h-full p-5 rounded-2xl border transition-all overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
+                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${l.color}66`; el.style.background = "rgba(255,255,255,0.06)"; el.style.transform = "translateY(-3px)"; }}
+                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; }}>
+                <span className="absolute -top-10 -right-10 w-28 h-28 rounded-full blur-2xl pointer-events-none" style={{ background: l.color, opacity: 0.08 }} />
+                <div className="relative flex items-center gap-3 mb-3">
+                  <Monogram l={l} />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-white text-sm truncate">{l.lang}</p>
+                    <p className="text-[10px] font-mono text-white/40">{l.ext}</p>
+                  </div>
                 </div>
                 <p className="text-sm text-white/75 leading-relaxed">{l.note}</p>
                 <p className="text-xs text-white/45 mt-1.5">{l.extra}</p>
@@ -768,43 +959,11 @@ function ArchSection() {
   );
 }
 
-// ── WhySection ───────────────────────────────────────────────────────────────
-
-function WhySection() {
-  return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${SURFACE}` }}>
-      <div className="max-w-5xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow>Why TrustLedger</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Proof, not a pattern match</h2>
-          <p className="text-white/60 mt-3 text-lg max-w-2xl mx-auto">Every finding traces back to a real signal in your code — reviewers spend time on judgment calls, not re-deriving whether it's real.</p>
-        </Reveal>
-        <div className="space-y-4">
-          {WHY_ROWS.map((row, i) => (
-            <Reveal key={row.vs} delay={i * 70}>
-              <div className="rounded-2xl border overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)" }}>
-                <div className="px-6 py-3 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.045)" }}>
-                  <span className="text-[11px] font-bold uppercase tracking-widest text-white/40 font-mono">vs </span>
-                  <span className="text-xs font-bold text-white/60">{row.vs}</span>
-                </div>
-                <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.09]">
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">They do</p><p className="text-sm text-white/60 leading-relaxed">{row.them}</p></div>
-                  <div className="px-6 py-5"><p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: `${row.accent}cc` }}>TrustLedger does</p><p className="text-sm text-white/80 leading-relaxed">{row.us}</p></div>
-                </div>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 // ── HowItWorksSection ────────────────────────────────────────────────────────
 
 function HowItWorksSection() {
   return (
-    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${INK}` }}>
+    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-4xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>How it works</Eyebrow>
@@ -839,23 +998,26 @@ function HowItWorksSection() {
 
 function CTASection() {
   return (
-    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}16, transparent 65%), ${SURFACE}` }}>
+    <section className="py-24 px-5 relative overflow-hidden" style={{ background: `radial-gradient(ellipse 70% 60% at 50% 40%, ${CYAN}16, transparent 65%), ${INK}` }}>
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[36rem] h-[36rem] rounded-full blur-[140px] pointer-events-none" style={{ background: CYAN, opacity: 0.06 }} />
-      <Reveal className="relative max-w-3xl mx-auto text-center space-y-6">
-<BrandMark size={84} className="mx-auto" />
-        <h2 className="text-4xl font-black text-white tracking-tight">Stop shipping blind.</h2>
+      <Reveal className="relative max-w-3xl mx-auto text-center space-y-6 rounded-3xl border px-6 py-14 sm:px-12" style={{ borderColor: `${CYAN}2e`, background: "linear-gradient(180deg, rgba(34,211,238,0.06), rgba(255,255,255,0.02))", boxShadow: `0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06)` }}>
+        <BrandMark size={72} className="mx-auto" />
+        <h2 className="text-4xl sm:text-5xl font-black text-white tracking-tight">Stop shipping blind.</h2>
         <p className="text-white/65 text-lg max-w-xl mx-auto leading-relaxed">
           AI-generated code, leaked secrets, reachable vulnerable dependencies, a public bucket, an endpoint that forgot its auth check — any of it can slip into a PR unnoticed. TrustLedger scores it, traces it, and makes sure a human signed off before any of it reaches production.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
-          <Link href="/dashboard" className="flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all active:scale-[0.98] text-[#050810]"
+          <Link href="/login?mode=signup" className="flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all active:scale-[0.98] text-[#050810]"
             style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
             onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
             onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
-            See the platform in action <ArrowRightIcon />
+            Get started free <ArrowRightIcon />
           </Link>
-          <a href="mailto:hello@trustledger.dev" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/75 font-semibold transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>Contact us</a>
+          <Link href="/dashboard" className="flex items-center gap-2 px-8 py-4 rounded-xl text-white/75 font-semibold transition-all border hover:text-white/90" style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>
+            Explore the dashboard
+          </Link>
         </div>
+        <p className="text-sm text-white/45">Questions first? <a href="mailto:hello@trustledger.dev" className="font-semibold text-white/70 hover:text-white underline underline-offset-4 decoration-white/25">Talk to us</a> — hello@trustledger.dev</p>
       </Reveal>
     </section>
   );
@@ -892,7 +1054,7 @@ function Footer() {
       </div>
       <div className="max-w-6xl mx-auto mt-10 pt-6 border-t flex flex-col sm:flex-row items-center justify-between gap-3" style={{ borderColor: "rgba(255,255,255,0.14)" }}>
         <p className="text-xs text-white/40">© 2026 TrustLedger. All rights reserved.</p>
-        <div className="flex items-center gap-1.5 text-xs text-white/40"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />All systems operational</div>
+        <Link href="/status" className="flex items-center gap-1.5 text-xs text-white/40 hover:text-white/70 transition-colors"><span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} />System status</Link>
       </div>
     </footer>
   );
@@ -906,15 +1068,17 @@ export default function LandingPage() {
       <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
       <NavBar />
       <HeroSection />
+      <StackBand />
+      <ProofSection />
       <PillarsSection />
-      <VulnCoverageSection />
       <LanguageEngineSection />
+      <VulnCoverageSection />
       <CloudApiSection />
+      <HowItWorksSection />
       <PipelineSection />
       <FeaturesSection />
       <ArchSection />
-      <WhySection />
-      <HowItWorksSection />
+      <FaqSection />
       <CTASection />
       <Footer />
     </div>
