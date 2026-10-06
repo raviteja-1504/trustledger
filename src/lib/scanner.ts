@@ -82,6 +82,11 @@ import {
   findEnclosingFunctionNameRuby, findNodeAtRowRuby, astTaintRubySeverity, astTaintRubyLabel,
 } from "./astTaintRuby";
 import type { Node as RubySyntaxNode } from "web-tree-sitter";
+import {
+  parseKotlinSourceSync, isKotlinParserReady, scanAstTaintKotlin, computeKotlinMethodSinkFacts,
+  findEnclosingFunctionNameKotlin, findNodeAtRowKotlin, astTaintKotlinSeverity, astTaintKotlinLabel,
+} from "./astTaintKotlin";
+import type { Node as KotlinSyntaxNode } from "web-tree-sitter";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -6316,6 +6321,23 @@ function findAstTaintRubyFindings(
   }));
 }
 
+// Kotlin: same contract and confidence split as Java (entry-point-seeded findings are lower confidence).
+function findAstTaintKotlinFindings(
+  content: string, filePath: string, root: KotlinSyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintKotlin(content, filePath, root, suppressed, { entryPoints: true, crossFileFacts }).map(f => ({
+    id: f.id, label: astTaintKotlinLabel(f.id), severity: f.severityOverride ?? astTaintKotlinSeverity(f.id),
+    line: f.line,
+    detail: f.entryPointSeeded
+      ? `${f.detail} [input assumed untrusted: parameter of a public function with no in-file caller and no framework annotation]`
+      : f.detail,
+    confidence: f.entryPointSeeded ? 70 : 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+    sourceAssumed: f.entryPointSeeded || undefined,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -6370,6 +6392,8 @@ export function analyzeFile(
   crossFilePhp?: { tree?: PhpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for Ruby (Rails controllers -> services/models in other files), keyed Class.method / Class#method.
   crossFileRuby?: { tree?: RubySyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Kotlin shares the JVM fact namespace with Java (Class.method), so this carries Java facts too.
+  crossFileKotlin?: { tree?: KotlinSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6475,6 +6499,10 @@ export function analyzeFile(
     lang === "ruby" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRubyParserReady()
       ? (crossFileRuby?.tree ?? parseRubySourceSync(content, file_path))
       : null;
+  const kotlinTree: KotlinSyntaxNode | null =
+    lang === "kotlin" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isKotlinParserReady()
+      ? (crossFileKotlin?.tree ?? parseKotlinSourceSync(content, file_path))
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6503,6 +6531,7 @@ export function analyzeFile(
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
     ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
+    ...(kotlinTree ? findAstTaintKotlinFindings(content, file_path, kotlinTree, suppressedSinks, crossFileKotlin?.facts) : []),
   ];
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
     ...findXSS(lines),
@@ -6780,6 +6809,9 @@ export function analyzeFile(
     if (rubyTree) {
       return findEnclosingFunctionNameRuby(findNodeAtRowRuby(rubyTree, Math.max(0, line - 1)));
     }
+    if (kotlinTree) {
+      return findEnclosingFunctionNameKotlin(findNodeAtRowKotlin(kotlinTree, Math.max(0, line - 1)));
+    }
     return "unknown";
   };
   // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
@@ -6943,7 +6975,7 @@ export interface ScanInput {
  * incrementalCache.ts / moduleSummaryCache.ts). A stored scan with an older value can be rescanned. */
 export const CURRENT_ENGINE_VERSION = `${SCAN_CACHE_VERSION}.${MODULE_CACHE_VERSION}`;
 
-const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby"]);
+const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby", "kotlin"]);
 
 /** Why `path` will NOT get data-flow analysis in this process, or null when it will (or its language has
  * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
@@ -6956,7 +6988,7 @@ function coverageGapFor(path: string, content: string): CoverageGap | null {
   if (lineCount > AST_TAINT_LINE_CAP) return { file: path, language, reason: "too-large" };
   const ready = language === "python" ? isPythonParserReady() : language === "golang" ? isGoParserReady()
     : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady()
-    : language === "ruby" ? isRubyParserReady() : true;
+    : language === "ruby" ? isRubyParserReady() : language === "kotlin" ? isKotlinParserReady() : true;
   return ready ? null : { file: path, language, reason: "engine-unavailable" };
 }
 
@@ -7663,7 +7695,24 @@ export function runScan(input: ScanInput): ScanOutput {
     const cst = parseJavaSource(f.content);
     if (cst) javaCsts.set(f.path, cst);
   }
-  const javaFacts = convergeServiceFacts(javaCsts, allFiles, computeJavaMethodSinkFacts);
+  // Kotlin joins the same convergence: it calls Java services and Java calls Kotlin ones, under one Class.method
+  // namespace, so a controller in either language resolves a service in either.
+  const kotlinTrees = new Map<string, KotlinSyntaxNode>();
+  if (isKotlinParserReady()) {
+    for (const f of allFiles) {
+      if (detectLanguage(f.path) !== "kotlin" || getFileTypeMeta(f.path).isGenerated) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseKotlinSourceSync(f.content, f.path);
+      if (tree) kotlinTrees.set(f.path, tree);
+    }
+  }
+  type JvmTree = { kind: "java"; cst: JavaCstNode } | { kind: "kotlin"; tree: KotlinSyntaxNode };
+  const jvmTrees = new Map<string, JvmTree>([
+    ...[...javaCsts].map(([p, cst]) => [p, { kind: "java", cst }] as [string, JvmTree]),
+    ...[...kotlinTrees].map(([p, tree]) => [p, { kind: "kotlin", tree }] as [string, JvmTree]),
+  ]);
+  const javaFacts = convergeServiceFacts(jvmTrees, allFiles, (content, path, t, incoming) =>
+    t.kind === "java" ? computeJavaMethodSinkFacts(content, path, t.cst, incoming) : computeKotlinMethodSinkFacts(content, path, t.tree, incoming));
   const javaFactsDigest = javaFacts.size > 0 ? factsDigest(javaFacts) : "";
 
   // Same for C# (ASP.NET controllers -> injected services -> repositories).
@@ -7738,7 +7787,7 @@ export function runScan(input: ScanInput): ScanOutput {
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
       serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
-        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : undefined,
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : undefined,
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7752,6 +7801,7 @@ export function runScan(input: ScanInput): ScanOutput {
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
           rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,
+          kotlinTrees.has(f.path) ? { tree: kotlinTrees.get(f.path), facts: javaFacts } : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused

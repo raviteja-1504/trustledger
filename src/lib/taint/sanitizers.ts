@@ -15,7 +15,7 @@
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
 
-export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb";
+export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt";
 
 /** A fixed mask, or a function of the callee text and argument source texts
  * (for entries whose effect depends on a receiver or a flag argument). */
@@ -141,6 +141,26 @@ const TABLES: Record<SanitizerLang, Table> = {
     },
     // connection.quote / ActiveRecord::Base.connection.quote / conn.quote_string
     tail: { quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL },
+  },
+  // Kotlin runs on the JVM and calls the same libraries: Java's tail table, plus JVM/Kotlin calls whose tail alone
+  // is too generic to trust (`encode`, `fromString`, `getName`, `clean`). Receiver conversions (x.toInt()) are
+  // modelled in astTaintKotlin.ts.
+  kt: {
+    exact: {
+      "URLEncoder.encode": URL_SAFE, "UriUtils.encode": URL_SAFE, "UriUtils.encodePathSegment": URL_SAFE,
+      "UriUtils.encodeQueryParam": URL_SAFE,
+      "UUID.fromString": NUMERIC, "Integer.valueOf": NUMERIC, "Long.valueOf": NUMERIC, "BigDecimal": NUMERIC,
+      "FilenameUtils.getName": C.PATH, "StringUtils.cleanPath": 0,
+      "Jsoup.clean": XSS, "HtmlUtils.htmlEscape": XSS, "StringEscapeUtils.escapeHtml4": XSS, "Encode.forHtml": XSS,
+      "Regex.escape": 0, "Pattern.quote": 0,
+    },
+    tail: {
+      forHtml: XSS, forHtmlAttribute: XSS, forHtmlContent: XSS, forJavaScript: XSS,
+      forUriComponent: URL_SAFE, encodeForHTML: XSS, encodeForJavaScript: XSS,
+      escapeHtml4: XSS, escapeHtml3: XSS, htmlEscape: XSS, escapeXml10: XSS, escapeXml11: XSS,
+      encodeForSQL: C.SQL, encodeForOS: C.CMD, encodeForLDAP: C.LDAP, encodeForXPath: C.XPATH,
+      parseInt: NUMERIC, parseLong: NUMERIC, parseDouble: NUMERIC, parseBoolean: NUMERIC,
+    },
   },
 };
 

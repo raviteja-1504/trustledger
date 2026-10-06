@@ -28,7 +28,8 @@ import type { ParamSinkFact } from "./taint/taintCore";
  * forgotten bump here can never silently serve stale results across releases.
  */
 // 7: Kotlin taint pass (kotlinTaint.ts), Ruby taint pass + Ruby AST engine (astTaintRuby.ts).
-export const SCAN_CACHE_VERSION = 7;
+// 8: Kotlin AST engine (astTaintKotlin.ts), Java facts shared with Kotlin.
+export const SCAN_CACHE_VERSION = 8;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

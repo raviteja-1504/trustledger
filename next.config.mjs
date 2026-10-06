@@ -106,6 +106,7 @@ const nextConfig = {
       "./node_modules/tree-sitter-wasms/out/tree-sitter-c_sharp.wasm",
       "./node_modules/tree-sitter-wasms/out/tree-sitter-php.wasm",
       "./node_modules/tree-sitter-wasms/out/tree-sitter-ruby.wasm",
+      "./node_modules/tree-sitter-wasms/out/tree-sitter-kotlin.wasm",
     ],
   },
 

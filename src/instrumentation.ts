@@ -49,6 +49,10 @@ export async function register() {
     const { warmRubyTaintEngine } = await import("./lib/astTaintRuby");
     warmRubyTaintEngine().catch(() => { /* already logged inside astTaintRuby.ts */ });
 
+    // 3f. Same warm-up for the Kotlin AST taint engine -- see astTaintKotlin.ts.
+    const { warmKotlinTaintEngine } = await import("./lib/astTaintKotlin");
+    warmKotlinTaintEngine().catch(() => { /* already logged inside astTaintKotlin.ts */ });
+
     // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
     const org    = process.env.NEXT_PUBLIC_ORG ?? "unknown";
