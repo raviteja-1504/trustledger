@@ -32,6 +32,44 @@ const { Parser } = require("web-tree-sitter") as typeof import("web-tree-sitter"
 // finish loading, failed every cold start with "Incompatible language version 0".
 const shared = globalThis as typeof globalThis & { __trustledgerTreeSitterInit?: Promise<void> };
 
+/**
+ * Deepest syntax-tree nesting the taint engines analyse. Their visitors recurse once (or more) per node, so a
+ * repository file nested thousands of levels deep (`f(f(f(...)))`, a 20k-term `a + b + ...` chain, nested
+ * `if ... end`) overflowed the call stack and failed the WHOLE scan. Real code stays far below this; a deeper
+ * file is still scanned by the regex layer, just not by the AST engines.
+ */
+export const MAX_AST_DEPTH = 1000;
+
+/** True when `root` nests deeper than `limit` -- walked with a cursor, so the check itself never recurses. */
+export function treeTooDeep(root: import("web-tree-sitter").Node, limit = MAX_AST_DEPTH): boolean {
+  const cursor = root.walk();
+  let depth = 0;
+  try {
+    for (;;) {
+      if (cursor.gotoFirstChild()) {
+        if (++depth > limit) return true;
+        continue;
+      }
+      while (!cursor.gotoNextSibling()) {
+        if (depth === 0 || !cursor.gotoParent()) return false;
+        depth--;
+      }
+    }
+  } finally {
+    cursor.delete();
+  }
+}
+
+/** A parsed root, or null (with a log line) when it is too deep for the engines to walk safely. */
+export function rootIfShallowEnough<N extends import("web-tree-sitter").Node>(root: N | null | undefined, engine: string, filePath: string): N | null {
+  if (!root) return null;
+  if (treeTooDeep(root)) {
+    console.warn(`[${engine}] ${filePath}: syntax tree nests deeper than ${MAX_AST_DEPTH} levels -- AST analysis skipped (regex rules still run)`);
+    return null;
+  }
+  return root;
+}
+
 export function ensureTreeSitterInit(): Promise<void> {
   if (!shared.__trustledgerTreeSitterInit) shared.__trustledgerTreeSitterInit = Parser.init();
   return shared.__trustledgerTreeSitterInit;

@@ -33,6 +33,7 @@ import { collectFindingReports } from "@/lib/findingReport";
 import type { FileIndicator } from "@/types";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { safeEqual } from "@/lib/safeEqual";
+import { internalSecret } from "@/lib/internalSecret";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
@@ -55,10 +56,10 @@ export const maxDuration = 300;
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
 async function verifyRequest(req: NextRequest, rawBody: string): Promise<boolean> {
-  // Internal secret always accepted (webhook fallback when QStash isn't used)
-  // Strip BOM (﻿) that Windows CLI piping adds to env vars in Vercel
-  const expectedSecret = (process.env.INTERNAL_SECRET ?? "dev").replace(/^﻿/, "").trim();
-  if (safeEqual(req.headers.get("x-internal-secret") ?? "", expectedSecret)) {
+  // Internal secret (the queue's direct-call fallback when QStash isn't used) -- only when one is configured;
+  // in production without INTERNAL_SECRET only QStash signatures are accepted (lib/internalSecret.ts).
+  const expectedSecret = internalSecret();
+  if (expectedSecret && safeEqual(req.headers.get("x-internal-secret") ?? "", expectedSecret)) {
     return true;
   }
   // QStash signature verification

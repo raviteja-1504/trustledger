@@ -1,5 +1,6 @@
 import { Client } from "@upstash/qstash";
 import { sendSlackAlert } from "@/lib/alertDelivery";
+import { internalSecret } from "@/lib/internalSecret";
 
 export interface ScanJob {
   org_id:           string | null;
@@ -47,7 +48,12 @@ function client(): Client {
 }
 
 async function directFetch(workerUrl: string, job: ScanJob): Promise<void> {
-  const secret = cleanEnv(process.env.INTERNAL_SECRET, "dev");
+  const secret = internalSecret();
+  if (!secret) {
+    // The worker would refuse the call (production without INTERNAL_SECRET accepts only QStash signatures).
+    console.error("[queue] cannot run the scan directly: INTERNAL_SECRET is not set in production");
+    return;
+  }
   console.log("[queue] calling scan-worker at", workerUrl, "secret len:", secret.length);
   const res = await fetch(workerUrl, {
     method:  "POST",

@@ -59,7 +59,7 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
-import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
@@ -156,7 +156,7 @@ export async function warmCSharpTaintEngine(): Promise<void> {
 export function parseCSharpSourceSync(content: string, filePath: string): SyntaxNode | null {
   if (!parserPool) return null;
   try {
-    return parserPool.parse(content)?.rootNode ?? null;
+    return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintCSharp", filePath);
   } catch (err) {
     console.error(`[astTaintCSharp] parse threw for ${filePath}:`, err);
     return null;

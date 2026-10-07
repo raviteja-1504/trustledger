@@ -76,9 +76,13 @@ function instructions(content: string): Array<{ text: string; line: number }> {
   const lines = content.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const start = i;
-    let text = lines[i];
-    while (/\\\s*$/.test(text) && i + 1 < lines.length) text = text.replace(/\\\s*$/, " ") + lines[++i];
-    out.push({ text, line: start + 1 });
+    // Test/strip only the newest physical line and join once: re-testing and re-copying the growing text on every
+    // continuation was quadratic for a long `RUN a \` chain.
+    const parts: string[] = [];
+    let cur = lines[i];
+    while (/\\\s*$/.test(cur) && i + 1 < lines.length) { parts.push(cur.replace(/\\\s*$/, " ")); cur = lines[++i]; }
+    parts.push(cur);
+    out.push({ text: parts.join(""), line: start + 1 });
   }
   return out;
 }

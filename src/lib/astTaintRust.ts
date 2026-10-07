@@ -34,7 +34,7 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT, Tree } from "web-tree-sitter";
-import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ensureTreeSitterInit, rootIfShallowEnough, treeTooDeep } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch,
@@ -128,7 +128,7 @@ export async function warmRustTaintEngine(): Promise<void> {
 export function parseRustSourceSync(content: string, filePath: string): SyntaxNode | null {
   if (!parserPool) return null;
   try {
-    return parserPool.parse(content)?.rootNode ?? null;
+    return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintRust", filePath);
   } catch (err) {
     console.error(`[astTaintRust] parse threw for ${filePath}:`, err);
     return null;
@@ -418,6 +418,7 @@ function macroArgs(m: SyntaxNode): { args: SyntaxNode[]; captures: Map<string, S
   const src = `fn __tl() { __tl(${inner}${captured.length ? `, ${captured.join(", ")}` : ""}); }`;
   let tree: Tree | null = null;
   try { tree = parserPool.parse(src); } catch { tree = null; }
+  if (tree && treeTooDeep(tree.rootNode)) tree = null;
   const call = tree ? findAllNodes(tree.rootNode, "call_expression")[0] : null;
   if (!tree || !call || tree.rootNode.hasError) {
     // not expression-shaped: every identifier token is a value it may carry

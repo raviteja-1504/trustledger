@@ -44,7 +44,7 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
-import { ensureTreeSitterInit } from "./treeSitterRuntime";
+import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry,
@@ -124,7 +124,7 @@ export async function warmKotlinTaintEngine(): Promise<void> {
 export function parseKotlinSourceSync(content: string, filePath: string): SyntaxNode | null {
   if (!parserPool) return null;
   try {
-    return parserPool.parse(content)?.rootNode ?? null;
+    return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintKotlin", filePath);
   } catch (err) {
     console.error(`[astTaintKotlin] parse threw for ${filePath}:`, err);
     return null;

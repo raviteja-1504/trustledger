@@ -30,7 +30,8 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 7: Kotlin taint pass (kotlinTaint.ts), Ruby taint pass + Ruby AST engine (astTaintRuby.ts).
 // 8: Kotlin AST engine (astTaintKotlin.ts), Java facts shared with Kotlin.
 // 9: Rust AST engine (astTaintRust.ts).
-export const SCAN_CACHE_VERSION = 9;
+// 10: hostile-input limits (long runs cut, too-deep trees skip the AST engines), LDAP template rule narrowed.
+export const SCAN_CACHE_VERSION = 10;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

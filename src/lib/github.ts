@@ -142,8 +142,10 @@ export async function fetchFileContents(
 
   await mapWithConcurrency(paths, FILE_FETCH_CONCURRENCY, async path => {
     try {
+      // File names come from the repository (attacker-controlled): encode each segment so a name containing
+      // `?`, `#` or `%` can't rewrite the query (e.g. `x?ref=other-branch#`).
       const res = await fetch(
-        `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${ref}`,
+        `${GITHUB_API}/repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
         {
           headers: {
             ...(token ? { Authorization: `token ${token}` } : {}),

@@ -123,6 +123,7 @@ import { scanLicenseContamination } from "./licenseContamination";
 import { isDockerfilePath } from "./scannableFiles";
 import { findKotlinTaintFindings } from "./kotlinTaint";
 import { findRubyTaintFindings } from "./rubyTaint";
+import { tameLongRuns } from "./scanInputLimits";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -634,7 +635,8 @@ function extractTaintedVars(rawLines: string[]): Set<string> {
     // check further down, needed because that one only recognizes an
     // already-tainted *variable name* on the RHS, not an inline req.X
     // property access.
-    const inlineConcatSource = /\b(?:const|let|var)\s+(\w+)\s*=\s*.*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
+    // (Bounded: an unbounded `.*` rescanned the rest of the line from every `var` on it -- quadratic on a long line.)
+    const inlineConcatSource = /\b(?:const|let|var)\s+(\w+)\s*=\s*.{0,400}?(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
     if (inlineConcatSource) { tainted.add(inlineConcatSource[1]); continue; }
     // const { a, b } = req.query
     const destruct = /\b(?:const|let|var)\s+\{([^}]+)\}\s*=\s*(?:req|request)\.(?:query|body|params|headers)\b/.exec(line);
@@ -1282,8 +1284,10 @@ const XXE_RE = [
 // LDAP injection (filter construction with user input)
 /** Exported for its unit test only. */
 export const LDAP_INJECT_RE = [
-  // the template must hold an LDAP clause `(attr=` before the interpolation -- a CSS `filter: \`blur(${x}px)\`` doesn't
-  /(?:searchFilter|filter|ldapFilter)\s*[:=]\s*`[^`]*\(\s*[A-Za-z][\w.-]*\s*[~<>]?=[^`]*\$\{/i,
+  // the template must hold an LDAP clause `(attr=` before the interpolation -- a CSS `filter: \`blur(${x}px)\`` doesn't.
+  // Only the template's FIRST parenthesised group is tried (`(uid=`, `(&(objectClass=`): trying every `(` made this
+  // quadratic on a long `(a=(a=(a=...` line.
+  /(?:searchFilter|filter|ldapFilter)\s*[:=]\s*`[^`(]*(?:\([&|!]?)*\(\s*[A-Za-z][\w.-]*\s*[~<>]?=[^`]*\$\{/i,
   /(?:searchFilter|filter)\s*[:=]\s*['"][^'"]*['"]\s*\+\s*(?:req|request)\./i,
   /(?:ldap|ad)\.(?:search|query|findUser|bind)\s*\([^)]*\+\s*(?:req|request)\./i,
   /\(\s*(?:cn|uid|mail|sAMAccountName)\s*=\s*['"]?\s*\+\s*(?:req|request)\./i,
@@ -3838,7 +3842,7 @@ function sigDeadCodeAbsence(content: string, lineCount: number): number {
 function sigFunctionSizeUniformity(content: string, lang: string): number {
   const sizes: number[] = [];
   if (lang === "typescript" || lang === "javascript") {
-    const funcRe = /(?:(?:async\s+)?function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?\([^)]*\)\s*=>|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?function)\s*[({]/g;
+    const funcRe = /(?:(?:async\s+)?function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?\([^)]{0,500}\)\s*=>|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?function)\s*[({]/g;
     let m: RegExpExecArray | null;
     while ((m = funcRe.exec(content)) !== null) {
       let depth = 0, i = m.index;
@@ -4015,7 +4019,7 @@ function sigGuardClauseDensity(content: string, lang: string): number {
   const funcCount = Math.max(1,
     lang === "python"
       ? (content.match(/^\s*(?:async\s+)?def\s+\w+/gm) ?? []).length
-      : (content.match(/(?:async\s+)?function\s+\w+|\w+\s*=\s*(?:async\s+)?\([^)]*\)\s*=>/g) ?? []).length
+      : (content.match(/(?:async\s+)?function\s+\w+|\w+\s*=\s*(?:async\s+)?\([^)]{0,500}\)\s*=>/g) ?? []).length
   );
   const guards = [
     /if\s*\(\s*![\w.?[\]]+\s*\)\s*(?:return|throw)/g,
@@ -4362,7 +4366,7 @@ function sigStructuredLogging(content: string, lang: string): number {
 function extractFunctionBodies(content: string, lang: string): string[] {
   const bodies: string[] = [];
   if (lang === "typescript" || lang === "javascript") {
-    const funcRe = /(?:(?:async\s+)?function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?\([^)]*\)\s*=>|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?function)\s*[({]/g;
+    const funcRe = /(?:(?:async\s+)?function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?\([^)]{0,500}\)\s*=>|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?function)\s*[({]/g;
     let m: RegExpExecArray | null;
     while ((m = funcRe.exec(content)) !== null) {
       let depth = 0, i = m.index;
@@ -7404,7 +7408,11 @@ export function runScan(input: ScanInput): ScanOutput {
   // Incremental scanning (see incrementalCache.ts). EVERY provided file participates in the cross-file
   // import graph / semantic graph / aggregates -- what a valid cache entry skips is only the expensive
   // per-file analyzeFile() pass below. (This used to filter unchanged files out of the whole scan.)
-  const allFiles = input.files;
+  // Untrusted content: cut pathological runs before any rule sees them (scanInputLimits.ts).
+  const allFiles = input.files.map(f => {
+    const content = f.content == null ? f.content : tameLongRuns(f.content);
+    return content === f.content ? f : { ...f, content };
+  });
   const contentHashByPath = new Map(allFiles.map(f => [f.path, sha256Hex(f.content ?? "")]));
   // Namespaces BOTH cache round-trips (file_cache below, and moduleSummaryCache's own version+namespace
   // fold) -- declared once, this early, so a deploy boundary invalidates everything consistently rather
@@ -8027,8 +8035,8 @@ export function runScan(input: ScanInput): ScanOutput {
   const scan_id = crypto.randomUUID();
 
   // CI/CD trust scoring — analyse any workflow/pipeline files in the PR
-  const contentMap = new Map(input.files.map(f => [f.path, f.content]));
-  const cicd_trust = scoreCICDTrust(input.files.map(f => f.path), contentMap);
+  const contentMap = new Map(allFiles.map(f => [f.path, f.content]));
+  const cicd_trust = scoreCICDTrust(allFiles.map(f => f.path), contentMap);
 
   // Cryptographic TrustLedger signature chain
   const trust_chain = buildTrustChain(files, scan_id);
@@ -8072,7 +8080,7 @@ export function runScan(input: ScanInput): ScanOutput {
   // config files are typically added once, early in a repo's life.
   const ai_tooling = detectAIToolingArtifacts(
     (input.all_file_paths ?? input.files.map(f => f.path)),
-    input.files,
+    allFiles,
   );
 
   // ── Finalise evidence breakdown ───────────────────────────────────────────
