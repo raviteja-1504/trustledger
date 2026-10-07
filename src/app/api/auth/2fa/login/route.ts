@@ -14,6 +14,7 @@ import { getJwtSessionId } from "@/lib/jwt";
 import { verifyTOTP } from "@/lib/totp";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { writeAuditLog } from "@/lib/audit";
+import { openSecret, matchBackupCode, hashBackupCode, isHashedCode, sealSecret, needsUpgrade } from "@/lib/secretBox";
 
 type Member = { org_id: string; email: string | null; active_session_id: string | null };
 type TwoFa = { enabled: boolean; secret: string | null; backup_codes: string[] | null };
@@ -59,14 +60,22 @@ export async function POST(req: NextRequest) {
   const code = (body.code ?? "").replace(/\s/g, "");
   if (!code) return NextResponse.json({ error: "code_required" }, { status: 400 });
 
-  const viaTotp = /^\d{6}$/.test(code) && verifyTOTP(twoFa.secret, code);
-  const backup = (twoFa.backup_codes ?? []).find(b => b === code.toUpperCase());
-  if (!viaTotp && !backup) {
+  const secret = openSecret(twoFa.secret);
+  const viaTotp = !!secret && /^\d{6}$/.test(code) && verifyTOTP(secret, code);
+  const codes = twoFa.backup_codes ?? [];
+  const backupIdx = viaTotp ? -1 : await matchBackupCode(codes, code);
+  if (!viaTotp && backupIdx < 0) {
     return NextResponse.json({ error: "invalid_code", message: "That code didn't match. Check your authenticator app and try again." }, { status: 400 });
   }
 
-  if (!viaTotp && backup) {
-    await db.from("user_2fa").update({ backup_codes: (twoFa.backup_codes ?? []).filter(b => b !== backup) }).eq("user_id", user.id);
+  // Use up a backup code, and rewrite any values still stored in the old plain form (sealed secret, hashed codes).
+  const remaining = backupIdx >= 0 ? codes.filter((_, i) => i !== backupIdx) : codes;
+  const upgrade = needsUpgrade(twoFa.secret, remaining);
+  if (backupIdx >= 0 || upgrade.codes || upgrade.secret) {
+    await db.from("user_2fa").update({
+      backup_codes: upgrade.codes ? await Promise.all(remaining.map(c => isHashedCode(c) ? c : hashBackupCode(c))) : remaining,
+      ...(upgrade.secret && secret ? { secret: sealSecret(secret) } : {}),
+    }).eq("user_id", user.id);
   }
   await db.from("org_members")
     .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
@@ -80,5 +89,5 @@ export async function POST(req: NextRequest) {
     payload: { action: "2fa_login", method: viaTotp ? "totp" : "backup_code" },
   });
 
-  return NextResponse.json({ ok: true, backup_codes_left: viaTotp ? undefined : (twoFa.backup_codes ?? []).length - 1 });
+  return NextResponse.json({ ok: true, backup_codes_left: viaTotp ? undefined : remaining.length });
 }

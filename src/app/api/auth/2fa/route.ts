@@ -16,6 +16,7 @@ import crypto from "crypto";
 import { generateTOTPSecret, verifyTOTP, buildOtpAuthUri } from "@/lib/totp";
 import { writeAuditLog } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rateLimit";
+import { sealSecret, openSecret, hashBackupCode, matchBackupCode, needsUpgrade } from "@/lib/secretBox";
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
 
     // Upsert pending 2FA record (not enabled until verified)
     await db.from("user_2fa").upsert({
-      user_id, secret, enabled: false, backup_codes: [],
+      user_id, secret: sealSecret(secret), enabled: false, backup_codes: [],
     }, { onConflict: "user_id" });
 
     const otpUri = buildOtpAuthUri(secret, actor_email ?? user_id, issuer);
@@ -95,16 +96,21 @@ export async function POST(req: NextRequest) {
     if (!record?.secret) return NextResponse.json({ error: "no_setup_pending" }, { status: 400 });
     if (record.enabled)  return NextResponse.json({ error: "already_enabled"  }, { status: 400 });
 
-    if (!verifyTOTP(record.secret, body.code)) {
+    const secret = openSecret(record.secret);
+    if (!secret || !verifyTOTP(secret, body.code)) {
       return NextResponse.json({ error: "invalid_code" }, { status: 400 });
     }
 
-    // Generate backup codes
+    // Generate backup codes -- shown once, stored only as hashes
     const backupCodes = Array.from({ length: 8 }, () =>
       crypto.randomBytes(4).toString("hex").toUpperCase(),
     );
+    const hashedCodes = await Promise.all(backupCodes.map(hashBackupCode));
 
-    await db.from("user_2fa").update({ enabled: true, backup_codes: backupCodes }).eq("user_id", user_id);
+    await db.from("user_2fa").update({
+      enabled: true, backup_codes: hashedCodes,
+      ...(needsUpgrade(record.secret, []).secret ? { secret: sealSecret(secret) } : {}),
+    }).eq("user_id", user_id);
 
     await writeAuditLog(db, {
       org_id,
@@ -130,8 +136,9 @@ export async function POST(req: NextRequest) {
     if (!record?.enabled) return NextResponse.json({ error: "not_enabled" }, { status: 400 });
 
     // Check TOTP code or backup code
-    const validTotp   = verifyTOTP(record.secret!, body.code);
-    const validBackup = record.backup_codes?.includes(body.code.toUpperCase());
+    const secret      = openSecret(record.secret);
+    const validTotp   = !!secret && verifyTOTP(secret, body.code);
+    const validBackup = !validTotp && (await matchBackupCode(record.backup_codes, body.code)) >= 0;
 
     if (!validTotp && !validBackup) {
       return NextResponse.json({ error: "invalid_code" }, { status: 400 });

@@ -94,8 +94,6 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "UI/catalog/label content describing this vulnerability class to users (a string literal shown in the product's own vulnerability-description, SARIF-rule, or threat-catalog UI) -- not executable code containing the vulnerability itself." },
   { file: "src/lib/vulnCatalog.ts", id: "jwt-none-alg", lineHash: "2c086b6c0303", line: 45, severity: "critical",
     reason: "UI/catalog/label content describing this vulnerability class to users (a string literal shown in the product's own vulnerability-description, SARIF-rule, or threat-catalog UI) -- not executable code containing the vulnerability itself." },
-  { file: "src/lib/realtime.ts", id: "ldap-injection", lineHash: "fc10a9f0feed", line: 173, severity: "critical",
-    reason: "This is a Supabase Postgres realtime channel filter string (`filter: `org_id=eq.${...}`), not an LDAP filter -- pure keyword collision on the word \"filter\"." },
   { file: "src/lib/licenseContamination.ts", id: "license-header-contamination", lineHash: "54f37ad57cd7", line: 106, severity: "medium",
     reason: "This is the license-detector's OWN pattern-definition string (a literal snippet of real MIT/BSD license text used to detect copied license headers elsewhere) -- self-matches its own regex." },
   { file: "src/lib/licenseContamination.ts", id: "license-header-contamination", lineHash: "27ae6dba759c", line: 110, severity: "medium",

@@ -120,9 +120,32 @@ describe("2FA at sign-in", () => {
   it("a backup code works once and is then used up", async () => {
     seed();
     expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "s2"), { code: "aaaa1111" }))).status).toBe(200);
-    const codes = (db.client.from("user_2fa") as unknown as { rows: Record<string, unknown>[] }).rows[0].backup_codes;
-    expect(codes).toEqual(["BBBB2222"]);
+    // The used code is gone; the legacy plain code that is left is rewritten as a hash, and still works.
+    const codes = (db.client.from("user_2fa") as unknown as { rows: Record<string, unknown>[] }).rows[0].backup_codes as string[];
+    expect(codes).toHaveLength(1);
+    expect(codes[0]).toMatch(/^scrypt:/);
+    expect(codes.join()).not.toContain("BBBB2222");
     expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "s3"), { code: "AAAA1111" }))).status).toBe(400);
+    const last = await mfaVerify(req("/api/auth/2fa/login", token("u", "s4"), { code: "bbbb 2222" }));
+    expect(last.status).toBe(200);
+    expect((await last.json()).backup_codes_left).toBe(0);
+    expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "s5"), { code: "BBBB2222" }))).status).toBe(400);
+  });
+
+  it("with DATA_ENCRYPTION_KEY set, a legacy plain secret is sealed on the next sign-in and keeps working", async () => {
+    process.env.DATA_ENCRYPTION_KEY = "11".repeat(32);
+    try {
+      seed();
+      expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "a1"), { code: generateTOTP(secret) }))).status).toBe(200);
+      const row = (db.client.from("user_2fa") as unknown as { rows: Record<string, unknown>[] }).rows[0];
+      expect(row.secret).toMatch(/^enc:v1:/);
+      expect(String(row.secret)).not.toContain(secret);
+      expect((row.backup_codes as string[]).every(c => c.startsWith("scrypt:"))).toBe(true);
+      expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "a2"), { code: generateTOTP(secret) }))).status).toBe(200);
+      expect((await mfaVerify(req("/api/auth/2fa/login", token("u", "a3"), { code: "AAAA1111" }))).status).toBe(200);
+    } finally {
+      delete process.env.DATA_ENCRYPTION_KEY;
+    }
   });
 
   it("is rate limited", async () => {

@@ -1280,8 +1280,10 @@ const XXE_RE = [
 ];
 
 // LDAP injection (filter construction with user input)
-const LDAP_INJECT_RE = [
-  /(?:searchFilter|filter|ldapFilter)\s*[:=]\s*`[^`]*\$\{/i,
+/** Exported for its unit test only. */
+export const LDAP_INJECT_RE = [
+  // the template must hold an LDAP clause `(attr=` before the interpolation -- a CSS `filter: \`blur(${x}px)\`` doesn't
+  /(?:searchFilter|filter|ldapFilter)\s*[:=]\s*`[^`]*\(\s*[A-Za-z][\w.-]*\s*[~<>]?=[^`]*\$\{/i,
   /(?:searchFilter|filter)\s*[:=]\s*['"][^'"]*['"]\s*\+\s*(?:req|request)\./i,
   /(?:ldap|ad)\.(?:search|query|findUser|bind)\s*\([^)]*\+\s*(?:req|request)\./i,
   /\(\s*(?:cn|uid|mail|sAMAccountName)\s*=\s*['"]?\s*\+\s*(?:req|request)\./i,

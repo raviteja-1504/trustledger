@@ -14,6 +14,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
+import { orgStorageKey, orgStorageFolder } from "@/lib/storagePath";
 
 const BUCKET = "evidence";
 
@@ -55,8 +56,9 @@ export async function GET(req: NextRequest) {
   }
 
   // Single file download URL
+  const safePath = orgStorageKey(org_id, path);
+  if (!safePath) return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   const db = createServiceClient();
-  const safePath = path.startsWith(org_id) ? path : `${org_id}/${path}`;
   const { data, error: signErr } = await db.storage
     .from(BUCKET)
     .createSignedUrl(safePath, 3600);
@@ -80,9 +82,11 @@ export async function POST(req: NextRequest) {
   const label    = (formData.get("label") as string | null) ?? "";
 
   if (!file) return NextResponse.json({ error: "missing_file" }, { status: 400 });
+  const folder = orgStorageFolder(org_id, path);
+  if (folder === null) return NextResponse.json({ error: "invalid_path" }, { status: 400 });
 
   const safeName  = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const storagePath = `${org_id}/${path ? `${path}/` : ""}${Date.now()}_${safeName}`;
+  const storagePath = `${org_id}/${folder ? `${folder}/` : ""}${Date.now()}_${safeName}`;
 
   const db = createServiceClient();
   const { error: upErr } = await db.storage
@@ -129,7 +133,8 @@ export async function DELETE(req: NextRequest) {
   const filePath = url.searchParams.get("path");
   if (!filePath) return NextResponse.json({ error: "missing_path" }, { status: 400 });
 
-  const safePath = filePath.startsWith(org_id) ? filePath : `${org_id}/${filePath}`;
+  const safePath = orgStorageKey(org_id, filePath);
+  if (!safePath) return NextResponse.json({ error: "invalid_path" }, { status: 400 });
   const db       = createServiceClient();
 
   const { error: delErr } = await db.storage.from(BUCKET).remove([safePath]);
