@@ -20,7 +20,11 @@ export type AuditEventType =
   | "member_invited" | "member_role_changed" | "member_removed"
   | "exception_created" | "exception_resolved"
   | "risk_updated" | "evidence_collected"
-  | "finding_triaged" | "finding_reopened" | "findings_baselined" | "scan_rescan_requested";
+  | "finding_triaged" | "finding_reopened" | "findings_baselined" | "scan_rescan_requested"
+  | "user_login"
+  | "repo_connected" | "repo_enabled" | "repo_disabled"
+  | "data_exported"
+  | "evidence_uploaded" | "evidence_deleted";
 
 interface AuditEntry {
   org_id:        string;

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getJwtSessionId, getJwtSsoProviderId } from "@/lib/jwt";
 import { resolveSsoMembership } from "@/lib/ssoMembership";
+import { writeAuditLog } from "@/lib/audit";
+import { logger } from "@/lib/logger";
 
 /**
  * POST /api/auth/bootstrap — called right after every sign-in (GitHub, email, reset link).
@@ -69,10 +71,31 @@ export async function POST(req: NextRequest) {
 
   const sessionId = getJwtSessionId(token);
   if (sessionId) {
+    const { data: current } = await db.from("org_members").select("org_id, email, active_session_id").eq("user_id", user.id).maybeSingle() as
+      { data: { org_id: string; email: string | null; active_session_id: string | null } | null };
+    const previousSession = current?.active_session_id ?? null;
     await db
       .from("org_members")
       .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
       .eq("user_id", user.id);
+    // One audit entry per new session (a repeated call for the same session is not a new sign-in).
+    if (current && previousSession !== sessionId) {
+      await writeAuditLog(db, {
+        org_id: current.org_id, event_type: "user_login",
+        actor_id: user.id, actor_email: current.email ?? user.email ?? null,
+        resource_type: "session", resource_id: sessionId,
+        payload: { method: loginMethod(user, ssoProviderId), mfa: false },
+      }).catch(err => {
+        // Never block a sign-in on the audit write -- but don't lose it silently either.
+        logger.error("Sign-in audit entry failed", { event: "audit_write_failed", org_id: current.org_id, error: err instanceof Error ? err.message : String(err) });
+      });
+    }
   }
   return NextResponse.json({ has_org: true, is_new_user: false, mfa_required: false });
+}
+
+/** How the user signed in: "sso", or Supabase's provider for this session ("email", "github", ...). */
+function loginMethod(user: { app_metadata?: { provider?: unknown } }, ssoProviderId: string | null): string {
+  if (ssoProviderId) return "sso";
+  return typeof user.app_metadata?.provider === "string" ? user.app_metadata.provider : "unknown";
 }

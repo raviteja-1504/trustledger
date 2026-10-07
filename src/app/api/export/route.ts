@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
+import { writeAuditLog } from "@/lib/audit";
 
 type ExportType = "violations" | "audit" | "scans" | "attestations" | "secrets" | "aibom";
 type ExportFormat = "csv" | "json";
@@ -145,6 +146,12 @@ export async function GET(req: NextRequest) {
     default:
       return NextResponse.json({ error: "invalid_type" }, { status: 400 });
   }
+
+  await writeAuditLog(db, {
+    org_id, event_type: "data_exported", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "export", resource_id: type,
+    payload: { export_type: type, format: format === "json" ? "json" : "csv", rows: data.length },
+  });
 
   if (format === "json") {
     return new NextResponse(JSON.stringify({ exported_at: new Date().toISOString(), count: data.length, data }, null, 2), {

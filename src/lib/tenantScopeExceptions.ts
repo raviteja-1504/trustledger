@@ -52,7 +52,8 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/api-security/route.ts", table: "scan_files", op: "select", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/auth/2fa/login/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/auth/2fa/login/route.ts", table: "org_members", op: "update", keys: ["user_id"], why: "own-membership" },
-  { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
+  // the caller's own row: membership, then its org and previous session for the sign-in audit entry
+  { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership", count: 2 },
   { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "update", keys: ["email","user_id"], why: "own-membership" },
   { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "update", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/auth/callback/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },

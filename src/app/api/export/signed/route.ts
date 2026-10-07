@@ -14,13 +14,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { verifyApiKey } from "../../_middleware";
-import { verifyAuditChain } from "@/lib/audit";
+import { verifyApiKey, requirePermission } from "../../_middleware";
+import { verifyAuditChain, writeAuditLog } from "@/lib/audit";
 import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
-  const { org_id, error } = await verifyApiKey(req);
-  if (error) return NextResponse.json({ error }, { status: 401 });
+  const auth = await verifyApiKey(req);
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
+  // A bulk export of the whole audit log -- the same permission as every other export (api/export?type=audit).
+  const roleErr = await requirePermission(auth, "can_export_data");
+  if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
+  const { org_id } = auth;
 
   const url    = new URL(req.url);
   const start  = url.searchParams.get("period_start") ?? new Date(Date.now() - 90*86400_000).toISOString();
@@ -67,6 +71,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "export_signing_not_configured", detail: "Set EXPORT_SIGNING_KEY or CRON_SECRET" }, { status: 503 });
   }
   const signature  = crypto.createHmac("sha256", signingKey).update(contentToSign).digest("hex");
+
+  // Logged after the export content is fixed, so this entry is never part of the export it describes.
+  await writeAuditLog(db, {
+    org_id, event_type: "data_exported", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "export", resource_id: "audit_signed",
+    payload: { export_type: "audit_signed", format: format === "csv" ? "csv" : "json", rows: (events ?? []).length, period_start: start, period_end: end },
+  });
 
   if (format === "csv") {
     const header = "id,event_type,actor_email,resource_type,resource_id,entry_hash,created_at";

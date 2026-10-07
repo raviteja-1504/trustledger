@@ -289,6 +289,13 @@ const RAW_TYPE_MAP: Record<string, AuditEventType> = {
   exception_resolved:    "policy_change",
   risk_updated:          "policy_change",
   evidence_collected:    "policy_change",
+  user_login:            "user_added",
+  repo_connected:        "integration_connected",
+  repo_enabled:          "integration_connected",
+  repo_disabled:         "integration_connected",
+  data_exported:         "policy_change",
+  evidence_uploaded:     "attestation",
+  evidence_deleted:      "policy_change",
 };
 
 const SEVERITY_BY_TYPE: Partial<Record<AuditEventType, AuditEvent["severity"]>> = {
@@ -331,6 +338,36 @@ function auditLogToAuditEvent(row: AuditLogRow): AuditEvent {
     case "api_key_revoked":
       description = `API key revoked${payload.name ? ` — ${payload.name}` : ""}`;
       break;
+    case "user_login":
+      description = "Signed in";
+      detail = [typeof payload.method === "string" ? `via ${payload.method}` : null, payload.mfa ? "with 2FA" : null, actor].filter(Boolean).join(" · ");
+      severity = "info";
+      break;
+    case "repo_connected": {
+      const n = typeof payload.count === "number" ? payload.count : 1;
+      description = n > 1 ? `${n} repositories connected` : "Repository connected";
+      detail = typeof payload.repo === "string" ? payload.repo
+        : Array.isArray(payload.repos) ? (payload.repos as unknown[]).slice(0, 3).join(", ") + (n > 3 ? ` +${n - 3} more` : "") : undefined;
+      break;
+    }
+    case "repo_enabled":
+    case "repo_disabled":
+      description = row.event_type === "repo_enabled" ? "Repository switched on" : "Repository switched off";
+      detail = typeof payload.repo === "string" ? payload.repo : undefined;
+      break;
+    case "data_exported":
+      description = `Data exported${typeof payload.export_type === "string" ? ` — ${payload.export_type.replace(/_/g, " ")}` : ""}`;
+      detail = [typeof payload.format === "string" ? payload.format.toUpperCase() : null,
+        typeof payload.rows === "number" ? `${payload.rows} rows` : typeof payload.findings === "number" ? `${payload.findings} findings` : null,
+        actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
+      break;
+    case "evidence_uploaded":
+    case "evidence_deleted": {
+      const file = typeof payload.filename === "string" ? payload.filename : typeof payload.path === "string" ? payload.path.split("/").pop() : undefined;
+      description = row.event_type === "evidence_uploaded" ? "Evidence uploaded" : "Evidence deleted";
+      detail = [file, actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
+      break;
+    }
     default:
       description = row.event_type.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
       detail = repoShort ?? (row.resource_id ? `resource ${row.resource_id}` : undefined);

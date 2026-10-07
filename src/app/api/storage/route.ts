@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
 
   await writeAuditLog(db, {
     org_id,
-    event_type:    "attestation", // reuse for evidence uploads
+    event_type:    "evidence_uploaded",
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "evidence",
@@ -142,7 +142,7 @@ export async function DELETE(req: NextRequest) {
 
   await writeAuditLog(db, {
     org_id,
-    event_type:    "report_generated",
+    event_type:    "evidence_deleted",
     actor_id:      user_id ?? null,
     actor_email:   actor_email ?? null,
     resource_type: "evidence",

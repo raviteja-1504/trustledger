@@ -14,6 +14,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { getInstallationToken, listInstallationRepos } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { cacheDel, cacheKeys } from "@/lib/cache";
+import { writeAuditLog } from "@/lib/audit";
 
 /** Repos switched on/off or added change what the dashboard counts — drop its cached numbers right away. */
 async function invalidateDashboard(orgId: string) {
@@ -75,6 +76,11 @@ export async function POST(req: NextRequest) {
             { onConflict: "org_id,repo_full_name", ignoreDuplicates: true });
         if (insErr) throw insErr;
         await invalidateDashboard(org_id);
+        await writeAuditLog(db, {
+          org_id, event_type: "repo_connected", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+          resource_type: "repository", resource_id: fresh.length === 1 ? fresh[0][0] : undefined,
+          payload: { source: "github_import", count: fresh.length, repos: fresh.slice(0, 100).map(([name]) => name) },
+        });
       }
       return NextResponse.json({ added: fresh.length, already_connected: found.size - fresh.length, total: found.size });
     } catch (err) {
@@ -95,6 +101,11 @@ export async function POST(req: NextRequest) {
 
   if (insErr) return NextResponse.json({ error: "insert_failed" }, { status: 500 });
   await invalidateDashboard(org_id);
+  await writeAuditLog(db, {
+    org_id, event_type: "repo_connected", actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "repository", resource_id: name,
+    payload: { source: "manual", repo: name },
+  });
   return NextResponse.json({ repo: data });
 }
 
@@ -109,8 +120,14 @@ export async function PATCH(req: NextRequest) {
 
   const db = createServiceClient();
   const { data } = await db.from("repositories").update({ is_active: body.is_active }).eq("id", body.id).eq("org_id", auth.org_id)
-    .select("id, is_active") as { data: unknown[] | null };
+    .select("id, is_active, repo_full_name") as { data: Array<{ repo_full_name?: string }> | null };
   if (!data || data.length === 0) return NextResponse.json({ error: "repo_not_found" }, { status: 404 });
   await invalidateDashboard(auth.org_id);
+  await writeAuditLog(db, {
+    org_id: auth.org_id, event_type: body.is_active ? "repo_enabled" : "repo_disabled",
+    actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
+    resource_type: "repository", resource_id: body.id,
+    payload: { repo: data[0].repo_full_name ?? null },
+  });
   return NextResponse.json({ ok: true });
 }

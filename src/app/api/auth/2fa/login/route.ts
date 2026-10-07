@@ -81,12 +81,12 @@ export async function POST(req: NextRequest) {
     .update({ active_session_id: sessionId, active_session_at: new Date().toISOString() })
     .eq("user_id", user.id);
 
+  // The sign-in itself (bootstrap holds back the session for 2FA users, so this is where their login completes).
   await writeAuditLog(db, {
-    // Same event type the 2FA setup/disable route uses (the audit table's event types are fixed).
-    org_id: member.org_id, event_type: "org_settings_changed",
+    org_id: member.org_id, event_type: "user_login",
     actor_id: user.id, actor_email: member.email ?? user.email ?? null,
-    resource_type: "2fa", resource_id: user.id,
-    payload: { action: "2fa_login", method: viaTotp ? "totp" : "backup_code" },
+    resource_type: "session", resource_id: sessionId,
+    payload: { method: user.app_metadata?.provider ?? "unknown", mfa: true, mfa_method: viaTotp ? "totp" : "backup_code" },
   });
 
   return NextResponse.json({ ok: true, backup_codes_left: viaTotp ? undefined : remaining.length });
