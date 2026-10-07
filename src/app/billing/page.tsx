@@ -8,6 +8,7 @@ import PageSkeleton from "@/components/PageSkeleton";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useToastHelpers } from "@/lib/toast";
+import { contactEmail } from "@/lib/contacts";
 
 interface UsageData {
   org:    { name: string; plan: string; member_since: string };
@@ -261,7 +262,7 @@ function BillingContent() {
                     </ul>
                     <button
                       onClick={() => {
-                        if (isPremium) window.open("mailto:sales@trustledger.dev?subject=Enterprise%20enquiry","_blank");
+                        if (isPremium) window.open(`mailto:${contactEmail("sales")}?subject=Enterprise%20enquiry`,"_blank");
                         else if (!isCurrent) startCheckout(p);
                       }}
                       className="mt-4 w-full py-2 rounded-xl text-xs font-bold transition-all"

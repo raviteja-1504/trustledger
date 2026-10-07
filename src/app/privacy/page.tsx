@@ -6,6 +6,7 @@
  */
 
 import { BrandMark } from "@/components/BrandLogo";
+import { contactEmail } from "@/lib/contacts";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -92,7 +93,7 @@ export default function PrivacyPolicyPage() {
 
         <Section title="11. Contact Us">
           <p>Questions about this policy or your data can be sent to{" "}
-            <a href="mailto:privacy@trustledger.dev" className="text-indigo-600 hover:underline">privacy@trustledger.dev</a>.
+            <a href={`mailto:${contactEmail("privacy")}`} className="text-indigo-600 hover:underline">{contactEmail("privacy")}</a>.
           </p>
         </Section>
 

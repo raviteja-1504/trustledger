@@ -1,5 +1,6 @@
 "use client";
 import { formatDateOnly, useTimezone, getSavedTimezone } from "@/lib/timezone";
+import { contactEmail } from "@/lib/contacts";
 /**
  * Public API Changelog — documents breaking changes, new features, deprecations.
  * Accessible at /changelog — no auth required.
@@ -155,7 +156,7 @@ export default function ChangelogPage() {
         <div className="mt-16 text-center">
           <p className="text-xs text-gray-400">
             Subscribe to updates:{" "}
-            <a href="mailto:updates@trustledger.dev" className="text-indigo-600 hover:underline">updates@trustledger.dev</a>
+            <a href={`mailto:${contactEmail("updates")}`} className="text-indigo-600 hover:underline">{contactEmail("updates")}</a>
           </p>
         </div>
       </div>

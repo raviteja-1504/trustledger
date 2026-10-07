@@ -77,8 +77,7 @@ export function validateEnv(): void {
     ...errors.missing.map(v => `  ✗ MISSING:  ${v}`),
     ...errors.invalid.map(v => `  ✗ INVALID:  ${v}`),
     "",
-    "  Copy .env.example → .env.local and fill in values.",
-    "  Docs: https://docs.trustledger.dev/self-hosted",
+    "  Copy .env.example → .env.local and fill in values (each variable is described there).",
     "═══════════════════════════════════════════════════",
   ];
 

@@ -6,7 +6,7 @@
  */
 
 import { BrandMark } from "@/components/BrandLogo";
-import { securityContact, SECURITY_ACK_BUSINESS_DAYS } from "@/lib/securityContact";
+import { securityContact, SECURITY_ACK_BUSINESS_DAYS } from "@/lib/contacts";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

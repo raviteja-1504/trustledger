@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { FINDING_CATALOG } from "@/lib/findingCatalog";
 import { BrandLogo, BrandMark, BrandWordmark } from "@/components/BrandLogo";
+import { contactEmail } from "@/lib/contacts";
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 // Scoped to this page only (not a global rebrand): a near-black, cyan-accented
@@ -1058,7 +1059,7 @@ function CTASection() {
             Explore the dashboard
           </Link>
         </div>
-        <p className="text-sm text-white/45">Questions first? <a href="mailto:hello@trustledger.dev" className="font-semibold text-white/70 hover:text-white underline underline-offset-4 decoration-white/25">Talk to us</a> — hello@trustledger.dev</p>
+        <p className="text-sm text-white/45">Questions first? <a href={`mailto:${contactEmail("hello")}`} className="font-semibold text-white/70 hover:text-white underline underline-offset-4 decoration-white/25">Talk to us</a> — {contactEmail("hello")}</p>
       </Reveal>
     </section>
   );
@@ -1089,7 +1090,7 @@ function Footer() {
           </div>
           <div>
             <p className="font-bold text-white/60 text-xs uppercase tracking-wider mb-3">Company</p>
-            <ul className="space-y-2">{[{ label: "Dashboard", href: "/dashboard" }, { label: "Settings", href: "/settings" }, { label: "Contact", href: "mailto:hello@trustledger.dev" }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }, { label: "Security", href: "/security" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
+            <ul className="space-y-2">{[{ label: "Dashboard", href: "/dashboard" }, { label: "Settings", href: "/settings" }, { label: "Contact", href: `mailto:${contactEmail("hello")}` }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }, { label: "Security", href: "/security" }].map(l => <li key={l.label}><a href={l.href} className="text-white/40 hover:text-white/70 transition-colors">{l.label}</a></li>)}</ul>
           </div>
         </div>
       </div>

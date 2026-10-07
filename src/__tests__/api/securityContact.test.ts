@@ -7,10 +7,58 @@
  */
 import { NextRequest } from "next/server";
 import { GET as securityTxt } from "@/app/.well-known/security.txt/route";
-import { securityContact, isPlaceholderSecurityContact, PLACEHOLDER_SECURITY_CONTACT } from "@/lib/securityContact";
+import { readFileSync, readdirSync, statSync } from "fs";
+import { join } from "path";
+import { securityContact, isPlaceholderSecurityContact, PLACEHOLDER_SECURITY_CONTACT, contactEmail, contactDomain, PLACEHOLDER_CONTACT_DOMAIN } from "@/lib/contacts";
+import { OPENAPI_SPEC } from "@/lib/openapi";
 
 const saved = process.env.NEXT_PUBLIC_SECURITY_CONTACT;
-afterEach(() => { if (saved === undefined) delete process.env.NEXT_PUBLIC_SECURITY_CONTACT; else process.env.NEXT_PUBLIC_SECURITY_CONTACT = saved; });
+const savedDomain = process.env.NEXT_PUBLIC_CONTACT_DOMAIN;
+afterEach(() => {
+  if (saved === undefined) delete process.env.NEXT_PUBLIC_SECURITY_CONTACT; else process.env.NEXT_PUBLIC_SECURITY_CONTACT = saved;
+  if (savedDomain === undefined) delete process.env.NEXT_PUBLIC_CONTACT_DOMAIN; else process.env.NEXT_PUBLIC_CONTACT_DOMAIN = savedDomain;
+});
+
+describe("published contact addresses", () => {
+  it("are role@trustledger.example until a domain is configured", () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_DOMAIN;
+    expect(contactDomain()).toBe(PLACEHOLDER_CONTACT_DOMAIN);
+    expect(PLACEHOLDER_CONTACT_DOMAIN.endsWith(".example")).toBe(true);
+    for (const role of ["hello", "privacy", "sales", "support", "updates", "security"] as const) {
+      expect(contactEmail(role)).toBe(`${role}@trustledger.example`);
+    }
+  });
+
+  it("one setting switches them all; the security address can still be set on its own", () => {
+    process.env.NEXT_PUBLIC_CONTACT_DOMAIN = " @Acme-Sec.io ";
+    expect(contactEmail("privacy")).toBe("privacy@acme-sec.io");
+    expect(contactEmail("security")).toBe("security@acme-sec.io");
+    process.env.NEXT_PUBLIC_SECURITY_CONTACT = "psirt@other.org";
+    expect(contactEmail("security")).toBe("psirt@other.org");
+    expect(contactEmail("hello")).toBe("hello@acme-sec.io");
+  });
+
+  it("ignores a setting that isn't a plain domain", () => {
+    for (const v of ["", "acme", "acme.com/evil", "a b.com", "-acme.com", "x@acme.com"]) {
+      process.env.NEXT_PUBLIC_CONTACT_DOMAIN = v;
+      expect(contactDomain()).toBe(PLACEHOLDER_CONTACT_DOMAIN);
+    }
+  });
+
+  it("the API docs publish the support address and no link to a domain we don't own", () => {
+    expect(OPENAPI_SPEC.info.contact).toEqual({ name: "TrustLedger Support", email: contactEmail("support") });
+  });
+
+  it("no page publishes an address on trustledger.dev (someone else's domain) for people to write to", () => {
+    const walk = (d: string): string[] => readdirSync(d).flatMap(n => {
+      const p = join(d, n);
+      return statSync(p).isDirectory() ? (n === "__tests__" ? [] : walk(p)) : /\.tsx?$/.test(n) ? [p] : [];
+    });
+    const hits = walk(join(process.cwd(), "src")).flatMap(f =>
+      [...readFileSync(f, "utf8").matchAll(/\b(hello|privacy|sales|support|updates|contact|info)@trustledger\.dev\b|docs\.trustledger\.dev/g)].map(m => `${f}: ${m[0]}`));
+    expect(hits).toEqual([]);
+  });
+});
 
 const fields = async () => {
   const res = securityTxt(new NextRequest(new URL("https://app.example/.well-known/security.txt")));

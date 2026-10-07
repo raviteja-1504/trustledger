@@ -13,7 +13,8 @@ Email **security@trustledger.example** with:
 
 > The address above is a placeholder until the real security mailbox is set up. The live address is always
 > the one on the site's `/security` page and in `/.well-known/security.txt` (set with
-> `NEXT_PUBLIC_SECURITY_CONTACT`). Update this file when that changes.
+> `NEXT_PUBLIC_CONTACT_DOMAIN`, or `NEXT_PUBLIC_SECURITY_CONTACT` for this address alone). Update this file
+> when that changes.
 
 ## What to expect
 

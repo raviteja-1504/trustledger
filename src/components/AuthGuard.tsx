@@ -7,6 +7,7 @@ import { authedFetch, handleSessionError } from "@/lib/useRealData";
 import { fullPageReplace } from "@/lib/authFlow";
 
 import { BrandLogo } from "./BrandLogo";
+import { contactEmail } from "@/lib/contacts";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -153,7 +154,7 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
 
           <p className="text-center text-xs text-gray-400 mt-5">
             Need access?{" "}
-            <a href="mailto:hello@trustledger.dev" className="text-indigo-500 hover:text-indigo-600 font-medium">
+            <a href={`mailto:${contactEmail("hello")}`} className="text-indigo-500 hover:text-indigo-600 font-medium">
               Contact your admin
             </a>
           </p>

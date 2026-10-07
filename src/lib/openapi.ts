@@ -3,6 +3,8 @@
  * Served at /api/docs as JSON and rendered via Swagger UI.
  */
 
+import { contactEmail } from "@/lib/contacts";
+
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";
 
 export const OPENAPI_SPEC = {
@@ -13,8 +15,7 @@ export const OPENAPI_SPEC = {
     description: "AI code provenance, attestation, and compliance API. Authenticate with a TrustLedger API key (`tl_live_...`) in the `X-TrustLedger-Key` header, or with a Supabase JWT in the `Authorization: Bearer` header.",
     contact: {
       name:  "TrustLedger Support",
-      email: "support@trustledger.dev",
-      url:   "https://docs.trustledger.dev",
+      email: contactEmail("support"),
     },
     license: { name:"Proprietary" },
   },

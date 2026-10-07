@@ -3,7 +3,7 @@
  * contact comes from NEXT_PUBLIC_SECURITY_CONTACT and Expires is always within the RFC's "less than a year".
  */
 import { NextRequest } from "next/server";
-import { securityContact } from "@/lib/securityContact";
+import { securityContact } from "@/lib/contacts";
 
 const EXPIRES_DAYS = 180;
 
