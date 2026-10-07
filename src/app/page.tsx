@@ -324,9 +324,9 @@ function NavBar() {
             <a key={l} href={`#${l.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")}`} className="text-sm text-white/65 hover:text-white/90 transition-colors font-medium">{l}</a>
           ))}
         </nav>
-        <div className="flex items-center gap-2">
-          <Link href="/login" className="text-sm font-semibold text-white/70 hover:text-white transition-colors px-3 py-1.5">Sign in</Link>
-          <Link href="/login?mode=signup" className="flex items-center gap-1.5 text-sm font-bold px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+          <Link href="/login" className="whitespace-nowrap text-sm font-semibold text-white/70 hover:text-white transition-colors px-2 sm:px-3 py-1.5">Sign in</Link>
+          <Link href="/login?mode=signup" className="whitespace-nowrap flex items-center gap-1.5 text-sm font-bold px-3 sm:px-3.5 py-1.5 rounded-lg transition-all text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 2px 18px ${CYAN}66` }}>
             Get started <ArrowRightIcon size={13} />
           </Link>
         </div>
@@ -336,6 +336,46 @@ function NavBar() {
 }
 
 // ── Hero: what a PR check looks like + trace visual ─────────────────────────
+
+/**
+ * One line of text that never truncates: if it fits it stays still; if it doesn't, it slides to its end, pauses
+ * and slides back, so the whole line is readable. With reduced motion it wraps instead.
+ */
+function ScrollText({ children, className = "", style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
+  const outer = useRef<HTMLSpanElement | null>(null);
+  const inner = useRef<HTMLSpanElement | null>(null);
+  const [shift, setShift] = useState(0);
+  useEffect(() => {
+    const o = outer.current;
+    if (!o) return;
+    // ResizeObserver also fires once on observe(), which takes the first measurement
+    const ro = new ResizeObserver(() => {
+      const i = inner.current;
+      if (!i) return;
+      const overflow = i.scrollWidth - o.clientWidth;
+      setShift(overflow > 0.5 ? Math.ceil(overflow) : 0);
+    });
+    ro.observe(o);
+    if (inner.current) ro.observe(inner.current);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <span ref={outer} className={`tl-scrollbox block overflow-hidden whitespace-nowrap ${className}`} style={style}>
+      <span ref={inner} className="tl-scroll inline-block" data-scroll={shift ? "" : undefined}
+        style={shift ? ({ "--tl-shift": `-${shift}px`, animationDuration: `${Math.max(7, 4 + shift / 14)}s` } as React.CSSProperties) : undefined}>
+        {children}
+      </span>
+    </span>
+  );
+}
+const SCROLL_TEXT_CSS = `
+  .tl-scroll[data-scroll] { animation-name: tlScrollText; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+  @keyframes tlScrollText { 0%, 18% { transform: translateX(0); } 50%, 68% { transform: translateX(var(--tl-shift)); } 100% { transform: translateX(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    .tl-scrollbox, .tl-scroll { white-space: normal; }
+    .tl-scroll[data-scroll] { animation: none; }
+  }
+`;
 
 /** A risk gauge that fills to `value` once visible. */
 function RiskGauge({ value, color }: { value: number; color: string }) {
@@ -366,8 +406,8 @@ function PrCheckMock() {
         <div className="px-4 sm:px-5 py-3 flex items-center gap-2.5 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.03)" }}>
           <span className="text-white/60"><GitHubIcon size={15} /></span>
           <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-semibold text-white truncate">Add password reset flow <span className="text-white/35 font-normal">#482</span></p>
-            <p className="text-[10.5px] font-mono text-white/40 truncate">acme/api · feature/reset → main · 14 files</p>
+            <ScrollText className="text-[13px] font-semibold text-white">Add password reset flow <span className="text-white/35 font-normal">#482</span></ScrollText>
+            <ScrollText className="text-[10.5px] font-mono text-white/40">acme/api · feature/reset → main · 14 files</ScrollText>
           </div>
           <span className="text-[10px] font-bold px-2 py-1 rounded-md shrink-0" style={{ color: ROSE, background: `${ROSE}1a`, border: `1px solid ${ROSE}40` }}>Merge blocked</span>
         </div>
@@ -392,8 +432,8 @@ function PrCheckMock() {
             <Reveal key={f.title} delay={300 + i * 110} className="px-4 sm:px-5 py-2.5 flex items-center gap-3" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
               <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0" style={{ color: f.color, background: `${f.color}1a`, border: `1px solid ${f.color}38` }}>{f.icon(13)}</span>
               <div className="min-w-0 flex-1">
-                <p className="text-[12.5px] font-semibold text-white/90 truncate">{f.title}</p>
-                <p className="text-[10.5px] font-mono text-white/40 truncate">{f.detail}</p>
+                <ScrollText className="text-[12.5px] font-semibold text-white/90">{f.title}</ScrollText>
+                <ScrollText className="text-[10.5px] font-mono text-white/40">{f.detail}</ScrollText>
               </div>
               <span className="text-[9.5px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0 hidden sm:inline" style={{ color: "rgba(255,255,255,0.6)", background: "rgba(255,255,255,0.07)" }}>{f.tag}</span>
               <span className="text-[10px] font-bold w-14 text-right shrink-0" style={{ color: f.color }}>{f.sev}</span>
@@ -403,11 +443,12 @@ function PrCheckMock() {
         {/* gate */}
         <div className="px-4 sm:px-5 py-3 flex items-center gap-3 border-t" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.03)" }}>
           <span className="relative flex w-2 h-2 shrink-0"><span className="absolute inset-0 rounded-full animate-ping" style={{ background: AMBER, opacity: 0.6 }} /><span className="relative w-2 h-2 rounded-full" style={{ background: AMBER }} /></span>
-          <p className="text-[11.5px] text-white/60 flex-1 min-w-0 truncate">Waiting for a named reviewer to attest <span className="font-mono text-white/80">auth/reset.ts</span></p>
+          <ScrollText className="text-[11.5px] text-white/60 flex-1 min-w-0">Waiting for a named reviewer to attest <span className="font-mono text-white/80">auth/reset.ts</span></ScrollText>
           <span className="text-[11px] font-bold px-2.5 py-1 rounded-md shrink-0 text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})` }}>Review &amp; attest</span>
         </div>
       </div>
       <p className="relative text-center text-[10.5px] font-mono text-white/35 mt-3">Example PR check · illustrative</p>
+      <style>{SCROLL_TEXT_CSS}</style>
     </div>
   );
 }
