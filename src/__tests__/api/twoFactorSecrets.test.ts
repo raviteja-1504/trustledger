@@ -19,6 +19,10 @@ jest.mock("@/app/api/_middleware", () => ({
 
 import { POST } from "@/app/api/auth/2fa/route";
 
+// scrypt is deliberately slow (8 backup codes are hashed per enable, and matched one by one), so under the full
+// suite's parallel CPU load a test can pass jest's default 5 s limit. Give it room rather than weaken the hash.
+jest.setTimeout(30_000);
+
 const KEY_HEX = "ab".repeat(32);
 const row = () => (db.client.from("user_2fa") as unknown as { rows: Record<string, unknown>[] }).rows[0];
 const call = (action: string, body: unknown = {}) =>

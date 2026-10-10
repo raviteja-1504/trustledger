@@ -3,8 +3,8 @@
  *
  * GET /api/scans/:id/trust-record → a signed JSON document for this scan: the change, the engine and
  * coverage, every security finding (confidence, introduced-by-PR, triage decision), AI share per file,
- * reviewer attestations and the merge-gate outcome. Signed with HMAC-SHA256 over the canonical JSON of
- * `record`, using the same export signing key as the signed audit-log export.
+ * reviewer attestations and the merge-gate outcome. Signed over the canonical JSON of `record`: Ed25519
+ * (public-key, independently verifiable) when configured, else legacy HMAC-SHA256 -- see lib/trustRecord.ts.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
@@ -12,7 +12,7 @@ import { verifyApiKey } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
-import { buildTrustRecord, signTrustRecord, signingKeyId } from "@/lib/trustRecord";
+import { buildTrustRecord, buildTrustRecordSignature } from "@/lib/trustRecord";
 import type { ScanHealth } from "@/lib/scanHealth";
 import type { FileIndicator } from "@/types";
 
@@ -62,10 +62,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       generated_at,
     });
 
-    const key = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
-    const signature = key
-      ? { algorithm: "HMAC-SHA256", value: signTrustRecord(record, key), key_id: signingKeyId(key), signed_content: "canonical JSON of `record`: object keys sorted, no whitespace" }
-      : null;
+    // Public-key (Ed25519) when EXPORT_SIGNING_PRIVATE_KEY is set, so auditors verify independently; otherwise
+    // the legacy HMAC scheme, or unsigned when no key is configured (see lib/trustRecord.ts).
+    const signature = buildTrustRecordSignature(record, process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET);
 
     await writeAuditLog(db, {
       org_id: auth.org_id, event_type: "report_generated",

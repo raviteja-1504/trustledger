@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { verifyAuditChain, writeAuditLog } from "@/lib/audit";
+import { signEd25519 } from "@/lib/exportSigning";
 import crypto from "crypto";
 
 export async function GET(req: NextRequest) {
@@ -66,11 +67,15 @@ export async function GET(req: NextRequest) {
     events,
   });
 
-  const signingKey = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
-  if (!signingKey) {
-    return NextResponse.json({ error: "export_signing_not_configured", detail: "Set EXPORT_SIGNING_KEY or CRON_SECRET" }, { status: 503 });
+  // Public-key (Ed25519) when EXPORT_SIGNING_PRIVATE_KEY is set, so auditors verify independently; otherwise
+  // the legacy HMAC scheme over the same bytes.
+  const hmacKey = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
+  const ed = signEd25519(contentToSign, "the JSON object of {org_id, period_start, period_end, exported_at, event_count, chain_valid, events}");
+  if (!ed && !hmacKey) {
+    return NextResponse.json({ error: "export_signing_not_configured", detail: "Set EXPORT_SIGNING_PRIVATE_KEY (preferred) or EXPORT_SIGNING_KEY" }, { status: 503 });
   }
-  const signature  = crypto.createHmac("sha256", signingKey).update(contentToSign).digest("hex");
+  const signatureAlgo = ed ? ed.algorithm : "HMAC-SHA256";
+  const signature     = ed ? ed.value : crypto.createHmac("sha256", hmacKey!).update(contentToSign).digest("hex");
 
   // Logged after the export content is fixed, so this entry is never part of the export it describes.
   await writeAuditLog(db, {
@@ -91,8 +96,10 @@ export async function GET(req: NextRequest) {
       `# Period: ${start} — ${end}`,
       `# Generated: ${exportedAt}`,
       `# Chain integrity: ${chainResult.valid ? "VERIFIED" : "BROKEN (tampered)"}`,
-      `# HMAC-SHA256 signature: ${signature}`,
-      `# Verify: echo -n '${contentToSign.slice(0,100)}...' | openssl dgst -sha256 -hmac YOUR_SIGNING_KEY`,
+      `# Signature (${signatureAlgo}): ${signature}`,
+      ...(ed
+        ? [`# Public key id: ${ed.key_id}`, `# Public key: ${new URL("/.well-known/trustledger-export-signing-key", req.url).toString()}`]
+        : [`# Verify: recompute HMAC-SHA256 of the signed content with your EXPORT_SIGNING_KEY`]),
       "",
       header,
       ...rows,
@@ -103,6 +110,7 @@ export async function GET(req: NextRequest) {
         "Content-Type":        "text/csv",
         "Content-Disposition": `attachment; filename="trustledger-audit-${org?.slug}-${exportedAt.slice(0,10)}.signed.csv"`,
         "X-TrustLedger-Signature": signature,
+        "X-TrustLedger-Signature-Algo": signatureAlgo,
         "X-TrustLedger-Chain-Valid": String(chainResult.valid),
       },
     });
@@ -125,9 +133,12 @@ export async function GET(req: NextRequest) {
       chain_valid:      chainResult.valid,
       total_records:    chainResult.total,
       broken_at:        chainResult.broken_at ?? null,
-      signature_algo:   "HMAC-SHA256",
+      signature_algo:   signatureAlgo,
       signature:        signature,
-      verification_note:"Verify by recomputing HMAC-SHA256 of the 'content_hash_input' using your EXPORT_SIGNING_KEY env var.",
+      signed_content:   ed?.signed_content ?? "the JSON object of {org_id, period_start, period_end, exported_at, event_count, chain_valid, events}",
+      ...(ed
+        ? { key_id: ed.key_id, public_key_pem: ed.public_key_pem, public_key_url: new URL("/.well-known/trustledger-export-signing-key", req.url).toString(), verification_note: "Ed25519-verify base64(signature) over the signed content with the public key above; confirm key_id matches public_key_url." }
+        : { verification_note: "Verify by recomputing HMAC-SHA256 of the signed content using your EXPORT_SIGNING_KEY env var." }),
     },
     events: events ?? [],
   };
@@ -137,6 +148,7 @@ export async function GET(req: NextRequest) {
       "Content-Type":        "application/json",
       "Content-Disposition": `attachment; filename="trustledger-audit-${org?.slug}-${exportedAt.slice(0,10)}.signed.json"`,
       "X-TrustLedger-Signature":  signature,
+      "X-TrustLedger-Signature-Algo": signatureAlgo,
       "X-TrustLedger-Chain-Valid":String(chainResult.valid),
     },
   });

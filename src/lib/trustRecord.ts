@@ -4,8 +4,9 @@
  * security finding with its confidence, whether the PR introduced it and any triage decision on it, the AI
  * share per file, the reviewer attestations, and the merge-gate outcome.
  *
- * Signed with HMAC-SHA256 over the canonical JSON of `record` (keys sorted, no whitespace), with the same
- * export signing key as the signed audit-log export. verifyTrustRecord() recomputes it.
+ * Signed over the canonical JSON of `record` (keys sorted, no whitespace): with Ed25519 when
+ * EXPORT_SIGNING_PRIVATE_KEY is set, so anyone can verify with the published public key (lib/exportSigning.ts);
+ * otherwise with the legacy HMAC-SHA256 shared secret, which only the issuing server can check.
  * Server-only (node:crypto).
  */
 import crypto from "crypto";
@@ -14,6 +15,10 @@ import type { ScanHealth } from "./scanHealth";
 import { isActive, type TriageDecision } from "./findingLifecycle";
 import { confidenceLevel } from "./confidence";
 import { findingMeta } from "./findingCatalog";
+import { EXPORT_SIG_ALGO, signEd25519, verifyEd25519, keyIdMatches, type Ed25519Signature } from "./exportSigning";
+
+/** What the signed bytes are, named inside every signature so a verifier reconstructs them exactly. */
+const SIGNED_CONTENT_NOTE = "canonical JSON of `record`: object keys sorted, no whitespace";
 
 export const TRUST_RECORD_SCHEMA = "trustledger.trust-record/v1";
 
@@ -105,6 +110,22 @@ export function signTrustRecord(record: TrustRecord, key: string): string {
   return crypto.createHmac("sha256", key).update(canonicalJson(record)).digest("hex");
 }
 
+/** HMAC signature object, the legacy scheme (shared secret; only the server can verify). */
+export interface HmacSignature { algorithm: "HMAC-SHA256"; value: string; key_id: string; signed_content: string }
+export type TrustRecordSignature = Ed25519Signature | HmacSignature;
+
+/**
+ * The signature to attach to a Trust Record, preferring public-key (Ed25519) so auditors can verify
+ * independently. Falls back to HMAC when only EXPORT_SIGNING_KEY is set, and to null (unsigned) when neither
+ * key is configured.
+ */
+export function buildTrustRecordSignature(record: TrustRecord, hmacKey: string | undefined): TrustRecordSignature | null {
+  const ed = signEd25519(canonicalJson(record), SIGNED_CONTENT_NOTE);
+  if (ed) return ed;
+  if (hmacKey) return { algorithm: "HMAC-SHA256", value: signTrustRecord(record, hmacKey), key_id: signingKeyId(hmacKey), signed_content: SIGNED_CONTENT_NOTE };
+  return null;
+}
+
 export function verifyTrustRecord(doc: { record: TrustRecord; signature: { algorithm: string; value: string } }, key: string): boolean {
   if (doc.signature?.algorithm !== "HMAC-SHA256") return false;
   const expected = Buffer.from(signTrustRecord(doc.record, key), "hex");
@@ -135,13 +156,28 @@ export const CHECK_MESSAGE: Record<TrustRecordCheck, string> = {
   not_configured: "Can't verify. This server has no export signing key configured.",
 };
 
-/** Check an uploaded Trust Record document against `key` (this server's signing key, if any). */
-export function checkTrustRecord(doc: unknown, key: string | undefined): TrustRecordCheck {
-  const d = doc as { record?: { schema?: unknown }; signature?: { algorithm?: string; value?: string; key_id?: string } | null } | null;
+/**
+ * Check an uploaded Trust Record document.
+ *   hmacKey          -- this server's HMAC export secret, for legacy HMAC-SHA256 documents (if any).
+ *   trustedPublicPem -- this server's Ed25519 PUBLIC key PEM, for public-key documents (if any).
+ * A public-key document is trusted only when its embedded key matches our published key (keyIdMatches), so a
+ * document self-signed with a stranger's key is rejected as "unknown_key", not accepted.
+ */
+export function checkTrustRecord(doc: unknown, hmacKey: string | undefined, trustedPublicPem?: string | undefined): TrustRecordCheck {
+  const d = doc as { record?: { schema?: unknown }; signature?: { algorithm?: string; value?: string; key_id?: string; public_key_pem?: string } | null } | null;
   if (!d || typeof d !== "object" || !d.record || typeof d.record !== "object" || d.record.schema !== TRUST_RECORD_SCHEMA) return "malformed";
   if (!d.signature) return "unsigned";
-  if (!key) return "not_configured";
-  if (d.signature.key_id && d.signature.key_id !== signingKeyId(key)) return "unknown_key";
-  if (typeof d.signature.value !== "string" || !/^[0-9a-f]{64}$/.test(d.signature.value)) return "tampered";
-  return verifyTrustRecord(d as { record: TrustRecord; signature: { algorithm: string; value: string } }, key) ? "valid" : "tampered";
+  const sig = d.signature;
+
+  if (sig.algorithm === EXPORT_SIG_ALGO) {
+    if (!trustedPublicPem) return "not_configured";
+    if (!keyIdMatches(sig, trustedPublicPem)) return "unknown_key";
+    return verifyEd25519(canonicalJson((d as { record: TrustRecord }).record), sig) ? "valid" : "tampered";
+  }
+
+  // Legacy HMAC-SHA256 (shared secret).
+  if (!hmacKey) return "not_configured";
+  if (sig.key_id && sig.key_id !== signingKeyId(hmacKey)) return "unknown_key";
+  if (typeof sig.value !== "string" || !/^[0-9a-f]{64}$/.test(sig.value)) return "tampered";
+  return verifyTrustRecord(d as { record: TrustRecord; signature: { algorithm: string; value: string } }, hmacKey) ? "valid" : "tampered";
 }

@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyApiKey } from "../../_middleware";
 import { checkTrustRecord, CHECK_MESSAGE, type TrustRecord } from "@/lib/trustRecord";
+import { exportPublicKey } from "@/lib/exportSigning";
 
 const MAX_BYTES = 5 * 1024 * 1024;
 
@@ -21,7 +22,7 @@ export async function POST(req: NextRequest) {
   let body: { document?: unknown };
   try { body = JSON.parse(raw); } catch { return NextResponse.json({ status: "malformed", message: CHECK_MESSAGE.malformed }); }
 
-  const status = checkTrustRecord(body.document, process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET);
+  const status = checkTrustRecord(body.document, process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET, exportPublicKey()?.public_key_pem);
   const record = status === "malformed" ? null : (body.document as { record: TrustRecord }).record;
   return NextResponse.json({
     status,
