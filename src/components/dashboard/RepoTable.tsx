@@ -114,9 +114,9 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
               const risky = r.openCritical != null ? r.openCritical + (r.openHigh ?? 0) : r.highCrit;
               return (
                 <tr key={r.repo} className="hover:bg-gray-50/60">
-                  <td className="px-5 py-2.5 max-w-[240px]">
-                    <Link href={repoHref(r.repo)} className="block text-xs font-bold text-gray-800 hover:text-indigo-600 truncate">{r.repo.split("/").pop()}</Link>
-                    <span className="block text-[10px] text-gray-400 truncate">{r.repo.split("/")[0]} · {r.scans} scan{r.scans === 1 ? "" : "s"}</span>
+                  <td className="px-5 py-2.5 min-w-[160px]">
+                    <Link href={repoHref(r.repo)} title={r.repo} className="block text-xs font-bold text-gray-800 hover:text-indigo-600 break-words leading-snug">{r.repo.split("/").pop()}</Link>
+                    <span className="block text-[11px] text-gray-500 break-words">{r.repo.split("/")[0]} · {r.scans} scan{r.scans === 1 ? "" : "s"}</span>
                   </td>
                   {hasScores && (
                     <td className="px-3 py-2.5">

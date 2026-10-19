@@ -97,7 +97,8 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
       style={{ background: "radial-gradient(120% 140% at 0% 0%, #312e81 0%, #1e1b4b 38%, #0b1020 100%)" }}>
       <div className="absolute inset-0 pointer-events-none opacity-[0.07]"
         style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.6) 1px, transparent 1px)", backgroundSize: "28px 28px" }} />
-      <div className="relative grid grid-cols-1 lg:grid-cols-[auto_1fr_minmax(260px,320px)] gap-6 lg:gap-8 p-5 sm:p-7">
+      {/* Three columns only when there's room for them (xl); below that the dimensions get the full width. */}
+      <div className="relative grid grid-cols-1 lg:grid-cols-[auto_minmax(0,1fr)] xl:grid-cols-[auto_minmax(0,1fr)_300px] gap-6 lg:gap-8 p-5 sm:p-7">
 
         {/* Score */}
         <div className="flex items-center gap-5">
@@ -119,14 +120,14 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
         <div className="min-w-0">
           <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-3">What drives it</p>
           {score ? (
-            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
+            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3.5">
               {score.dimensions.map(d => (
                 <li key={d.key} className="min-w-0">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="text-xs font-semibold text-white/85 truncate">{d.label}</span>
-                    <span className="flex items-baseline gap-1.5 shrink-0">
-                      <span className="text-[11px] tabular-nums text-white/45">{d.points}/{d.max_points}</span>
-                      <span className="text-xs font-black w-4 text-right" style={{ color: GRADE_COLOR[d.grade] }}>{d.grade}</span>
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="min-w-0 text-xs font-semibold text-white/85 leading-snug">{d.label}</span>
+                    <span className="flex items-baseline gap-1.5 shrink-0 whitespace-nowrap">
+                      <span className="text-[11px] tabular-nums text-white/55">{d.points}/{d.max_points}</span>
+                      <span className="text-xs font-black text-right min-w-[1rem]" style={{ color: GRADE_COLOR[d.grade] }}>{d.grade}</span>
                     </span>
                   </div>
                   <div className="mt-1.5 h-1.5 rounded-full bg-white/10 overflow-hidden">
@@ -143,7 +144,7 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
         </div>
 
         {/* Next actions */}
-        <div className="rounded-2xl bg-white/[0.06] ring-1 ring-white/10 p-4">
+        <div className="rounded-2xl bg-white/[0.06] ring-1 ring-white/10 p-4 lg:col-span-2 xl:col-span-1">
           <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-2.5">Do next</p>
           {actions.length ? (
             <ol className="space-y-2">

@@ -181,9 +181,10 @@ function ItemCard({ i }: { i: AttentionItem }) {
         <div className="flex flex-wrap gap-1.5 pl-4 pr-3.5 pb-2.5">
           {i.links.map(l => (
             <Link key={l.href + l.label} href={l.href}
-              className={`inline-flex items-center gap-1.5 max-w-full rounded-lg ring-1 px-2 py-1 text-[11px] font-semibold transition-colors ${s.chip}`}>
-              <span className="font-mono truncate max-w-[150px]">{l.label}</span>
-              {l.note && <span className="font-medium opacity-60 whitespace-nowrap">{l.note}</span>}
+              title={l.note ? `${l.label} · ${l.note}` : l.label}
+              className={`inline-flex flex-wrap items-baseline gap-x-1.5 max-w-full rounded-lg ring-1 px-2 py-1 text-[11px] font-semibold transition-colors ${s.chip}`}>
+              <span className="font-mono break-all">{l.label}</span>
+              {l.note && <span className="font-medium opacity-70">{l.note}</span>}
             </Link>
           ))}
           {i.more ? <Link href={i.all?.href ?? i.href} className="text-[11px] font-semibold text-gray-500 hover:text-gray-800 self-center px-1">+{i.more} more</Link> : null}
@@ -198,7 +199,8 @@ function ItemCard({ i }: { i: AttentionItem }) {
   );
 }
 
-const COLS: Record<number, string> = { 1: "grid-cols-1", 2: "grid-cols-1 md:grid-cols-2", 3: "grid-cols-1 md:grid-cols-2 xl:grid-cols-3" };
+// Three columns only on wide screens, so item titles and chips have room.
+const COLS: Record<number, string> = { 1: "grid-cols-1", 2: "grid-cols-1 lg:grid-cols-2", 3: "grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 lg:[&>*:nth-child(3)]:col-span-2 2xl:[&>*:nth-child(3)]:col-span-1" };
 
 export default function NeedsAttention({ items, ready }: { items: readonly AttentionItem[]; ready: boolean }) {
   if (!ready) return <div className="h-32 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading what needs attention" />;
@@ -237,7 +239,7 @@ export default function NeedsAttention({ items, ready }: { items: readonly Atten
             </span>
             <div className="min-w-0">
               <h2 className="text-lg font-black tracking-tight leading-tight">Needs attention</h2>
-              <p className="text-sm text-white/85 truncate">{summary}</p>
+              <p className="text-sm text-white/90 leading-snug">{summary}</p>
             </div>
           </div>
           <div className="text-right shrink-0">
@@ -251,12 +253,12 @@ export default function NeedsAttention({ items, ready }: { items: readonly Atten
           const s = SEV[g.severity];
           return (
             <div key={g.severity} role="group" aria-label={`${g.label}: ${g.items.length}`} className={`rounded-2xl ring-1 p-3 ${s.column}`}>
-              <div className="flex items-center justify-between gap-2 px-1 pb-2.5">
+              <div className="flex items-start justify-between gap-2 px-1 pb-2.5">
                 <div className="min-w-0">
                   <p className={`text-xs font-black uppercase tracking-wider ${s.head}`}>{g.label}</p>
-                  <p className="text-[11px] text-gray-500 truncate">{g.hint}</p>
+                  <p className="text-[11px] text-gray-500 leading-snug">{g.hint}</p>
                 </div>
-                <span className={`min-w-[26px] h-[26px] px-2 rounded-full text-xs font-black flex items-center justify-center ${s.badge}`}>{g.items.length}</span>
+                <span className={`min-w-[26px] h-[26px] px-2 rounded-full text-xs font-black flex items-center justify-center shrink-0 ${s.badge}`}>{g.items.length}</span>
               </div>
               <ul className="space-y-2.5">
                 {g.items.map(i => <ItemCard key={i.key} i={i} />)}

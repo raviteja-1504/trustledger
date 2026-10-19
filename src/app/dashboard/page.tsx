@@ -359,7 +359,7 @@ export default function DashboardPage() {
                 </span>
                 Live
               </span>
-              <span className="text-xs font-semibold text-gray-500 truncate">{orgLabel}</span>
+              <span className="text-xs font-semibold text-gray-500 break-words">{orgLabel}</span>
               <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${roleColor.dot}`} />{ROLE_LABELS[role]}
               </span>

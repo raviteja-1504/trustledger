@@ -36,10 +36,10 @@ export default function ActivityList({ events, limit = 8 }: { events: readonly A
                     : <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <Link href={`/pr/${e.scan_id}`} className="block text-xs font-semibold text-gray-800 hover:text-indigo-600 truncate">
+                  <Link href={`/pr/${e.scan_id}`} className="block text-xs font-semibold text-gray-800 hover:text-indigo-600 break-words leading-snug">
                     {scan ? `Scanned ${e.repo.split("/").pop()}` : `Signed off ${e.file_path.split("/").pop()}`}
                   </Link>
-                  <p className="text-[10px] text-gray-400 truncate">
+                  <p className="text-[11px] text-gray-500 break-words leading-snug">
                     {scan ? `${Math.round(e.total_ai_pct * 100)}% AI content` : `${e.repo.split("/").pop()}${e.pr_number > 0 ? ` · PR #${e.pr_number}` : ""}${e.reviewer_email ? ` · ${e.reviewer_email}` : ""}`}
                   </p>
                 </div>

@@ -66,19 +66,20 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
             return (
               <li key={`${f.scan_id}::${f.file_path}`}>
                 <Link href={`/pr/${f.scan_id}?attest=${encodeURIComponent(f.file_path)}`}
-                  className="flex items-center gap-3 px-5 py-2.5 hover:bg-gray-50/70 transition-colors">
-                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded shrink-0 ${crit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>
+                  title={f.file_path}
+                  className="flex items-start gap-3 px-5 py-2.5 hover:bg-gray-50/70 transition-colors">
+                  <span className={`mt-0.5 text-[9px] font-black px-1.5 py-0.5 rounded shrink-0 ${crit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>
                     {crit ? "CRIT" : "HIGH"}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-xs font-semibold font-mono text-gray-800 truncate">{name}</span>
-                    <span className="block text-[10px] text-gray-400 truncate">
+                    <span className="block text-xs font-semibold font-mono text-gray-800 break-all leading-snug">{name}</span>
+                    <span className="block text-[11px] text-gray-500 leading-snug mt-0.5">
                       {f.repo.split("/").pop()}{f.pr_number > 0 ? ` · PR #${f.pr_number}` : ""} · {Math.round(f.ai_pct * 100)}% AI
                     </span>
                   </span>
                   {f.overdueHours != null
-                    ? <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded shrink-0">{overdueLabel(f.overdueHours)}</span>
-                    : <span className="text-[10px] font-semibold text-indigo-600 shrink-0">Review</span>}
+                    ? <span className="mt-0.5 text-[10px] font-bold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded shrink-0 whitespace-nowrap">{overdueLabel(f.overdueHours)}</span>
+                    : <span className="mt-0.5 text-[11px] font-semibold text-indigo-600 shrink-0">Review</span>}
                 </Link>
               </li>
             );

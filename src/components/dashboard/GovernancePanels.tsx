@@ -15,7 +15,7 @@ export type Loadable<T> = T | null | "unavailable";
 function Panel({ title, href, cta, children, label }: { title: string; href: string; cta: string; children: React.ReactNode; label: string }) {
   return (
     <section aria-label={label} className="section-card p-5 flex flex-col gap-4 min-w-0">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-bold text-gray-900">{title}</h2>
         <Link href={href} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">{cta} →</Link>
       </div>
@@ -40,7 +40,7 @@ export function ShadowAiPanel({ summary }: { summary: Loadable<ShadowSummary> })
         const maxDet = Math.max(1, ...tools.map(t => t.detections));
         return (
           <>
-            <div className="flex items-end gap-6">
+            <div className="grid grid-cols-2 gap-4">
               <div>
                 <p className={`text-3xl font-black tabular-nums leading-none ${summary.open_violations ? "text-rose-600" : "text-gray-900"}`}>{summary.open_violations}</p>
                 <p className="text-[11px] text-gray-500 mt-1">unapproved-tool detections open</p>
@@ -61,14 +61,14 @@ export function ShadowAiPanel({ summary }: { summary: Loadable<ShadowSummary> })
               <ul className="space-y-2">
                 {tools.map(t => (
                   <li key={t.tool}>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-gray-700 truncate">{t.label}</span>
+                    <div className="flex items-start justify-between gap-2 text-xs">
+                      <span className="min-w-0 font-semibold text-gray-700 break-words leading-snug">{t.label}</span>
                       <span className="flex items-center gap-2 shrink-0">
-                        <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                        <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded whitespace-nowrap ${
                           t.approval === "approved" ? "bg-emerald-50 text-emerald-700" : t.approval === "unapproved" ? "bg-rose-50 text-rose-700" : "bg-gray-100 text-gray-500"}`}>
                           {t.approval}
                         </span>
-                        <span className="tabular-nums text-gray-500 w-6 text-right">{t.detections}</span>
+                        <span className="tabular-nums text-gray-500 min-w-[1.5rem] text-right">{t.detections}</span>
                       </span>
                     </div>
                     <div className="mt-1 h-1 rounded-full bg-gray-100 overflow-hidden">
@@ -120,8 +120,8 @@ export function SecretsPanel({ counts }: { counts: Loadable<SecretCounts> }) {
             </div>
             <ul className="grid grid-cols-3 gap-2">
               {rows.map(r => (
-                <li key={r.k} className="rounded-xl bg-gray-50 px-3 py-2">
-                  <p className="flex items-center gap-1.5 text-[10px] font-semibold text-gray-500"><span className={`w-1.5 h-1.5 rounded-full ${r.c}`} />{r.k}</p>
+                <li key={r.k} className="rounded-xl bg-gray-50 px-2.5 py-2 min-w-0">
+                  <p className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-500"><span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.c}`} />{r.k}</p>
                   <p className="text-lg font-black tabular-nums text-gray-900">{r.n}</p>
                 </li>
               ))}
@@ -149,9 +149,9 @@ export function EvidencePanel({ overview }: { overview: Loadable<EvidenceOvervie
               const total = f.controls.length;
               return (
                 <li key={f.id}>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-gray-700 truncate">{f.name}</span>
-                    <span className="tabular-nums text-gray-500 shrink-0"><span className="font-black text-gray-900">{f.status_counts.pass}</span>/{total} with evidence</span>
+                  <div className="flex items-start justify-between gap-2 text-xs">
+                    <span className="min-w-0 font-semibold text-gray-700 leading-snug">{f.name}</span>
+                    <span className="tabular-nums text-gray-500 shrink-0 whitespace-nowrap"><span className="font-black text-gray-900">{f.status_counts.pass}</span>/{total} with evidence</span>
                   </div>
                   <div className="mt-1 flex h-1.5 rounded-full overflow-hidden bg-gray-100" aria-hidden="true">
                     {ORDER.map(s => f.status_counts[s] > 0 && <div key={s} className={DOT[s]} style={{ width: `${(f.status_counts[s] / Math.max(total, 1)) * 100}%` }} />)}

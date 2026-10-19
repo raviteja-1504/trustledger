@@ -36,15 +36,15 @@ export default function RiskPanel({ data, periodLabel }: { data: Pick<DashboardD
           <h2 className="text-sm font-bold text-gray-900">Risk trend</h2>
           <p className="text-xs text-gray-400 mt-0.5">Flagged files by week · {periodLabel}</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           {stats.map(s => (
             <div key={s.k} className="text-right">
-              <p className="flex items-center justify-end gap-1.5 text-[10px] font-semibold text-gray-500"><span className={`w-2 h-2 rounded-sm ${s.c}`} />{s.k}</p>
+              <p className="flex items-center justify-end gap-1.5 text-[11px] font-semibold text-gray-500 whitespace-nowrap"><span className={`w-2 h-2 rounded-sm ${s.c}`} />{s.k}</p>
               <p className="text-lg font-black tabular-nums text-gray-900 leading-tight">{s.n}</p>
             </div>
           ))}
           {dir && (
-            <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${
+            <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 whitespace-nowrap ${
               dir.dir === "up" ? "bg-rose-50 text-rose-700 ring-rose-200" : dir.dir === "down" ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-gray-50 text-gray-600 ring-gray-200"}`}
               title="Average weekly CRITICAL+HIGH, second half of the period vs the first">
               {dir.dir === "up" ? "▲" : dir.dir === "down" ? "▼" : "■"} {dir.pct}% critical/high

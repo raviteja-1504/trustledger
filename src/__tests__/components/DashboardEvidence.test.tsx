@@ -303,6 +303,26 @@ describe("needs attention", () => {
   });
 });
 
+describe("no cut-off text", () => {
+  it("no dashboard block truncates or clamps its text (it wraps instead)", () => {
+    const now = Date.parse("2026-10-19T12:00:00Z");
+    const q = buildQueue({ top_risk_files: [file({ file_path: "src/a/very/long/path/to/some_really_long_file_name_here.ts" })], sla_breach_files: [] }, now);
+    const { container } = render(<>
+      <TrustHero score={score} history={[]} />
+      <KpiStrip kpis={buildKpis(kpiBase)} />
+      <NeedsAttention ready items={buildAttention({
+        slaOverdue: 1, overdueFiles: [{ file: "src/x.ts", scanId: "s", repo: "acme/api", overdueHours: 3 }], unreviewedCritical: [], unreviewedHigh: [],
+        awaitingRepos: [{ repo: "acme/a-very-long-repository-name", repoName: "a-very-long-repository-name", scanId: "s" }],
+        openCriticalSecrets: 1, openOtherSecrets: 1, unapprovedAiTools: 1, failingControls: 1,
+      })} />
+      <ReviewQueue items={q} />
+      <RepoTable rows={buildRepoRows([{ repo: "acme/x", ai_pct: 0, attestation_rate: 1, last_scan: "2026-10-18", scan_count: 1, file_count: 1, latest_scan_id: "s" }], null)} />
+      <ActivityList events={[]} />
+    </>);
+    expect(container.querySelectorAll(".truncate, [class*='line-clamp']")).toHaveLength(0);
+  });
+});
+
 describe("risk direction", () => {
   const pt = (c: number, h: number) => ({ date: "d", critical_count: c, high_count: h, medium_count: 9 });
   it("second half vs first half of CRITICAL+HIGH; too little data → none", () => {
