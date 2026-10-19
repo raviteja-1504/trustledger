@@ -12,6 +12,7 @@ import { readSeed } from "@/lib/offlineData";
 import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { patchDataWithAttestations } from "@/lib/trustScore";
+import { loadStatuses } from "@/lib/violationStatuses";
 import type { DashboardData } from "@/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -369,7 +370,8 @@ export default function AlertsPage() {
       // This is authoritative — if the DB says 0 open violations, patch the
       // dashboard data so no false-positive alerts fire (catches cases where
       // localStorage was cleared but attestations are persisted in Supabase).
-      let patchedData = patchDataWithAttestations(data);
+      // Server statuses (resolved on any device) plus this tab's just-made sign-offs.
+      let patchedData = patchDataWithAttestations(data, seed ? undefined : await loadStatuses());
 
       if (profile?.org_id) {
         try {

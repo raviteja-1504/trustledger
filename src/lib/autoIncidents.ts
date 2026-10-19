@@ -24,11 +24,15 @@ import { fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
 import { cached, cacheKeys } from "@/lib/cache";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "./incidentPlaybooks";
 import { writeAuditLog } from "./audit";
+import { orgDataVersion, versionedKey } from "./orgDataVersion";
 
 type IncidentRow = Database["public"]["Tables"]["incidents"]["Row"];
 
 /** Bounded so an incident that flaps open/closed for months can't grow its timeline without limit. */
 const MAX_TIMELINE_ENTRIES = 50;
+
+export const backlogTitle = (files: number, repos: number) =>
+  `${files} CRITICAL/HIGH file${files !== 1 ? "s" : ""} unattested across ${repos} repo${repos !== 1 ? "s" : ""}`;
 
 /** Change an auto-incident's status and append one timeline entry (reading only that row's timeline). */
 async function transitionIncident(
@@ -56,12 +60,25 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     // call is unaffected since nothing is cached yet. Incident sync is
     // already best-effort (see the catch below), so a few seconds of
     // staleness here is an acceptable trade for the CPU savings.
-    const data = await cached(cacheKeys.autoIncidentState(orgId), 12, () => fetchUnattestedRiskState(orgId));
+    // The cache key carries the org's data version, so a sync right after an attestation never reuses state computed
+    // before it (that left the file's incident active until some later scan or attestation happened to re-sync).
+    const version = await orgDataVersion(db, orgId);
+    const data = version == null
+      ? await fetchUnattestedRiskState(orgId)
+      : await cached(versionedKey(cacheKeys.autoIncidentState(orgId), version), 12, () => fetchUnattestedRiskState(orgId));
     const now  = new Date().toISOString();
 
     // Identity of a file-tied incident: repo AND path (the same path in two repos is two problems).
     const fileKey = (repo: string | null | undefined, file: string | null | undefined) => `${repo ?? ""}::${file ?? ""}`;
-    const openFiles = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested);
+    // Open: a CRITICAL file in the latest scan, not attested, and whose finding hasn't been closed (resolved or
+    // accepted on the violations page also ends the incident).
+    const closed = new Set(data.closed_files ?? []);
+    // The violations page records status changes as overrides keyed "crit::<scan>::<path>"; resolved ones count too.
+    const { data: overrides } = await db.from("violation_overrides").select("violation_id").eq("org_id", orgId).eq("status", "resolved") as
+      { data: Array<{ violation_id: string }> | null };
+    const resolvedOverride = new Set((overrides ?? []).map(o => { const p = o.violation_id.split("::"); return `${p[1]}::${p.slice(2).join("::")}`; }));
+    const openFiles = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested
+      && !closed.has(fileKey(f.repo, f.file_path)) && !resolvedOverride.has(`${f.scan_id}::${f.file_path}`));
     const stillOpenKeys = new Set(openFiles.map(f => fileKey(f.repo, f.file_path)));
 
     // No timeline here: it's the bulk of each row, and only the few rows actually updated need it.
@@ -85,7 +102,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     for (const row of rowByKey.values()) {
       if (row.status !== "active" || stillOpenKeys.has(fileKey(row.affected_repo, row.affected_file))) continue;
       await transitionIncident(db, orgId, row.id, now, { status: "resolved", resolved_at: now },
-        "Auto-resolved: no longer an unattested CRITICAL file in the repository's latest scan");
+        "Auto-resolved: attested, resolved, or no longer a CRITICAL file in the repository's latest scan");
     }
 
     // 2. Auto-resolve the deploy-backlog incident once the count clears.
@@ -140,7 +157,14 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
       }
     }
 
-    // 4. Create a P2 backlog incident once the unattested deploy count is high.
+    // 4. Keep an active backlog incident's title current (it used to keep the count from when it was created).
+    if (backlogRow?.status === "active" && data.unattested_deploy_count > 3) {
+      const title = backlogTitle(data.unattested_deploy_count, data.repos.length);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (db.from("incidents") as any).update({ title }).eq("id", backlogRow.id).eq("org_id", orgId).neq("title", title);
+    }
+
+    // 5. Create a P2 backlog incident once the unattested deploy count is high.
     if (data.unattested_deploy_count > 3 && backlogRow?.status === "resolved") {
       await transitionIncident(db, orgId, backlogRow.id, now, { status: "active", resolved_at: null },
         `Re-opened: ${data.unattested_deploy_count} CRITICAL/HIGH files unattested`);
@@ -153,7 +177,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data: incident } = await (db.from("incidents") as any).insert({
         org_id: orgId,
-        title: `${data.unattested_deploy_count} files unattested across ${repos.length} repo${repos.length !== 1 ? "s" : ""}`,
+        title: backlogTitle(data.unattested_deploy_count, repos.length),
         description: `${data.unattested_deploy_count} CRITICAL/HIGH files require attestation. Organisation-wide attestation rate: ${attPct}%. Policy requires all CRITICAL and HIGH files to be reviewed before merge.`,
         severity: "P2",
         status: "active",

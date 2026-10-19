@@ -15,6 +15,8 @@ import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
 import { authedFetch } from "@/lib/useRealData";
+import { readLocalStatuses, recordLocalStatuses } from "@/lib/localStatuses";
+import { invalidateServerStatuses } from "@/lib/violationStatuses";
 import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
 import { usePresence, initials } from "@/lib/presence";
@@ -1079,11 +1081,11 @@ function PRDetailContent() {
 
   // Realtime presence — show who else is reviewing this scan
   const { reviewers } = usePresence(scan?.scan_id ?? null);
-  // Initialise attestedSet from persisted tl_violation_statuses so navigation doesn't reset state
+  // Initialise attestedSet from this tab's recent sign-offs so navigation doesn't reset state before the scan reloads
   const [attestedSet, setAttestedSet] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set<string>();
     try {
-      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
+      const statuses = readLocalStatuses();
       const paths = Object.entries(statuses)
         .filter(([key, val]) => val === "resolved" && key.split("::")[1] === id)
         .map(([key]) => key.split("::").slice(2).join("::"));
@@ -1119,7 +1121,7 @@ function PRDetailContent() {
     setPolicy(loadPolicy());
     // Re-sync attestedSet in case localStorage was updated while away
     try {
-      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
+      const statuses = readLocalStatuses();
       const paths = Object.entries(statuses)
         .filter(([key, val]) => val === "resolved" && key.split("::")[1] === id)
         .map(([key]) => key.split("::").slice(2).join("::"));
@@ -1202,7 +1204,6 @@ function PRDetailContent() {
   function resolveOneFile(path: string) {
     if (!scan) return;
     try {
-      const stored = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
       const snap   = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null");
       const updates: Record<string,string> = {};
 
@@ -1221,7 +1222,8 @@ function PRDetailContent() {
         if (mockFile) updates[`${riskPfx(mockFile.risk_score)}::${scan.scan_id}::${path}`] = "resolved";
       }
       if (Object.keys(updates).length > 0) {
-        localStorage.setItem("tl_violation_statuses", JSON.stringify({ ...stored, ...updates }));
+        recordLocalStatuses(updates);
+        invalidateServerStatuses();
         window.dispatchEvent(new Event("tl:badge"));
       }
     } catch {}
@@ -1372,7 +1374,6 @@ function PRDetailContent() {
   // for this scan, then marks them all resolved.
   function resolveViolationsForScan(scanId: string) {
     try {
-      const stored  = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
       const snap    = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null");
       const updates: Record<string,string> = {};
 
@@ -1395,7 +1396,8 @@ function PRDetailContent() {
         });
       }
 
-      localStorage.setItem("tl_violation_statuses", JSON.stringify({ ...stored, ...updates }));
+      recordLocalStatuses(updates);
+      invalidateServerStatuses();
       window.dispatchEvent(new Event("tl:badge"));
     } catch {}
   }
@@ -1496,7 +1498,7 @@ function PRDetailContent() {
     try {
       const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as
         { top_risk_files: { scan_id: string; file_path: string; risk_score: string; attested: boolean; repo: string }[] } | null;
-      const statuses = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
+      const statuses = readLocalStatuses();
       const pfx = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : "med";
       const next = (snap?.top_risk_files ?? []).find(f => {
         if (f.scan_id === scan.scan_id) return false;

@@ -6,13 +6,17 @@ import {
 } from "recharts";
 import type { RiskTrendPoint } from "@/types";
 
+/** A point may carry an axis `label` and a tooltip `range` (dashboard RiskPanel fillTrendWeeks); otherwise the date. */
+type TrendPoint = RiskTrendPoint & { label?: string; range?: string };
+
 function CustomTooltip({ active, payload, label }: {
   active?: boolean;
-  payload?: { name: string; value: number; color: string }[];
+  payload?: { name: string; value: number; color: string; payload?: TrendPoint }[];
   label?: string;
 }) {
   if (!active || !payload?.length) return null;
   const total = payload.reduce((s, p) => s + p.value, 0);
+  label = payload[0].payload?.range ?? label;
   return (
     <div
       className="px-4 py-3 text-sm"
@@ -44,7 +48,8 @@ function CustomTooltip({ active, payload, label }: {
   );
 }
 
-export default function RiskTrendChart({ data }: { data: RiskTrendPoint[] }) {
+export default function RiskTrendChart({ data }: { data: TrendPoint[] }) {
+  const labelled = data.some(d => d.label);
   if (!data.length) {
     return (
       <div className="flex flex-col items-center justify-center h-56 gap-3 text-gray-300">
@@ -84,11 +89,13 @@ export default function RiskTrendChart({ data }: { data: RiskTrendPoint[] }) {
         )}
 
         <XAxis
-          dataKey="date"
-          tick={{ fontSize: 10, fill: "#94a3b8", fontWeight: 500 }}
+          dataKey={labelled ? "label" : "date"}
+          tick={{ fontSize: 11, fill: "#94a3b8", fontWeight: 500 }}
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v: string) => v.slice(5)}
+          interval="preserveStartEnd"
+          minTickGap={18}
+          tickFormatter={(v: string) => labelled ? v : v.slice(5)}
           dy={4}
         />
         <YAxis

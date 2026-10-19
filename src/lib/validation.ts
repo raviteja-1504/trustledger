@@ -67,7 +67,7 @@ export const SecretUpdateSchema = z.object({
 export const ViolationOverrideSchema = z.object({
   violation_id:   z.string().min(1).max(500),
   status:         z.enum(["open", "in_review", "resolved"]),
-  assigned_email: emailSchema.optional(),
+  assigned_email: emailSchema.or(z.literal("")).optional(),   // "" clears it
   note:           z.string().max(2000).optional(),
   escalated:      z.boolean().optional(),
 });

@@ -148,16 +148,23 @@ export default function IncidentsPage() {
   useEffect(() => { fetchIncidents(); }, [fetchIncidents]);
 
   useEffect(() => {
-    // 3min drift safety-net, skipped while hidden -- useIncidentsRealtime
-    // below already gives instant updates on DB changes.
-    const id = setInterval(() => { if (!document.hidden) fetchIncidents(); }, 180_000);
-    const onEvent = () => fetchIncidents();
+    // Sign-offs and finding status changes (tl:attest-complete / tl:attestation from the PR page, tl:badge from the
+    // violations page) end or restart auto-incidents; the list endpoint re-syncs them, so refetch on those, on return
+    // to the tab, and every minute while visible.
+    const onEvent = () => { if (!document.hidden) fetchIncidents(); };
+    const id = setInterval(onEvent, 60_000);
     window.addEventListener("tl:attest-complete", onEvent);
+    window.addEventListener("tl:attestation", onEvent);
+    window.addEventListener("tl:badge", onEvent);
     window.addEventListener("focus", onEvent);
+    document.addEventListener("visibilitychange", onEvent);
     return () => {
       clearInterval(id);
       window.removeEventListener("tl:attest-complete", onEvent);
+      window.removeEventListener("tl:attestation", onEvent);
+      window.removeEventListener("tl:badge", onEvent);
       window.removeEventListener("focus", onEvent);
+      document.removeEventListener("visibilitychange", onEvent);
     };
   }, [fetchIncidents]);
 

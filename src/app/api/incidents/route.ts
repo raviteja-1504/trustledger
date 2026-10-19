@@ -4,6 +4,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert } from "@/lib/alertDelivery";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "@/lib/incidentPlaybooks";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -14,6 +15,11 @@ export async function GET(req: NextRequest) {
   const sev    = url.searchParams.get("severity");
 
   const db = createServiceClient();
+
+  // Bring auto-incidents in line with the current attestations / finding statuses before answering, so the list and
+  // the badge never show an incident whose trigger has already cleared. Cheap when nothing changed (cached by the
+  // org's data version) and best-effort (never fails the request).
+  await syncAutoIncidents(db, org_id);
 
   // ?count=open -- just the number of open (active + contained) incidents, for badges. Rows carry their
   // whole playbook and timeline (~9 KB each), so a badge must never download the list to count it.

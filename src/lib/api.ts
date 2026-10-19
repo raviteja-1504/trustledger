@@ -133,8 +133,6 @@ export const api = {
   vulnCatalog: () =>
     apiFetch<{ catalog: Record<string, unknown> }>("/api/vuln-catalog"),
 
-  threatCatalog: () =>
-    apiFetch<{ threats: unknown[] }>("/api/threat-catalog"),
 
   auditConfig: (org: string) =>
     apiFetch<{ eventConfig: unknown; eventSoc2: unknown }>(

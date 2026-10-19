@@ -18,9 +18,16 @@ export async function GET(req: NextRequest) {
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   const { org_id, role, user_id } = auth;
 
-  const url   = new URL(req.url);
-  const repo  = url.searchParams.get("repo") ?? undefined;
-  const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "100"), 200);
+  const params = req.nextUrl.searchParams;
+  const repo  = params.get("repo") ?? undefined;
+  const limit = Math.min(parseInt(params.get("limit") ?? "100") || 100, 200);
+  // Paging and period (optional): ?before=<ISO created_at of the last row you have> for the next page, ?since=<ISO>.
+  const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
+  const before = params.get("before");
+  const since  = params.get("since");
+  if ((before && !ISO.test(before)) || (since && !ISO.test(since))) {
+    return NextResponse.json({ error: "invalid_cursor", message: "before and since must be ISO timestamps." }, { status: 400 });
+  }
 
   const db = createServiceClient();
 
@@ -56,6 +63,8 @@ export async function GET(req: NextRequest) {
 
   if (repo)            query = query.eq("repo_full_name", repo);
   if (prAuthorFilter)  query = query.eq("pr_author", prAuthorFilter);
+  if (before)          query = query.lt("created_at", before);
+  if (since)           query = query.gte("created_at", since);
 
   const { data: scans, error: dbErr } = await query;
   if (dbErr) return NextResponse.json({ error: "db_error" }, { status: 500 });
@@ -112,7 +121,9 @@ export async function GET(req: NextRequest) {
       created_at:          s.created_at,
       triggered_by:        s.triggered_by ?? "api",
     })),
-  });
+    // Cursor for the next page (pass as ?before=); null when this page wasn't full.
+    next_before: (scans ?? []).length === limit ? (scans ?? [])[(scans ?? []).length - 1].created_at : null,
+  }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
 export async function POST(req: NextRequest) {

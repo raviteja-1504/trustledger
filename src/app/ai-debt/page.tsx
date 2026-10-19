@@ -1,286 +1,148 @@
 "use client";
 
 /**
- * AI Code Debt Clock
- *
- * Like the US National Debt Clock, but for unattested AI-generated code.
- * Every hour that passes without human review of AI code is added to the
- * debt. Makes the risk visceral, urgent, and measurable.
- *
- * Debt = Σ (unattested_ai_lines × age_hours × risk_multiplier)
+ * Review debt clock: how long unreviewed HIGH/CRITICAL findings have really been waiting (lib/reviewDebt.ts), from
+ * /api/violations (when each finding was opened) and /api/violation-status (findings resolved since). The counter
+ * ticks at the measured rate -- the sum of the waiting findings' weights per hour -- and drops when one is signed off.
  */
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
-import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
-import { api } from "@/lib/api";
-import { readSeed } from "@/lib/offlineData";
-import { patchDataWithAttestations } from "@/lib/trustScore";
-import type { DashboardData } from "@/types";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { useAuth } from "@/lib/auth";
+import { useScansRealtime } from "@/lib/realtime";
+import { computeReviewDebt, DEBT_WEIGHT, type DebtFinding } from "@/lib/reviewDebt";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
+interface ApiViolation { id: string; file_path: string; risk_score: string; status: string; created_at: string; sla_deadline: string | null; scan_id: string;
+  scans: { repo_full_name?: string; pr_number?: number | null } | Array<{ repo_full_name?: string; pr_number?: number | null }> | null }
 
-// ── Debt calculation ───────────────────────────────────────────────────────────
+const fmtHours = (h: number) => h < 1 ? `${Math.round(h * 60)}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`;
 
-interface DebtItem {
-  repo:           string;
-  file:           string;
-  aiLines:        number;
-  ageHours:       number;
-  riskMultiplier: number;
-  debt:           number;  // debt units
-}
-
-// Risk multipliers: higher risk = debt accumulates faster
-const RISK_MULTIPLIER: Record<string, number> = {
-  CRITICAL: 10,
-  HIGH:     4,
-  MEDIUM:   2,
-  LOW:      1,
-};
-
-function computeDebt(data: DashboardData): { total: number; items: DebtItem[]; hourlyRate: number } {
-  const topRisk = data.top_risk_files ?? [];
-  const now = Date.now();
-
-  // Build repo → last_scan lookup so we can derive real age from scan timestamps
-  const repoLastScan: Record<string, string> = Object.fromEntries(
-    (data.repos ?? []).map(r => [r.repo, r.last_scan])
-  );
-
-  const items: DebtItem[] = topRisk
-    .filter(f => !f.attested)
-    .map((f, i) => {
-      // Use the repo's real last_scan timestamp; fall back to index estimate if missing
-      const lastScanIso = repoLastScan[f.repo];
-      const ageHours = lastScanIso
-        ? Math.max(1, Math.round((now - new Date(lastScanIso).getTime()) / 3_600_000))
-        : Math.round(12 + i * 7.3);
-      const mult = RISK_MULTIPLIER[f.risk_score ?? "MEDIUM"] ?? 2;
-      const aiLines = Math.round(f.ai_pct * 80 + 20); // estimate
-      const debt = aiLines * ageHours * mult;
-      return {
-        repo:           f.repo ?? "unknown",
-        file:           f.file_path ?? "unknown",
-        aiLines,
-        ageHours,
-        riskMultiplier: mult,
-        debt,
-      };
-    });
-
-  const total = items.reduce((s, i) => s + i.debt, 0);
-  // Hourly rate = debt that accumulates each hour from current unattested files
-  const hourlyRate = items.reduce((s, i) => s + i.aiLines * i.riskMultiplier, 0);
-
-  return { total, items, hourlyRate };
-}
-
-// ── Animated debt clock ────────────────────────────────────────────────────────
-
-function DebtClock({ value, hourlyRate }: { value: number; hourlyRate: number }) {
-  const [current, setCurrent] = useState(value);
-  const ref = useRef(value);
-
+function Clock({ value, perHour }: { value: number; perHour: number }) {
+  const [shown, setShown] = useState(value);
+  const base = useRef({ value, at: Date.now() });
+  useEffect(() => { base.current = { value, at: Date.now() }; setShown(value); }, [value]);
   useEffect(() => {
-    ref.current = value;
-    setCurrent(value);
-  }, [value]);
-
-  // Tick up in real time based on hourly rate
-  useEffect(() => {
-    if (hourlyRate === 0) return;
-    const perMs = hourlyRate / 3600_000;
-    const id = setInterval(() => {
-      ref.current += perMs * 50;
-      setCurrent(Math.round(ref.current));
-    }, 50);
+    if (!perHour) return;
+    const id = setInterval(() => setShown(base.current.value + ((Date.now() - base.current.at) / 3600_000) * perHour), 1000);
     return () => clearInterval(id);
-  }, [hourlyRate]);
-
-  const str = current.toLocaleString("en-US").padStart(12, " ");
-  return (
-    <div className="flex items-center justify-center gap-1">
-      {str.split("").map((c, i) => (
-        <span key={i} className={`inline-block text-center ${c === "," ? "w-3 text-4xl text-red-800" : c === " " ? "w-3" : "w-10 h-14 bg-red-800 rounded text-4xl font-black text-white leading-[56px]"}`}>
-          {c !== " " ? c : ""}
-        </span>
-      ))}
-    </div>
-  );
+  }, [perHour]);
+  return <p className="text-5xl sm:text-6xl font-black tabular-nums tracking-tight text-white">{Math.round(shown).toLocaleString("en-US")}</p>;
 }
 
-// ── Page ───────────────────────────────────────────────────────────────────────
+export default function ReviewDebtPage() {
+  const { profile } = useAuth();
+  const offline = isSeedMode() && !profile?.org_id;
+  const [findings, setFindings] = useState<DebtFinding[] | null>(null);
+  const [resolved, setResolved] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
-export default function AIDebtPage() {
-    const tz = useTimezone();
-  const [data,              setData]              = useState<DashboardData | null>(null);
-  const [elapsed,           setElapsed]           = useState(0);
-  const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
+  const load = useCallback(async () => {
+    if (offline) return;
+    try {
+      const [v, o] = await Promise.all([
+        authedFetch<{ violations: ApiViolation[] }>("/api/violations?status=unresolved&limit=1000"),
+        authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status").catch(() => ({ overrides: {} })),
+      ]);
+      setFindings((v.violations ?? []).map(x => {
+        const scan = Array.isArray(x.scans) ? x.scans[0] : x.scans;
+        return { id: x.id, file_path: x.file_path, risk_score: x.risk_score, status: x.status, created_at: x.created_at, sla_deadline: x.sla_deadline,
+          scan_id: x.scan_id, repo: scan?.repo_full_name ?? "", pr_number: scan?.pr_number ?? null };
+      }));
+      setResolved(new Set(Object.entries(o.overrides ?? {}).filter(([, s]) => s.status === "resolved").map(([k]) => k)));
+      setError(null);
+    } catch (e) { setError(e instanceof Error ? e.message : "Couldn't load findings"); }
+  }, [offline]);
 
+  useEffect(() => { load(); }, [load]);
+  useScansRealtime(profile?.org_id, () => { load(); });
   useEffect(() => {
-    const seed = readSeed();
-    if (seed) { setData(seed); return; }
-    api.dashboard(ORG, 30).then(setData).catch(() => {});
-  }, []);
+    const tick = () => { if (!document.hidden) load(); };
+    const id = setInterval(tick, 60_000);
+    window.addEventListener("tl:attestation", tick);
+    window.addEventListener("tl:attest-complete", tick);
+    window.addEventListener("tl:badge", tick);
+    window.addEventListener("focus", tick);
+    return () => { clearInterval(id); ["tl:attestation", "tl:attest-complete", "tl:badge", "focus"].forEach(e => window.removeEventListener(e, tick)); };
+  }, [load]);
 
-  useEffect(() => {
-    const id = setInterval(() => setElapsed(e => e + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    function sync() {
-      try {
-        setViolationStatuses(JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>);
-      } catch {}
-    }
-    function onVisible() { if (!document.hidden) sync(); }
-    sync();
-    window.addEventListener("focus",   sync);
-    window.addEventListener("storage", sync);
-    document.addEventListener("visibilitychange", onVisible);
-    const id = setInterval(sync, 2_000);
-    return () => {
-      window.removeEventListener("focus",   sync);
-      window.removeEventListener("storage", sync);
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(id);
-    };
-  }, []);
-
-  const effectiveData = useMemo(
-    () => data ? patchDataWithAttestations(data) : null,
-    [data, violationStatuses], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  const { total, items, hourlyRate } = effectiveData
-    ? computeDebt(effectiveData)
-    : { total: 0, items: [], hourlyRate: 0 };
-
-  const unattested = items.length;
-  const totalAiLines = items.reduce((s, i) => s + i.aiLines, 0);
-  const avgAge = items.length > 0
-    ? Math.round(items.reduce((s, i) => s + i.ageHours, 0) / items.length)
-    : 0;
-
-  // How many hours until debt doubles
-  const rawDouble = total > 0 && hourlyRate > 0 ? total / hourlyRate : null;
-  const doubleHours = rawDouble !== null && isFinite(rawDouble) ? Math.round(rawDouble) : null;
+  const debt = useMemo(() => computeReviewDebt(findings ?? [], resolved), [findings, resolved]);
 
   return (
     <AuthGuard>
-      <div className="max-w-4xl mx-auto space-y-6 pb-10">
+      <div className="max-w-5xl mx-auto space-y-8 pb-16">
+        <header>
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Review debt</h1>
+          <p className="text-sm text-gray-500 mt-0.5">How long unreviewed HIGH and CRITICAL findings have been waiting · live</p>
+        </header>
 
-        <div className="pt-1">
-          <h1 className="text-xl font-black text-gray-900">AI Code Debt Clock</h1>
-          <p className="text-sm text-gray-400 mt-0.5">
-            Every hour of unreviewed AI code adds to your governance debt — live counter
-          </p>
-        </div>
-
-        {/* ── Main clock ── */}
-        <div className="rounded-2xl overflow-hidden border-2 border-red-300"
-          style={{ background: "linear-gradient(135deg, #1a0000 0%, #3d0000 100%)" }}>
-          <div className="px-6 pt-6 pb-2 text-center">
-            <p className="text-red-300 text-sm font-bold uppercase tracking-widest mb-1">AI Governance Debt Units</p>
-            <DebtClock value={total} hourlyRate={hourlyRate} />
-            <p className="text-red-500 text-xs mt-3 font-mono">
-              +{hourlyRate.toLocaleString()} units / hour · Accumulating since {avgAge}h ago average
-            </p>
+        {offline && <div className="section-card p-6 text-sm text-gray-600">Connect a repository to start measuring review debt.</div>}
+        {error && !findings && (
+          <div role="alert" className="flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm">
+            <span>Couldn&apos;t load findings. {error}</span><button onClick={load} className="font-bold text-xs">Retry</button>
           </div>
+        )}
+        {!offline && !findings && !error && <div className="h-48 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading review debt" />}
 
-          {/* Stats row */}
-          <div className="grid grid-cols-4 gap-0 border-t border-red-900 mt-4">
-            {[
-              { label: "Unattested Files",  value: unattested,          color: "#fca5a5" },
-              { label: "Unreviewed AI Lines", value: totalAiLines.toLocaleString(), color: "#fca5a5" },
-              { label: "Avg File Age",       value: `${avgAge}h`,         color: "#fbbf24" },
-              { label: "Doubles in",         value: doubleHours !== null ? `${doubleHours}h` : "—", color: "#fca5a5" },
-            ].map(s => (
-              <div key={s.label} className="text-center py-4 border-r border-red-900 last:border-r-0">
-                <div className="text-2xl font-black" style={{ color: s.color }}>{s.value}</div>
-                <div className="text-xs text-red-400 mt-1">{s.label}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* ── What is debt? ── */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-5 shadow-sm">
-          <h3 className="font-black text-gray-900 mb-3">How Debt is Calculated</h3>
-          <div className="font-mono text-sm text-gray-700 bg-gray-50 rounded-xl p-4 mb-4">
-            Debt = Σ ( AI lines × age in hours × risk multiplier )
-          </div>
-          <div className="grid grid-cols-4 gap-3">
-            {[
-              { risk:"CRITICAL", mult:"×10", bg:"#fff1f2", text:"#dc2626", desc:"Security vuln in unreviewed AI code" },
-              { risk:"HIGH",     mult:"×4",  bg:"#fff7ed", text:"#c2410c", desc:"High-risk pattern, no human review" },
-              { risk:"MEDIUM",   mult:"×2",  bg:"#fffbeb", text:"#b45309", desc:"Medium risk, still accumulating" },
-              { risk:"LOW",      mult:"×1",  bg:"#f0fdf4", text:"#15803d", desc:"Low risk baseline accumulation" },
-            ].map(r => (
-              <div key={r.risk} className="rounded-xl p-3 text-center" style={{ background: r.bg }}>
-                <div className="font-black text-lg" style={{ color: r.text }}>{r.mult}</div>
-                <div className="text-xs font-bold mt-1" style={{ color: r.text }}>{r.risk}</div>
-                <div className="text-xs text-gray-500 mt-1 leading-tight">{r.desc}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* ── Debt breakdown ── */}
-        {items.length > 0 && (
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
-              <p className="text-xs font-black text-gray-700 uppercase tracking-wider">Debt Breakdown by File</p>
-              <span className="text-xs text-gray-400">Sorted by debt contribution</span>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {[...items].sort((a,b) => b.debt - a.debt).map((item, i) => {
-                const pct = total > 0 ? (item.debt / total * 100) : 0;
-                const riskColor = { CRITICAL:"#dc2626", HIGH:"#ea580c", MEDIUM:"#d97706", LOW:"#16a34a" }[item.riskMultiplier === 10 ? "CRITICAL" : item.riskMultiplier === 4 ? "HIGH" : item.riskMultiplier === 2 ? "MEDIUM" : "LOW"] ?? "#64748b";
-                return (
-                  <div key={i} className="px-5 py-3.5">
-                    <div className="flex items-center gap-3 mb-2">
-                      <span className="text-xs font-mono font-bold text-gray-500 w-5 shrink-0">{i+1}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-bold text-gray-900 truncate">{item.file}</div>
-                        <div className="text-xs text-gray-400 font-mono">{item.repo} · {item.aiLines} AI lines · {item.ageHours}h unreviewed</div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className="text-sm font-black" style={{ color: riskColor }}>{item.debt.toLocaleString()}</div>
-                        <div className="text-xs text-gray-400">{pct.toFixed(1)}% of debt</div>
-                      </div>
-                    </div>
-                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden ml-8">
-                      <div className="h-full rounded-full" style={{ width:`${pct}%`, background: riskColor }} />
-                    </div>
+        {findings && (debt.items.length === 0 ? (
+          <section aria-label="Review debt" className="rounded-3xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white p-8">
+            <p className="text-lg font-black">No review debt</p>
+            <p className="text-sm text-white/85 mt-1">Every HIGH and CRITICAL finding has been signed off or resolved.</p>
+          </section>
+        ) : (
+          <>
+            <section aria-label="Review debt" className="rounded-3xl text-white p-6 sm:p-8" style={{ background: "radial-gradient(120% 140% at 0% 0%, #7f1d1d 0%, #450a0a 45%, #1c0606 100%)" }}>
+              <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-rose-200/80">Risk-hours waiting for review</p>
+              <div className="mt-2"><Clock value={debt.total} perHour={debt.perHour} /></div>
+              <p className="mt-2 text-sm text-rose-100/80">Growing by <strong className="text-white">{debt.perHour}</strong> every hour until these findings are signed off</p>
+              <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {[
+                  { l: "Waiting", v: String(debt.items.length) },
+                  { l: "Critical", v: String(debt.critical) },
+                  { l: "Past deadline", v: String(debt.overdue) },
+                  { l: "Oldest", v: fmtHours(debt.oldestHours) },
+                ].map(s => (
+                  <div key={s.l} className="rounded-2xl bg-white/[0.07] ring-1 ring-white/10 p-4">
+                    <p className="text-2xl font-black tabular-nums">{s.v}</p>
+                    <p className="text-xs text-rose-100/70 mt-1">{s.l}</p>
                   </div>
-                );
-              })}
-            </div>
-
-            {/* Zero the debt CTA */}
-            <div className="px-5 py-4 bg-indigo-50 border-t border-indigo-100 flex items-center justify-between gap-4">
-              <div>
-                <p className="font-bold text-indigo-900 text-sm">Zero the debt</p>
-                <p className="text-xs text-indigo-600 mt-0.5">Attest all {unattested} files to bring debt to 0. Estimated time: ~{Math.round(unattested * 4)} minutes.</p>
+                ))}
               </div>
-              <a href="/violations" className="px-4 py-2 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700 transition-colors whitespace-nowrap">
-                Start Attestation →
-              </a>
-            </div>
-          </div>
-        )}
+            </section>
 
-        {items.length === 0 && effectiveData && (
-          <div className="bg-green-50 border border-green-200 rounded-2xl p-8 text-center">
-            <div className="text-4xl mb-3">🎉</div>
-            <div className="font-black text-green-800 text-lg mb-2">Zero AI Code Debt</div>
-            <div className="text-sm text-green-600">All AI-generated files have been reviewed and attested. Debt clock is at zero.</div>
-          </div>
-        )}
+            <section aria-label="How it's measured" className="section-card p-6">
+              <h2 className="text-sm font-bold text-gray-900">How it&apos;s measured</h2>
+              <p className="mt-2 font-mono text-sm text-gray-700 bg-gray-50 rounded-xl px-4 py-3">debt = Σ hours waiting × weight</p>
+              <p className="mt-3 text-sm text-gray-600 leading-relaxed">
+                Hours waiting run from when the finding was opened. CRITICAL findings weigh {DEBT_WEIGHT.CRITICAL}, HIGH {DEBT_WEIGHT.HIGH}. A finding stops counting
+                the moment its file is signed off or the finding is resolved. MEDIUM and LOW findings don&apos;t block merges and aren&apos;t counted.
+              </p>
+            </section>
 
+            <section aria-label="Findings" className="section-card overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-6 pt-5 pb-4 border-b border-gray-100">
+                <h2 className="text-sm font-bold text-gray-900">Largest first</h2>
+                <Link href="/dashboard#review-queue" className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Review queue →</Link>
+              </div>
+              <ul className="divide-y divide-gray-50">
+                {debt.items.map(i => (
+                  <li key={i.id}>
+                    <Link href={`/pr/${i.scan_id}?attest=${encodeURIComponent(i.file_path)}`} className="flex flex-wrap items-center gap-x-5 gap-y-1 px-6 py-4 hover:bg-gray-50/70">
+                      <span className={`text-[11px] font-black px-2 py-0.5 rounded shrink-0 ${i.weight === DEBT_WEIGHT.CRITICAL ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>{i.risk_score.toUpperCase()}</span>
+                      <span className="min-w-[200px] flex-1">
+                        <span className="block text-sm font-bold font-mono text-gray-900 break-all">{i.file_path}</span>
+                        <span className="block text-xs text-gray-500">{i.repo}{i.pr_number ? ` · PR #${i.pr_number}` : ""}</span>
+                      </span>
+                      <span className="shrink-0 text-xs text-gray-600">waiting <strong className="text-gray-900">{fmtHours(i.hours)}</strong>{i.overdue && <span className="ml-2 text-rose-600 font-bold">past deadline</span>}</span>
+                      <span className="shrink-0 w-20 text-right text-sm font-black tabular-nums text-gray-900">{Math.round(i.debt).toLocaleString()}</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </>
+        ))}
       </div>
     </AuthGuard>
   );

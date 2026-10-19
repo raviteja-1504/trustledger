@@ -18,10 +18,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationOverrideSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
+
+const PAGE = 1000;
+const MAX_ROWS = 20_000;
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -29,15 +33,24 @@ export async function GET(req: NextRequest) {
   const { org_id } = auth;
 
   const db = createServiceClient();
-  const { data, error } = await db
-    .from("violation_overrides")
-    .select("violation_id, status, assigned_email, note, escalated, updated_by, updated_at")
-    .eq("org_id", org_id);
-
-  if (error) return safeError(error, { code: "violation_status_fetch_failed", message: "We couldn't load violation status right now. Please try again." });
+  // One override per file per scan accumulates quickly; page past the 1000-row response cap so none are dropped
+  // (a dropped "resolved" would show the file as open again).
+  type Row = { violation_id: string; status: string; assigned_email: string | null; note: string | null; escalated: boolean; updated_at: string };
+  const data: Row[] = [];
+  for (let from = 0; from < MAX_ROWS; from += PAGE) {
+    const { data: page, error } = await db
+      .from("violation_overrides")
+      .select("violation_id, status, assigned_email, note, escalated, updated_by, updated_at")
+      .eq("org_id", org_id)
+      .order("violation_id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) return safeError(error, { code: "violation_status_fetch_failed", message: "We couldn't load violation status right now. Please try again." });
+    data.push(...((page ?? []) as Row[]));
+    if ((page ?? []).length < PAGE) break;
+  }
 
   const overrides: Record<string, { status: string; assigned_email: string | null; note: string | null; escalated: boolean; updated_at: string }> = {};
-  for (const row of data ?? []) {
+  for (const row of data) {
     overrides[row.violation_id] = {
       status:         row.status,
       assigned_email: row.assigned_email,
@@ -47,7 +60,7 @@ export async function GET(req: NextRequest) {
     };
   }
 
-  return NextResponse.json({ overrides });
+  return NextResponse.json({ overrides }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
 export async function PATCH(req: NextRequest) {
@@ -63,20 +76,26 @@ export async function PATCH(req: NextRequest) {
 
   const db = createServiceClient();
 
+  // Only the fields the caller sent are written: a status change must not wipe the note, assignee or escalation
+  // set earlier (an upsert leaves columns it isn't given untouched on update, and uses defaults on insert).
+  // An empty string clears a note / assignee.
+  const row: Record<string, unknown> = {
+    violation_id: body.violation_id,
+    status:       body.status,
+    updated_by:   user_id ?? null,
+    updated_at:   new Date().toISOString(),
+  };
+  if (body.assigned_email !== undefined) row.assigned_email = body.assigned_email || null;
+  if (body.note !== undefined)           row.note = body.note || null;
+  if (body.escalated !== undefined)      row.escalated = body.escalated;
   const { error: upErr } = await db
     .from("violation_overrides")
-    .upsert({
-      org_id,
-      violation_id:   body.violation_id,
-      status:         body.status,
-      assigned_email: body.assigned_email ?? null,
-      note:           body.note ?? null,
-      escalated:      body.escalated ?? false,
-      updated_by:     user_id ?? null,
-      updated_at:     new Date().toISOString(),
-    }, { onConflict: "org_id,violation_id" });
+    .upsert({ ...row, org_id }, { onConflict: "org_id,violation_id" });
 
   if (upErr) return safeError(upErr, { code: "violation_status_update_failed", message: "We couldn't update that violation. Please try again." });
+
+  // A resolved (or reopened) finding can end or restart its auto-incident; keep incidents in step. Best-effort.
+  await syncAutoIncidents(db, org_id);
 
   if (body.status === "resolved") {
     await writeAuditLog(db, {

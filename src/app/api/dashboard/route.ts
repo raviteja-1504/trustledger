@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { cached, cacheDel, cacheKeys, TTL } from "@/lib/cache";
 import { fetchDashboard, type DashboardPeriod } from "@/lib/dashboardAggregate";
+import { orgDataVersion, versionedKey } from "@/lib/orgDataVersion";
 
 const DEVELOPER_DASHBOARD_TTL = 60;
 // Per-org data behind auth: never storable by a shared cache (the URL is the same for every org, so an edge copy
@@ -10,25 +11,10 @@ const DEVELOPER_DASHBOARD_TTL = 60;
 // cache (lib/cache, invalidated when a file is attested) is what absorbs repeated loads.
 const NO_SHARED_CACHE = "private, no-store";
 
-/**
- * The org's data version: when it last attested, scanned or changed a violation's status. It is part of every cache
- * key, so a copy computed before the change is never served again -- on any server instance. (Deleting keys on
- * attestation wasn't enough: without Redis each instance has its own in-memory cache, and a request in flight during
- * the attestation could write the old numbers back right after the delete.) Null if it can't be read: don't cache.
- */
-async function dataVersion(orgId: string): Promise<string | null> {
-  const db = createServiceClient();
-  const latest = (table: string, column: string) =>
-    db.from(table).select(column).eq("org_id", orgId).order(column, { ascending: false }).limit(1).maybeSingle() as unknown as
-      Promise<{ data: Record<string, string> | null; error: unknown }>;
-  try {
-    const rows = await Promise.all([latest("attestations", "created_at"), latest("scans", "created_at"), latest("violation_overrides", "updated_at")]);
-    // A table that doesn't exist yet (older database) just contributes nothing; any other error means "unknown".
-    if (rows.slice(0, 2).some(r => r.error)) return null;
-    return [rows[0].data?.created_at, rows[1].data?.created_at, rows[2].error ? "" : rows[2].data?.updated_at].map(v => v ?? "").join("|");
-  } catch { return null; }
-}
-const versioned = (key: string, version: string) => `${key}:v:${version}`;
+// Every cache key carries the org's data version (lib/orgDataVersion.ts), so numbers computed before an attestation,
+// scan or status change are never served after it, on any instance. Unknown version → don't cache.
+const dataVersion = (orgId: string) => orgDataVersion(createServiceClient(), orgId);
+const versioned = versionedKey;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**

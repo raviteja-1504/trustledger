@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { DashboardData } from "@/types";
 import { supabase } from "./supabase";
+import { readLocalStatuses } from "./localStatuses";
 
 export type NotifLevel = "critical" | "high" | "warning" | "info" | "success";
 
@@ -66,7 +67,8 @@ function uid() {
 function resolvedViolationCount(): number {
   if (typeof window === "undefined") return 0;
   try {
-    const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
+    // Only this tab's recent resolutions: older ones are already reflected in the server's count.
+    const s = readLocalStatuses();
     // Key format: "{pfx}::{scan_id}::{file_path}" — count unique scan IDs with resolved files
     // to match the deploy-level granularity of unattested_deploy_count
     const resolvedScanIds = new Set(

@@ -25,12 +25,17 @@ jest.mock("@/lib/dashboardAggregate", () => ({ fetchDashboard: async () => ({ re
 let role = "admin";
 jest.mock("@/app/api/_middleware", () => ({ verifyApiKey: async () => ({ org_id: "org-1", role, user_id: "u1" }) }));
 const orgFilters: string[] = [];
+const eventFilters: string[] = [];
 jest.mock("@/lib/supabase", () => ({
   createServiceClient: () => ({
     from: (table: string) => {
       const q = {
         select: () => q,
-        eq: (col: string, val: string) => { if (col === "org_id") orgFilters.push(`${table}=${val}`); return q; },
+        eq: (col: string, val: string) => {
+          if (col === "org_id") orgFilters.push(`${table}=${val}`);
+          if (col === "event_type") eventFilters.push(`${table}=${val}`);
+          return q;
+        },
         order: () => q, limit: () => q, single: async () => ({ data: { github_login: "dev1" } }),
         maybeSingle: async () => failTable === table
           ? { data: null, error: { message: "boom" } }
@@ -46,7 +51,7 @@ import { GET } from "@/app/api/dashboard/route";
 const get = async () => (await (await GET(new NextRequest(new URL("/api/dashboard?days=30", "https://app.example")))).json()) as { computed: number };
 
 beforeEach(() => {
-  store.clear(); computed = 0; failTable = null; role = "admin"; orgFilters.length = 0;
+  store.clear(); computed = 0; failTable = null; role = "admin"; orgFilters.length = 0; eventFilters.length = 0;
   latest = { attestations: "2026-10-19T10:00:00Z", scans: "2026-10-19T09:00:00Z", violation_overrides: null };
 });
 
@@ -73,6 +78,19 @@ describe("dashboard cache is keyed by the org's data version", () => {
     expect((await get()).computed).toBe(3);
   });
 
+  it("a status change on the violations page (incl. reopening) changes the version, via its audit entry", async () => {
+    await get();
+    latest.audit_log = "2026-10-19T11:45:00Z";
+    expect((await get()).computed).toBe(2);
+    expect(eventFilters).toContain("audit_log=violation_resolved");
+  });
+
+  it("an audit log that can't be read doesn't stop caching", async () => {
+    failTable = "audit_log";
+    expect((await get()).computed).toBe(1);
+    expect((await get()).computed).toBe(1);
+  });
+
   it("can't read the version → no cache at all (never risk stale numbers)", async () => {
     failTable = "attestations";
     expect((await get()).computed).toBe(1);
@@ -96,6 +114,6 @@ describe("dashboard cache is keyed by the org's data version", () => {
 
   it("the version lookups are scoped to the caller's org", async () => {
     await get();
-    expect(orgFilters).toEqual(expect.arrayContaining(["attestations=org-1", "scans=org-1", "violation_overrides=org-1"]));
+    expect(orgFilters).toEqual(expect.arrayContaining(["attestations=org-1", "scans=org-1", "violation_overrides=org-1", "audit_log=org-1"]));
   });
 });

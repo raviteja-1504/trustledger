@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
@@ -11,7 +11,9 @@ import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import type { DashboardData, FileResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
-import { authedFetch } from "@/lib/useRealData";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { readLocalStatuses } from "@/lib/localStatuses";
+import { detailsFromOverrides, fetchServerOverrides, invalidateServerStatuses, localDetailUploads, type OverridePatch, type ServerOverride } from "@/lib/violationStatuses";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
@@ -245,19 +247,24 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
 
 // ── Persistence ────────────────────────────────────────────────────────────────
 
+// Status, assignee, note and escalation all live server-side in violation_overrides (/api/violation-status), so
+// every device shows the same. These browser keys held assignee/note/escalation before that; whatever is still in
+// them is uploaded once (for violations the server has nothing for) and then removed -- see migrateLocalDetails.
 const ASSIGNEE_KEY = "tl_violation_assignees";
 
 function notifyBadgeSync() {
   if (typeof window !== "undefined") {
+    invalidateServerStatuses();
     window.dispatchEvent(new Event("tl:badge"));
     window.dispatchEvent(new Event("tl:attestation"));
   }
 }
-function loadAssignees(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(ASSIGNEE_KEY) ?? "{}"); } catch { return {}; }
-}
-function saveAssignees(a: Record<string, string>) {
-  localStorage.setItem(ASSIGNEE_KEY, JSON.stringify(a));
+
+function readLocalDetails() {
+  const obj = (k: string) => { try { const v = JSON.parse(localStorage.getItem(k) ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, string> : {}; } catch { return {}; } };
+  let escalated: string[] = [];
+  try { const v = JSON.parse(localStorage.getItem(ESCALATE_KEY) ?? "[]"); if (Array.isArray(v)) escalated = v; } catch { /* none */ }
+  return { assignees: obj(ASSIGNEE_KEY), notes: obj(NOTES_KEY), escalated };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -373,33 +380,45 @@ export default function ViolationsPage() {
   const [loadError,    setLoadError]    = useState<string | null>(null);
   const [recentScans,  setRecentScans]  = useState<RecentScan[]>([]);
 
-  // Load all persisted state
-  useEffect(() => {
-    setAssignees(loadAssignees());
-    try { setNotes(JSON.parse(localStorage.getItem(NOTES_KEY) ?? "{}")); } catch {}
-    try {
-      const esc = JSON.parse(localStorage.getItem(ESCALATE_KEY) ?? "[]");
-      setEscalated(new Set(Array.isArray(esc) ? esc : []));
-    } catch {}
+  // Status, assignee, note and escalation come from the server (violation_overrides, see
+  // api/violation-status/route.ts), so they're identical on every device. Demo mode keeps them in the browser.
+  const applyOverrides = useCallback((o: Record<string, ServerOverride>) => {
+    const next: Record<string, VStatus> = {};
+    for (const [id, v] of Object.entries(o)) next[id] = v.status as VStatus;
+    setStatuses(next);
+    const d = detailsFromOverrides(o);
+    setAssignees(d.assignees); setNotes(d.notes); setEscalated(d.escalated);
   }, []);
 
-  // Violation status (open/in_review/resolved) is the one piece of state that
-  // drives the Sidebar badge count, so it's the one that must be identical on
-  // every device -- it now lives server-side in violation_overrides instead of
-  // localStorage (see api/violation-status/route.ts). Everything else on this
-  // page (notes, assignee, escalation) is per-browser convenience state only
-  // and isn't part of what the badge reports.
   const fetchStatuses = useCallback(async () => {
+    if (isSeedMode()) {
+      const l = readLocalDetails();
+      setAssignees(l.assignees); setNotes(l.notes); setEscalated(new Set(l.escalated));
+      return;
+    }
     if (!profile?.org_id) return;
-    try {
-      const res = await authedFetch<{ overrides: Record<string, { status: VStatus }> }>("/api/violation-status");
-      const next: Record<string, VStatus> = {};
-      for (const [id, o] of Object.entries(res.overrides ?? {})) next[id] = o.status;
-      setStatuses(next);
-    } catch { /* offline — keep whatever's currently shown */ }
-  }, [profile?.org_id]);
+    let server: Record<string, ServerOverride>;
+    try { server = await fetchServerOverrides(); } catch { return; /* offline — keep whatever's currently shown */ }
+    applyOverrides(server);
+    // One-time move of details this browser held before they were stored server-side.
+    const uploads = localDetailUploads(server, readLocalDetails());
+    if (uploads.length === 0) { [ASSIGNEE_KEY, NOTES_KEY, ESCALATE_KEY].forEach(k => { try { localStorage.removeItem(k); } catch {} }); return; }
+    const ok = await Promise.all(uploads.map(u => authedFetch("/api/violation-status", { method: "PATCH", body: JSON.stringify(u) }).then(() => true, () => false)));
+    if (ok.every(Boolean)) {
+      [ASSIGNEE_KEY, NOTES_KEY, ESCALATE_KEY].forEach(k => { try { localStorage.removeItem(k); } catch {} });
+      invalidateServerStatuses();
+      fetchServerOverrides().then(applyOverrides, () => {});
+    }
+  }, [profile?.org_id, applyOverrides]);
 
   useEffect(() => { fetchStatuses(); }, [fetchStatuses]);
+  // Changes made on another device or tab: pick them up when this tab regains focus or another page signals one.
+  useEffect(() => {
+    const on = () => { invalidateServerStatuses(); fetchStatuses(); };
+    window.addEventListener("focus", on);
+    window.addEventListener("tl:attest-complete", on);
+    return () => { window.removeEventListener("focus", on); window.removeEventListener("tl:attest-complete", on); };
+  }, [fetchStatuses]);
 
   // Fetch real team members for the reviewer dropdown
   useEffect(() => {
@@ -457,12 +476,13 @@ export default function ViolationsPage() {
   // place status is persisted -- no localStorage fallback -- so a failure
   // must roll the UI back to what the server actually has, rather than
   // leaving it showing a change that never took effect.
-  const syncViolationToAPI = useCallback(async (violation_id: string, status: VStatus, note?: string) => {
+  const syncViolationToAPI = useCallback(async (violation_id: string, status: VStatus, extra: Omit<OverridePatch, "violation_id" | "status"> = {}) => {
     if (!profile?.org_id) throw new Error("no org");
     await authedFetch("/api/violation-status", {
       method: "PATCH",
-      body:   JSON.stringify({ violation_id, status, note }),
+      body:   JSON.stringify({ violation_id, status, ...extra }),
     });
+    invalidateServerStatuses();
   }, [profile?.org_id]);
 
   // Derive violations from live data, apply persisted statuses.
@@ -471,7 +491,8 @@ export default function ViolationsPage() {
   const violations = useMemo<(Violation & { status: VStatus; assignee?: string })[]>(() => {
     if (!data) return [];
     const raw     = data;
-    const active  = deriveViolations(patchDataWithAttestations(raw), statuses);
+    // Server statuses plus this tab's just-made sign-offs (demo data: the browser's own).
+    const active  = deriveViolations(patchDataWithAttestations(raw, isSeedMode() ? undefined : { ...statuses, ...readLocalStatuses() }), statuses);
     const activeIds = new Set(active.map(v => v.id));
 
     // Violations that patchData removed (resolved files) — add them back for history
@@ -507,25 +528,49 @@ export default function ViolationsPage() {
     else if (status === "open") { info("Re-opened", "Violation moved back to open status."); }
   }
 
+  // Assignee / note / escalation: saved to the server (demo mode: this browser). The status sent is the current one,
+  // and the server only writes the fields sent, so nothing else about the violation changes. A failed save rolls
+  // the screen back to what the server has.
+  function saveDetail(id: string, extra: Omit<OverridePatch, "violation_id" | "status">, localKey: string, localValue: unknown, rollback: () => void) {
+    if (isSeedMode()) { try { localStorage.setItem(localKey, JSON.stringify(localValue)); } catch {} return; }
+    syncViolationToAPI(id, statuses[id] ?? "open", extra).catch(() => {
+      rollback();
+      toastError("Couldn't save", "That change didn't reach the server — please try again.");
+    });
+  }
+
+  // The note box saves as you type: one request once typing pauses, not one per keystroke.
+  const noteTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => () => { noteTimers.current.forEach(clearTimeout); }, []);
   function saveNote(id: string, text: string) {
+    const prev = notes;
     const next = { ...notes, [id]: text };
     setNotes(next);
-    localStorage.setItem(NOTES_KEY, JSON.stringify(next));
+    const t = noteTimers.current.get(id);
+    if (t) clearTimeout(t);
+    noteTimers.current.set(id, setTimeout(() => {
+      noteTimers.current.delete(id);
+      saveDetail(id, { note: text.slice(0, 2000) }, NOTES_KEY, next, () => setNotes(prev));
+    }, 800));
   }
 
   function toggleEscalate(id: string) {
+    const prev = escalated;
     const next = new Set(Array.from(escalated));
-    if (next.has(id)) { next.delete(id); info("Escalation removed", "Violation de-escalated."); }
-    else               { next.add(id);    success("Escalated!", "Security lead will be notified."); }
+    const on = !next.has(id);
+    if (on) { next.add(id);    success("Escalated!", "Security lead will be notified."); }
+    else    { next.delete(id); info("Escalation removed", "Violation de-escalated."); }
     setEscalated(next);
-    localStorage.setItem(ESCALATE_KEY, JSON.stringify(Array.from(next)));
+    saveDetail(id, { escalated: on }, ESCALATE_KEY, Array.from(next), () => setEscalated(prev));
   }
 
   function setAssignee(id: string, email: string) {
+    const prev = assignees;
     const next = { ...assignees, [id]: email };
     setAssignees(next);
-    saveAssignees(next);
-    success("Reviewer assigned", `${email.split("@")[0]} has been assigned.`);
+    saveDetail(id, { assigned_email: email }, ASSIGNEE_KEY, next, () => setAssignees(prev));
+    if (email) success("Reviewer assigned", `${email.split("@")[0]} has been assigned.`);
+    else info("Reviewer removed", "Nobody is assigned to this violation now.");
   }
 
   function bulkResolve() {

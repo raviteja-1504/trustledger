@@ -19,6 +19,9 @@ import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { api } from "@/lib/api";
 import { collectManifestPackages } from "@/lib/manifestPackages";
+import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { fetchServerOverrides, invalidateServerStatuses, type ServerOverride } from "@/lib/violationStatuses";
+import { phantomFromServer, phantomPatch, phantomUploads, type PhantomOverride, type RemediationStatus } from "@/lib/phantomOverrides";
 import type { DashboardData, ScanResult } from "@/types";
 
 
@@ -35,7 +38,6 @@ function isPrivatePackage(name: string): boolean {
 }
 
 type CheckStatus = "pending" | "checking" | "exists" | "phantom" | "private" | "error";
-type RemediationStatus = "open" | "remediating" | "resolved";
 
 interface PackageResult {
   name:        string;
@@ -49,10 +51,7 @@ interface PackageResult {
   riskScore?:  "critical" | "high" | "low";
 }
 
-interface PackageOverride {
-  status?: RemediationStatus;
-  notes?:  string[];
-}
+type PackageOverride = PhantomOverride;
 
 const REMEDIATION_STYLE: Record<RemediationStatus, { bg:string; text:string; border:string; label:string }> = {
   open:        { bg:"#fef2f2", text:"#be123c", border:"#fecdd3", label:"Open"        },
@@ -60,16 +59,19 @@ const REMEDIATION_STYLE: Record<RemediationStatus, { bg:string; text:string; bor
   resolved:    { bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0", label:"Resolved"    },
 };
 
+// Remediation status + notes are stored server-side (violation_overrides, ids "phantom::<pkg>|<repo>") so every
+// device shows the same; see lib/phantomOverrides.ts. This browser key held them before; it's uploaded once, then
+// removed. Demo mode keeps using it.
 const OVERRIDES_KEY    = "tl_phantom_overrides";
 const LAST_SCANNED_KEY = "tl_phantom_last_scanned";
 
 function pkgId(p: { name:string; source:string }) { return `${p.name}|${p.source}`; }
 
 function loadOverrides(): Record<string, PackageOverride> {
-  try { return JSON.parse(localStorage.getItem(OVERRIDES_KEY) ?? "{}"); } catch { return {}; }
+  try { const v = JSON.parse(localStorage.getItem(OVERRIDES_KEY) ?? "{}"); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; }
 }
 function saveOverrides(o: Record<string, PackageOverride>) {
-  localStorage.setItem(OVERRIDES_KEY, JSON.stringify(o));
+  try { localStorage.setItem(OVERRIDES_KEY, JSON.stringify(o)); } catch {}
 }
 
 function timeAgo(iso: string) {
@@ -115,12 +117,34 @@ export default function PhantomDepsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [noteInput, setNoteInput] = useState<Record<string,string>>({});
   const [copied, setCopied] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Load package list — normally published by /dependencies (tl_phantom_packages,
   // derived from manifest files in scanned PRs). If that hasn't run yet in this
   // browser session, fetch scans directly so this page works standalone too.
+  // Overrides: the server's (demo mode: this browser's), plus a one-time upload of what this browser held before.
+  const loadServerOverrides = useCallback(async () => {
+    if (isSeedMode()) { setOverrides(loadOverrides()); return; }
+    if (!profile?.org_id) return;
+    let server: Record<string, ServerOverride>;
+    try { server = await fetchServerOverrides(); } catch { return; }
+    setOverrides(phantomFromServer(server));
+    const uploads = phantomUploads(server, loadOverrides());
+    const ok = await Promise.all(uploads.map(u => authedFetch("/api/violation-status", { method: "PATCH", body: JSON.stringify(u) }).then(() => true, () => false)));
+    if (ok.every(Boolean)) {
+      try { localStorage.removeItem(OVERRIDES_KEY); } catch {}
+      if (uploads.length > 0) { invalidateServerStatuses(); fetchServerOverrides().then(s => setOverrides(phantomFromServer(s)), () => {}); }
+    }
+  }, [profile?.org_id]);
+
   useEffect(() => {
-    setOverrides(loadOverrides());
+    loadServerOverrides();
+    const onFocus = () => { invalidateServerStatuses(); loadServerOverrides(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadServerOverrides]);
+
+  useEffect(() => {
     setLastScanned(localStorage.getItem(LAST_SCANNED_KEY));
     // Show cached packages immediately so page isn't blank while fetching
     const raw = localStorage.getItem("tl_phantom_packages");
@@ -151,11 +175,14 @@ export default function PhantomDepsPage() {
   }, [profile?.org_id]);
 
   function updateOverride(id: string, patch: Partial<PackageOverride>) {
-    setOverrides(prev => {
-      const next = { ...prev, [id]: { ...prev[id], ...patch } };
-      saveOverrides(next);
-      return next;
-    });
+    const prev = overrides;
+    const merged = { ...prev[id], ...patch };
+    const next = { ...prev, [id]: merged };
+    setOverrides(next);
+    if (isSeedMode()) { saveOverrides(next); return; }
+    authedFetch("/api/violation-status", { method: "PATCH", body: JSON.stringify(phantomPatch(id, merged)) })
+      .then(() => invalidateServerStatuses())
+      .catch(() => { setOverrides(prev); setSaveError("That change didn't reach the server — please try again."); });
   }
 
   function addNote(id: string) {
@@ -269,6 +296,13 @@ export default function PhantomDepsPage() {
             {lastScanned && !scanning && <span className="text-[9px] text-gray-400">Last scanned {timeAgo(lastScanned)}</span>}
           </div>
         </div>
+
+        {saveError && (
+          <div role="alert" className="flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 text-xs font-semibold text-rose-700">
+            <span>Couldn&apos;t save: {saveError}</span>
+            <button onClick={() => setSaveError(null)} className="text-rose-500 hover:text-rose-700" aria-label="Dismiss">✕</button>
+          </div>
+        )}
 
         {/* ── Explainer ── */}
         <div className="animate-fade-up bg-amber-50 border border-amber-200 rounded-2xl p-5">

@@ -696,7 +696,7 @@ export function clearSeed(): void {
   if (typeof window === "undefined") return;
   [
     "tl_notif_snapshot", "tl_force_seed",
-    "tl_violation_statuses", "tl_violation_assignees",
+    "tl_violation_statuses", "tl_violation_statuses_at", "tl_violation_assignees",
     "tl_alerts_state", "tl_secret_status", "tl_secret_total",
     "tl_incidents", "tl_risk_register",
     "tl_evidence_state", "tl_exceptions_state",

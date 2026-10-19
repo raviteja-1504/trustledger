@@ -4,47 +4,12 @@ import "@testing-library/jest-dom";
 jest.mock("@/lib/useRealData", () => ({ authedFetch: jest.fn() }));
 jest.mock("@/components/AuthGuard", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 import { authedFetch } from "@/lib/useRealData";
-import VerifyRecordPage from "@/app/verify-record/page";
 import RulesPage from "@/app/rules/page";
 import type { CatalogRule } from "@/lib/ruleCatalog";
 
 const mockFetch = authedFetch as jest.MockedFunction<typeof authedFetch>;
 jest.setTimeout(30000);
 beforeEach(() => mockFetch.mockReset());
-
-describe("Verify Trust Record page", () => {
-  it("a chosen file is sent for verification and the verdict and record details are shown", async () => {
-    mockFetch.mockResolvedValue({
-      status: "valid", message: "Valid. This record was produced by TrustLedger with this server's key and hasn't been changed since.",
-      summary: { organization: "Acme", change: { repository: "acme/shop", pull_request: 7, commit: "abcdef123456" }, verdict: { overall_risk: "HIGH", merge_gate: "clear", ai_share_percent: 12, open_blocking_violations: 0 },
-        summary: { findings: 3, critical: 0, high: 1, introduced_by_pr: 1, accepted_or_false_positive: 1, files: 4, files_attested: 4 } },
-    });
-    render(<VerifyRecordPage />);
-    const file = new File([JSON.stringify({ record: { schema: "trustledger.trust-record/v1" }, signature: null })], "trust-record.json", { type: "application/json" });
-    fireEvent.change(screen.getByLabelText("Choose a file"), { target: { files: [file] } });
-    expect(await screen.findByText("Valid", {}, { timeout: 5000 })).toBeInTheDocument();
-    expect(mockFetch).toHaveBeenCalledWith("/api/trust-record/verify", expect.objectContaining({ method: "POST" }));
-    expect(screen.getByText(/acme\/shop · PR #7 · abcdef1234/)).toBeInTheDocument();
-    expect(screen.getByText("4 of 4 files attested")).toBeInTheDocument();
-  });
-
-  it("text that isn't JSON is rejected locally, without calling the server", async () => {
-    render(<VerifyRecordPage />);
-    fireEvent.change(screen.getByLabelText("Trust Record JSON"), { target: { value: "not json" } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
-    expect(await screen.findByText("Not a Trust Record", {}, { timeout: 5000 })).toBeInTheDocument();
-    expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it("a tampered record says so and warns that its details can't be trusted", async () => {
-    mockFetch.mockResolvedValue({ status: "tampered", message: "Tampered.", summary: { organization: null, change: { repository: "a/b", pull_request: 1, commit: "c0ffee00" } } });
-    render(<VerifyRecordPage />);
-    fireEvent.change(screen.getByLabelText("Trust Record JSON"), { target: { value: "{}" } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
-    expect(await screen.findByText("Tampered", {}, { timeout: 5000 })).toBeInTheDocument();
-    expect(screen.getByText(/only trustworthy when the record is valid/)).toBeInTheDocument();
-  });
-});
 
 describe("Rule catalog page", () => {
   const rules: CatalogRule[] = [

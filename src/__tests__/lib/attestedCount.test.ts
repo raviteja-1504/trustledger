@@ -80,3 +80,33 @@ describe("GET /api/scans attested_count", () => {
     expect([...scans[0].attested_files].sort()).toEqual(["src/a.ts", "src/b.ts"]);
   });
 });
+
+describe("GET /api/scans paging and period", () => {
+  beforeEach(() => {
+    db = fakeSupabase({
+      repositories: [{ id: "r1", org_id: "org-1", repo_full_name: "acme/app", is_active: true }],
+      scans: [1, 2, 3, 4, 5].map(d => ({ id: `s${d}`, org_id: "org-1", repo_full_name: "acme/app", pr_number: d, commit_sha: "abc", branch: "f", overall_risk: "LOW",
+        total_ai_percentage: 0, file_count: 1, created_at: `2026-10-0${d}T00:00:00.000Z`, triggered_by: "webhook" })),
+      attestations: [], scan_files: [],
+    });
+  });
+  const get = async (q: string) => { const res = await GET(new NextRequest(new URL(`https://app.example/api/scans?${q}`))); return { res, body: await res.json() }; };
+
+  it("pages with ?before= until a short page; never cached at the edge", async () => {
+    const p1 = await get("limit=2");
+    expect(p1.res.headers.get("cache-control")).toBe("private, no-store");
+    expect(p1.body.scans.map((x: { scan_id: string }) => x.scan_id)).toEqual(["s5", "s4"]);
+    expect(p1.body.next_before).toBe("2026-10-04T00:00:00.000Z");
+    const p2 = await get(`limit=2&before=${p1.body.next_before}`);
+    expect(p2.body.scans.map((x: { scan_id: string }) => x.scan_id)).toEqual(["s3", "s2"]);
+    const p3 = await get(`limit=2&before=${p2.body.next_before}`);
+    expect(p3.body.scans.map((x: { scan_id: string }) => x.scan_id)).toEqual(["s1"]);
+    expect(p3.body.next_before).toBeNull();
+  });
+
+  it("?since= limits to the period; malformed cursors are rejected", async () => {
+    expect((await get("since=2026-10-04T00:00:00.000Z")).body.scans.map((x: { scan_id: string }) => x.scan_id)).toEqual(["s5", "s4"]);
+    expect((await get("before=yesterday")).res.status).toBe(400);
+    expect((await get("since=2026-10-04%27%3B")).res.status).toBe(400);
+  });
+});

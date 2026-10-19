@@ -25,7 +25,6 @@ const EXCEPTIONS: Record<string, string> = {
   "DELETE scim/v2/Users/[id]":  "SCIM provisioning, authenticated by the org's SCIM bearer token.",
   "POST slack/commands":        "Verified by Slack request signature; attest maps the Slack user to a member and checks their permissions.",
   "POST stripe/webhook":        "Verified by Stripe signature; no user.",
-  "POST trust-record/verify":   "Public verification of a signed Trust Record; reads only.",
   "POST webhook/bitbucket":     "Inbound webhook, verified by signature.",
   "POST webhook/github":        "Inbound webhook, verified by signature.",
   "POST webhook/gitlab":        "Inbound webhook, verified by token.",

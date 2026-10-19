@@ -10,6 +10,8 @@ import { useAuth } from "@/lib/auth";
 import { isSeedMode, authedFetch } from "@/lib/useRealData";
 import { countOpenViolations } from "@/lib/violations";
 import { patchDataWithAttestations } from "@/lib/trustScore";
+import { readLocalStatuses } from "@/lib/localStatuses";
+import { fetchServerOverrides } from "@/lib/violationStatuses";
 import { api } from "@/lib/api";
 import type { DashboardData } from "@/types";
 import { BrandMark, BrandWordmark } from "./BrandLogo";
@@ -206,7 +208,6 @@ const ALL_LINKS: Array<{
   { href: "/audit",           label: "Audit Trail",     icon: AuditIcon,       permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/trace",           label: "Trace",           icon: ScansNavIcon,    permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
-  { href: "/verify-record",   label: "Verify Record",   icon: AuditIcon,       permission: null                         },
   { href: "/rules",           label: "Rule Catalog",    icon: ReportsIcon,     permission: null                         },
   // AI Intel
   { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
@@ -277,7 +278,7 @@ export default function Sidebar() {
       // though the DB had real, correct data the whole time.
       const results = await Promise.allSettled([
         api.dashboard(profile.org_slug || "org", 90),
-        authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status"),
+        fetchServerOverrides().then(overrides => ({ overrides })),
         authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
         authedFetch<{ count: number }>("/api/incidents?count=open"),
         authedFetch<{ alerts: { id: string; status: string; scan_id?: string; source?: string }[] }>("/api/alerts?status=firing&limit=200"),
@@ -313,7 +314,7 @@ export default function Sidebar() {
 
         // Violations: single source of truth shared with /violations and the
         // dashboard's own "Needs attention" strip (src/lib/violations.ts).
-        setOpenViolations(countOpenViolations(patchDataWithAttestations(dashData), statuses));
+        setOpenViolations(countOpenViolations(patchDataWithAttestations(dashData, { ...statuses, ...readLocalStatuses() }), statuses));
       }
       // else: leave pendingCount/openViolations as they were — a failed
       // dashboard fetch shouldn't reset them to 0.
@@ -511,7 +512,7 @@ export default function Sidebar() {
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
           { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/api-security"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
-          { label:"Audit",       hrefs:["/audit","/reports","/verify-record","/rules"] },
+          { label:"Audit",       hrefs:["/audit","/reports","/rules"] },
           { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
           { label:"Config",      hrefs:["/settings/team","/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {

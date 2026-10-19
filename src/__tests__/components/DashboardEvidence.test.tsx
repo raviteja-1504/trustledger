@@ -8,7 +8,7 @@ import KpiStrip, { buildKpis, type KpiInput } from "@/components/dashboard/KpiSt
 import ReviewQueue, { buildQueue } from "@/components/dashboard/ReviewQueue";
 import { EvidencePanel, SecretsPanel, ShadowAiPanel, countSecrets } from "@/components/dashboard/GovernancePanels";
 import RepoTable, { buildRepoRows, sortRepoRows } from "@/components/dashboard/RepoTable";
-import { riskDirection } from "@/components/dashboard/RiskPanel";
+import RiskPanel, { fillTrendWeeks, riskDirection } from "@/components/dashboard/RiskPanel";
 import ActivityList from "@/components/dashboard/ActivityList";
 import NeedsAttention, { buildAttention, type AttentionInput } from "@/components/dashboard/NeedsAttention";
 import { activityKey, deriveActivity, mergeActivity } from "@/lib/dashboardActivity";
@@ -197,18 +197,24 @@ describe("governance panels", () => {
       gaps: [
         { key: "independent_review", label: "Reviewer is not the author", status: "fail", gaps: ["2 self-approvals", "1 couldn't be checked"] },
         { key: "review", label: "High-risk changes reviewed", status: "partial", gaps: ["3 high-risk files not yet reviewed"] },
+        { key: "scanning", label: "Changes scanned automatically", status: "partial", gaps: ["1 repo not scanned"] },
+        { key: "secrets", label: "Leaked secrets resolved", status: "partial", gaps: ["2 secrets open"] },
       ],
     };
     render(<EvidencePanel overview={overview} />);
     const p = screen.getByRole("region", { name: "Audit evidence" });
-    const soc2 = within(p).getByRole("article", { name: "SOC 2" });
-    expect(soc2).toHaveTextContent("1 of 2 controls with evidence");
-    expect(within(soc2).getAllByRole("listitem").map(li => li.textContent)).toEqual([
-      "CC8.1Changes are authorised, tested and approvedGaps found", "CC7.2Activity is loggedEvidence collected"]);
-    expect(within(soc2).getByRole("link", { name: /Report/ })).toHaveAttribute("href", "/reports?fw=SOC2");
-    expect(within(p).getByRole("article", { name: "AI code governance" })).toHaveTextContent("AIG-1Only approved AI tools are usedFailing");
-    expect(p).toHaveTextContent("Reviewer is not the author: 2 self-approvals; 1 couldn't be checked");
-    expect(p).toHaveTextContent("High-risk changes reviewed: 3 high-risk files not yet reviewed");
+    // Dashboard shows stats only: per framework a count and its issues, no control-by-control list.
+    expect(within(p).getByRole("link", { name: /SOC 2/ })).toHaveTextContent("SOC 21/2controls with evidence1 with gaps");
+    expect(within(p).getByRole("link", { name: /SOC 2/ })).toHaveAttribute("href", "/reports?fw=SOC2");
+    expect(within(p).getByRole("link", { name: /AI code governance/ })).toHaveTextContent("1 failing");
+    expect(p).not.toHaveTextContent("CC8.1");
+    expect(p).not.toHaveTextContent("Only approved AI tools are used");
+    // Only the top three gaps, first detail each, and a link to the rest.
+    expect(p).toHaveTextContent("Reviewer is not the author: 2 self-approvals");
+    expect(p).not.toHaveTextContent("1 couldn't be checked");
+    expect(p).toHaveTextContent("Changes scanned automatically: 1 repo not scanned");
+    expect(p).not.toHaveTextContent("Leaked secrets resolved");
+    expect(within(p).getByRole("link", { name: /\+1 more on the Compliance page/ })).toHaveAttribute("href", "/compliance");
     expect(p).toHaveTextContent("not a certification");
   });
 
@@ -339,6 +345,38 @@ describe("no cut-off text", () => {
       <ActivityList events={[]} />
     </>);
     expect(container.querySelectorAll(".truncate, [class*='line-clamp']")).toHaveLength(0);
+  });
+});
+
+describe("risk trend weeks", () => {
+  const now = Date.parse("2026-10-19T12:00:00Z"); // a Monday
+  const pt = (date: string, c = 0, h = 0, m = 0) => ({ date, critical_count: c, high_count: h, medium_count: m });
+
+  it("covers the whole period to today, with empty weeks as zeros", () => {
+    const w = fillTrendWeeks([pt("2026-09-28", 1, 2, 3)], { start: "2026-09-16", end: "2026-10-19" }, now);
+    expect(w.map(x => x.date)).toEqual(["2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05", "2026-10-12", "2026-10-19"]);
+    expect(w.map(x => x.critical_count + x.high_count + x.medium_count)).toEqual([0, 0, 6, 0, 0, 0]);
+    expect(w[w.length - 1]).toMatchObject({ label: "Today", range: "Oct 19" });
+    expect(w[0]).toMatchObject({ label: "Sep 14", range: "Sep 16 – Sep 20" });
+    expect(w[4].range).toBe("Oct 12 – Oct 18");
+  });
+
+  it("the server's relabelled current week (today's date) lands in the current week", () => {
+    const tue = Date.parse("2026-10-21T12:00:00Z");
+    const w = fillTrendWeeks([pt("2026-10-12", 1), pt("2026-10-21", 0, 4)], { start: "2026-10-12", end: "2026-10-21" }, tue);
+    expect(w.map(x => [x.date, x.critical_count, x.high_count, x.label])).toEqual([
+      ["2026-10-12", 1, 0, "Oct 12"], ["2026-10-19", 0, 4, "Today"]]);
+    expect(w[1].range).toBe("Oct 19 – Oct 21 (so far)");
+  });
+
+  it("the panel covers the dashboard's whole period, not just weeks with findings", () => {
+    render(<RiskPanel data={{ risk_trend: [pt("2026-10-12", 1)], risk_totals: { critical_count: 1, high_count: 0, medium_count: 0 }, period: { start: "2026-07-21", end: "2026-10-19" } }} periodLabel="last 90 days" />);
+    expect(screen.getByRole("region", { name: "Risk trend" })).toHaveTextContent("last 90 days · Jul 21 to today");
+  });
+
+  it("without a period it starts at the first data point; no data and no period → nothing", () => {
+    expect(fillTrendWeeks([pt("2026-10-05", 1)], undefined, now).map(x => x.date)).toEqual(["2026-10-05", "2026-10-12", "2026-10-19"]);
+    expect(fillTrendWeeks([], undefined, now)).toEqual([]);
   });
 });
 

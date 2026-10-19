@@ -9,6 +9,8 @@ import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTime
 import type { DashboardData } from "@/types";
 import { api } from "@/lib/api";
 import { authedFetch } from "@/lib/useRealData";
+import { readLocalStatuses } from "@/lib/localStatuses";
+import { loadStatuses } from "@/lib/violationStatuses";
 import { useAuth } from "@/lib/auth";
 import { BrandWordmark } from "@/components/BrandLogo";
 import {
@@ -376,10 +378,7 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
   // Optimistic local set — keeps instant feedback when Attest is clicked in-page
   const [localAttested, setLocalAttested] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set<string>();
-    try {
-      const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
-      return new Set(Object.entries(s).filter(([,v]) => v === "resolved").map(([k]) => k));
-    } catch { return new Set<string>(); }
+    return new Set(Object.entries(readLocalStatuses()).filter(([,v]) => v === "resolved").map(([k]) => k));
   });
 
   // Keep localAttested in sync whenever the parent violationStatuses updates
@@ -1165,20 +1164,18 @@ function ReportsContent() {
     if (fw === "PCI DSS" && !pciApplicable) setFw("SOC 2");
   }, [fw, pciApplicable]);
 
-  // Sync violation statuses so attested files reflect immediately
+  // Violation statuses: the server's (same on every device), with this tab's just-made sign-offs on top so they
+  // show immediately. Refetched on focus / sign-off / another tab's change, and every minute for other devices.
   useEffect(() => {
-    function sync() {
-      try {
-        const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>;
-        setViolationStatuses(s);
-      } catch {}
-    }
+    let alive = true;
+    function sync() { loadStatuses().then(s => { if (alive) setViolationStatuses(s); }); }
     sync();
     window.addEventListener("focus",   sync);
     window.addEventListener("storage", sync);
     window.addEventListener("tl:badge",sync);
-    const id = setInterval(sync, 2_000);
+    const id = setInterval(sync, 60_000);
     return () => {
+      alive = false;
       window.removeEventListener("focus",   sync);
       window.removeEventListener("storage", sync);
       window.removeEventListener("tl:badge",sync);
@@ -1192,8 +1189,8 @@ function ReportsContent() {
     const patchedFiles = data.top_risk_files.map(f => {
       if (f.attested) return f;
       const pfx = riskPfx(f.risk_score);
-      const status = violationStatuses[`${pfx}::${f.scan_id}::${f.file_path}`];
-      return status === "resolved" || status === "in_review" ? { ...f, attested: true } : f;
+      // Only a resolution counts for the report -- "in review" means someone has started, not that it's signed off.
+      return violationStatuses[`${pfx}::${f.scan_id}::${f.file_path}`] === "resolved" ? { ...f, attested: true } : f;
     });
     const totalFiles   = patchedFiles.length || 1;
     const attestedCnt  = patchedFiles.filter(f => f.attested).length;

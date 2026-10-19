@@ -5,6 +5,8 @@ import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationUpdateSchema } from "@/lib/validation";
 import { cached, cacheDel, cacheKeys, TTL, invalidateViolationsCache } from "@/lib/cache";
 import { safeError } from "@/lib/errors";
+import { syncAutoIncidents } from "@/lib/autoIncidents";
+import { orgDataVersion, versionedKey } from "@/lib/orgDataVersion";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -76,11 +78,14 @@ export async function GET(req: NextRequest) {
   try {
     // repo-filtered and developer-scoped requests are narrower/per-user --
     // only the plain org-wide request (what every real caller sends today)
-    // is safe to share across requests via a short cache.
-    const violations = (!repo && !prAuthorFilter)
-      ? await cached(`${cacheKeys.violations(org_id, status ?? "")}:${limit}`, TTL.VIOLATIONS, fetchViolations)
+    // is safe to share across requests via a short cache. The key carries the
+    // org's data version, so a list cached before a sign-off or status change
+    // is never served after it, on any instance; no version -> no cache.
+    const version = (!repo && !prAuthorFilter) ? await orgDataVersion(db, org_id) : null;
+    const violations = version !== null
+      ? await cached(versionedKey(`${cacheKeys.violations(org_id, status ?? "")}:${limit}`, version), TTL.VIOLATIONS, fetchViolations)
       : await fetchViolations();
-    return NextResponse.json({ violations });
+    return NextResponse.json({ violations }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (qErr) {
     return safeError(qErr, { code: "violations_fetch_failed", message: "We couldn't load violations right now. Please try again." });
   }
@@ -116,6 +121,9 @@ export async function PATCH(req: NextRequest) {
     .single();
 
   if (upErr || !data) return NextResponse.json({ error: "update_failed" }, { status: 500 });
+
+  // Resolving (or reopening) a finding can end or restart its auto-incident. Best-effort.
+  await syncAutoIncidents(db, org_id);
 
   // Append note if provided
   if (body.note) {

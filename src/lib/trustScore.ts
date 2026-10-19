@@ -1,22 +1,18 @@
 import type { DashboardData } from "@/types";
+import { readLocalStatuses } from "./localStatuses";
 
 // ── Shared patching ───────────────────────────────────────────────────────────
-// Apply locally-stored violation statuses on top of raw API data so every
-// page that computes trust scores reflects the same in-session attestations.
+// Apply violation statuses on top of raw API data so every page that computes
+// trust scores reflects the same resolutions. Callers that have the server's
+// statuses pass them (violationStatuses.loadStatuses); the default is only
+// this tab's just-made, short-lived local ones (localStatuses.ts).
 
 function riskPrefix(r: string): string {
   return r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
 }
 
 export function patchDataWithAttestations(data: DashboardData, injectedStatuses?: Record<string, string>): DashboardData {
-  let statuses: Record<string, string> = injectedStatuses ?? {};
-  if (!injectedStatuses) {
-    try {
-      statuses = JSON.parse(
-        (typeof window !== "undefined" ? localStorage.getItem("tl_violation_statuses") : null) ?? "{}"
-      ) as Record<string, string>;
-    } catch { /* keep empty */ }
-  }
+  const statuses: Record<string, string> = injectedStatuses ?? readLocalStatuses();
 
   if (Object.keys(statuses).length === 0) return data;
 

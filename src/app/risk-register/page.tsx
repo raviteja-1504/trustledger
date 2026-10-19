@@ -14,6 +14,7 @@ import { useRole } from "@/lib/roles";
 import { useToastHelpers } from "@/lib/toast";
 import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
+import { loadStatuses } from "@/lib/violationStatuses";
 import { cweFor } from "@/lib/cweMap";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
@@ -474,7 +475,8 @@ export default function RiskRegisterPage() {
     if (data) {
       const scanPromises = data.repos.filter(r=>r.latest_scan_id).map(r=>api.getScan(r.latest_scan_id).catch(()=>null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s!==null);
-      const derived = deriveRisks(patchDataWithAttestations(data), scans, memberEmails);
+      // Server statuses (resolved on any device) plus this tab's just-made sign-offs; demo data keeps its own.
+      const derived = deriveRisks(patchDataWithAttestations(data, seed ? undefined : await loadStatuses()), scans, memberEmails);
       setDerivedRisks(derived);
       setLastRefreshed(new Date());
 

@@ -27,7 +27,8 @@ jest.mock("@/lib/cache", () => {
 
 import { GET as getScan } from "@/app/api/scans/[id]/route";
 import { GET as getTrustRecord } from "@/app/api/scans/[id]/trust-record/route";
-import { POST as verifyRecord } from "@/app/api/trust-record/verify/route";
+import { checkTrustRecord } from "@/lib/trustRecord";
+import { exportPublicKey } from "@/lib/exportSigning";
 import { GET as getSarif } from "@/app/api/export/sarif/route";
 import { runScan } from "@/lib/scanner";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
@@ -60,13 +61,14 @@ function seed() {
 }
 
 const req = (url: string, init?: { method?: string; body?: string }) => new NextRequest(new URL(url, "http://localhost"), init);
-const verify = async (doc: unknown) => (await verifyRecord(req("/api/trust-record/verify", { method: "POST", body: JSON.stringify({ document: doc }) }))).json() as Promise<{ status: string }>;
+// The record check an auditor's tooling performs (the in-app verify page and its endpoint were removed).
+const verify = async (doc: unknown) => ({ status: checkTrustRecord(doc, process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET, exportPublicKey()?.public_key_pem) });
 
 describe("Trust Record: valid -> modify one byte -> tampered -> unknown key", () => {
   const OLD = process.env.EXPORT_SIGNING_KEY;
   afterAll(() => { process.env.EXPORT_SIGNING_KEY = OLD; });
 
-  it("through the real download and verify endpoints", async () => {
+  it("through the real download endpoint and the record check", async () => {
     seed();
     process.env.EXPORT_SIGNING_KEY = "deployment-A-key";
     const res = await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: Promise.resolve({ id: SCAN_ID }) });

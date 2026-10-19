@@ -5,15 +5,14 @@ import { useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import RiskBadge from "@/components/RiskBadge";
 import type { TopRiskFile } from "@/types";
+import { readLocalStatuses } from "@/lib/localStatuses";
 
 const riskPfx = (r: string) =>
   r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
 
+// Only this tab's recent sign-offs (the server's are already in f.attested).
 function loadLocalAttested(): Set<string> {
-  try {
-    const s = JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string, string>;
-    return new Set(Object.entries(s).filter(([, v]) => v === "resolved").map(([k]) => k));
-  } catch { return new Set(); }
+  return new Set(Object.entries(readLocalStatuses()).filter(([, v]) => v === "resolved").map(([k]) => k));
 }
 
 const RISK_ACCENT: Record<string, string> = {

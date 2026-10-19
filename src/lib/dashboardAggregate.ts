@@ -423,7 +423,7 @@ export async function fetchUnattestedRiskState(org_id: string) {
   })();
 
   if (latestScanIdPerRepo.length === 0) {
-    return { top_risk_files: [] as { repo: string; file_path: string; ai_pct: number; risk_score: string; pr_number: number; attested: boolean }[], unattested_deploy_count: 0, repos: [] as { repo: string; attestation_rate: number }[], attestation_rate: 0 };
+    return { top_risk_files: [] as { repo: string; file_path: string; scan_id: string; ai_pct: number; risk_score: string; pr_number: number; attested: boolean }[], closed_files: [] as string[], unattested_deploy_count: 0, repos: [] as { repo: string; attestation_rate: number }[], attestation_rate: 0 };
   }
 
   const { data: attests } = await db
@@ -475,6 +475,7 @@ export async function fetchUnattestedRiskState(org_id: string) {
     .map(f => ({
       repo: f.scans?.repo_full_name ?? "",
       file_path: f.file_path,
+      scan_id: f.scan_id,
       ai_pct: f.ai_percentage,
       risk_score: f.risk_score,
       pr_number: f.scans?.pr_number ?? 0,
@@ -488,9 +489,13 @@ export async function fetchUnattestedRiskState(org_id: string) {
     latestViolationByFile.set(`${repo}::${v.file_path}`, { status: v.status, risk_score: v.risk_score });
   });
   const unattested = [...latestViolationByFile.values()].filter(v => v.status === "open" || v.status === "in_review").length;
+  // "repo::path" of files whose latest finding was closed (resolved / accepted) without an attestation, so incident
+  // sync can treat them as handled too.
+  const closed_files = [...latestViolationByFile.entries()].filter(([, v]) => v.status !== "open" && v.status !== "in_review").map(([k]) => k);
 
   return {
     top_risk_files,
+    closed_files,
     unattested_deploy_count: unattested,
     repos,
     attestation_rate: repos.length === 0 ? 0 : repos.reduce((s, r) => s + r.attestation_rate, 0) / repos.length,
