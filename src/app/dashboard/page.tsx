@@ -39,6 +39,7 @@ import ReviewQueue, { buildQueue } from "@/components/dashboard/ReviewQueue";
 import RiskPanel from "@/components/dashboard/RiskPanel";
 import RepoTable, { buildRepoRows } from "@/components/dashboard/RepoTable";
 import ActivityList from "@/components/dashboard/ActivityList";
+import NeedsAttention, { buildAttention } from "@/components/dashboard/NeedsAttention";
 import { EvidencePanel, SecretsPanel, ShadowAiPanel, countSecrets, type Loadable, type SecretCounts } from "@/components/dashboard/GovernancePanels";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
@@ -224,7 +225,7 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [lastRefreshed]);
 
-  const { effectiveData } = useMemo(() => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
+  const { effectiveData, unresolvedRepoScans } = useMemo(() => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
 
   const displayActivity = useMemo(() => {
     const seen = new Set<string>();
@@ -262,6 +263,32 @@ export default function DashboardPage() {
       reposScanned7d: scanned7d, reposConnected: connected,
     });
   }, [effectiveData, secretCounts]);
+
+  const attention = useMemo(() => {
+    if (!effectiveData) return [];
+    const d = effectiveData;
+    const secrets = secretCounts && secretCounts !== "unavailable" ? secretCounts : null;
+    const now = Date.now();
+    // Overdue files straight from the SLA breaches, oldest deadline first (signed-off ones drop out).
+    const signedOff = new Set(d.top_risk_files.filter(f => f.attested).map(f => `${f.scan_id}::${f.file_path}`));
+    const overdueFiles = (d.sla_breach_files ?? [])
+      .filter(b => !signedOff.has(`${b.scan_id}::${b.file_path}`))
+      .sort((a, b) => a.sla_deadline.localeCompare(b.sla_deadline))
+      .map(b => ({ file: b.file_path, scanId: b.scan_id, repo: b.repo, overdueHours: Math.max(0, Math.floor((now - Date.parse(b.sla_deadline)) / 3600_000)) }));
+    // Awaiting attestation: the review queue (worst first; files someone is already reviewing are left out).
+    const ref = (f: (typeof queue)[number]) => ({ file: f.file_path, scanId: f.scan_id, repo: f.repo });
+    return buildAttention({
+      slaOverdue: d.sla_breach_files ? overdueFiles.length : (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0),
+      overdueFiles,
+      unreviewedCritical: queue.filter(f => f.risk_score === "CRITICAL").map(ref),
+      unreviewedHigh: queue.filter(f => f.risk_score === "HIGH").map(ref),
+      awaitingRepos: unresolvedRepoScans,
+      openCriticalSecrets: secrets ? secrets.CRITICAL : null,
+      openOtherSecrets: secrets ? secrets.HIGH + secrets.MEDIUM : null,
+      unapprovedAiTools: shadow && shadow !== "unavailable" ? shadow.open_violations : null,
+      failingControls: evidence && evidence !== "unavailable" ? evidence.gaps.filter(g => g.status === "fail").length : null,
+    });
+  }, [effectiveData, secretCounts, queue, unresolvedRepoScans, shadow, evidence]);
 
   const repoRows = useMemo(() => effectiveData
     ? buildRepoRows(effectiveData.repos, trust && trust !== "unavailable" ? trust.score.repos : null)
@@ -411,6 +438,14 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2.5 text-xs text-indigo-700">
             <span className="font-bold">My PRs</span>
             Showing repositories and files from pull requests opened by @{profile?.github_login ?? profile?.email?.split("@")[0] ?? "you"}. The Trust Score is your organisation&apos;s.
+          </div>
+        )}
+
+        {/* ── 0. Needs attention: what needs action now, first ── */}
+        {(effectiveData ? hasData : loading) && (
+          <div className="animate-fade-up">
+            {/* "All clear" only once open secrets are known too (no org → nothing to wait for). */}
+            <NeedsAttention items={attention} ready={!!effectiveData && (secretCounts !== null || !profile?.org_id)} />
           </div>
         )}
 

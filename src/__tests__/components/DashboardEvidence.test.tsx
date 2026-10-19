@@ -10,6 +10,7 @@ import { EvidencePanel, SecretsPanel, ShadowAiPanel, countSecrets } from "@/comp
 import RepoTable, { buildRepoRows, sortRepoRows } from "@/components/dashboard/RepoTable";
 import { riskDirection } from "@/components/dashboard/RiskPanel";
 import ActivityList from "@/components/dashboard/ActivityList";
+import NeedsAttention, { buildAttention, type AttentionInput } from "@/components/dashboard/NeedsAttention";
 import { deriveActivity } from "@/lib/dashboardActivity";
 import type { GovernanceScore, Dimension } from "@/lib/governanceScore";
 import type { ShadowSummary } from "@/lib/shadowAi";
@@ -217,6 +218,57 @@ describe("repositories", () => {
     rerender(<RepoTable rows={buildRepoRows(repos, [{ repo: "acme/api", score: 410, open_critical: 1, open_high: 3, review_coverage: 0.5, open_secrets: 0, last_scan: null }])} />);
     expect(screen.getByRole("columnheader", { name: "Trust Score" })).toBeInTheDocument();
     expect(screen.getByText("410")).toBeInTheDocument();
+  });
+});
+
+describe("needs attention", () => {
+  const none: AttentionInput = {
+    slaOverdue: 0, overdueFiles: [], unreviewedCritical: [], unreviewedHigh: [], awaitingRepos: [],
+    openCriticalSecrets: 0, openOtherSecrets: 0, unapprovedAiTools: 0, failingControls: 0,
+  };
+  const ref = (file: string, extra: { overdueHours?: number } = {}) => ({ file: `src/${file}`, scanId: `s-${file}`, repo: "acme/api", ...extra });
+
+  it("nothing to do → all clear", () => {
+    expect(buildAttention(none)).toEqual([]);
+    render(<NeedsAttention items={[]} ready />);
+    expect(screen.getByRole("region", { name: "Needs attention" })).toHaveTextContent("All clear");
+  });
+
+  it("lists every open item, critical first, naming the files and repos with direct links", () => {
+    const items = buildAttention({
+      slaOverdue: 2, overdueFiles: [ref("pay.ts", { overdueHours: 72 }), ref("auth.ts", { overdueHours: 5 })],
+      unreviewedCritical: [ref("crit.ts")], unreviewedHigh: [ref("a.ts"), ref("b.ts"), ref("c.ts"), ref("d.ts")],
+      awaitingRepos: [{ repoName: "api", scanId: "s1" }, { repoName: "web", scanId: "s2" }, { repoName: "a", scanId: "s3" }, { repoName: "b", scanId: "s4" }],
+      openCriticalSecrets: 1, openOtherSecrets: 2, unapprovedAiTools: 1, failingControls: 1,
+    });
+    expect(items.map(i => [i.key, i.severity])).toEqual([
+      ["sla", "critical"], ["secrets-critical", "critical"], ["critical", "critical"],
+      ["repos", "high"], ["high", "high"], ["ai", "high"], ["secrets", "medium"], ["controls", "medium"],
+    ]);
+    expect(items[0]).toMatchObject({ title: "2 files past the fix deadline", more: 0 });
+    expect(items[0].links).toEqual([
+      { label: "pay.ts", href: "/pr/s-pay.ts?attest=src%2Fpay.ts", note: "3d overdue" },
+      { label: "auth.ts", href: "/pr/s-auth.ts?attest=src%2Fauth.ts", note: "5h overdue" },
+    ]);
+    expect(items[2]).toMatchObject({ title: "1 CRITICAL file awaiting attestation" });
+    expect(items[3]).toMatchObject({ title: "4 repos pending sign-off", more: 1 });
+    expect(items[3].links!.map(l => [l.label, l.href])).toEqual([["api", "/pr/s1"], ["web", "/pr/s2"], ["a", "/pr/s3"]]);
+    expect(items[4]).toMatchObject({ title: "4 HIGH-risk files awaiting attestation", more: 1 });
+
+    render(<NeedsAttention items={items} ready />);
+    const region = screen.getByRole("region", { name: "Needs attention" });
+    expect(region).toHaveTextContent("8 items · 3 critical");
+    expect(within(region).getByRole("link", { name: /pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
+    expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/pr/s2");
+    expect(within(region).getAllByRole("link", { name: "+1 more" })).toHaveLength(2);
+    expect(within(region).getByRole("link", { name: "1 critical secret exposed in code" })).toHaveAttribute("href", "/secrets");
+  });
+
+  it("unknown sources add nothing; not ready shows a placeholder, not 'all clear'", () => {
+    expect(buildAttention({ ...none, openCriticalSecrets: null, openOtherSecrets: null, unapprovedAiTools: null, failingControls: null })).toEqual([]);
+    expect(buildAttention({ ...none, slaOverdue: 1 })[0]).toMatchObject({ href: "/sla", links: [], more: 0 });
+    render(<NeedsAttention items={[]} ready={false} />);
+    expect(screen.queryByText("All clear")).not.toBeInTheDocument();
   });
 });
 

@@ -3,7 +3,7 @@
  * fails instead of breaking the page.
  */
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import type { DashboardData } from "@/types";
 
 jest.mock("next/dynamic", () => () => () => null);
@@ -66,15 +66,21 @@ describe("Dashboard page", () => {
   it("shows every section, in order, from real data", async () => {
     render(<DashboardPage />);
     await screen.findByRole("region", { name: "Review queue" });
-    const order = ["Trust Score", "Review queue", "AI tool usage", "Leaked secrets", "Audit evidence", "Repositories", "Recent activity"];
+    const order = ["Needs attention", "Trust Score", "Review queue", "AI tool usage", "Leaked secrets", "Audit evidence", "Repositories", "Recent activity"];
     const regions = screen.getAllByRole("region").map(r => r.getAttribute("aria-label"));
     expect(regions.filter(r => order.includes(r!))).toEqual(order);
     expect(screen.getByRole("heading", { name: /Ada/ })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("img", { name: "Trust Score 612 out of 1000" })).toBeInTheDocument());
     expect(screen.getByRole("link", { name: /Review 1 high-risk file/ })).toHaveAttribute("href", "/violations");
-    expect(screen.getByRole("link", { name: /auth\.ts/ })).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
-    await waitFor(() => expect(screen.getByRole("link", { name: /Open secrets/ })).toHaveTextContent("1"));
+    expect(within(screen.getByRole("region", { name: "Review queue" })).getByRole("link", { name: /auth\.ts/ })).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
+    await waitFor(() => expect(screen.getByRole("link", { name: /^Open secrets/ })).toHaveTextContent("1"));
     expect(screen.getByText("480")).toBeInTheDocument();
+    // Needs attention leads with the critical items from the same data.
+    const attention = screen.getByRole("region", { name: "Needs attention" });
+    await waitFor(() => expect(attention).toHaveTextContent("1 critical secret exposed in code"));
+    expect(attention).toHaveTextContent("1 CRITICAL file awaiting attestation");
+    expect(attention).toHaveTextContent("1 repo pending sign-off");
+    expect(within(attention).getAllByRole("link", { name: /auth\.ts/ })[0]).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
   });
 
   it("a failing source only blanks its own panel", async () => {
