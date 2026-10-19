@@ -449,7 +449,10 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* ── 1. Trust Score ── */}
+        {/* ── 1. Headline numbers ── */}
+        {effectiveData && hasData && <div className="animate-fade-up"><KpiStrip kpis={kpis} /></div>}
+
+        {/* ── 2. Trust Score ── */}
         <div className="animate-fade-up">
           <TrustHero
             score={trust && trust !== "unavailable" ? trust.score : null}
@@ -472,9 +475,6 @@ export default function DashboardPage() {
 
         {effectiveData && hasData && (
           <>
-            {/* ── 2. Headline numbers ── */}
-            <div className="animate-fade-up"><KpiStrip kpis={kpis} /></div>
-
             {/* ── 3. Risk + review queue ── */}
             <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-3 gap-5 items-stretch">
               <div className="xl:col-span-2 min-w-0"><RiskPanel data={effectiveData} periodLabel={periodLabel} /></div>

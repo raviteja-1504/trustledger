@@ -31,7 +31,7 @@ function overdueLabel(h: number) {
 export default function ReviewQueue({ items, limit = 6 }: { items: readonly QueueItem[]; limit?: number }) {
   const shown = items.slice(0, limit);
   return (
-    <section aria-label="Review queue" className="section-card flex flex-col h-full">
+    <section id="review-queue" aria-label="Review queue" className="section-card flex flex-col h-full scroll-mt-6">
       <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
         <div>
           <h2 className="text-sm font-bold text-gray-900">Review queue</h2>

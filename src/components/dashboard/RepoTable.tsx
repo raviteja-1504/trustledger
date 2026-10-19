@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import type { RepoStat } from "@/types";
 import type { RepoScore } from "@/lib/governanceScore";
+import { repoHref } from "./NeedsAttention";
 
 export interface RepoRow {
   repo: string;
@@ -74,7 +75,7 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
   const hasScores = rows.some(r => r.score != null);
 
   return (
-    <section aria-label="Repositories" className="section-card overflow-hidden min-w-0">
+    <section id="repositories" aria-label="Repositories" className="section-card overflow-hidden min-w-0 scroll-mt-6">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
         <div>
           <h2 className="text-sm font-bold text-gray-900">Repositories</h2>
@@ -114,7 +115,7 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
               return (
                 <tr key={r.repo} className="hover:bg-gray-50/60">
                   <td className="px-5 py-2.5 max-w-[240px]">
-                    <Link href={`/repo/${r.repo}`} className="block text-xs font-bold text-gray-800 hover:text-indigo-600 truncate">{r.repo.split("/").pop()}</Link>
+                    <Link href={repoHref(r.repo)} className="block text-xs font-bold text-gray-800 hover:text-indigo-600 truncate">{r.repo.split("/").pop()}</Link>
                     <span className="block text-[10px] text-gray-400 truncate">{r.repo.split("/")[0]} · {r.scans} scan{r.scans === 1 ? "" : "s"}</span>
                   </td>
                   {hasScores && (

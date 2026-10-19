@@ -238,30 +238,41 @@ describe("needs attention", () => {
     const items = buildAttention({
       slaOverdue: 2, overdueFiles: [ref("pay.ts", { overdueHours: 72 }), ref("auth.ts", { overdueHours: 5 })],
       unreviewedCritical: [ref("crit.ts")], unreviewedHigh: [ref("a.ts"), ref("b.ts"), ref("c.ts"), ref("d.ts")],
-      awaitingRepos: [{ repoName: "api", scanId: "s1" }, { repoName: "web", scanId: "s2" }, { repoName: "a", scanId: "s3" }, { repoName: "b", scanId: "s4" }],
+      awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "s1" }, { repo: "acme/web", repoName: "web", scanId: "s2" }, { repo: "acme/a", repoName: "a", scanId: "s3" }, { repo: "acme/b", repoName: "b", scanId: "s4" }],
       openCriticalSecrets: 1, openOtherSecrets: 2, unapprovedAiTools: 1, failingControls: 1,
     });
-    expect(items.map(i => [i.key, i.severity])).toEqual([
-      ["sla", "critical"], ["secrets-critical", "critical"], ["critical", "critical"],
-      ["repos", "high"], ["high", "high"], ["ai", "high"], ["secrets", "medium"], ["controls", "medium"],
+    expect(items.map(i => [i.key, i.severity, i.count])).toEqual([
+      ["sla", "critical", 2], ["secrets-critical", "critical", 1], ["critical", "critical", 1],
+      ["repos", "high", 4], ["high", "high", 4], ["ai", "high", 1], ["secrets", "medium", 2], ["controls", "medium", 1],
     ]);
-    expect(items[0]).toMatchObject({ title: "2 files past the fix deadline", more: 0 });
+    // Deadlines: the heading opens the oldest overdue file; each file opens its own sign-off.
+    expect(items[0]).toMatchObject({ title: "files past the fix deadline", href: "/pr/s-pay.ts?attest=src%2Fpay.ts", all: { href: "/sla" }, more: 0 });
     expect(items[0].links).toEqual([
       { label: "pay.ts", href: "/pr/s-pay.ts?attest=src%2Fpay.ts", note: "3d overdue" },
       { label: "auth.ts", href: "/pr/s-auth.ts?attest=src%2Fauth.ts", note: "5h overdue" },
     ]);
-    expect(items[2]).toMatchObject({ title: "1 CRITICAL file awaiting attestation" });
-    expect(items[3]).toMatchObject({ title: "4 repos pending sign-off", more: 1 });
-    expect(items[3].links!.map(l => [l.label, l.href])).toEqual([["api", "/pr/s1"], ["web", "/pr/s2"], ["a", "/pr/s3"]]);
-    expect(items[4]).toMatchObject({ title: "4 HIGH-risk files awaiting attestation", more: 1 });
+    // Files awaiting attestation go to their sign-off, never to the violations list.
+    expect(items[2]).toMatchObject({ title: "CRITICAL file awaiting attestation", href: "/pr/s-crit.ts?attest=src%2Fcrit.ts", all: { href: "#review-queue" } });
+    expect(items[4]).toMatchObject({ title: "HIGH-risk files awaiting attestation", href: "/pr/s-a.ts?attest=src%2Fa.ts", more: 1 });
+    // Repos go to the repository pages.
+    expect(items[3]).toMatchObject({ title: "repos pending sign-off", href: "#repositories", more: 1 });
+    expect(items[3].links!.map(l => [l.label, l.href])).toEqual([["api", "/repo/acme/api"], ["web", "/repo/acme/web"], ["a", "/repo/acme/a"]]);
+    expect(items.some(i => i.href === "/violations" || i.links?.some(l => l.href === "/violations"))).toBe(false);
 
     render(<NeedsAttention items={items} ready />);
     const region = screen.getByRole("region", { name: "Needs attention" });
-    expect(region).toHaveTextContent("8 items · 3 critical");
-    expect(within(region).getByRole("link", { name: /pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
-    expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/pr/s2");
-    expect(within(region).getAllByRole("link", { name: "+1 more" })).toHaveLength(2);
-    expect(within(region).getByRole("link", { name: "1 critical secret exposed in code" })).toHaveAttribute("href", "/secrets");
+    expect(region).toHaveTextContent("3 critical");
+    expect(region).toHaveTextContent("3 high");
+    expect(region).toHaveTextContent("2 medium");
+    expect(within(region).getByRole("link", { name: /^pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
+    expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/repo/acme/web");
+    expect(within(region).getAllByRole("link", { name: "+1 more" }).map(a => a.getAttribute("href"))).toEqual(["#repositories", "#review-queue"]);
+    expect(within(region).getByRole("link", { name: /critical secret exposed/ })).toHaveAttribute("href", "/secrets");
+  });
+
+  it("a single pending repo opens that repo directly", () => {
+    const [item] = buildAttention({ ...none, awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "s1" }] });
+    expect(item).toMatchObject({ title: "repo pending sign-off", href: "/repo/acme/api" });
   });
 
   it("unknown sources add nothing; not ready shows a placeholder, not 'all clear'", () => {

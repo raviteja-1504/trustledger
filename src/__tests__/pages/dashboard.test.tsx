@@ -73,13 +73,16 @@ describe("Dashboard page", () => {
     await waitFor(() => expect(screen.getByRole("img", { name: "Trust Score 612 out of 1000" })).toBeInTheDocument());
     expect(screen.getByRole("link", { name: /Review 1 high-risk file/ })).toHaveAttribute("href", "/violations");
     expect(within(screen.getByRole("region", { name: "Review queue" })).getByRole("link", { name: /auth\.ts/ })).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
-    await waitFor(() => expect(screen.getByRole("link", { name: /^Open secrets/ })).toHaveTextContent("1"));
+    await waitFor(() => expect(screen.getByRole("link", { name: /Open secrets/ })).toHaveTextContent("1"));
     expect(screen.getByText("480")).toBeInTheDocument();
     // Needs attention leads with the critical items from the same data.
     const attention = screen.getByRole("region", { name: "Needs attention" });
-    await waitFor(() => expect(attention).toHaveTextContent("1 critical secret exposed in code"));
-    expect(attention).toHaveTextContent("1 CRITICAL file awaiting attestation");
-    expect(attention).toHaveTextContent("1 repo pending sign-off");
+    await waitFor(() => expect(attention).toHaveTextContent("critical secret exposed"));
+    expect(attention).toHaveTextContent("CRITICAL file awaiting attestation");
+    expect(within(attention).getByRole("link", { name: /repo pending sign-off/ })).toHaveAttribute("href", "/repo/acme/api");
+    // The headline numbers come before the Trust Score.
+    const tile = screen.getByRole("link", { name: /Open secrets/ });
+    expect(tile.compareDocumentPosition(screen.getByRole("region", { name: "Trust Score" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(attention).getAllByRole("link", { name: /auth\.ts/ })[0]).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
   });
 
