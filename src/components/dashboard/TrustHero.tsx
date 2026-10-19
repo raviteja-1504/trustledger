@@ -97,8 +97,8 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
       style={{ background: "radial-gradient(120% 140% at 0% 0%, #312e81 0%, #1e1b4b 38%, #0b1020 100%)" }}>
       <div className="absolute inset-0 pointer-events-none opacity-[0.07]"
         style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.6) 1px, transparent 1px)", backgroundSize: "28px 28px" }} />
-      {/* Three columns only when there's room for them (xl); below that the dimensions get the full width. */}
-      <div className="relative grid grid-cols-1 lg:grid-cols-[auto_minmax(0,1fr)] xl:grid-cols-[auto_minmax(0,1fr)_300px] gap-8 lg:gap-10 p-6 sm:p-8">
+      {/* Score and "Do next" side by side; the six drivers get a full-width row below, so labels fit on one line. */}
+      <div className="relative grid grid-cols-1 lg:grid-cols-[auto_minmax(0,1fr)] gap-8 lg:gap-x-12 lg:gap-y-6 p-6 sm:p-8">
 
         {/* Score */}
         <div className="flex items-center gap-5">
@@ -116,21 +116,42 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
           </div>
         </div>
 
+        {/* Next actions */}
+        <div className="rounded-2xl bg-white/[0.06] ring-1 ring-white/10 p-5 self-start">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-2.5">Do next</p>
+          {actions.length ? (
+            <ol className="space-y-2.5">
+              {actions.map((a, i) => (
+                <li key={a.label}>
+                  <Link href={a.href} className="group flex items-start gap-2.5 rounded-xl px-2 py-1.5 -mx-2 hover:bg-white/[0.06]">
+                    <span className="mt-0.5 w-5 h-5 rounded-full bg-white/10 text-[10px] font-black flex items-center justify-center shrink-0">{i + 1}</span>
+                    <span className="min-w-0 flex-1 text-sm text-white/90 leading-snug group-hover:text-white">{a.label}</span>
+                    <span className="text-xs font-black text-emerald-300 tabular-nums shrink-0 whitespace-nowrap">+{a.gain} pts</span>
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-xs text-white/55 leading-relaxed">
+              {score ? "Nothing to win back — every dimension is at full marks." : "Your highest-value fixes appear here once the score is calculated."}
+            </p>
+          )}
+        </div>
         {/* Dimensions */}
-        <div className="min-w-0">
-          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-3">What drives it</p>
+        <div className="min-w-0 lg:col-span-2 pt-6 border-t border-white/10">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-4">What drives it</p>
           {score ? (
-            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-10 gap-y-5">
+            <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-10 gap-y-5">
               {score.dimensions.map(d => (
                 <li key={d.key} className="min-w-0">
                   <div className="flex items-start justify-between gap-3">
-                    <span className="min-w-0 text-xs font-semibold text-white/85 leading-snug">{d.label}</span>
+                    <span className="min-w-0 text-sm font-semibold text-white/90 leading-snug">{d.label}</span>
                     <span className="flex items-baseline gap-1.5 shrink-0 whitespace-nowrap">
-                      <span className="text-[11px] tabular-nums text-white/55">{d.points}/{d.max_points}</span>
-                      <span className="text-xs font-black text-right min-w-[1rem]" style={{ color: GRADE_COLOR[d.grade] }}>{d.grade}</span>
+                      <span className="text-xs tabular-nums text-white/55">{d.points}/{d.max_points}</span>
+                      <span className="text-sm font-black text-right min-w-[1rem]" style={{ color: GRADE_COLOR[d.grade] }}>{d.grade}</span>
                     </span>
                   </div>
-                  <div className="mt-1.5 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div className="mt-2 h-1.5 rounded-full bg-white/10 overflow-hidden">
                     <div className="h-full rounded-full" style={{ width: `${Math.round(d.value * 100)}%`, background: GRADE_COLOR[d.grade] }} />
                   </div>
                 </li>
@@ -143,27 +164,6 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
           )}
         </div>
 
-        {/* Next actions */}
-        <div className="rounded-2xl bg-white/[0.06] ring-1 ring-white/10 p-5 lg:col-span-2 xl:col-span-1">
-          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-2.5">Do next</p>
-          {actions.length ? (
-            <ol className="space-y-2.5">
-              {actions.map((a, i) => (
-                <li key={a.label}>
-                  <Link href={a.href} className="group flex items-start gap-2.5 rounded-xl px-2 py-1.5 -mx-2 hover:bg-white/[0.06]">
-                    <span className="mt-0.5 w-5 h-5 rounded-full bg-white/10 text-[10px] font-black flex items-center justify-center shrink-0">{i + 1}</span>
-                    <span className="min-w-0 flex-1 text-xs text-white/85 leading-snug group-hover:text-white">{a.label}</span>
-                    <span className="text-[11px] font-black text-emerald-300 tabular-nums shrink-0">+{a.gain}</span>
-                  </Link>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="text-xs text-white/55 leading-relaxed">
-              {score ? "Nothing to win back — every dimension is at full marks." : "Your highest-value fixes appear here once the score is calculated."}
-            </p>
-          )}
-        </div>
       </div>
     </section>
   );

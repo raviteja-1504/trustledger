@@ -138,36 +138,69 @@ export function SecretsPanel({ counts }: { counts: Loadable<SecretCounts> }) {
 
 const DOT: Record<EvidenceStatus, string> = { pass: "bg-emerald-500", partial: "bg-amber-400", fail: "bg-rose-500", not_tested: "bg-gray-300" };
 const ORDER: EvidenceStatus[] = ["pass", "partial", "fail", "not_tested"];
+const STATUS_TEXT: Record<EvidenceStatus, { label: string; cls: string }> = {
+  pass:       { label: "Evidence collected", cls: "text-emerald-700 bg-emerald-50 ring-emerald-100" },
+  partial:    { label: "Gaps found",         cls: "text-amber-700 bg-amber-50 ring-amber-100" },
+  fail:       { label: "Failing",            cls: "text-rose-700 bg-rose-50 ring-rose-100" },
+  not_tested: { label: "No evidence yet",    cls: "text-gray-500 bg-gray-50 ring-gray-100" },
+};
+const REPORT_FW: Record<string, string> = { soc2: "SOC2", iso27001: "ISO27001", pcidss: "PCIDSS", aigov: "AIGOV" };
 
+/** Expanded: a card per framework listing every control with its status, then every open gap. */
 export function EvidencePanel({ overview }: { overview: Loadable<EvidenceOverview> }) {
   return (
     <Panel title="Audit evidence" href="/compliance" cta="Compliance" label="Audit evidence">
       {overview === null || overview === "unavailable" ? <Pending state={overview} /> : (
         <>
-          <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <p className="text-sm text-gray-500 -mt-2">
+            What your scans, reviews and audit log prove for each framework&apos;s code-change controls. Evidence for your auditor, not a certification.
+          </p>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
             {overview.frameworks.map(f => {
               const total = f.controls.length;
               return (
-                <li key={f.id}>
-                  <div className="flex items-start justify-between gap-2 text-xs">
-                    <span className="min-w-0 font-semibold text-gray-700 leading-snug">{f.name}</span>
-                    <span className="tabular-nums text-gray-500 shrink-0 whitespace-nowrap"><span className="font-black text-gray-900">{f.status_counts.pass}</span>/{total} with evidence</span>
+                <article key={f.id} aria-label={f.name} className="rounded-2xl ring-1 ring-gray-100 bg-gray-50/40 p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-bold text-gray-900">{f.name}</h3>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        <span className="font-black text-gray-900 tabular-nums">{f.status_counts.pass}</span> of {total} controls with evidence
+                      </p>
+                    </div>
+                    <Link href={`/reports?fw=${REPORT_FW[f.id] ?? f.id}`} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">Report →</Link>
                   </div>
-                  <div className="mt-1 flex h-1.5 rounded-full overflow-hidden bg-gray-100" aria-hidden="true">
+                  <div className="mt-3 flex h-2 rounded-full overflow-hidden bg-gray-100" aria-hidden="true">
                     {ORDER.map(s => f.status_counts[s] > 0 && <div key={s} className={DOT[s]} style={{ width: `${(f.status_counts[s] / Math.max(total, 1)) * 100}%` }} />)}
                   </div>
-                </li>
+                  <ul className="mt-4 divide-y divide-gray-100">
+                    {f.controls.map(c => (
+                      <li key={c.control_id} className="flex items-start gap-3 py-2.5">
+                        <span className="mt-0.5 text-[11px] font-black font-mono text-indigo-600 bg-indigo-50 rounded-md px-1.5 py-0.5 shrink-0">{c.control_id}</span>
+                        <span className="min-w-0 flex-1 text-sm text-gray-700 leading-snug">{c.control_name}</span>
+                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 whitespace-nowrap shrink-0 ${STATUS_TEXT[c.status].cls}`}>{STATUS_TEXT[c.status].label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </article>
               );
             })}
-          </ul>
-          {overview.gaps[0] ? (
-            <p className="text-[11px] text-gray-600 leading-snug">
-              <span className="font-bold text-gray-800">Top gap:</span> {overview.gaps[0].gaps[0]}
-            </p>
-          ) : <p className="text-[11px] text-emerald-700">No gaps in the controls TrustLedger can evidence.</p>}
-          <p className="text-[10px] text-gray-400">Evidence for your auditor, not a certification.</p>
+          </div>
+          {overview.gaps.length > 0 ? (
+            <div className="rounded-2xl ring-1 ring-amber-100 bg-amber-50/40 p-5">
+              <h3 className="text-sm font-bold text-gray-900">Gaps to close</h3>
+              <ul className="mt-3 space-y-2.5">
+                {overview.gaps.map(g => (
+                  <li key={g.key} className="flex items-start gap-3 text-sm">
+                    <span className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${DOT[g.status]}`} />
+                    <span className="text-gray-700 leading-snug"><span className="font-semibold text-gray-900">{g.label}:</span> {g.gaps.join("; ")}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : <p className="text-sm text-emerald-700">No gaps in the controls TrustLedger can evidence.</p>}
         </>
       )}
     </Panel>
   );
 }
+

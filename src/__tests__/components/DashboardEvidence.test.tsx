@@ -41,7 +41,7 @@ describe("Trust Score hero", () => {
     expect(hero).toHaveTextContent("▲ 40 pts in 7 days");
     expect(hero).toHaveTextContent("Human review of risky code");
     const actions = within(hero).getAllByRole("link").filter(a => /\+\d+/.test(a.textContent ?? ""));
-    expect(actions.map(a => a.textContent)).toEqual(["1Fix 3 CRITICAL findings in api+90", "2Review 4 high-risk files+60", "3Resolve 1 overdue finding+15"]);
+    expect(actions.map(a => a.textContent)).toEqual(["1Fix 3 CRITICAL findings in api+90 pts", "2Review 4 high-risk files+60 pts", "3Resolve 1 overdue finding+15 pts"]);
     expect(actions[0]).toHaveAttribute("href", "/violations?repo=api");
   });
 
@@ -185,17 +185,30 @@ describe("governance panels", () => {
     expect(screen.getByRole("region", { name: "Leaked secrets" })).toHaveTextContent("4open credentials found in code");
   });
 
-  it("audit evidence per framework, with the top gap and what it is not", () => {
+  it("audit evidence expanded: every control of every framework with its status, then every gap", () => {
     const overview: EvidenceOverview = {
       period_start: "a", period_end: "b", generated_at: "c",
-      frameworks: [{ id: "soc2", name: "SOC 2", short: "SOC 2", status_counts: { pass: 3, partial: 1, fail: 0, not_tested: 0 },
-        controls: [0, 1, 2, 3].map(i => ({ control_id: `c${i}`, control_name: "x", status: "pass" as const })) }],
-      gaps: [{ key: "review", label: "High-risk changes reviewed", status: "partial", gaps: ["3 high-risk files not yet reviewed"] }],
+      frameworks: [
+        { id: "soc2", name: "SOC 2", short: "SOC 2", status_counts: { pass: 1, partial: 1, fail: 0, not_tested: 0 },
+          controls: [{ control_id: "CC8.1", control_name: "Changes are authorised, tested and approved", status: "partial" }, { control_id: "CC7.2", control_name: "Activity is logged", status: "pass" }] },
+        { id: "aigov", name: "AI code governance", short: "AI governance", status_counts: { pass: 0, partial: 0, fail: 1, not_tested: 0 },
+          controls: [{ control_id: "AIG-1", control_name: "Only approved AI tools are used", status: "fail" }] },
+      ],
+      gaps: [
+        { key: "independent_review", label: "Reviewer is not the author", status: "fail", gaps: ["2 self-approvals", "1 couldn't be checked"] },
+        { key: "review", label: "High-risk changes reviewed", status: "partial", gaps: ["3 high-risk files not yet reviewed"] },
+      ],
     };
     render(<EvidencePanel overview={overview} />);
     const p = screen.getByRole("region", { name: "Audit evidence" });
-    expect(p).toHaveTextContent("3/4 with evidence");
-    expect(p).toHaveTextContent("Top gap: 3 high-risk files not yet reviewed");
+    const soc2 = within(p).getByRole("article", { name: "SOC 2" });
+    expect(soc2).toHaveTextContent("1 of 2 controls with evidence");
+    expect(within(soc2).getAllByRole("listitem").map(li => li.textContent)).toEqual([
+      "CC8.1Changes are authorised, tested and approvedGaps found", "CC7.2Activity is loggedEvidence collected"]);
+    expect(within(soc2).getByRole("link", { name: /Report/ })).toHaveAttribute("href", "/reports?fw=SOC2");
+    expect(within(p).getByRole("article", { name: "AI code governance" })).toHaveTextContent("AIG-1Only approved AI tools are usedFailing");
+    expect(p).toHaveTextContent("Reviewer is not the author: 2 self-approvals; 1 couldn't be checked");
+    expect(p).toHaveTextContent("High-risk changes reviewed: 3 high-risk files not yet reviewed");
     expect(p).toHaveTextContent("not a certification");
   });
 
