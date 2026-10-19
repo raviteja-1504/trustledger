@@ -1,72 +1,53 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
-import dynamic from "next/dynamic";
+/**
+ * Dashboard: one screen that answers "how governed is our code right now, and what should we do next?" before
+ * anyone opens a specific page.
+ *
+ *   1. Trust Score hero: score, 30-day trend, the six dimensions, the actions worth the most points.
+ *   2. Six headline numbers, each linking to where it's handled.
+ *   3. Risk trend for the period, next to the review queue.
+ *   4. Governance: AI tool usage, leaked secrets, audit evidence.
+ *   5. Repositories, next to recent activity.
+ *
+ * Every number comes from real data: the dashboard payload (api.dashboard), /api/trust-score, /api/shadow-ai,
+ * /api/secrets and /api/evidence/collect?overview=1. Panels whose data can't load say so instead of guessing.
+ */
+
+import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
-import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
-import InfoTooltip from "@/components/InfoTooltip";
-import StatsCard from "@/components/StatsCard";
-import RiskDonut from "@/components/RiskDonut";
-import ProgressBar from "@/components/ProgressBar";
-import RiskBadge from "@/components/RiskBadge";
-
-// Heavy components — lazy loaded to reduce initial bundle size
-const RiskTrendChart     = dynamic(() => import("@/components/RiskTrendChart"),    { ssr:false });
-const TopRiskFilesPanel  = dynamic(() => import("@/components/TopRiskFilesPanel"), { ssr:false });
-const AuditEvidenceCard  = dynamic(() => import("@/components/dashboard/AuditEvidenceCard"), { ssr:false });
-import { topAction, type ScoreAction } from "@/lib/governanceScore";
-import { deriveActivity } from "@/lib/dashboardActivity";
 import { api } from "@/lib/api";
 import { loadPolicy } from "@/lib/policy";
-import { computeTrustScore, scoreColor } from "@/lib/trustScore";
+import { computeTrustScore } from "@/lib/trustScore";
 import { useScansRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import SetupGuide from "@/components/setup/SetupGuide";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/roles";
 import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
-import type { DashboardData, RepoStat, RiskLevel, ActivityEvent } from "@/types";
-import AttentionPanel from "@/components/dashboard/AttentionPanel";
+import type { DashboardData, ActivityEvent } from "@/types";
+import type { GovernanceScore } from "@/lib/governanceScore";
+import type { ShadowSummary } from "@/lib/shadowAi";
+import type { EvidenceOverview } from "@/lib/evidenceEngine";
 import { applyLiveReviewState } from "@/lib/dashboardLiveState";
+import { deriveActivity } from "@/lib/dashboardActivity";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import TrustHero, { type TrustHistoryPoint } from "@/components/dashboard/TrustHero";
+import KpiStrip, { buildKpis } from "@/components/dashboard/KpiStrip";
+import ReviewQueue, { buildQueue } from "@/components/dashboard/ReviewQueue";
+import RiskPanel from "@/components/dashboard/RiskPanel";
+import RepoTable, { buildRepoRows } from "@/components/dashboard/RepoTable";
+import ActivityList from "@/components/dashboard/ActivityList";
+import { EvidencePanel, SecretsPanel, ShadowAiPanel, countSecrets, type Loadable, type SecretCounts } from "@/components/dashboard/GovernancePanels";
 
 const DAYS_OPTIONS = [7, 30, 90] as const;
 type DaysOption = (typeof DAYS_OPTIONS)[number];
 type RangeMode = DaysOption | "custom";
-const ORG       = process.env.NEXT_PUBLIC_ORG ?? "acme";
+const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
-// ── SLA helpers ───────────────────────────────────────────────────────────────
+const riskPrefix = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
 
-function slaStatus(data: DashboardData) {
-  if (data.sla_breach_critical_count !== undefined || data.sla_breach_high_count !== undefined) {
-    const crit = data.sla_breach_critical_count ?? 0;
-    const high = data.sla_breach_high_count ?? 0;
-    return { crit, high, total: crit + high };
-  }
-  const crit = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested).length;
-  const high = data.top_risk_files.filter(f => f.risk_score === "HIGH" && !f.attested).length;
-  return { crit, high, total: crit + high };
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function RepoIcon()        { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3h18v18H3z"/><path d="M9 3v18"/><path d="M3 9h6"/><path d="M3 15h6"/></svg>; }
-function ScanIcon()        { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>; }
-function FileIcon()        { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>; }
-function CoverageIcon()    { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>; }
-function BrainIcon()       { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3Z"/></svg>; }
-function ShieldCheckIcon() { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>; }
-function AlertIcon()       { return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>; }
-function ClockIcon()       { return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>; }
-function ExternalLinkIcon(){ return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>; }
-function StarIcon({ filled }: { filled: boolean }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill={filled ? "#f59e0b" : "none"} stroke={filled ? "#f59e0b" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-    </svg>
-  );
-}
 function KeyboardIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -75,172 +56,10 @@ function KeyboardIcon() {
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function repoRiskLevel(r: RepoStat): RiskLevel {
-  if (r.ai_pct > 0.7 && r.attestation_rate < 0.5) return "CRITICAL";
-  if (r.ai_pct > 0.5 || r.attestation_rate < 0.5)  return "HIGH";
-  if (r.ai_pct > 0.3 || r.attestation_rate < 0.8)  return "MEDIUM";
-  return "LOW";
-}
-
-// ── Security Inbox (compact strip below stats) ───────────────────────────────
-
-function securityScore(r: RepoStat): number {
-  const attest  = r.attestation_rate * 40;
-  const aiScore = (1 - Math.min(r.ai_pct, 1)) * 30;
-  const daysSince = r.last_scan
-    ? Math.floor((Date.now() - new Date(r.last_scan).getTime()) / 86400000)
-    : 999;
-  const freshness = Math.max(0, 15 - daysSince * 0.5);
-  const critPenalty = repoRiskLevel(r) === "CRITICAL" ? 0 : repoRiskLevel(r) === "HIGH" ? 7.5 : 15;
-  return Math.round(attest + aiScore + freshness + critPenalty);
-}
-
-function SecurityGrade({ score }: { score: number }) {
-  const { grade, bg, text, border } =
-    score >= 85 ? { grade:"A", bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0" } :
-    score >= 70 ? { grade:"B", bg:"#eff6ff", text:"#1d4ed8", border:"#bfdbfe" } :
-    score >= 55 ? { grade:"C", bg:"#fffbeb", text:"#b45309", border:"#fde68a" } :
-    score >= 40 ? { grade:"D", bg:"#fff7ed", text:"#c2410c", border:"#fed7aa" } :
-                  { grade:"F", bg:"#fef2f2", text:"#be123c", border:"#fecdd3" };
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black border"
-        style={{ background: bg, color: text, borderColor: border }}>
-        {grade}
-      </span>
-      <span className="text-[10px] font-bold tabular-nums" style={{ color: text }}>{score}</span>
-    </div>
-  );
-}
-
-function relativeDate(iso: string) {
-  if (!iso) return "—";
-  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
-  if (d === 0) return "Today";
-  if (d === 1) return "Yesterday";
-  if (d < 7)   return `${d}d ago`;
-  if (d < 30)  return `${Math.floor(d / 7)}w ago`;
-  return `${Math.floor(d / 30)}mo ago`;
-}
-
-// ── Top Risk Repos ───────────────────────────────────────────────────────────
-// Ranks repos by concentration of actionable risk (CRITICAL/HIGH files in
-// their latest scan) -- a different question than RepoRiskMatrix's AI% vs
-// attestation scatter: "where is risk concentrated" rather than "which repos
-// combine high AI content with low review coverage."
-
-function TopRiskRepos({ data }: { data: DashboardData }) {
-  const ranked = [...data.repos]
-    .map(r => ({ ...r, risk: r.high_crit_count ?? 0 }))
-    .filter(r => r.risk > 0)
-    .sort((a, b) => b.risk - a.risk)
-    .slice(0, 5);
-
-  const maxRisk = Math.max(1, ...ranked.map(r => r.risk));
-
-  return (
-    <div className="section-card p-5 h-full flex flex-col">
-      <div className="mb-3">
-        <p className="font-bold text-gray-900 text-sm">Top Risk Repos</p>
-        <p className="text-xs text-gray-400 mt-0.5">Ranked by CRITICAL &amp; HIGH files needing attestation</p>
-      </div>
-
-      {ranked.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-6 text-center">
-          <div className="w-11 h-11 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-500">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-          </div>
-          <p className="text-xs font-bold text-gray-700">No repos need attention</p>
-          <p className="text-[10px] text-gray-400">Every repo is clear of CRITICAL/HIGH risk</p>
-        </div>
-      ) : (
-        <div className="flex-1 flex flex-col justify-center gap-3">
-          {ranked.map(r => {
-            const pct = Math.round((r.risk / maxRisk) * 100);
-            const attestedShare = Math.round(r.attestation_rate * 100);
-            return (
-              <Link key={r.repo} href={`/repo/${r.repo}`} className="group block">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-gray-700 truncate group-hover:text-indigo-600 transition-colors">
-                    {r.repo.split("/").pop()}
-                  </span>
-                  <span className="text-xs font-black text-rose-600 tabular-nums shrink-0 ml-2">{r.risk}</span>
-                </div>
-                <div className="h-2 rounded-full overflow-hidden bg-gray-100">
-                  <div
-                    className="h-full rounded-full transition-all duration-700"
-                    style={{ width: `${pct}%`, background: "linear-gradient(90deg,#f97316,#ef4444)" }}
-                  />
-                </div>
-                <p className="text-[9px] text-gray-400 mt-0.5">{attestedShare}% attested</p>
-              </Link>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Empty State ───────────────────────────────────────────────────────────────
-
-function EmptyState({ org }: { org: string }) {
-  return (
-    <div className="animate-fade-up flex flex-col items-center justify-center py-20 gap-5">
-      <div className="w-16 h-16 rounded-2xl bg-indigo-50 flex items-center justify-center">
-        <svg className="text-indigo-400 w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
-      </div>
-      <div className="text-center">
-        <p className="font-bold text-gray-800 text-lg">No scans for <span className="text-indigo-600">{org}</span></p>
-        <p className="text-gray-400 text-sm mt-1 max-w-xs">
-          Submit your first scan via the API or install the GitHub App to start tracking AI code provenance.
-        </p>
-      </div>
-      <div className="bg-gray-900 rounded-2xl p-5 text-left max-w-lg w-full">
-        <p className="text-xs text-gray-400 mb-2 font-medium">Quick start — submit a test scan</p>
-        <pre className="text-xs text-emerald-400 font-mono leading-relaxed overflow-x-auto">{`curl -X POST ${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/api/scans \\
-  -H 'Content-Type: application/json' \\
-  -H 'X-TrustLedger-Key: tl_live_your_api_key' \\
-  -d '{
-    "repo": "${org}/my-repo",
-    "pr_number": 1,
-    "commit_sha": "abc1234",
-    "files": [{"path": "src/app.py",
-               "content": "# code here"}]
-  }'`}</pre>
-      </div>
-      <div className="flex gap-3 flex-wrap justify-center">
-        {[
-          { n: "1", t: "Submit scan",         c: "bg-indigo-50 text-indigo-700 border-indigo-100" },
-          { n: "2", t: "Review flagged files", c: "bg-violet-50 text-violet-700 border-violet-100" },
-          { n: "3", t: "Record attestation",   c: "bg-emerald-50 text-emerald-700 border-emerald-100" },
-        ].map(s => (
-          <div key={s.n} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium ${s.c}`}>
-            <span className="w-5 h-5 rounded-full bg-white flex items-center justify-center text-xs font-bold shadow-sm">{s.n}</span>
-            {s.t}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Keyboard shortcuts toast ──────────────────────────────────────────────────
-
 function ShortcutsToast({ onClose }: { onClose: () => void }) {
   const shortcuts = [
-    { key: "N", desc: "New scan" },
-    { key: "E", desc: "Export CSV" },
-    { key: "7", desc: "Last 7 days" },
-    { key: "3", desc: "Last 30 days" },
-    { key: "9", desc: "Last 90 days" },
-    { key: "W", desc: "Toggle watchlist" },
+    { key: "N", desc: "New scan" }, { key: "E", desc: "Export CSV" },
+    { key: "7", desc: "Last 7 days" }, { key: "3", desc: "Last 30 days" }, { key: "9", desc: "Last 90 days" },
     { key: "?", desc: "This menu" },
   ];
   return (
@@ -248,7 +67,7 @@ function ShortcutsToast({ onClose }: { onClose: () => void }) {
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 mx-4 animate-fade-up" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <p className="font-bold text-gray-900 flex items-center gap-2"><KeyboardIcon /> Keyboard shortcuts</p>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">×</button>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none" aria-label="Close">×</button>
         </div>
         <ul className="space-y-2">
           {shortcuts.map(s => (
@@ -263,23 +82,13 @@ function ShortcutsToast({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
-
-const WATCHLIST_KEY = "tl_watchlist";
-
-function loadWatchlist(): Set<string> {
-  try {
-    const raw = typeof window !== "undefined" ? localStorage.getItem(WATCHLIST_KEY) : null;
-    return new Set(raw ? JSON.parse(raw) : []);
-  } catch { return new Set(); }
-}
-function saveWatchlist(s: Set<string>) {
-  if (typeof window !== "undefined")
-    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(Array.from(s)));
+function greeting(name?: string | null) {
+  const h = new Date().getHours();
+  const part = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  return name ? `${part}, ${name}` : part;
 }
 
 export default function DashboardPage() {
-    const tz = useTimezone();
   const [rangeMode,     setRangeMode]     = useState<RangeMode>(90);
   const [days,          setDays]          = useState<DaysOption>(90);
   const [startDate,     setStartDate]     = useState("");
@@ -291,1248 +100,366 @@ export default function DashboardPage() {
   const [loading,       setLoading]       = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [refreshAgo,    setRefreshAgo]    = useState("");
-  const [clearingCache, setClearingCache] = useState(false);
+  const [refreshing,    setRefreshing]    = useState(false);
   const [activity,      setActivity]      = useState<ActivityEvent[]>([]);
-  const [localActivity, setLocalActivity] = useState<ActivityEvent[]>([]); // attestations from PR page
-  const [repoSort,      setRepoSort]      = useState<"risk" | "ai" | "attest" | "scans">("risk");
-  const [repoFilter,    setRepoFilter]    = useState<"all" | "critical" | "needs_action" | "watchlist">("all");
-  const [repoSearch,    setRepoSearch]    = useState("");
-  const [repoView,      setRepoView]      = useState<"table" | "grid">("table");
-  const [repoGroupOrg,  setRepoGroupOrg]  = useState(false);
-  const [repoPage,      setRepoPage]      = useState(0);
-  const REPO_PAGE_SIZE = 15;
-  const [policyName,    setPolicyName]    = useState<string>("Standard");
+  const [localActivity, setLocalActivity] = useState<ActivityEvent[]>([]); // sign-offs made on the PR page
+  const [policyName,    setPolicyName]    = useState("Standard");
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
-  const [watchlist,     setWatchlistState]= useState<Set<string>>(new Set());
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [pulseCount,    setPulseCount]    = useState(0);
   const [reloadKey,     setReloadKey]     = useState(0);
-  const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
-  const [openSecretsCount,  setOpenSecretsCount]  = useState(0);
+  const [violationStatuses, setViolationStatuses] = useState<Record<string, string>>({});
+  const [secretCounts,  setSecretCounts]  = useState<Loadable<SecretCounts>>(null);
+  const [trust,         setTrust]         = useState<Loadable<{ score: GovernanceScore; history: TrustHistoryPoint[] }>>(null);
+  const [shadow,        setShadow]        = useState<Loadable<ShadowSummary>>(null);
+  const [evidence,      setEvidence]      = useState<Loadable<EvidenceOverview>>(null);
 
   const { role, permissions } = useRole();
   const roleColor = ROLE_COLORS[role];
   const { profile } = useAuth();
   const isDeveloperView = role === "developer";
+  const seed = isSeedMode();
+  const orgLabel = profile?.org_id ? (profile.org_name || profile.org_slug || ORG) : ORG;
 
-  // Supabase Realtime — refresh dashboard when a new scan lands
-  useScansRealtime(profile?.org_id, () => {
-    // New scan detected — trigger a dashboard refresh
-    setData(null);
-    setLoading(true);
-    api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days)
-      .then(d => { setData(d); setLastRefreshed(new Date()); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  });
+  // A new scan landed: reload the dashboard payload.
+  useScansRealtime(profile?.org_id, () => setReloadKey(k => k + 1));
 
-  // Load watchlist from localStorage
-  useEffect(() => { setWatchlistState(loadWatchlist()); }, []);
+  useEffect(() => { setPolicyName(loadPolicy().name); }, []);
 
-  // Violation status and open-secrets count now live server-side (see
-  // api/violation-status and api/secrets) instead of in localStorage, so this
-  // widget can't disagree with the Sidebar badge or the Violations/Secrets
-  // pages themselves — resolving something on any device updates all of them.
+  // Review state and open secrets live server-side, so this agrees with the sidebar badges and their pages.
   useEffect(() => {
-    function syncFromSeed() {
-      try { setViolationStatuses({}); } catch {}
-      const total = parseInt(localStorage.getItem("tl_secret_total") ?? "8", 10);
-      setOpenSecretsCount(isNaN(total) ? 0 : total);
-    }
-    async function syncStatuses() {
+    async function sync() {
       if (!profile?.org_id) return;
-      if (isSeedMode()) { syncFromSeed(); return; }
+      if (isSeedMode()) {
+        const total = parseInt(localStorage.getItem("tl_secret_total") ?? "0", 10);
+        setSecretCounts({ CRITICAL: 0, HIGH: 0, MEDIUM: isNaN(total) ? 0 : total });
+        return;
+      }
       try {
         const [overridesRes, secretsRes] = await Promise.all([
           authedFetch<{ overrides: Record<string, { status: string }> }>("/api/violation-status"),
-          authedFetch<{ findings: { status: string }[] }>("/api/secrets?status=open"),
+          authedFetch<{ findings: { status: string; severity?: string }[] }>("/api/secrets?status=open"),
         ]);
         const next: Record<string, string> = {};
         for (const [id, o] of Object.entries(overridesRes.overrides ?? {})) next[id] = o.status;
         setViolationStatuses(next);
-        setOpenSecretsCount((secretsRes.findings ?? []).length);
-      } catch { /* offline — keep whatever's currently shown */ }
+        setSecretCounts(countSecrets(secretsRes.findings ?? []));
+      } catch { setSecretCounts(prev => prev ?? "unavailable"); }
     }
-    function onVisible() { if (!document.hidden) syncStatuses(); }
-    syncStatuses();
-    window.addEventListener("focus",              syncStatuses);
-    window.addEventListener("tl:badge",            syncStatuses);
-    document.addEventListener("visibilitychange",  onVisible);
-    // Skipped while the tab is hidden (becoming visible again re-syncs immediately, see onVisible).
-    const id = setInterval(() => { if (!document.hidden) syncStatuses(); }, 30_000);
+    function onVisible() { if (!document.hidden) sync(); }
+    sync();
+    window.addEventListener("focus", sync);
+    window.addEventListener("tl:badge", sync);
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (!document.hidden) sync(); }, 30_000);
     return () => {
-      window.removeEventListener("focus",             syncStatuses);
-      window.removeEventListener("tl:badge",           syncStatuses);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("tl:badge", sync);
       document.removeEventListener("visibilitychange", onVisible);
       clearInterval(id);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
-  // Sync local attestation events from PR page — updates on focus so new attestations appear immediately
+  // Trust Score, AI tool usage and audit evidence: server-computed, independent of the date range.
+  useEffect(() => {
+    if (seed) return;
+    let live = true;
+    authedFetch<{ score: GovernanceScore; history: TrustHistoryPoint[] }>("/api/trust-score?history=30")
+      .then(r => { if (live) setTrust(r?.score ? { score: r.score, history: r.history ?? [] } : "unavailable"); })
+      .catch(() => { if (live) setTrust("unavailable"); });
+    authedFetch<{ summary: ShadowSummary }>("/api/shadow-ai?days=30")
+      .then(r => { if (live) setShadow(r?.summary ?? "unavailable"); })
+      .catch(() => { if (live) setShadow("unavailable"); });
+    if (!isDeveloperView) {
+      authedFetch<EvidenceOverview>("/api/evidence/collect?overview=1")
+        .then(o => { if (live) setEvidence(Array.isArray(o?.frameworks) ? o : "unavailable"); })
+        .catch(() => { if (live) setEvidence("unavailable"); });
+    }
+    return () => { live = false; };
+  }, [seed, isDeveloperView, reloadKey]);
+
+  // Sign-offs made on the PR page show up in activity straight away.
   useEffect(() => {
     function syncLocal() {
-      try {
-        const raw = JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[];
-        setLocalActivity(raw.slice(0, 15));
-      } catch {}
+      try { setLocalActivity((JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[]).slice(0, 15)); } catch {}
     }
-    function onVisible() { if (!document.hidden) syncLocal(); }
     syncLocal();
     window.addEventListener("focus", syncLocal);
-    document.addEventListener("visibilitychange", onVisible);
     const id = setInterval(syncLocal, 5_000);
-    return () => {
-      window.removeEventListener("focus", syncLocal);
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(id);
-    };
+    return () => { window.removeEventListener("focus", syncLocal); clearInterval(id); };
   }, []);
 
-  const toggleWatch = useCallback((repo: string) => {
-    setWatchlistState(prev => {
-      const next = new Set(prev);
-      next.has(repo) ? next.delete(repo) : next.add(repo);
-      saveWatchlist(next);
-      return next;
-    });
-  }, []);
-
-  useEffect(() => { setPolicyName(loadPolicy().name); }, []);
-
-  // Animate scan pulse every 8s
+  // Dashboard payload for the selected range.
   useEffect(() => {
-    const t = setInterval(() => setPulseCount(c => c + 1), 8000);
-    return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    // Merge local attestation events (from PR page) with API/seed events
-    function mergeWithLocal(base: ActivityEvent[]): ActivityEvent[] {
-      try {
-        const local = JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[];
-        const all   = [...local, ...base];
-        // Dedup by scan_id+file_path+timestamp
-        const seen  = new Set<string>();
-        return all
-          .filter(e => { const k = `${e.scan_id}::${e.file_path}::${e.timestamp}`; if (seen.has(k)) return false; seen.add(k); return true; })
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, 15);
-      } catch { return base.slice(0, 15); }
-    }
-
-    // Check for dev-seed forced data BEFORE making any API call. Real orgs
-    // (profile.org_id set) always go through api.dashboard() below so the
-    // selected date range is respected, instead of a stale cached snapshot.
+    // Opt-in dev seed, only without a real org.
     const seedRaw = typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1" && !profile?.org_id
       ? localStorage.getItem("tl_notif_snapshot") : null;
     if (seedRaw) {
       try {
-        const seed = JSON.parse(seedRaw) as DashboardData;
-        if (Array.isArray(seed?.repos) && seed.repos.length > 0) {
-          setData(seed); setLastRefreshed(new Date()); setLoading(false);
-          setActivity(mergeWithLocal(deriveActivity(seed)));
+        const s = JSON.parse(seedRaw) as DashboardData;
+        if (Array.isArray(s?.repos) && s.repos.length > 0) {
+          setData(s); setLastRefreshed(new Date()); setLoading(false); setActivity(deriveActivity(s));
           return;
         }
       } catch {}
     }
-
-    setData(null); setError(null); setLoading(true);
+    let live = true;
+    setError(null); setLoading(true);
     const sd = rangeMode === "custom" ? startDate : undefined;
-    const ed = rangeMode === "custom" ? endDate   : undefined;
+    const ed = rangeMode === "custom" ? endDate : undefined;
     api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed)
-      .then(d => {
-        setData(d); setLastRefreshed(new Date());
-        // Activity is derived from real scan/attestation data — empty when the org has none yet.
-        setActivity(mergeWithLocal(d.repos.length > 0 ? deriveActivity(d) : []));
-      })
-      .catch((e: Error) => {
-        setData(null); setError(e?.message || "Failed to load dashboard data");
-      })
-
-      .finally(() => setLoading(false));
+      .then(d => { if (!live) return; setData(d); setLastRefreshed(new Date()); setActivity(d.repos.length > 0 ? deriveActivity(d) : []); })
+      .catch((e: Error) => { if (live) { setData(null); setError(e?.message || "Failed to load dashboard data"); } })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
   }, [days, rangeMode, startDate, endDate, profile?.org_id, reloadKey]);
 
-  // Refresh-ago ticker
   useEffect(() => {
     function tick() {
       if (!lastRefreshed) { setRefreshAgo(""); return; }
       const s = Math.floor((Date.now() - lastRefreshed.getTime()) / 1000);
-      if (s < 60)  setRefreshAgo("just now");
-      else if (s < 3600) setRefreshAgo(`${Math.floor(s / 60)}m ago`);
-      else setRefreshAgo(`${Math.floor(s / 3600)}h ago`);
+      setRefreshAgo(s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ago`);
     }
     tick();
     const id = setInterval(tick, 30_000);
     return () => clearInterval(id);
   }, [lastRefreshed]);
 
-  // Keyboard shortcuts
+  const { effectiveData } = useMemo(() => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
+
+  const displayActivity = useMemo(() => {
+    const seen = new Set<string>();
+    return [...localActivity, ...activity]
+      .filter(e => { const k = `${e.scan_id}::${e.file_path}::${e.timestamp}`; if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 15);
+  }, [localActivity, activity]);
+
+  const queue = useMemo(() => effectiveData
+    ? buildQueue(effectiveData, Date.now(), f => violationStatuses[`${riskPrefix(f.risk_score)}::${f.scan_id}::${f.file_path}`] === "in_review")
+    : [], [effectiveData, violationStatuses]);
+
+  const kpis = useMemo(() => {
+    if (!effectiveData) return [];
+    const d = effectiveData;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const scanned7d = d.repos.filter(r => r.last_scan && r.last_scan >= sevenDaysAgo).length;
+    const connected = Math.max(d.connected_repo_count ?? 0, d.repos.length);
+    const totalHigh = d.total_high_crit ?? null;
+    const reviewed = d.attested_high_crit ?? null;
+    const unreviewed = d.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+    const sla = (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0);
+    const secrets = secretCounts === null || secretCounts === "unavailable" ? null : secretCounts;
+    return buildKpis({
+      unreviewedHighRisk: unreviewed.length,
+      unreviewedCritical: unreviewed.filter(f => f.risk_score === "CRITICAL").length,
+      awaitingSignoffRepos: d.unattested_deploy_count,
+      slaBreaches: sla,
+      openSecrets: secrets ? secrets.CRITICAL + secrets.HIGH + secrets.MEDIUM : null,
+      openCriticalSecrets: secrets ? secrets.CRITICAL : null,
+      reviewCoverage: totalHigh ? d.attestation_rate : null,
+      reviewedFiles: reviewed, totalHighRiskFiles: totalHigh,
+      scanCoverage: connected ? scanned7d / connected : 0,
+      reposScanned7d: scanned7d, reposConnected: connected,
+    });
+  }, [effectiveData, secretCounts]);
+
+  const repoRows = useMemo(() => effectiveData
+    ? buildRepoRows(effectiveData.repos, trust && trust !== "unavailable" ? trust.score.repos : null)
+    : [], [effectiveData, trust]);
+
+  const demoTotal = useMemo(() => seed && effectiveData ? computeTrustScore(effectiveData).total : null, [seed, effectiveData]);
+
+  function exportCSV() {
+    if (!effectiveData) return;
+    const rows = [
+      ["Repository", "Trust Score", "Open CRITICAL", "Open HIGH", "High-risk reviewed %", "AI %", "Scans", "Last scan"],
+      ...repoRows.map(r => [r.repo, r.score ?? "", r.openCritical ?? "", r.openHigh ?? r.highCrit, Math.round(r.review * 100), (r.ai * 100).toFixed(1), r.scans, r.lastScan ?? ""]),
+    ];
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = `trustledger-repositories-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      const sd = rangeMode === "custom" ? startDate : undefined;
+      const ed = rangeMode === "custom" ? endDate : undefined;
+      const d = await api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed, true);
+      setData(d); setLastRefreshed(new Date()); setActivity(d.repos.length > 0 ? deriveActivity(d) : []);
+      setReloadKey(k => k + 1);
+    } catch {}
+    setRefreshing(false);
+  }
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "?" || e.key === "/") { setShowShortcuts(s => !s); return; }
       if (e.key === "n" || e.key === "N") { if (permissions.canScan) setScanPanelOpen(true); }
-      if (e.key === "e" || e.key === "E") { if (permissions.canExportData && data) exportCSV(); }
+      if (e.key === "e" || e.key === "E") { if (permissions.canExportData) exportCSV(); }
       if (e.key === "7") { setDays(7); setRangeMode(7); }
       if (e.key === "3") { setDays(30); setRangeMode(30); }
       if (e.key === "9") { setDays(90); setRangeMode(90); }
-      if (e.key === "w" || e.key === "W") {
-        setRepoFilter(f => f === "watchlist" ? "all" : "watchlist");
-      }
       if (e.key === "Escape") setShowShortcuts(false);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [permissions, data]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [permissions, repoRows]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function clearCache() {
-    setClearingCache(true);
-    try {
-      const sd = rangeMode === "custom" ? startDate : undefined;
-      const ed = rangeMode === "custom" ? endDate   : undefined;
-      const d = await api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed, true);
-      setData(d); setLastRefreshed(new Date());
-    } catch {}
-    setClearingCache(false);
-  }
-
-  // Recompute unattested_deploy_count from which scan IDs still have unresolved files.
-  // This way attesting ALL visible files always drives the counter to 0.
-  // Unresolved scan IDs + first unresolved scan link — both derived together
-  const { effectiveData, firstUnresolvedScanId, unresolvedRepoScans } = useMemo(
-    () => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
-
-  // Merge local attestations (always fresh from state) with base activity — newest first
-  const displayActivity = useMemo(() => {
-    const base = activity;
-    if (localActivity.length === 0) return base.slice(0, 15);
-    const seen = new Set<string>();
-    return [...localActivity, ...base]
-      .filter(e => { const k = `${e.scan_id}::${e.file_path}::${e.timestamp}`; if (seen.has(k)) return false; seen.add(k); return true; })
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, 15);
-  }, [localActivity, activity]);
-
-  // Derived stats
-  // The real Trust Score is computed on the server from all governance data (/api/trust-score); demo mode, which
-  // has no server data, keeps the local estimate. The tile also shows the single action worth the most points.
-  const [serverTrust, setServerTrust] = useState<{ total: number; topAction: ScoreAction | null } | null>(null);
-  useEffect(() => {
-    if (isSeedMode()) return;
-    authedFetch<{ score: { total: number; dimensions?: Array<{ actions?: ScoreAction[] }> } }>("/api/trust-score?history=7")
-      .then(r => setServerTrust({ total: r.score.total, topAction: topAction(r.score.dimensions ?? []) }))
-      .catch(() => {});
-  }, []);
-  const demoTrustScore = useMemo(() => effectiveData ? computeTrustScore(effectiveData).total : 0, [effectiveData]);
-  const trustScore   = isSeedMode() ? demoTrustScore : serverTrust?.total ?? null;
-  const trustAction  = isSeedMode() ? null : serverTrust?.topAction ?? null;
-  const recentlyCovered = effectiveData?.repos.filter(r => {
-    if (!r.last_scan) return false;
-    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
-    return r.last_scan >= sevenDaysAgo; // ISO date string comparison is lexicographically safe
-  }).length ?? 0;
-  // Over every connected repo — a connected repo with no scans in the period is exactly what coverage should catch.
-  const coverageTotal = Math.max(effectiveData?.connected_repo_count ?? 0, effectiveData?.repos.length ?? 0);
-  const coverageRate = coverageTotal > 0 ? recentlyCovered / coverageTotal : 0;
-
-  // Risk velocity: compare second half of trend period to first half
-  const riskVelocity = useMemo(() => {
-    if (!data || data.risk_trend.length < 4) return null;
-    const half = Math.floor(data.risk_trend.length / 2);
-    const first  = data.risk_trend.slice(0, half);
-    const second = data.risk_trend.slice(half);
-    const avg = (pts: typeof first) =>
-      pts.length === 0 ? 0 : pts.reduce((s, p) => s + p.critical_count + p.high_count, 0) / pts.length;
-    const fa = avg(first), sa = avg(second);
-    const delta = fa > 0 ? ((sa - fa) / fa) * 100 : 0;
-    return { delta: Math.abs(Math.round(delta)), direction: delta > 5 ? "up" : delta < -5 ? "down" : "neutral" } as const;
-  }, [data]);
-
-  // Fills the space below the Risk Trend chart with numbers actually worth
-  // reading, rather than leaving it blank -- current/average week totals,
-  // plus a streak callout when CRITICAL/HIGH has moved the same direction
-  // for 2+ consecutive weeks (the "medium" tier is excluded from the streak
-  // specifically because it's noisier and less decision-relevant than the
-  // two tiers that actually block merges).
-  const trendInsights = useMemo(() => {
-    const trend = data?.risk_trend ?? [];
-    if (trend.length === 0) return null;
-
-    const totals = trend.map(t => t.critical_count + t.high_count + t.medium_count);
-    const avg = Math.round(totals.reduce((a, b) => a + b, 0) / totals.length);
-
-    const actionable = trend.map(t => t.critical_count + t.high_count);
-    let streak = 0;
-    let dir: "up" | "down" | null = null;
-    for (let i = actionable.length - 1; i > 0; i--) {
-      const d: "up" | "down" | null =
-        actionable[i] > actionable[i - 1] ? "up" : actionable[i] < actionable[i - 1] ? "down" : null;
-      if (d === null) break;
-      if (dir === null) dir = d;
-      else if (d !== dir) break;
-      streak++;
-    }
-
-    return {
-      current: { total: totals[totals.length - 1], date: trend[trend.length - 1].date },
-      avg,
-      streak, dir,
-    };
-  }, [data]);
-
-  // SLA tracker — use effectiveData so locally-attested files are excluded from breach count
-  const sla = effectiveData ? slaStatus(effectiveData) : null;
-
-  function exportCSV() {
-    if (!data) return;
-    const rows = [
-      ["Repository", "AI%", "Attestation%", "Risk", "Scans", "Files", "Last Scan"],
-      ...(effectiveData?.repos ?? []).map(r => [
-        r.repo,
-        (r.ai_pct * 100).toFixed(1),
-        (r.attestation_rate * 100).toFixed(0),
-        repoRiskLevel(r),
-        String(r.scan_count),
-        String(r.file_count),
-        r.last_scan,
-      ]),
-    ];
-    const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    a.download = `trustledger-${ORG}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-  }
-
-  const hasData = effectiveData && effectiveData.repos.length > 0;
-
-  const sortedRepos = useMemo(() => (effectiveData?.repos ?? [])
-    .filter(r => {
-      if (repoSearch  && !r.repo.toLowerCase().includes(repoSearch.toLowerCase())) return false;
-      if (repoFilter === "watchlist")    return watchlist.has(r.repo);
-      if (repoFilter === "critical")     return repoRiskLevel(r) === "CRITICAL" || repoRiskLevel(r) === "HIGH";
-      if (repoFilter === "needs_action") return r.attestation_rate < 0.8;
-      return true;
-    })
-    .sort((a, b) => {
-      const riskOrder: Record<RiskLevel, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
-      if (repoSort === "risk")   return riskOrder[repoRiskLevel(b)] - riskOrder[repoRiskLevel(a)];
-      if (repoSort === "ai")     return b.ai_pct - a.ai_pct;
-      if (repoSort === "attest") return a.attestation_rate - b.attestation_rate;
-      if (repoSort === "scans")  return b.scan_count - a.scan_count;
-      return 0;
-    }),
-  [effectiveData, repoSearch, repoFilter, repoSort, watchlist]);
-
-  // Reset to page 0 whenever filter/search/sort changes
-  useEffect(() => { setRepoPage(0); }, [repoSearch, repoFilter, repoSort]);
-
-  // Paginated slice
-  const pagedRepos = sortedRepos.slice(0, (repoPage + 1) * REPO_PAGE_SIZE);
-  const hasMore    = pagedRepos.length < sortedRepos.length;
-
-  // Group by GitHub org (the owner part of "owner/repo")
-  const repoGroups: { org: string; repos: typeof sortedRepos }[] = repoGroupOrg
-    ? (() => {
-        const map: Record<string, typeof sortedRepos> = {};
-        pagedRepos.forEach(r => {
-          const org = r.repo.includes("/") ? r.repo.split("/")[0] : "—";
-          if (!map[org]) map[org] = [];
-          map[org].push(r);
-        });
-        return Object.entries(map)
-          .sort((a, b) => b[1].length - a[1].length)
-          .map(([org, repos]) => ({ org, repos }));
-      })()
-    : [{ org: "", repos: pagedRepos }];
+  const hasData = !!effectiveData && effectiveData.repos.length > 0;
+  const periodLabel = rangeMode === "custom"
+    ? (startDate && endDate ? `${startDate} → ${endDate}` : "custom range")
+    : `last ${rangeMode} days`;
+  const firstName = profile?.name?.split(" ")[0] ?? null;
 
   return (
     <AuthGuard>
-      <div className="max-w-7xl mx-auto space-y-4 pb-10">
+      <div className="max-w-[1400px] mx-auto space-y-5 pb-12">
 
-        {/* ── Page header ──────────────────────────────────────────────── */}
-        <div className="animate-fade-up space-y-2.5">
-        {/* Row 1: identity + actions */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          {/* Left: org identity */}
-          <div className="flex items-center gap-2 min-w-0">
-            {/* Live pulse */}
-            <span className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200 shrink-0">
-              <span className="relative flex w-2 h-2">
-                <span key={pulseCount} className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full w-2 h-2 bg-emerald-500" />
+        {/* ── Header ── */}
+        <header className="animate-fade-up flex flex-wrap items-end justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200">
+                <span className="relative flex w-1.5 h-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-500" />
+                </span>
+                Live
               </span>
-              Live
-            </span>
-            <span className="text-sm font-bold text-gray-900 truncate">
-              {profile?.org_id ? (profile.org_name || profile.org_slug || ORG) : ORG}
-            </span>
-            <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ring-1 shrink-0 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${roleColor.dot}`} />
-              {ROLE_LABELS[role]}
-            </span>
+              <span className="text-xs font-semibold text-gray-500 truncate">{orgLabel}</span>
+              <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 ${roleColor.bg} ${roleColor.text} ${roleColor.ring}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${roleColor.dot}`} />{ROLE_LABELS[role]}
+              </span>
+              <Link href="/settings" className="text-[11px] font-semibold text-gray-500 hover:text-indigo-600">
+                {/policy/i.test(policyName) ? policyName : `${policyName} policy`}
+              </Link>
+            </div>
+            <h1 className="mt-1.5 text-2xl font-black text-gray-900 tracking-tight">{greeting(firstName)}</h1>
+            <p className="text-sm text-gray-500 mt-0.5">
+              {isDeveloperView ? "Your pull requests" : "Code governance across your organisation"} · {periodLabel}
+              {refreshAgo && <span className="text-gray-400"> · updated {refreshAgo}</span>}
+            </p>
           </div>
-          {/* Right: actions */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setShowShortcuts(true)}
-              className="hidden lg:flex items-center gap-1 px-2.5 py-2 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-xl transition-colors"
-              title="Keyboard shortcuts (?)"
-            >
-              <KeyboardIcon />
-              <kbd className="text-[10px] bg-gray-100 px-1 rounded hidden sm:inline">?</kbd>
-            </button>
-            {permissions.canExportData && data && (
-              <button
-                onClick={exportCSV}
-                className="hidden sm:flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 active:scale-[0.98] transition-all shadow-sm"
-                title="Export CSV (E)"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
-                Export
-              </button>
-            )}
-            <RoleGate requires="canScan">
-              <button
-                onClick={() => setScanPanelOpen(true)}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-sm shadow-indigo-200"
-                title="New Scan (N)"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-                <span className="hidden sm:inline">New Scan</span>
-                <span className="sm:hidden">Scan</span>
-              </button>
-            </RoleGate>
-            {/* Date range */}
-            <div className="flex items-center gap-0.5 bg-gray-100 p-1 rounded-xl">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-0.5 bg-gray-100 p-1 rounded-xl" role="group" aria-label="Period">
               {DAYS_OPTIONS.map(d => (
-                <button
-                  key={d}
-                  onClick={() => { setDays(d); setRangeMode(d); }}
-                  className={`px-2.5 sm:px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-all duration-150 ${
-                    rangeMode === d ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-                  }`}
-                >
+                <button key={d} onClick={() => { setDays(d); setRangeMode(d); }} aria-pressed={rangeMode === d}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${rangeMode === d ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
                   {d}d
                 </button>
               ))}
-              <button
-                onClick={() => { setRangeMode("custom"); setPendingStart(""); setPendingEnd(""); }}
-                className={`px-2.5 sm:px-4 py-1.5 text-xs sm:text-sm font-semibold rounded-lg transition-all duration-150 ${
-                  rangeMode === "custom" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-                }`}
-              >
+              <button onClick={() => { setRangeMode("custom"); setPendingStart(""); setPendingEnd(""); }} aria-pressed={rangeMode === "custom"}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${rangeMode === "custom" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
                 Custom
               </button>
             </div>
+            <button onClick={refresh} disabled={refreshing} aria-label="Refresh data" title="Refresh"
+              className="w-9 h-9 flex items-center justify-center text-gray-500 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 shadow-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={refreshing ? "animate-spin" : ""}>
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+            </button>
+            <button onClick={() => setShowShortcuts(true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"
+              className="hidden lg:flex w-9 h-9 items-center justify-center text-gray-400 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 shadow-sm">
+              <KeyboardIcon />
+            </button>
+            <RoleGate requires="canScan">
+              <button onClick={() => setScanPanelOpen(true)} title="New scan (N)"
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-sm shadow-indigo-200">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                New scan
+              </button>
+            </RoleGate>
           </div>
-        </div>
-        {/* Row 2: metadata strip */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="flex items-center gap-1 text-xs text-gray-400">
-            <ClockIcon />
-            {rangeMode === "custom"
-              ? (startDate && endDate ? `${startDate} → ${endDate}` : "Custom range")
-              : `Last ${rangeMode}d`}
-          </span>
-          {refreshAgo && (
-            <span className="text-[10px] text-gray-400">· Updated {refreshAgo}</span>
-          )}
-          <button
-            onClick={clearCache}
-            disabled={clearingCache}
-            title="Refresh — fetch fresh data now"
-            aria-label="Refresh data"
-            className="flex items-center justify-center w-5 h-5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors disabled:opacity-50"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={clearingCache ? "animate-spin" : ""}>
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
-          </button>
-          <Link
-            href="/settings"
-            className="flex items-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full ring-1 ring-emerald-200 hover:bg-emerald-100 transition-colors"
-          >
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-            {/policy/i.test(policyName) ? policyName : `${policyName} policy`}
-          </Link>
-          {repoFilter === "watchlist" && (
-            <span className="flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full ring-1 ring-amber-200">
-              <StarIcon filled /> Watchlist
-              <button onClick={() => setRepoFilter("all")} className="ml-0.5 hover:text-amber-900">×</button>
-            </span>
-          )}
-        </div>
+        </header>
 
-        {/* ── Custom date range bar ─────────────────────────────────────── */}
         {rangeMode === "custom" && (
           <div className="flex flex-wrap items-center gap-3 bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
-            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider shrink-0">Custom range</span>
-            <div className="flex items-center gap-2 flex-wrap flex-1">
-              <div className="flex items-center gap-2">
-                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider shrink-0">From</label>
-                <input
-                  type="date"
-                  value={pendingStart}
-                  onChange={e => setPendingStart(e.target.value)}
-                  className="text-sm text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
-                />
-              </div>
-              <span className="text-gray-300 font-mono">→</span>
-              <div className="flex items-center gap-2">
-                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider shrink-0">To</label>
-                <input
-                  type="date"
-                  value={pendingEnd}
-                  onChange={e => setPendingEnd(e.target.value)}
-                  className="text-sm text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
-                />
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                disabled={!pendingStart || !pendingEnd}
-                onClick={() => { setStartDate(pendingStart); setEndDate(pendingEnd); }}
-                className="px-4 py-1.5 text-sm font-bold bg-indigo-600 text-white rounded-lg disabled:opacity-40 hover:bg-indigo-700 active:scale-[0.98] transition-all"
-              >
-                Apply
-              </button>
-              <button
-                onClick={() => { setRangeMode(90); setDays(90); setPendingStart(""); setPendingEnd(""); }}
-                className="px-3 py-1.5 text-sm font-semibold text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
+            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Custom range</span>
+            <label className="flex items-center gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-wider">From
+              <input type="date" value={pendingStart} onChange={e => setPendingStart(e.target.value)}
+                className="text-sm text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            </label>
+            <label className="flex items-center gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-wider">To
+              <input type="date" value={pendingEnd} onChange={e => setPendingEnd(e.target.value)}
+                className="text-sm text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            </label>
+            <div className="flex items-center gap-2 ml-auto">
+              <button disabled={!pendingStart || !pendingEnd} onClick={() => { setStartDate(pendingStart); setEndDate(pendingEnd); }}
+                className="px-4 py-1.5 text-sm font-bold bg-indigo-600 text-white rounded-lg disabled:opacity-40 hover:bg-indigo-700">Apply</button>
+              <button onClick={() => { setRangeMode(90); setDays(90); }} className="px-3 py-1.5 text-sm font-semibold text-gray-400 hover:text-gray-600">Cancel</button>
             </div>
           </div>
         )}
+
+        {!loading && !error && data && data.repos.length === 0 && <SetupGuide />}
+
+        {error && !loading && (
+          <div role="alert" className="flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm">
+            <span><span className="font-bold">Couldn&apos;t load the dashboard.</span> {error}</span>
+            <button onClick={() => setReloadKey(k => k + 1)} className="shrink-0 font-bold text-xs text-rose-600 hover:text-rose-900">Retry</button>
+          </div>
+        )}
+
+        {isDeveloperView && (
+          <div className="flex items-center gap-3 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-2.5 text-xs text-indigo-700">
+            <span className="font-bold">My PRs</span>
+            Showing repositories and files from pull requests opened by @{profile?.github_login ?? profile?.email?.split("@")[0] ?? "you"}. The Trust Score is your organisation&apos;s.
+          </div>
+        )}
+
+        {/* ── 1. Trust Score ── */}
+        <div className="animate-fade-up">
+          <TrustHero
+            score={trust && trust !== "unavailable" ? trust.score : null}
+            history={trust && trust !== "unavailable" ? trust.history : []}
+            demoTotal={demoTotal}
+            loading={!seed && trust === null} />
         </div>
 
-        {/* ── Setup guide for new orgs with no real data ──────────────── */}
-        {!loading && !error && data && data.repos.length === 0 && (
-          <SetupGuide />
-        )}
-
-        {/* ── Error state ──────────────────────────────────────────────── */}
-        {error && !loading && (
-          <div className="animate-fade-up flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm font-medium">
-            <div className="flex items-center gap-2">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-              </svg>
-              <span><span className="font-bold">Failed to load dashboard.</span> {error}</span>
+        {loading && !effectiveData && (
+          <div className="space-y-5" aria-label="Loading dashboard">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+              {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-[118px] rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
             </div>
-            <button
-              onClick={() => { setError(null); setLoading(true); setReloadKey(k => k + 1); }}
-              className="shrink-0 text-rose-600 hover:text-rose-900 font-bold text-xs"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {/* ── Loading skeleton ─────────────────────────────────────────── */}
-        {loading && !error && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
-              {[0,1,2,3,4,5,6].map(i => (
-                <div key={i} className="bg-white rounded-2xl border border-gray-100 h-[104px] animate-pulse overflow-hidden">
-                  <div className="h-[3px] bg-gray-100 w-full" />
-                  <div className="p-4 space-y-2">
-                    <div className="h-2 w-16 bg-gray-100 rounded-full" />
-                    <div className="h-7 w-12 bg-gray-100 rounded-lg" />
-                    <div className="h-2 w-20 bg-gray-100 rounded-full" />
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="section-card h-56 animate-pulse" />
-              <div className="section-card h-56 animate-pulse lg:col-span-2" />
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+              <div className="section-card h-72 animate-pulse xl:col-span-2" />
+              <div className="section-card h-72 animate-pulse" />
             </div>
           </div>
         )}
 
-        {effectiveData && (
+        {effectiveData && hasData && (
           <>
-            {/* ── Developer scope banner ───────────────────────────────── */}
-            {isDeveloperView && (
-              <div className="animate-fade-up flex items-center gap-3 bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3">
-                <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-                  </svg>
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-indigo-800">My PRs</p>
-                  <p className="text-xs text-indigo-600 mt-0.5">
-                    Showing only repositories and files from pull requests opened by{" "}
-                    <span className="font-semibold">@{profile?.github_login ?? profile?.email?.split("@")[0] ?? "you"}</span>.
-                    Contact your admin to see org-wide data.
-                  </p>
-                </div>
+            {/* ── 2. Headline numbers ── */}
+            <div className="animate-fade-up"><KpiStrip kpis={kpis} /></div>
+
+            {/* ── 3. Risk + review queue ── */}
+            <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-3 gap-5 items-stretch">
+              <div className="xl:col-span-2 min-w-0"><RiskPanel data={effectiveData} periodLabel={periodLabel} /></div>
+              <ReviewQueue items={queue} />
+            </div>
+
+            {/* ── 4. Governance ── */}
+            <div className={`animate-fade-up grid grid-cols-1 md:grid-cols-2 gap-5 ${isDeveloperView ? "" : "xl:grid-cols-3"}`}>
+              <ShadowAiPanel summary={seed ? "unavailable" : shadow} />
+              <SecretsPanel counts={secretCounts} />
+              {!isDeveloperView && <EvidencePanel overview={seed ? "unavailable" : evidence} />}
+            </div>
+
+            {/* ── 5. Repositories + activity ── */}
+            <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
+              <div className="xl:col-span-2 min-w-0">
+                <RepoTable rows={repoRows} onExport={permissions.canExportData ? exportCSV : undefined} />
               </div>
-            )}
-
-            {/* ── Needs attention: deploys awaiting sign-off, SLA breaches, open queues ── */}
-            <AttentionPanel data={effectiveData} violationStatuses={violationStatuses} openSecrets={openSecretsCount}
-              unresolvedRepoScans={unresolvedRepoScans} sla={sla} showQueues={!isDeveloperView} />
-
-
-            {/* ── Empty state ──────────────────────────────────────────── */}
-            {!hasData ? (
-              <EmptyState org={ORG} />
-            ) : (
-              <>
-                {/* ── Trust Score: the one governance number, with the action worth the most points ── */}
-                <Link href="/trust-score"
-                  className="animate-fade-up block rounded-2xl border p-5 transition-colors hover:shadow-md"
-                  style={{
-                    background: "linear-gradient(135deg,#eef2ff,#faf5ff)",
-                    borderColor: trustScore == null ? "#e0e7ff" : scoreColor(trustScore).ring,
-                  }}>
-                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                    <div className="shrink-0">
-                      <p className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-1">Trust Score</p>
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-5xl font-black tabular-nums" style={{ color: trustScore == null ? "#a5b4fc" : scoreColor(trustScore).text }}>
-                          {trustScore ?? "—"}
-                        </span>
-                        <span className="text-sm font-semibold text-indigo-300">/ 1000</span>
-                      </div>
-                      <p className="text-xs mt-1" style={{ color: trustScore == null ? "#818cf8" : scoreColor(trustScore).text }}>
-                        {trustScore == null ? "Calculating…" : scoreColor(trustScore).label}
-                      </p>
-                    </div>
-                    <div className="min-w-0 flex-1 sm:border-l sm:border-indigo-100 sm:pl-6">
-                      {trustAction ? (
-                        <>
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">Biggest improvement</p>
-                          <p className="text-sm font-semibold text-gray-800 mt-0.5">{trustAction.label}</p>
-                          <p className="text-xs text-emerald-700 font-semibold mt-0.5">up to +{trustAction.gain} points</p>
-                        </>
-                      ) : (
-                        <p className="text-sm text-gray-600">How well your team governs code changes: open risk, review of risky code, fix deadlines, secrets, approved AI tools and scan coverage.</p>
-                      )}
-                    </div>
-                    <span className="text-xs font-semibold text-indigo-600 shrink-0">See what to fix →</span>
-                  </div>
-                </Link>
-
-                {/* ── Key numbers: four, each a different question ── */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-fade-up">
-                  <StatsCard
-                    label="Awaiting Sign-off"
-                    value={effectiveData.unattested_deploy_count}
-                    sub={`repo${effectiveData.unattested_deploy_count !== 1 ? "s" : ""} with unreviewed HIGH/CRIT files`}
-                    icon={<AlertIcon />}
-                    color={effectiveData.unattested_deploy_count > 0 ? "rose" : "emerald"}
-                    info={{ title:"Awaiting Sign-off", description:"Repositories whose latest scan has HIGH or CRITICAL files that nobody has attested or started reviewing yet. Their pull requests are held by the merge gate until a reviewer signs off. Zero is the goal." }}
-                    trend={effectiveData.unattested_deploy_count > 0
-                      ? { direction: "up",      label: "action needed" }
-                      : { direction: "neutral", label: "all clear" }}
-                  />
-                  <StatsCard
-                    label="High-risk Reviewed"
-                    value={`${(effectiveData.attestation_rate * 100).toFixed(0)}%`}
-                    sub={effectiveData.total_high_crit != null ? `${effectiveData.attested_high_crit ?? 0}/${effectiveData.total_high_crit} HIGH/CRIT files` : "HIGH/CRIT files signed off"}
-                    icon={<ShieldCheckIcon />} color="emerald"
-                    ringValue={effectiveData.attestation_rate}
-                    info={{ title:"High-risk files reviewed", description:"Share of HIGH and CRITICAL-risk files that a named reviewer has signed off.", formula:"attested_high_crit_files ÷ total_high_crit_files × 100" }}
-                    trend={effectiveData.attestation_rate >= 0.8
-                      ? { direction: "up",   label: "on track" }
-                      : { direction: "down", label: "needs review" }}
-                  />
-                  <StatsCard
-                    label="7-day Coverage"
-                    value={`${Math.round(coverageRate * 100)}%`}
-                    sub={`${recentlyCovered}/${coverageTotal} repos scanned`}
-                    icon={<CoverageIcon />} color="emerald"
-                    ringValue={coverageRate}
-                    info={{ title:"7-day Scan Coverage", description:"Percentage of connected repositories that have had at least one scan in the last 7 days, including connected repos with no scans in this period. Low coverage means some changes aren't being checked.", formula:"repos_scanned_last_7d ÷ connected_repos × 100" }}
-                    trend={coverageRate >= 0.8
-                      ? { direction: "up",   label: "good coverage" }
-                      : { direction: "down", label: "stale repos" }}
-                  />
-                  <StatsCard
-                    label="AI Content"
-                    value={`${(effectiveData.overall_ai_pct * 100).toFixed(1)}%`}
-                    sub={`${effectiveData.file_count} files · ${effectiveData.scan_count} scans ${rangeMode === "custom" ? "in range" : `· ${rangeMode}d`}`}
-                    icon={<BrainIcon />} color="violet"
-                    ringValue={effectiveData.overall_ai_pct}
-                    info={{ title:"Average AI Content %", description:"Share of AI-generated code across the files scanned in this period: each scan's AI% weighted by the number of files it analysed. Using AI isn't a problem in itself; unreviewed risky AI code is.", formula:"Σ(scan AI% × files in scan) ÷ Σ files scanned" }}
-                  />
-                </div>
-
-                {/* ── Top Risk Files ────────────────────────────────────── */}
-                {(() => {
-                  const needsAction = effectiveData.top_risk_files.filter(
-                    f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")
-                  );
-                  const shown = needsAction.slice(0, 10);
-                  const remaining = needsAction.length - shown.length;
-                  return (
-                    <div className="section-card animate-fade-up delay-350">
-                      <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                        <div>
-                          <p className="font-bold text-gray-900 text-sm">Files Needing Attestation</p>
-                          <p className="text-xs text-gray-400 mt-0.5">
-                            {needsAction.length === 0
-                              ? "All high-risk files reviewed — nothing to action"
-                              : `${needsAction.length} CRITICAL/HIGH file${needsAction.length !== 1 ? "s" : ""} pending reviewer sign-off`}
-                          </p>
-                        </div>
-                        {needsAction.length > 0 && (
-                          <Link href="/violations"
-                            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1 rounded-lg transition-colors whitespace-nowrap">
-                            View all →
-                          </Link>
-                        )}
-                      </div>
-                      <TopRiskFilesPanel files={shown} />
-                      {remaining > 0 && (
-                        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
-                          <span className="text-xs text-gray-400">{remaining} more file{remaining !== 1 ? "s" : ""} not shown</span>
-                          <Link href="/violations" className="text-xs font-semibold text-indigo-600 hover:underline">
-                            View all {needsAction.length} in Violations →
-                          </Link>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                {/* ── Repos section ─────────────────────────────────── */}
-                <div className="section-card animate-fade-up delay-350">
-
-                  {/* ── Toolbar ── */}
-                  <div className="flex flex-col gap-3 px-5 py-4 border-b border-gray-100">
-                    {/* Row 1: title + view toggle */}
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <p className="font-bold text-gray-900 text-sm">Repositories</p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {sortedRepos.length} of {effectiveData.repos.length} repo{effectiveData.repos.length !== 1 ? "s" : ""}
-                          {repoSearch && <span className="ml-1 text-indigo-500">· filtered</span>}
-                          {watchlist.size > 0 && <span className="ml-2 text-amber-600 font-medium">{watchlist.size} starred</span>}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {/* Group by org toggle */}
-                        <button
-                          onClick={() => setRepoGroupOrg(v => !v)}
-                          title="Group by GitHub organisation"
-                          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                            repoGroupOrg ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-500 hover:bg-gray-200"
-                          }`}
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <rect x="2" y="3" width="6" height="4" rx="1"/><rect x="9" y="3" width="6" height="4" rx="1"/><rect x="16" y="3" width="6" height="4" rx="1"/>
-                            <line x1="5" y1="7" x2="5" y2="21"/><line x1="12" y1="7" x2="12" y2="21"/><line x1="5" y1="21" x2="19" y2="21"/><line x1="19" y1="7" x2="19" y2="21"/>
-                          </svg>
-                          <span className="hidden sm:inline">Group</span>
-                        </button>
-                        {/* View toggle: table | grid */}
-                        <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
-                          <button
-                            onClick={() => setRepoView("table")}
-                            title="Table view"
-                            className={`p-1.5 rounded-md transition-all ${repoView === "table" ? "bg-white shadow-sm text-gray-900" : "text-gray-400 hover:text-gray-600"}`}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 3h18v4H3z"/><path d="M3 9h18v4H3z"/><path d="M3 15h18v6H3z"/></svg>
-                          </button>
-                          <button
-                            onClick={() => setRepoView("grid")}
-                            title="Card grid view"
-                            className={`p-1.5 rounded-md transition-all ${repoView === "grid" ? "bg-white shadow-sm text-gray-900" : "text-gray-400 hover:text-gray-600"}`}
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                    {/* Row 2: search + filter + sort */}
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 focus-within:ring-1 focus-within:ring-indigo-300 transition-all">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400 shrink-0">
-                          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                        </svg>
-                        <input
-                          type="text" placeholder="Search repos…" value={repoSearch}
-                          onChange={e => setRepoSearch(e.target.value)}
-                          className="text-xs text-gray-700 border-0 outline-none bg-transparent w-36 placeholder:text-gray-400"
-                        />
-                        {repoSearch && (
-                          <button onClick={() => setRepoSearch("")} className="text-gray-300 hover:text-gray-500 transition-colors">
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                          </button>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
-                        {([["all","All"],["critical","At Risk"],["needs_action","Action"],["watchlist","★"]] as const).map(([v,l]) => (
-                          <button key={v} onClick={() => setRepoFilter(v)}
-                            className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${repoFilter === v ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
-                            {l}
-                          </button>
-                        ))}
-                      </div>
-                      <select value={repoSort} onChange={e => setRepoSort(e.target.value as typeof repoSort)}
-                        className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-600 font-medium bg-white focus:outline-none focus:ring-1 focus:ring-indigo-300">
-                        <option value="risk">Sort: Risk</option>
-                        <option value="ai">Sort: AI%</option>
-                        <option value="attest">Sort: Attestation</option>
-                        <option value="scans">Sort: Scans</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* ── Grid view ── */}
-                  {repoView === "grid" && (
-                    <div className="p-4 space-y-4">
-                      {repoGroups.map(({ org, repos: groupRepos }) => (
-                        <div key={org || "all"}>
-                          {repoGroupOrg && org && (
-                            <div className="flex items-center gap-2 mb-2">
-                              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{org}</span>
-                              <span className="text-[10px] text-gray-300">{groupRepos.length} repo{groupRepos.length !== 1 ? "s" : ""}</span>
-                              <div className="flex-1 h-px bg-gray-100" />
-                            </div>
-                          )}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-                            {groupRepos.map(r => {
-                              const level    = repoRiskLevel(r);
-                              const isWatched = watchlist.has(r.repo);
-                              const repoName  = r.repo.includes("/") ? r.repo.split("/")[1] : r.repo;
-                              const orgName   = r.repo.includes("/") ? r.repo.split("/")[0] : "";
-                              const grade     = securityScore(r);
-                              const gradeLetter = grade >= 90 ? "A" : grade >= 75 ? "B" : grade >= 60 ? "C" : grade >= 45 ? "D" : "F";
-                              const gradeColor  = grade >= 90 ? "text-emerald-600 bg-emerald-50" : grade >= 75 ? "text-blue-600 bg-blue-50" : grade >= 60 ? "text-amber-600 bg-amber-50" : "text-rose-600 bg-rose-50";
-                              const RISK_DOT: Record<string,string> = { CRITICAL:"bg-rose-500", HIGH:"bg-orange-400", MEDIUM:"bg-amber-400", LOW:"bg-emerald-400", UNKNOWN:"bg-gray-300" };
-                              return (
-                                <Link key={r.repo} href={`/repo/${r.repo}`}
-                                  className="group relative flex flex-col gap-3 p-4 bg-white border border-gray-200 rounded-xl hover:border-indigo-300 hover:shadow-md transition-all">
-                                  {/* Header */}
-                                  <div className="flex items-start gap-2">
-                                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm font-black shrink-0 ${gradeColor}`}>
-                                      {gradeLetter}
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-xs font-bold text-gray-900 truncate">{repoName}</p>
-                                      {orgName && <p className="text-[10px] text-gray-400 truncate">{orgName}</p>}
-                                    </div>
-                                    <button
-                                      onClick={e => { e.preventDefault(); toggleWatch(r.repo); }}
-                                      className={`shrink-0 transition-opacity ${isWatched ? "opacity-100" : "opacity-0 group-hover:opacity-50 hover:!opacity-100"}`}
-                                    >
-                                      <StarIcon filled={isWatched} />
-                                    </button>
-                                  </div>
-                                  {/* Risk dot + level */}
-                                  <div className="flex items-center gap-1.5">
-                                    <span className={`w-2 h-2 rounded-full shrink-0 ${RISK_DOT[level] ?? RISK_DOT.UNKNOWN}`} />
-                                    <span className="text-[10px] font-bold text-gray-500">{level}</span>
-                                    <span className="ml-auto text-[10px] text-gray-400">{relativeDate(r.last_scan)}</span>
-                                  </div>
-                                  {/* Bars */}
-                                  <div className="space-y-1.5">
-                                    <div>
-                                      <div className="flex justify-between text-[10px] text-gray-400 mb-0.5">
-                                        <span>AI Content</span><span className="font-semibold text-gray-600">{Math.round(r.ai_pct * 100)}%</span>
-                                      </div>
-                                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                        <div className="h-full rounded-full bg-indigo-500" style={{ width: `${r.ai_pct * 100}%` }} />
-                                      </div>
-                                    </div>
-                                    <div>
-                                      <div className="flex justify-between text-[10px] text-gray-400 mb-0.5">
-                                        <span>Attested</span><span className="font-semibold text-gray-600">{Math.round(r.attestation_rate * 100)}%</span>
-                                      </div>
-                                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${r.attestation_rate * 100}%` }} />
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {/* Footer */}
-                                  <div className="flex items-center gap-3 text-[10px] text-gray-400 border-t border-gray-50 pt-2">
-                                    <span>{r.scan_count} scans</span>
-                                    <span>{r.file_count} files</span>
-                                    <span
-                                      onClick={e => { e.preventDefault(); window.location.href = `/scans?repo=${encodeURIComponent(r.repo)}`; }}
-                                      className="ml-auto text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity"
-                                    >
-                                      View PRs →
-                                    </span>
-                                  </div>
-                                </Link>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* ── Table view ── */}
-                  {repoView === "table" && (
-                    <div className="overflow-x-auto">
-                      {repoGroups.map(({ org, repos: groupRepos }) => (
-                        <div key={org || "all"}>
-                          {repoGroupOrg && org && (
-                            <div className="flex items-center gap-2 px-5 py-2 bg-gray-50 border-b border-gray-100">
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-gray-400"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">{org}</span>
-                              <span className="text-[10px] text-gray-300">{groupRepos.length} repo{groupRepos.length !== 1 ? "s" : ""}</span>
-                            </div>
-                          )}
-                          <table className="w-full">
-                            {!repoGroupOrg && (
-                              <thead>
-                                <tr className="border-b border-gray-100">
-                                  {["", "Repository", "Score", "AI Content", "Attestation", "Risk", "Scans", "Files", "Status", "Last Scan", ""].map((h, i) => (
-                                    <th key={i} className="px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-4 last:pr-4">
-                                      {h === "Score" ? (
-                                        <span className="flex items-center gap-1">Score
-                                          <InfoTooltip position="bottom" size="sm" title="Security Score"
-                                            description="Composite security grade (A–F) for each repository."
-                                            formula={"Attestation rate × 40pts\n+ (1 − AI%) × 30pts\n+ Scan freshness × 15pts\n+ Risk level × 15pts\n= Total / 100"} />
-                                        </span>
-                                      ) : h}
-                                    </th>
-                                  ))}
-                                </tr>
-                              </thead>
-                            )}
-                            {repoGroupOrg && (
-                              <thead>
-                                <tr className="border-b border-gray-100">
-                                  {["", "Repository", "Score", "AI%", "Attested", "Risk", "Scans", "Last Scan", ""].map((h, i) => (
-                                    <th key={i} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-5 last:pr-4">{h}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                            )}
-                            <tbody className="divide-y divide-gray-50">
-                              {groupRepos.map(r => {
-                                const level = repoRiskLevel(r);
-                                const isWatched = watchlist.has(r.repo);
-                                const statusLabel = r.attestation_rate >= 0.8 ? "Reviewed" : r.attestation_rate < 0.5 ? "Needs Action" : "In Review";
-                                const statusCls   = r.attestation_rate >= 0.8
-                                  ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-                                  : r.attestation_rate < 0.5
-                                    ? "bg-rose-50 text-rose-700 ring-rose-200"
-                                    : "bg-amber-50 text-amber-700 ring-amber-200";
-                                const repoName = r.repo.includes("/") ? r.repo.split("/")[1] : r.repo;
-                                const orgPart  = r.repo.includes("/") ? r.repo.split("/")[0] : "";
-                                return (
-                                  <tr key={r.repo} className="hover:bg-gray-50/70 transition-colors group">
-                                    <td className="pl-4 pr-1 py-3">
-                                      <button onClick={() => toggleWatch(r.repo)}
-                                        className={`transition-opacity ${isWatched ? "opacity-100" : "opacity-0 group-hover:opacity-60 hover:!opacity-100"}`}
-                                        title={isWatched ? "Remove from watchlist" : "Add to watchlist"}>
-                                        <StarIcon filled={isWatched} />
-                                      </button>
-                                    </td>
-                                    <td className="px-3 py-3">
-                                      <div className="flex items-center gap-2">
-                                        <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
-                                          <svg className="text-indigo-400 w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3h18v18H3z"/><path d="M9 3v18"/></svg>
-                                        </div>
-                                        <div className="min-w-0">
-                                          <Link href={`/repo/${r.repo}`}
-                                            className="block font-semibold text-xs text-gray-800 group-hover:text-indigo-600 transition-colors hover:underline truncate max-w-[160px]"
-                                            onClick={e => e.stopPropagation()}>
-                                            {repoName}
-                                          </Link>
-                                          {!repoGroupOrg && orgPart && (
-                                            <span className="text-[10px] text-gray-400">{orgPart}</span>
-                                          )}
-                                        </div>
-                                      </div>
-                                    </td>
-                                    <td className="px-3 py-3"><SecurityGrade score={securityScore(r)} /></td>
-                                          <td className="px-3 py-3 min-w-[100px]">
-                                      {repoGroupOrg
-                                        ? <span className="text-xs font-semibold text-gray-700">{Math.round(r.ai_pct * 100)}%</span>
-                                        : <ProgressBar value={r.ai_pct} mode="ai" />}
-                                    </td>
-                                    <td className="px-3 py-3 min-w-[100px]">
-                                      {repoGroupOrg
-                                        ? <span className="text-xs font-semibold text-gray-700">{Math.round(r.attestation_rate * 100)}%</span>
-                                        : <ProgressBar value={r.attestation_rate} mode="attest" />}
-                                    </td>
-                                    <td className="px-3 py-3"><RiskBadge level={level} /></td>
-                                    <td className="px-3 py-3">
-                                      <span className="text-xs font-semibold text-gray-700 bg-gray-100 px-2 py-0.5 rounded-md tabular-nums">{r.scan_count}</span>
-                                    </td>
-                                    {!repoGroupOrg && (
-                                      <>
-                                        <td className="px-3 py-3 hidden xl:table-cell">
-                                          <span className="text-xs text-gray-500 tabular-nums">{r.file_count}</span>
-                                        </td>
-                                        <td className="px-3 py-3 hidden md:table-cell">
-                                          <span className={`badge ring-1 ${statusCls}`}>{statusLabel}</span>
-                                        </td>
-                                      </>
-                                    )}
-                                    <td className="px-3 py-3">
-                                      <span className="text-xs text-gray-400 tabular-nums whitespace-nowrap">{relativeDate(r.last_scan)}</span>
-                                    </td>
-                                    <td className="px-3 py-3 pr-4">
-                                      <Link href={`/scans?repo=${encodeURIComponent(r.repo)}`}
-                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                        PRs <ExternalLinkIcon />
-                                      </Link>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Empty state */}
-                  {sortedRepos.length === 0 && (
-                    <div className="py-10 text-center">
-                      <p className="text-sm text-gray-400">
-                        {repoFilter === "watchlist"
-                          ? "No starred repos yet — click ★ on any repo row to add it."
-                          : "No repositories match the current filter."}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Pagination footer */}
-                  {sortedRepos.length > 0 && (
-                    <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100">
-                      <span className="text-xs text-gray-400">
-                        Showing {Math.min(pagedRepos.length, sortedRepos.length)} of {sortedRepos.length}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        {hasMore && (
-                          <button
-                            onClick={() => setRepoPage(p => p + 1)}
-                            className="px-3.5 py-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors"
-                          >
-                            Show {Math.min(REPO_PAGE_SIZE, sortedRepos.length - pagedRepos.length)} more
-                          </button>
-                        )}
-                        {repoPage > 0 && !hasMore && (
-                          <button
-                            onClick={() => setRepoPage(0)}
-                            className="px-3.5 py-1.5 text-xs font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
-                          >
-                            Show less
-                          </button>
-                        )}
-                        {hasMore && (
-                          <button
-                            onClick={() => setRepoPage(Math.ceil(sortedRepos.length / REPO_PAGE_SIZE) - 1)}
-                            className="px-3.5 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700 transition-colors"
-                          >
-                            Show all {sortedRepos.length}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* ── Audit evidence: what the records prove, per framework — admin/security_reviewer only ── */}
-                {!isDeveloperView && <AuditEvidenceCard />}
-
-                {/* ── Risk Intelligence row ─────────────────────────────── */}
-                <div className="animate-fade-up delay-250">
-                  <div className="flex items-center justify-between mb-3 px-0.5">
-                    <div>
-                      <p className="font-black text-gray-900 text-base tracking-tight">Risk Intelligence</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Trend, composition and where risk is concentrated</p>
-                    </div>
-                    {riskVelocity && (
-                      <span className={`flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${
-                        riskVelocity.direction === "up"    ? "bg-rose-50 text-rose-700 ring-rose-200" :
-                        riskVelocity.direction === "down"  ? "bg-emerald-50 text-emerald-700 ring-emerald-200" :
-                        "bg-gray-50 text-gray-600 ring-gray-200"
-                      }`}>
-                        {riskVelocity.direction === "up" ? "↑" : riskVelocity.direction === "down" ? "↓" : "—"}
-                        {riskVelocity.delta}% vs prev period
-                      </span>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                    <div className="section-card p-5 lg:col-span-2">
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <p className="font-bold text-gray-900 text-sm">Risk Trend</p>
-                          <p className="text-xs text-gray-400 mt-0.5">HIGH, CRITICAL &amp; MEDIUM files over time</p>
-                        </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-400">
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400 rounded inline-block" />MED</span>
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-orange-500 rounded inline-block" />HIGH</span>
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
-                        </div>
-                      </div>
-                      <RiskTrendChart data={effectiveData.risk_trend} />
-                      {trendInsights && (
-                        <div className="mt-4 pt-4 border-t border-gray-100">
-                          <div className="grid grid-cols-2 gap-3">
-                            <div className="rounded-xl border p-3 bg-orange-50 border-orange-100 text-orange-700">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wider">Current Week</span>
-                                <div className="flex items-center gap-1">
-                                  <span className="text-sm font-black">●</span>
-                                  <InfoTooltip position="top" size="sm" title="Current Week"
-                                    description="Total CRITICAL, HIGH & MEDIUM files scanned so far in the most recent week (through today). This is your current risk exposure, not a historical figure." />
-                                </div>
-                              </div>
-                              <p className="text-2xl font-extrabold tabular-nums text-orange-800">{trendInsights.current.total}</p>
-                              <p className="text-[10px] opacity-70 mt-0.5">
-                                Where risk stands now · {new Date(trendInsights.current.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
-                              </p>
-                            </div>
-                            <div className="rounded-xl border p-3 bg-slate-50 border-slate-200 text-slate-600">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wider">Weekly Average</span>
-                                <div className="flex items-center gap-1">
-                                  <span className="text-sm font-black">—</span>
-                                  <InfoTooltip position="top" size="sm" title="Weekly Average"
-                                    description="The average number of CRITICAL, HIGH & MEDIUM flagged files per week across the entire period shown. Use it as a baseline — compare Current Week against this to judge whether things are unusually high or low right now." />
-                                </div>
-                              </div>
-                              <p className="text-2xl font-extrabold tabular-nums text-slate-800">{trendInsights.avg}</p>
-                              <p className="text-[10px] opacity-70 mt-0.5">Typical week in this period</p>
-                            </div>
-                          </div>
-                          {trendInsights.streak >= 2 && trendInsights.dir && (
-                            <div className={`mt-3 flex items-center gap-2 text-[11px] font-semibold rounded-lg px-3 py-2.5 ${
-                              trendInsights.dir === "up" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"
-                            }`}>
-                              <span>{trendInsights.dir === "up" ? "📈" : "📉"}</span>
-                              <span>
-                                {trendInsights.streak} consecutive week{trendInsights.streak !== 1 ? "s" : ""} of{" "}
-                                {trendInsights.dir === "up" ? "rising" : "falling"} CRITICAL/HIGH risk
-                                {trendInsights.dir === "up" ? " — worth investigating what's driving it." : " — attestation is keeping pace."}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-col gap-4">
-                      <div className="section-card p-5">
-                        <div className="mb-3">
-                          <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
-                          <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
-                        </div>
-                        <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
-                      </div>
-                      <TopRiskRepos data={effectiveData} />
-                    </div>
-                  </div>
-                </div>
-
-                {/* ── Activity Feed — up to 15 events, derived from live data or seed ── */}
-                {displayActivity.length > 0 && (
-                  <div className="section-card animate-fade-up delay-400">
-                    <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-                      <div>
-                        <p className="font-bold text-gray-900 text-sm">Recent Activity</p>
-                        <p className="text-xs text-gray-400 mt-0.5">Latest scans and attestations across all repos</p>
-                      </div>
-                      <Link
-                        href="/audit"
-                        className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1 rounded-lg transition-colors"
-                      >
-                        View full history
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="9 18 15 12 9 6"/>
-                        </svg>
-                      </Link>
-                    </div>
-                    <div className="divide-y divide-gray-50">
-                      {displayActivity.map((ev, i) => {
-                        const repoShort = ev.repo.includes("/") ? ev.repo.split("/").slice(1).join("/") : ev.repo;
-                        const isScan = ev.type === "scan";
-                        const riskColor: Record<string, string> = {
-                          CRITICAL: "bg-violet-100 text-violet-800",
-                          HIGH:     "bg-orange-100 text-orange-800",
-                          MEDIUM:   "bg-amber-100 text-amber-800",
-                          LOW:      "bg-emerald-100 text-emerald-700",
-                        };
-                        return (
-                          <div key={i} className="flex items-start gap-3 px-5 py-3 hover:bg-gray-50/60 transition-colors">
-                            <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${isScan ? "bg-indigo-50 text-indigo-500" : "bg-emerald-50 text-emerald-500"}`}>
-                              {isScan ? (
-                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="10" height="10" rx="1"/>
-                                </svg>
-                              ) : (
-                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>
-                                </svg>
-                              )}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-xs font-semibold text-gray-800">
-                                  {isScan ? (ev.pr_number > 0 ? `Scan: PR #${ev.pr_number}` : "Latest scan") : `Attested: ${ev.file_path.split("/").pop() || ev.file_path}`}
-                                </span>
-                                <span className="text-[11px] text-gray-500 font-mono bg-gray-100 px-1.5 py-px rounded">{repoShort}</span>
-                                {isScan && ev.overall_risk && (
-                                  <span className={`text-[10px] font-bold px-1.5 py-px rounded ${riskColor[ev.overall_risk] ?? "bg-gray-100 text-gray-600"}`}>
-                                    {ev.overall_risk}
-                                  </span>
-                                )}
-                                {!isScan && ev.reviewer_email && (
-                                  <span className="text-[11px] text-gray-400">by {ev.reviewer_email}</span>
-                                )}
-                              </div>
-                              {isScan && (
-                                <p className="text-[11px] text-gray-400 mt-0.5">
-                                  {ev.file_count > 0 && <>{ev.file_count} file{ev.file_count !== 1 ? "s" : ""} · </>}{(ev.total_ai_pct * 100).toFixed(1)}% avg AI
-                                </p>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-[11px] text-gray-400 tabular-nums">
-                                {(() => {
-                                  const d = Math.floor((Date.now() - new Date(ev.timestamp).getTime()) / 86400000);
-                                  return d === 0 ? "Today" : d === 1 ? "Yesterday" : `${d}d ago`;
-                                })()}
-                              </span>
-                              {isScan && ev.scan_id && (
-                                <Link href={`/pr/${ev.scan_id}`} className="text-[11px] font-semibold text-indigo-500 hover:text-indigo-700">
-                                  View →
-                                </Link>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Footer: view full history */}
-                    <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between"
-                      style={{ background:"rgba(248,250,252,0.7)" }}>
-                      <p className="text-[10px] text-gray-400">
-                        Showing last {displayActivity.length} events · full history in Audit Trail
-                      </p>
-                      <Link href="/audit"
-                        className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors">
-                        View all history →
-                      </Link>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
+              <ActivityList events={displayActivity} />
+            </div>
           </>
         )}
       </div>

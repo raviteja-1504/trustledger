@@ -80,13 +80,6 @@ const short = (repo: string) => repo.split("/").pop() ?? repo;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const mean = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 1;
 
-/** The single action across all dimensions that wins back the most points (dashboard tile). */
-export function topAction(dimensions: ReadonlyArray<{ actions?: readonly ScoreAction[] }>): ScoreAction | null {
-  let best: ScoreAction | null = null;
-  for (const d of dimensions) for (const a of d.actions ?? []) if (a.gain > 0 && (!best || a.gain > best.gain)) best = a;
-  return best;
-}
-
 export function computeGovernanceScore(input: ScoreInput): GovernanceScore {
   const now = Date.parse(input.now);
   const active = new Set(input.repos);
