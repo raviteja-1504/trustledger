@@ -9,6 +9,26 @@ const DEVELOPER_DASHBOARD_TTL = 60;
 // could be served to the wrong org, and it outlived the server-side invalidation on attestation). The server-side
 // cache (lib/cache, invalidated when a file is attested) is what absorbs repeated loads.
 const NO_SHARED_CACHE = "private, no-store";
+
+/**
+ * The org's data version: when it last attested, scanned or changed a violation's status. It is part of every cache
+ * key, so a copy computed before the change is never served again -- on any server instance. (Deleting keys on
+ * attestation wasn't enough: without Redis each instance has its own in-memory cache, and a request in flight during
+ * the attestation could write the old numbers back right after the delete.) Null if it can't be read: don't cache.
+ */
+async function dataVersion(orgId: string): Promise<string | null> {
+  const db = createServiceClient();
+  const latest = (table: string, column: string) =>
+    db.from(table).select(column).eq("org_id", orgId).order(column, { ascending: false }).limit(1).maybeSingle() as unknown as
+      Promise<{ data: Record<string, string> | null; error: unknown }>;
+  try {
+    const rows = await Promise.all([latest("attestations", "created_at"), latest("scans", "created_at"), latest("violation_overrides", "updated_at")]);
+    // A table that doesn't exist yet (older database) just contributes nothing; any other error means "unknown".
+    if (rows.slice(0, 2).some(r => r.error)) return null;
+    return [rows[0].data?.created_at, rows[1].data?.created_at, rows[2].error ? "" : rows[2].data?.updated_at].map(v => v ?? "").join("|");
+  } catch { return null; }
+}
+const versioned = (key: string, version: string) => `${key}:v:${version}`;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -51,9 +71,10 @@ export async function GET(req: NextRequest) {
       githubLogin = member?.github_login ?? null;
     }
     const devKey = `${cacheKeys.dashboard(org_id, days)}:dev:${githubLogin ?? `user:${user_id ?? "-"}`}`;
-    const result = noCache || period
+    const version = noCache || period ? null : await dataVersion(org_id);
+    const result = version == null
       ? await fetchDashboard(org_id, days, githubLogin, period)
-      : await cached(devKey, DEVELOPER_DASHBOARD_TTL, () => fetchDashboard(org_id, days, githubLogin));
+      : await cached(versioned(devKey, version), DEVELOPER_DASHBOARD_TTL, () => fetchDashboard(org_id, days, githubLogin));
     return NextResponse.json({ ...result, _scope: "developer" }, { headers: { "Cache-Control": NO_SHARED_CACHE } });
   }
 
@@ -64,8 +85,9 @@ export async function GET(req: NextRequest) {
 
   // Admin / security_reviewer — org-wide, cacheable
   const cacheKey = cacheKeys.dashboard(org_id, days);
-  if (!noCache) {
-    const hit = await cached(cacheKey, TTL.DASHBOARD, () => fetchDashboard(org_id, days, null));
+  const version = noCache ? null : await dataVersion(org_id);
+  if (version != null) {
+    const hit = await cached(versioned(cacheKey, version), TTL.DASHBOARD, () => fetchDashboard(org_id, days, null));
     return NextResponse.json(hit, { headers: { "X-Cache": "HIT", "Cache-Control": NO_SHARED_CACHE } });
   }
   // Fetch fresh data, then DELETE the stale cache entry so all subsequent
