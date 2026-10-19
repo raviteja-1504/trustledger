@@ -27,13 +27,13 @@ function makeStaticResults(): SearchResult[] {
   // Pages
   { id:"p-dash",    kind:"page",      title:"Overview Dashboard",        sub:"Org-wide health score and metrics",          href:"/dashboard",      badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-posture", kind:"page",      title:"Security Posture",          sub:"Real-time security health score and trend",  href:"/posture",        badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-comp",    kind:"page",      title:"Compliance Center",         sub:"SOC 2 · EU AI Act · PCI-DSS status",         href:"/compliance",     badge:"Page",     badgeColor:"#6366f1" },
+  { id:"p-comp",    kind:"page",      title:"Compliance Evidence",       sub:"SOC 2 · ISO 27001 · PCI DSS · AI governance",  href:"/compliance",     badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-viol",    kind:"page",      title:"Policy Violations",         sub:"Active violations requiring remediation",     href:"/violations",     badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-alert",   kind:"page",      title:"Security Alerts",           sub:"Real-time incident management",               href:"/alerts",         badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-secrets", kind:"page",      title:"Secret Scanner",            sub:"Hardcoded credential detection",              href:"/secrets",         badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-deps",    kind:"page",      title:"Dependency Scanner",        sub:"AI-introduced package risk",                  href:"/dependencies",   badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-apisec",  kind:"page",      title:"API Security",              sub:"Endpoint inventory · auth coverage · OpenAPI", href:"/api-security",   badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-reports", kind:"page",      title:"Audit Reports",             sub:"SOC 2, EU AI Act, PCI-DSS reports",           href:"/reports",        badge:"Page",     badgeColor:"#6366f1" },
+  { id:"p-reports", kind:"page",      title:"Audit Reports",             sub:"Signed control-evidence reports", href:"/reports",        badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-audit",   kind:"page",      title:"Audit Trail",               sub:"Tamper-evident security event log",           href:"/audit",          badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-settings",kind:"page",      title:"Settings",                  sub:"Policies, integrations, team roles",          href:"/settings",       badge:"Page",     badgeColor:"#6366f1" },
   // Repos

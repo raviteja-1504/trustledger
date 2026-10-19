@@ -1,6 +1,7 @@
 /**
  * PDF Report Generator — server-side
- * Generates signed compliance reports for SOC 2, EU AI Act, PCI-DSS.
+ * Generates signed control-evidence reports for SOC 2, ISO 27001, PCI DSS and AI code governance
+ * (lib/controlEvidence.ts). The old "EUAI" id is accepted and maps to AI code governance.
  * Uses @react-pdf/renderer on the server.
  */
 
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json() as {
-    framework:    string;   // SOC2 | EUAI | PCIDSS
+    framework:    string;   // SOC2 | ISO27001 | PCIDSS | AIGOV (EUAI accepted → AIGOV)
     period_start: string;
     period_end:   string;
   };
@@ -123,11 +124,17 @@ export async function POST(req: NextRequest) {
     period_end:    body.period_end,
     generated_at:  new Date().toISOString(),
     generated_by:  actor_email ?? "—",
+    framework_id:  evidence.framework,
+    evidence_scope: { name: evidence.framework_name, standard: evidence.standard, scope: evidence.scope, status_counts: evidence.status_counts },
     metrics: {
       total_scans:        scans?.length ?? 0,
       total_files:        (scans ?? []).reduce((s, sc) => s + sc.file_count, 0),
       total_attestations: attestations?.length ?? 0,
-      critical_findings:  (scans ?? []).filter(s => s.overall_risk === "CRITICAL").length,
+      critical_findings:  criticalCount,
+      high_risk_files:    evidence.facts.risky.total,
+      high_risk_reviewed: evidence.facts.risky.reviewed,
+      independent_reviews: evidence.facts.reviews.independent,
+      self_approvals:     evidence.facts.reviews.self,
       secrets_detected:   secrets?.length ?? 0,
       avg_ai_percentage:  scans && scans.length > 0
         ? scans.reduce((s, sc) => s + sc.total_ai_percentage, 0) / scans.length
@@ -137,7 +144,7 @@ export async function POST(req: NextRequest) {
     gaps:           gapFiles,
     compliance:     evidence.controls.map(c => ({
       control_id: c.control_id, control_name: c.control_name, status: c.status, score: c.score,
-      evidence: c.evidence.map(e => ({ description: e.description, count: e.count, source: e.source })),
+      checks: c.checks.map(k => ({ label: k.label, status: k.status, summary: k.summary, gaps: k.gaps })),
     })),
     scans:        scans ?? [],
     attestations: attestations ?? [],

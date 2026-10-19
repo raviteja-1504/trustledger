@@ -11,29 +11,42 @@ import { api } from "@/lib/api";
 import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { BrandWordmark } from "@/components/BrandLogo";
+import {
+  STATUS_LABEL, frameworkById, normalizeFrameworkId,
+  type CheckResult, type ComplianceFacts, type EvidenceStatus, type FrameworkDef as EvidenceFramework,
+} from "@/lib/controlEvidence";
+
+type EvidenceFrameworkId = EvidenceFramework["id"];
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BASE_URL = "";
 
-const FRAMEWORKS = ["SOC2", "EU AI Act", "PCI-DSS", "ISO 27001"] as const;
+const FRAMEWORKS = ["SOC 2", "ISO 27001", "PCI DSS", "AI governance"] as const;
 type Framework = (typeof FRAMEWORKS)[number];
 
-// /api/report and /api/evidence/collect expect the compact ids used by
-// reportPDF.tsx's FRAMEWORK_META / evidence/collect's normalizeFramework,
-// not this page's display labels.
+// /api/report and /api/evidence/collect ids (lib/controlEvidence.ts normalizeFrameworkId).
 const API_FRAMEWORK_ID: Record<Framework, string> = {
-  "SOC2": "SOC2", "EU AI Act": "EUAI", "PCI-DSS": "PCIDSS", "ISO 27001": "ISO27001",
+  "SOC 2": "SOC2", "ISO 27001": "ISO27001", "PCI DSS": "PCIDSS", "AI governance": "AIGOV",
+};
+const EVIDENCE_ID: Record<Framework, EvidenceFrameworkId> = {
+  "SOC 2": "soc2", "ISO 27001": "iso27001", "PCI DSS": "pcidss", "AI governance": "aigov",
 };
 
-// ─── Framework definitions ────────────────────────────────────────────────────
+/** ?fw= values, including the old labels ("SOC2", "PCI-DSS", "EU AI Act") that links elsewhere still use. */
+function frameworkFromParam(p: string | null | undefined): Framework {
+  if (!p) return "SOC 2";
+  const id = normalizeFrameworkId(p);
+  return (Object.keys(EVIDENCE_ID) as Framework[]).find(k => EVIDENCE_ID[k] === id) ?? "SOC 2";
+}
+
+// ─── Framework presentation (names, scope and controls come from lib/controlEvidence.ts) ─────────
 
 interface FwDef {
   shortName:   string;
   fullName:    string;
   standard:    string;
   tagline:     string;
-  description: string;
   scopeNote:   string;          // explicit "what this does / doesn't cover" disclaimer
   color:       string;          // primary hex
   colorDark:   string;
@@ -41,18 +54,11 @@ interface FwDef {
   headerBg:    string;
   accentBg:    string;
   icon:        ReactNode;
-  criteria:    { id: string; label: string; desc: string }[];
-  tableColumns: { key: string; label: string; w: string; align?: "right" }[];
 }
 
-const FW: Record<Framework, FwDef> = {
-  SOC2: {
-    shortName:   "SOC2",
-    fullName:    "SOC 2 Type II",
-    standard:    "AICPA Trust Services Criteria",
-    tagline:     "Reviewer attestations & change management log",
-    description: "AI code provenance evidence for Trust Services Criteria CC6.1, CC7.2 and CC8.1.",
-    scopeNote:   "This report provides evidence for a narrow slice of SOC 2 Type II — the Trust Services Criteria listed in Compliance Mapping below, as they relate to AI-generated code review. It does not cover the full Trust Services Criteria set (e.g. availability infrastructure, confidentiality, privacy) and is not a substitute for a SOC 2 Type II audit performed by a licensed CPA firm.",
+const FW_STYLE: Record<Framework, Omit<FwDef, "shortName" | "fullName" | "standard" | "scopeNote">> = {
+  "SOC 2": {
+    tagline:     "Change management & vulnerability management evidence",
     color:       "#6366f1",
     colorDark:   "#4338ca",
     gradientCss: "linear-gradient(135deg,#6366f1,#7c3aed)",
@@ -64,67 +70,22 @@ const FW: Record<Framework, FwDef> = {
         <polyline points="9 12 11 14 15 10"/>
       </svg>
     ),
-    criteria: [
-      { id:"CC6.1", label:"Logical Access Controls",  desc:"AI-authored changes reviewed by authorised personnel only" },
-      { id:"CC6.2", label:"Authentication",            desc:"Reviewer identity verified via GitHub OAuth flow" },
-      { id:"CC7.2", label:"System Monitoring",         desc:"Continuous AI content scanning on every pull request" },
-      { id:"CC8.1", label:"Change Management",         desc:"All changes formally attested prior to deployment" },
-      { id:"A1.2",  label:"Availability",              desc:"Audit trail retained and accessible for ≥ 12 months" },
-    ],
-    tableColumns: [
-      { key:"pr",          label:"PR",          w:"52px"  },
-      { key:"repo",        label:"Repository",  w:"1fr"   },
-      { key:"reviewer",    label:"Reviewer",    w:"160px" },
-      { key:"ai_pct",      label:"AI %",        w:"56px", align:"right" },
-      { key:"risk",        label:"Risk Level",  w:"96px"  },
-      { key:"status",      label:"Status",      w:"96px"  },
-      { key:"attested_at", label:"Date",        w:"96px"  },
-    ],
   },
-
-  "EU AI Act": {
-    shortName:   "EU AI Act",
-    fullName:    "EU Artificial Intelligence Act",
-    standard:    "Regulation (EU) 2024/1689",
-    tagline:     "AI system provenance & human oversight evidence",
-    description: "Technical documentation evidence for high-risk AI systems per Article 9 risk management obligations.",
-    scopeNote:   "This report provides evidence for AI system provenance and human oversight as they relate to AI-generated source code, mapped to the Articles listed in Compliance Mapping below. It does not perform risk-tier classification, conformity assessment, or cover the Act's other obligations, and is not a substitute for a full EU AI Act compliance assessment.",
-    color:       "#3b82f6",
-    colorDark:   "#1d4ed8",
-    gradientCss: "linear-gradient(135deg,#3b82f6,#0891b2)",
-    headerBg:    "linear-gradient(135deg,#0f172a 0%,#0c2340 60%,#0f172a 100%)",
-    accentBg:    "rgba(59,130,246,0.07)",
+  "ISO 27001": {
+    tagline:     "Secure development & logging evidence (Annex A)",
+    color:       "#8b5cf6",
+    colorDark:   "#6d28d9",
+    gradientCss: "linear-gradient(135deg,#8b5cf6,#6366f1)",
+    headerBg:    "linear-gradient(135deg,#0f172a 0%,#2e1065 60%,#0f172a 100%)",
+    accentBg:    "rgba(139,92,246,0.07)",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10"/>
-        <line x1="2" y1="12" x2="22" y2="12"/>
-        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
       </svg>
     ),
-    criteria: [
-      { id:"Art.9",  label:"Risk Management System", desc:"Continuous AI risk identification, evaluation and mitigation" },
-      { id:"Art.10", label:"Data Governance",         desc:"Training data provenance documented per scanned file" },
-      { id:"Art.13", label:"Transparency",            desc:"AI-generated code percentage disclosed at PR level" },
-      { id:"Art.14", label:"Human Oversight",         desc:"Human reviewer mandated for all CRITICAL-risk AI files" },
-      { id:"Art.17", label:"Quality Management",      desc:"Post-market monitoring via continuous automated scanning" },
-    ],
-    tableColumns: [
-      { key:"file",           label:"File",            w:"1fr"   },
-      { key:"repo",           label:"Repository",      w:"120px" },
-      { key:"ai_pct",         label:"AI %",            w:"56px", align:"right" },
-      { key:"classification", label:"Classification",  w:"108px" },
-      { key:"oversight",      label:"Oversight",       w:"108px" },
-      { key:"provenance",     label:"Provenance",      w:"96px"  },
-    ],
   },
-
-  "PCI-DSS": {
-    shortName:   "PCI-DSS",
-    fullName:    "Payment Card Industry DSS v4.0",
-    standard:    "PCI Security Standards Council",
-    tagline:     "Dual-reviewer attestations & change control audit trail",
-    description: "Code review evidence for payment system changes satisfying PCI-DSS v4.0 Requirement 6.4.2.",
-    scopeNote:   "This report provides evidence for PCI-DSS v4.0 Requirement 6.2–6.4 (secure software development) only, as it relates to AI-generated code changes. It does not cover network segmentation, cardholder data encryption, physical security, ASV scanning, or any of PCI-DSS's other requirements, and is not a substitute for a Report on Compliance (ROC) or SAQ performed by a Qualified Security Assessor. Only relevant to organisations with a cardholder data environment (CDE) — see Compliance Scope in Settings.",
+  "PCI DSS": {
+    tagline:     "Code review & secure development evidence (Req. 6 and 10)",
     color:       "#10b981",
     colorDark:   "#047857",
     gradientCss: "linear-gradient(135deg,#10b981,#0d9488)",
@@ -136,59 +97,28 @@ const FW: Record<Framework, FwDef> = {
         <line x1="1" y1="10" x2="23" y2="10"/>
       </svg>
     ),
-    criteria: [
-      { id:"6.2.4", label:"Prevention of Software Attacks", desc:"AI code screened for injection and logic vulnerabilities" },
-      { id:"6.3.2", label:"Software Inventory",             desc:"AI-authored code logged per file and pull request" },
-      { id:"6.4.1", label:"Security Vulnerabilities",       desc:"CRITICAL-risk files blocked automatically from merge" },
-      { id:"6.4.2", label:"Change Control Process",         desc:"Payment-system changes require dual-reviewer attestation" },
-      { id:"6.4.3", label:"Payment Page Security",          desc:"AI content in payment paths flagged for mandatory review" },
-    ],
-    tableColumns: [
-      { key:"pr",        label:"PR",          w:"52px"  },
-      { key:"repo",      label:"Repository",  w:"1fr"   },
-      { key:"reviewer1", label:"Reviewer 1",  w:"148px" },
-      { key:"reviewer2", label:"Reviewer 2",  w:"148px" },
-      { key:"ai_pct",    label:"AI %",        w:"56px", align:"right" },
-      { key:"risk",      label:"Risk",        w:"90px"  },
-      { key:"cleared",   label:"Cleared",     w:"76px"  },
-    ],
   },
-
-  "ISO 27001": {
-    shortName:   "ISO 27001",
-    fullName:    "ISO/IEC 27001:2022",
-    standard:    "ISO/IEC 27001:2022 Annex A",
-    tagline:     "Secure development lifecycle & audit trail evidence",
-    description: "Information security management evidence for Annex A controls A.8.25–A.8.30 and A.5.33.",
-    scopeNote:   "This report provides evidence for the Annex A controls listed in Compliance Mapping below, as they relate to AI-generated code review. It does not cover the full ISMS scope, risk assessment, or the remainder of Annex A's controls, and is not a substitute for a certification audit performed by an accredited certification body.",
-    color:       "#8b5cf6",
-    colorDark:   "#6d28d9",
-    gradientCss: "linear-gradient(135deg,#8b5cf6,#6366f1)",
-    headerBg:    "linear-gradient(135deg,#0f172a 0%,#2e1065 60%,#0f172a 100%)",
-    accentBg:    "rgba(139,92,246,0.07)",
+  "AI governance": {
+    tagline:     "Approved AI tools, human review & provenance of AI-written code",
+    color:       "#0ea5e9",
+    colorDark:   "#0369a1",
+    gradientCss: "linear-gradient(135deg,#0ea5e9,#6366f1)",
+    headerBg:    "linear-gradient(135deg,#0f172a 0%,#0c2340 60%,#0f172a 100%)",
+    accentBg:    "rgba(14,165,233,0.07)",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        <rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/>
+        <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
+        <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>
       </svg>
     ),
-    criteria: [
-      { id:"A.8.25", label:"Secure Development Lifecycle",   desc:"Automated security scanning integrated into every code change" },
-      { id:"A.8.26", label:"Application Security Requirements", desc:"Open vulnerabilities tracked to resolution" },
-      { id:"A.8.28", label:"Secure Coding",                    desc:"Human reviewer sign-off on AI-authored code before merge" },
-      { id:"A.8.30", label:"Outsourced Development",           desc:"Every contributor's code scanned and logged regardless of authorship" },
-      { id:"A.5.33", label:"Protection of Records",            desc:"Audit trail retained and cryptographically tamper-evident" },
-    ],
-    tableColumns: [
-      { key:"pr",          label:"PR",          w:"52px"  },
-      { key:"repo",        label:"Repository",  w:"1fr"   },
-      { key:"reviewer",    label:"Reviewer",    w:"160px" },
-      { key:"ai_pct",      label:"AI %",        w:"56px", align:"right" },
-      { key:"risk",        label:"Risk Level",  w:"96px"  },
-      { key:"status",      label:"Status",      w:"96px"  },
-      { key:"attested_at", label:"Date",        w:"96px"  },
-    ],
   },
 };
+
+const FW: Record<Framework, FwDef> = Object.fromEntries(FRAMEWORKS.map(k => {
+  const def = frameworkById(EVIDENCE_ID[k])!;
+  return [k, { ...FW_STYLE[k], shortName: k, fullName: def.name, standard: def.standard, scopeNote: def.scope }];
+})) as Record<Framework, FwDef>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -217,92 +147,34 @@ interface ReportHistoryItem {
   created_at: string;
 }
 
-function buildMetrics(fw: Framework, d: DashboardData): Metric[] {
-  const att          = Math.round(d.attestation_rate * 100);
-  const ai           = (d.overall_ai_pct * 100).toFixed(1);
-  const crit         = d.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested).length;
-  const high         = d.top_risk_files.filter(f => f.risk_score === "HIGH"     && !f.attested).length;
-  // Deployment-blocking: CRITICAL + HIGH only (matches SLA definition)
-  const unattBlocking = crit + high;
-  // Provenance: count tracked risk files specifically (not total file_count which spans all repos)
-  const trackedAtt   = d.top_risk_files.filter(f => f.attested).length;
-  const trackedTotal = d.top_risk_files.length;
+/** Headline numbers, measured by the evidence engine for the selected period. */
+function buildMetrics(fw: Framework, ev: EvidencePackageView | null): Metric[] {
+  if (!ev) return ["High-risk files reviewed", "Independent reviews", "Findings past deadline", "Repositories scanned"]
+    .map(label => ({ label, value: "—", sub: "Loading evidence…", status: "info" as const }));
+  const f = ev.facts;
+  const ratio = (n: number, d: number) => d > 0 ? n / d : 1;
+  const comparable = f.reviews.independent + f.reviews.self;
 
-  const slaBreached = (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0);
-
-  if (fw === "SOC2") return [
-    { label:"Attestation Rate",    value:`${att}%`,                      sub:"CC8.1 change control",         status: att>=80?"good":att>=60?"warn":"bad"  },
-    { label:"Unattested HIGH/CRIT files", value:String(d.unattested_deploy_count), sub:`Org-wide HIGH/CRITICAL pending review — ${slaBreached} past SLA deadline`, status: d.unattested_deploy_count===0?"good":"warn" },
-    { label:"Critical Files",      value:String(crit),                   sub:"Require immediate review",     status: crit===0?"good":crit<=2?"warn":"bad" },
-    { label:"Scans Completed",     value:String(d.scan_count),           sub:`${d.file_count} files reviewed`, status:"info" },
-  ];
-
-  if (fw === "EU AI Act") return [
-    { label:"Avg AI Content",      value:`${ai}%`,                       sub:"Across all scanned files",     status: d.overall_ai_pct<0.4?"good":d.overall_ai_pct<0.7?"warn":"bad" },
-    { label:"High-Risk Systems",   value:String(d.repos.filter(r=>r.ai_pct>0.5).length), sub:"Repos > 50% AI",   status: d.repos.filter(r=>r.ai_pct>0.5).length===0?"good":"warn" },
-    { label:"Oversight Coverage",  value:`${att}%`,                      sub:"Human review rate (Art.14)",   status: att>=70?"good":att>=50?"warn":"bad"  },
-    { label:"Provenance Complete", value:`${trackedAtt} / ${trackedTotal}`, sub:"AI-flagged files with chain", status: unattBlocking===0?"good":"warn" },
-  ];
-
-  if (fw === "PCI-DSS") return [
-    { label:"Dual-Review Rate",    value:`${att}%`,                      sub:"Req 6.4.2 compliance",         status: att>=90?"good":att>=70?"warn":"bad"  },
-    { label:"Repos in Scope",      value:String(d.repos.length),         sub:"Payment system repositories",  status:"info" },
-    { label:"AI-Flagged Changes",  value:String(crit+high),              sub:"Require manual sign-off",      status: crit===0?"good":crit<=2?"warn":"bad" },
-    { label:"SoD Compliance",      value:unattBlocking===0?"PASS":"PARTIAL", sub:"Separation of duties",    status: unattBlocking===0?"good":"warn" },
+  if (fw === "AI governance") return [
+    { label:"Approved AI tools policy", value: f.ai.policy_configured ? "Set" : "Not set",
+      sub: f.ai.policy_configured ? `${f.ai.open_violations} open unapproved-tool detection${f.ai.open_violations === 1 ? "" : "s"}` : "Choose approved tools in Shadow AI",
+      status: !f.ai.policy_configured ? "bad" : f.ai.open_violations ? "warn" : "good" },
+    { label:"AI-written risky code reviewed", value: f.risky.ai_heavy_total ? `${f.risky.ai_heavy_reviewed} / ${f.risky.ai_heavy_total}` : "—",
+      sub:"High-risk files that are mostly AI-written", status: !f.risky.ai_heavy_total ? "info" : ratio(f.risky.ai_heavy_reviewed, f.risky.ai_heavy_total) >= 0.9 ? "good" : "warn" },
+    { label:"Self-approvals", value: String(f.reviews.self), sub:"Author signed off their own change", status: f.reviews.self ? "bad" : "good" },
+    { label:"Files with provenance", value: String(f.ai.files_analyzed), sub:"AI estimate and tool evidence stored per commit", status:"info" },
   ];
 
   return [
-    { label:"Attestation Rate",    value:`${att}%`,                      sub:"A.8.28 secure coding",          status: att>=80?"good":att>=60?"warn":"bad"  },
-    { label:"Open Violations",     value:String(d.unattested_deploy_count), sub:"A.8.26 tracked to resolution", status: d.unattested_deploy_count===0?"good":"warn" },
-    { label:"Critical Files",      value:String(crit),                   sub:"Require immediate review",     status: crit===0?"good":crit<=2?"warn":"bad" },
-    { label:"Scans Completed",     value:String(d.scan_count),           sub:`${d.file_count} files reviewed`, status:"info" },
+    { label:"High-risk files reviewed", value: f.risky.total ? `${f.risky.reviewed} / ${f.risky.total}` : "—",
+      sub:"Latest scan of each pull request", status: !f.risky.total ? "info" : ratio(f.risky.reviewed, f.risky.total) >= 0.9 ? "good" : ratio(f.risky.reviewed, f.risky.total) >= 0.5 ? "warn" : "bad" },
+    { label:"Independent reviews", value: comparable ? `${f.reviews.independent} / ${comparable}` : "—",
+      sub: f.reviews.self ? `${f.reviews.self} self-approval${f.reviews.self === 1 ? "" : "s"}` : f.reviews.unknown ? `${f.reviews.unknown} couldn't be checked` : "Reviewer is not the author",
+      status: f.reviews.self ? "bad" : comparable ? "good" : "info" },
+    { label:"Findings past deadline", value: String(f.findings.overdue), sub:`${f.findings.open} open finding${f.findings.open === 1 ? "" : "s"}`, status: f.findings.overdue ? "bad" : "good" },
+    { label:"Repositories scanned", value: `${f.repos.scanned} / ${f.repos.active}`, sub:`${f.prs_scanned} pull request${f.prs_scanned === 1 ? "" : "s"} scanned`,
+      status: f.repos.active && f.repos.scanned < f.repos.active ? "warn" : "good" },
   ];
-}
-
-function buildRows(fw: Framework, d: DashboardData, start: string): Record<string, string>[] {
-  const files = d.top_risk_files;
-
-  if (fw === "SOC2") return files.map((f) => ({
-    pr:          `#${f.pr_number}`,
-    repo:        f.repo.split("/").pop() ?? f.repo,
-    reviewer:    f.attested_by ?? "—",
-    ai_pct:      `${(f.ai_pct * 100).toFixed(1)}%`,
-    risk:        f.risk_score,
-    status:      f.attested ? "ATTESTED" : "PENDING",
-    attested_at: f.attested_at ? f.attested_at.split("T")[0] : "—",
-  }));
-
-  if (fw === "EU AI Act") {
-    const classify = (r: string) => r==="CRITICAL"?"HIGH-RISK":r==="HIGH"?"LIMITED":r==="MEDIUM"?"MINIMAL":"EXEMPT";
-    return files.map(f => ({
-      file:           f.file_path.split("/").pop() ?? f.file_path,
-      repo:           f.repo.split("/").pop() ?? f.repo,
-      ai_pct:         `${(f.ai_pct * 100).toFixed(1)}%`,
-      classification: classify(f.risk_score),
-      oversight:      f.attested ? "Reviewed" : "REQUIRED",
-      provenance:     f.attested ? "Complete" : "Incomplete",
-    }));
-  }
-
-  if (fw === "PCI-DSS") return files.map((f) => ({
-    pr:        `#${f.pr_number}`,
-    repo:      f.repo.split("/").pop() ?? f.repo,
-    reviewer1: f.attested_by ?? "—",
-    reviewer2: "—",
-    ai_pct:    `${(f.ai_pct * 100).toFixed(1)}%`,
-    risk:      f.risk_score,
-    cleared:   f.attested ? "YES" : "PENDING",
-  }));
-
-  return files.map((f) => ({
-    pr:          `#${f.pr_number}`,
-    repo:        f.repo.split("/").pop() ?? f.repo,
-    reviewer:    f.attested_by ?? "—",
-    ai_pct:      `${(f.ai_pct * 100).toFixed(1)}%`,
-    risk:        f.risk_score,
-    status:      f.attested ? "ATTESTED" : "PENDING",
-    attested_at: f.attested_at ? f.attested_at.split("T")[0] : "—",
-  }));
 }
 
 function buildRiskBars(d: DashboardData) {
@@ -352,49 +224,20 @@ function AIPctBar({ raw }: { raw: number }) {
   );
 }
 
-interface RealControlEvidence { control_id: string; score: number; status: string }
-interface RealEvidencePackage { framework: string; controls: RealControlEvidence[] }
-
-// Prefers the real Evidence engine's live-computed per-control score
-// (GET /api/evidence/collect, same engine the Compliance page and this
-// report's PDF use) over this page's own heuristic -- this was previously a
-// third, independently-invented scoring formula that could disagree
-// with the other two for the same control.
-function criterionEvidence(id: string, data: DashboardData, real?: RealEvidencePackage | null): { text: string; pct: number } {
-  const realCtrl = real?.controls.find(c => c.control_id === id);
-  const files    = data.top_risk_files;
-  const total    = files.length || 1;
-  const attested = files.filter(f => f.attested).length;
-  const att      = Math.round((attested / total) * 100);
-  const crit     = files.filter(f => f.risk_score === "CRITICAL").length;
-  const high     = files.filter(f => f.risk_score === "HIGH").length;
-
-  const MAP: Record<string, { text: string; pct: number }> = {
-    "CC6.1": { text:`${attested} of ${total} changes reviewed by authorised personnel`, pct:att },
-    "CC6.2": { text:`${data.scan_count} reviewer sessions verified via GitHub OAuth`, pct:data.scan_count>0?100:0 },
-    "CC7.2": { text:`${data.scan_count} automated scans · ${data.file_count} files continuously monitored`, pct:data.scan_count>0?100:0 },
-    "CC8.1": { text:`${att}% attestation coverage · ${data.unattested_deploy_count} HIGH/CRITICAL file${data.unattested_deploy_count !== 1 ? "s" : ""} awaiting sign-off`, pct:att },
-    "A1.2":  { text:`Audit trail retained across ${data.repos.length} repos · ${data.file_count} records`, pct:100 },
-    "Art.9":  { text:`${crit+high} risk items tracked · ${attested} remediated via attestation workflow`, pct:crit+high===0?100:Math.max(att,50) },
-    "Art.10": { text:`Provenance captured for ${data.file_count} files across ${data.repos.length} repositories`, pct:100 },
-    "Art.13": { text:`AI content percentage disclosed for all ${data.scan_count} pull requests`, pct:100 },
-    "Art.14": { text:`${att}% of high-risk AI files reviewed by a qualified human engineer`, pct:att },
-    "Art.17": { text:`${data.scan_count} quality assessments completed · continuous scanning active`, pct:data.scan_count>0?100:0 },
-    "6.2.4":  { text:`${crit} high-risk AI patterns detected · ${crit===0?"none unresolved":attested+" resolved via attestation"}`, pct:crit===0?100:Math.round((attested/total)*100) },
-    "6.3.2":  { text:`${data.file_count} AI-authored code entries inventoried across ${data.repos.length} repos`, pct:100 },
-    "6.4.1":  { text:`${data.unattested_deploy_count} CRITICAL deployments blocked automatically pre-merge`, pct:data.unattested_deploy_count===0?100:80 },
-    "6.4.2":  { text:`${att}% dual-reviewer attestation across all payment-system changes`, pct:att },
-    "6.4.3":  { text:`AI content in payment paths flagged in ${crit+high} instances · all escalated`, pct:att },
-    "A.8.25": { text:`${data.scan_count} automated scans integrated into the development lifecycle`, pct:data.scan_count>0?100:0 },
-    "A.8.26": { text:`${data.unattested_deploy_count} open violations requiring remediation`, pct:data.unattested_deploy_count===0?100:80 },
-    "A.8.28": { text:`${att}% of AI-authored code reviewed before merge`, pct:att },
-    "A.8.30": { text:`${data.file_count} files scanned regardless of authorship`, pct:data.file_count>0?100:0 },
-    "A.5.33": { text:`Tamper-evident audit log chain intact`, pct:100 },
-  };
-  const fallback = MAP[id] ?? { text:"Evidence available in full audit trail", pct:100 };
-  if (!realCtrl) return fallback;
-  return { text: `${fallback.text} (live-verified)`, pct: Math.round(realCtrl.score) };
+/** The parts of /api/evidence/collect's EvidencePackage this page shows. */
+interface EvidencePackageView {
+  framework: string;
+  status_counts: Record<EvidenceStatus, number>;
+  controls: Array<{ control_id: string; control_name: string; status: EvidenceStatus; checks: CheckResult[] }>;
+  facts: ComplianceFacts;
 }
+
+const STATUS_STYLE: Record<EvidenceStatus, { textColor: string; bg: string; border: string }> = {
+  pass:       { textColor:"#065f46", bg:"#d1fae5", border:"#6ee7b7" },
+  partial:    { textColor:"#78350f", bg:"#fef3c7", border:"#fcd34d" },
+  fail:       { textColor:"#7c2d12", bg:"#fee2e2", border:"#fca5a5" },
+  not_tested: { textColor:"#475569", bg:"#f1f5f9", border:"#e2e8f0" },
+};
 
 // ─── StatusPill ───────────────────────────────────────────────────────────────
 
@@ -409,13 +252,9 @@ const PILL_STYLES: Record<string, CSSProperties> = {
   REQUIRED:   { background:"#fef3c7", color:"#78350f", border:"1px solid #fde68a" },
   PARTIAL:    { background:"#fef3c7", color:"#78350f", border:"1px solid #fde68a" },
   CRITICAL:   { background:"#ede9fe", color:"#4c1d95", border:"1px solid #c4b5fd" },
-  "HIGH-RISK":{ background:"#ede9fe", color:"#4c1d95", border:"1px solid #c4b5fd" },
   HIGH:       { background:"#ffedd5", color:"#7c2d12", border:"1px solid #fed7aa" },
-  LIMITED:    { background:"#ffedd5", color:"#7c2d12", border:"1px solid #fed7aa" },
   MEDIUM:     { background:"#fef3c7", color:"#78350f", border:"1px solid #fde68a" },
-  MINIMAL:    { background:"#f0fdf4", color:"#14532d", border:"1px solid #bbf7d0" },
   LOW:        { background:"#f0fdf4", color:"#14532d", border:"1px solid #bbf7d0" },
-  EXEMPT:     { background:"#f8fafc", color:"#475569", border:"1px solid #e2e8f0" },
 };
 
 function StatusPill({ v }: { v: string }) {
@@ -572,9 +411,6 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
   const total         = files.length || 1;
   const attPct        = Math.round((attFiles.length / total) * 100);
 
-  const classify = (r: string) =>
-    r==="CRITICAL"?"HIGH-RISK":r==="HIGH"?"LIMITED":r==="MEDIUM"?"MINIMAL":"EXEMPT";
-
   function FileRow({ f, idx }: { f: (typeof files)[0]; idx: number }) {
     const attested  = isAttested(f);
     const rev       = f.attested_by;
@@ -587,7 +423,7 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
     const lbColor   = attested ? "#10b981"
                     : f.risk_score==="CRITICAL" ? "#ef4444"
                     : f.risk_score==="HIGH" ? "#f97316" : "#f59e0b";
-    const displayRisk = fw==="EU AI Act" ? classify(f.risk_score) : f.risk_score;
+    const displayRisk = f.risk_score;
 
     const inner = (
       <>
@@ -746,8 +582,8 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
           )}
         </div>
         <div className="flex justify-between mt-1.5">
-          <span className="text-[9px] font-semibold text-emerald-600">{attPct}% compliant</span>
-          <span className="text-[9px] text-gray-400">Target: 100% attestation</span>
+          <span className="text-[9px] font-semibold text-emerald-600">{attPct}% signed off</span>
+          <span className="text-[9px] text-gray-400">Goal: every high-risk file reviewed</span>
         </div>
       </div>
 
@@ -806,136 +642,79 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
   );
 }
 
-function ComplianceMapping({ criteria, data, color, accentBg, realEvidence }: {
-  criteria: { id: string; label: string; desc: string }[];
-  data: DashboardData;
+function StatusBadge({ status }: { status: EvidenceStatus }) {
+  const ss = STATUS_STYLE[status];
+  return (
+    <span className="inline-flex items-center text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
+      style={{ background:ss.bg, color:ss.textColor, border:`1px solid ${ss.border}` }}>
+      {STATUS_LABEL[status]}
+    </span>
+  );
+}
+
+/** Each control with the checks behind it, measured from the org's records. No percentages: a status says what
+ * the evidence shows, and the numbers are in the check summaries. */
+function ControlEvidenceSection({ evidence, failed, color, accentBg }: {
+  evidence: EvidencePackageView | null;
+  failed: boolean;
   color: string;
   accentBg: string;
-  realEvidence?: RealEvidencePackage | null;
 }) {
-  const evidences = criteria.map(c => ({ ...c, ev: criterionEvidence(c.id, data, realEvidence) }));
-  const satisfied = evidences.filter(c => c.ev.pct >= 80).length;
-  const partial   = evidences.filter(c => c.ev.pct >= 50 && c.ev.pct < 80).length;
-  const gaps      = evidences.filter(c => c.ev.pct < 50).length;
-  const overallPct = Math.round(evidences.reduce((s,c) => s + c.ev.pct, 0) / (criteria.length || 1));
-
-  function statusStyle(pct: number): { label: string; textColor: string; bg: string; border: string } {
-    if (pct >= 80) return { label:"SATISFIED", textColor:"#065f46", bg:"#d1fae5", border:"#6ee7b7" };
-    if (pct >= 50) return { label:"PARTIAL",   textColor:"#78350f", bg:"#fef3c7", border:"#fcd34d" };
-    return               { label:"GAP",        textColor:"#7c2d12", bg:"#fee2e2", border:"#fca5a5" };
-  }
+  if (failed) return (
+    <div className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-xs text-rose-700">
+      Couldn&apos;t load control evidence for this period. Nothing is shown rather than an estimate.
+    </div>
+  );
+  if (!evidence) return (
+    <div className="rounded-xl border border-gray-200 px-5 py-8 text-center text-xs text-gray-400">Collecting evidence…</div>
+  );
+  const counts = evidence.status_counts;
+  const order: EvidenceStatus[] = ["pass", "partial", "fail", "not_tested"];
 
   return (
     <div className="space-y-4">
-      {/* ── Summary header ── */}
-      <div className="rounded-xl overflow-hidden border border-gray-200"
-        style={{ background:"#f8fafc" }}>
-        <div className="px-5 py-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-black tabular-nums" style={{ color }}>{satisfied}</span>
-              <span className="text-sm text-gray-500 font-medium">of {criteria.length} controls satisfied</span>
-            </div>
-            <div className="flex items-center gap-3">
-              {satisfied > 0 && (
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-emerald-700">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  {satisfied} satisfied
-                </span>
-              )}
-              {partial > 0 && (
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-700">
-                  <span className="w-2 h-2 rounded-full bg-amber-400" />
-                  {partial} partial
-                </span>
-              )}
-              {gaps > 0 && (
-                <span className="flex items-center gap-1.5 text-[10px] font-semibold text-rose-700">
-                  <span className="w-2 h-2 rounded-full bg-rose-500" />
-                  {gaps} gap
-                </span>
-              )}
-              <span className="text-[11px] font-black px-2.5 py-0.5 rounded-full tabular-nums"
-                style={{ background: overallPct>=80?"#d1fae5":overallPct>=50?"#fef3c7":"#fee2e2",
-                  color: overallPct>=80?"#065f46":overallPct>=50?"#78350f":"#7c2d12" }}>
-                {overallPct}% overall
-              </span>
-            </div>
-          </div>
-          {/* Overall bar */}
-          <div className="h-2 rounded-full overflow-hidden" style={{ background:"#e2e8f0" }}>
-            <div className="h-full rounded-full transition-all duration-700"
-              style={{ width:`${overallPct}%`, background:`linear-gradient(90deg,${color},${color}cc)` }} />
-          </div>
+      <div className="rounded-xl border border-gray-200 px-5 py-4 flex flex-wrap items-center gap-x-5 gap-y-2" style={{ background:"#f8fafc" }}>
+        <p className="text-sm text-gray-600">
+          <span className="text-2xl font-black tabular-nums mr-1.5" style={{ color }}>{evidence.controls.length}</span>
+          controls in scope
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          {order.filter(s => counts[s] > 0).map(s => (
+            <span key={s} className="flex items-center gap-1.5 text-[10px] font-semibold" style={{ color: STATUS_STYLE[s].textColor }}>
+              <span className="w-2 h-2 rounded-full" style={{ background: STATUS_STYLE[s].border }} />
+              {counts[s]} {STATUS_LABEL[s].toLowerCase()}
+            </span>
+          ))}
         </div>
       </div>
 
-      {/* ── Criterion cards ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {evidences.map(c => {
-          const ss  = statusStyle(c.ev.pct);
-          const barColor = c.ev.pct>=80 ? "#10b981" : c.ev.pct>=50 ? "#f59e0b" : "#ef4444";
-          return (
-            <div key={c.id}
-              className="rounded-xl overflow-hidden border transition-all duration-150"
-              style={{ borderColor: ss.border, boxShadow:"0 1px 6px rgba(0,0,0,0.05)" }}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow=`0 4px 16px ${color}20`; }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow="0 1px 6px rgba(0,0,0,0.05)"; }}
-            >
-              {/* Card header */}
-              <div className="flex items-center justify-between px-4 py-2.5"
-                style={{ background: accentBg, borderBottom:`1px solid ${ss.border}` }}>
-                <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded"
-                  style={{ background:"rgba(255,255,255,0.7)", color }}>
-                  {c.id}
-                </span>
-                <span className="inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-wide"
-                  style={{ background:ss.bg, color:ss.textColor, border:`1px solid ${ss.border}` }}>
-                  {c.ev.pct>=80 && (
-                    <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5"><polyline points="20 6 9 17 4 12"/></svg>
-                  )}
-                  {c.ev.pct<80 && c.ev.pct>=50 && (
-                    <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  )}
-                  {c.ev.pct<50 && (
-                    <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  )}
-                  {ss.label}
-                </span>
-              </div>
-
-              {/* Card body */}
-              <div className="px-4 py-3.5 space-y-2.5" style={{ background:"#fff" }}>
-                <div>
-                  <p className="text-xs font-bold text-gray-800 leading-snug">{c.label}</p>
-                  <p className="text-[10px] text-gray-500 mt-0.5 leading-relaxed">{c.desc}</p>
-                </div>
-
-                {/* Evidence box */}
-                <div className="flex items-start gap-2 rounded-lg px-3 py-2"
-                  style={{ background:accentBg, border:`1px solid ${ss.border}40` }}>
-                  <svg className="shrink-0 mt-0.5" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                  </svg>
-                  <p className="text-[10px] text-gray-600 leading-relaxed">{c.ev.text}</p>
-                </div>
-
-                {/* Compliance bar */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400">Compliance</span>
-                    <span className="text-[10px] font-black tabular-nums" style={{ color:barColor }}>{c.ev.pct}%</span>
-                  </div>
-                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background:"rgba(0,0,0,0.07)" }}>
-                    <div className="h-full rounded-full transition-all duration-700"
-                      style={{ width:`${c.ev.pct}%`, background:barColor }} />
-                  </div>
-                </div>
-              </div>
+        {evidence.controls.map(c => (
+          <div key={c.control_id} className="rounded-xl overflow-hidden border" style={{ borderColor: STATUS_STYLE[c.status].border }}>
+            <div className="flex items-center justify-between gap-2 px-4 py-2.5"
+              style={{ background: accentBg, borderBottom:`1px solid ${STATUS_STYLE[c.status].border}` }}>
+              <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded" style={{ background:"rgba(255,255,255,0.7)", color }}>
+                {c.control_id}
+              </span>
+              <StatusBadge status={c.status} />
             </div>
-          );
-        })}
+            <div className="px-4 py-3.5 space-y-2.5 bg-white">
+              <p className="text-xs font-bold text-gray-800 leading-snug">{c.control_name}</p>
+              {c.checks.map(k => (
+                <div key={k.key} className="rounded-lg px-3 py-2" style={{ background:accentBg }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] font-bold text-gray-700">{k.label}</p>
+                    <span className="text-[9px] font-bold" style={{ color: STATUS_STYLE[k.status].textColor }}>{STATUS_LABEL[k.status]}</span>
+                  </div>
+                  <p className="text-[10px] text-gray-600 leading-relaxed mt-0.5">{k.summary}</p>
+                  {k.gaps.map(g => (
+                    <p key={g} className="text-[10px] font-semibold text-amber-800 mt-1">Gap: {g}</p>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1011,15 +790,17 @@ function ReportReferenceBlock({ id, fw, start, end, org, generatedBy }: {
 
 // ─── Full report document ─────────────────────────────────────────────────────
 
-function ReportDocument({ data, fw, start, end, violationStatuses, org, generatedBy, realEvidence }: {
+function ReportDocument({ data, fw, start, end, violationStatuses, org, generatedBy, evidence, evidenceFailed }: {
   data: DashboardData; fw: Framework; start: string; end: string;
   violationStatuses: Record<string, string>;
   org: string;
   generatedBy?: string;
-  realEvidence?: RealEvidencePackage | null;
+  evidence: EvidencePackageView | null;
+  evidenceFailed: boolean;
 }) {
   const def     = FW[fw];
-  const metrics = buildMetrics(fw, data);
+  const metrics = buildMetrics(fw, evidence);
+  const evidenceGaps = (evidence?.controls ?? []).flatMap(c => c.checks).filter((k, i, all) => k.gaps.length > 0 && all.findIndex(x => x.key === k.key) === i);
   // One id per render of the document -- shown identically in the
   // letterhead, the Report Reference section, and the footer, unlike the
   // two independently-generated fake ids this replaced.
@@ -1117,16 +898,10 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
           <AttestationRecords data={data} fw={fw} start={start} color={def.color} violationStatuses={violationStatuses} />
         </section>
 
-        {/* 4. Compliance Mapping */}
+        {/* 4. Control Evidence */}
         <section>
-          <SectionHead num={4} title="Compliance Mapping" color={def.color} />
-          <ComplianceMapping
-            criteria={def.criteria}
-            data={data}
-            color={def.color}
-            accentBg={def.accentBg}
-            realEvidence={realEvidence}
-          />
+          <SectionHead num={4} title="Control Evidence" color={def.color} />
+          <ControlEvidenceSection evidence={evidence} failed={evidenceFailed} color={def.color} accentBg={def.accentBg} />
         </section>
 
         {/* 5. Report Reference */}
@@ -1150,14 +925,14 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
                 Management of <strong>{org}</strong> asserts that, to the best of its knowledge and belief,
                 the controls described in this report were suitably designed and operating effectively throughout
                 the period <strong>{start}</strong> to <strong>{end}</strong> with respect to the specific
-                {" "}{def.shortName} criteria listed in Compliance Mapping above. This assertion does not extend
-                to any {def.shortName} requirement outside that scope — see Scope &amp; Limitations at the top
-                of this report.
+                {" "}{def.shortName} controls listed in Control Evidence above, except for the gaps recorded there.
+                This assertion does not extend to any {def.shortName} requirement outside that scope — see
+                Scope &amp; Limitations at the top of this report.
               </p>
               <p className="text-xs text-gray-700 leading-relaxed">
-                All AI-generated code changes were subjected to automated risk scanning, and HIGH/CRITICAL-risk
-                files required named reviewer attestation prior to deployment. The attestation records and scan
-                logs included in this report constitute the evidence base for this assertion; the downloaded PDF
+                Pull requests in connected repositories were scanned automatically, and reviewer sign-offs on
+                high-risk files were recorded with the reviewer&apos;s identity. The scan, sign-off and audit-log
+                records summarised in this report are the evidence base for this assertion; the downloaded PDF
                 additionally carries a cryptographic signature over its exact contents.
               </p>
               <div className="grid grid-cols-2 gap-6 pt-4 border-t border-gray-100">
@@ -1182,13 +957,27 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
         <section>
           <SectionHead num={7} title="Gap Analysis &amp; Remediation" color={def.color} />
           <div className="space-y-3">
+            {evidenceGaps.length > 0 && (
+              <div className="rounded-xl border border-amber-200 overflow-hidden">
+                <div className="px-4 py-2.5 bg-amber-50 border-b border-amber-100">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Gaps found by control evidence</p>
+                </div>
+                <ul className="divide-y divide-amber-50 bg-white">
+                  {evidenceGaps.flatMap(k => k.gaps.map(g => (
+                    <li key={`${k.key}-${g}`} className="px-4 py-2.5 text-[11px] text-gray-700">
+                      <span className="font-bold text-gray-800">{k.label}:</span> {g}
+                    </li>
+                  )))}
+                </ul>
+              </div>
+            )}
             {data.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")).length === 0 ? (
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4">
                 <p className="text-sm font-bold text-emerald-800 flex items-center gap-2">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  No open gaps identified for this audit period
+                  No unreviewed high-risk files
                 </p>
-                <p className="text-xs text-emerald-700 mt-1">All HIGH and CRITICAL risk files were attested within the audit period.</p>
+                <p className="text-xs text-emerald-700 mt-1">Every HIGH and CRITICAL file in the latest scans has a reviewer sign-off.</p>
               </div>
             ) : (
               <div className="rounded-xl border border-amber-200 overflow-hidden">
@@ -1340,10 +1129,7 @@ function ReportsContent() {
   const params = useSearchParams();
   const { profile } = useAuth();
   const orgName = profile?.org_name || profile?.org_slug || "your organisation";
-  const initialFw = (() => {
-    const p = params?.get("fw");
-    return (FRAMEWORKS as readonly string[]).includes(p ?? "") ? (p as Framework) : "SOC2";
-  })();
+  const initialFw = frameworkFromParam(params?.get("fw"));
   const [fw,         setFw]         = useState<Framework>(initialFw);
   const [start,      setStart]      = useState(offsetDate(1));
   const [end,        setEnd]        = useState(todayStr());
@@ -1354,7 +1140,8 @@ function ReportsContent() {
   const [loading,           setLoading]           = useState(true);
   const [dataError,         setDataError]         = useState(false);
   const [reportHistory,     setReportHistory]     = useState<ReportHistoryItem[] | null>(null);
-  const [realEvidence,      setRealEvidence]      = useState<RealEvidencePackage | null>(null);
+  const [evidence,          setEvidence]          = useState<EvidencePackageView | null>(null);
+  const [evidenceFailed,    setEvidenceFailed]    = useState(false);
   const [violationStatuses, setViolationStatuses] = useState<Record<string,string>>({});
   const [pciApplicable,     setPciApplicable]     = useState(true); // assume true until settings load, so PCI-DSS isn't visibly yanked from view on first paint
 
@@ -1368,14 +1155,14 @@ function ReportsContent() {
   }, []);
 
   const visibleFrameworks = useMemo(
-    () => pciApplicable ? FRAMEWORKS : FRAMEWORKS.filter(f => f !== "PCI-DSS"),
+    () => pciApplicable ? FRAMEWORKS : FRAMEWORKS.filter(f => f !== "PCI DSS"),
     [pciApplicable]
   );
 
-  // If PCI-DSS was selected (e.g. via ?fw=PCI-DSS) but the org has since
+  // If PCI DSS was selected (e.g. via ?fw=PCI-DSS) but the org has since
   // turned off PCI applicability, fall back to a framework that's actually visible.
   useEffect(() => {
-    if (fw === "PCI-DSS" && !pciApplicable) setFw("SOC2");
+    if (fw === "PCI DSS" && !pciApplicable) setFw("SOC 2");
   }, [fw, pciApplicable]);
 
   // Sync violation statuses so attested files reflect immediately
@@ -1457,14 +1244,21 @@ function ReportsContent() {
 
   useEffect(() => { fetchHistory(); }, [fetchHistory]);
 
-  // Real per-control scores for the active framework (same engine the
-  // Compliance and Evidence pages use), merged into the Compliance
-  // Mapping section instead of this page's own independent formula.
+  // Control evidence for the selected framework and period -- the same engine the PDF uses (/api/report).
   useEffect(() => {
-    authedFetch<RealEvidencePackage>(`/api/evidence/collect?framework=${API_FRAMEWORK_ID[fw]}`)
-      .then(setRealEvidence)
-      .catch(() => setRealEvidence(null));
-  }, [fw]);
+    if (!start || !end) return;
+    let live = true;
+    setEvidence(null); setEvidenceFailed(false);
+    const q = new URLSearchParams({
+      framework: API_FRAMEWORK_ID[fw],
+      period_start: new Date(start).toISOString(),
+      period_end: new Date(`${end}T23:59:59.999Z`).toISOString(),
+    });
+    authedFetch<EvidencePackageView>(`/api/evidence/collect?${q}`)
+      .then(p => { if (live) setEvidence(p?.facts ? p : null); if (live && !p?.facts) setEvidenceFailed(true); })
+      .catch(() => { if (live) setEvidenceFailed(true); });
+    return () => { live = false; };
+  }, [fw, start, end]);
 
   async function generate() {
     if (!start || !end) { setError("Select a date range first."); return; }
@@ -1474,7 +1268,7 @@ function ReportsContent() {
       const res = await api.generateReport({
         org: orgName, framework: API_FRAMEWORK_ID[fw],
         period_start: new Date(start).toISOString(),
-        period_end:   new Date(end).toISOString(),
+        period_end:   new Date(`${end}T23:59:59.999Z`).toISOString(),
       });
       // The API can return 200 with a JSON body (not a PDF) if server-side
       // PDF rendering failed -- previously this got force-downloaded as
@@ -1519,7 +1313,7 @@ function ReportsContent() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-xl font-black text-gray-900">Audit Reports</h1>
-            <p className="text-xs text-gray-400 mt-0.5">Generate signed AI code review evidence assessments for {visibleFrameworks.join(", ")}</p>
+            <p className="text-xs text-gray-400 mt-0.5">Signed control-evidence reports for auditors: {visibleFrameworks.join(", ")}</p>
           </div>
           <div className="flex items-center gap-2">
             {visibleFrameworks.map(f => (
@@ -1622,50 +1416,32 @@ function ReportsContent() {
               </div>
             )}
 
-            {/* Compliance health card */}
-            {!dataError && (() => {
-              const d = effectiveData ?? FALLBACK_DATA;
-              const attPct   = Math.round(d.attestation_rate * 100);
-              const crit     = d.top_risk_files.filter(f => f.risk_score==="CRITICAL" && !f.attested).length;
-              const high     = d.top_risk_files.filter(f => f.risk_score==="HIGH" && !f.attested).length;
-              const score    = attPct >= 90 ? "STRONG" : attPct >= 70 ? "FAIR" : "AT RISK";
-              const scoreClr = attPct >= 90 ? "#065f46" : attPct >= 70 ? "#78350f" : "#7c2d12";
-              const scoreBg  = attPct >= 90 ? "#d1fae5" : attPct >= 70 ? "#fef3c7" : "#fee2e2";
-              return (
-                <div className="section-card p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">Compliance Health</p>
-                    <span className="text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider"
-                      style={{ background:scoreBg, color:scoreClr }}>{score}</span>
-                  </div>
-                  <div className="flex items-end gap-3">
-                    <span className="text-3xl font-black tabular-nums" style={{ color:def.color }}>{attPct}</span>
-                    <span className="text-base font-bold text-gray-400 pb-0.5">%</span>
-                    <span className="text-[10px] text-gray-400 pb-1 leading-snug">attestation<br/>coverage</span>
-                  </div>
-                  <div className="h-2 rounded-full overflow-hidden" style={{ background:"rgba(0,0,0,0.07)" }}>
-                    <div className="h-full rounded-full transition-all duration-700"
-                      style={{ width:`${attPct}%`, background:def.gradientCss }} />
-                  </div>
-                  {(crit + high) > 0 && (
-                    <div className="flex items-center gap-2 pt-1">
-                      {crit > 0 && (
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">
-                          <span className="w-1.5 h-1.5 rounded-full bg-rose-500 inline-block" />
-                          {crit} CRITICAL
+            {/* Evidence status for the selected framework and period */}
+            {!dataError && (
+              <div className="section-card p-4 space-y-2.5">
+                <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">Evidence status</p>
+                {evidenceFailed ? (
+                  <p className="text-[11px] text-rose-600">Couldn&apos;t load evidence for this period.</p>
+                ) : !evidence ? (
+                  <p className="text-[11px] text-gray-400">Collecting evidence…</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {(["pass", "partial", "fail", "not_tested"] as EvidenceStatus[]).map(s => (
+                      <div key={s} className="flex items-center justify-between text-[11px]">
+                        <span className="flex items-center gap-1.5 text-gray-600">
+                          <span className="w-2 h-2 rounded-full" style={{ background: STATUS_STYLE[s].border }} />
+                          {STATUS_LABEL[s]}
                         </span>
-                      )}
-                      {high > 0 && (
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-orange-700 bg-orange-50 px-2 py-0.5 rounded-full border border-orange-200">
-                          <span className="w-1.5 h-1.5 rounded-full bg-orange-400 inline-block" />
-                          {high} HIGH
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
+                        <span className="font-black tabular-nums text-gray-800">{evidence.status_counts[s]}</span>
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-gray-400 leading-snug pt-1">
+                      Controls by what TrustLedger&apos;s records show. Evidence for an auditor, not a certification.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Generate button -- downloads the real, signed PDF from /api/report */}
             <button onClick={generate} disabled={generating || dataError}
@@ -1766,7 +1542,7 @@ function ReportsContent() {
                 <button onClick={fetchData} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">Try again</button>
               </div>
             ) : (
-              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} generatedBy={profile?.email ?? undefined} realEvidence={realEvidence} />
+              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} generatedBy={profile?.email ?? undefined} evidence={evidence} evidenceFailed={evidenceFailed} />
             )}
           </div>
         </div>

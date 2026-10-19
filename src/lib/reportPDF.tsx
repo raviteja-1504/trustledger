@@ -1,8 +1,9 @@
 /**
  * PDF Report Document — React PDF
- * Generates signed AI code review evidence assessments scoped to a single
- * framework's narrow control set (SOC 2, EU AI Act, PCI-DSS, ISO 27001) --
- * not a full compliance report. See each framework's scopeNote.
+ * Generates signed control-evidence reports scoped to a single framework's
+ * narrow control set (SOC 2, ISO 27001, PCI DSS, AI code governance; see
+ * lib/controlEvidence.ts) -- not a full compliance report. See each
+ * framework's scope statement.
  */
 
 import React from "react";
@@ -10,6 +11,7 @@ import {
   Document, Page, Text, View, StyleSheet, Image,
 } from "@react-pdf/renderer";
 import { WORDMARK_PNG_DATA_URI, WORDMARK_ASPECT } from "./brandAssets";
+import { FRAMEWORKS, normalizeFrameworkId } from "./controlEvidence";
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 
@@ -87,9 +89,6 @@ const S = StyleSheet.create({
   ctrlId:      { fontSize:8, fontFamily:"Helvetica-Bold", color:"#6366f1", backgroundColor:"#eef2ff",
                  borderRadius:3, padding:"2 5", marginRight:6 },
   ctrlName:    { fontSize:8.5, fontFamily:"Helvetica-Bold", color:"#1e293b" },
-  ctrlScore:   { fontSize:9, fontFamily:"Helvetica-Bold" },
-  ctrlBarTrack:{ height:5, backgroundColor:"#f1f5f9", borderRadius:3, overflow:"hidden", marginBottom:6 },
-  ctrlBarFill: { height:5, borderRadius:3 },
   ctrlEvidenceRow: { fontSize:7.5, color:"#64748b", marginTop:2 },
   statusPass:    { color:"#15803d" },
   statusPartial: { color:"#d97706" },
@@ -131,17 +130,12 @@ function statusStyle(status: string) {
   return S.statusNotTested;
 }
 
+// What the evidence shows -- never "satisfied"/"compliant": only an auditor can conclude that.
 function statusLabel(status: string) {
-  if (status === "pass")    return "SATISFIED";
-  if (status === "partial") return "PARTIAL";
-  if (status === "fail")    return "NOT MET";
-  return "NOT TESTED";
-}
-
-function scoreColor(score: number) {
-  if (score >= 80) return "#15803d";
-  if (score >= 50) return "#d97706";
-  return "#dc2626";
+  if (status === "pass")    return "EVIDENCE COLLECTED";
+  if (status === "partial") return "GAPS FOUND";
+  if (status === "fail")    return "FAILING";
+  return "NO EVIDENCE YET";
 }
 
 // Real production rows have occasionally shown up with a null path (bad
@@ -177,7 +171,7 @@ interface ComplianceControl {
   control_name: string;
   status:       string;
   score:        number;
-  evidence:     Array<{ description: string; count: number; source: string }>;
+  checks:       Array<{ label: string; status: string; summary: string; gaps: string[] }>;
 }
 
 interface GapFile {
@@ -192,6 +186,9 @@ interface ReportData {
   report_id:     string;
   org:           { name: string; slug: string; github_org: string | null };
   framework:     string;
+  /** Normalised id (soc2 | iso27001 | pcidss | aigov) from the evidence engine. */
+  framework_id?: string;
+  evidence_scope?: { name: string; standard: string; scope: string; status_counts: Record<string, number> };
   period_start:  string;
   period_end:    string;
   generated_at:  string;
@@ -201,6 +198,10 @@ interface ReportData {
     total_files:        number;
     total_attestations: number;
     critical_findings:  number;
+    high_risk_files:    number;
+    high_risk_reviewed: number;
+    independent_reviews: number;
+    self_approvals:     number;
     secrets_detected:   number;
     avg_ai_percentage:  number;
   };
@@ -214,31 +215,23 @@ interface ReportData {
 
 // ── Framework metadata ─────────────────────────────────────────────────────────
 
-const FRAMEWORK_META: Record<string, { full: string; certBody: string; standard: string; scopeNote: string }> = {
-  SOC2: {
-    full: "SOC 2 Type II", certBody: "AICPA-accredited CPA firm", standard: "Trust Services Criteria 2017",
-    scopeNote: "This report evidences AI-generated code review controls only (Trust Services Criteria CC6.1, CC6.2, CC7.2, CC8.1, A1.2). It does not cover the full Trust Services Criteria and is not a substitute for a SOC 2 Type II audit performed by a licensed CPA firm.",
-  },
-  EUAI: {
-    full: "EU AI Act", certBody: "EU Notified Body", standard: "Regulation (EU) 2024/1689",
-    scopeNote: "This report evidences AI system provenance and human oversight for AI-generated source code only (Articles 9, 10, 13, 14, 17). It does not perform risk-tier classification or conformity assessment, and is not a substitute for a full EU AI Act compliance assessment.",
-  },
-  PCIDSS: {
-    full: "PCI DSS v4.0", certBody: "QSA Assessor", standard: "PCI Security Standards Council Req 6",
-    scopeNote: "This report evidences secure software development practices only (Requirement 6.2–6.4) as they relate to AI-generated code. It does not cover network segmentation, cardholder data encryption, physical security, ASV scanning, or PCI-DSS's other requirements, and is not a substitute for a Report on Compliance (ROC) or SAQ performed by a Qualified Security Assessor. Relevant only to organisations with a cardholder data environment.",
-  },
-  ISO27001: {
-    full: "ISO/IEC 27001:2022", certBody: "Accredited Certification Body", standard: "ISO/IEC 27001:2022 Annex A",
-    scopeNote: "This report evidences AI-generated code review against a subset of Annex A controls only (A.8.25, A.8.26, A.8.28, A.8.30, A.5.33). It does not cover the full ISMS scope and is not a substitute for a certification audit performed by an accredited certification body.",
-  },
+// Names, standards and scope statements come from lib/controlEvidence.ts (FRAMEWORKS); only who can assess is here.
+const ASSESSOR: Record<string, string> = {
+  soc2: "Licensed CPA firm (SOC 2 examination)",
+  iso27001: "Accredited certification body",
+  pcidss: "Qualified Security Assessor (QSA)",
+  aigov: "Internal review: not a regulatory framework",
 };
 
 // ── Document component ─────────────────────────────────────────────────────────
 
 export function buildReportDocument({ data, signature }: { data: ReportData; signature: string }) {
-  const meta = FRAMEWORK_META[data.framework] ?? {
-    full: data.framework, certBody:"—", standard:"—",
-    scopeNote: "This report evidences AI-generated code review activity for the period below. It is not a substitute for a formal audit.",
+  const fw = FRAMEWORKS.find(f => f.id === (data.framework_id ?? normalizeFrameworkId(data.framework)));
+  const meta = {
+    full: data.evidence_scope?.name ?? fw?.name ?? data.framework,
+    standard: data.evidence_scope?.standard ?? fw?.standard ?? "—",
+    certBody: ASSESSOR[fw?.id ?? ""] ?? "—",
+    scopeNote: data.evidence_scope?.scope ?? fw?.scope ?? "This report shows evidence recorded by TrustLedger for the period below. It is not a substitute for a formal audit.",
   };
   const topScans = data.scans
     .filter(s => s.overall_risk === "CRITICAL" || s.overall_risk === "HIGH")
@@ -306,8 +299,12 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
             <View style={S.metricCard}><Text style={[S.metricValue, S.critical]}>{data.metrics.critical_findings}</Text><Text style={S.metricLabel}>Critical Findings</Text></View>
             <View style={S.metricCard}><Text style={[S.metricValue, S.high]}>{data.metrics.secrets_detected}</Text><Text style={S.metricLabel}>Secrets Detected</Text></View>
             <View style={S.metricCard}>
-              <Text style={S.metricValue}>{data.metrics.total_scans > 0 ? fmtPct(data.metrics.total_attestations / Math.max(data.metrics.total_files, 1)) : "N/A"}</Text>
-              <Text style={S.metricLabel}>Attestation Coverage</Text>
+              <Text style={S.metricValue}>{data.metrics.high_risk_files > 0 ? `${data.metrics.high_risk_reviewed}/${data.metrics.high_risk_files}` : "N/A"}</Text>
+              <Text style={S.metricLabel}>High-risk files reviewed</Text>
+            </View>
+            <View style={S.metricCard}>
+              <Text style={[S.metricValue, data.metrics.self_approvals > 0 ? S.high : {}]}>{data.metrics.self_approvals}</Text>
+              <Text style={S.metricLabel}>Self-approvals</Text>
             </View>
           </View>
         </View>
@@ -359,10 +356,11 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
 
       {/* ── Page 3: Compliance Mapping ──────────────────────────────────────── */}
       <Page size="A4" style={S.page} wrap>
-        <Text style={S.pageHeading}>4. Compliance Mapping</Text>
+        <Text style={S.pageHeading}>4. Control Evidence</Text>
         <Text style={S.pageSubheading}>
-          Real, live-computed evidence per {meta.full} control in scope for this report — the same engine
-          driving the Compliance and Evidence pages, not a separate estimate.
+          What TrustLedger&apos;s own records show for each {meta.full} control in scope, measured from the
+          period&apos;s scans, reviews, findings and audit log. A status describes the evidence; it is not an
+          auditor&apos;s conclusion that the control is effective.
         </Text>
 
         {data.compliance.map(c => (
@@ -372,16 +370,15 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
                 <Text style={S.ctrlId}>{c.control_id}</Text>
                 <Text style={S.ctrlName}>{c.control_name}</Text>
               </View>
-              <Text style={[S.ctrlScore, { color:scoreColor(c.score) }]}>{Math.round(c.score)}%</Text>
               <Text style={[S.ctrlEvidenceRow, statusStyle(c.status), { marginLeft:8, marginTop:0 }]}>{statusLabel(c.status)}</Text>
             </View>
-            <View style={S.ctrlBarTrack}>
-              <View style={[S.ctrlBarFill, { width:`${Math.round(c.score)}%`, backgroundColor:scoreColor(c.score) }]} />
-            </View>
-            {c.evidence.map((e, i) => (
-              <Text key={i} style={S.ctrlEvidenceRow}>
-                • {e.description} — {e.count} record{e.count === 1 ? "" : "s"} ({e.source})
-              </Text>
+            {c.checks.map((k, i) => (
+              <View key={i}>
+                <Text style={S.ctrlEvidenceRow}>• {k.label}: {k.summary}</Text>
+                {k.gaps.map((g, j) => (
+                  <Text key={j} style={[S.ctrlEvidenceRow, S.statusPartial, { marginLeft:8 }]}>Gap: {g}</Text>
+                ))}
+              </View>
             ))}
           </View>
         ))}
@@ -479,13 +476,14 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
                 Management of {data.org.name} asserts that, to the best of its knowledge and belief, the
                 controls described in this report were suitably designed and operating effectively throughout
                 the period {fmtDate(data.period_start)} to {fmtDate(data.period_end)} with respect to the specific
-                {" "}{meta.full} criteria listed in Compliance Mapping above. This assertion does not extend to
-                any {meta.full} requirement outside that scope — see Scope &amp; Limitations on page 1.
+                {" "}{meta.full} controls listed in Control Evidence above, except for the gaps recorded there.
+                This assertion does not extend to any {meta.full} requirement outside that scope — see
+                Scope &amp; Limitations on page 1.
               </Text>
               <Text style={S.assertionP}>
-                All AI-generated code changes were subjected to automated risk scanning, and HIGH/CRITICAL-risk
-                files required named reviewer attestation prior to deployment. The attestation records and scan
-                logs included in this report constitute the evidence base for this assertion; this document
+                Pull requests in connected repositories were scanned automatically, and reviewer sign-offs on
+                high-risk files were recorded with the reviewer&apos;s identity. The scan, sign-off and audit-log
+                records summarised in this report are the evidence base for this assertion; this document
                 additionally carries the cryptographic signature below over its exact contents.
               </Text>
               <View style={{ flexDirection:"row", gap:24, marginTop:4 }}>

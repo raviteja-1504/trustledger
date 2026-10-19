@@ -13,11 +13,10 @@ import RiskBadge from "@/components/RiskBadge";
 
 // Heavy components — lazy loaded to reduce initial bundle size
 const RiskTrendChart     = dynamic(() => import("@/components/RiskTrendChart"),    { ssr:false });
-const HealthScoreGauge   = dynamic(() => import("@/components/HealthScoreGauge"),  { ssr:false });
-import { healthScoreParts } from "@/components/HealthScoreGauge";
 const TopRiskFilesPanel  = dynamic(() => import("@/components/TopRiskFilesPanel"), { ssr:false });
-const ComplianceReadiness= dynamic(() => import("@/components/ComplianceReadiness"),{ ssr:false });
-const ActionItemsPanel   = dynamic(() => import("@/components/ActionItemsPanel"),  { ssr:false });
+const AuditEvidenceCard  = dynamic(() => import("@/components/dashboard/AuditEvidenceCard"), { ssr:false });
+import { topAction, type ScoreAction } from "@/lib/governanceScore";
+import { deriveActivity } from "@/lib/dashboardActivity";
 import { api } from "@/lib/api";
 import { loadPolicy } from "@/lib/policy";
 import { computeTrustScore, scoreColor } from "@/lib/trustScore";
@@ -36,171 +35,6 @@ const DAYS_OPTIONS = [7, 30, 90] as const;
 type DaysOption = (typeof DAYS_OPTIONS)[number];
 type RangeMode = DaysOption | "custom";
 const ORG       = process.env.NEXT_PUBLIC_ORG ?? "acme";
-
-function deriveActivity(data: DashboardData): ActivityEvent[] {
-  const events: ActivityEvent[] = [];
-  const now = Date.now();
-
-  // One scan event per repo (most recent scan)
-  data.repos.forEach((r, i) => {
-    if (!r.latest_scan_id) return;
-    const ts = r.last_scan
-      ? new Date(r.last_scan).toISOString()
-      : new Date(now - (i + 1) * 86400000).toISOString();
-    const risk = r.attestation_rate < 0.4 ? "CRITICAL"
-                : r.attestation_rate < 0.7 ? "HIGH"
-                : r.attestation_rate < 0.9 ? "MEDIUM" : "LOW";
-    events.push({
-      type: "scan", timestamp: ts, repo: r.repo,
-      pr_number: 400 + i * 17,
-      scan_id: r.latest_scan_id,
-      overall_risk: risk,
-      file_count: Math.round(r.file_count * 0.15),
-      total_ai_pct: r.ai_pct,
-      file_path: "", reviewer_email: "",
-    });
-  });
-
-  // Attestation events from attested top_risk_files. Use the real reviewer/
-  // timestamp recorded on the attestation when available, falling back to
-  // synthetic placeholders only for demo/mock data that has neither.
-  data.top_risk_files.filter(f => f.attested).forEach((f, i) => {
-    const tsOffset = (i + 1) * 3600000 * 2;
-    events.push({
-      type: "attestation",
-      timestamp: f.attested_at ?? new Date(now - tsOffset).toISOString(),
-      repo: f.repo,
-      pr_number: f.pr_number,
-      scan_id: f.scan_id,
-      overall_risk: f.risk_score,
-      file_count: 0,
-      total_ai_pct: f.ai_pct,
-      file_path: f.file_path,
-      reviewer_email: f.attested_by ?? "unknown",
-    });
-  });
-
-  // Fill remaining slots up to 15 with historical scan events
-  if (events.length < 15 && data.repos.length > 0) {
-    data.risk_trend.slice().reverse().forEach((pt, i) => {
-      if (events.length >= 15) return;
-      const firstRepo = data.repos[i % data.repos.length];
-      if (!firstRepo) return;
-      events.push({
-        type: "scan",
-        timestamp: new Date(pt.date + "T10:00:00Z").toISOString(),
-        repo: firstRepo.repo,
-        pr_number: 300 + i * 13,
-        scan_id: firstRepo.latest_scan_id,
-        overall_risk: pt.critical_count > 5 ? "CRITICAL" : pt.high_count > 8 ? "HIGH" : "MEDIUM",
-        file_count: pt.high_count + pt.critical_count,
-        total_ai_pct: firstRepo.ai_pct,
-        file_path: "", reviewer_email: "",
-      });
-    });
-  }
-
-  return events
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 15);
-}
-
-// ── Executive Summary ─────────────────────────────────────────────────────────
-
-function ExecSummary({ data }: { data: DashboardData }) {
-  const [dismissed, setDismissed] = useState(false);
-  useEffect(() => { setDismissed(localStorage.getItem("tl_exec_dismissed") === "1"); }, []);
-
-  if (dismissed) return null;
-
-  const score   = healthScore(data);
-  const attPct  = Math.round(data.attestation_rate * 100);
-  const crit    = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested).length;
-  const blocked = data.unattested_deploy_count;
-  const posture = score >= 80 ? { label:"STRONG", color:"#15803d", bg:"#f0fdf4", border:"#bbf7d0" }
-                : score >= 60 ? { label:"FAIR",   color:"#b45309", bg:"#fffbeb", border:"#fde68a" }
-                :               { label:"AT RISK", color:"#be123c", bg:"#fef2f2", border:"#fecdd3" };
-  const summary = crit > 0
-    ? `${crit} CRITICAL file${crit > 1 ? "s" : ""} need${crit > 1 ? "" : "s"} immediate attestation · ${blocked} repo${blocked !== 1 ? "s" : ""} awaiting sign-off`
-    : `Attestation coverage at ${attPct}% · ${blocked} repo${blocked !== 1 ? "s" : ""} awaiting sign-off`;
-
-  // Repos / attestation / AI% / blocked used to be repeated here; the stat cards below show them.
-  return (
-    <div className="animate-fade-up rounded-2xl border overflow-hidden"
-      style={{ background:"linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%)", borderColor:"rgba(255,255,255,0.08)" }}>
-      <div className="flex items-center gap-4 sm:gap-5 px-5 sm:px-6 py-4">
-        <div className="text-center shrink-0">
-          <p className="text-4xl sm:text-5xl font-black text-white tabular-nums leading-none">{score}</p>
-          <p className="text-[10px] text-white/40 mt-1 font-semibold uppercase tracking-wider whitespace-nowrap">Health score</p>
-        </div>
-        <div className="w-px self-stretch bg-white/10" />
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <span className="inline-block whitespace-nowrap text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full"
-            style={{ background:posture.bg, color:posture.color, border:`1px solid ${posture.border}` }}>
-            {posture.label}
-          </span>
-          <p className="text-sm text-white/70 leading-snug">{summary}</p>
-        </div>
-        <button onClick={() => { localStorage.setItem("tl_exec_dismissed","1"); setDismissed(true); }}
-          className="self-start text-white/30 hover:text-white/60 transition-colors shrink-0" aria-label="Dismiss health summary">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
-      <div className="h-1 w-full bg-white/5">
-        <div className="h-full rounded-full transition-all duration-1000"
-          style={{ width:`${score}%`, background:`linear-gradient(90deg,#6366f1,${score>=80?"#10b981":score>=60?"#f59e0b":"#ef4444"})` }} />
-      </div>
-    </div>
-  );
-}
-
-// ── Score ─────────────────────────────────────────────────────────────────────
-
-function healthInputs(data: DashboardData) {
-  return { attestation_rate: data.attestation_rate, ai_pct: data.overall_ai_pct, blocked_deploys: data.unattested_deploy_count };
-}
-
-/** Health score (0–100) — the one formula used by the summary banner and the Security Health gauge. */
-function healthScore(data: DashboardData): number {
-  if (data.repos.length === 0) return 100;
-  return healthScoreParts(healthInputs(data)).total;
-}
-
-// ── Sparkline ─────────────────────────────────────────────────────────────────
-
-function miniSparkline(repo: string, currentAi: number): number[] {
-  let seed = 0;
-  for (let i = 0; i < repo.length; i++) seed = (seed * 31 + repo.charCodeAt(i)) & 0x7fffffff;
-  const pts: number[] = [];
-  let v = Math.max(0.05, currentAi - 0.15 + (seed % 100) / 700);
-  for (let i = 0; i < 6; i++) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    v = Math.max(0.05, Math.min(0.95, v + (seed % 200 - 100) / 1200));
-    pts.push(v);
-  }
-  pts.push(currentAi);
-  return pts;
-}
-
-function Sparkline({ repo, aiPct }: { repo: string; aiPct: number }) {
-  const pts = miniSparkline(repo, aiPct);
-  const W = 52, H = 24, pad = 2;
-  const min = Math.min(...pts), max = Math.max(...pts);
-  const range = Math.max(max - min, 0.05);
-  const x = (i: number) => pad + (i / (pts.length - 1)) * (W - pad * 2);
-  const y = (v: number) => H - pad - ((v - min) / range) * (H - pad * 2);
-  const d = pts.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
-  const rising = pts[pts.length - 1] > pts[0] + 0.03;
-  const color = rising ? "#f43f5e" : "#10b981";
-  return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
-      <path d={d} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx={x(pts.length - 1).toFixed(1)} cy={y(pts[pts.length - 1]).toFixed(1)} r="2" fill={color} />
-    </svg>
-  );
-}
 
 // ── SLA helpers ───────────────────────────────────────────────────────────────
 
@@ -289,178 +123,6 @@ function relativeDate(iso: string) {
   if (d < 7)   return `${d}d ago`;
   if (d < 30)  return `${Math.floor(d / 7)}w ago`;
   return `${Math.floor(d / 30)}mo ago`;
-}
-
-// ── Repo Risk Matrix ──────────────────────────────────────────────────────────
-
-function RepoRiskMatrix({ data }: { data: DashboardData }) {
-  const [hovered, setHovered] = useState<string | null>(null);
-
-  const fileMin = Math.min(...data.repos.map(r => r.file_count));
-  const fileMax = Math.max(...data.repos.map(r => r.file_count));
-
-  const dots = data.repos.map(r => {
-    const rf          = data.top_risk_files.filter(f => f.repo === r.repo && !f.attested);
-    const worstRisk   = rf.some(f => f.risk_score === "CRITICAL") ? "CRITICAL"
-      : rf.some(f => f.risk_score === "HIGH") ? "HIGH"
-      : rf.some(f => f.risk_score === "MEDIUM") ? "MEDIUM" : "CLEAR";
-    const dotColor    = worstRisk === "CRITICAL" ? "#ef4444"
-      : worstRisk === "HIGH" ? "#f97316"
-      : worstRisk === "MEDIUM" ? "#f59e0b" : "#10b981";
-    const t           = fileMax > fileMin ? (r.file_count - fileMin) / (fileMax - fileMin) : 0.5;
-    const size        = Math.round(12 + t * 16);
-    return {
-      repo: r.repo, short: r.repo.split("/").pop()!,
-      scanId: r.latest_scan_id,
-      x: r.ai_pct * 100,
-      y: (1 - r.attestation_rate) * 100,   // inverted: 0 = top = 100% attested
-      dotColor, worstRisk, size,
-      aiPct: r.ai_pct, attRate: r.attestation_rate,
-      fileCount: r.file_count, unattested: rf.length,
-    };
-  });
-
-  const h           = dots.find(d => d.repo === hovered) ?? null;
-  // Danger zone: AI% > 50 AND attestation < 60%  (y > 40 in inverted coords)
-  const dangerCount = dots.filter(d => d.x > 50 && d.y > 40).length;
-
-  return (
-    <div className="section-card overflow-visible animate-fade-up h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 rounded-t-2xl overflow-hidden">
-        <div>
-          <p className="font-bold text-gray-900 text-sm">Repo Risk Matrix</p>
-          <p className="text-xs text-gray-400 mt-0.5">AI content vs attestation — hover to inspect, click to review</p>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          {([["#ef4444","Critical"],["#f97316","High"],["#f59e0b","Medium"],["#10b981","Clear"]] as const).map(([c,l]) => (
-            <span key={l} className="flex items-center gap-1 text-[10px] text-gray-500 shrink-0">
-              <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ background:c }} />{l}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="p-5 pb-4">
-        <div className="flex gap-3">
-          {/* Y-axis label */}
-          <div className="flex items-center justify-center shrink-0" style={{ width:14 }}>
-            <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400 whitespace-nowrap select-none"
-              style={{ writingMode:"vertical-rl", transform:"rotate(180deg)" }}>
-              Attestation Rate ↑
-            </span>
-          </div>
-
-          <div className="flex-1 min-w-0 space-y-1">
-            {/* Plot area */}
-            <div className="relative rounded-xl border border-gray-100 overflow-visible" style={{ height:260, background:"#f8fafc" }}>
-
-              {/* Quadrant shading — divider at AI=50% (x), Attestation=60% (y=40 inverted) */}
-              <div className="absolute rounded-tl-xl"    style={{ left:0,     top:0,    width:"50%", height:"40%", background:"rgba(16,185,129,0.06)" }} />
-              <div className="absolute rounded-tr-xl"    style={{ left:"50%", top:0,    width:"50%", height:"40%", background:"rgba(245,158,11,0.06)"  }} />
-              <div className="absolute rounded-bl-xl"    style={{ left:0,     top:"40%",width:"50%", height:"60%", background:"rgba(148,163,184,0.05)" }} />
-              <div className="absolute rounded-br-xl"    style={{ left:"50%", top:"40%",width:"50%", height:"60%", background:"rgba(239,68,68,0.07)"    }} />
-
-              {/* Quadrant labels */}
-              <span className="absolute text-[8px] font-black text-emerald-600 select-none pointer-events-none" style={{ left:7,  top:5,    opacity:0.65 }}>SAFE</span>
-              <span className="absolute text-[8px] font-black text-amber-600   select-none pointer-events-none" style={{ right:7, top:5,    opacity:0.65 }}>MONITORED</span>
-              <span className="absolute text-[8px] font-black text-slate-400   select-none pointer-events-none" style={{ left:7,  bottom:5, opacity:0.65 }}>LOW PRIORITY</span>
-              <span className="absolute text-[8px] font-black text-rose-600    select-none pointer-events-none" style={{ right:7, bottom:5, opacity:0.80 }}>⚠ DANGER ZONE</span>
-
-              {/* Divider lines */}
-              <div className="absolute inset-y-0 pointer-events-none" style={{ left:"50%",  borderLeft:"1px dashed rgba(0,0,0,0.09)" }} />
-              <div className="absolute inset-x-0 pointer-events-none" style={{ top:"40%",   borderTop: "1px dashed rgba(0,0,0,0.09)" }} />
-
-              {/* Repo dots */}
-              {dots.map(d => (
-                <Link
-                  key={d.repo}
-                  href={`/pr/${d.scanId}`}
-                  onMouseEnter={() => setHovered(d.repo)}
-                  onMouseLeave={() => setHovered(null)}
-                  className="absolute block rounded-full border-2 border-white transition-all duration-200"
-                  style={{
-                    left:        `${d.x}%`,
-                    top:         `${d.y}%`,
-                    width:       d.size,
-                    height:      d.size,
-                    background:  d.dotColor,
-                    transform:   `translate(-50%,-50%) scale(${hovered === d.repo ? 1.35 : 1})`,
-                    boxShadow:   hovered === d.repo
-                      ? `0 0 0 4px ${d.dotColor}30, 0 4px 16px ${d.dotColor}55`
-                      : `0 2px 6px ${d.dotColor}50`,
-                    zIndex: hovered === d.repo ? 20 : 1,
-                  }}
-                />
-              ))}
-
-              {/* Tooltip */}
-              {h && (
-                <div
-                  className="absolute z-30 pointer-events-none rounded-xl border border-gray-200 bg-white shadow-xl px-3 py-2.5"
-                  style={{
-                    left:         h.x <= 60 ? `${h.x}%`    : "auto",
-                    right:        h.x >  60 ? `${100-h.x}%` : "auto",
-                    top:          h.y <= 55 ? `${h.y}%`    : "auto",
-                    bottom:       h.y >  55 ? `${100-h.y}%` : "auto",
-                    marginTop:    h.y <= 55 ?  10 : 0,
-                    marginBottom: h.y >  55 ?  10 : 0,
-                    minWidth:     152,
-                  }}
-                >
-                  <p className="text-[11px] font-black text-gray-800 mb-1.5 truncate">{h.short}</p>
-                  <div className="space-y-1">
-                    {([
-                      ["AI Content",  `${Math.round(h.aiPct  * 100)}%`, false],
-                      ["Attested",    `${Math.round(h.attRate * 100)}%`, false],
-                      ["Files",       String(h.fileCount),               false],
-                      ...(h.unattested > 0 ? [["Unattested", String(h.unattested), true] as [string,string,boolean]] : []),
-                    ] as [string,string,boolean][]).map(([lbl,val,warn]) => (
-                      <div key={lbl} className="flex items-center justify-between gap-4">
-                        <span className="text-[9px] text-gray-400">{lbl}</span>
-                        <span className="text-[9px] font-bold" style={{ color: warn ? h.dotColor : "#374151" }}>{val}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-1.5 pt-1.5 border-t border-gray-100">
-                    <span className="text-[8px] font-black uppercase tracking-wider" style={{ color: h.dotColor }}>
-                      {h.worstRisk === "CLEAR" ? "✓ Fully cleared" : `${h.worstRisk} risk`}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* X-axis ticks */}
-            <div className="flex justify-between px-0.5">
-              {[0,25,50,75,100].map(v => (
-                <span key={v} className="text-[8px] text-gray-300 tabular-nums">{v}%</span>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* X-axis label */}
-        <div className="text-center mt-0.5 ml-[22px]">
-          <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400">AI Content % →</span>
-        </div>
-
-        {/* Danger zone callout */}
-        {dangerCount > 0 && (
-          <div className="mt-3 flex items-center gap-2 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-            <svg className="text-rose-500 shrink-0" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <p className="text-[10px] text-rose-700">
-              <span className="font-bold">{dangerCount} repo{dangerCount !== 1 ? "s" : ""} in the danger zone</span>
-              {" "}— high AI content with low attestation. Prioritise these first.
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 // ── Top Risk Repos ───────────────────────────────────────────────────────────
@@ -854,19 +516,18 @@ export default function DashboardPage() {
   }, [localActivity, activity]);
 
   // Derived stats
-  const compliant    = effectiveData?.repos.filter(r => r.attestation_rate >= 0.8).length ?? 0;
-  const underReview  = effectiveData?.repos.filter(r => r.attestation_rate >= 0.5 && r.attestation_rate < 0.8).length ?? 0;
-  const needsAction  = effectiveData?.repos.filter(r => r.attestation_rate < 0.5).length ?? 0;
-  const score        = effectiveData ? healthScore(effectiveData) : 0;
   // The real Trust Score is computed on the server from all governance data (/api/trust-score); demo mode, which
-  // has no server data, keeps the local estimate.
-  const [serverTrustScore, setServerTrustScore] = useState<number | null>(null);
+  // has no server data, keeps the local estimate. The tile also shows the single action worth the most points.
+  const [serverTrust, setServerTrust] = useState<{ total: number; topAction: ScoreAction | null } | null>(null);
   useEffect(() => {
     if (isSeedMode()) return;
-    authedFetch<{ score: { total: number } }>("/api/trust-score?history=7").then(r => setServerTrustScore(r.score.total)).catch(() => {});
+    authedFetch<{ score: { total: number; dimensions?: Array<{ actions?: ScoreAction[] }> } }>("/api/trust-score?history=7")
+      .then(r => setServerTrust({ total: r.score.total, topAction: topAction(r.score.dimensions ?? []) }))
+      .catch(() => {});
   }, []);
   const demoTrustScore = useMemo(() => effectiveData ? computeTrustScore(effectiveData).total : 0, [effectiveData]);
-  const trustScore   = isSeedMode() ? demoTrustScore : serverTrustScore;
+  const trustScore   = isSeedMode() ? demoTrustScore : serverTrust?.total ?? null;
+  const trustAction  = isSeedMode() ? null : serverTrust?.topAction ?? null;
   const recentlyCovered = effectiveData?.repos.filter(r => {
     if (!r.last_scan) return false;
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
@@ -1219,76 +880,9 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* ── Executive Summary — admin/security_reviewer only ─────── */}
-            {!isDeveloperView && hasData && <ExecSummary data={effectiveData} />}
-
             {/* ── Needs attention: deploys awaiting sign-off, SLA breaches, open queues ── */}
             <AttentionPanel data={effectiveData} violationStatuses={violationStatuses} openSecrets={openSecretsCount}
               unresolvedRepoScans={unresolvedRepoScans} sla={sla} showQueues={!isDeveloperView} />
-
-
-            {/* ── Stats grid ───────────────────────────────────────────── */}
-            {/* Two even rows: activity (4) and review (3) — seven cards in one grid left a gap */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-fade-up">
-              <StatsCard label="Repositories" value={effectiveData.repos.length} sub="scanned" icon={<RepoIcon />} color="indigo"
-                info={{ title:"Repositories", description:"Total number of GitHub repositories connected to TrustLedger and actively scanned for AI-generated code." }} />
-              <StatsCard
-                label="Total Scans" value={effectiveData.scan_count}
-                sub={rangeMode === "custom" ? "in range" : `last ${rangeMode}d`}
-                icon={<ScanIcon />} color="indigo"
-                info={{ title:"Total Scans", description:"Number of pull request scans completed in the selected date range. Each scan analyses every changed file for AI content and vulnerability patterns." }}
-              />
-              <StatsCard label="Files Scanned" value={effectiveData.file_count} sub="total files" icon={<FileIcon />} color="violet"
-                info={{ title:"Files Scanned", description:"Total individual files analysed across all scans. Each file is scored for AI% and risk signals (SQL injection, hardcoded secrets, eval/exec, etc.)." }} />
-              <StatsCard
-                label="AI Content"
-                value={`${(effectiveData.overall_ai_pct * 100).toFixed(1)}%`}
-                sub="avg across repos"
-                icon={<BrainIcon />} color="violet"
-                ringValue={effectiveData.overall_ai_pct}
-                info={{ title:"Average AI Content %", description:"Share of AI-generated code across the files scanned in this period: each scan's AI% weighted by the number of files it analysed.", formula:"Σ(scan AI% × files in scan) ÷ Σ files scanned" }}
-                // (Its "vs prev" used to be the HIGH/CRITICAL risk-file trend — a different metric.)
-                trend={effectiveData.overall_ai_pct > 0.5
-                  ? { direction: "up", label: "above threshold" }
-                  : { direction: "down", label: "within threshold" }}
-              />
-            </div>
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 animate-fade-up [&>*:last-child]:col-span-2 lg:[&>*:last-child]:col-span-1">
-              <StatsCard
-                label="Attestation"
-                value={`${(effectiveData.attestation_rate * 100).toFixed(0)}%`}
-                sub={effectiveData.total_high_crit != null ? `${effectiveData.attested_high_crit ?? 0}/${effectiveData.total_high_crit} HIGH/CRIT files` : "HIGH/CRIT reviewed"}
-                icon={<ShieldCheckIcon />} color="emerald"
-                ringValue={effectiveData.attestation_rate}
-                info={{ title:"Attestation Rate", description:"Percentage of HIGH and CRITICAL-risk files that have been reviewed and signed off by a named human reviewer. Target ≥ 80%.", formula:"attested_high_crit_files ÷ total_high_crit_files × 100" }}
-                trend={effectiveData.attestation_rate >= 0.8
-                  ? { direction: "up",   label: "compliant" }
-                  : { direction: "down", label: "needs review" }}
-              />
-              <StatsCard
-                label="Awaiting Sign-off"
-                value={effectiveData.unattested_deploy_count}
-                sub={`repo${effectiveData.unattested_deploy_count !== 1 ? "s" : ""} with unattested HIGH/CRIT files`}
-                icon={<AlertIcon />}
-                color={effectiveData.unattested_deploy_count > 0 ? "rose" : "emerald"}
-                info={{ title:"Awaiting Sign-off", description:"Repositories whose latest scan has HIGH or CRITICAL files that nobody has attested or started reviewing yet. Their pull requests are held by the merge gate until a reviewer signs off. Zero is the goal." }}
-                trend={effectiveData.unattested_deploy_count > 0
-                  ? { direction: "up",      label: "action needed" }
-                  : { direction: "neutral", label: "all clear" }}
-              />
-              <StatsCard
-                label="7-day Coverage"
-                value={`${Math.round(coverageRate * 100)}%`}
-                sub={`${recentlyCovered}/${coverageTotal} repos`}
-                icon={<CoverageIcon />} color="emerald"
-                ringValue={coverageRate}
-                info={{ title:"7-day Scan Coverage", description:"Percentage of connected repositories that have had at least one scan in the last 7 days, including connected repos with no scans in this period. Low coverage means some repos may have ungoverned AI code changes.", formula:"repos_scanned_last_7d ÷ connected_repos × 100" }}
-                trend={coverageRate >= 0.8
-                  ? { direction: "up",   label: "good coverage" }
-                  : { direction: "down", label: "stale repos" }}
-              />
-            </div>
-
 
 
             {/* ── Empty state ──────────────────────────────────────────── */}
@@ -1296,211 +890,84 @@ export default function DashboardPage() {
               <EmptyState org={ORG} />
             ) : (
               <>
-                {/* ── TrustScore™ quick widget ─────────────────────────── */}
-                <a href="/trust-score"
-                  className="block rounded-2xl p-5 border hover:border-opacity-80 transition-colors animate-fade-up"
+                {/* ── Trust Score: the one governance number, with the action worth the most points ── */}
+                <Link href="/trust-score"
+                  className="animate-fade-up block rounded-2xl border p-5 transition-colors hover:shadow-md"
                   style={{
                     background: "linear-gradient(135deg,#eef2ff,#faf5ff)",
                     borderColor: trustScore == null ? "#e0e7ff" : scoreColor(trustScore).ring,
                   }}>
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                    <div className="shrink-0">
                       <p className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-1">Trust Score</p>
-                      <div className="text-5xl font-black tabular-nums" style={{ color: trustScore == null ? "#a5b4fc" : scoreColor(trustScore).text }}>
-                        {trustScore ?? "—"}
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-5xl font-black tabular-nums" style={{ color: trustScore == null ? "#a5b4fc" : scoreColor(trustScore).text }}>
+                          {trustScore ?? "—"}
+                        </span>
+                        <span className="text-sm font-semibold text-indigo-300">/ 1000</span>
                       </div>
                       <p className="text-xs mt-1" style={{ color: trustScore == null ? "#818cf8" : scoreColor(trustScore).text }}>
-                        {trustScore == null ? "Calculating…" : `${scoreColor(trustScore).label} · out of 1000 · click for what to fix`}
+                        {trustScore == null ? "Calculating…" : scoreColor(trustScore).label}
                       </p>
                     </div>
-                    <div className="shrink-0 text-right">
-                      <div className="text-xs text-indigo-600 font-bold mb-3">AI Governance Health</div>
-                      {[
-                        { label:"Shadow AI",      href:"/shadow-ai",    icon:"🔍" },
-                        { label:"Phantom Deps",   href:"/phantom-deps", icon:"👻" },
-                        { label:"AI Debt Clock",  href:"/ai-debt",      icon:"⏱" },
-                      ].map(l => (
-                        <a key={l.href} href={l.href} onClick={e => e.stopPropagation()}
-                          className="flex items-center gap-1.5 text-xs text-indigo-500 hover:text-indigo-800 mb-1">
-                          <span>{l.icon}</span><span>{l.label} →</span>
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                </a>
-
-                {/* ── Health Score + Compliance Breakdown ─────────────── */}
-                <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 animate-fade-up delay-200">
-                  <div className="section-card p-5 flex flex-col items-center justify-center gap-1">
-                    <p className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-1">Security Health</p>
-                    <HealthScoreGauge score={score} inputs={healthInputs(effectiveData)} />
-                  </div>
-                  <div className="section-card p-5 lg:col-span-3 flex flex-col">
-                    <p className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-4">Compliance Breakdown</p>
-                    <div className="grid grid-cols-3 gap-3 mb-4">
-                      {[
-                        { label: "Compliant",    value: compliant,   color: "emerald", desc: "≥ 80% attestation", icon: "✓" },
-                        { label: "Under Review", value: underReview, color: "amber",   desc: "50–79% attestation", icon: "◐" },
-                        { label: "Needs Action", value: needsAction, color: "rose",    desc: "< 50% attestation",  icon: "!" },
-                      ].map(({ label, value, color, desc, icon }) => {
-                        const cls = color === "emerald" ? "bg-emerald-50 border-emerald-100 text-emerald-700"
-                          : color === "amber" ? "bg-amber-50 border-amber-100 text-amber-700"
-                          : "bg-rose-50 border-rose-100 text-rose-700";
-                        const numCls = color === "emerald" ? "text-emerald-800" : color === "amber" ? "text-amber-800" : "text-rose-800";
-                        return (
-                          <div key={label} className={`rounded-xl border p-3 ${cls}`}>
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="text-xs font-bold">{label}</span>
-                              <span className="text-base font-black">{icon}</span>
-                            </div>
-                            <p className={`text-2xl font-extrabold ${numCls}`}>{value}</p>
-                            <p className="text-[10px] opacity-70 mt-0.5">{desc}</p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-2.5 rounded-full overflow-hidden bg-gray-100 flex">
-                        {compliant   > 0 && <div className="h-full bg-emerald-500 transition-all duration-700" style={{ width: `${(compliant / effectiveData.repos.length) * 100}%` }} />}
-                        {underReview > 0 && <div className="h-full bg-amber-400 transition-all duration-700"   style={{ width: `${(underReview / effectiveData.repos.length) * 100}%` }} />}
-                        {needsAction > 0 && <div className="h-full bg-rose-500 transition-all duration-700"    style={{ width: `${(needsAction / effectiveData.repos.length) * 100}%` }} />}
-                      </div>
-                      <span className="text-xs text-gray-400 tabular-nums shrink-0">{effectiveData.repos.length} repos</span>
-                    </div>
-                    {/* Which repositories are in each bucket (lowest attestation first) */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 flex-1">
-                      {([
-                        { label: "Needs action",  dot: "bg-rose-500",    test: (a: number) => a < 0.5 },
-                        { label: "Under review",  dot: "bg-amber-400",   test: (a: number) => a >= 0.5 && a < 0.8 },
-                        { label: "Compliant",     dot: "bg-emerald-500", test: (a: number) => a >= 0.8 },
-                      ]).map(b => {
-                        const list = effectiveData.repos.filter(r => b.test(r.attestation_rate)).sort((x, y) => x.attestation_rate - y.attestation_rate);
-                        return (
-                          <div key={b.label} className="min-w-0">
-                            <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1.5">
-                              <span className={`w-2 h-2 rounded-full ${b.dot}`} />{b.label}
-                            </p>
-                            {list.length === 0 ? <p className="text-xs text-gray-300">None</p> : (
-                              <ul className="space-y-1">
-                                {list.slice(0, 4).map(r => (
-                                  <li key={r.repo} className="flex items-center justify-between gap-2 text-xs">
-                                    <Link href={`/repo/${r.repo}`} className="font-mono text-gray-700 hover:text-indigo-600 truncate">{r.repo.split("/").pop()}</Link>
-                                    <span className="tabular-nums text-gray-400 shrink-0">{Math.round(r.attestation_rate * 100)}%</span>
-                                  </li>
-                                ))}
-                                {list.length > 4 && <li className="text-[11px] text-gray-400">+{list.length - 4} more</li>}
-                              </ul>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-
-                {/* ── Risk Intelligence row ─────────────────────────────── */}
-                <div className="animate-fade-up delay-250">
-                  <div className="flex items-center justify-between mb-3 px-0.5">
-                    <div>
-                      <p className="font-black text-gray-900 text-base tracking-tight">Risk Intelligence</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Trend, composition and where risk is concentrated</p>
-                    </div>
-                    {riskVelocity && (
-                      <span className={`flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${
-                        riskVelocity.direction === "up"    ? "bg-rose-50 text-rose-700 ring-rose-200" :
-                        riskVelocity.direction === "down"  ? "bg-emerald-50 text-emerald-700 ring-emerald-200" :
-                        "bg-gray-50 text-gray-600 ring-gray-200"
-                      }`}>
-                        {riskVelocity.direction === "up" ? "↑" : riskVelocity.direction === "down" ? "↓" : "—"}
-                        {riskVelocity.delta}% vs prev period
-                      </span>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                    <div className="section-card p-5 lg:col-span-2">
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <p className="font-bold text-gray-900 text-sm">Risk Trend</p>
-                          <p className="text-xs text-gray-400 mt-0.5">HIGH, CRITICAL &amp; MEDIUM files over time</p>
-                        </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-400">
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400 rounded inline-block" />MED</span>
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-orange-500 rounded inline-block" />HIGH</span>
-                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
-                        </div>
-                      </div>
-                      <RiskTrendChart data={effectiveData.risk_trend} />
-                      {trendInsights && (
-                        <div className="mt-4 pt-4 border-t border-gray-100">
-                          <div className="grid grid-cols-2 gap-3">
-                            <div className="rounded-xl border p-3 bg-orange-50 border-orange-100 text-orange-700">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wider">Current Week</span>
-                                <div className="flex items-center gap-1">
-                                  <span className="text-sm font-black">●</span>
-                                  <InfoTooltip position="top" size="sm" title="Current Week"
-                                    description="Total CRITICAL, HIGH & MEDIUM files scanned so far in the most recent week (through today). This is your current risk exposure, not a historical figure." />
-                                </div>
-                              </div>
-                              <p className="text-2xl font-extrabold tabular-nums text-orange-800">{trendInsights.current.total}</p>
-                              <p className="text-[10px] opacity-70 mt-0.5">
-                                Where risk stands now · {new Date(trendInsights.current.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
-                              </p>
-                            </div>
-                            <div className="rounded-xl border p-3 bg-slate-50 border-slate-200 text-slate-600">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wider">Weekly Average</span>
-                                <div className="flex items-center gap-1">
-                                  <span className="text-sm font-black">—</span>
-                                  <InfoTooltip position="top" size="sm" title="Weekly Average"
-                                    description="The average number of CRITICAL, HIGH & MEDIUM flagged files per week across the entire period shown. Use it as a baseline — compare Current Week against this to judge whether things are unusually high or low right now." />
-                                </div>
-                              </div>
-                              <p className="text-2xl font-extrabold tabular-nums text-slate-800">{trendInsights.avg}</p>
-                              <p className="text-[10px] opacity-70 mt-0.5">Typical week in this period</p>
-                            </div>
-                          </div>
-                          {trendInsights.streak >= 2 && trendInsights.dir && (
-                            <div className={`mt-3 flex items-center gap-2 text-[11px] font-semibold rounded-lg px-3 py-2.5 ${
-                              trendInsights.dir === "up" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"
-                            }`}>
-                              <span>{trendInsights.dir === "up" ? "📈" : "📉"}</span>
-                              <span>
-                                {trendInsights.streak} consecutive week{trendInsights.streak !== 1 ? "s" : ""} of{" "}
-                                {trendInsights.dir === "up" ? "rising" : "falling"} CRITICAL/HIGH risk
-                                {trendInsights.dir === "up" ? " — worth investigating what's driving it." : " — attestation is keeping pace."}
-                              </span>
-                            </div>
-                          )}
-                        </div>
+                    <div className="min-w-0 flex-1 sm:border-l sm:border-indigo-100 sm:pl-6">
+                      {trustAction ? (
+                        <>
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">Biggest improvement</p>
+                          <p className="text-sm font-semibold text-gray-800 mt-0.5">{trustAction.label}</p>
+                          <p className="text-xs text-emerald-700 font-semibold mt-0.5">up to +{trustAction.gain} points</p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-gray-600">How well your team governs code changes: open risk, review of risky code, fix deadlines, secrets, approved AI tools and scan coverage.</p>
                       )}
                     </div>
-                    <div className="flex flex-col gap-4">
-                      <div className="section-card p-5">
-                        <div className="mb-3">
-                          <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
-                          <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
-                        </div>
-                        <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
-                      </div>
-                      <TopRiskRepos data={effectiveData} />
-                    </div>
+                    <span className="text-xs font-semibold text-indigo-600 shrink-0">See what to fix →</span>
                   </div>
-                </div>
+                </Link>
 
-                {/* ── Compliance Readiness — admin/security_reviewer only ── */}
-                {!isDeveloperView && <ComplianceReadiness data={effectiveData} />}
-
-                {/* ── My Actions / Repos at a Glance / Risk Matrix ─────── */}
-                <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 animate-fade-up delay-300">
-                  <div className="lg:col-span-2">
-                    <ActionItemsPanel data={effectiveData} violationStatuses={violationStatuses} />
-                  </div>
-                  {!isDeveloperView && (
-                    <div className="lg:col-span-3">
-                      <RepoRiskMatrix data={effectiveData} />
-                    </div>
-                  )}
+                {/* ── Key numbers: four, each a different question ── */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 animate-fade-up">
+                  <StatsCard
+                    label="Awaiting Sign-off"
+                    value={effectiveData.unattested_deploy_count}
+                    sub={`repo${effectiveData.unattested_deploy_count !== 1 ? "s" : ""} with unreviewed HIGH/CRIT files`}
+                    icon={<AlertIcon />}
+                    color={effectiveData.unattested_deploy_count > 0 ? "rose" : "emerald"}
+                    info={{ title:"Awaiting Sign-off", description:"Repositories whose latest scan has HIGH or CRITICAL files that nobody has attested or started reviewing yet. Their pull requests are held by the merge gate until a reviewer signs off. Zero is the goal." }}
+                    trend={effectiveData.unattested_deploy_count > 0
+                      ? { direction: "up",      label: "action needed" }
+                      : { direction: "neutral", label: "all clear" }}
+                  />
+                  <StatsCard
+                    label="High-risk Reviewed"
+                    value={`${(effectiveData.attestation_rate * 100).toFixed(0)}%`}
+                    sub={effectiveData.total_high_crit != null ? `${effectiveData.attested_high_crit ?? 0}/${effectiveData.total_high_crit} HIGH/CRIT files` : "HIGH/CRIT files signed off"}
+                    icon={<ShieldCheckIcon />} color="emerald"
+                    ringValue={effectiveData.attestation_rate}
+                    info={{ title:"High-risk files reviewed", description:"Share of HIGH and CRITICAL-risk files that a named reviewer has signed off.", formula:"attested_high_crit_files ÷ total_high_crit_files × 100" }}
+                    trend={effectiveData.attestation_rate >= 0.8
+                      ? { direction: "up",   label: "on track" }
+                      : { direction: "down", label: "needs review" }}
+                  />
+                  <StatsCard
+                    label="7-day Coverage"
+                    value={`${Math.round(coverageRate * 100)}%`}
+                    sub={`${recentlyCovered}/${coverageTotal} repos scanned`}
+                    icon={<CoverageIcon />} color="emerald"
+                    ringValue={coverageRate}
+                    info={{ title:"7-day Scan Coverage", description:"Percentage of connected repositories that have had at least one scan in the last 7 days, including connected repos with no scans in this period. Low coverage means some changes aren't being checked.", formula:"repos_scanned_last_7d ÷ connected_repos × 100" }}
+                    trend={coverageRate >= 0.8
+                      ? { direction: "up",   label: "good coverage" }
+                      : { direction: "down", label: "stale repos" }}
+                  />
+                  <StatsCard
+                    label="AI Content"
+                    value={`${(effectiveData.overall_ai_pct * 100).toFixed(1)}%`}
+                    sub={`${effectiveData.file_count} files · ${effectiveData.scan_count} scans ${rangeMode === "custom" ? "in range" : `· ${rangeMode}d`}`}
+                    icon={<BrainIcon />} color="violet"
+                    ringValue={effectiveData.overall_ai_pct}
+                    info={{ title:"Average AI Content %", description:"Share of AI-generated code across the files scanned in this period: each scan's AI% weighted by the number of files it analysed. Using AI isn't a problem in itself; unreviewed risky AI code is.", formula:"Σ(scan AI% × files in scan) ÷ Σ files scanned" }}
+                  />
                 </div>
 
                 {/* ── Top Risk Files ────────────────────────────────────── */}
@@ -1727,7 +1194,7 @@ export default function DashboardPage() {
                             {!repoGroupOrg && (
                               <thead>
                                 <tr className="border-b border-gray-100">
-                                  {["", "Repository", "Score", "AI Trend", "AI Content", "Attestation", "Risk", "Scans", "Files", "Status", "Last Scan", ""].map((h, i) => (
+                                  {["", "Repository", "Score", "AI Content", "Attestation", "Risk", "Scans", "Files", "Status", "Last Scan", ""].map((h, i) => (
                                     <th key={i} className="px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-4 last:pr-4">
                                       {h === "Score" ? (
                                         <span className="flex items-center gap-1">Score
@@ -1754,7 +1221,7 @@ export default function DashboardPage() {
                               {groupRepos.map(r => {
                                 const level = repoRiskLevel(r);
                                 const isWatched = watchlist.has(r.repo);
-                                const statusLabel = r.attestation_rate >= 0.8 ? "Compliant" : r.attestation_rate < 0.5 ? "Needs Action" : "In Review";
+                                const statusLabel = r.attestation_rate >= 0.8 ? "Reviewed" : r.attestation_rate < 0.5 ? "Needs Action" : "In Review";
                                 const statusCls   = r.attestation_rate >= 0.8
                                   ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
                                   : r.attestation_rate < 0.5
@@ -1789,8 +1256,7 @@ export default function DashboardPage() {
                                       </div>
                                     </td>
                                     <td className="px-3 py-3"><SecurityGrade score={securityScore(r)} /></td>
-                                    {!repoGroupOrg && <td className="px-3 py-3 hidden lg:table-cell"><Sparkline repo={r.repo} aiPct={r.ai_pct} /></td>}
-                                    <td className="px-3 py-3 min-w-[100px]">
+                                          <td className="px-3 py-3 min-w-[100px]">
                                       {repoGroupOrg
                                         ? <span className="text-xs font-semibold text-gray-700">{Math.round(r.ai_pct * 100)}%</span>
                                         : <ProgressBar value={r.ai_pct} mode="ai" />}
@@ -1880,6 +1346,99 @@ export default function DashboardPage() {
                   )}
                 </div>
 
+                {/* ── Audit evidence: what the records prove, per framework — admin/security_reviewer only ── */}
+                {!isDeveloperView && <AuditEvidenceCard />}
+
+                {/* ── Risk Intelligence row ─────────────────────────────── */}
+                <div className="animate-fade-up delay-250">
+                  <div className="flex items-center justify-between mb-3 px-0.5">
+                    <div>
+                      <p className="font-black text-gray-900 text-base tracking-tight">Risk Intelligence</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Trend, composition and where risk is concentrated</p>
+                    </div>
+                    {riskVelocity && (
+                      <span className={`flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${
+                        riskVelocity.direction === "up"    ? "bg-rose-50 text-rose-700 ring-rose-200" :
+                        riskVelocity.direction === "down"  ? "bg-emerald-50 text-emerald-700 ring-emerald-200" :
+                        "bg-gray-50 text-gray-600 ring-gray-200"
+                      }`}>
+                        {riskVelocity.direction === "up" ? "↑" : riskVelocity.direction === "down" ? "↓" : "—"}
+                        {riskVelocity.delta}% vs prev period
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <div className="section-card p-5 lg:col-span-2">
+                      <div className="flex items-center justify-between mb-4">
+                        <div>
+                          <p className="font-bold text-gray-900 text-sm">Risk Trend</p>
+                          <p className="text-xs text-gray-400 mt-0.5">HIGH, CRITICAL &amp; MEDIUM files over time</p>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-gray-400">
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-400 rounded inline-block" />MED</span>
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-orange-500 rounded inline-block" />HIGH</span>
+                          <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-violet-600 rounded inline-block" />CRIT</span>
+                        </div>
+                      </div>
+                      <RiskTrendChart data={effectiveData.risk_trend} />
+                      {trendInsights && (
+                        <div className="mt-4 pt-4 border-t border-gray-100">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="rounded-xl border p-3 bg-orange-50 border-orange-100 text-orange-700">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-bold uppercase tracking-wider">Current Week</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-sm font-black">●</span>
+                                  <InfoTooltip position="top" size="sm" title="Current Week"
+                                    description="Total CRITICAL, HIGH & MEDIUM files scanned so far in the most recent week (through today). This is your current risk exposure, not a historical figure." />
+                                </div>
+                              </div>
+                              <p className="text-2xl font-extrabold tabular-nums text-orange-800">{trendInsights.current.total}</p>
+                              <p className="text-[10px] opacity-70 mt-0.5">
+                                Where risk stands now · {new Date(trendInsights.current.date + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
+                              </p>
+                            </div>
+                            <div className="rounded-xl border p-3 bg-slate-50 border-slate-200 text-slate-600">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-bold uppercase tracking-wider">Weekly Average</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-sm font-black">—</span>
+                                  <InfoTooltip position="top" size="sm" title="Weekly Average"
+                                    description="The average number of CRITICAL, HIGH & MEDIUM flagged files per week across the entire period shown. Use it as a baseline — compare Current Week against this to judge whether things are unusually high or low right now." />
+                                </div>
+                              </div>
+                              <p className="text-2xl font-extrabold tabular-nums text-slate-800">{trendInsights.avg}</p>
+                              <p className="text-[10px] opacity-70 mt-0.5">Typical week in this period</p>
+                            </div>
+                          </div>
+                          {trendInsights.streak >= 2 && trendInsights.dir && (
+                            <div className={`mt-3 flex items-center gap-2 text-[11px] font-semibold rounded-lg px-3 py-2.5 ${
+                              trendInsights.dir === "up" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"
+                            }`}>
+                              <span>{trendInsights.dir === "up" ? "📈" : "📉"}</span>
+                              <span>
+                                {trendInsights.streak} consecutive week{trendInsights.streak !== 1 ? "s" : ""} of{" "}
+                                {trendInsights.dir === "up" ? "rising" : "falling"} CRITICAL/HIGH risk
+                                {trendInsights.dir === "up" ? " — worth investigating what's driving it." : " — attestation is keeping pace."}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-4">
+                      <div className="section-card p-5">
+                        <div className="mb-3">
+                          <p className="font-bold text-gray-900 text-sm">Risk Distribution</p>
+                          <p className="text-xs text-gray-400 mt-0.5">Total flagged files by severity</p>
+                        </div>
+                        <RiskDonut data={effectiveData.risk_trend} attestationRate={effectiveData.attestation_rate} totals={effectiveData.risk_totals} />
+                      </div>
+                      <TopRiskRepos data={effectiveData} />
+                    </div>
+                  </div>
+                </div>
+
                 {/* ── Activity Feed — up to 15 events, derived from live data or seed ── */}
                 {displayActivity.length > 0 && (
                   <div className="section-card animate-fade-up delay-400">
@@ -1924,7 +1483,7 @@ export default function DashboardPage() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-xs font-semibold text-gray-800">
-                                  {isScan ? (ev.pr_number > 0 ? `Scan: PR #${ev.pr_number}` : "Scan: direct push") : `Attested: ${ev.file_path.split("/").pop() || ev.file_path}`}
+                                  {isScan ? (ev.pr_number > 0 ? `Scan: PR #${ev.pr_number}` : "Latest scan") : `Attested: ${ev.file_path.split("/").pop() || ev.file_path}`}
                                 </span>
                                 <span className="text-[11px] text-gray-500 font-mono bg-gray-100 px-1.5 py-px rounded">{repoShort}</span>
                                 {isScan && ev.overall_risk && (
@@ -1938,7 +1497,7 @@ export default function DashboardPage() {
                               </div>
                               {isScan && (
                                 <p className="text-[11px] text-gray-400 mt-0.5">
-                                  {ev.file_count} file{ev.file_count !== 1 ? "s" : ""} · {(ev.total_ai_pct * 100).toFixed(1)}% avg AI
+                                  {ev.file_count > 0 && <>{ev.file_count} file{ev.file_count !== 1 ? "s" : ""} · </>}{(ev.total_ai_pct * 100).toFixed(1)}% avg AI
                                 </p>
                               )}
                             </div>

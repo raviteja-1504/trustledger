@@ -136,11 +136,6 @@ export const api = {
   threatCatalog: () =>
     apiFetch<{ threats: unknown[] }>("/api/threat-catalog"),
 
-  complianceConfig: (org: string) =>
-    apiFetch<{ frameworks: unknown[]; crossFrameworkThemes: unknown[] }>(
-      `/api/compliance-config?org=${encodeURIComponent(org)}`,
-    ),
-
   auditConfig: (org: string) =>
     apiFetch<{ eventConfig: unknown; eventSoc2: unknown }>(
       `/api/audit-config?org=${encodeURIComponent(org)}`,

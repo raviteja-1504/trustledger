@@ -1,32 +1,24 @@
 /**
- * Real Evidence Engine — computes genuine per-control compliance evidence
- * from live scan/attestation/violation/audit data. Extracted out of
- * api/evidence/collect/route.ts (which now just calls collectEvidence())
- * so /api/report can pull the exact same real per-control scores into the
- * generated PDF's Compliance Mapping section, instead of that page having
- * its own third, independently-invented scoring formula. Next.js route.ts
- * files may only export the reserved HTTP-method handlers, so this logic
- * has to live in a plain lib module to be shared across routes (same
- * reasoning as dashboardAggregate.ts).
+ * Evidence engine: loads an organisation's real records for an audit period and evaluates them against the
+ * controls in lib/controlEvidence.ts (which defines what each control's evidence is, and what it does not cover).
  *
- * SOC 2:
- *   CC6.1 (Logical Access)    → attestation records (reviewer identity)
- *   CC6.2 (Authentication)    → OAuth login records from audit_log
- *   CC7.2 (System Monitoring) → scan completion records
- *   CC8.1 (Change Management) → attestation before merge evidence
- *   A1.2  (Availability)      → audit log retention records
+ * Shared by GET /api/evidence/collect (reports page, compliance page) and /api/report (the PDF), so every surface
+ * shows the same evidence. Next.js route files may only export HTTP handlers, so this lives in a plain lib module.
+ * Server-only (service-role client).
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyAuditChain } from "@/lib/audit";
+import { loadShadowAi } from "@/lib/shadowAiStore";
+import { builtinPermissions, canAttestAny, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
+import {
+  FRAMEWORKS, STATUS_LABEL, countStatuses, deriveFacts, evaluateChecks, evaluateFramework, normalizeFrameworkId,
+  type CheckResult, type ComplianceFacts, type EvidenceStatus, type FactRows,
+} from "@/lib/controlEvidence";
 
-export interface ControlEvidence {
-  control_id:   string;
-  control_name: string;
-  status:       "pass" | "partial" | "fail" | "not_tested";
-  evidence:     EvidenceItem[];
-  score:        number;   // 0-100
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Db = SupabaseClient<any>;
 
 export interface EvidenceItem {
   type:         string;
@@ -36,315 +28,179 @@ export interface EvidenceItem {
   source:       string;
 }
 
-interface Signals {
-  totalScans:          number;
-  totalAttestations:   number;
-  openViolations:       number;
-  resolvedViolations:   number;
-  auditEvents:          number;
-  teamMembers:          number;
-  secretFindings:        number;
-  secretResolved:        number;
-  scanFilesTotal:         number;
-  chainIntegrity:         { valid: boolean; total: number };
-  now:                    string;
-}
-
-// Attestation coverage relative to scan volume -- the same real "how much
-// of what we scanned was actually reviewed" ratio used across several
-// controls below (SOC 2 CC6.1, EU AI Act Art.14, PCI 6.4.2, ISO A.8.28).
-function attestationCoveragePct(s: Signals): number {
-  return Math.min(100, (s.totalAttestations / Math.max(1, s.totalScans)) * 100);
-}
-// Open-violation backlog health -- the same real "is remediation keeping
-// up with detection" signal used across several controls (SOC 2 CC8.1,
-// EU AI Act Art.9, PCI 6.4.1, ISO A.8.26).
-function violationHealthPct(s: Signals): number {
-  return Math.min(100, 100 - Math.min(50, s.openViolations * 5));
-}
-
-function buildSoc2(s: Signals): ControlEvidence[] {
-  return [
-    {
-      control_id: "CC6.1", control_name: "Logical and Physical Access Controls",
-      status: s.totalAttestations > 0 ? "pass" : "partial",
-      score: attestationCoveragePct(s),
-      evidence: [
-        { type:"attestation_records", description:"Signed reviewer attestations with PGP-like payload hash", count:s.totalAttestations, collected_at:s.now, source:"attestations table" },
-        { type:"team_roster", description:"Authorised reviewer list with role assignments", count:s.teamMembers, collected_at:s.now, source:"org_members table" },
-      ],
-    },
-    {
-      control_id: "CC6.2", control_name: "Authentication",
-      status: s.auditEvents > 0 ? "pass" : "fail",
-      score: s.auditEvents > 0 ? 100 : 0,
-      evidence: [
-        { type:"auth_events", description:"OAuth authentication events logged in tamper-evident audit trail", count:s.auditEvents, collected_at:s.now, source:"audit_log table" },
-      ],
-    },
-    {
-      control_id: "CC7.2", control_name: "System Monitoring",
-      status: s.totalScans > 0 ? "pass" : "fail",
-      score: s.totalScans > 0 ? 80 + (s.totalScans > 10 ? 20 : 0) : 0,
-      evidence: [
-        { type:"scan_records", description:"Automated AI content scans on every pull request", count:s.totalScans, collected_at:s.now, source:"scans table" },
-        { type:"secret_detection", description:"Hardcoded credential and secret detection", count:s.secretFindings, collected_at:s.now, source:"secret_findings table" },
-      ],
-    },
-    {
-      control_id: "CC8.1", control_name: "Change Management",
-      status: s.resolvedViolations > 0 && s.openViolations === 0 ? "pass" : s.openViolations > 5 ? "partial" : "pass",
-      score: violationHealthPct(s),
-      evidence: [
-        { type:"policy_gate_evidence", description:"Deploy gate blocked merges until attestation completed", count:s.resolvedViolations, collected_at:s.now, source:"violations table (resolved)" },
-        { type:"open_violations", description:"Currently open violations requiring remediation", count:s.openViolations, collected_at:s.now, source:"violations table (open)" },
-      ],
-    },
-    {
-      control_id: "A1.2", control_name: "Availability — Audit Log Retention",
-      status: s.chainIntegrity.valid ? "pass" : "fail",
-      score: s.chainIntegrity.valid ? 100 : 0,
-      evidence: [
-        { type:"audit_log_integrity", description:`Tamper-evident hash chain verified — ${s.chainIntegrity.total} records intact`, count:s.chainIntegrity.total, collected_at:s.now, source:"audit_log table (hash chain)" },
-      ],
-    },
-  ];
-}
-
-function buildEuAiAct(s: Signals): ControlEvidence[] {
-  const totalTracked = s.openViolations + s.resolvedViolations;
-  return [
-    {
-      control_id: "Art.9", control_name: "Risk Management System",
-      status: totalTracked === 0 ? "not_tested" : s.openViolations === 0 ? "pass" : "partial",
-      score: totalTracked === 0 ? 0 : Math.round((s.resolvedViolations / totalTracked) * 100),
-      evidence: [
-        { type:"risk_classifications", description:"CRITICAL/HIGH/MEDIUM/LOW risk classification per scanned file", count:totalTracked, collected_at:s.now, source:"violations table" },
-      ],
-    },
-    {
-      control_id: "Art.10", control_name: "Data Governance",
-      status: s.scanFilesTotal > 0 ? "pass" : "fail",
-      score: s.scanFilesTotal > 0 ? 100 : 0,
-      evidence: [
-        { type:"provenance_records", description:"Per-file scan provenance (content hash, AI%, risk classification)", count:s.scanFilesTotal, collected_at:s.now, source:"scan_files table" },
-      ],
-    },
-    {
-      control_id: "Art.13", control_name: "Transparency",
-      status: s.totalScans > 0 ? "pass" : "fail",
-      score: s.totalScans > 0 ? 80 + (s.totalScans > 10 ? 20 : 0) : 0,
-      evidence: [
-        { type:"ai_disclosure", description:"AI content percentage computed and disclosed for every PR scan", count:s.totalScans, collected_at:s.now, source:"scans table" },
-      ],
-    },
-    {
-      control_id: "Art.14", control_name: "Human Oversight",
-      status: s.totalAttestations > 0 ? "pass" : "partial",
-      score: attestationCoveragePct(s),
-      evidence: [
-        { type:"reviewer_signoffs", description:"Named human reviewer attestations for HIGH/CRITICAL AI files", count:s.totalAttestations, collected_at:s.now, source:"attestations table" },
-      ],
-    },
-    {
-      control_id: "Art.17", control_name: "Quality Management",
-      status: s.totalScans > 0 ? "pass" : "fail",
-      score: s.totalScans > 0 ? 80 + (s.totalScans > 10 ? 20 : 0) : 0,
-      evidence: [
-        { type:"continuous_monitoring", description:"Automated post-deployment scanning on every pull request", count:s.totalScans, collected_at:s.now, source:"scans table" },
-      ],
-    },
-  ];
-}
-
-function buildPciDss(s: Signals): ControlEvidence[] {
-  const totalTracked = s.openViolations + s.resolvedViolations;
-  return [
-    {
-      control_id: "6.2.4", control_name: "Prevention of Software Attacks",
-      status: totalTracked === 0 ? "not_tested" : s.openViolations === 0 ? "pass" : "partial",
-      score: totalTracked === 0 ? 0 : Math.round((s.resolvedViolations / totalTracked) * 100),
-      evidence: [
-        { type:"vulnerability_scans", description:"Injection, eval/exec, JWT-bypass and related pattern detection per PR", count:s.totalScans, collected_at:s.now, source:"scans table" },
-      ],
-    },
-    {
-      control_id: "6.3.2", control_name: "Software Inventory",
-      status: s.scanFilesTotal > 0 ? "pass" : "fail",
-      score: s.scanFilesTotal > 0 ? 100 : 0,
-      evidence: [
-        { type:"aibom_records", description:"AI Bill of Materials — every scanned file logged with provenance", count:s.scanFilesTotal, collected_at:s.now, source:"scan_files table" },
-      ],
-    },
-    {
-      control_id: "6.4.1", control_name: "Change Control Process",
-      status: s.openViolations === 0 ? "pass" : s.openViolations > 5 ? "partial" : "pass",
-      score: violationHealthPct(s),
-      evidence: [
-        { type:"open_violations", description:"Currently open violations requiring remediation before deploy", count:s.openViolations, collected_at:s.now, source:"violations table (open)" },
-      ],
-    },
-    {
-      control_id: "6.4.2", control_name: "Change Control — Dual Review",
-      status: s.totalAttestations > 0 ? "pass" : "partial",
-      score: attestationCoveragePct(s),
-      evidence: [
-        { type:"attestation_records", description:"Reviewer attestation records for changed code", count:s.totalAttestations, collected_at:s.now, source:"attestations table" },
-      ],
-    },
-    {
-      control_id: "6.4.3", control_name: "Payment Page Security",
-      status: totalTracked === 0 ? "not_tested" : s.openViolations === 0 ? "pass" : "partial",
-      score: totalTracked === 0 ? 0 : Math.round((s.resolvedViolations / totalTracked) * 100),
-      evidence: [
-        { type:"flagged_files", description:"High-risk AI-authored files flagged and tracked to resolution", count:totalTracked, collected_at:s.now, source:"violations table" },
-      ],
-    },
-  ];
-}
-
-function buildIso27001(s: Signals): ControlEvidence[] {
-  return [
-    {
-      control_id: "A.8.25", control_name: "Secure Development Lifecycle",
-      status: s.totalScans > 0 ? "pass" : "fail",
-      score: s.totalScans > 0 ? 80 + (s.totalScans > 10 ? 20 : 0) : 0,
-      evidence: [
-        { type:"scan_records", description:"Automated security scanning integrated into the development lifecycle", count:s.totalScans, collected_at:s.now, source:"scans table" },
-      ],
-    },
-    {
-      control_id: "A.8.26", control_name: "Application Security Requirements",
-      status: s.openViolations === 0 ? "pass" : s.openViolations > 5 ? "partial" : "pass",
-      score: violationHealthPct(s),
-      evidence: [
-        { type:"violation_backlog", description:"Open vs. resolved application security violations", count:s.openViolations + s.resolvedViolations, collected_at:s.now, source:"violations table" },
-      ],
-    },
-    {
-      control_id: "A.8.28", control_name: "Secure Coding",
-      status: s.totalAttestations > 0 ? "pass" : "partial",
-      score: attestationCoveragePct(s),
-      evidence: [
-        { type:"attestation_records", description:"Human reviewer sign-off coverage for AI-authored code", count:s.totalAttestations, collected_at:s.now, source:"attestations table" },
-      ],
-    },
-    {
-      control_id: "A.8.30", control_name: "Outsourced Development",
-      status: s.scanFilesTotal > 0 ? "pass" : "fail",
-      score: s.scanFilesTotal > 0 ? 100 : 0,
-      evidence: [
-        { type:"file_coverage", description:"Every file from every contributor (human or AI) scanned and logged", count:s.scanFilesTotal, collected_at:s.now, source:"scan_files table" },
-      ],
-    },
-    {
-      control_id: "A.5.33", control_name: "Protection of Records",
-      status: s.chainIntegrity.valid ? "pass" : "fail",
-      score: s.chainIntegrity.valid ? 100 : 0,
-      evidence: [
-        { type:"audit_log_integrity", description:`Tamper-evident hash chain verified — ${s.chainIntegrity.total} records intact`, count:s.chainIntegrity.total, collected_at:s.now, source:"audit_log table (hash chain)" },
-      ],
-    },
-  ];
-}
-
-const FRAMEWORK_BUILDERS: Record<string, (s: Signals) => ControlEvidence[]> = {
-  soc2: buildSoc2, euai: buildEuAiAct, pcidss: buildPciDss, iso27001: buildIso27001,
-};
-
-export function normalizeFramework(raw: string): string {
-  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (key.startsWith("soc")) return "soc2";
-  if (key.startsWith("eu") || key.includes("aiact")) return "euai";
-  if (key.startsWith("pci")) return "pcidss";
-  if (key.startsWith("iso")) return "iso27001";
-  return "soc2";
+export interface ControlEvidence {
+  control_id:   string;
+  control_name: string;
+  status:       EvidenceStatus;
+  status_label: string;
+  /** 0-100: the weakest measured check's share. Shown only as a detail, never as "% compliant". */
+  score:        number;
+  evidence:     EvidenceItem[];
+  checks:       CheckResult[];
 }
 
 export interface EvidencePackage {
   framework:       string;
+  framework_name:  string;
+  standard:        string;
+  /** What this evidence does and does not cover. Always shown next to the controls. */
+  scope:           string;
   period_start:    string;
   period_end:      string;
   generated_at:    string;
+  /** @deprecated kept for older clients: mean of the tested controls' scores. */
   overall_score:   number;
+  status_counts:   Record<EvidenceStatus, number>;
   controls:        ControlEvidence[];
   audit_integrity: { valid: boolean; total: number };
+  facts:           ComplianceFacts;
   summary: {
     total_scans:         number;
     total_attestations:  number;
     open_violations:     number;
-    resolved_violations: number;
-    secrets_detected:    number;
+    secrets_open:        number;
     secrets_resolved:    number;
     audit_events:        number;
     scan_files_total:    number;
   };
 }
 
-export async function collectEvidence(
-  org_id: string, rawFramework: string, periodStart: string, periodEnd: string,
-): Promise<EvidencePackage> {
-  const framework = normalizeFramework(rawFramework);
-  const db = createServiceClient();
+const MAX_SCANS = 2000;
+const IN_CHUNK = 200;
 
-  // Collect metrics from the database -- shared across all four frameworks,
-  // each framework's controls just draw on this same real signal set in
-  // different combinations (see buildSoc2/buildEuAiAct/buildPciDss/
-  // buildIso27001 above).
-  const [
-    { count: totalScans },
-    { count: totalAttestations },
-    { count: openViolations },
-    { count: resolvedViolations },
-    { count: auditEvents },
-    { count: teamMembers },
-    { count: secretFindings },
-    { count: secretResolved },
-    { count: scanFilesTotal },
-  ] = await Promise.all([
-    db.from("scans").select("*",{ count:"exact",head:true }).eq("org_id",org_id).gte("created_at",periodStart).lte("created_at",periodEnd),
-    db.from("attestations").select("*",{ count:"exact",head:true }).eq("org_id",org_id).gte("created_at",periodStart),
-    db.from("violations").select("*",{ count:"exact",head:true }).eq("org_id",org_id).in("status",["open","in_review"]),
-    db.from("violations").select("*",{ count:"exact",head:true }).eq("org_id",org_id).eq("status","resolved").gte("resolved_at",periodStart),
-    db.from("audit_log").select("*",{ count:"exact",head:true }).eq("org_id",org_id).gte("created_at",periodStart),
-    db.from("org_members").select("*",{ count:"exact",head:true }).eq("org_id",org_id),
-    db.from("secret_findings").select("*",{ count:"exact",head:true }).eq("org_id",org_id).gte("created_at",periodStart),
-    db.from("secret_findings").select("*",{ count:"exact",head:true }).eq("org_id",org_id).eq("status","resolved").gte("created_at",periodStart),
-    db.from("scan_files").select("*",{ count:"exact",head:true }).eq("org_id",org_id).gte("created_at",periodStart),
+async function inChunks<T>(ids: string[], fetch: (chunk: string[]) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += IN_CHUNK) out.push(...((await fetch(ids.slice(i, i + IN_CHUNK))).data ?? []));
+  return out;
+}
+
+/** Who can sign off changes: built-in role, replaced by a custom role when one is assigned (lib/permissions.ts). */
+async function loadMembers(db: Db, orgId: string): Promise<Array<{ can_attest: boolean }>> {
+  let { data, error } = await db.from("org_members").select("role, custom_role_id").eq("org_id", orgId) as
+    { data: Array<{ role: string; custom_role_id?: string | null }> | null; error: { code?: string } | null };
+  if (error) ({ data } = await db.from("org_members").select("role").eq("org_id", orgId) as { data: Array<{ role: string }> | null; error: unknown });
+  const members = data ?? [];
+  const roleIds = [...new Set(members.map(m => m.custom_role_id).filter((x): x is string => !!x))];
+  const { data: roles } = roleIds.length
+    ? await db.from("custom_roles").select("*").eq("org_id", orgId).in("id", roleIds) as { data: Array<{ id: string } & Partial<Record<PermissionKey, unknown>>> | null }
+    : { data: [] };
+  const byId = new Map((roles ?? []).map(r => [r.id, r]));
+  return members.map(m => {
+    const custom = m.custom_role_id ? byId.get(m.custom_role_id) : undefined;
+    // An assigned custom role that can't be read grants nothing (same rule as permissionResolver).
+    const perms = m.custom_role_id ? (custom ? permissionsFromRow(custom) : null) : builtinPermissions(m.role);
+    return { can_attest: !!perms && canAttestAny(perms) };
+  });
+}
+
+export async function loadFactRows(db: Db, orgId: string, periodStart: string, periodEnd: string, now = new Date()): Promise<FactRows> {
+  const [{ data: repoRows }, { data: scanRows }] = await Promise.all([
+    db.from("repositories").select("repo_full_name").eq("org_id", orgId).eq("is_active", true) as unknown as Promise<{ data: Array<{ repo_full_name: string }> | null }>,
+    db.from("scans").select("id, repo_full_name, pr_number, pr_author, created_at").eq("org_id", orgId)
+      .gte("created_at", periodStart).lte("created_at", periodEnd)
+      .order("created_at", { ascending: false }).limit(MAX_SCANS) as unknown as Promise<{ data: Array<{ id: string; repo_full_name: string; pr_number: number | null; pr_author: string | null; created_at: string }> | null }>,
+  ]);
+  const scans = (scanRows ?? []).map(s => ({ id: s.id, repo: s.repo_full_name, pr_number: s.pr_number, pr_author: s.pr_author, created_at: s.created_at }));
+  const ids = scans.map(s => s.id);
+  const days = Math.max(1, Math.ceil((now.getTime() - new Date(periodStart).getTime()) / 86400_000));
+
+  const [riskyFiles, attestations, violations, openSecrets, openCritical, resolvedSecrets, filesAnalyzed, audit, members, ai] = await Promise.all([
+    inChunks(ids, c => db.from("scan_files").select("scan_id, file_path, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]) as unknown as PromiseLike<{ data: FactRows["riskyFiles"][number][] | null }>),
+    inChunks(ids, c => db.from("attestations").select("scan_id, file_path, reviewer_github").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: FactRows["attestations"][number][] | null }>),
+    inChunks(ids, c => db.from("violations").select("scan_id, file_path, status, sla_deadline").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: FactRows["violations"][number][] | null }>),
+    db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "open"),
+    db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "open").eq("severity", "CRITICAL"),
+    db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "resolved").gte("resolved_at", periodStart).lte("resolved_at", periodEnd),
+    db.from("scan_files").select("id", { count: "exact", head: true }).eq("org_id", orgId).gte("created_at", periodStart).lte("created_at", periodEnd),
+    verifyAuditChain(db, orgId),
+    loadMembers(db, orgId),
+    loadShadowAi(db, orgId, days).then(r => r.summary, () => null),
   ]);
 
-  // Verify audit log chain integrity
-  const chainIntegrity = await verifyAuditChain(db, org_id);
-
-  const signals: Signals = {
-    totalScans: totalScans ?? 0, totalAttestations: totalAttestations ?? 0,
-    openViolations: openViolations ?? 0, resolvedViolations: resolvedViolations ?? 0,
-    auditEvents: auditEvents ?? 0, teamMembers: teamMembers ?? 0,
-    secretFindings: secretFindings ?? 0, secretResolved: secretResolved ?? 0,
-    scanFilesTotal: scanFilesTotal ?? 0, chainIntegrity,
-    now: new Date().toISOString(),
-  };
-
-  const evidence = FRAMEWORK_BUILDERS[framework](signals);
-  const overallScore = Math.round(evidence.reduce((s, e) => s + e.score, 0) / evidence.length);
-
   return {
-    framework,
-    period_start:    periodStart,
-    period_end:      periodEnd,
-    generated_at:    signals.now,
-    overall_score:   overallScore,
-    controls:        evidence,
-    audit_integrity: chainIntegrity,
+    period_start: periodStart, period_end: periodEnd, now: now.toISOString(),
+    activeRepos: (repoRows ?? []).map(r => r.repo_full_name),
+    scans, riskyFiles, attestations, violations,
+    secrets: { open: openSecrets.count ?? 0, open_critical: openCritical.count ?? 0, resolved_in_period: resolvedSecrets.count ?? 0 },
+    audit, members,
+    ai: ai ? { policy_configured: ai.policy_configured, compliance: ai.compliance, open_violations: ai.open_violations } : null,
+    files_analyzed: filesAnalyzed.count ?? 0,
+  };
+}
+
+/** Package for one framework from already-derived facts (pure; tested directly). */
+export function buildPackage(rawFramework: string, facts: ComplianceFacts, rows: Pick<FactRows, "scans" | "attestations" | "audit">, generatedAt: string): EvidencePackage {
+  const fw = FRAMEWORKS.find(f => f.id === normalizeFrameworkId(rawFramework))!;
+  const controls = evaluateFramework(fw, evaluateChecks(facts));
+  const tested = controls.filter(c => c.status !== "not_tested");
+  return {
+    framework: fw.id, framework_name: fw.name, standard: fw.standard, scope: fw.scope,
+    period_start: facts.period_start, period_end: facts.period_end, generated_at: generatedAt,
+    overall_score: tested.length ? Math.round(tested.reduce((a, c) => a + c.score, 0) / tested.length) : 0,
+    status_counts: countStatuses(controls),
+    controls: controls.map(c => ({
+      control_id: c.control_id, control_name: c.control_name, status: c.status, status_label: STATUS_LABEL[c.status], score: c.score,
+      checks: c.checks,
+      evidence: c.checks.map(k => ({ type: k.key, description: `${k.label}: ${k.summary}`, count: k.score, collected_at: generatedAt, source: "TrustLedger records" })),
+    })),
+    audit_integrity: { valid: rows.audit.valid, total: rows.audit.total },
+    facts,
     summary: {
-      total_scans:        signals.totalScans,
-      total_attestations: signals.totalAttestations,
-      open_violations:    signals.openViolations,
-      resolved_violations:signals.resolvedViolations,
-      secrets_detected:   signals.secretFindings,
-      secrets_resolved:   signals.secretResolved,
-      audit_events:       signals.auditEvents,
-      scan_files_total:   signals.scanFilesTotal,
+      total_scans: rows.scans.length,
+      total_attestations: rows.attestations.length,
+      open_violations: facts.findings.open,
+      secrets_open: facts.secrets.open,
+      secrets_resolved: facts.secrets.resolved_in_period,
+      audit_events: facts.audit.total,
+      scan_files_total: facts.ai.files_analyzed,
     },
   };
+}
+
+/** Every framework at a glance (dashboard card): statuses per control and the distinct gaps, from one load. */
+export interface EvidenceOverview {
+  period_start: string;
+  period_end:   string;
+  generated_at: string;
+  frameworks: Array<{
+    id: string; name: string; short: string;
+    status_counts: Record<EvidenceStatus, number>;
+    controls: Array<{ control_id: string; control_name: string; status: EvidenceStatus }>;
+  }>;
+  /** Checks with gaps, once each (a check feeds several frameworks). Worst first. */
+  gaps: Array<{ key: string; label: string; status: EvidenceStatus; gaps: string[] }>;
+}
+
+export function buildOverview(facts: ComplianceFacts, opts: { pciApplicable: boolean }, generatedAt: string): EvidenceOverview {
+  const checks = evaluateChecks(facts);
+  const rank: Record<EvidenceStatus, number> = { fail: 0, partial: 1, not_tested: 2, pass: 3 };
+  return {
+    period_start: facts.period_start, period_end: facts.period_end, generated_at: generatedAt,
+    frameworks: FRAMEWORKS.filter(f => f.id !== "pcidss" || opts.pciApplicable).map(f => {
+      const controls = evaluateFramework(f, checks);
+      return {
+        id: f.id, name: f.name, short: f.short, status_counts: countStatuses(controls),
+        controls: controls.map(c => ({ control_id: c.control_id, control_name: c.control_name, status: c.status })),
+      };
+    }),
+    gaps: Object.values(checks).filter(c => c.gaps.length > 0)
+      .sort((a, b) => rank[a.status] - rank[b.status])
+      .map(c => ({ key: c.key, label: c.label, status: c.status, gaps: c.gaps })),
+  };
+}
+
+export async function collectEvidenceOverview(org_id: string, periodStart: string, periodEnd: string): Promise<EvidenceOverview> {
+  const now = new Date();
+  const db = createServiceClient();
+  const [rows, { data: org }] = await Promise.all([
+    loadFactRows(db, org_id, periodStart, periodEnd, now),
+    db.from("organizations").select("pci_applicable").eq("id", org_id).maybeSingle() as unknown as Promise<{ data: { pci_applicable?: boolean } | null }>,
+  ]);
+  return buildOverview(deriveFacts(rows), { pciApplicable: !!org?.pci_applicable }, now.toISOString());
+}
+
+export async function collectEvidence(org_id: string, rawFramework: string, periodStart: string, periodEnd: string): Promise<EvidencePackage> {
+  const now = new Date();
+  const rows = await loadFactRows(createServiceClient(), org_id, periodStart, periodEnd, now);
+  return buildPackage(rawFramework, deriveFacts(rows), rows, now.toISOString());
 }

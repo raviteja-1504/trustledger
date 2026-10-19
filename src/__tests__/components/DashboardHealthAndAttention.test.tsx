@@ -1,29 +1,10 @@
 /**
- * Dashboard: the Security Health gauge shows its real inputs, and the single "Needs attention" panel.
+ * Dashboard: the single "Needs attention" panel. (The separate Security Health gauge was removed: the Trust Score is
+ * the dashboard's one governance number.)
  */
 import { fireEvent, render, screen } from "@testing-library/react";
-import HealthScoreGauge, { healthScoreParts } from "@/components/HealthScoreGauge";
 import AttentionPanel from "@/components/dashboard/AttentionPanel";
 import type { DashboardData } from "@/types";
-
-describe("health score", () => {
-  it("is the sum of three real parts: attestation (60), human-written share (25), clean deploys (15)", () => {
-    expect(healthScoreParts({ attestation_rate: 0.71, ai_pct: 0.6, blocked_deploys: 9 })).toMatchObject({ total: 53 });
-    expect(healthScoreParts({ attestation_rate: 1, ai_pct: 0, blocked_deploys: 0 }).total).toBe(100);
-    expect(healthScoreParts({ attestation_rate: 0, ai_pct: 1, blocked_deploys: 2 })).toMatchObject({ attestation: 0, human: 0, deploys: 9, total: 9 });
-  });
-
-  it("the gauge shows each factor's actual value and points — not numbers back-derived from the total", () => {
-    render(<HealthScoreGauge score={53} inputs={{ attestation_rate: 0.71, ai_pct: 0.6, blocked_deploys: 9 }} />);
-    expect(screen.getByText("· 71% attested")).toBeInTheDocument();
-    expect(screen.getByText("43/60")).toBeInTheDocument();
-    expect(screen.getByText("· 40% of code")).toBeInTheDocument();
-    expect(screen.getByText("10/25")).toBeInTheDocument();
-    expect(screen.getByText("· 9 repos waiting")).toBeInTheDocument();
-    expect(screen.getByText("0/15")).toBeInTheDocument();
-    expect(screen.queryByText("88%")).not.toBeInTheDocument();
-  });
-});
 
 function data(over: Partial<DashboardData> = {}): DashboardData {
   return {

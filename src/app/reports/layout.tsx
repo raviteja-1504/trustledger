@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Audit Reports — TrustLedger",
-  description: "Generate signed AI code review evidence assessments for SOC 2, EU AI Act, PCI-DSS and ISO 27001, backed by real attestation records.",
+  description: "Generate signed control-evidence reports for SOC 2, ISO 27001, PCI DSS and AI code governance, measured from real scans, reviews and audit records.",
 };
 
 export default function ReportsLayout({ children }: { children: React.ReactNode }) {

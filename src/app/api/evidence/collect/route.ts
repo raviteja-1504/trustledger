@@ -1,17 +1,13 @@
 /**
- * Real Evidence Auto-Collection
- * Maps TrustLedger scan data to each framework's control set.
+ * Control evidence (lib/controlEvidence.ts, loaded by lib/evidenceEngine.ts)
  *
- * POST /api/evidence/collect → collect evidence for a specific control
+ * POST /api/evidence/collect → record manually collected evidence for a control
  * GET  /api/evidence/collect?framework=soc2&period_start=...&period_end=...
- *       → generate a full evidence package for the audit period
+ *       → the evidence package for the audit period
+ * GET  /api/evidence/collect?overview=1 → every applicable framework's control statuses and the distinct gaps
  *
- * `framework` accepts soc2 | euai | pcidss | iso27001 (case-insensitive,
- * defaults to soc2). Every framework's controls are computed from the
- * same real signals -- no framework gets a fabricated number. The actual
- * computation lives in lib/evidenceEngine.ts so /api/report can reuse the
- * exact same real per-control scores in the generated PDF instead of a
- * third, independently-invented formula.
+ * `framework` accepts soc2 | iso27001 | pcidss | aigov (case-insensitive, defaults to soc2; the old "euai"
+ * maps to aigov). /api/report uses the same engine for the PDF.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -19,19 +15,23 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
-import { collectEvidence } from "@/lib/evidenceEngine";
+import { collectEvidence, collectEvidenceOverview } from "@/lib/evidenceEngine";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
 
-  const url          = new URL(req.url);
-  const framework    = url.searchParams.get("framework") ?? "soc2";
-  const periodStart  = url.searchParams.get("period_start") ?? new Date(Date.now() - 90 * 86400_000).toISOString();
-  const periodEnd    = url.searchParams.get("period_end")   ?? new Date().toISOString();
+  const params       = req.nextUrl.searchParams;
+  const framework    = params.get("framework") ?? "soc2";
+  const periodStart  = params.get("period_start") ?? new Date(Date.now() - 90 * 86400_000).toISOString();
+  const periodEnd    = params.get("period_end")   ?? new Date().toISOString();
 
-  const pkg = await collectEvidence(org_id, framework, periodStart, periodEnd);
-  return NextResponse.json(pkg);
+  try {
+    if (params.get("overview") === "1") return NextResponse.json(await collectEvidenceOverview(org_id, periodStart, periodEnd));
+    return NextResponse.json(await collectEvidence(org_id, framework, periodStart, periodEnd));
+  } catch (err) {
+    return safeError(err, { code: "evidence_failed", message: "We couldn't collect the evidence right now. Please try again." });
+  }
 }
 
 export async function POST(req: NextRequest) {

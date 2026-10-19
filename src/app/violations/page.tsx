@@ -932,10 +932,7 @@ export default function ViolationsPage() {
                           tags.push({ fw:"SOC 2", color:"#6366f1" });
                         }
                         if (v.policy_rule.includes("6.") && !v.policy_rule.includes("CC6")) {
-                          tags.push({ fw:"PCI-DSS", color:"#10b981" });
-                        }
-                        if (v.policy_rule.includes("SLA") || v.policy_rule.includes("AI Content") || v.severity === "CRITICAL") {
-                          tags.push({ fw:"EU AI Act", color:"#3b82f6" });
+                          tags.push({ fw:"PCI DSS", color:"#10b981" });
                         }
                         return tags.map(t => (
                           <span key={`${v.id}-${t.fw}`} className="text-[8px] font-black px-1.5 py-0.5 rounded text-white"
