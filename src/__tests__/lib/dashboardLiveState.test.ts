@@ -83,6 +83,13 @@ describe("GET /api/dashboard date range", () => {
     expect(fetchDashboard).toHaveBeenCalledWith("org-1", 30, null);
   });
 
+  it("responses are never storable by a shared (edge) cache: the URL is the same for every org", async () => {
+    for (const q of ["days=30", "days=30&nocache=1", "start_date=2026-09-01&end_date=2026-09-10"]) {
+      const res = await get(`org=x&${q}`);
+      expect([q, res.headers.get("cache-control")]).toEqual([q, "private, no-store"]);
+    }
+  });
+
   it("rejects a malformed or backwards range", async () => {
     for (const q of ["start_date=2026-09-10", "start_date=2026-09-10&end_date=2026-09-01", "start_date=bad&end_date=2026-09-01"]) {
       expect((await get(q)).status).toBe(400);

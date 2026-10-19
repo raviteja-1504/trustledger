@@ -5,6 +5,28 @@
  */
 import type { ActivityEvent, DashboardData } from "@/types";
 
+/** One identity per real event: a sign-off on a file of a scan, or a scan. Timestamps differ between the copy the PR
+ * page records locally (browser clock) and the server's, so they can't be part of the key. */
+export const activityKey = (e: Pick<ActivityEvent, "type" | "scan_id" | "file_path">) =>
+  e.type === "attestation" ? `att::${e.scan_id}::${e.file_path}` : `scan::${e.scan_id}`;
+
+/**
+ * Merge server events with sign-offs recorded locally on the PR page (shown before the server data catches up).
+ * Each event appears once; the server's copy wins. Local events for repos outside the current data (another org,
+ * or outside the developer's scope) are dropped when `repos` is given.
+ */
+export function mergeActivity(server: readonly ActivityEvent[], local: readonly ActivityEvent[], repos?: ReadonlySet<string>, limit = 15): ActivityEvent[] {
+  const seen = new Set<string>();
+  const out: ActivityEvent[] = [];
+  for (const e of server) { const k = activityKey(e); if (!seen.has(k)) { seen.add(k); out.push(e); } }
+  for (const e of local) {
+    if (repos && !repos.has(e.repo)) continue;
+    const k = activityKey(e);
+    if (!seen.has(k)) { seen.add(k); out.push(e); }
+  }
+  return out.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, limit);
+}
+
 export function deriveActivity(data: DashboardData, limit = 15): ActivityEvent[] {
   const events: ActivityEvent[] = [];
 

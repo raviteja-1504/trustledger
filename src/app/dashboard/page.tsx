@@ -14,7 +14,7 @@
  * /api/secrets and /api/evidence/collect?overview=1. Panels whose data can't load say so instead of guessing.
  */
 
-import { useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import { api } from "@/lib/api";
@@ -31,7 +31,7 @@ import type { GovernanceScore } from "@/lib/governanceScore";
 import type { ShadowSummary } from "@/lib/shadowAi";
 import type { EvidenceOverview } from "@/lib/evidenceEngine";
 import { applyLiveReviewState } from "@/lib/dashboardLiveState";
-import { deriveActivity } from "@/lib/dashboardActivity";
+import { activityKey, deriveActivity, mergeActivity } from "@/lib/dashboardActivity";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import TrustHero, { type TrustHistoryPoint } from "@/components/dashboard/TrustHero";
 import KpiStrip, { buildKpis } from "@/components/dashboard/KpiStrip";
@@ -47,7 +47,8 @@ type DaysOption = (typeof DAYS_OPTIONS)[number];
 type RangeMode = DaysOption | "custom";
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
-const riskPrefix = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
+const SEEN_SIG_KEY = "tl_dash_seen_signoff";
+const riskPrefix =(r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
 
 function KeyboardIcon() {
   return (
@@ -122,6 +123,10 @@ export default function DashboardPage() {
   const [trust,         setTrust]         = useState<Loadable<{ score: GovernanceScore; history: TrustHistoryPoint[] }>>(null);
   const [shadow,        setShadow]        = useState<Loadable<ShadowSummary>>(null);
   const [evidence,      setEvidence]      = useState<Loadable<EvidenceOverview>>(null);
+  /** Next dashboard load bypasses the server cache (set after a sign-off). */
+  const bustCache    = useRef(false);
+  /** Newest locally recorded sign-off at the last check; null until the first check. */
+  const lastLocalSig = useRef<string | null>(null);
 
   const { role, permissions } = useRole();
   const roleColor = ROLE_COLORS[role];
@@ -187,16 +192,40 @@ export default function DashboardPage() {
     return () => { live = false; };
   }, [seed, isDeveloperView, reloadKey]);
 
-  // Sign-offs made on the PR page show up in activity straight away.
+  // A sign-off anywhere -- this tab, another tab, or the PR page before coming back -- reloads everything (dashboard
+  // payload with the server cache bypassed, Trust Score, AI usage, evidence), not just the activity list.
+  // The PR page records each sign-off in tl_local_activity and fires tl:attestation; either is the signal.
+  const resync = useCallback(() => { bustCache.current = true; setReloadKey(k => k + 1); }, []);
   useEffect(() => {
     function syncLocal() {
-      try { setLocalActivity((JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[]).slice(0, 15)); } catch {}
+      let list: ActivityEvent[] = [];
+      try { list = JSON.parse(localStorage.getItem("tl_local_activity") ?? "[]") as ActivityEvent[]; } catch {}
+      setLocalActivity(list.slice(0, 15));
+      const sig = list[0] ? `${activityKey(list[0])}::${list[0].timestamp}` : "";
+      // First check after (re)mounting compares with what this session last saw, so coming back from the PR page
+      // after signing off also bypasses the cache.
+      let seen = lastLocalSig.current;
+      if (seen === null) { try { seen = sessionStorage.getItem(SEEN_SIG_KEY); } catch {} }
+      if (seen !== null && sig !== seen) resync();
+      lastLocalSig.current = sig;
+      try { sessionStorage.setItem(SEEN_SIG_KEY, sig); } catch {}
     }
+    function onStorage(e: StorageEvent) { if (e.key === "tl_local_activity") syncLocal(); }
+    function onVisible() { if (!document.hidden) syncLocal(); }
     syncLocal();
     window.addEventListener("focus", syncLocal);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("tl:attestation", resync);
+    document.addEventListener("visibilitychange", onVisible);
     const id = setInterval(syncLocal, 5_000);
-    return () => { window.removeEventListener("focus", syncLocal); clearInterval(id); };
-  }, []);
+    return () => {
+      window.removeEventListener("focus", syncLocal);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("tl:attestation", resync);
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(id);
+    };
+  }, [resync]);
 
   // Dashboard payload for the selected range.
   useEffect(() => {
@@ -216,7 +245,9 @@ export default function DashboardPage() {
     setError(null); setLoading(true);
     const sd = rangeMode === "custom" ? startDate : undefined;
     const ed = rangeMode === "custom" ? endDate : undefined;
-    api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed)
+    const nocache = bustCache.current;
+    bustCache.current = false;
+    api.dashboard(ORG, typeof rangeMode === "number" ? rangeMode : days, sd, ed, nocache)
       .then(d => { if (!live) return; setData(d); setLastRefreshed(new Date()); setActivity(d.repos.length > 0 ? deriveActivity(d) : []); })
       .catch((e: Error) => { if (live) { setData(null); setError(e?.message || "Failed to load dashboard data"); } })
       .finally(() => { if (live) setLoading(false); });
@@ -236,13 +267,10 @@ export default function DashboardPage() {
 
   const { effectiveData, unresolvedRepoScans } = useMemo(() => applyLiveReviewState(data, violationStatuses), [data, violationStatuses]);
 
-  const displayActivity = useMemo(() => {
-    const seen = new Set<string>();
-    return [...localActivity, ...activity]
-      .filter(e => { const k = `${e.scan_id}::${e.file_path}::${e.timestamp}`; if (seen.has(k)) return false; seen.add(k); return true; })
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .slice(0, 15);
-  }, [localActivity, activity]);
+  // Each scan / sign-off once; the server's copy wins over the PR page's local one.
+  const displayActivity = useMemo(
+    () => mergeActivity(activity, localActivity, data && data.repos.length ? new Set(data.repos.map(r => r.repo)) : undefined),
+    [localActivity, activity, data]);
 
   const queue = useMemo(() => effectiveData
     ? buildQueue(effectiveData, Date.now(), f => violationStatuses[`${riskPrefix(f.risk_score)}::${f.scan_id}::${f.file_path}`] === "in_review")

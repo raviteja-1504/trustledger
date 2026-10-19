@@ -11,7 +11,7 @@ import RepoTable, { buildRepoRows, sortRepoRows } from "@/components/dashboard/R
 import { riskDirection } from "@/components/dashboard/RiskPanel";
 import ActivityList from "@/components/dashboard/ActivityList";
 import NeedsAttention, { buildAttention, type AttentionInput } from "@/components/dashboard/NeedsAttention";
-import { deriveActivity } from "@/lib/dashboardActivity";
+import { activityKey, deriveActivity, mergeActivity } from "@/lib/dashboardActivity";
 import type { GovernanceScore, Dimension } from "@/lib/governanceScore";
 import type { ShadowSummary } from "@/lib/shadowAi";
 import type { EvidenceOverview } from "@/lib/evidenceEngine";
@@ -373,6 +373,30 @@ describe("recent activity", () => {
     expect(ev[0]).toMatchObject({ type: "attestation", file_path: "src/a.ts", pr_number: 12, reviewer_email: "carol@acme.test" });
     expect(ev[1]).toMatchObject({ type: "scan", repo: "acme/api", pr_number: 0, overall_risk: "", file_count: 0, scan_id: "s1" });
     expect(deriveActivity(data, 1)).toHaveLength(1);
+  });
+
+  it("each sign-off and scan appears once: the PR page's local copy (browser clock) and the server's merge", () => {
+    const server = deriveActivity(data);
+    const local = [
+      // Same sign-off as the server's, recorded locally a few seconds earlier: must not show twice.
+      { ...server[0], timestamp: "2026-10-19T07:59:55Z", reviewer_email: "carol@acme.test" },
+      // Same sign-off recorded twice locally (attested again).
+      { ...server[0], timestamp: "2026-10-19T07:59:58Z" },
+      // A sign-off the server doesn't have yet: shown.
+      { ...server[0], file_path: "src/c.ts", timestamp: "2026-10-19T09:00:00Z" },
+      // Another org's repo, left in this browser's storage: dropped.
+      { ...server[0], repo: "other/repo", file_path: "x.ts", timestamp: "2026-10-19T10:00:00Z" },
+    ];
+    const merged = mergeActivity(server, local, new Set(["acme/api", "acme/never"]));
+    expect(merged.map(e => [e.type, e.file_path, e.timestamp])).toEqual([
+      ["attestation", "src/c.ts", "2026-10-19T09:00:00Z"],
+      ["attestation", "src/a.ts", "2026-10-19T08:00:00Z"],   // the server's copy won
+      ["scan", "", "2026-10-18T00:00:00.000Z"],
+    ]);
+    // Without a repo list (seed/demo), nothing is filtered, but duplicates still collapse.
+    expect(mergeActivity(server, local).filter(e => e.file_path === "src/a.ts")).toHaveLength(1);
+    expect(mergeActivity(server, local, undefined, 2)).toHaveLength(2);
+    expect(activityKey({ type: "scan", scan_id: "s1", file_path: "" })).not.toBe(activityKey({ type: "attestation", scan_id: "s1", file_path: "" }));
   });
 
   it("renders sign-offs and scans", () => {

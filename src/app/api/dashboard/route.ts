@@ -5,6 +5,10 @@ import { cached, cacheDel, cacheKeys, TTL } from "@/lib/cache";
 import { fetchDashboard, type DashboardPeriod } from "@/lib/dashboardAggregate";
 
 const DEVELOPER_DASHBOARD_TTL = 60;
+// Per-org data behind auth: never storable by a shared cache (the URL is the same for every org, so an edge copy
+// could be served to the wrong org, and it outlived the server-side invalidation on attestation). The server-side
+// cache (lib/cache, invalidated when a file is attested) is what absorbs repeated loads.
+const NO_SHARED_CACHE = "private, no-store";
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -50,28 +54,24 @@ export async function GET(req: NextRequest) {
     const result = noCache || period
       ? await fetchDashboard(org_id, days, githubLogin, period)
       : await cached(devKey, DEVELOPER_DASHBOARD_TTL, () => fetchDashboard(org_id, days, githubLogin));
-    return NextResponse.json({ ...result, _scope: "developer" });
+    return NextResponse.json({ ...result, _scope: "developer" }, { headers: { "Cache-Control": NO_SHARED_CACHE } });
   }
 
   // Custom ranges aren't cached: the cache is keyed (and invalidated) per 7/30/90-day window.
   if (period) {
-    return NextResponse.json(await fetchDashboard(org_id, days, null, period), { headers: { "X-Cache": "BYPASS" } });
+    return NextResponse.json(await fetchDashboard(org_id, days, null, period), { headers: { "X-Cache": "BYPASS", "Cache-Control": NO_SHARED_CACHE } });
   }
 
   // Admin / security_reviewer — org-wide, cacheable
   const cacheKey = cacheKeys.dashboard(org_id, days);
   if (!noCache) {
     const hit = await cached(cacheKey, TTL.DASHBOARD, () => fetchDashboard(org_id, days, null));
-    return NextResponse.json(hit, {
-      headers: { "X-Cache": "HIT", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
-    });
+    return NextResponse.json(hit, { headers: { "X-Cache": "HIT", "Cache-Control": NO_SHARED_CACHE } });
   }
   // Fetch fresh data, then DELETE the stale cache entry so all subsequent
   // regular calls (violations page 30s poll, other pages) also get fresh
   // data instead of the old truncated result.
   const result = await fetchDashboard(org_id, days, null);
   await Promise.all([7, 30, 90].map(d => cacheDel(cacheKeys.dashboard(org_id, d))));
-  return NextResponse.json(result, {
-    headers: { "X-Cache": "MISS", "Cache-Control": `s-maxage=${TTL.DASHBOARD}` },
-  });
+  return NextResponse.json(result, { headers: { "X-Cache": "MISS", "Cache-Control": NO_SHARED_CACHE } });
 }

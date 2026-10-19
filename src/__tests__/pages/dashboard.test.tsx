@@ -3,7 +3,7 @@
  * fails instead of breaking the page.
  */
 import React from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import type { DashboardData } from "@/types";
 
 jest.mock("next/dynamic", () => () => () => null);
@@ -59,8 +59,68 @@ jest.mock("@/lib/useRealData", () => ({
 }));
 
 import DashboardPage from "@/app/dashboard/page";
+import { api } from "@/lib/api";
 
-beforeEach(() => { fail = new Set(); fetched.length = 0; role = "admin"; });
+const dashboardCalls = () => (api.dashboard as jest.Mock).mock.calls;
+
+beforeEach(() => {
+  fail = new Set(); fetched.length = 0; role = "admin";
+  (api.dashboard as jest.Mock).mockClear();
+  localStorage.clear(); sessionStorage.clear();
+});
+
+describe("Dashboard sync after a sign-off", () => {
+  const signOff = (file: string) => ({ type: "attestation", timestamp: new Date().toISOString(), repo: "acme/api", pr_number: 7, scan_id: "s1",
+    overall_risk: "CRITICAL", file_count: 0, total_ai_pct: 0.9, file_path: file, reviewer_email: "ada@acme.test" });
+
+  it("a sign-off event reloads the whole dashboard, bypassing the server cache", async () => {
+    render(<DashboardPage />);
+    await screen.findByRole("region", { name: "Review queue" });
+    expect(dashboardCalls()).toHaveLength(1);
+    expect(dashboardCalls()[0][4]).toBeFalsy();
+    const trustBefore = fetched.filter(u => u.startsWith("/api/trust-score")).length;
+
+    act(() => { window.dispatchEvent(new Event("tl:attestation")); });
+    await waitFor(() => expect(dashboardCalls()).toHaveLength(2));
+    expect(dashboardCalls()[1][4]).toBe(true);
+    await waitFor(() => expect(fetched.filter(u => u.startsWith("/api/trust-score")).length).toBe(trustBefore + 1));
+  });
+
+  it("a sign-off in another tab (recorded in local storage) reloads it too", async () => {
+    render(<DashboardPage />);
+    await screen.findByRole("region", { name: "Review queue" });
+    act(() => {
+      localStorage.setItem("tl_local_activity", JSON.stringify([signOff("src/auth.ts")]));
+      window.dispatchEvent(new StorageEvent("storage", { key: "tl_local_activity" }));
+    });
+    await waitFor(() => expect(dashboardCalls().length).toBeGreaterThanOrEqual(2));
+    expect(dashboardCalls().at(-1)![4]).toBe(true);
+  });
+
+  it("coming back after signing off elsewhere bypasses the cache on the first load", async () => {
+    sessionStorage.setItem("tl_dash_seen_signoff", "");
+    localStorage.setItem("tl_local_activity", JSON.stringify([signOff("src/auth.ts")]));
+    render(<DashboardPage />);
+    await screen.findByRole("region", { name: "Review queue" });
+    await waitFor(() => expect(dashboardCalls().some(c => c[4] === true)).toBe(true));
+  });
+
+  it("nothing new → no extra reloads", async () => {
+    localStorage.setItem("tl_local_activity", JSON.stringify([signOff("src/auth.ts")]));
+    render(<DashboardPage />);
+    await screen.findByRole("region", { name: "Review queue" });
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await new Promise(r => setTimeout(r, 50));
+    expect(dashboardCalls()).toHaveLength(1);
+  });
+
+  it("the activity list shows a sign-off once, even when also recorded locally", async () => {
+    localStorage.setItem("tl_local_activity", JSON.stringify([{ ...signOff("src/db.ts"), timestamp: "2026-10-18T09:59:00Z" }]));
+    render(<DashboardPage />);
+    const activity = await screen.findByRole("region", { name: "Recent activity" });
+    expect(within(activity).getAllByRole("link", { name: /Signed off db\.ts/ })).toHaveLength(1);
+  });
+});
 
 describe("Dashboard page", () => {
   it("shows every section, in order, from real data", async () => {
