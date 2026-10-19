@@ -76,7 +76,7 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
 
   return (
     <section id="repositories" aria-label="Repositories" className="section-card overflow-hidden min-w-0 scroll-mt-6">
-      <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-6 pt-5 pb-4 border-b border-gray-100">
         <div>
           <h2 className="text-sm font-bold text-gray-900">Repositories</h2>
           <p className="text-xs text-gray-400 mt-0.5">{rows.length} with scans in this period</p>
@@ -101,11 +101,11 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
         <table className="w-full min-w-[640px]">
           <thead>
             <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 border-b border-gray-100">
-              <th className="px-5 py-2.5">Repository</th>
-              {hasScores && <th className="px-3 py-2.5">Trust Score</th>}
-              <th className="px-3 py-2.5">Open high-risk</th>
-              <th className="px-3 py-2.5">Reviewed</th>
-              <th className="px-3 py-2.5">AI content</th>
+              <th className="px-6 py-3">Repository</th>
+              {hasScores && <th className="px-4 py-3">Trust Score</th>}
+              <th className="px-4 py-3">Open high-risk</th>
+              <th className="px-4 py-3">Reviewed</th>
+              <th className="px-4 py-3">AI content</th>
               <th className="px-3 py-2.5 text-right pr-5">Last scan</th>
             </tr>
           </thead>
@@ -114,12 +114,12 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
               const risky = r.openCritical != null ? r.openCritical + (r.openHigh ?? 0) : r.highCrit;
               return (
                 <tr key={r.repo} className="hover:bg-gray-50/60">
-                  <td className="px-5 py-2.5 min-w-[160px]">
+                  <td className="px-6 py-3.5 min-w-[160px]">
                     <Link href={repoHref(r.repo)} title={r.repo} className="block text-xs font-bold text-gray-800 hover:text-indigo-600 break-words leading-snug">{r.repo.split("/").pop()}</Link>
                     <span className="block text-[11px] text-gray-500 break-words">{r.repo.split("/")[0]} · {r.scans} scan{r.scans === 1 ? "" : "s"}</span>
                   </td>
                   {hasScores && (
-                    <td className="px-3 py-2.5">
+                    <td className="px-4 py-3.5">
                       {r.score == null ? <span className="text-xs text-gray-300">—</span> : (
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-black tabular-nums text-gray-900 w-8">{r.score}</span>
@@ -128,14 +128,14 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
                       )}
                     </td>
                   )}
-                  <td className="px-3 py-2.5">
+                  <td className="px-4 py-3.5">
                     {risky === 0 ? <span className="text-xs text-emerald-600 font-semibold">None</span> : (
                       <span className="text-xs font-bold text-gray-800 tabular-nums">
                         {r.openCritical != null && r.openCritical > 0 && <span className="text-violet-700">{r.openCritical} crit · </span>}{r.openCritical != null ? `${r.openHigh ?? 0} high` : risky}
                       </span>
                     )}
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="px-4 py-3.5">
                     <div className="flex items-center gap-2">
                       <span className="w-14 h-1.5 rounded-full bg-gray-100 overflow-hidden">
                         <span className={`block h-full ${r.review >= 0.9 ? "bg-emerald-500" : r.review >= 0.5 ? "bg-amber-400" : "bg-rose-500"}`} style={{ width: `${Math.round(r.review * 100)}%` }} />
@@ -143,8 +143,8 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
                       <span className="text-xs tabular-nums text-gray-600">{Math.round(r.review * 100)}%</span>
                     </div>
                   </td>
-                  <td className="px-3 py-2.5 text-xs tabular-nums text-gray-600">{Math.round(r.ai * 100)}%</td>
-                  <td className="px-3 py-2.5 pr-5 text-right">
+                  <td className="px-4 py-3.5 text-xs tabular-nums text-gray-600">{Math.round(r.ai * 100)}%</td>
+                  <td className="px-4 py-3.5 pr-6 text-right">
                     {r.latestScanId
                       ? <Link href={`/pr/${r.latestScanId}`} className="text-xs text-gray-500 hover:text-indigo-600">{ago(r.lastScan)}</Link>
                       : <span className="text-xs text-gray-400">{ago(r.lastScan)}</span>}
@@ -159,7 +159,7 @@ export default function RepoTable({ rows, onExport }: { rows: readonly RepoRow[]
         </table>
       </div>
       {filtered.length > limit && (
-        <button onClick={() => setLimit(l => l + 12)} className="w-full py-2.5 text-xs font-semibold text-indigo-600 hover:bg-indigo-50/50 border-t border-gray-100">
+        <button onClick={() => setLimit(l => l + 12)} className="w-full py-3 text-xs font-semibold text-indigo-600 hover:bg-indigo-50/50 border-t border-gray-100">
           Show more ({filtered.length - limit} more)
         </button>
       )}

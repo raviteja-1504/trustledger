@@ -14,7 +14,7 @@ export type Loadable<T> = T | null | "unavailable";
 
 function Panel({ title, href, cta, children, label }: { title: string; href: string; cta: string; children: React.ReactNode; label: string }) {
   return (
-    <section aria-label={label} className="section-card p-5 flex flex-col gap-4 min-w-0">
+    <section aria-label={label} className="section-card p-6 flex flex-col gap-5 min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-bold text-gray-900">{title}</h2>
         <Link href={href} className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">{cta} →</Link>

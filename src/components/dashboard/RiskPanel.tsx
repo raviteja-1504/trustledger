@@ -30,8 +30,8 @@ export default function RiskPanel({ data, periodLabel }: { data: Pick<DashboardD
     { k: "Medium", n: totals.medium_count, c: "bg-amber-400" },
   ];
   return (
-    <section aria-label="Risk trend" className="section-card p-5 min-w-0">
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+    <section aria-label="Risk trend" className="section-card p-6 min-w-0">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
           <h2 className="text-sm font-bold text-gray-900">Risk trend</h2>
           <p className="text-xs text-gray-400 mt-0.5">Flagged files by week · {periodLabel}</p>

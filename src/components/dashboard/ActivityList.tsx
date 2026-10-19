@@ -17,15 +17,15 @@ export default function ActivityList({ events, limit = 8 }: { events: readonly A
   const shown = events.slice(0, limit);
   return (
     <section aria-label="Recent activity" className="section-card flex flex-col min-w-0">
-      <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-gray-100">
+      <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-100">
         <h2 className="text-sm font-bold text-gray-900">Recent activity</h2>
         <Link href="/audit" className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">Audit trail →</Link>
       </div>
       {shown.length === 0 ? (
         <p className="px-5 py-10 text-center text-xs text-gray-400">Scans and sign-offs will appear here.</p>
       ) : (
-        <ol className="relative px-5 py-3 space-y-3">
-          <span className="absolute left-[29px] top-5 bottom-5 w-px bg-gray-100" aria-hidden="true" />
+        <ol className="relative px-6 py-5 space-y-4">
+          <span className="absolute left-[33px] top-6 bottom-6 w-px bg-gray-100" aria-hidden="true" />
           {shown.map((e, i) => {
             const scan = e.type === "scan";
             return (

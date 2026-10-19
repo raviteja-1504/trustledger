@@ -167,7 +167,7 @@ function ItemCard({ i }: { i: AttentionItem }) {
   return (
     <li className="relative flex flex-col rounded-2xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.08)] ring-1 ring-black/[0.04] hover:shadow-md transition-shadow overflow-hidden">
       <span className={`absolute inset-y-0 left-0 w-1 ${s.accent}`} aria-hidden="true" />
-      <div className="flex items-start gap-3 pl-4 pr-3.5 pt-3 pb-2.5">
+      <div className="flex items-start gap-3 pl-5 pr-4 pt-4 pb-3">
         <span className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${s.icon}`}><KindIcon kind={i.kind} /></span>
         <div className="min-w-0 flex-1">
           <Link href={i.href} className="block leading-tight hover:underline decoration-gray-300 underline-offset-2">
@@ -178,7 +178,7 @@ function ItemCard({ i }: { i: AttentionItem }) {
         </div>
       </div>
       {i.links && i.links.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 pl-4 pr-3.5 pb-2.5">
+        <div className="flex flex-wrap gap-1.5 pl-5 pr-4 pb-3.5">
           {i.links.map(l => (
             <Link key={l.href + l.label} href={l.href}
               title={l.note ? `${l.label} · ${l.note}` : l.label}
@@ -191,7 +191,7 @@ function ItemCard({ i }: { i: AttentionItem }) {
         </div>
       )}
       {i.all && (
-        <Link href={i.all.href} className={`mt-auto flex items-center justify-between pl-4 pr-3.5 py-1.5 border-t border-gray-100 text-[11px] font-semibold ${s.footer}`}>
+        <Link href={i.all.href} className={`mt-auto flex items-center justify-between pl-5 pr-4 py-2 border-t border-gray-100 text-[11px] font-semibold ${s.footer}`}>
           {i.all.label}<span aria-hidden="true">→</span>
         </Link>
       )}
@@ -226,7 +226,7 @@ export default function NeedsAttention({ items, ready }: { items: readonly Atten
 
   return (
     <section aria-label="Needs attention" className="relative overflow-hidden rounded-3xl bg-white shadow-[0_8px_30px_rgba(15,23,42,0.06)] ring-1 ring-gray-100">
-      <div className={`relative bg-gradient-to-r ${BAND[worst]} px-5 sm:px-6 py-4 text-white`}>
+      <div className={`relative bg-gradient-to-r ${BAND[worst]} px-6 sm:px-7 py-5 text-white`}>
         <div className="absolute inset-0 opacity-[0.12] pointer-events-none"
           style={{ backgroundImage: "radial-gradient(circle at 1px 1px, #fff 1px, transparent 0)", backgroundSize: "16px 16px" }} aria-hidden="true" />
         <div className="relative flex items-center justify-between gap-4">
@@ -248,19 +248,19 @@ export default function NeedsAttention({ items, ready }: { items: readonly Atten
           </div>
         </div>
       </div>
-      <div className={`grid ${COLS[groups.length]} gap-4 p-4 sm:p-5`}>
+      <div className={`grid ${COLS[groups.length]} gap-5 p-5 sm:p-6`}>
         {groups.map(g => {
           const s = SEV[g.severity];
           return (
-            <div key={g.severity} role="group" aria-label={`${g.label}: ${g.items.length}`} className={`rounded-2xl ring-1 p-3 ${s.column}`}>
-              <div className="flex items-start justify-between gap-2 px-1 pb-2.5">
+            <div key={g.severity} role="group" aria-label={`${g.label}: ${g.items.length}`} className={`rounded-2xl ring-1 p-4 ${s.column}`}>
+              <div className="flex items-start justify-between gap-2 px-1 pb-3.5">
                 <div className="min-w-0">
                   <p className={`text-xs font-black uppercase tracking-wider ${s.head}`}>{g.label}</p>
                   <p className="text-[11px] text-gray-500 leading-snug">{g.hint}</p>
                 </div>
                 <span className={`min-w-[26px] h-[26px] px-2 rounded-full text-xs font-black flex items-center justify-center shrink-0 ${s.badge}`}>{g.items.length}</span>
               </div>
-              <ul className="space-y-2.5">
+              <ul className="space-y-3">
                 {g.items.map(i => <ItemCard key={i.key} i={i} />)}
               </ul>
             </div>

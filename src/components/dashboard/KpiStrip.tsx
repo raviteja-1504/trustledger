@@ -96,26 +96,26 @@ export function buildKpis(k: KpiInput): Kpi[] {
 export default function KpiStrip({ kpis }: { kpis: readonly Kpi[] }) {
   return (
     // Six across only on wide screens; labels and notes wrap instead of being cut.
-    <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 2xl:grid-cols-6 gap-3">
+    <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 2xl:grid-cols-6 gap-5">
       {kpis.map(k => {
         const t = TONE[k.tone];
         return (
           <Link key={k.key} href={k.href}
-            className="group relative overflow-hidden bg-white rounded-2xl border border-gray-100 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:-translate-y-0.5 hover:shadow-lg hover:border-gray-200">
+            className="group relative overflow-hidden bg-white rounded-2xl border border-gray-100 p-5 shadow-[0_1px_2px_rgba(15,23,42,0.05)] transition-all hover:-translate-y-0.5 hover:shadow-lg hover:border-gray-200">
             <span className={`absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r ${t.glow} to-transparent`} aria-hidden="true" />
             <div className="flex items-start justify-between gap-2">
               <span className={`w-9 h-9 rounded-xl ring-1 flex items-center justify-center shrink-0 ${t.icon}`}><KpiIcon k={k.key} /></span>
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${t.status}`}>{t.label}</span>
             </div>
-            <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500 leading-snug">{k.label}</p>
-            <p className={`mt-0.5 text-3xl leading-none font-black tabular-nums tracking-tight ${t.value}`}>{k.value}</p>
+            <p className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-gray-500 leading-snug">{k.label}</p>
+            <p className={`mt-1 text-3xl leading-none font-black tabular-nums tracking-tight ${t.value}`}>{k.value}</p>
             {k.progress != null && (
-              <div className="mt-2.5 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+              <div className="mt-3 h-1.5 rounded-full bg-gray-100 overflow-hidden">
                 <div className={`h-full rounded-full ${t.bar}`} style={{ width: `${Math.round(Math.max(0, Math.min(1, k.progress)) * 100)}%` }} />
               </div>
             )}
-            <p className="mt-2 pr-4 text-[11px] text-gray-500 leading-snug">{k.sub}</p>
-            <span className="absolute bottom-3 right-3 text-gray-300 group-hover:text-indigo-500 transition-colors" aria-hidden="true">→</span>
+            <p className="mt-2.5 pr-4 text-[11px] text-gray-500 leading-snug">{k.sub}</p>
+            <span className="absolute bottom-4 right-4 text-gray-300 group-hover:text-indigo-500 transition-colors" aria-hidden="true">→</span>
           </Link>
         );
       })}

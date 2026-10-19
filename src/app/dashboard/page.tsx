@@ -83,6 +83,15 @@ function ShortcutsToast({ onClose }: { onClose: () => void }) {
   );
 }
 
+function SectionHeading({ title, sub }: { title: string; sub: string }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-1">
+      <h2 className="text-base font-black text-gray-900 tracking-tight">{title}</h2>
+      <p className="text-sm text-gray-400">{sub}</p>
+    </div>
+  );
+}
+
 function greeting(name?: string | null) {
   const h = new Date().getHours();
   const part = h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
@@ -346,7 +355,7 @@ export default function DashboardPage() {
 
   return (
     <AuthGuard>
-      <div className="max-w-[1400px] mx-auto space-y-5 pb-12">
+      <div className="max-w-[1400px] mx-auto space-y-10 pb-16">
 
         {/* ── Header ── */}
         <header className="animate-fade-up flex flex-wrap items-end justify-between gap-4">
@@ -450,7 +459,12 @@ export default function DashboardPage() {
         )}
 
         {/* ── 1. Headline numbers ── */}
-        {effectiveData && hasData && <div className="animate-fade-up"><KpiStrip kpis={kpis} /></div>}
+        {effectiveData && hasData && (
+          <section className="animate-fade-up space-y-4">
+            <SectionHeading title="At a glance" sub="Each number links to where it's handled" />
+            <KpiStrip kpis={kpis} />
+          </section>
+        )}
 
         {/* ── 2. Trust Score ── */}
         <div className="animate-fade-up">
@@ -462,11 +476,11 @@ export default function DashboardPage() {
         </div>
 
         {loading && !effectiveData && (
-          <div className="space-y-5" aria-label="Loading dashboard">
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-              {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-[118px] rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
+          <div className="space-y-8" aria-label="Loading dashboard">
+            <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-6 gap-5">
+              {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-[150px] rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
             </div>
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
               <div className="section-card h-72 animate-pulse xl:col-span-2" />
               <div className="section-card h-72 animate-pulse" />
             </div>
@@ -476,25 +490,34 @@ export default function DashboardPage() {
         {effectiveData && hasData && (
           <>
             {/* ── 3. Risk + review queue ── */}
-            <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-3 gap-5 items-stretch">
-              <div className="xl:col-span-2 min-w-0"><RiskPanel data={effectiveData} periodLabel={periodLabel} /></div>
-              <ReviewQueue items={queue} />
-            </div>
+            <section className="animate-fade-up space-y-4">
+              <SectionHeading title="Risk & review" sub={`What was flagged ${periodLabel}, and what's waiting for a reviewer`} />
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-stretch">
+                <div className="xl:col-span-2 min-w-0"><RiskPanel data={effectiveData} periodLabel={periodLabel} /></div>
+                <ReviewQueue items={queue} />
+              </div>
+            </section>
 
             {/* ── 4. Governance ── */}
-            <div className={`animate-fade-up grid grid-cols-1 md:grid-cols-2 gap-5 ${isDeveloperView ? "" : "xl:grid-cols-3"}`}>
-              <ShadowAiPanel summary={seed ? "unavailable" : shadow} />
-              <SecretsPanel counts={secretCounts} />
-              {!isDeveloperView && <EvidencePanel overview={seed ? "unavailable" : evidence} />}
-            </div>
+            <section className="animate-fade-up space-y-4">
+              <SectionHeading title="Governance" sub="AI tool usage, leaked credentials and audit evidence" />
+              <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${isDeveloperView ? "" : "xl:grid-cols-3"}`}>
+                <ShadowAiPanel summary={seed ? "unavailable" : shadow} />
+                <SecretsPanel counts={secretCounts} />
+                {!isDeveloperView && <EvidencePanel overview={seed ? "unavailable" : evidence} />}
+              </div>
+            </section>
 
             {/* ── 5. Repositories + activity ── */}
-            <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-3 gap-5 items-start">
-              <div className="xl:col-span-2 min-w-0">
-                <RepoTable rows={repoRows} onExport={permissions.canExportData ? exportCSV : undefined} />
+            <section className="animate-fade-up space-y-4">
+              <SectionHeading title="Repositories & activity" sub="Where risk sits, and what changed recently" />
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+                <div className="xl:col-span-2 min-w-0">
+                  <RepoTable rows={repoRows} onExport={permissions.canExportData ? exportCSV : undefined} />
+                </div>
+                <ActivityList events={displayActivity} />
               </div>
-              <ActivityList events={displayActivity} />
-            </div>
+            </section>
           </>
         )}
       </div>

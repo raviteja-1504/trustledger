@@ -36,7 +36,7 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
   const hidden = items.length - shown.length;
   return (
     <section id="review-queue" aria-label="Review queue" className="section-card flex flex-col h-full scroll-mt-6">
-      <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
+      <div className="flex items-center justify-between gap-3 px-6 pt-5 pb-4 border-b border-gray-100">
         <div>
           <h2 className="text-sm font-bold text-gray-900">Review queue</h2>
           <p className="text-xs text-gray-400 mt-0.5">
@@ -67,7 +67,7 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
               <li key={`${f.scan_id}::${f.file_path}`}>
                 <Link href={`/pr/${f.scan_id}?attest=${encodeURIComponent(f.file_path)}`}
                   title={f.file_path}
-                  className="flex items-start gap-3 px-5 py-2.5 hover:bg-gray-50/70 transition-colors">
+                  className="flex items-start gap-3 px-6 py-3.5 hover:bg-gray-50/70 transition-colors">
                   <span className={`mt-0.5 text-[9px] font-black px-1.5 py-0.5 rounded shrink-0 ${crit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>
                     {crit ? "CRIT" : "HIGH"}
                   </span>
@@ -88,7 +88,7 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
       )}
       {hidden > 0 && (
         <button onClick={() => setExpanded(true)}
-          className="w-full px-5 py-2.5 border-t border-gray-100 text-[11px] font-semibold text-indigo-600 hover:bg-indigo-50/40 text-left">
+          className="w-full px-6 py-3 border-t border-gray-100 text-[11px] font-semibold text-indigo-600 hover:bg-indigo-50/40 text-left">
           +{hidden} more waiting
         </button>
       )}
