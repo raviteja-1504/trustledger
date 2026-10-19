@@ -18,9 +18,12 @@ import { runWithTrace, newTraceId } from "@/lib/trace";
 import { logger } from "@/lib/logger";
 import { writeAuditLog } from "@/lib/audit";
 import { enforceRetention, normalizeRetention, totalDeleted } from "@/lib/retention";
+import { computeOrgScore, saveSnapshot } from "@/lib/governanceScoreLoader";
 
 export const maxDuration = 120;
 const RETENTION_DAYS = 30;
+/** Leave headroom inside maxDuration for the snapshots. */
+const SCORE_BUDGET_MS = 100_000;
 
 export async function GET(req: NextRequest) {
   if (req.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -87,6 +90,15 @@ async function run() {
   const cutoff = new Date(now - RETENTION_DAYS * 86400_000).toISOString();
   const { error: purgeErr } = await db.from("ops_events").delete().lt("created_at", cutoff);
 
-  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted });
-  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted });
+  // Daily Trust Score snapshot (lib/governanceScoreLoader.ts), so days nobody opened the page still have history.
+  // Stops before the function's time limit; the page records today's score whenever someone opens it anyway.
+  let scoresSaved = 0;
+  for (const org of orgs ?? []) {
+    if (Date.now() - now > SCORE_BUDGET_MS) break;
+    try { if (await saveSnapshot(db, org.id, await computeOrgScore(db, org.id, new Date(now)))) scoresSaved++; }
+    catch (err) { logger.error("Trust Score snapshot failed for org", { org_id: org.id, detail: err instanceof Error ? err.message : String(err) }); }
+  }
+
+  logger.info("Pipeline health check finished", { orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, purged_before: cutoff, purge_error: purgeErr?.message, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved });
+  return NextResponse.json({ ok: true, orgs: orgs?.length ?? 0, alerts_raised: alertsRaised, retention_orgs: retentionOrgs, retention_deleted: retentionDeleted, scores_saved: scoresSaved });
 }

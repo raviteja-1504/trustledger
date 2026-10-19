@@ -24,7 +24,8 @@ export type AuditEventType =
   | "user_login"
   | "repo_connected" | "repo_enabled" | "repo_disabled"
   | "data_exported"
-  | "evidence_uploaded" | "evidence_deleted";
+  | "evidence_uploaded" | "evidence_deleted"
+  | "ai_tool_policy_changed" | "shadow_ai_triaged";
 
 interface AuditEntry {
   org_id:        string;

@@ -858,7 +858,15 @@ export default function DashboardPage() {
   const underReview  = effectiveData?.repos.filter(r => r.attestation_rate >= 0.5 && r.attestation_rate < 0.8).length ?? 0;
   const needsAction  = effectiveData?.repos.filter(r => r.attestation_rate < 0.5).length ?? 0;
   const score        = effectiveData ? healthScore(effectiveData) : 0;
-  const trustScore   = useMemo(() => effectiveData ? computeTrustScore(effectiveData).total : 0, [effectiveData]);
+  // The real Trust Score is computed on the server from all governance data (/api/trust-score); demo mode, which
+  // has no server data, keeps the local estimate.
+  const [serverTrustScore, setServerTrustScore] = useState<number | null>(null);
+  useEffect(() => {
+    if (isSeedMode()) return;
+    authedFetch<{ score: { total: number } }>("/api/trust-score?history=7").then(r => setServerTrustScore(r.score.total)).catch(() => {});
+  }, []);
+  const demoTrustScore = useMemo(() => effectiveData ? computeTrustScore(effectiveData).total : 0, [effectiveData]);
+  const trustScore   = isSeedMode() ? demoTrustScore : serverTrustScore;
   const recentlyCovered = effectiveData?.repos.filter(r => {
     if (!r.last_scan) return false;
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
@@ -1293,16 +1301,16 @@ export default function DashboardPage() {
                   className="block rounded-2xl p-5 border hover:border-opacity-80 transition-colors animate-fade-up"
                   style={{
                     background: "linear-gradient(135deg,#eef2ff,#faf5ff)",
-                    borderColor: scoreColor(trustScore).ring,
+                    borderColor: trustScore == null ? "#e0e7ff" : scoreColor(trustScore).ring,
                   }}>
                   <div className="flex items-center justify-between gap-4">
                     <div>
-                      <p className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-1">TrustScore™</p>
-                      <div className="text-5xl font-black tabular-nums" style={{ color: scoreColor(trustScore).text }}>
-                        {trustScore}
+                      <p className="text-xs font-bold uppercase tracking-wider text-indigo-400 mb-1">Trust Score</p>
+                      <div className="text-5xl font-black tabular-nums" style={{ color: trustScore == null ? "#a5b4fc" : scoreColor(trustScore).text }}>
+                        {trustScore ?? "—"}
                       </div>
-                      <p className="text-xs mt-1" style={{ color: scoreColor(trustScore).text }}>
-                        {scoreColor(trustScore).label} · out of 1000 · click for breakdown
+                      <p className="text-xs mt-1" style={{ color: trustScore == null ? "#818cf8" : scoreColor(trustScore).text }}>
+                        {trustScore == null ? "Calculating…" : `${scoreColor(trustScore).label} · out of 1000 · click for what to fix`}
                       </p>
                     </div>
                     <div className="shrink-0 text-right">

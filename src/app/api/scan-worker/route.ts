@@ -34,6 +34,9 @@ import type { FileIndicator } from "@/types";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { safeEqual } from "@/lib/safeEqual";
 import { internalSecret } from "@/lib/internalSecret";
+import { detectCommitEvidence, type CommitEvidence } from "@/lib/aiTools";
+import { unapprovedToolsInScan, shadowAiCheckMarkdown } from "@/lib/shadowAi";
+import { loadPolicy, notifyUnapprovedTools } from "@/lib/shadowAiStore";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
@@ -293,6 +296,8 @@ async function handle(req: NextRequest) {
     // Build a git log string from the GitHub commits API so analyzeGitProvenance()
     // can score commit velocity, AI commit messages, and signing rate.
     let gitLog: string | undefined;
+    // AI tools that signed this PR's commits (co-author trailers, bot authors) -- Shadow AI's strongest evidence.
+    let commitEvidence: CommitEvidence[] = [];
     try {
       const commitsRes = await fetch(
         `https://api.github.com/repos/${repoFullName}/pulls/${prNumber}/commits?per_page=50`,
@@ -302,7 +307,9 @@ async function handle(req: NextRequest) {
         const commits = await commitsRes.json() as Array<{
           sha: string;
           commit: { author: { name: string; email: string; date: string }; message: string };
+          author?: { login?: string } | null;
         }>;
+        commitEvidence = detectCommitEvidence(commits.map(c => ({ sha: c.sha, message: c.commit.message, author_login: c.author?.login ?? null })));
         // Format: "%H|%an|%ae|%at|%G?|%s"  (G? = GPG status, use N = no sig)
         gitLog = commits.map(c => {
           const ts = Math.floor(new Date(c.commit.author.date).getTime() / 1000);
@@ -349,6 +356,9 @@ async function handle(req: NextRequest) {
       all_file_paths:      prFiles.map(f => f.filename),
       files: fileContents.map(f => ({ path: f.path, content: f.content })),
     });
+
+    // Commit signatures join the scan's AI-tool evidence (stored in scans.ai_tooling, read by Shadow AI).
+    for (const e of commitEvidence) result.ai_tooling.push({ tool: e.tool, file: `commit:${e.sha.slice(0, 7)}`, label: e.label });
 
     // Which findings this PR introduced, from its own diff (prDiff.ts) -- stored with each finding.
     const addedByPath = addedLinesByPath(prFiles);
@@ -721,6 +731,17 @@ async function handle(req: NextRequest) {
       }
     }
 
+    // ── Shadow AI: unapproved AI tools in this PR (lib/shadowAi.ts) ────────────
+    // Computed once: a warning section on the check run below, and one alert per PR and set of tools through the
+    // org's own channels -- whether or not this scan has a check run. Never affects the merge decision.
+    let unapproved: ReturnType<typeof unapprovedToolsInScan> = [];
+    if (orgId) {
+      try {
+        unapproved = unapprovedToolsInScan(result.ai_tooling, (await loadPolicy(db, orgId))?.allowed ?? null);
+        if (prNumber) await notifyUnapprovedTools(db, orgId, { repo: repoFullName, pr_number: prNumber, scan_id: result.scan_id, author: prAuthor ?? null }, unapproved);
+      } catch { /* best-effort */ }
+    }
+
     // ── Update check run ──────────────────────────────────────────────────────
     const mergedFiles = [
       ...result.files,
@@ -799,6 +820,8 @@ async function handle(req: NextRequest) {
             : null;
           summary += regressionMarkdown(securityRegression(evidenceFilesWithSuppressed, previous, triage));
         } catch { /* best-effort: the check run still completes without the section */ }
+        // Unapproved AI tools in this PR: a warning section only -- never changes the conclusion.
+        summary += shadowAiCheckMarkdown(unapproved, process.env.NEXT_PUBLIC_APP_URL ? `${process.env.NEXT_PUBLIC_APP_URL}/shadow-ai` : "");
       }
       await updateCheckRun(token, owner, repoName, checkRunId, {
         name: "TrustLedger AI Governance", status: "completed", conclusion,

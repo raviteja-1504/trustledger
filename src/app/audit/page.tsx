@@ -296,6 +296,8 @@ const RAW_TYPE_MAP: Record<string, AuditEventType> = {
   data_exported:         "policy_change",
   evidence_uploaded:     "attestation",
   evidence_deleted:      "policy_change",
+  ai_tool_policy_changed: "policy_change",
+  shadow_ai_triaged:     "policy_change",
 };
 
 const SEVERITY_BY_TYPE: Partial<Record<AuditEventType, AuditEvent["severity"]>> = {
@@ -360,6 +362,16 @@ function auditLogToAuditEvent(row: AuditLogRow): AuditEvent {
       detail = [typeof payload.format === "string" ? payload.format.toUpperCase() : null,
         typeof payload.rows === "number" ? `${payload.rows} rows` : typeof payload.findings === "number" ? `${payload.findings} findings` : null,
         actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
+      break;
+    case "ai_tool_policy_changed": {
+      const allowed = Array.isArray(payload.allowed) ? (payload.allowed as string[]) : [];
+      description = "Approved AI tools changed";
+      detail = [allowed.length ? `now: ${allowed.join(", ")}` : "no tools approved", actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
+      break;
+    }
+    case "shadow_ai_triaged":
+      description = `Shadow AI detection ${typeof payload.status === "string" ? `marked ${payload.status}` : "updated"}`;
+      detail = [typeof row.resource_id === "string" ? row.resource_id.split("|").slice(0, 2).join(" · ") : null, actor ? `by ${actor}` : null].filter(Boolean).join(" · ");
       break;
     case "evidence_uploaded":
     case "evidence_deleted": {

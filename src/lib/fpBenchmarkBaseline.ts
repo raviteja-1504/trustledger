@@ -196,8 +196,6 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "The `I` helper is defined but never invoked anywhere in this file (confirmed: no JSX usage, no call site) -- its dangerouslySetInnerHTML can never execute with any value at runtime. Effectively dead code; worth a future cleanup, but not a live XSS sink." },
   { file: "src/app/docs/page.tsx", id: "xss", lineHash: "824f2ab04e15", line: 20, severity: "critical",
     reason: "Static CSS string passed to dangerouslySetInnerHTML with zero interpolated variables (a plain template literal, no ${...} expressions) -- no dynamic content of any kind ever reaches this call." },
-  { file: "src/app/trust-score/page.tsx", id: "xss", lineHash: "31dca680a91f", line: 149, severity: "critical",
-    reason: "`org` (the only interpolated value not locally computed from `score`) is derived from `effectiveData?.repos?.[0]?.repo.split(\"/\")[0]` -- a GitHub org/user login segment, which GitHub itself restricts to alphanumerics and hyphens (no HTML metacharacters possible through this path). Impact is also bounded to self-XSS: document.write runs in a window.open() popup the acting user opened for their own org, not a sink reachable by any other user. Accepted with this specific caveat, not templated -- revisit if `org` is ever sourced from a less-constrained field." },
   { file: "src/lib/ast.ts", id: "xss", lineHash: "a5a8570f0472", line: 484, severity: "critical",
     reason: "This line is inside a detector's own pattern-DEFINITION list (e.g. HIGH_RISKS) -- a regex literal used to detect this vulnerability class elsewhere in scanned code, not an actual occurrence of it in this file." },
   // Added by the PHP OWASP hardening phase -- confirmed the same

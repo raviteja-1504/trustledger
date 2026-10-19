@@ -1,370 +1,286 @@
 "use client";
 
 /**
- * TrustScore™ — AI Governance Credit Score
- *
- * A single 0–1000 score summarising your organisation's AI code governance
- * health. Like a credit score, it tells auditors, insurers, and board members
- * how trustworthy your AI-assisted development process is at a glance.
+ * Trust Score: how well this organisation governs its code, 0-1000, computed on the server from real data
+ * (lib/governanceScore.ts), saved daily so the trend is real, and explained point by point: every dimension shows
+ * its formula, the facts behind it, and what to fix to win points back. Using AI never lowers the score.
  */
 
 import { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
-import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
-import { readSeed } from "@/lib/offlineData";
-import { api } from "@/lib/api";
-import { computeTrustScore, scoreColor, patchDataWithAttestations } from "@/lib/trustScore";
-import type { DashboardData } from "@/types";
+import PageSkeleton from "@/components/PageSkeleton";
+import { authedFetch, isSeedMode, getAuthHeader } from "@/lib/useRealData";
+import { formatDateOnly, formatDateTime, relativeTime, useTimezone } from "@/lib/timezone";
+import { scoreColor } from "@/lib/trustScore";
+import { computeGovernanceScore, type GovernanceScore, type Dimension, type ScoreAction } from "@/lib/governanceScore";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
+interface HistoryPoint { day: string; total: number; dimensions: Record<string, number> }
+interface ScoreResponse { score: GovernanceScore; history: HistoryPoint[]; history_available: boolean }
 
-function rd(daysBack: number): string {
-  return new Date(Date.now() - daysBack * 86400000).toISOString().split("T")[0];
+// ── Demo data (seed mode only) ──────────────────────────────────────────────────
+function demoResponse(): ScoreResponse {
+  const now = new Date();
+  const ago = (d: number) => new Date(now.getTime() - d * 86400_000).toISOString();
+  const score = computeGovernanceScore({
+    now: now.toISOString(),
+    repos: ["acme/payments-api", "acme/auth-service", "acme/fraud-detection", "acme/data-platform"],
+    scans: [
+      { id: "p1", repo: "acme/payments-api", pr_number: 482, created_at: ago(1) },
+      { id: "a1", repo: "acme/auth-service", pr_number: 345, created_at: ago(2) },
+      { id: "f1", repo: "acme/fraud-detection", pr_number: 219, created_at: ago(3) },
+      { id: "d1", repo: "acme/data-platform", pr_number: 103, created_at: ago(19) },
+    ],
+    riskyFiles: [
+      { scan_id: "p1", file_path: "src/card_validator.py", risk_score: "CRITICAL", ai_percentage: 0.91 },
+      { scan_id: "p1", file_path: "src/stripe_client.py", risk_score: "HIGH", ai_percentage: 0.76 },
+      { scan_id: "a1", file_path: "src/token_exchange.ts", risk_score: "HIGH", ai_percentage: 0.68 },
+      { scan_id: "f1", file_path: "models/risk_scorer.ts", risk_score: "CRITICAL", ai_percentage: 0.83 },
+    ],
+    attested: [{ scan_id: "a1", file_path: "src/token_exchange.ts" }, { scan_id: "p1", file_path: "src/stripe_client.py" }],
+    violations: [
+      { scan_id: "p1", file_path: "src/card_validator.py", risk_score: "CRITICAL", status: "open", sla_deadline: ago(1) },
+      { scan_id: "f1", file_path: "models/risk_scorer.ts", risk_score: "CRITICAL", status: "in_review", sla_deadline: ago(-2) },
+    ],
+    secrets: [{ scan_id: "d1", severity: "HIGH" }],
+    shadow: { policy_configured: true, compliance: 0.75, open_violations: 1 },
+  });
+  const history = Array.from({ length: 30 }, (_, i) => ({
+    day: ago(29 - i).slice(0, 10),
+    total: Math.round(Math.min(score.total, 520 + i * 7 + (i % 5) * 6)),
+    dimensions: {},
+  }));
+  history[history.length - 1].total = score.total;
+  return { score, history, history_available: true };
 }
 
-const FALLBACK: DashboardData = {
-  repos: [
-    { repo:`${ORG}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:rd(2), scan_count:18, file_count:142, latest_scan_id:"sc_mock_001" },
-    { repo:`${ORG}/auth-service`,    ai_pct:0.44, attestation_rate:0.92, last_scan:rd(1), scan_count:12, file_count:98,  latest_scan_id:"sc_mock_002" },
-    { repo:`${ORG}/fraud-detection`, ai_pct:0.58, attestation_rate:0.67, last_scan:rd(0), scan_count:9,  file_count:76,  latest_scan_id:"sc_mock_003" },
-    { repo:`${ORG}/risk-engine`,     ai_pct:0.36, attestation_rate:0.95, last_scan:rd(3), scan_count:7,  file_count:54,  latest_scan_id:"sc_mock_004" },
-    { repo:`${ORG}/data-platform`,   ai_pct:0.62, attestation_rate:0.55, last_scan:rd(4), scan_count:5,  file_count:61,  latest_scan_id:"sc_mock_005" },
-  ],
-  overall_ai_pct: 0.54,
-  attestation_rate: 0.78,
-  unattested_deploy_count: 3,
-  scan_count: 51,
-  file_count: 431,
-  risk_trend: [
-    { date:rd(35), high_count:5, critical_count:3, medium_count:9 },
-    { date:rd(28), high_count:4, critical_count:2, medium_count:7 },
-    { date:rd(21), high_count:6, critical_count:3, medium_count:8 },
-    { date:rd(14), high_count:3, critical_count:1, medium_count:5 },
-    { date:rd(7),  high_count:2, critical_count:1, medium_count:4 },
-  ],
-  top_risk_files: [
-    { repo:`${ORG}/payments-api`,    file_path:"src/processors/card_validator.py",   ai_pct:0.91, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:482 },
-    { repo:`${ORG}/fraud-detection`, file_path:"models/risk_scorer.ts",              ai_pct:0.83, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_003", pr_number:219 },
-    { repo:`${ORG}/payments-api`,    file_path:"src/gateway/stripe_client.py",       ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:479 },
-    { repo:`${ORG}/auth-service`,    file_path:"src/oauth/token_exchange.ts",        ai_pct:0.68, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_002", pr_number:341 },
-    { repo:`${ORG}/fraud-detection`, file_path:"src/rules/velocity_check.py",        ai_pct:0.62, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_003", pr_number:218 },
-    { repo:`${ORG}/payments-api`,    file_path:"src/api/refund_handler.py",          ai_pct:0.55, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_001", pr_number:477 },
-    { repo:`${ORG}/auth-service`,    file_path:"src/middleware/rate_limiter.ts",     ai_pct:0.49, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_002", pr_number:338 },
-    { repo:`${ORG}/data-platform`,   file_path:"src/pipelines/etl_runner.py",        ai_pct:0.65, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_005", pr_number:103 },
-    { repo:`${ORG}/risk-engine`,     file_path:"src/models/credit_score.ts",         ai_pct:0.41, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_004", pr_number:88  },
-    { repo:`${ORG}/payments-api`,    file_path:"src/utils/currency_formatter.py",    ai_pct:0.22, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_001", pr_number:471 },
-  ],
+const BAND_DESC: Record<GovernanceScore["band"], string> = {
+  Excellent: "Risky code is reviewed, findings are fixed on time, and AI tools are governed.",
+  Good: "A solid foundation. The actions below close the remaining gaps.",
+  Fair: "Real governance gaps. Start with the biggest wins below.",
+  Poor: "Significant ungoverned risk. Work through the biggest wins below.",
+  Critical: "Most risk is ungoverned. Start with open critical findings and unreviewed risky code.",
 };
 
-// ── Industry benchmarks ────────────────────────────────────────────────────────
-
-const BENCHMARKS = [
-  { label:"Top 10%",  score:892, color:"#6366f1" },
-  { label:"Average",  score:621, color:"#64748b" },
-  { label:"Bottom 10%", score:312, color:"#dc2626" },
-];
-
-// ── Animated counter ───────────────────────────────────────────────────────────
-
-function AnimatedScore({ target }: { target: number }) {
-  const [displayed, setDisplayed] = useState(0);
-  useEffect(() => {
-    let start = 0;
-    const step = Math.ceil(target / 60);
-    const id = setInterval(() => {
-      start = Math.min(start + step, target);
-      setDisplayed(start);
-      if (start >= target) clearInterval(id);
-    }, 16);
-    return () => clearInterval(id);
-  }, [target]);
-  return <>{displayed}</>;
-}
-
-// ── Certificate ────────────────────────────────────────────────────────────────
-
-function downloadCertificate(score: number, org: string, label: string) {
-  const date      = new Date().toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
-  const validUntil = new Date(Date.now() + 90 * 86400_000).toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
-  const certId    = `TL-${Date.now().toString(36).toUpperCase()}`;
-  const accentColor = score >= 850 ? "#15803d" : score >= 700 ? "#16a34a" : score >= 550 ? "#d97706" : score >= 400 ? "#ea580c" : "#dc2626";
-  const tickColor   = score >= 700 ? "#16a34a" : "#d97706";
-  const tick        = score >= 700 ? "✓" : "◐";
-  const components  = ["Attestation Coverage","Policy Compliance","Critical Risk Resolution","Cross-Repo Consistency","Scan Freshness"];
-
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<title>TrustLedger Certificate — ${org}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  @page{size:A4 landscape;margin:0}
-  body{font-family:Georgia,'Times New Roman',serif;background:#f8f8ff;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:32px}
-  .cert{width:860px;background:#fff;border:5px double #6366f1;padding:52px 64px;text-align:center;position:relative;box-shadow:0 8px 48px rgba(99,102,241,.15)}
-  .corner{position:absolute;width:36px;height:36px;border-color:#a5b4fc;border-style:solid}
-  .tl{top:14px;left:14px;border-width:3px 0 0 3px}
-  .tr{top:14px;right:14px;border-width:3px 3px 0 0}
-  .bl{bottom:14px;left:14px;border-width:0 0 3px 3px}
-  .br{bottom:14px;right:14px;border-width:0 3px 3px 0}
-  .brand{font-family:Arial,sans-serif;font-size:12px;letter-spacing:4px;text-transform:uppercase;color:#6366f1;font-weight:800;margin-bottom:4px}
-  .title{font-size:26px;font-weight:bold;color:#1e1b4b;letter-spacing:2px;text-transform:uppercase;margin-bottom:30px}
-  .sub{font-size:13px;color:#9ca3af;margin-bottom:6px}
-  .org{font-size:34px;font-weight:bold;color:#1e1b4b;margin-bottom:2px}
-  .org-label{font-size:11px;color:#d1d5db;letter-spacing:2px;text-transform:uppercase;margin-bottom:28px}
-  .score-label{font-family:Arial,sans-serif;font-size:11px;letter-spacing:3px;text-transform:uppercase;color:#9ca3af;margin-bottom:4px}
-  .score{font-family:Arial,sans-serif;font-size:100px;font-weight:900;line-height:1;color:${accentColor}}
-  .denom{font-family:Arial,sans-serif;font-size:28px;color:#9ca3af}
-  .score-name{font-family:Arial,sans-serif;font-size:17px;font-weight:700;color:${accentColor};margin:8px 0 28px}
-  hr{border:none;border-top:1px solid #e5e7eb;margin:20px 0}
-  .comps{display:flex;justify-content:center;gap:20px;flex-wrap:wrap;margin-bottom:20px}
-  .comp{font-family:Arial,sans-serif;font-size:11px;color:#4b5563;display:flex;align-items:center;gap:5px}
-  .ck{color:${tickColor};font-size:13px}
-  .dates{font-size:12px;color:#9ca3af;margin-bottom:16px}
-  .cert-id{font-family:'Courier New',monospace;font-size:11px;color:#d1d5db;letter-spacing:1px}
-  .footer{margin-top:20px;font-family:Arial,sans-serif;font-size:11px;color:#c7c9d9}
-  @media print{body{background:#fff;padding:0}.cert{box-shadow:none}}
-</style></head>
-<body>
-<div class="cert">
-  <div class="corner tl"></div><div class="corner tr"></div>
-  <div class="corner bl"></div><div class="corner br"></div>
-  <p class="brand">TrustLedger</p>
-  <h1 class="title">AI Governance Certificate</h1>
-  <p class="sub">This certifies that</p>
-  <p class="org">${org}</p>
-  <p class="org-label">Organisation</p>
-  <p class="score-label">TrustScore™</p>
-  <div><span class="score">${score}</span><span class="denom"> / 1000</span></div>
-  <p class="score-name">${label}</p>
-  <hr>
-  <div class="comps">${components.map(c => `<span class="comp"><span class="ck">${tick}</span>${c}</span>`).join("")}</div>
-  <p class="dates">Issued: ${date} &nbsp;·&nbsp; Valid until: ${validUntil}</p>
-  <p class="cert-id">Certificate ID: ${certId} &nbsp;·&nbsp; trustledger.dev/verify</p>
-  <hr>
-  <p class="footer">Powered by TrustLedger — AI Code Governance Platform</p>
-</div>
-<script>window.onload=function(){window.print()}</script>
-</body></html>`;
-
-  const win = window.open("", "_blank", "width=1100,height=750");
-  if (win) { win.document.write(html); win.document.close(); }
-}
-
-// ── Main page ──────────────────────────────────────────────────────────────────
-
 export default function TrustScorePage() {
-    const tz = useTimezone();
-  const [data,      setData]      = useState<DashboardData>(FALLBACK);
-  const [statuses,  setStatuses]  = useState<Record<string,string>>({});
+  const tz = useTimezone();
+  const demo = isSeedMode();
+  const [data, setData] = useState<ScoreResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openDim, setOpenDim] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
-    const seed = readSeed();
-    if (seed) { setData(seed); } else {
-      api.dashboard(ORG, 90).then(setData).catch(() => {});
-    }
-  }, []);
+    if (demo) { setData(demoResponse()); return; }
+    authedFetch<ScoreResponse>("/api/trust-score?history=90").then(setData).catch(e => setError((e as Error).message || "We couldn't compute the Trust Score."));
+  }, [demo]);
 
-  // Keep violation statuses in sync with localStorage (same key the dashboard writes)
-  useEffect(() => {
-    function sync() {
-      try {
-        setStatuses(JSON.parse(localStorage.getItem("tl_violation_statuses") ?? "{}") as Record<string,string>);
-      } catch {}
-    }
-    function onVisible() { if (!document.hidden) sync(); }
-    sync();
-    window.addEventListener("storage", sync);
-    window.addEventListener("focus",   sync);
-    document.addEventListener("visibilitychange", onVisible);
-    const id = setInterval(sync, 2_000);
-    return () => {
-      window.removeEventListener("storage", sync);
-      window.removeEventListener("focus",   sync);
-      document.removeEventListener("visibilitychange", onVisible);
-      clearInterval(id);
-    };
-  }, []);
+  const score = data?.score;
+  const history = useMemo(() => data?.history ?? [], [data]);
+  const wins = useMemo(() => score
+    ? score.dimensions.flatMap(d => d.actions.map(a => ({ ...a, dim: d.label }))).sort((a, b) => b.gain - a.gain).slice(0, 6)
+    : [], [score]);
+  const delta = useMemo(() => {
+    if (!score || history.length < 2) return null;
+    const target = new Date(Date.parse(score.computed_at) - 30 * 86400_000).toISOString().slice(0, 10);
+    const past = history.find(h => h.day >= target) ?? history[0];
+    return past.day === score.computed_at.slice(0, 10) ? null : { change: score.total - past.total, since: past.day };
+  }, [score, history]);
 
-  const effectiveData = useMemo(() => patchDataWithAttestations(data, statuses), [data, statuses]);
+  async function downloadReport() {
+    if (demo) return;
+    setDownloading(true);
+    try {
+      const res = await fetch("/api/trust-score?report=1", { headers: await getAuthHeader() });
+      if (!res.ok) throw new Error();
+      const url = URL.createObjectURL(await res.blob());
+      Object.assign(document.createElement("a"), { href: url, download: `trust-score-${new Date().toISOString().slice(0, 10)}.json` }).click();
+      URL.revokeObjectURL(url);
+    } catch { setError("The report download failed. Please try again."); }
+    finally { setDownloading(false); }
+  }
 
-  const { total, dimensions } = useMemo(
-    () => computeTrustScore(effectiveData),
-    [effectiveData],
-  );
+  if (error && !score) return <AuthGuard><div className="max-w-4xl mx-auto"><div className="bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl px-4 py-3">{error}</div></div></AuthGuard>;
+  if (!score) return <AuthGuard><PageSkeleton rows={6} cards={3}><div /></PageSkeleton></AuthGuard>;
 
-  const col  = scoreColor(total);
-  const org  = effectiveData?.repos?.[0]?.repo.split("/")[0] ?? "your-org";
+  const col = scoreColor(score.total);
 
   return (
     <AuthGuard>
-      <div className="max-w-4xl mx-auto space-y-6 pb-10">
+      <div className="max-w-5xl mx-auto space-y-5 pb-10">
 
-        <div className="pt-1">
-          <h1 className="text-xl font-black text-gray-900">TrustScore™</h1>
-          <p className="text-sm text-gray-400 mt-0.5">Your AI governance health score — like a credit score, but for code</p>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-black text-gray-900">Trust Score</h1>
+              {demo && <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">Demo data</span>}
+            </div>
+            <p className="text-sm text-gray-500 mt-0.5 max-w-2xl">How well your organisation governs its code, from real scan data. Using AI never lowers the score; ungoverned risk does.</p>
+          </div>
+          {!demo && (
+            <button onClick={downloadReport} disabled={downloading}
+              className="px-4 py-2 rounded-xl text-xs font-bold bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 shadow-sm disabled:opacity-50">
+              {downloading ? "Preparing…" : "Download signed report"}
+            </button>
+          )}
+        </div>
+        {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl px-4 py-2.5">{error}</div>}
+
+        {/* Score + trend */}
+        <div className="rounded-2xl border-2 p-6 grid grid-cols-1 md:grid-cols-[auto_1fr] gap-6 items-center" style={{ background: col.bg, borderColor: col.ring }}>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-7xl font-black tabular-nums leading-none" style={{ color: col.text }}>{score.total}</span>
+              <span className="text-2xl font-bold text-gray-400">/ 1000</span>
+            </div>
+            <div className="text-lg font-bold mt-2" style={{ color: col.text }}>{score.band}</div>
+            {delta && (
+              <p className={`text-xs font-semibold mt-1 ${delta.change > 0 ? "text-green-700" : delta.change < 0 ? "text-rose-700" : "text-gray-500"}`}>
+                {delta.change > 0 ? "▲" : delta.change < 0 ? "▼" : "■"} {Math.abs(delta.change)} since {formatDateOnly(delta.since, tz)}
+              </p>
+            )}
+            <p className="text-xs text-gray-500 mt-2 max-w-xs">{BAND_DESC[score.band]}</p>
+            <p className="text-[11px] text-gray-400 mt-2">Computed {relativeTime(score.computed_at, tz)}</p>
+          </div>
+          <TrendChart history={history} tz={tz} historyAvailable={data?.history_available ?? false} />
         </div>
 
-        {/* ── Score card ── */}
-        <div className="rounded-2xl border-2 p-6 sm:p-8"
-          style={{ background: col.bg, borderColor: col.ring }}>
-
-          {/* Top row: score + label + actions */}
-          <div className="flex flex-wrap items-start justify-between gap-6 mb-6">
-            {/* Big score */}
-            <div>
-              <div className="flex items-baseline gap-3">
-                <span className="text-7xl sm:text-8xl font-black tabular-nums leading-none" style={{ color: col.text }}>
-                  <AnimatedScore target={total} />
-                </span>
-                <span className="text-2xl sm:text-3xl font-bold text-gray-400 leading-none">/ 1000</span>
-              </div>
-              <div className="text-lg font-bold mt-2" style={{ color: col.text }}>{col.label}</div>
-              <div className="text-xs text-gray-500 mt-0.5">AI Governance TrustScore™</div>
+        {/* Biggest wins */}
+        {wins.length > 0 && (
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+              <p className="text-xs font-black text-gray-700 uppercase tracking-wider">Biggest wins</p>
+              <p className="text-[11px] text-gray-400">Points each action would add</p>
             </div>
-
-            {/* Actions */}
-            <div className="flex flex-col gap-3 shrink-0">
-              <button onClick={() => downloadCertificate(total, org, col.label)}
-                className="px-5 py-2.5 rounded-xl text-sm font-bold text-white transition-colors hover:opacity-90"
-                style={{ background:"#6366f1" }}>
-                Download Certificate PDF
-              </button>
+            <div className="divide-y divide-gray-50">
+              {wins.map((w, i) => <WinRow key={i} w={w} />)}
             </div>
           </div>
+        )}
 
-          {/* Gauge bar */}
-          <div className="space-y-2">
-            <div className="h-4 bg-black/10 rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-1000"
-                style={{ width: `${total / 10}%`, background: `linear-gradient(90deg, #dc2626, #d97706, #16a34a)` }} />
-            </div>
-            <div className="flex justify-between text-xs text-gray-400 font-medium">
-              <span>0</span><span>250</span><span>500</span><span>750</span><span>1000</span>
-            </div>
-            <div className="flex gap-4 flex-wrap pt-1">
-              {BENCHMARKS.map(b => (
-                <div key={b.label} className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: b.color }} />
-                  <span className="text-xs text-gray-500">{b.label}: <strong>{b.score}</strong></span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* ── Score breakdown ── */}
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50">
-            <p className="text-xs font-black text-gray-700 uppercase tracking-wider">Score Breakdown</p>
-          </div>
+        {/* Dimensions */}
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 bg-gray-50"><p className="text-xs font-black text-gray-700 uppercase tracking-wider">How the score is made</p></div>
           <div className="divide-y divide-gray-50">
-            {dimensions.map(d => {
-              const pct = d.value; // 0–1
-              const dc = {
-                text: pct >= 0.85 ? "#15803d" : pct >= 0.70 ? "#16a34a" : pct >= 0.55 ? "#d97706" : pct >= 0.40 ? "#ea580c" : "#dc2626",
-                bg:   pct >= 0.85 ? "#f0fdf4" : pct >= 0.70 ? "#f0fdf4" : pct >= 0.55 ? "#fffbeb" : pct >= 0.40 ? "#fff7ed" : "#fff1f2",
-              };
-              return (
-                <div key={d.key} className="px-5 py-4 flex items-start gap-4">
-                  {/* Grade badge */}
-                  <div className="w-9 h-9 rounded-xl flex items-center justify-center font-black text-base shrink-0 mt-0.5"
-                    style={{ background: dc.bg, color: dc.text }}>
-                    {d.grade}
-                  </div>
-                  {/* Label + bar */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex justify-between mb-1.5">
-                      <span className="text-sm font-bold text-gray-900">{d.label}</span>
-                      <span className="text-xs font-bold tabular-nums" style={{ color: dc.text }}>
-                        +{d.score}
-                        <span className="font-normal text-gray-300"> / {Math.round(d.weight * 1000)} pts</span>
-                      </span>
-                    </div>
-                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full transition-all duration-700"
-                        style={{ width:`${d.value * 100}%`, background: dc.text }} />
-                    </div>
-                    <p className="text-xs text-gray-400 mt-1.5">{d.detail}</p>
-
-                    {/* Per-repo spread for consistency dimension */}
-                    {d.key === "consistency" && effectiveData.repos.length > 0 && (
-                      <div className="mt-3 space-y-1.5">
-                        {[...effectiveData.repos]
-                          .sort((a, b) => a.attestation_rate - b.attestation_rate)
-                          .map(r => {
-                            const name = r.repo.split("/").pop() ?? r.repo;
-                            const att  = r.attestation_rate;
-                            const rc = att >= 0.80 ? "#16a34a" : att >= 0.60 ? "#d97706" : "#dc2626";
-                            return (
-                              <div key={r.repo} className="flex items-center gap-2">
-                                <span className="text-xs text-gray-500 w-32 truncate shrink-0">{name}</span>
-                                <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                  <div className="h-full rounded-full transition-all duration-500"
-                                    style={{ width:`${att * 100}%`, background: rc }} />
-                                </div>
-                                <span className="text-xs font-bold w-9 text-right shrink-0" style={{ color: rc }}>
-                                  {Math.round(att * 100)}%
-                                </span>
-                                <span className="text-xs text-gray-400 w-20 shrink-0">
-                                  AI: {Math.round(r.ai_pct * 100)}%
-                                </span>
-                              </div>
-                            );
-                          })}
-                      </div>
-                    )}
-                  </div>
-                  {/* Weight */}
-                  <div className="text-xs text-gray-400 shrink-0 text-right w-12">
-                    {Math.round(d.weight * 100)}%<br/>
-                    <span className="text-gray-300">weight</span>
-                  </div>
-                </div>
-              );
-            })}
+            {score.dimensions.map(d => <DimensionRow key={d.key} d={d} open={openDim === d.key} onToggle={() => setOpenDim(openDim === d.key ? null : d.key)} />)}
           </div>
         </div>
 
-        {/* ── What your score means ── */}
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            { range:"850–1000", label:"Excellent",  bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0",
-              desc:"Audit-ready. Share with enterprise customers, insurers, and auditors as proof of AI governance maturity." },
-            { range:"600–849",  label:"Good",        bg:"#eff6ff", text:"#1d4ed8", border:"#bfdbfe",
-              desc:"Strong foundation. Address the lowest-scoring dimensions to reach excellence within 30 days." },
-            { range:"0–599",    label:"Needs Work",  bg:"#fff1f2", text:"#be123c", border:"#fecaca",
-              desc:"Governance gaps detected. Prioritise attestation coverage and critical risk resolution immediately." },
-          ].map(r => (
-            <div key={r.range} className="rounded-2xl p-5 border"
-              style={{ background: r.bg, borderColor: r.border }}>
-              <div className="text-lg font-black mb-1" style={{ color: r.text }}>{r.range}</div>
-              <div className="text-sm font-bold mb-2" style={{ color: r.text }}>{r.label}</div>
-              <p className="text-xs text-gray-600 leading-relaxed">{r.desc}</p>
+        {/* Repositories */}
+        {score.repos.length > 0 && (
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-100 bg-gray-50"><p className="text-xs font-black text-gray-700 uppercase tracking-wider">Repositories · weakest first</p></div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="text-left text-xs text-gray-500 border-b border-gray-100">
+                  <th className="px-5 py-2 font-semibold">Repository</th><th className="px-3 py-2 font-semibold text-right">Score</th>
+                  <th className="px-3 py-2 font-semibold text-right">Open critical</th><th className="px-3 py-2 font-semibold text-right">Open high</th>
+                  <th className="px-3 py-2 font-semibold text-right">Risky code reviewed</th><th className="px-3 py-2 font-semibold text-right">Secrets</th>
+                  <th className="px-5 py-2 font-semibold text-right">Last scan</th>
+                </tr></thead>
+                <tbody>
+                  {score.repos.map(r => {
+                    const c = scoreColor(r.score);
+                    return (
+                      <tr key={r.repo} className="border-b border-gray-50 last:border-0">
+                        <td className="px-5 py-2.5 font-mono text-xs text-gray-800">{r.repo}</td>
+                        <td className="px-3 py-2.5 text-right font-black tabular-nums" style={{ color: c.text }}>{r.score}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${r.open_critical ? "text-rose-600 font-bold" : "text-gray-400"}`}>{r.open_critical}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${r.open_high ? "text-amber-600 font-bold" : "text-gray-400"}`}>{r.open_high}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-gray-700">{r.review_coverage == null ? "—" : `${Math.round(r.review_coverage * 100)}%`}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${r.open_secrets ? "text-rose-600 font-bold" : "text-gray-400"}`}>{r.open_secrets}</td>
+                        <td className="px-5 py-2.5 text-right text-xs text-gray-500">{r.last_scan ? relativeTime(r.last_scan, tz) : "never"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-          ))}
-        </div>
-
-        {/* ── Use cases ── */}
-        <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-6 text-white">
-          <h3 className="font-black text-lg mb-4">Who accepts TrustScore™</h3>
-          <div className="grid grid-cols-2 gap-4">
-            {[
-              { icon:"🏦", title:"Cyber Insurance",  desc:"Show insurers your score to qualify for lower premiums on AI-related coverage" },
-              { icon:"📋", title:"SOC 2 Auditors",    desc:"Pre-populate evidence packages with your score and dimension breakdown" },
-              { icon:"🏢", title:"Enterprise Clients", desc:"Respond to vendor security assessments with a single shareable score" },
-              { icon:"📊", title:"Board Reports",      desc:"Give CISOs a clear number to present to the board every quarter" },
-            ].map(u => (
-              <div key={u.title} className="flex gap-3">
-                <span className="text-2xl shrink-0">{u.icon}</span>
-                <div>
-                  <div className="font-bold text-sm">{u.title}</div>
-                  <div className="text-xs text-indigo-200 mt-0.5">{u.desc}</div>
-                </div>
-              </div>
-            ))}
           </div>
-        </div>
+        )}
 
+        <div className="text-[11px] text-gray-400 space-y-1">
+          <p>The score looks at the last 90 days of scans. Scores are recorded daily, so the trend reflects real history.</p>
+          {!demo && <p>The signed report can be verified by anyone with your public key: <a className="underline" href="/.well-known/trustledger-export-signing-key">/.well-known/trustledger-export-signing-key</a>.</p>}
+          <p>Last updated {formatDateTime(score.computed_at, tz)}.</p>
+        </div>
       </div>
     </AuthGuard>
+  );
+}
+
+function WinRow({ w }: { w: ScoreAction & { dim: string } }) {
+  return (
+    <Link href={w.href} className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50/70">
+      <span className="w-14 shrink-0 text-right text-sm font-black text-green-700 tabular-nums">+{w.gain}</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-gray-900">{w.label}</p>
+        <p className="text-[11px] text-gray-400">{w.dim}</p>
+      </div>
+      <span className="text-gray-300 text-sm">→</span>
+    </Link>
+  );
+}
+
+function DimensionRow({ d, open, onToggle }: { d: Dimension; open: boolean; onToggle: () => void }) {
+  const c = d.value >= 0.85 ? "#15803d" : d.value >= 0.7 ? "#16a34a" : d.value >= 0.55 ? "#d97706" : d.value >= 0.4 ? "#ea580c" : "#dc2626";
+  return (
+    <div>
+      <button onClick={onToggle} className="w-full text-left px-5 py-4 flex items-start gap-4 hover:bg-gray-50/60">
+        <div className="w-9 h-9 rounded-xl flex items-center justify-center font-black shrink-0 bg-gray-50" style={{ color: c }}>{d.grade}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex justify-between gap-3 mb-1.5">
+            <span className="text-sm font-bold text-gray-900">{d.label}</span>
+            <span className="text-xs font-bold tabular-nums" style={{ color: c }}>{d.points}<span className="font-normal text-gray-400"> / {d.max_points}</span></span>
+          </div>
+          <div className="h-2 bg-gray-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${d.value * 100}%`, background: c }} /></div>
+          <p className="text-xs text-gray-500 mt-1.5">{d.facts.join(" · ")}</p>
+        </div>
+        <span className="text-xs text-gray-400 shrink-0 w-14 text-right">{Math.round(d.weight * 100)}% weight</span>
+      </button>
+      {open && (
+        <div className="px-5 pb-4 pl-[4.25rem] space-y-2">
+          <p className="text-xs text-gray-600"><span className="font-semibold text-gray-700">How it's calculated: </span>{d.formula}</p>
+          {d.actions.length > 0 ? (
+            <ul className="space-y-1">
+              {d.actions.map((a, i) => (
+                <li key={i}><Link href={a.href} className="text-xs text-indigo-700 hover:underline">{a.label}</Link> <span className="text-xs text-green-700 font-semibold">+{a.gain}</span></li>
+              ))}
+            </ul>
+          ) : <p className="text-xs text-green-700">Nothing to fix here.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Score history, drawn to scale: x = date, y = 0-1000. */
+function TrendChart({ history, tz, historyAvailable }: { history: HistoryPoint[]; tz: string; historyAvailable: boolean }) {
+  if (history.length < 2) {
+    return (
+      <div className="h-40 rounded-xl bg-white/60 border border-black/5 flex items-center justify-center text-center px-6">
+        <p className="text-xs text-gray-500">{historyAvailable ? "Your score is recorded every day. The trend appears here from tomorrow." : "Score history needs the 20261020_trust_score_history migration. The score itself is live."}</p>
+      </div>
+    );
+  }
+  const W = 560, H = 170, L = 36, R = 10, T = 10, B = 24;
+  const t0 = Date.parse(history[0].day), t1 = Date.parse(history[history.length - 1].day);
+  const x = (day: string) => L + (t1 === t0 ? 0 : (Date.parse(day) - t0) / (t1 - t0)) * (W - L - R);
+  const y = (v: number) => T + (1 - v / 1000) * (H - T - B);
+  const path = history.map((h, i) => `${i ? "L" : "M"}${x(h.day).toFixed(1)} ${y(h.total).toFixed(1)}`).join(" ");
+  const last = history[history.length - 1];
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img" aria-label="Trust Score over time">
+      {[0, 250, 500, 750, 1000].map(v => (
+        <g key={v}>
+          <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} stroke="currentColor" className="text-black/10" strokeWidth="1" />
+          <text x={L - 6} y={y(v) + 3} textAnchor="end" fontSize="10" className="fill-gray-400">{v}</text>
+        </g>
+      ))}
+      <path d={path} fill="none" stroke="#4f46e5" strokeWidth="2" strokeLinejoin="round" />
+      <circle cx={x(last.day)} cy={y(last.total)} r="3.5" fill="#4f46e5" />
+      <text x={L} y={H - 6} fontSize="10" className="fill-gray-400">{formatDateOnly(history[0].day, tz)}</text>
+      <text x={W - R} y={H - 6} fontSize="10" textAnchor="end" className="fill-gray-400">{formatDateOnly(last.day, tz)}</text>
+    </svg>
   );
 }
