@@ -277,9 +277,15 @@ describe("needs attention", () => {
     const region = screen.getByRole("region", { name: "Needs attention" });
     // Grouped into labelled columns, each with its own count, worst first.
     expect(within(region).getAllByRole("group").map(g => g.getAttribute("aria-label"))).toEqual(["Act now: 3", "Next up: 3", "Plan for: 2"]);
-    expect(within(within(region).getByRole("group", { name: "Act now: 3" })).getAllByRole("listitem")).toHaveLength(3);
     expect(region).toHaveTextContent("3 need action now");
-    expect(region).toHaveTextContent("8items");
+    // One row per item, worst first, each tagged with its group and a verb for what you'll do there.
+    const rows = within(region).getAllByRole("listitem");
+    expect(rows).toHaveLength(8);
+    expect(rows[0]).toHaveTextContent("Act now");
+    expect(rows[7]).toHaveTextContent("Plan for");
+    expect(within(rows[0]).getByRole("link", { name: /Fix now/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
+    expect(within(rows[1]).getByRole("link", { name: /Rotate/ })).toHaveAttribute("href", "/secrets");
+    expect(within(rows[3]).getByRole("link", { name: /Open/ })).toHaveAttribute("href", "#repositories");
     expect(within(region).getByRole("link", { name: /^pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
     expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/repo/acme/web");
     expect(within(region).getAllByRole("link", { name: "+1 more" }).map(a => a.getAttribute("href"))).toEqual(["#repositories", "#review-queue"]);

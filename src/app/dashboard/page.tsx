@@ -492,29 +492,27 @@ export default function DashboardPage() {
             {/* ── 3. Risk + review queue ── */}
             <section className="animate-fade-up space-y-4">
               <SectionHeading title="Risk & review" sub={`What was flagged ${periodLabel}, and what's waiting for a reviewer`} />
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-stretch">
-                <div className="xl:col-span-2 min-w-0"><RiskPanel data={effectiveData} periodLabel={periodLabel} /></div>
+              <div className="space-y-6">
+                <RiskPanel data={effectiveData} periodLabel={periodLabel} />
                 <ReviewQueue items={queue} />
               </div>
             </section>
 
             {/* ── 4. Governance ── */}
-            <section className="animate-fade-up space-y-4">
+            <section className="animate-fade-up space-y-6">
               <SectionHeading title="Governance" sub="AI tool usage, leaked credentials and audit evidence" />
-              <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${isDeveloperView ? "" : "xl:grid-cols-3"}`}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <ShadowAiPanel summary={seed ? "unavailable" : shadow} />
                 <SecretsPanel counts={secretCounts} />
-                {!isDeveloperView && <EvidencePanel overview={seed ? "unavailable" : evidence} />}
               </div>
+              {!isDeveloperView && <EvidencePanel overview={seed ? "unavailable" : evidence} />}
             </section>
 
             {/* ── 5. Repositories + activity ── */}
             <section className="animate-fade-up space-y-4">
               <SectionHeading title="Repositories & activity" sub="Where risk sits, and what changed recently" />
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
-                <div className="xl:col-span-2 min-w-0">
-                  <RepoTable rows={repoRows} onExport={permissions.canExportData ? exportCSV : undefined} />
-                </div>
+              <div className="space-y-6">
+                <RepoTable rows={repoRows} onExport={permissions.canExportData ? exportCSV : undefined} />
                 <ActivityList events={displayActivity} />
               </div>
             </section>

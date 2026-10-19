@@ -144,7 +144,7 @@ export function EvidencePanel({ overview }: { overview: Loadable<EvidenceOvervie
     <Panel title="Audit evidence" href="/compliance" cta="Compliance" label="Audit evidence">
       {overview === null || overview === "unavailable" ? <Pending state={overview} /> : (
         <>
-          <ul className="space-y-2.5">
+          <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {overview.frameworks.map(f => {
               const total = f.controls.length;
               return (
