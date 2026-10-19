@@ -67,7 +67,9 @@ export async function GET(req: NextRequest) {
   // which permanently defeats Supabase's server-side max_rows cap that silently
   // truncates org-wide queries regardless of the client's .limit() value.
   const scanIds = (scans ?? []).map(s => s.id);
-  const attestCounts   = new Map<string, number>();
+  // Attested files per scan as a SET of paths: a file can have more than one attestation row (two reviewers,
+  // or two clicks racing the check-then-insert), and must still count once.
+  const attestedFiles  = new Map<string, Set<string>>();
   const highCritCounts = new Map<string, number>();
 
   if (scanIds.length > 0) {
@@ -81,11 +83,13 @@ export async function GET(req: NextRequest) {
     const latestIds = [...new Set(latestPerPR.values())];
 
     const [attestRes, highCritRes] = await Promise.all([
-      db.from("attestations").select("scan_id").in("scan_id", latestIds),
+      db.from("attestations").select("scan_id, file_path").in("scan_id", latestIds),
       db.from("scan_files").select("scan_id").in("scan_id", latestIds).in("risk_score", ["CRITICAL", "HIGH"]),
     ]);
     (attestRes.data ?? []).forEach(a => {
-      attestCounts.set(a.scan_id, (attestCounts.get(a.scan_id) ?? 0) + 1);
+      const set = attestedFiles.get(a.scan_id) ?? new Set<string>();
+      set.add(a.file_path);
+      attestedFiles.set(a.scan_id, set);
     });
     (highCritRes.data ?? []).forEach(f => {
       highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
@@ -103,7 +107,8 @@ export async function GET(req: NextRequest) {
       total_ai_percentage: s.total_ai_percentage,
       file_count:          s.file_count,
       high_crit_count:     highCritCounts.get(s.id) ?? 0,
-      attested_count:      attestCounts.get(s.id) ?? 0,
+      attested_count:      attestedFiles.get(s.id)?.size ?? 0,
+      attested_files:      [...(attestedFiles.get(s.id) ?? [])],
       created_at:          s.created_at,
       triggered_by:        s.triggered_by ?? "api",
     })),

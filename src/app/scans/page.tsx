@@ -9,6 +9,7 @@ import PageSkeleton from "@/components/PageSkeleton";
 import RiskBadge from "@/components/RiskBadge";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { effectiveAttestedCount } from "@/lib/attestedCount";
 import type { RiskLevel } from "@/types";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
@@ -26,6 +27,8 @@ interface ScanSummary {
   file_count:          number;
   high_crit_count?:    number;
   attested_count:      number;
+  /** Distinct attested file paths (live data; absent for demo data) -- see lib/attestedCount.ts. */
+  attested_files?:     string[];
   created_at:          string;
   triggered_by:        string;
 }
@@ -237,20 +240,6 @@ function PrIcon() {
       <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 9v12"/><path d="M13 5a4 4 0 0 1 4 4v4a3 3 0 0 0 3 3"/>
     </svg>
   );
-}
-
-// ── Attestation patch helper ──────────────────────────────────────────────────
-// Count how many files for a given scan_id have been locally attested via
-// tl_violation_statuses (format: "{riskPrefix}::{scan_id}::{file_path}").
-function localAttestedCount(scanId: string, statuses: Record<string, string>): number {
-  return Object.entries(statuses).filter(([key, val]) => {
-    const parts = key.split("::");
-    return parts.length === 3 && parts[1] === scanId && (val === "resolved" || val === "in_review");
-  }).length;
-}
-
-function effectiveAttestedCount(s: ScanSummary, statuses: Record<string, string>): number {
-  return Math.min(s.file_count, s.attested_count + localAttestedCount(s.scan_id, statuses));
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
