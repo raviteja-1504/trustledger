@@ -2,7 +2,7 @@
  * Dashboard building blocks: each turns real data into what's shown, and says so when data is missing rather than
  * inventing it.
  */
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import TrustHero, { bandFor, scoreDelta, topActions } from "@/components/dashboard/TrustHero";
 import KpiStrip, { buildKpis, type KpiInput } from "@/components/dashboard/KpiStrip";
 import ReviewQueue, { buildQueue } from "@/components/dashboard/ReviewQueue";
@@ -99,6 +99,10 @@ describe("headline numbers", () => {
     render(<KpiStrip kpis={buildKpis(kpiBase)} />);
     expect(screen.getByRole("link", { name: /Open secrets/ })).toHaveAttribute("href", "/secrets");
     expect(screen.getByRole("link", { name: /Past fix deadline/ })).toHaveAttribute("href", "/sla");
+    // Review work stays on the dashboard: the queue and the repositories table, not the violations list.
+    expect(screen.getByRole("link", { name: /Unreviewed high-risk/ })).toHaveAttribute("href", "#review-queue");
+    expect(screen.getByRole("link", { name: /High-risk reviewed/ })).toHaveAttribute("href", "#review-queue");
+    expect(screen.getByRole("link", { name: /Repos awaiting sign-off/ })).toHaveAttribute("href", "#repositories");
   });
 });
 
@@ -131,7 +135,17 @@ describe("review queue", () => {
     render(<ReviewQueue items={buildQueue(data, now)} limit={2} />);
     expect(screen.getByRole("link", { name: /late\.ts/ })).toHaveAttribute("href", "/pr/s1?attest=src%2Flate.ts");
     expect(screen.getByText("2d overdue")).toBeInTheDocument();
-    expect(screen.getByText("+2 more in Violations")).toBeInTheDocument();
+    // "View all" expands the queue in place instead of leaving for the violations page.
+    expect(screen.queryByRole("link", { name: /View all/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /taken\.ts/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /high\.ts/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View all 4" }));
+    expect(screen.getByRole("link", { name: /high\.ts/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(screen.queryByRole("link", { name: /high\.ts/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "+2 more waiting" }));
+    expect(screen.getByRole("link", { name: /high\.ts/ })).toBeInTheDocument();
   });
 
   it("empty queue says so", () => {
@@ -261,18 +275,24 @@ describe("needs attention", () => {
 
     render(<NeedsAttention items={items} ready />);
     const region = screen.getByRole("region", { name: "Needs attention" });
-    expect(region).toHaveTextContent("3 critical");
-    expect(region).toHaveTextContent("3 high");
-    expect(region).toHaveTextContent("2 medium");
+    // Grouped into labelled columns, each with its own count, worst first.
+    expect(within(region).getAllByRole("group").map(g => g.getAttribute("aria-label"))).toEqual(["Act now: 3", "Next up: 3", "Plan for: 2"]);
+    expect(within(within(region).getByRole("group", { name: "Act now: 3" })).getAllByRole("listitem")).toHaveLength(3);
+    expect(region).toHaveTextContent("3 need action now");
+    expect(region).toHaveTextContent("8items");
     expect(within(region).getByRole("link", { name: /^pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
     expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/repo/acme/web");
     expect(within(region).getAllByRole("link", { name: "+1 more" }).map(a => a.getAttribute("href"))).toEqual(["#repositories", "#review-queue"]);
     expect(within(region).getByRole("link", { name: /critical secret exposed/ })).toHaveAttribute("href", "/secrets");
   });
 
-  it("a single pending repo opens that repo directly", () => {
-    const [item] = buildAttention({ ...none, awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "s1" }] });
-    expect(item).toMatchObject({ title: "repo pending sign-off", href: "/repo/acme/api" });
+  it("a single pending repo opens that repo directly; only groups with items are shown", () => {
+    const items = buildAttention({ ...none, awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "s1" }] });
+    expect(items[0]).toMatchObject({ title: "repo pending sign-off", href: "/repo/acme/api" });
+    render(<NeedsAttention items={items} ready />);
+    const region = screen.getByRole("region", { name: "Needs attention" });
+    expect(within(region).getAllByRole("group").map(g => g.getAttribute("aria-label"))).toEqual(["Next up: 1"]);
+    expect(region).toHaveTextContent("Nothing urgent, but reviewers are needed");
   });
 
   it("unknown sources add nothing; not ready shows a placeholder, not 'all clear'", () => {

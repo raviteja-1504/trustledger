@@ -3,7 +3,9 @@
 /**
  * The review queue: HIGH/CRITICAL files with no sign-off yet, worst first -- past-deadline files, then CRITICAL,
  * then the most AI-written. Each row opens the file on its PR page, where the reviewer reads the code before signing.
+ * "View all" expands the full queue here (the violations list is a different, broader view).
  */
+import { useState } from "react";
 import Link from "next/link";
 import type { DashboardData, TopRiskFile } from "@/types";
 
@@ -29,7 +31,9 @@ function overdueLabel(h: number) {
 }
 
 export default function ReviewQueue({ items, limit = 6 }: { items: readonly QueueItem[]; limit?: number }) {
-  const shown = items.slice(0, limit);
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? items : items.slice(0, limit);
+  const hidden = items.length - shown.length;
   return (
     <section id="review-queue" aria-label="Review queue" className="section-card flex flex-col h-full scroll-mt-6">
       <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
@@ -39,8 +43,11 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
             {items.length ? `${items.length} high-risk file${items.length === 1 ? "" : "s"} waiting for a reviewer` : "Nothing waiting for review"}
           </p>
         </div>
-        {items.length > 0 && (
-          <Link href="/violations" className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">View all →</Link>
+        {items.length > limit && (
+          <button onClick={() => setExpanded(e => !e)} aria-expanded={expanded}
+            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">
+            {expanded ? "Show less" : `View all ${items.length}`}
+          </button>
         )}
       </div>
       {shown.length === 0 ? (
@@ -78,8 +85,11 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
           })}
         </ul>
       )}
-      {items.length > limit && (
-        <p className="px-5 py-2.5 border-t border-gray-100 text-[11px] text-gray-400">+{items.length - limit} more in Violations</p>
+      {hidden > 0 && (
+        <button onClick={() => setExpanded(true)}
+          className="w-full px-5 py-2.5 border-t border-gray-100 text-[11px] font-semibold text-indigo-600 hover:bg-indigo-50/40 text-left">
+          +{hidden} more waiting
+        </button>
       )}
     </section>
   );

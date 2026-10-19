@@ -60,12 +60,12 @@ export function buildKpis(k: KpiInput): Kpi[] {
     {
       key: "unreviewed", label: "Unreviewed high-risk", value: String(k.unreviewedHighRisk),
       sub: k.unreviewedHighRisk ? `${k.unreviewedCritical} critical · need sign-off` : "Every HIGH/CRITICAL file signed off",
-      href: "/violations", tone: k.unreviewedCritical ? "bad" : k.unreviewedHighRisk ? "warn" : "good",
+      href: "#review-queue", tone: k.unreviewedCritical ? "bad" : k.unreviewedHighRisk ? "warn" : "good",
     },
     {
       key: "signoff", label: "Repos awaiting sign-off", value: String(k.awaitingSignoffRepos),
       sub: k.awaitingSignoffRepos ? "Merges held by the gate" : "No merges held",
-      href: "/violations", tone: k.awaitingSignoffRepos ? "warn" : "good",
+      href: "#repositories", tone: k.awaitingSignoffRepos ? "warn" : "good",
     },
     {
       key: "sla", label: "Past fix deadline", value: String(k.slaBreaches),
@@ -81,7 +81,7 @@ export function buildKpis(k: KpiInput): Kpi[] {
       key: "review", label: "High-risk reviewed",
       value: k.reviewCoverage == null ? "—" : `${Math.round(k.reviewCoverage * 100)}%`,
       sub: k.totalHighRiskFiles ? `${k.reviewedFiles ?? 0} of ${plural(k.totalHighRiskFiles, "file")}` : "No high-risk files in this period",
-      href: "/violations", progress: k.reviewCoverage ?? undefined,
+      href: "#review-queue", progress: k.reviewCoverage ?? undefined,
       tone: k.reviewCoverage == null || !k.totalHighRiskFiles ? "neutral" : k.reviewCoverage >= 0.9 ? "good" : k.reviewCoverage >= 0.5 ? "warn" : "bad",
     },
     {

@@ -117,13 +117,37 @@ export function buildAttention(a: AttentionInput): AttentionItem[] {
   return items;
 }
 
-const SEV: Record<AttentionSeverity, { label: string; accent: string; iconBg: string; icon: string; count: string; chip: string; pill: string }> = {
-  critical: { label: "Critical", accent: "from-rose-500 to-rose-400", iconBg: "bg-rose-50 ring-rose-100", icon: "text-rose-600", count: "text-rose-600",
-    chip: "bg-rose-50/60 ring-rose-100 text-rose-900 hover:bg-rose-50 hover:ring-rose-200", pill: "bg-rose-50 text-rose-700 ring-rose-200" },
-  high:     { label: "High", accent: "from-amber-500 to-amber-300", iconBg: "bg-amber-50 ring-amber-100", icon: "text-amber-600", count: "text-amber-600",
-    chip: "bg-amber-50/60 ring-amber-100 text-amber-900 hover:bg-amber-50 hover:ring-amber-200", pill: "bg-amber-50 text-amber-700 ring-amber-200" },
-  medium:   { label: "Medium", accent: "from-slate-400 to-slate-300", iconBg: "bg-slate-50 ring-slate-100", icon: "text-slate-500", count: "text-slate-700",
-    chip: "bg-slate-50 ring-slate-100 text-slate-800 hover:bg-slate-100 hover:ring-slate-200", pill: "bg-slate-50 text-slate-600 ring-slate-200" },
+/** The three groups the bar shows, in order. Item severity decides the group. */
+export const GROUPS: ReadonlyArray<{ severity: AttentionSeverity; label: string; hint: string }> = [
+  { severity: "critical", label: "Act now", hint: "Live risk: overdue, exposed or blocking merges" },
+  { severity: "high",     label: "Next up", hint: "Waiting on a reviewer or a decision" },
+  { severity: "medium",   label: "Plan for", hint: "Not blocking, but your auditor will see it" },
+];
+
+const SEV: Record<AttentionSeverity, {
+  column: string; head: string; badge: string; accent: string; icon: string; count: string; chip: string; footer: string;
+}> = {
+  critical: {
+    column: "bg-gradient-to-b from-rose-50 to-rose-50/30 ring-rose-100", head: "text-rose-800", badge: "bg-rose-600 text-white",
+    accent: "bg-rose-500", icon: "bg-rose-100 text-rose-600", count: "text-rose-600",
+    chip: "bg-rose-50 ring-rose-200/70 text-rose-900 hover:bg-rose-100", footer: "text-rose-700 hover:bg-rose-50",
+  },
+  high: {
+    column: "bg-gradient-to-b from-amber-50 to-amber-50/30 ring-amber-100", head: "text-amber-800", badge: "bg-amber-500 text-white",
+    accent: "bg-amber-400", icon: "bg-amber-100 text-amber-600", count: "text-amber-600",
+    chip: "bg-amber-50 ring-amber-200/70 text-amber-900 hover:bg-amber-100", footer: "text-amber-700 hover:bg-amber-50",
+  },
+  medium: {
+    column: "bg-gradient-to-b from-slate-50 to-slate-50/30 ring-slate-200/70", head: "text-slate-700", badge: "bg-slate-500 text-white",
+    accent: "bg-slate-400", icon: "bg-slate-100 text-slate-600", count: "text-slate-700",
+    chip: "bg-slate-50 ring-slate-200 text-slate-800 hover:bg-slate-100", footer: "text-slate-600 hover:bg-slate-50",
+  },
+};
+
+const BAND: Record<AttentionSeverity, string> = {
+  critical: "from-rose-600 via-rose-500 to-orange-400",
+  high: "from-amber-500 via-orange-400 to-amber-300",
+  medium: "from-slate-600 via-slate-500 to-slate-400",
 };
 
 function KindIcon({ kind }: { kind: AttentionKind }) {
@@ -138,79 +162,110 @@ function KindIcon({ kind }: { kind: AttentionKind }) {
   }
 }
 
+function ItemCard({ i }: { i: AttentionItem }) {
+  const s = SEV[i.severity];
+  return (
+    <li className="relative flex flex-col rounded-2xl bg-white shadow-[0_1px_3px_rgba(15,23,42,0.08)] ring-1 ring-black/[0.04] hover:shadow-md transition-shadow overflow-hidden">
+      <span className={`absolute inset-y-0 left-0 w-1 ${s.accent}`} aria-hidden="true" />
+      <div className="flex items-start gap-3 pl-4 pr-3.5 pt-3 pb-2.5">
+        <span className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${s.icon}`}><KindIcon kind={i.kind} /></span>
+        <div className="min-w-0 flex-1">
+          <Link href={i.href} className="block leading-tight hover:underline decoration-gray-300 underline-offset-2">
+            <span className={`text-xl font-black tabular-nums mr-1.5 ${s.count}`}>{i.count}</span>
+            <span className="text-sm font-bold text-gray-900">{i.title}</span>
+          </Link>
+          <p className="text-xs text-gray-500 mt-0.5">{i.detail}</p>
+        </div>
+      </div>
+      {i.links && i.links.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pl-4 pr-3.5 pb-2.5">
+          {i.links.map(l => (
+            <Link key={l.href + l.label} href={l.href}
+              className={`inline-flex items-center gap-1.5 max-w-full rounded-lg ring-1 px-2 py-1 text-[11px] font-semibold transition-colors ${s.chip}`}>
+              <span className="font-mono truncate max-w-[150px]">{l.label}</span>
+              {l.note && <span className="font-medium opacity-60 whitespace-nowrap">{l.note}</span>}
+            </Link>
+          ))}
+          {i.more ? <Link href={i.all?.href ?? i.href} className="text-[11px] font-semibold text-gray-500 hover:text-gray-800 self-center px-1">+{i.more} more</Link> : null}
+        </div>
+      )}
+      {i.all && (
+        <Link href={i.all.href} className={`mt-auto flex items-center justify-between pl-4 pr-3.5 py-1.5 border-t border-gray-100 text-[11px] font-semibold ${s.footer}`}>
+          {i.all.label}<span aria-hidden="true">→</span>
+        </Link>
+      )}
+    </li>
+  );
+}
+
+const COLS: Record<number, string> = { 1: "grid-cols-1", 2: "grid-cols-1 md:grid-cols-2", 3: "grid-cols-1 md:grid-cols-2 xl:grid-cols-3" };
+
 export default function NeedsAttention({ items, ready }: { items: readonly AttentionItem[]; ready: boolean }) {
-  if (!ready) return <div className="h-28 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading what needs attention" />;
+  if (!ready) return <div className="h-32 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading what needs attention" />;
   if (items.length === 0) {
     return (
-      <section aria-label="Needs attention" className="flex items-center gap-4 rounded-3xl bg-gradient-to-r from-emerald-50 to-teal-50 ring-1 ring-emerald-100 px-6 py-4">
-        <span className="w-10 h-10 rounded-2xl bg-white ring-1 ring-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 shadow-sm">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+      <section aria-label="Needs attention" className="relative overflow-hidden flex items-center gap-4 rounded-3xl bg-gradient-to-r from-emerald-500 to-teal-500 px-6 py-5 text-white shadow-sm">
+        <span className="w-11 h-11 rounded-2xl bg-white/20 ring-1 ring-white/30 flex items-center justify-center shrink-0">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
         </span>
         <div>
-          <p className="text-sm font-black text-emerald-900">All clear</p>
-          <p className="text-xs text-emerald-700">Nothing is overdue, awaiting attestation or exposed right now.</p>
+          <p className="text-base font-black">All clear</p>
+          <p className="text-sm text-white/85">Nothing is overdue, awaiting attestation or exposed right now.</p>
         </div>
       </section>
     );
   }
-  const counts = { critical: 0, high: 0, medium: 0 } as Record<AttentionSeverity, number>;
-  for (const i of items) counts[i.severity]++;
+  const groups = GROUPS.map(g => ({ ...g, items: items.filter(i => i.severity === g.severity) })).filter(g => g.items.length > 0);
+  const worst = groups[0].severity;
+  const urgent = groups.find(g => g.severity === "critical")?.items.length ?? 0;
+  const summary = urgent
+    ? `${urgent} ${urgent === 1 ? "needs" : "need"} action now`
+    : worst === "high" ? "Nothing urgent, but reviewers are needed" : "Nothing urgent or blocking";
+
   return (
-    <section aria-label="Needs attention" className="relative overflow-hidden rounded-3xl bg-white border border-gray-100 shadow-sm">
-      <div className={`h-1 bg-gradient-to-r ${counts.critical ? "from-rose-500 via-orange-400 to-amber-300" : "from-amber-400 to-amber-200"}`} aria-hidden="true" />
-      <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <div className="flex items-center gap-2.5">
-            <span className="relative flex w-2.5 h-2.5">
-              {counts.critical > 0 && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-60" />}
-              <span className={`relative inline-flex rounded-full w-2.5 h-2.5 ${counts.critical ? "bg-rose-500" : "bg-amber-500"}`} />
+    <section aria-label="Needs attention" className="relative overflow-hidden rounded-3xl bg-white shadow-[0_8px_30px_rgba(15,23,42,0.06)] ring-1 ring-gray-100">
+      <div className={`relative bg-gradient-to-r ${BAND[worst]} px-5 sm:px-6 py-4 text-white`}>
+        <div className="absolute inset-0 opacity-[0.12] pointer-events-none"
+          style={{ backgroundImage: "radial-gradient(circle at 1px 1px, #fff 1px, transparent 0)", backgroundSize: "16px 16px" }} aria-hidden="true" />
+        <div className="relative flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="relative w-10 h-10 rounded-2xl bg-white/20 ring-1 ring-white/30 flex items-center justify-center shrink-0">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+              </svg>
+              {urgent > 0 && <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-white animate-pulse" aria-hidden="true" />}
             </span>
-            <h2 className="text-base font-black text-gray-900 tracking-tight">Needs attention</h2>
+            <div className="min-w-0">
+              <h2 className="text-lg font-black tracking-tight leading-tight">Needs attention</h2>
+              <p className="text-sm text-white/85 truncate">{summary}</p>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5" aria-label="By severity">
-            {(["critical", "high", "medium"] as const).filter(s => counts[s] > 0).map(s => (
-              <span key={s} className={`text-[11px] font-bold px-2.5 py-1 rounded-full ring-1 ${SEV[s].pill}`}>{counts[s]} {SEV[s].label.toLowerCase()}</span>
-            ))}
+          <div className="text-right shrink-0">
+            <p className="text-3xl font-black tabular-nums leading-none">{items.length}</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-white/75 mt-1">{items.length === 1 ? "item" : "items"}</p>
           </div>
         </div>
-        <ul className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {items.map(i => {
-            const s = SEV[i.severity];
-            return (
-              <li key={i.key} className="group relative flex flex-col rounded-2xl bg-white ring-1 ring-gray-100 shadow-[0_1px_2px_rgba(15,23,42,0.04)] hover:shadow-md hover:ring-gray-200 transition-all overflow-hidden">
-                <span className={`absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${s.accent}`} aria-hidden="true" />
-                <div className="flex items-start gap-3 pl-5 pr-4 pt-3.5 pb-3">
-                  <span className={`w-9 h-9 rounded-xl ring-1 flex items-center justify-center shrink-0 ${s.iconBg} ${s.icon}`}><KindIcon kind={i.kind} /></span>
-                  <div className="min-w-0 flex-1">
-                    <Link href={i.href} className="block leading-tight hover:underline decoration-gray-300 underline-offset-2">
-                      <span className={`text-xl font-black tabular-nums mr-1.5 ${s.count}`}>{i.count}</span>
-                      <span className="text-sm font-bold text-gray-900">{i.title}</span>
-                    </Link>
-                    <p className="text-xs text-gray-500 mt-1">{i.detail}</p>
-                  </div>
+      </div>
+      <div className={`grid ${COLS[groups.length]} gap-4 p-4 sm:p-5`}>
+        {groups.map(g => {
+          const s = SEV[g.severity];
+          return (
+            <div key={g.severity} role="group" aria-label={`${g.label}: ${g.items.length}`} className={`rounded-2xl ring-1 p-3 ${s.column}`}>
+              <div className="flex items-center justify-between gap-2 px-1 pb-2.5">
+                <div className="min-w-0">
+                  <p className={`text-xs font-black uppercase tracking-wider ${s.head}`}>{g.label}</p>
+                  <p className="text-[11px] text-gray-500 truncate">{g.hint}</p>
                 </div>
-                {i.links && i.links.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 pl-5 pr-4 pb-3">
-                    {i.links.map(l => (
-                      <Link key={l.href + l.label} href={l.href}
-                        className={`inline-flex items-center gap-1.5 max-w-full rounded-lg ring-1 px-2 py-1 text-[11px] font-semibold transition-colors ${s.chip}`}>
-                        <span className="font-mono truncate max-w-[150px]">{l.label}</span>
-                        {l.note && <span className="font-medium opacity-60 whitespace-nowrap">{l.note}</span>}
-                      </Link>
-                    ))}
-                    {i.more ? <Link href={i.all?.href ?? i.href} className="text-[11px] font-semibold text-gray-500 hover:text-gray-800 self-center px-1">+{i.more} more</Link> : null}
-                  </div>
-                )}
-                {i.all && (
-                  <Link href={i.all.href} className="mt-auto flex items-center justify-between pl-5 pr-4 py-2 border-t border-gray-50 text-[11px] font-semibold text-indigo-600 hover:bg-indigo-50/40">
-                    {i.all.label}<span aria-hidden="true">→</span>
-                  </Link>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+                <span className={`min-w-[26px] h-[26px] px-2 rounded-full text-xs font-black flex items-center justify-center ${s.badge}`}>{g.items.length}</span>
+              </div>
+              <ul className="space-y-2.5">
+                {g.items.map(i => <ItemCard key={i.key} i={i} />)}
+              </ul>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 }
+
