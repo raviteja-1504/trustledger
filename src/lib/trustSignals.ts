@@ -1,63 +1,42 @@
 /**
- * Security posture domains: one card per governance area, each built from a real source and nothing else.
- * A source that hasn't loaded is "unknown" (never a default number). Pure, client-safe.
+ * Signals shown on the Trust Score page next to the score's own dimensions: dependencies, incidents and audit
+ * evidence. They aren't part of the 0-1000 number (that comes from lib/governanceScore.ts), but they are part of
+ * how trustworthy the code is, so they sit beside it. Each is built from its real source only; a source that
+ * hasn't loaded is "unknown" -- never a default number. Pure, client-safe.
+ *
+ * (These were the Security posture page's extra cards; that page otherwise repeated the Trust Score.)
  */
-import type { Dimension, GovernanceScore } from "./governanceScore";
 import type { EvidenceOverview } from "./evidenceEngine";
 
-export interface PostureSources {
-  score: GovernanceScore | null;
+export interface SignalSources {
   dependencies: { vulnerable: number; hallucinated: number; typosquatting: number; critical: number; exploits: number; license_issues: number } | null | "unavailable";
   incidents: ReadonlyArray<{ status: string; severity: string }> | null | "unavailable";
   evidence: EvidenceOverview | null | "unavailable";
 }
 
-export interface PostureDomain {
-  key: string;
+export interface TrustSignal {
+  key: "dependencies" | "incidents" | "evidence";
   name: string;
   /** Where the numbers come from, in a few words. */
   source: string;
   status: "good" | "warn" | "bad" | "unknown";
-  grade?: Dimension["grade"];
   headline: string;
   headlineLabel: string;
-  /** 0-1 bar, for score-style domains. */
+  /** 0-1 bar, when the signal is a proportion. */
   value: number | null;
   facts: string[];
   href: string;
   cta: string;
 }
 
-const DIM: Record<Dimension["key"], { name: string; href: string; cta: string }> = {
-  exposure:  { name: "Open risk",                   href: "/violations",  cta: "violations" },
-  review:    { name: "Review of risky code",         href: "/dashboard#review-queue", cta: "review queue" },
-  sla:       { name: "Fix deadlines",                href: "/sla",         cta: "SLA tracker" },
-  secrets:   { name: "Leaked secrets",               href: "/secrets",     cta: "secrets" },
-  shadow_ai: { name: "Approved AI tools",            href: "/shadow-ai",   cta: "Shadow AI" },
-  coverage:  { name: "Scan coverage",                href: "/scans",       cta: "scan history" },
-};
-
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-const fromGrade = (g: Dimension["grade"]): PostureDomain["status"] => g === "A" || g === "B" ? "good" : g === "C" ? "warn" : "bad";
 
-function unknown(key: string, name: string, source: string, href: string, cta: string, loading: boolean): PostureDomain {
+function unknown(key: TrustSignal["key"], name: string, source: string, href: string, cta: string, loading: boolean): TrustSignal {
   return { key, name, source, status: "unknown", headline: "—", headlineLabel: loading ? "Loading…" : "Couldn't load", value: null, facts: [], href, cta };
 }
 
-export function buildPostureDomains(s: PostureSources): PostureDomain[] {
-  const out: PostureDomain[] = [];
-
-  // The six Trust Score dimensions, as computed by the server.
-  const order: Dimension["key"][] = ["exposure", "review", "sla", "secrets", "shadow_ai", "coverage"];
-  for (const key of order) {
-    const meta = DIM[key];
-    const d = s.score?.dimensions.find(x => x.key === key);
-    if (!d) { out.push(unknown(key, meta.name, "Trust Score", meta.href, meta.cta, s.score == null)); continue; }
-    out.push({
-      key, name: meta.name, source: `Trust Score · ${d.points}/${d.max_points} pts`, status: fromGrade(d.grade), grade: d.grade,
-      headline: `${Math.round(d.value * 100)}%`, headlineLabel: d.label, value: d.value, facts: d.facts, href: meta.href, cta: meta.cta,
-    });
-  }
+export function buildTrustSignals(s: SignalSources): TrustSignal[] {
+  const out: TrustSignal[] = [];
 
   // Dependencies.
   if (s.dependencies == null || s.dependencies === "unavailable") {

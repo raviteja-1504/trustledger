@@ -122,7 +122,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
 
   // Build repo stats
   const repoMap = new Map<string, {
-    ai_sum: number; ai_count: number; scan_count: number;
+    ai_sum: number; ai_count: number; ai_weighted: number; ai_weight: number; scan_count: number;
     file_count: number; last_scan: string; latest_scan_id: string;
   }>();
 
@@ -133,11 +133,16 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
 
   scans.forEach(s => {
     const r = repoMap.get(s.repo_full_name) ?? {
-      ai_sum: 0, ai_count: 0, scan_count: 0, file_count: 0,
+      ai_sum: 0, ai_count: 0, ai_weighted: 0, ai_weight: 0, scan_count: 0, file_count: 0,
       last_scan: s.created_at, latest_scan_id: s.id,
     };
     r.ai_sum   += s.total_ai_percentage;
     r.ai_count += 1;
+    // Weighted by files analysed, the same way the org-wide figure is (overall_ai_pct below), so a repo's AI share
+    // and the org's agree -- a 2-file scan no longer counts as much as a 200-file one.
+    const w = Math.max(0, s.file_count ?? 0);
+    r.ai_weighted += s.total_ai_percentage * w;
+    r.ai_weight   += w;
     r.scan_count += 1;
     r.file_count += s.file_count;
     if (s.created_at > r.last_scan) { r.last_scan = s.created_at; r.latest_scan_id = s.id; }
@@ -175,7 +180,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     const attestRate  = highCrit === 0 ? 1 : attested / highCrit;
     return {
       repo,
-      ai_pct:           r.ai_count === 0 ? 0 : r.ai_sum / r.ai_count,
+      ai_pct:           r.ai_count === 0 ? 0 : r.ai_weight > 0 ? r.ai_weighted / r.ai_weight : r.ai_sum / r.ai_count,
       attestation_rate: attestRate,
       last_scan:        r.last_scan.split("T")[0],
       scan_count:       r.scan_count,
@@ -398,10 +403,15 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
 export async function fetchUnattestedRiskState(org_id: string) {
   const db = createServiceClient();
 
-  const { data: scansRaw } = await db
+  // Paged and ordered: unpaged, an org past 1000 scans got an arbitrary 1000 back, so a repo's "latest scan" could
+  // be an old one.
+  const scansRaw = await fetchAllRows<{ id: string; repo_full_name: string; created_at: string }>((from, to) => db
     .from("scans")
     .select("id, repo_full_name, created_at")
-    .eq("org_id", org_id);
+    .eq("org_id", org_id)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: { id: string; repo_full_name: string; created_at: string }[] | null }>);
 
   const { data: activeRepoRows } = await db
     .from("repositories")
@@ -439,13 +449,16 @@ export async function fetchUnattestedRiskState(org_id: string) {
     .in("scan_id", latestScanIdPerRepo)
     .in("risk_score", ["CRITICAL", "HIGH"]);
 
-  const { data: riskFiles } = await db
+  // Paged: past the 1000-row response cap, the files beyond it silently had no incident.
+  type StateFileRow = { scan_id: string; file_path: string; ai_percentage: number; risk_score: string; scans: { repo_full_name: string; pr_number: number } | null };
+  const riskFiles = await fetchAllRows<StateFileRow>((from, to) => db
     .from("scan_files")
     .select("scan_id, file_path, ai_percentage, risk_score, scans(repo_full_name, pr_number)")
     .eq("org_id", org_id)
     .in("risk_score", ["CRITICAL", "HIGH"])
     .in("scan_id", latestScanIdPerRepo)
-    .limit(1000) as { data: Array<{ scan_id: string; file_path: string; ai_percentage: number; risk_score: string; scans: { repo_full_name: string; pr_number: number } | null }> | null };
+    .order("file_path", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: StateFileRow[] | null }>);
 
   const scanToRepo = new Map(scans.map(s => [s.id, s.repo_full_name]));
   const attestedPerRepo = new Map<string, number>();

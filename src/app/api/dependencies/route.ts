@@ -27,6 +27,21 @@ import { fetchContentByHash } from "@/lib/contentByHash";
 
 interface DependencyResult { findings: DepFinding[]; manifestPackages: ManifestPackage[] }
 
+const PAGE = 1000;          // the project's PostgREST max_rows
+const MAX_ROWS = 50_000;
+const IN_CHUNK = 200;
+
+async function allRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; from < MAX_ROWS; from += PAGE) {
+    const { data, error } = await page(from, from + PAGE - 1);
+    if (error) throw error;
+    out.push(...(data ?? []));
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
+
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
   if (error) return NextResponse.json({ error }, { status: 401 });
@@ -57,24 +72,38 @@ async function computeFindings(orgId: string): Promise<DependencyResult> {
   // Latest scan per repo — same "group by repo, keep newest created_at"
   // approach api/dashboard/route.ts uses, kept independent of that route so
   // this endpoint doesn't pull in everything else it aggregates.
-  const { data: scans } = await db
+  // Both reads are paged: past the 1000-row response cap, a repository whose latest scan is older than the org's
+  // newest 1000 scans dropped out, and files beyond the first 1000 (manifests included) were silently skipped.
+  type ScanRow = { id: string; repo_full_name: string; pr_number: number; created_at: string };
+  const scans = await allRows<ScanRow>((from, to) => db
     .from("scans")
     .select("id, repo_full_name, pr_number, created_at")
     .eq("org_id", orgId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: ScanRow[] | null; error: unknown }>);
 
   const latestByRepo = new Map<string, { id: string; repo_full_name: string; pr_number: number }>();
-  for (const s of scans ?? []) {
+  for (const s of scans) {
     if (!latestByRepo.has(s.repo_full_name)) latestByRepo.set(s.repo_full_name, s);
   }
   const latestScans = Array.from(latestByRepo.values());
   if (latestScans.length === 0) return { findings: [], manifestPackages: [] };
 
   const scanIds = latestScans.map(s => s.id);
-  const { data: files } = await db
-    .from("scan_files")
-    .select("scan_id, file_path, content, content_hash, ai_percentage")
-    .in("scan_id", scanIds);
+  type FileRow = { scan_id: string; file_path: string; content: string | null; content_hash: string | null; ai_percentage: number };
+  const files: FileRow[] = [];
+  for (let i = 0; i < scanIds.length; i += IN_CHUNK) {
+    const chunk = scanIds.slice(i, i + IN_CHUNK);
+    files.push(...await allRows<FileRow>((from, to) => db
+      .from("scan_files")
+      .select("scan_id, file_path, content, content_hash, ai_percentage")
+      .eq("org_id", orgId)
+      .in("scan_id", chunk)
+      .order("scan_id", { ascending: true })
+      .order("file_path", { ascending: true })
+      .range(from, to) as unknown as PromiseLike<{ data: FileRow[] | null; error: unknown }>));
+  }
 
   // Files carried forward unchanged across an incremental scan don't store
   // their own copy of `content` (see api/scan-worker/route.ts) -- backfill

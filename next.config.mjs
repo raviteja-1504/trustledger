@@ -111,6 +111,13 @@ const nextConfig = {
     ],
   },
 
+  // ── Retired pages ──────────────────────────────────────────────────────────────
+  // Security posture repeated the Trust Score; its extra cards now live on the Trust Score page. Old links and
+  // bookmarks land there instead of on a 404.
+  async redirects() {
+    return [{ source: "/posture", destination: "/trust-score", permanent: true }];
+  },
+
   // ── Security headers (supplements middleware.ts) ─────────────────────────────
   async headers() {
     return [

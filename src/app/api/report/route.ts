@@ -168,8 +168,10 @@ export async function POST(req: NextRequest) {
     const { renderToBuffer } = await import("@react-pdf/renderer");
     const { createElement }  = await import("react");
     const { buildReportDocument } = await import("@/lib/reportPDF");
+    const { toRendererElements, loadRendererReact } = await import("@/lib/pdfElements");
 
-    const doc    = createElement(buildReportDocument, { data: reportData, signature });
+    // Rebuilt with the renderer's own React: the bundled one's elements are rejected by it (see lib/pdfElements.ts).
+    const doc    = toRendererElements(createElement(buildReportDocument, { data: reportData, signature }), loadRendererReact());
     const buffer = await renderToBuffer(doc as Parameters<typeof renderToBuffer>[0]);
 
     await writeAuditLog(db, {
@@ -205,12 +207,10 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (err) {
-    // Fallback: return JSON if PDF rendering failed. Logged (previously
-    // silent) because a silent catch here means the client still gets a
-    // 200 and force-downloads the JSON body as "*.pdf" -- a file that
-    // can't be opened, with no trace of why in the response.
+    // A failed render is an error response (it used to be a 200 carrying the whole report as JSON), logged so the
+    // cause is visible -- the page shows "couldn't render" for it.
     logger.error("Report PDF render failed", { org_id, framework: body.framework, detail: err instanceof Error ? err.message : String(err) });
     reportServerError(err, { code: "report_render_failed", framework: body.framework });
-    return NextResponse.json({ ...reportData, signature, pdf_render_failed: true });
+    return NextResponse.json({ error: "report_render_failed", pdf_render_failed: true }, { status: 500 });
   }
 }

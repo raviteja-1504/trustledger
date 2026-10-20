@@ -340,9 +340,8 @@ function BellNavIcon() {
 const PAGE_TITLES: Record<string, { title: string; sub: string; icon: ReactNode }> = {
   "/dashboard":            { title: "Overview",                sub: "AI code provenance metrics",                  icon: <GridIcon />       },
   "/analytics":            { title: "Analytics",               sub: "Trends, velocity and team performance",        icon: <GridIcon />       },
-  "/threat-intel":         { title: "Threat Intelligence",     sub: "AI-specific CVEs and emerging patterns",       icon: <WarnIcon />       },
+  "/threat-intel":         { title: "Threat Intelligence",     sub: "Known vulnerabilities in your dependencies",   icon: <WarnIcon />       },
   "/incidents":            { title: "Incident Response",       sub: "Structured IR playbooks and timeline",         icon: <BlockIcon />      },
-  "/posture":              { title: "Security Posture",        sub: "Real-time security health score and trend",    icon: <GridIcon />       },
   "/compliance":           { title: "Compliance Evidence",     sub: "SOC 2 · ISO 27001 · PCI DSS · AI governance",                 icon: <ShieldCheckIcon />},
   "/compliance-calendar":  { title: "Compliance Calendar",     sub: "Audit deadlines and review schedule",          icon: <ListIcon />       },
   "/sla":                  { title: "SLA Dashboard",           sub: "Violation SLA tracking and breach alerts",     icon: <WarnIcon />       },

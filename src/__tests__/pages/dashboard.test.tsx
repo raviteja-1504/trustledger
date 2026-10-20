@@ -146,6 +146,17 @@ describe("Dashboard page", () => {
     expect(within(attention).getAllByRole("link", { name: /auth\.ts/ })[0]).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
   });
 
+  // The server's unattested_deploy_count is a FILE count; dashboardLiveState replaces it with the repo count.
+  it("'Repos awaiting sign-off' counts repos with a file still waiting, not files", async () => {
+    const before = dashboard.unattested_deploy_count;
+    dashboard.unattested_deploy_count = 5;                 // a FILE count from the server
+    try {
+      render(<DashboardPage />);
+      const tile = await screen.findByRole("link", { name: /Repos awaiting sign-off/ });
+      expect(tile).toHaveTextContent(/^\D*1\D/);           // only acme/api has an unsigned HIGH/CRITICAL file
+    } finally { dashboard.unattested_deploy_count = before; }
+  });
+
   it("a failing source only blanks its own panel", async () => {
     fail = new Set(["/api/trust-score", "/api/shadow-ai"]);
     render(<DashboardPage />);

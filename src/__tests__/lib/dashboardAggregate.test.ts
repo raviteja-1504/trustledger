@@ -8,7 +8,7 @@ import { fakeSupabase } from "../helpers/fakeSupabase";
 let db: ReturnType<typeof fakeSupabase>;
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
 
-import { fetchDashboard } from "@/lib/dashboardAggregate";
+import { fetchDashboard, fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
 
 const ORG = "org-1";
 const daysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString();
@@ -77,6 +77,14 @@ it("AI share is per file: each scan weighted by the files it analysed", async ()
   expect(d.file_count).toBe(202);
 });
 
+it("a repo's AI share is weighted by files the same way, so repo and org figures agree", async () => {
+  seed({ scans: [scan("a1", "o/api", 20, 0.9, 30), scan("a2", "o/api", 2, 0.1, 10), scan("w0", "o/web", 3, 0.5, 0)] });
+  const d = await fetchDashboard(ORG, 90, null);
+  expect(d.repos.find(r => r.repo === "o/api")!.ai_pct).toBeCloseTo((0.9 * 30 + 0.1 * 10) / 40, 6);   // 0.7, not the mean 0.5
+  expect(d.repos.find(r => r.repo === "o/web")!.ai_pct).toBeCloseTo(0.5, 6);                           // no file counts: plain mean
+  expect(d.overall_ai_pct).toBeCloseTo((0.9 * 30 + 0.1 * 10) / 40, 6);
+});
+
 it("reports every connected repo, scanned in the period or not (for coverage)", async () => {
   seed();
   const d = await fetchDashboard(ORG, 90, null);
@@ -111,4 +119,14 @@ it("reads past the 1000-row cap instead of silently truncating", async () => {
   expect(d.file_count).toBe(2300);
   expect(d.total_high_crit).toBe(1500);
   expect(d.top_risk_files).toHaveLength(1500);
+});
+
+it("incident state reads past the 1000-row cap too: the real latest scan, and every risky file in it", async () => {
+  // The latest scan is inserted LAST, behind 2299 older ones: an unpaged read stops at 1000 rows and misses it.
+  const scans = [...Array.from({ length: 2299 }, (_, i) => scan(`s${i}`, "o/api", (i % 80) + 1, 0.5, 1)), scan("latest", "o/api", 0.1, 0.5, 1)];
+  const files = Array.from({ length: 1500 }, (_, i) => riskFile("latest", "o/api", `f${i}.ts`, "HIGH"));
+  seed({ scans, scan_files: files, attestations: [], violations: [] }, { maxRows: 1000 });
+  const s = await fetchUnattestedRiskState(ORG);
+  expect(new Set(s.top_risk_files.map(f => f.scan_id))).toEqual(new Set(["latest"]));
+  expect(s.top_risk_files).toHaveLength(1500);
 });

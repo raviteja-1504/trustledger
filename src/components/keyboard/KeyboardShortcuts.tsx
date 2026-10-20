@@ -73,7 +73,7 @@ export function useKeyboardShortcuts() {
       const nav: Record<string, string> = {
         d: "/dashboard", v: "/violations", a: "/alerts",
         i: "/incidents", r: "/reports",    s: "/settings",
-        c: "/compliance",p: "/posture",    l: "/audit",
+        c: "/compliance",t: "/trust-score",l: "/audit",
         k: "/risks",     b: "/billing",
       };
       if (e.key in nav) {

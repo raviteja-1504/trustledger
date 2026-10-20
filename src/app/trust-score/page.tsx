@@ -4,9 +4,12 @@
  * Trust Score: how well this organisation governs its code, 0-1000, computed on the server from real data
  * (lib/governanceScore.ts), saved daily so the trend is real, and explained point by point: every dimension shows
  * its formula, the facts behind it, and what to fix to win points back. Using AI never lowers the score.
+ *
+ * Beside the score: dependencies, incidents and audit evidence (lib/trustSignals.ts), each from its own source.
+ * Everything refreshes after a sign-off, on focus and every minute.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import PageSkeleton from "@/components/PageSkeleton";
@@ -14,6 +17,16 @@ import { authedFetch, isSeedMode, getAuthHeader } from "@/lib/useRealData";
 import { formatDateOnly, formatDateTime, relativeTime, useTimezone } from "@/lib/timezone";
 import { scoreColor } from "@/lib/trustScore";
 import { computeGovernanceScore, type GovernanceScore, type Dimension, type ScoreAction } from "@/lib/governanceScore";
+import { buildTrustSignals, type SignalSources, type TrustSignal } from "@/lib/trustSignals";
+import type { EvidenceOverview } from "@/lib/evidenceEngine";
+
+const POLL_MS = 60_000;
+const TONE: Record<TrustSignal["status"], { label: string; dot: string; chip: string; bar: string }> = {
+  good:    { label: "Good",       dot: "bg-emerald-500", chip: "text-emerald-700 bg-emerald-50 ring-emerald-100", bar: "bg-emerald-500" },
+  warn:    { label: "Needs work", dot: "bg-amber-400",   chip: "text-amber-700 bg-amber-50 ring-amber-100",       bar: "bg-amber-400" },
+  bad:     { label: "At risk",    dot: "bg-rose-500",    chip: "text-rose-700 bg-rose-50 ring-rose-100",          bar: "bg-rose-500" },
+  unknown: { label: "No data",    dot: "bg-gray-300",    chip: "text-gray-500 bg-gray-50 ring-gray-100",          bar: "bg-gray-300" },
+};
 
 interface HistoryPoint { day: string; total: number; dimensions: Record<string, number> }
 interface ScoreResponse { score: GovernanceScore; history: HistoryPoint[]; history_available: boolean }
@@ -69,11 +82,39 @@ export default function TrustScorePage() {
   const [error, setError] = useState<string | null>(null);
   const [openDim, setOpenDim] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [signalSrc, setSignalSrc] = useState<SignalSources>({ dependencies: null, incidents: null, evidence: null });
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (demo) { setData(demoResponse()); return; }
-    authedFetch<ScoreResponse>("/api/trust-score?history=90").then(setData).catch(e => setError((e as Error).message || "We couldn't compute the Trust Score."));
+    const settle = <T,>(p: Promise<T>) => p.then(v => v, () => "unavailable" as const);
+    const [, deps, inc, ev] = await Promise.all([
+      authedFetch<ScoreResponse>("/api/trust-score?history=90").then(d => { setData(d); setError(null); }, e => setError((e as Error).message || "We couldn't compute the Trust Score.")),
+      settle(authedFetch<{ counts: NonNullable<Exclude<SignalSources["dependencies"], "unavailable">> }>("/api/dependencies")),
+      settle(authedFetch<{ incidents: Array<{ status: string; severity: string }> }>("/api/incidents?status=active")),
+      settle(authedFetch<EvidenceOverview>("/api/evidence/collect?overview=1")),
+    ]);
+    setSignalSrc({
+      dependencies: deps === "unavailable" || !deps?.counts ? "unavailable" : deps.counts,
+      incidents: inc === "unavailable" ? "unavailable" : inc.incidents ?? [],
+      evidence: ev === "unavailable" || !Array.isArray(ev?.frameworks) ? "unavailable" : ev,
+    });
   }, [demo]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (demo) return;
+    const tick = () => { if (!document.hidden) load(); };
+    const id = setInterval(tick, POLL_MS);
+    window.addEventListener("tl:attestation", tick);
+    window.addEventListener("tl:attest-complete", tick);
+    window.addEventListener("focus", tick);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("tl:attestation", tick); window.removeEventListener("tl:attest-complete", tick); window.removeEventListener("focus", tick);
+    };
+  }, [demo, load]);
+
+  const signals = useMemo(() => buildTrustSignals(signalSrc), [signalSrc]);
 
   const score = data?.score;
   const history = useMemo(() => data?.history ?? [], [data]);
@@ -166,6 +207,19 @@ export default function TrustScorePage() {
           </div>
         </div>
 
+        {/* Beside the score */}
+        {!demo && (
+          <section aria-label="Beside the score" className="space-y-3">
+            <div className="px-1">
+              <h2 className="text-xs font-black text-gray-700 uppercase tracking-wider">Beside the score</h2>
+              <p className="text-[11px] text-gray-400 mt-0.5">Not counted in the 0–1000, but part of how far your code can be trusted</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {signals.map(s => <SignalCard key={s.key} s={s} />)}
+            </div>
+          </section>
+        )}
+
         {/* Repositories */}
         {score.repos.length > 0 && (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -206,6 +260,33 @@ export default function TrustScorePage() {
         </div>
       </div>
     </AuthGuard>
+  );
+}
+
+function SignalCard({ s }: { s: TrustSignal }) {
+  const t = TONE[s.status];
+  return (
+    <Link href={s.href} aria-label={s.name}
+      className="group bg-white rounded-2xl border border-gray-200 p-5 hover:shadow-md hover:-translate-y-0.5 transition-all flex flex-col">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-gray-900">{s.name}</p>
+          <p className="text-xs text-gray-500 mt-0.5">{s.source}</p>
+        </div>
+        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ring-1 whitespace-nowrap ${t.chip}`}>{t.label}</span>
+      </div>
+      <p className="mt-4 text-3xl font-black tabular-nums text-gray-900 leading-none">{s.headline}</p>
+      <p className="text-xs text-gray-500 mt-1">{s.headlineLabel}</p>
+      {s.value != null && (
+        <div className="mt-3 h-1.5 rounded-full bg-gray-100 overflow-hidden"><div className={`h-full rounded-full ${t.bar}`} style={{ width: `${Math.round(s.value * 100)}%` }} /></div>
+      )}
+      {s.facts.length > 0 && (
+        <ul className="mt-4 space-y-1.5">
+          {s.facts.slice(0, 3).map(f => <li key={f} className="text-xs text-gray-600 leading-snug flex gap-2"><span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${t.dot}`} />{f}</li>)}
+        </ul>
+      )}
+      <p className="mt-auto pt-4 text-xs font-semibold text-indigo-600 group-hover:text-indigo-800">Open {s.cta} →</p>
+    </Link>
   );
 }
 

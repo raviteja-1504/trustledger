@@ -189,7 +189,7 @@ const ALL_LINKS: Array<{
   // Overview
   { href: "/dashboard",       label: "Overview",        icon: OverviewIcon,    permission: null                         },
   { href: "/analytics",       label: "Analytics",       icon: AnalyticsIcon,   permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/posture",         label: "Security Posture",icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   // Threats
   { href: "/violations",      label: "Violations",      icon: ViolationsIcon,  permission: null                         },
   { href: "/alerts",          label: "Alerts",          icon: BellAlertIcon,   permission: null,  roles: ["admin","security_reviewer"] },
@@ -210,7 +210,6 @@ const ALL_LINKS: Array<{
   { href: "/reports",         label: "Reports",         icon: ReportsIcon,     permission: null                         },
   { href: "/rules",           label: "Rule Catalog",    icon: ReportsIcon,     permission: null                         },
   // AI Intel
-  { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/shadow-ai",       label: "Shadow AI",       icon: VulnIcon,        permission: "canManageSettings" as const },
   // Config
   { href: "/settings/team",   label: "Team",            icon: OverviewIcon,    permission: null                         },
@@ -508,12 +507,12 @@ export default function Sidebar() {
       <nav className={clsx("flex-1 py-3 overflow-y-auto overflow-x-hidden min-h-0", collapsed ? "px-1.5" : "px-3")}
         style={{ scrollbarWidth:"thin", scrollbarColor:"rgba(99,102,241,0.3) transparent" }}>
         {[
-          { label:"Overview",    hrefs:["/dashboard","/analytics","/posture"] },
+          { label:"Overview",    hrefs:["/dashboard","/analytics","/trust-score"] },
           { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
           { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/api-security"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
           { label:"Audit",       hrefs:["/audit","/reports","/rules"] },
-          { label:"AI Intel",    hrefs:["/trust-score","/shadow-ai"] },
+          { label:"AI Intel",    hrefs:["/shadow-ai"] },
           { label:"Config",      hrefs:["/settings/team","/orgs","/profile","/notifications","/settings","/billing"] },
         ].map(group => {
           const groupLinks = visibleLinks.filter(l => group.hrefs.includes(l.href));

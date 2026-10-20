@@ -2,7 +2,7 @@
  * Threat intel (lib/threatIntel.ts): advisories from real dependency findings, one per advisory + package version
  * with every repo that uses it; exploitable + reachable first.
  */
-import { buildAdvisories, type AdvisoryFinding } from "@/lib/threatIntel";
+import { buildAdvisories, filterFindings, filterOptions, type AdvisoryFinding } from "@/lib/threatIntel";
 
 const f = (o: Partial<AdvisoryFinding>): AdvisoryFinding => ({
   id: Math.random().toString(36).slice(2), package_name: "lodash", version_used: "4.17.15", ecosystem: "npm", risk: "HIGH", type: "vulnerable",
@@ -49,5 +49,13 @@ describe("buildAdvisories", () => {
     ]);
     expect(advisories).toHaveLength(0);
     expect(supplyChain.map(s => s.package_name)).toEqual(["react-utils-pro", "lodahs"]);
+  });
+
+  it("filter menus list each repository / ecosystem once, sorted; filtering keeps only the chosen ones", () => {
+    const all = [f({ repo: "zeta/svc", ecosystem: "python" }), f({ repo: "acme/web" }), f({ repo: "acme/api" }), f({ repo: "acme/web", ecosystem: "python" })];
+    expect(filterOptions(all)).toEqual({ repos: ["acme/api", "acme/web", "zeta/svc"], ecosystems: ["npm", "python"] });
+    expect(filterFindings(all, { repo: "acme/web", ecosystem: "all" }).map(x => x.ecosystem)).toEqual(["npm", "python"]);
+    expect(filterFindings(all, { repo: "acme/web", ecosystem: "python" })).toHaveLength(1);
+    expect(filterFindings(all, { repo: "all", ecosystem: "all" })).toHaveLength(4);
   });
 });

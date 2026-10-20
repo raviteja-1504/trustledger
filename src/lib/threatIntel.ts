@@ -31,6 +31,27 @@ const RISK_ORDER: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LO
 const REACHABLE = new Set(["called", "reachable"]);
 const NOT_REACHABLE = new Set(["not-called", "test-only", "not-imported"]);
 
+export interface ThreatFilters {
+  repo: string;        // "all" or "owner/name"
+  ecosystem: string;   // "all" or e.g. "npm"
+  severity: string;    // "all" or CRITICAL / HIGH / MEDIUM / LOW
+}
+export const NO_FILTERS: ThreatFilters = { repo: "all", ecosystem: "all", severity: "all" };
+
+/** The repositories and ecosystems present, for the filter menus (sorted). */
+export function filterOptions(findings: readonly AdvisoryFinding[]): { repos: string[]; ecosystems: string[] } {
+  return {
+    repos: [...new Set(findings.map(f => f.repo).filter(Boolean))].sort(),
+    ecosystems: [...new Set(findings.map(f => f.ecosystem).filter(Boolean))].sort(),
+  };
+}
+
+/** Findings narrowed to one repository and/or ecosystem -- applied BEFORE grouping, so the stats, the reachability
+ *  verdict and the supply-chain list describe that repository alone, not every repository that shares a package. */
+export function filterFindings(findings: readonly AdvisoryFinding[], f: Pick<ThreatFilters, "repo" | "ecosystem">): AdvisoryFinding[] {
+  return findings.filter(x => (f.repo === "all" || x.repo === f.repo) && (f.ecosystem === "all" || x.ecosystem === f.ecosystem));
+}
+
 export function buildAdvisories(findings: readonly AdvisoryFinding[]): {
   advisories: Advisory[];
   supplyChain: AdvisoryFinding[];

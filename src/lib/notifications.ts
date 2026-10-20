@@ -149,7 +149,7 @@ function stateNotifications(data: DashboardData): Notification[] {
       id: `ai-threshold-${today}`, level: "warning", read: false, time: now - 15000,
       title: `${highAiRepos.length} repo${highAiRepos.length > 1 ? "s" : ""} exceed AI content threshold`,
       body: highAiRepos.map(r => `${r.repo.split("/").pop()} (${(r.ai_pct * 100).toFixed(0)}%)`).join(", "),
-      href: "/posture",
+      href: "/analytics",
     });
   }
 
@@ -160,7 +160,7 @@ function stateNotifications(data: DashboardData): Notification[] {
       id: `low-attest-${today}`, level: "high", read: false, time: now - 20000,
       title: `${lowAttest.length} repo${lowAttest.length > 1 ? "s" : ""} below 60% attestation`,
       body: lowAttest.map(r => `${r.repo.split("/").pop()} ${Math.round(r.attestation_rate * 100)}%`).join(", "),
-      href: "/posture",
+      href: "/trust-score",
     });
   }
 

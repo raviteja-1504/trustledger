@@ -61,7 +61,6 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_configs", op: "select", keys: ["enabled","last_delivery_status","last_delivery_at"], why: "system-job" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_configs", op: "update", keys: ["id"], why: "system-job" },
   { file: "src/app/api/dashboard/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
-  { file: "src/app/api/dependencies/route.ts", table: "scan_files", op: "select", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/export/sarif/route.ts", table: "scan_files", op: "select", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/github-app/comment/route.ts", table: "scan_files", op: "select", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/github-app/comment/route.ts", table: "attestations", op: "select", keys: ["scan_id"], why: "parent-verified" },

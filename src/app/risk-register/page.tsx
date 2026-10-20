@@ -15,61 +15,18 @@ import { useToastHelpers } from "@/lib/toast";
 import type { DashboardData, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { loadStatuses } from "@/lib/violationStatuses";
-import { cweFor } from "@/lib/cweMap";
+import {
+  deriveRisks, mergeRisks, rowsToStore,
+  type ManualRisk, type PersistedRisk, type PersistStore, type RiskCategory, type RiskItem, type RiskRow, type RiskStatus, type TreatmentType,
+} from "@/lib/riskRegister";
 
 const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
 
-// ── Types ──────────────────────────────────────────────────────────────────────
+// Types, derivation and the merge of derived risks with recorded decisions: lib/riskRegister.ts.
 
-type RiskStatus    = "open" | "mitigating" | "accepted" | "closed";
-type RiskCategory  = "ai-code" | "supply-chain" | "secrets" | "compliance" | "access" | "infrastructure";
-type TreatmentType = "mitigate" | "accept" | "transfer" | "avoid";
-
-interface RiskItem {
-  id: string;
-  title: string;
-  description: string;
-  category: RiskCategory;
-  likelihood: 1|2|3|4|5;
-  impact:     1|2|3|4|5;
-  residual_likelihood?: 1|2|3|4|5;
-  residual_impact?:     1|2|3|4|5;
-  status: RiskStatus;
-  treatment: TreatmentType;
-  owner: string;
-  due_date?: string;
-  mitigation: string;
-  related_cve?: string;      // free-text, manually-entered risks only -- never auto-derived (see related_cwe)
-  related_cwe?: string;      // e.g. "CWE-89 — SQL Injection", derived from the real matched indicator
-  related_link?: string;
-  identified_at: string;
-  auto_derived: boolean;     // derived from scan data vs manually entered
-  notes: string[];
-  repo?: string;
-}
-
-// ── Persistence ────────────────────────────────────────────────────────────────
+// ── Persistence (demo mode only; real orgs use /api/risk-register/state) ──────
 
 const RISK_KEY = "tl_risk_register";
-
-interface PersistedRisk {
-  status?:       RiskStatus;
-  treatment?:    TreatmentType;
-  owner?:        string;
-  due_date?:     string;
-  mitigation?:   string;
-  residual_likelihood?: 1|2|3|4|5;
-  residual_impact?:     1|2|3|4|5;
-  notes?:        string[];
-  closed_at?:    string;
-}
-
-interface ManualRisk extends RiskItem { _manual: true }
-
-interface PersistStore {
-  overrides: Record<string, PersistedRisk>;
-  manuals:   ManualRisk[];
-}
 
 // Real, server-backed via /api/risk-register/state (and synced from live
 // derivation via /api/risk-register/sync) -- was previously localStorage-
@@ -87,226 +44,6 @@ function loadSeedStore(): PersistStore {
   } catch { return { overrides:{}, manuals:[] }; }
 }
 function saveSeedStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.stringify(s)); }
-
-interface RiskRow {
-  external_id:         string | null;
-  auto_derived:        boolean;
-  title:               string;
-  description:         string | null;
-  category:            string;
-  likelihood:          number;
-  impact:              number;
-  residual_likelihood: number | null;
-  residual_impact:     number | null;
-  status:              string;
-  treatment:           string;
-  owner_email:         string | null;
-  due_date:            string | null;
-  mitigation:          string | null;
-  related_cve:         string | null;
-  related_cwe:         string | null;
-  related_link:        string | null;
-  repo:                string | null;
-  notes:               string[];
-  created_at:          string;
-}
-
-function rowsToStore(rows: RiskRow[]): PersistStore {
-  const overrides: Record<string, PersistedRisk> = {};
-  const manuals: ManualRisk[] = [];
-  for (const r of rows) {
-    if (!r.external_id) continue;
-    if (r.auto_derived) {
-      overrides[r.external_id] = {
-        status:               r.status as RiskStatus,
-        treatment:            r.treatment as TreatmentType,
-        owner:                r.owner_email ?? undefined,
-        due_date:             r.due_date ?? undefined,
-        mitigation:           r.mitigation ?? undefined,
-        residual_likelihood:  (r.residual_likelihood ?? undefined) as 1|2|3|4|5|undefined,
-        residual_impact:      (r.residual_impact ?? undefined) as 1|2|3|4|5|undefined,
-        notes:                r.notes ?? [],
-      };
-    } else {
-      manuals.push({
-        _manual: true,
-        id:            r.external_id,
-        auto_derived:  false,
-        title:         r.title,
-        description:   r.description ?? "",
-        category:      r.category as RiskCategory,
-        likelihood:    r.likelihood as 1|2|3|4|5,
-        impact:        r.impact as 1|2|3|4|5,
-        status:        r.status as RiskStatus,
-        treatment:     r.treatment as TreatmentType,
-        owner:         r.owner_email ?? "",
-        due_date:      r.due_date ?? undefined,
-        mitigation:    r.mitigation ?? "",
-        related_cve:   r.related_cve ?? undefined,
-        related_cwe:   r.related_cwe ?? undefined,
-        related_link:  r.related_link ?? undefined,
-        identified_at: r.created_at.split("T")[0],
-        notes:         r.notes ?? [],
-        repo:          r.repo ?? undefined,
-      });
-    }
-  }
-  return { overrides, manuals };
-}
-
-// ── Derive risks from scan data ────────────────────────────────────────────────
-
-function groupByRepo<T>(items: T[], repoOf: (t: T) => string): Map<string, T[]> {
-  const m = new Map<string, T[]>();
-  for (const item of items) {
-    const repo = repoOf(item);
-    const arr = m.get(repo) ?? [];
-    arr.push(item);
-    m.set(repo, arr);
-  }
-  return m;
-}
-
-// "CWE-89 — SQL Injection" or undefined if this indicator id has no
-// mapping -- never falls back to a made-up value.
-function cweLabel(indicatorId: string): string | undefined {
-  const cwe = cweFor(indicatorId);
-  return cwe ? `${cwe.id} — ${cwe.title}` : undefined;
-}
-
-function deriveRisks(data: DashboardData, scans: ScanResult[], owners: string[]): RiskItem[] {
-  const now  = new Date().toISOString().split("T")[0];
-  const risks: RiskItem[] = [];
-  const owner = (i: number) => owners.length ? owners[i % owners.length] : "unassigned";
-  const repoSlug = (r: string) => r.replace(/[^a-zA-Z0-9]/g, "-");
-
-  // From top_risk_files — split per repo so each risk maps to exactly one
-  // repo and the Risk Register can be filtered by repo like every other
-  // findings page in the app.
-  const critUnatt = data.top_risk_files.filter(f => f.risk_score === "CRITICAL" && !f.attested);
-  const highUnatt = data.top_risk_files.filter(f => f.risk_score === "HIGH"     && !f.attested);
-
-  groupByRepo(critUnatt, f => f.repo).forEach((files, repo) => {
-    risks.push({
-      id:`DR-CRIT-UNATT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
-      category:"ai-code", likelihood:5, impact:5, repo,
-      title:`${files.length} CRITICAL file${files.length>1?"s":""} unattested in ${repo.split("/").pop()} — merge blocked`,
-      description:`${files.map(f=>f.file_path.split("/").pop()).join(", ")} flagged CRITICAL (avg ${(files.reduce((s,f)=>s+f.ai_pct,0)/files.length*100).toFixed(0)}% AI). Policy gate is blocking deploys.`,
-      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
-      mitigation:"Assign reviewer to each CRITICAL file. Attest via /pr/{scan_id} before merge deadline.",
-      identified_at:now, notes:[],
-    });
-  });
-
-  groupByRepo(highUnatt, f => f.repo).forEach((files, repo) => {
-    risks.push({
-      id:`DR-HIGH-UNATT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
-      category:"ai-code", likelihood:4, impact:4, repo,
-      title:`${files.length} HIGH-risk file${files.length>1?"s":""} awaiting attestation in ${repo.split("/").pop()}`,
-      description:`${files.map(f=>f.file_path.split("/").pop()).join(", ")} flagged HIGH. 48h SLA window applies.`,
-      owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
-      mitigation:"Schedule security review. Attest via the PR detail page within SLA window.",
-      identified_at:now, notes:[],
-    });
-  });
-
-  // Hardcoded secrets from risk_indicators — scans already carry a repo each
-  groupByRepo(scans, s => s.repo).forEach((repoScans, repo) => {
-    const secretFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("hardcoded-secret")));
-    if (secretFiles.length > 0) {
-      risks.push({
-        id:`DR-SECRETS-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
-        category:"secrets", likelihood:5, impact:5, repo,
-        residual_likelihood:2, residual_impact:3,
-        title:`${secretFiles.length} hardcoded credential${secretFiles.length>1?"s":""} detected in ${repo.split("/").pop()}`,
-        description:`${secretFiles.map(f=>f.file_path.split("/").pop()).join(", ")} contain API keys, passwords, or tokens in source. Treat as compromised.`,
-        owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
-        mitigation:"Rotate all exposed credentials immediately. Move to AWS Secrets Manager or HashiCorp Vault. Add gitleaks pre-commit hook.",
-        related_cwe:cweLabel("hardcoded-secret"), related_link:"/secrets",
-        identified_at:now, notes:[],
-      });
-    }
-
-    // Eval/exec
-    const evalFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("eval-exec")));
-    if (evalFiles.length > 0) {
-      risks.push({
-        id:`DR-EVAL-EXEC-${repoSlug(repo)}`, auto_derived:true, status:"mitigating", treatment:"mitigate",
-        category:"ai-code", likelihood:4, impact:5, repo,
-        residual_likelihood:2, residual_impact:4,
-        title:`eval()/exec() RCE pattern in ${evalFiles.length} file${evalFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
-        description:`${evalFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use eval/exec on potentially user-controlled input. Full server compromise if exploited.`,
-        owner:owner(1), due_date:new Date(Date.now()+3*86400000).toISOString().split("T")[0],
-        mitigation:"Replace eval/exec with safe alternatives: ast.literal_eval for Python, mathjs sandbox for JS expressions.",
-        related_cwe:cweLabel("eval-exec"), related_link:"/violations",
-        identified_at:now, notes:[],
-      });
-    }
-
-    // SQL injection
-    const sqlFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("sql-injection")));
-    if (sqlFiles.length > 0) {
-      risks.push({
-        id:`DR-SQL-INJECT-${repoSlug(repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
-        category:"ai-code", likelihood:5, impact:5, repo,
-        residual_likelihood:1, residual_impact:2,
-        title:`SQL Injection pattern in ${sqlFiles.length} file${sqlFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
-        description:`${sqlFiles.map(f=>f.file_path.split("/").pop()).join(", ")} use f-string or string concatenation in SQL queries, bypassing parameterisation.`,
-        owner:owner(0), due_date:new Date(Date.now()+5*86400000).toISOString().split("T")[0],
-        mitigation:"Replace all dynamic SQL with SQLAlchemy ORM or parameterised queries. Add Semgrep rule to CI.",
-        related_cwe:cweLabel("sql-injection"), related_link:"/violations",
-        identified_at:now, notes:[],
-      });
-    }
-
-    // JWT bypass
-    const jwtFiles = repoScans.flatMap(s => s.files.filter(f => f.risk_indicators.includes("jwt-none-alg")));
-    if (jwtFiles.length > 0) {
-      risks.push({
-        id:`DR-JWT-BYPASS-${repoSlug(repo)}`, auto_derived:true, status:"mitigating", treatment:"mitigate",
-        category:"ai-code", likelihood:4, impact:5, repo,
-        residual_likelihood:1, residual_impact:3,
-        title:`JWT 'none' algorithm bypass in ${jwtFiles.length} file${jwtFiles.length>1?"s":""} in ${repo.split("/").pop()}`,
-        description:`${jwtFiles.map(f=>f.file_path.split("/").pop()).join(", ")} accept the insecure 'none' JWT algorithm, enabling token forgery.`,
-        owner:owner(1), due_date:new Date(Date.now()+2*86400000).toISOString().split("T")[0],
-        mitigation:"Upgrade PyJWT to >= 2.8.0. Whitelist only HS256. Add CI lint rule.",
-        related_cwe:cweLabel("jwt-none-alg"), related_link:"/violations",
-        identified_at:now, notes:[],
-      });
-    }
-  });
-
-  // Deploy blocked — genuinely org-wide (aggregated across all repos), no
-  // single repo to attribute it to, so left without a repo field.
-  if (data.unattested_deploy_count > 0) {
-    risks.push({
-      id:"DR-DEPLOY-BLOCK", auto_derived:true, status:"open", treatment:"mitigate",
-      category:"compliance", likelihood:4, impact:4,
-      title:`${data.unattested_deploy_count} deploy${data.unattested_deploy_count>1?"s":""} blocked — SLA exposure`,
-      description:`${data.unattested_deploy_count} deployment${data.unattested_deploy_count>1?"s":""} currently blocked by policy gate. Prolonged blockage risks SLA breach and SOC 2 CC8.1 findings.`,
-      owner:owner(0), due_date:new Date(Date.now()+86400000).toISOString().split("T")[0],
-      mitigation:"Prioritise attestation of blocking files. Consider SLA escalation process for high-priority releases.",
-      related_link:"/violations",
-      identified_at:now, notes:[],
-    });
-  }
-
-  // Low attestation repos
-  data.repos.filter(r => r.attestation_rate < 0.6).forEach(r => {
-    risks.push({
-      id:`DR-LOW-ATT-${repoSlug(r.repo)}`, auto_derived:true, status:"open", treatment:"mitigate",
-      category:"compliance", likelihood:3, impact:4, repo:r.repo,
-      title:`Low attestation — ${r.repo.split("/").pop()} at ${Math.round(r.attestation_rate*100)}%`,
-      description:`${r.repo.split("/").pop()} attestation coverage (${Math.round(r.attestation_rate*100)}%) is below the 60% compliance threshold. Audit risk for SOC 2 CC8.1.`,
-      owner:owner(2), due_date:new Date(Date.now()+7*86400000).toISOString().split("T")[0],
-      mitigation:"Assign dedicated security reviewer. Batch-attest LOW and MEDIUM files. Target ≥80% before audit.",
-      related_link:"/violations",
-      identified_at:now, notes:[],
-    });
-  });
-
-  return risks;
-}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -476,16 +213,15 @@ export default function RiskRegisterPage() {
       const scanPromises = data.repos.filter(r=>r.latest_scan_id).map(r=>api.getScan(r.latest_scan_id).catch(()=>null));
       const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s!==null);
       // Server statuses (resolved on any device) plus this tab's just-made sign-offs; demo data keeps its own.
-      const derived = deriveRisks(patchDataWithAttestations(data, seed ? undefined : await loadStatuses()), scans, memberEmails);
+      const derived = deriveRisks(patchDataWithAttestations(data, seed ? undefined : await loadStatuses()), scans);
       setDerivedRisks(derived);
       setLastRefreshed(new Date());
 
-      // Keep the derived risks' metadata in sync in the database (title,
-      // category, likelihood/impact, repo, CVE links) without touching any
-      // human-set workflow field -- see /api/risk-register/sync. Skipped
-      // entirely in seed/offline mode, where there's no real org to persist
-      // against.
-      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && derived.length > 0 && permissions.canTriage) {
+      // Record the derived risks in the database (title, category, likelihood/impact, repo, CWE, link) without
+      // touching any human-set workflow field -- see /api/risk-register/sync -- then reload the stored state, so
+      // a first-seen risk gets its row (status / owner changes need one) and a reappearing one is reopened.
+      // An empty batch is sent too: it closes risks that are no longer derived. Skipped in offline demo mode.
+      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && permissions.canTriage) {
         authedFetch("/api/risk-register/sync", {
           method: "POST",
           body: JSON.stringify({
@@ -495,11 +231,11 @@ export default function RiskRegisterPage() {
               related_cve: r.related_cve, related_cwe: r.related_cwe, related_link: r.related_link,
             })),
           }),
-        }).catch(() => { /* best-effort -- page still works from derived + last-known store */ });
+        }).then(() => loadStoreFromServer(), () => { /* best-effort -- page still works from derived + last-known store */ });
       }
     }
     setLoading(false); if (spinner) setRefreshing(false);
-  }, [profile?.org_id, permissions.canTriage]);
+  }, [profile?.org_id, permissions.canTriage, loadStoreFromServer]);
 
   // No auto-poll interval: fetchData fans out to one scan fetch per repo with
   // no cap, the heaviest per-tick cost of any page in the app. The Refresh
@@ -513,14 +249,7 @@ export default function RiskRegisterPage() {
   }, []);
 
   // Merge derived + manual, apply overrides
-  const allRisks = useMemo<RiskItem[]>(() => {
-    const base = [...derivedRisks, ...store.manuals];
-    return base.map(r => {
-      const ov = store.overrides[r.id];
-      if (!ov) return r;
-      return { ...r, ...ov, notes: ov.notes ?? r.notes };
-    }).sort((a,b) => riskScore(b) - riskScore(a));
-  }, [derivedRisks, store]);
+  const allRisks = useMemo<RiskItem[]>(() => mergeRisks(derivedRisks, store), [derivedRisks, store]);
 
   async function updateOverride(id: string, patch: Partial<PersistedRisk>) {
     const prevStore = store;

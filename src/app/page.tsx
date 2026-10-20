@@ -132,7 +132,7 @@ const PILLARS: Pillar[] = [
       "AI adoption, attestation coverage, and SLA compliance in one place",
       "Per-file risk drill-down from any repo view",
     ],
-    pages: ["Dashboard", "Analytics", "Security Posture"],
+    pages: ["Dashboard", "Analytics", "Trust Score"],
   },
   {
     id: "threats", icon: ThreatIcon, color: ORANGE, name: "Threats", tagline: "Real-time detection, routed to the right response",

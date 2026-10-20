@@ -139,6 +139,8 @@ export const api = {
       `/api/audit-config?org=${encodeURIComponent(org)}`,
     ),
 
+  // Resolves with the response whatever its status (rejects only on a network failure): the caller reads the
+  // status and error code to say what went wrong (signing not configured, rate limited, no permission...).
   generateReport: (body: { org: string; period_start: string; period_end: string; framework: string }): Promise<Response> =>
     getToken().then(token =>
       fetch("/api/report", {
@@ -148,9 +150,6 @@ export const api = {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(body),
-      }).then(res => {
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        return res;
       })
     ),
 };

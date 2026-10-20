@@ -14,7 +14,9 @@ import AuthGuard from "@/components/AuthGuard";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
-import { buildAdvisories, type Advisory, type AdvisoryFinding } from "@/lib/threatIntel";
+import { buildAdvisories, filterFindings, filterOptions, NO_FILTERS, type Advisory, type AdvisoryFinding, type ThreatFilters } from "@/lib/threatIntel";
+
+const SELECT = "text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300 max-w-[14rem]";
 
 const SEV: Record<string, string> = {
   CRITICAL: "bg-violet-100 text-violet-700", HIGH: "bg-orange-100 text-orange-700", MEDIUM: "bg-amber-100 text-amber-800", LOW: "bg-gray-100 text-gray-600",
@@ -44,6 +46,7 @@ export default function ThreatIntelPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "exploit" | "reachable">("all");
   const [q, setQ] = useState("");
+  const [sel, setSel] = useState<ThreatFilters>(NO_FILTERS);
 
   const load = useCallback(async () => {
     if (offline) return;
@@ -61,10 +64,16 @@ export default function ThreatIntelPage() {
     return () => window.removeEventListener("focus", onFocus);
   }, [load]);
 
-  const { advisories, supplyChain, stats } = useMemo(() => buildAdvisories(findings ?? []), [findings]);
+  const options = useMemo(() => filterOptions(findings ?? []), [findings]);
+  // A repo/ecosystem that's gone from the data (e.g. after a rescan) falls back to "all" instead of showing nothing.
+  const repo = sel.repo !== "all" && !options.repos.includes(sel.repo) ? "all" : sel.repo;
+  const ecosystem = sel.ecosystem !== "all" && !options.ecosystems.includes(sel.ecosystem) ? "all" : sel.ecosystem;
+  const { advisories, supplyChain, stats } = useMemo(() => buildAdvisories(filterFindings(findings ?? [], { repo, ecosystem })), [findings, repo, ecosystem]);
   const shown = advisories.filter(a =>
     (filter === "all" || (filter === "exploit" ? a.exploit_public : a.reachable === true)) &&
+    (sel.severity === "all" || a.risk === sel.severity) &&
     (!q || `${a.id ?? ""} ${a.package_name} ${a.description} ${a.repos.join(" ")}`.toLowerCase().includes(q.toLowerCase())));
+  const narrowed = repo !== "all" || ecosystem !== "all" || sel.severity !== "all" || filter !== "all" || q !== "";
 
   return (
     <AuthGuard>
@@ -93,6 +102,26 @@ export default function ThreatIntelPage() {
 
         {findings && (
           <>
+            {/* Scope: applies to the stats, the advisories and the supply-chain list alike. */}
+            <div className="animate-fade-up flex flex-wrap items-center gap-2" role="group" aria-label="Scope">
+              <select aria-label="Repository" value={repo} onChange={e => setSel(s => ({ ...s, repo: e.target.value }))} className={SELECT}>
+                <option value="all">All repositories ({options.repos.length})</option>
+                {options.repos.map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+              <select aria-label="Ecosystem" value={ecosystem} onChange={e => setSel(s => ({ ...s, ecosystem: e.target.value }))} className={SELECT}>
+                <option value="all">All ecosystems</option>
+                {options.ecosystems.map(x => <option key={x} value={x}>{x}</option>)}
+              </select>
+              <select aria-label="Severity" value={sel.severity} onChange={e => setSel(s => ({ ...s, severity: e.target.value }))} className={SELECT}>
+                <option value="all">Any severity</option>
+                {["CRITICAL", "HIGH", "MEDIUM", "LOW"].map(x => <option key={x} value={x}>{x[0] + x.slice(1).toLowerCase()}</option>)}
+              </select>
+              {narrowed && (
+                <button onClick={() => { setSel(NO_FILTERS); setFilter("all"); setQ(""); }}
+                  className="text-xs font-bold text-rose-600 hover:text-rose-800 px-2 py-1 rounded-lg hover:bg-rose-50">Clear filters</button>
+              )}
+            </div>
+
             <div className="animate-fade-up grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-4 gap-4">
               <Stat label="Advisories affecting you" value={stats.advisories} sub={`${stats.packages} package version${stats.packages === 1 ? "" : "s"} across ${stats.repos} repo${stats.repos === 1 ? "" : "s"}`} />
               <Stat label="Public exploit available" value={stats.exploits} sub="Exploit code is published" tone="bad" />
@@ -104,7 +133,9 @@ export default function ThreatIntelPage() {
               <div className="flex flex-wrap items-center justify-between gap-3 px-6 pt-5 pb-4 border-b border-gray-100">
                 <div>
                   <h2 className="text-sm font-bold text-gray-900">Known vulnerabilities in your dependencies</h2>
-                  <p className="text-xs text-gray-400 mt-0.5">Exploitable and reachable first, then by severity</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {narrowed ? `${shown.length} of ${advisories.length} shown · ` : ""}Exploitable and reachable first, then by severity
+                  </p>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <div className="flex gap-0.5 bg-gray-100 p-1 rounded-xl" role="group" aria-label="Filter">

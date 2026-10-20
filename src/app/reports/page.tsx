@@ -1018,44 +1018,15 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
   );
 }
 
-// ─── Fallback demo data (used when backend is not reachable) ─────────────────
-
-function makeFallbackData(org: string): DashboardData {
-  const o = org;
-  return {
-    repos: [
-      { repo:`${o}/payments-api`,    ai_pct:0.71, attestation_rate:0.80, last_scan:"2026-05-20", scan_count:18, file_count:142, latest_scan_id:"sc_mock_001" },
-      { repo:`${o}/auth-service`,    ai_pct:0.44, attestation_rate:0.90, last_scan:"2026-05-21", scan_count:12, file_count:98,  latest_scan_id:"sc_mock_002" },
-      { repo:`${o}/fraud-detection`, ai_pct:0.58, attestation_rate:0.67, last_scan:"2026-05-22", scan_count:9,  file_count:76,  latest_scan_id:"sc_mock_003" },
-    ],
-    overall_ai_pct:        0.58,
-    attestation_rate:      0.78,
-    unattested_deploy_count: 3,
-    scan_count:            39,
-    file_count:            316,
-    risk_trend: [
-      { date:"2026-04-28", high_count:4, critical_count:2, medium_count:8 },
-      { date:"2026-05-05", high_count:3, critical_count:1, medium_count:6 },
-      { date:"2026-05-12", high_count:5, critical_count:2, medium_count:7 },
-      { date:"2026-05-19", high_count:2, critical_count:1, medium_count:5 },
-    ],
-    top_risk_files: [
-      { repo:`${o}/payments-api`,    file_path:"src/processors/card_validator.py",  ai_pct:0.91, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_001", pr_number:482 },
-      { repo:`${o}/fraud-detection`, file_path:"models/risk_scorer.ts",             ai_pct:0.83, risk_score:"CRITICAL", attested:false, scan_id:"sc_mock_003", pr_number:219 },
-      { repo:`${o}/payments-api`,    file_path:"src/gateway/stripe_client.py",      ai_pct:0.76, risk_score:"HIGH",     attested:false, scan_id:"sc_mock_001", pr_number:479 },
-      { repo:`${o}/auth-service`,    file_path:"src/oauth/token_exchange.ts",       ai_pct:0.68, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_002", pr_number:341 },
-      { repo:`${o}/fraud-detection`, file_path:"src/rules/velocity_check.py",       ai_pct:0.62, risk_score:"HIGH",     attested:true,  scan_id:"sc_mock_003", pr_number:218 },
-      { repo:`${o}/payments-api`,    file_path:"src/api/refund_handler.py",         ai_pct:0.55, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_001", pr_number:477 },
-      { repo:`${o}/auth-service`,    file_path:"src/middleware/rate_limiter.ts",    ai_pct:0.49, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_002", pr_number:338 },
-      { repo:`${o}/payments-api`,    file_path:"src/models/transaction.py",         ai_pct:0.44, risk_score:"MEDIUM",   attested:true,  scan_id:"sc_mock_001", pr_number:475 },
-      { repo:`${o}/fraud-detection`, file_path:"src/utils/feature_extractor.py",   ai_pct:0.38, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_003", pr_number:214 },
-      { repo:`${o}/auth-service`,    file_path:"src/services/session_manager.ts",  ai_pct:0.29, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_002", pr_number:334 },
-      { repo:`${o}/payments-api`,    file_path:"src/utils/currency_formatter.py",  ai_pct:0.21, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_001", pr_number:471 },
-      { repo:`${o}/fraud-detection`, file_path:"src/config/thresholds.ts",         ai_pct:0.14, risk_score:"LOW",      attested:true,  scan_id:"sc_mock_003", pr_number:209 },
-    ],
-  };
+/** What went wrong with a report download, in words someone can act on (every failure used to read as
+ *  "couldn't render a PDF", including a missing signing key or a rate limit). */
+function reportErrorMessage(status: number, code?: string): string {
+  if (code === "report_signing_not_configured") return "Reports can't be signed yet: the server has no signing key. An admin needs to set EXPORT_SIGNING_KEY.";
+  if (status === 429) return "Too many reports in a short time. Please wait a minute and try again.";
+  if (status === 401) return "Your session has expired. Sign in again to generate reports.";
+  if (status === 403) return "Your role can't generate reports. Ask an admin for the report permission.";
+  return "The server couldn't render a PDF for this report. Please try again, or a different date range.";
 }
-const FALLBACK_DATA: DashboardData = makeFallbackData("your organisation");
 
 // ─── AIBOM generator ─────────────────────────────────────────────────────────
 
@@ -1205,9 +1176,9 @@ function ReportsContent() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     setDataError(false);
-    // Check seed mode first -- FALLBACK_DATA/demo data is only ever shown
-    // here, behind an explicit opt-in toggle, never as a silent stand-in
-    // for a real fetch failure below.
+    // Check seed mode first -- demo data is only ever shown here, behind an
+    // explicit opt-in toggle, never as a stand-in for a real fetch failure
+    // below (the preview has no placeholder data at all).
     if (typeof window !== "undefined" && localStorage.getItem("tl_force_seed") === "1") {
       try {
         const snap = JSON.parse(localStorage.getItem("tl_notif_snapshot") ?? "null") as DashboardData | null;
@@ -1218,7 +1189,7 @@ function ReportsContent() {
       const d = await api.dashboard(orgName, 90);
       setData(d);
     } catch {
-      // A broken fetch used to silently fall back to FALLBACK_DATA's
+      // A broken fetch used to silently fall back to placeholder data's
       // fictional repos/scans with no on-screen indication -- a report
       // generated from a broken backend looked identical to a real one.
       // Surface the failure instead; see the error state below.
@@ -1273,7 +1244,8 @@ function ReportsContent() {
       // open. Only ever download bytes the server actually labelled as a PDF.
       const contentType = res.headers.get("content-type") ?? "";
       if (!res.ok || !contentType.includes("application/pdf")) {
-        setError("The server couldn't render a PDF for this report. Please try again, or a different date range.");
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        setError(reportErrorMessage(res.status, body?.error));
         setGenerating(false);
         return;
       }
@@ -1539,7 +1511,7 @@ function ReportsContent() {
                 <button onClick={fetchData} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">Try again</button>
               </div>
             ) : (
-              <ReportDocument data={effectiveData ?? FALLBACK_DATA} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} generatedBy={profile?.email ?? undefined} evidence={evidence} evidenceFailed={evidenceFailed} />
+              effectiveData && <ReportDocument data={effectiveData} fw={fw} start={start} end={end} violationStatuses={violationStatuses} org={orgName} generatedBy={profile?.email ?? undefined} evidence={evidence} evidenceFailed={evidenceFailed} />
             )}
           </div>
         </div>

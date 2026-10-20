@@ -26,7 +26,7 @@ function makeStaticResults(): SearchResult[] {
   return [
   // Pages
   { id:"p-dash",    kind:"page",      title:"Overview Dashboard",        sub:"Org-wide health score and metrics",          href:"/dashboard",      badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-posture", kind:"page",      title:"Security Posture",          sub:"Real-time security health score and trend",  href:"/posture",        badge:"Page",     badgeColor:"#6366f1" },
+  { id:"p-trust",   kind:"page",      title:"Trust Score",               sub:"Governance score, trend, and what to fix",    href:"/trust-score",    badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-comp",    kind:"page",      title:"Compliance Evidence",       sub:"SOC 2 · ISO 27001 · PCI DSS · AI governance",  href:"/compliance",     badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-viol",    kind:"page",      title:"Policy Violations",         sub:"Active violations requiring remediation",     href:"/violations",     badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-alert",   kind:"page",      title:"Security Alerts",           sub:"Real-time incident management",               href:"/alerts",         badge:"Page",     badgeColor:"#6366f1" },
