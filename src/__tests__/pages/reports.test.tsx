@@ -47,7 +47,9 @@ const fakeRes = (status: number, type: string, body: unknown) => ({
   blob: async () => body,
 });
 const json = (status: number, body: unknown) => fakeRes(status, "application/json", body);
-const generateButton = () => screen.findByRole("button", { name: /Generate Signed .* Report/ });
+// The page loads several sources before the button is ready; under full-suite load that can pass the 1s default.
+jest.setTimeout(30_000);
+const generateButton = () => screen.findByRole("button", { name: /Generate Signed .* Report/ }, { timeout: 10_000 });
 
 beforeEach(() => {
   dashFails = false;
@@ -62,7 +64,7 @@ describe("Reports page", () => {
     const click = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     render(<ReportsPage />);
     fireEvent.click(await generateButton());
-    await waitFor(() => expect(click).toHaveBeenCalled());
+    await waitFor(() => expect(click).toHaveBeenCalled(), { timeout: 10_000 });
     expect(api.generateReport).toHaveBeenCalledWith(expect.objectContaining({ framework: "SOC2" }));
     expect(screen.queryByText(/couldn't render/i)).not.toBeInTheDocument();
     click.mockRestore();

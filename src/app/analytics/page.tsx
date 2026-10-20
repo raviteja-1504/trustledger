@@ -16,6 +16,7 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import type { Analytics } from "@/lib/orgAnalytics";
+import { backlogSentence, clearSentence, reviewSentence, shortDuration } from "@/lib/analyticsWords";
 
 const WeeklyChart = dynamic(() => import("@/components/analytics/WeeklyChart"), { ssr: false, loading: () => <div className="h-[260px] rounded-xl bg-gray-50 animate-pulse" /> });
 
@@ -23,7 +24,6 @@ const PERIODS = [7, 30, 90] as const;
 const POLL_MS = 60_000;
 
 const pct = (n: number | null | undefined) => n == null ? "—" : `${Math.round(n * 100)}%`;
-const hours = (h: number | null) => h == null ? "—" : h < 1 ? `${Math.round(h * 60)}m` : h < 48 ? `${h.toFixed(h < 10 ? 1 : 0)}h` : `${Math.round(h / 24)}d`;
 
 function Stat({ label, value, sub, tone = "default" }: { label: string; value: string; sub: string; tone?: "default" | "good" | "bad" }) {
   return (
@@ -129,23 +129,24 @@ export default function AnalyticsPage() {
             {/* ── Headline ── */}
             <div className="animate-fade-up grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-4">
               <Stat label="Scans" value={String(data.totals.scans)} sub={`${data.totals.prs} pull requests · ${(data.totals.scans / Math.max(days / 7, 1)).toFixed(1)} per week`} />
-              <Stat label="Findings opened" value={String(data.totals.opened)} sub={`${data.totals.closed} closed in the same period`} />
-              <Stat label="Backlog change" value={`${net > 0 ? "+" : ""}${net}`} sub={net > 0 ? "More opened than closed" : net < 0 ? "More closed than opened" : "Opened = closed"} tone={net > 0 ? "bad" : net < 0 ? "good" : "default"} />
-              <Stat label="Median time to sign-off" value={hours(crit?.median_hours ?? null)} sub={`CRITICAL · HIGH: ${hours(high?.median_hours ?? null)}`} />
-              <Stat label="Signed off before deadline" value={allDeadline ? pct(allOnTime / allDeadline) : "—"} sub={allDeadline ? `${allOnTime} of ${allDeadline} with a fix deadline` : "No sign-offs with a deadline"} tone={allDeadline && allOnTime / allDeadline < 0.8 ? "bad" : "default"} />
-              <Stat label="Open now" value={String(data.backlog.open)} sub={data.backlog.overdue ? `${data.backlog.overdue} past their deadline` : "None past their deadline"} tone={data.backlog.overdue ? "bad" : "default"} />
+              <Stat label="Findings found" value={String(data.totals.opened)} sub={`${data.totals.closed} fixed or closed in the same period`} />
+              <Stat label="Open work" value={`${net > 0 ? "+" : ""}${net}`} sub={backlogSentence(data.totals.opened, data.totals.closed)} tone={net > 0 ? "bad" : net < 0 ? "good" : "default"} />
+              <Stat label="Typical wait for sign-off" value={shortDuration(crit?.median_hours ?? null)}
+                sub={crit?.count ? `Half of CRITICAL files were signed off faster than this. HIGH: ${shortDuration(high?.median_hours ?? null)}` : `No CRITICAL sign-offs yet. HIGH: ${shortDuration(high?.median_hours ?? null)}`} />
+              <Stat label="Signed off on time" value={allDeadline ? pct(allOnTime / allDeadline) : "—"} sub={allDeadline ? `${allOnTime} of ${allDeadline} sign-offs beat their fix deadline` : "No sign-offs had a fix deadline"} tone={allDeadline && allOnTime / allDeadline < 0.8 ? "bad" : "default"} />
+              <Stat label="Waiting now" value={String(data.backlog.open)} sub={data.backlog.overdue ? `${data.backlog.overdue} already past their fix deadline` : "None past their fix deadline"} tone={data.backlog.overdue ? "bad" : "default"} />
             </div>
 
             {/* ── Weekly activity ── */}
             <div className="animate-fade-up">
-              <Card title="Weekly activity" sub={`Findings opened and closed, and sign-offs, each week · last ${days} days to today`}>
+              <Card title="Weekly activity" sub={`Each week: findings found, findings fixed or closed, and files signed off · last ${days} days to today`}>
                 <WeeklyChart weeks={data.weeks} />
               </Card>
             </div>
 
             {/* ── Review time + backlog ── */}
             <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <Card title="Time to sign-off" sub="From the scan that flagged a file to its reviewer sign-off">
+              <Card title="How long files wait for a sign-off" sub="From the scan that flagged a file to the moment a reviewer signed it off">
                 <div className="space-y-4">
                   {data.review_time.map(r => (
                     <div key={r.severity} className="rounded-2xl bg-gray-50/60 ring-1 ring-gray-100 p-4">
@@ -153,12 +154,17 @@ export default function AnalyticsPage() {
                         <span className={`text-[11px] font-black px-2 py-0.5 rounded ${r.severity === "CRITICAL" ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>{r.severity}</span>
                         <span className="text-xs text-gray-500">{r.count} sign-off{r.count === 1 ? "" : "s"}</span>
                       </div>
+                      <p className="mt-2 text-xs text-gray-700 leading-relaxed">{reviewSentence(r)}</p>
                       <div className="mt-3 grid grid-cols-3 gap-3">
-                        <div><p className="text-xl font-black tabular-nums text-gray-900">{hours(r.median_hours)}</p><p className="text-[11px] text-gray-500">median</p></div>
-                        <div><p className="text-xl font-black tabular-nums text-gray-900">{hours(r.p90_hours)}</p><p className="text-[11px] text-gray-500">slowest 10%</p></div>
-                        <div>
+                        <div title="Half of the sign-offs were faster than this, half slower">
+                          <p className="text-xl font-black tabular-nums text-gray-900">{shortDuration(r.median_hours)}</p><p className="text-[11px] text-gray-500">typical wait</p>
+                        </div>
+                        <div title="9 in 10 sign-offs were faster than this; only the slowest 1 in 10 took longer">
+                          <p className="text-xl font-black tabular-nums text-gray-900">{shortDuration(r.p90_hours)}</p><p className="text-[11px] text-gray-500">9 in 10 within</p>
+                        </div>
+                        <div title="Of the sign-offs that had a fix deadline, the share that came before it">
                           <p className={`text-xl font-black tabular-nums ${r.with_deadline && r.on_time / r.with_deadline < 0.8 ? "text-rose-600" : "text-gray-900"}`}>{r.with_deadline ? pct(r.on_time / r.with_deadline) : "—"}</p>
-                          <p className="text-[11px] text-gray-500">before deadline</p>
+                          <p className="text-[11px] text-gray-500">on time</p>
                         </div>
                       </div>
                     </div>
@@ -166,7 +172,7 @@ export default function AnalyticsPage() {
                 </div>
               </Card>
 
-              <Card title="Waiting for review" sub="Open findings by how long they've been open"
+              <Card title="Waiting for review" sub="Findings still open, by how long they've been waiting"
                 aside={<Link href="/sla" className="text-xs font-semibold text-indigo-600 hover:text-indigo-800">SLA tracker →</Link>}>
                 <div className="space-y-3">
                   {data.backlog.by_age.map(b => (
@@ -180,26 +186,15 @@ export default function AnalyticsPage() {
                     </div>
                   ))}
                 </div>
-                <div className="mt-5 grid grid-cols-2 gap-3">
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <p className="text-lg font-black tabular-nums text-gray-900">{data.backlog.closed_per_day}</p>
-                    <p className="text-[11px] text-gray-500">closed per day (this period)</p>
-                  </div>
-                  <div className="rounded-xl bg-gray-50 p-3">
-                    <p className="text-lg font-black tabular-nums text-gray-900">
-                      {data.backlog.days_to_clear === 0 ? "Clear" : data.backlog.days_to_clear == null ? "—" : `${data.backlog.days_to_clear}d`}
-                    </p>
-                    <p className="text-[11px] text-gray-500">
-                      {data.backlog.days_to_clear == null ? "nothing closed this period" : "to clear the backlog at that pace"}
-                    </p>
-                  </div>
-                </div>
+                <p className="mt-5 rounded-xl bg-gray-50 p-3 text-xs text-gray-700 leading-relaxed">
+                  {clearSentence(data.backlog.open, data.totals.closed, days, data.backlog.days_to_clear)}
+                </p>
               </Card>
             </div>
 
             {/* ── AI content + reviewers ── */}
             <div className="animate-fade-up grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <Card title="AI content in scanned code" sub="Files-weighted AI share of each week's scans"
+              <Card title="AI-written code" sub="Share of each week's scanned code written by AI (bigger scans count for more)"
                 aside={<span className="text-xs text-gray-500">Period: <strong className="text-gray-900">{pct(data.totals.ai_share)}</strong></span>}>
                 <ul className="space-y-2">
                   {data.weeks.map(w => (
@@ -215,15 +210,15 @@ export default function AnalyticsPage() {
                 <p className="mt-4 text-xs text-gray-400">Using AI isn&apos;t a problem in itself; unreviewed risky AI code is. Weeks without scans show “—”.</p>
               </Card>
 
-              <Card title="Reviewers" sub="Sign-offs this period and each reviewer's median time to sign-off"
-                aside={data.self_approvals > 0 ? <span className="text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-lg">{data.self_approvals} self-approval{data.self_approvals === 1 ? "" : "s"}</span> : undefined}>
+              <Card title="Reviewers" sub="Who signed off files this period, and how quickly they usually did"
+                aside={data.self_approvals > 0 ? <span title="The pull request's author signed off their own change" className="text-xs font-bold text-rose-600 bg-rose-50 px-2 py-1 rounded-lg">{data.self_approvals} signed off their own change{data.self_approvals === 1 ? "" : "s"}</span> : undefined}>
                 {data.reviewers.length === 0 ? <p className="text-sm text-gray-400">No sign-offs in this period.</p> : (
                   <ul className="space-y-3">
                     {data.reviewers.slice(0, 8).map(r => (
                       <li key={r.reviewer}>
                         <div className="flex items-center justify-between gap-3 text-sm">
                           <span className="min-w-0 font-semibold text-gray-800 break-all">{r.reviewer}</span>
-                          <span className="shrink-0 text-xs text-gray-500 tabular-nums"><strong className="text-gray-900">{r.signoffs}</strong> · median {hours(r.median_hours)}</span>
+                          <span className="shrink-0 text-xs text-gray-500 tabular-nums"><strong className="text-gray-900">{r.signoffs}</strong> sign-off{r.signoffs === 1 ? "" : "s"} · usually within {shortDuration(r.median_hours)}</span>
                         </div>
                         <div className="mt-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
                           <div className="h-full rounded-full bg-emerald-400" style={{ width: `${(r.signoffs / maxReviewer) * 100}%` }} />
@@ -237,7 +232,7 @@ export default function AnalyticsPage() {
 
             {/* ── Repositories ── */}
             <div className="animate-fade-up">
-              <Card title="Repositories" sub="Activity per repository in this period; open is the current backlog">
+              <Card title="Repositories" sub="What happened in each repository this period. “Waiting now” is what's still open today.">
                 {data.repos.length === 0 ? <p className="text-sm text-gray-400">No scans in this period.</p> : (
                   <div className="overflow-x-auto -mx-6">
                     <table className="w-full min-w-[640px]">
@@ -246,10 +241,10 @@ export default function AnalyticsPage() {
                           <th className="px-6 py-3">Repository</th>
                           <th className="px-4 py-3 text-right">Scans</th>
                           <th className="px-4 py-3 text-right">PRs</th>
-                          <th className="px-4 py-3 text-right">Opened</th>
-                          <th className="px-4 py-3 text-right">Closed</th>
-                          <th className="px-4 py-3 text-right">Open now</th>
-                          <th className="px-6 py-3 text-right">AI content</th>
+                          <th className="px-4 py-3 text-right">Found</th>
+                          <th className="px-4 py-3 text-right">Fixed / closed</th>
+                          <th className="px-4 py-3 text-right">Waiting now</th>
+                          <th className="px-6 py-3 text-right">AI-written</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">

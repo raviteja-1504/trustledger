@@ -32,14 +32,18 @@ import AnalyticsPage from "@/app/analytics/page";
 beforeEach(() => { calls.length = 0; });
 
 describe("Analytics page", () => {
-  it("shows measured values", async () => {
+  it("shows measured values, in plain words", async () => {
     render(<AnalyticsPage />);
-    await screen.findByRole("region", { name: "Time to sign-off" });
+    const sign = await screen.findByRole("region", { name: "How long files wait for a sign-off" });
     expect(calls[0]).toBe("/api/analytics?days=30");
-    const sign = screen.getByRole("region", { name: "Time to sign-off" });
-    expect(sign).toHaveTextContent("CRITICAL1 sign-off3.0hmedian");
-    expect(screen.getByText("Findings opened").parentElement).toHaveTextContent("2");
-    expect(screen.getAllByText("Open now")[0].parentElement).toHaveTextContent("1 past their deadline");
+    expect(sign).toHaveTextContent("The one CRITICAL sign-off came 3 hours after the scan.");
+    expect(sign).toHaveTextContent("3 htypical wait");
+    expect(sign).toHaveTextContent("No HIGH files were signed off in this period.");
+    expect(screen.getByText("Findings found").parentElement).toHaveTextContent("2");
+    expect(screen.getByText("Open work").parentElement).toHaveTextContent("1 more finding opened than closed — open work grew.");
+    expect(screen.getAllByText("Waiting now")[0].parentElement).toHaveTextContent("1 already past their fix deadline");
+    expect(screen.getByRole("region", { name: "Waiting for review" })).toHaveTextContent("would all be closed in about");
+    expect(document.body.textContent).not.toMatch(/\bmedian\b|slowest 10%|\bp90\b|Backlog change/i);
     expect(within(screen.getByRole("region", { name: "Reviewers" })).getByText("carol@acme.test")).toBeInTheDocument();
     expect(within(screen.getByRole("region", { name: "Repositories" })).getByRole("link", { name: "acme/api" })).toHaveAttribute("href", "/repo/acme/api");
     // None of the old invented panels.
@@ -48,7 +52,7 @@ describe("Analytics page", () => {
 
   it("period switch and a sign-off both refetch", async () => {
     render(<AnalyticsPage />);
-    await screen.findByRole("region", { name: "Time to sign-off" });
+    await screen.findByRole("region", { name: "How long files wait for a sign-off" });
     fireEvent.click(screen.getByRole("button", { name: "90d" }));
     await waitFor(() => expect(calls).toContain("/api/analytics?days=90"));
     const before = calls.length;

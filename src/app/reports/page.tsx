@@ -13,6 +13,7 @@ import { readLocalStatuses } from "@/lib/localStatuses";
 import { loadStatuses } from "@/lib/violationStatuses";
 import { useAuth } from "@/lib/auth";
 import { BrandWordmark } from "@/components/BrandLogo";
+import PeriodAttestations from "@/components/reports/PeriodAttestations";
 import {
   STATUS_LABEL, frameworkById, normalizeFrameworkId,
   type CheckResult, type ComplianceFacts, type EvidenceStatus, type FrameworkDef as EvidenceFramework,
@@ -894,7 +895,17 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
         {/* 3. Attestation Records */}
         <section>
           <SectionHead num={3} title="Attestation Records" color={def.color} />
-          <AttestationRecords data={data} fw={fw} start={start} color={def.color} violationStatuses={violationStatuses} />
+          <div className="space-y-5">
+            <div>
+              <p className="text-xs font-bold text-gray-700 mb-2">3a. Signed off in this period</p>
+              <PeriodAttestations start={start} end={end} color={def.color} />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-gray-700 mb-0.5">3b. Where high-risk files stand now</p>
+              <p className="text-[11px] text-gray-500 mb-2">From the latest scan of each repository, whatever the period — including files still waiting for a sign-off.</p>
+              <AttestationRecords data={data} fw={fw} start={start} color={def.color} violationStatuses={violationStatuses} />
+            </div>
+          </div>
         </section>
 
         {/* 4. Control Evidence */}
