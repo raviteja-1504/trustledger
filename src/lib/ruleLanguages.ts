@@ -24,7 +24,7 @@ const PHP = ["sql-injection", "command-injection", "xss", "ssrf", "path-traversa
 const RUBY = ["sql-injection", "command-injection", "xss", "ssrf", "path-traversal", "open-redirect", "insecure-deserialization", "eval-exec", "ssti", "mass-assignment", "header-injection", "redos", "bola-missing-ownership-check", "timing-attack", "jwt-none-alg"] as const satisfies readonly AstTaintRubyId[];
 // Kotlin reports the same JVM vocabulary as Java.
 const KOTLIN = JAVA satisfies readonly AstTaintKotlinId[];
-const RUST = ["sql-injection", "command-injection", "argument-injection", "path-traversal", "ssrf", "open-redirect", "xss", "ssti", "eval-exec", "redos", "nosql-injection", "ldap-injection", "timing-attack", "jwt-none-alg", "weak-crypto", "bola-missing-ownership-check"] as const satisfies readonly AstTaintRustId[];
+const RUST = ["sql-injection", "command-injection", "argument-injection", "path-traversal", "ssrf", "open-redirect", "xss", "ssti", "eval-exec", "redos", "nosql-injection", "ldap-injection", "timing-attack", "jwt-none-alg", "weak-crypto", "bola-missing-ownership-check", "mass-assignment", "insecure-deserialization", "xpath-injection", "header-injection"] as const satisfies readonly AstTaintRustId[];
 
 // Compile-time completeness: each resolves to `true` only when the list covers the engine's whole id type.
 type Exhaustive<All, Listed> = [Exclude<All, Listed>] extends [never] ? true : { missing: Exclude<All, Listed> };

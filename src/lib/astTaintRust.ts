@@ -53,7 +53,7 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintRustId =
   | "sql-injection" | "command-injection" | "argument-injection" | "path-traversal" | "ssrf" | "open-redirect" | "xss"
   | "ssti" | "eval-exec" | "redos" | "nosql-injection" | "ldap-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto"
-  | "bola-missing-ownership-check";
+  | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection";
 
 export interface AstTaintRustFinding {
   id:         AstTaintRustId;
@@ -72,6 +72,8 @@ const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
   "ssrf": "critical", "open-redirect": "medium", "xss": "high", "ssti": "critical", "eval-exec": "critical", "redos": "high",
   "nosql-injection": "critical", "ldap-injection": "critical", "timing-attack": "medium", "jwt-none-alg": "critical",
   "weak-crypto": "high", "bola-missing-ownership-check": "high",
+  // No gadget-chain RCE in Rust's serde: attacker-sized allocations / panics (DoS), so high rather than critical.
+  "mass-assignment": "high", "insecure-deserialization": "high", "xpath-injection": "critical", "header-injection": "high",
 };
 const LABEL: Record<AstTaintRustId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "argument-injection": "Argument Injection",
@@ -80,6 +82,8 @@ const LABEL: Record<AstTaintRustId, string> = {
   "redos": "ReDoS — Regex DoS", "nosql-injection": "NoSQL Injection", "ldap-injection": "LDAP Injection",
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "weak-crypto": "Weak Cryptography",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
+  "mass-assignment": "Mass Assignment", "insecure-deserialization": "Insecure Deserialization",
+  "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection",
 };
 export function astTaintRustSeverity(id: AstTaintRustId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]; }
@@ -266,7 +270,15 @@ const REQUEST_TYPES = new Set(["HttpRequest", "Request", "ServiceRequest", "Part
 const REQUEST_INPUT_METHODS = new Set([
   "match_info", "query_string", "headers", "uri", "path", "cookie", "cookies", "connection_info", "head", "body", "into_body",
   "url", "query", "param", "params", "header", "get_header", "body_string", "body_json", "body_bytes", "query_pairs",
+  // tonic (gRPC): the message is `request.into_inner()` / `get_ref()`; metadata is the client's headers.
+  "into_inner", "get_ref", "get_mut", "metadata", "into_parts",
+  // lambda_http's RequestExt
+  "payload", "query_string_parameters", "path_parameters", "query_string_parameters_ref", "path_parameters_ref", "raw_http_path",
 ]);
+/** warp filters whose output is what the client sent; a handler fed by them (`.and_then(handler)`) gets it as params. */
+const WARP_INPUT_RE = /warp::(?:path::param|path::tail|path::full|query|body::json|body::form|body::bytes|body::stream|header|cookie|filters::query|multipart::form|ws)\b|warp::path!/;
+/** Fields that let a client grant themselves something when a request body is saved as-is. */
+const PRIVILEGED_FIELD_RE = /^(?:role|roles|is_admin|admin|is_superuser|superuser|is_staff|staff|permissions?|scopes?|privileges?|group|groups|owner_id|account_id|tenant_id|org_id|organization_id|balance|credits?|price|plan|tier|is_verified|verified|email_verified|approved|is_active|active|status|password_hash|hashed_password)$/;
 const ROUTE_ATTRS = /^(?:get|post|put|delete|patch|head|options|route|routes|handler|debug_handler|connect|trace)$/;
 
 // ── Propagation tables ─────────────────────────────────────────────────────────────────────────────────────
@@ -373,6 +385,41 @@ interface EngineCtx {
   refine?: (source: SyntaxNode, cls: number) => SyntaxNode;
   current: LocalFn | null;
   moduleName: string;
+  /** Functions a warp filter chain hands its extracted values to (`.and_then(handler)`), by name. */
+  warpHandlers: Set<string>;
+  /** Request-body variable -> the struct it was deserialized into (mass assignment). */
+  bodyTypes: Map<string, string>;
+}
+
+/** A warp handler's shared state, injected by the app rather than sent by the client. */
+const WARP_STATE_NAME_RE = /^(?:state|app|pool|db|database|config|cfg|store|ctx|client|clients|sender|tx|repo|repository|service|svc|cache)$/;
+const WARP_STATE_TYPE_RE = /(?:Db|Database|Pool|Store|Config|State|Client|Clients|Sender|Repo|Repository|Service|Cache|Context)$/;
+
+/** Extractors that deserialize the whole request body into a struct. */
+const BODY_EXTRACTORS = new Set(["Json", "Form", "ValidatedJson", "LenientForm", "MsgPack", "Protobuf", "Xml", "WithRejection"]);
+
+/**
+ * warp handlers: a named function passed to `.and_then(f)` / `.map(f)` / `.then(f)` of a filter chain that extracts
+ * request data (WARP_INPUT_RE, in the chain itself or in the variable it was built in). Their parameters are those
+ * extracted values, so they are sources -- warp has no extractor types or route attributes to recognise them by.
+ */
+function warpHandlersOf(root: SyntaxNode, content: string, fns: ReadonlyMap<string, LocalFn>): Set<string> {
+  const out = new Set<string>();
+  if (!/\bwarp::/.test(content)) return out;
+  const filterVars = new Set<string>();
+  for (const l of findAllNodes(root, "let_declaration")) {
+    const p = field(l, "pattern"), v = field(l, "value");
+    if (p?.type === "identifier" && v && WARP_INPUT_RE.test(v.text)) filterVars.add(p.text);
+  }
+  for (const c of findAllNodes(root, "call_expression")) {
+    const { name, recv } = callParts(c);
+    if (!recv || !/^(?:and_then|map|then)$/.test(name)) continue;
+    const a = argNodes(c)[0];
+    if (a?.type !== "identifier" || !fns.has(a.text)) continue;
+    const chain = recv.text;
+    if (WARP_INPUT_RE.test(chain) || [...filterVars].some(v => new RegExp(`\\b${v}\\b`).test(chain))) out.add(a.text);
+  }
+  return out;
 }
 
 function emit(
@@ -1309,6 +1356,46 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     fireOn(ctx, "xss", node, args[0], mask(args[0], env), "response.body (HTML)");
   }
 
+  if (!recv && path && /(?:^|::)PreEscaped$/.test(path) && args[0]) fireOn(ctx, "xss", node, args[0], mask(args[0], env), "maud::PreEscaped");
+
+  // ── More SQL builders: sea-query custom expressions, sea-orm raw statements ──
+  if (full && /(?:^|::)(?:Expr|SimpleExpr)::(?:cust|cust_with_values|cust_with_exprs|Custom)$/.test(full) && args[0]) checkSql(ctx, node, args[0], env, mask, two);
+  if (full && /(?:^|::)Statement::from_sql_and_values$/.test(full) && args[1]) checkSql(ctx, node, args[1], env, mask, "Statement::from_sql_and_values");
+
+  // ── More command runners: subprocess, duct ──
+  if (full && /(?:^|::)Exec::shell$/.test(full) && args[0]) fireOn(ctx, "command-injection", node, args[0], mask(args[0], env), "subprocess::Exec::shell");
+  if (full && /(?:^|::)Exec::cmd$/.test(full) && args[0]) fireOn(ctx, "command-injection", node, args[0], mask(args[0], env), "subprocess::Exec::cmd");
+  if (full && /(?:^|::)duct::cmd$/.test(full) && args[0]) fireOn(ctx, "command-injection", node, args[0], mask(args[0], env), "duct::cmd");
+  if (full && /(?:^|::)duct_sh::sh_dangerous$/.test(full) && args[0]) fireOn(ctx, "command-injection", node, args[0], mask(args[0], env), "duct_sh::sh_dangerous");
+
+  // ── Insecure deserialization: unbounded bincode (allocation bombs), pickle ──
+  if (full && /(?:^|::)bincode::(?:deserialize|deserialize_from|decode_from_slice|decode_from_std_read)$/.test(full) && args[0] && !/with_limit|limit::</.test(ctx.content)) {
+    fireOn(ctx, "insecure-deserialization", node, args[0], mask(args[0], env), two,
+      `Request bytes '${args[0].text.slice(0, 60)}' are decoded by ${two} with no size limit — a forged length prefix allocates gigabytes; use bincode::options().with_limit(...) (or config::standard().with_limit::<N>())`);
+  }
+  if (full && /(?:^|::)serde_pickle::(?:from_slice|from_reader|value_from_slice|value_from_reader)$/.test(full) && args[0]) {
+    fireOn(ctx, "insecure-deserialization", node, args[0], mask(args[0], env), two);
+  }
+
+  // ── XPath ──
+  if (full && /(?:^|::)evaluate_xpath$/.test(full) && args[1] && /sxd_xpath/.test(ctx.content)) fireOn(ctx, "xpath-injection", node, args[1], mask(args[1], env), "sxd_xpath::evaluate_xpath");
+  if (recv && name === "build" && args[0] && /sxd_xpath/.test(ctx.content) && /Factory/.test(ctx.varTypes.get(unwrapExpr(recv).text) ?? recvText)) {
+    fireOn(ctx, "xpath-injection", node, args[0], mask(args[0], env), "xpath Factory.build");
+  }
+  if (recv && /^(?:evaluate|findnodes|findvalues|node_evaluate)$/.test(name) && args[0] && /libxml/.test(ctx.content) &&
+      (name !== "evaluate" || /ctx|context|xpath/i.test(recvText + (ctx.varTypes.get(unwrapExpr(recv).text) ?? "")))) {
+    fireOn(ctx, "xpath-injection", node, args[0], mask(args[0], env), `libxml .${name}`);
+  }
+
+  // ── Header injection: only the unchecked constructors skip the CR/LF validation ──
+  if (full && /(?:^|::)HeaderValue::(?:from_maybe_shared_unchecked|from_bytes_unchecked|from_shared_unchecked)$/.test(full) && args[0]) {
+    fireOn(ctx, "header-injection", node, args[0], mask(args[0], env), two,
+      `Request input '${args[0].text.slice(0, 60)}' becomes a header value through ${two}, which skips the CR/LF check — use HeaderValue::from_str`);
+  }
+
+  // ── Mass assignment ──
+  checkMassAssignment(node, name, recv, full, args, env, ctx, mask);
+
   // ── Template injection ──
   if (full && /(?:^|::)Tera::one_off$/.test(full) && args[0]) fireOn(ctx, "ssti", node, args[0], mask(args[0], env), "Tera::one_off");
   if (recv && /^(?:render_str|render_template|template_from_str)$/.test(name) && args[0]) fireOn(ctx, "ssti", node, args[0], mask(args[0], env), `.${name}`);
@@ -1352,12 +1439,76 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 }
 
+/**
+ * Privileged fields a client can set on a struct deserialized from the request: the field names PRIVILEGED_FIELD_RE
+ * lists, minus those serde never reads (`#[serde(skip)]`, `skip_deserializing`).
+ */
+function privilegedFields(structName: string, ctx: EngineCtx): string[] {
+  const s = findAllNodes(ctx.root, "struct_item").find(x => field(x, "name")?.text === structName);
+  const list = s ? named(s).find(c => c.type === "field_declaration_list") : null;
+  if (!list) return [];
+  const out: string[] = [];
+  let skipped = false;
+  for (const c of named(list)) {
+    if (c.type === "attribute_item") { if (/serde\s*\([^)]*\bskip(?:_deserializing)?\b/.test(c.text)) skipped = true; continue; }
+    if (c.type !== "field_declaration") continue;
+    const fname = field(c, "name")?.text ?? "";
+    if (!skipped && PRIVILEGED_FIELD_RE.test(fname)) out.push(fname);
+    skipped = false;
+  }
+  return out;
+}
+
+/**
+ * Mass assignment: the deserialized request body written to the database as-is -- diesel
+ * `insert_into(t).values(&body)` / `update(t).set(&body)`, sea-orm `ActiveModel::from_json(json)` /
+ * `.set_from_json(json)`. For a typed body it fires only when the struct carries a privileged field.
+ */
+function checkMassAssignment(node: SyntaxNode, name: string, recv: SyntaxNode | null, full: string, args: SyntaxNode[], env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
+  const arg = args[0];
+  if (!arg || !(mask(arg, env) & ALL)) return;
+  const dieselWrite = recv && ((name === "values" && /\b(?:insert_into|replace_into|insert_or_ignore_into)\s*\(/.test(recv.text))
+    || (name === "set" && /\bupdate\s*\(/.test(recv.text) && /diesel/.test(ctx.content)));
+  if (dieselWrite) {
+    // the value must BE the deserialized body (an extractor, or `let b: T = serde_json::from_str(..)`), not a
+    // struct the handler built from it -- that one sets its privileged fields itself
+    const deserialized = (i: SyntaxNode) => {
+      const v = lastAssignment(i.text, i);
+      return !!v && ctx.varTypes.has(i.text) && /serde_json::from_(?:str|slice|value|reader)\b/.test(v.text);
+    };
+    const id = findAllNodes(arg, "identifier").find(i => ctx.bodyTypes.has(i.text) || deserialized(i));
+    const t = id ? ctx.bodyTypes.get(id.text) ?? ctx.varTypes.get(id.text)! : "";
+    const fields = t ? privilegedFields(t, ctx) : [];
+    if (fields.length) {
+      emit(ctx, "mass-assignment", node, arg.text, `diesel .${name}()`,
+        `The request body '${arg.text.slice(0, 60)}' (${t}) is written with .${name}() as-is — the client can set ${fields.join(", ")}; deserialize into a struct without those fields, or set them server-side`);
+    }
+    return;
+  }
+  const seaOrm = (full && /(?:^|::)ActiveModel::from_json$/.test(full)) || (recv && name === "set_from_json");
+  if (seaOrm) {
+    emit(ctx, "mass-assignment", node, arg.text, name,
+      `Request JSON '${arg.text.slice(0, 60)}' sets every column of the ActiveModel through ${name} — the client can set privileged columns (role, owner, ...); copy only the fields it may change`);
+  }
+}
+
 /** Macro-level sinks: doc! with $where, sqlx raw macros are safe (checked at compile time). */
 function checkMacroSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   const name = macroName(node);
   if (name === "doc" && /"\$where"/.test(node.text)) {
     const m = findAllNodes(node, "identifier").reduce((acc, i) => acc | mask(i, env), 0);
     if (m & ALL) emit(ctx, "nosql-injection", node, node.text.slice(0, 60), "doc! { \"$where\": ... }", "Request input is placed in a MongoDB $where clause — it runs as JavaScript on the server; use query operators instead");
+  }
+  // maud: `html! { (PreEscaped(body)) }` -- the macro body is a token tree, so the call is matched by its tokens
+  if (name === "html" && /\bPreEscaped\s*\(/.test(node.text)) {
+    const ids = findAllNodes(node, "identifier");
+    for (let i = 0; i < ids.length; i++) {
+      if (ids[i].text !== "PreEscaped") continue;
+      const tt = ids[i].nextSibling;
+      if (!tt || tt.type !== "token_tree") continue;
+      const m = findAllNodes(tt, "identifier").reduce((acc, x) => acc | mask(x, env), 0);
+      if (fireOn(ctx, "xss", node, tt, m, "maud::PreEscaped")) break;
+    }
   }
 }
 
@@ -1562,6 +1713,9 @@ function entryEnv(fn: LocalFn, seedEntryPoints: boolean, ctx: EngineCtx): Env {
       m = SCALAR_TYPE_RE.test(core) ? applyClears(ALL, NUMERIC_CLEARS) : ALL;
     } else if (handler && /^(?:String|Bytes|Vec)$/.test(core) && !p.names.some(n => /^(?:state|app|pool|db|config|cfg)$/.test(n))) {
       m = ALL;   // the request body as a String / Bytes extractor
+    } else if (ctx.warpHandlers.has(fn.name) && !WARP_STATE_NAME_RE.test(p.name) && !WARP_STATE_TYPE_RE.test(core) && !DB_TYPE_RE.test(core)) {
+      // warp hands a handler the values its filters extracted -- except shared state injected with `warp::any().map(...)`
+      m = SCALAR_TYPE_RE.test(core) ? applyClears(ALL, NUMERIC_CLEARS) : ALL;
     } else if (seedEntryPoints && /^(?:str|String)$/.test(core)) {
       m = ALL;
     }
@@ -1655,9 +1809,17 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
     suppressed, findings: [], seen: new Set(), varTypes: new Map(), structFields: collectStructFields(root),
     imports: collectImports(root), cmdVars: new Map(), crossFileFacts,
     localKeys: new Set(all.flatMap(f => [f.key, ...f.altKeys]).filter((k): k is string => !!k)), current: null, moduleName,
+    warpHandlers: warpHandlersOf(root, content, fns), bodyTypes: new Map(),
   };
   // `svc: Arc<UserService>` and `State(svc): State<Arc<UserService>>` both type svc as UserService
   for (const f of all) for (const p of f.params) { const t = coreType(p.type); if (t && (p.pattern?.type === "identifier" || p.names.length === 1) && !ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, t); }
+  // The struct a request body was deserialized into: `Json(user): Json<NewUser>`, `form: web::Form<Signup>`, or a warp
+  // handler's `body: NewUser` -- what mass assignment checks for privileged fields.
+  for (const f of all) for (const p of f.params) {
+    const inner = BODY_EXTRACTORS.has(outerType(p.type)) ? typeArg(p.type) : ctx.warpHandlers.has(f.name) ? p.type : null;
+    const t = inner ? coreType(inner) : "";
+    if (t && p.names.length === 1) ctx.bodyTypes.set(p.names[0], t);
+  }
   buildSummaries(ctx);
   return ctx;
 }

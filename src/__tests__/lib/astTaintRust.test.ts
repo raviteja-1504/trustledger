@@ -256,3 +256,86 @@ describe("BOLA", () => {
     expect(has(axum(`Path(id): Path<i64>, State(pool): State<PgPool>`, `    sqlx::query("SELECT * FROM posts WHERE id = $1").bind(id).fetch_one(&pool).await;`), "bola-missing-ownership-check")).toBe(false);
   });
 });
+
+describe("more frameworks: warp, tonic, lambda_http", () => {
+  const warp = (handler: string) => `use warp::Filter;\nuse sqlx::PgPool;\n${handler}\nfn routes(pool: PgPool) {\n    let db = warp::any().map(move || pool.clone());\n    let search = warp::path("s").and(warp::query::<Search>()).and(db.clone()).and_then(h);\n    let name = warp::path::param::<String>();\n    let users = warp::path("u").and(name).and_then(by_name);\n}\n`;
+  it("a function a warp filter chain hands to and_then gets the extracted values as request input", () => {
+    expect(has(warp(`async fn h(q: Search, pool: PgPool) -> Result<impl warp::Reply, warp::Rejection> {\n    sqlx::query(&format!("SELECT * FROM t WHERE a = '{}'", q.term)).fetch_all(&pool).await;\n    Ok("x")\n}\nasync fn by_name(n: String) -> Result<impl warp::Reply, warp::Rejection> { Ok("x") }`), "sql-injection")).toBe(true);
+    // a filter bound to a variable (`name`) and passed into the chain counts too
+    expect(has(warp(`async fn h(q: Search) -> Result<impl warp::Reply, warp::Rejection> { Ok("x") }\nasync fn by_name(n: String) -> Result<impl warp::Reply, warp::Rejection> {\n    std::process::Command::new(n).spawn();\n    Ok("x")\n}`), "command-injection")).toBe(true);
+  });
+  it("warp's injected state, scalar values, and functions no filter chain names are not request input", () => {
+    // the pool is the app's own state
+    expect(has(warp(`async fn h(q: Search, pool: PgPool) -> Result<impl warp::Reply, warp::Rejection> {\n    let p = pool.to_string();\n    sqlx::query(&p).fetch_all(&pool).await;\n    Ok("x")\n}\nasync fn by_name(n: String) -> Result<impl warp::Reply, warp::Rejection> { Ok("x") }`), "sql-injection")).toBe(false);
+    // shared state recognised by its name alone (its type says nothing)
+    expect(has(`use warp::Filter;\nfn routes(store: Arc<Mutex<HashMap<String, String>>>) {\n    let s = warp::any().map(move || store.clone());\n    let r = warp::path::param::<String>().and(s).and_then(h);\n}\nasync fn h(key: String, store: Arc<Mutex<HashMap<String, String>>>) -> Result<impl warp::Reply, warp::Rejection> {\n    let prog = store.lock().unwrap().get("tool").cloned().unwrap();\n    std::process::Command::new(prog).spawn();\n    Ok("x")\n}\n`, "command-injection")).toBe(false);
+    expect(has(`use warp::Filter;\nuse sqlx::PgPool;\nfn routes() {\n    let r = warp::path::param::<u32>().and_then(h);\n}\nasync fn h(id: u32) -> Result<impl warp::Reply, warp::Rejection> {\n    sqlx::query(&format!("SELECT * FROM t WHERE id = {}", id)).execute(&pool).await;\n    Ok("x")\n}\n`, "sql-injection")).toBe(false);
+    expect(has(`use warp::Filter;\nfn routes() { let r = warp::path("x").map(|| "ok"); }\nasync fn other(n: String) {\n    std::process::Command::new(n).spawn();\n}\nfn main() { other(String::from("ls")); }\n`, "command-injection")).toBe(false);
+  });
+  it("tonic request messages and lambda_http events are request input", () => {
+    expect(has(`use tonic::{Request, Response, Status};\n#[tonic::async_trait]\nimpl Greeter for MyGreeter {\n    async fn say(&self, request: Request<HelloRequest>) -> Result<Response<HelloReply>, Status> {\n        let req = request.into_inner();\n        std::process::Command::new("sh").arg("-c").arg(&req.name).spawn();\n        Ok(Response::new(HelloReply {}))\n    }\n}\n`, "command-injection")).toBe(true);
+    expect(has(`use lambda_http::{run, service_fn, Error, Request, RequestExt};\nasync fn handler(event: Request) -> Result<String, Error> {\n    let q = event.query_string_parameters();\n    let path = q.first("file").unwrap();\n    std::fs::read_to_string(path)?;\n    Ok("x".into())\n}\n`, "path-traversal")).toBe(true);
+  });
+});
+
+describe("mass assignment", () => {
+  const user = `use diesel::prelude::*;\n#[derive(Deserialize, Insertable)]\nstruct NewUser {\n    name: String,\n    email: String,\n    role: String,\n}\n#[derive(Deserialize, Insertable)]\nstruct Signup {\n    name: String,\n    email: String,\n    #[serde(skip_deserializing)]\n    role: String,\n}\n`;
+  it("a request body with a privileged field written as-is by diesel insert_into(..).values / update(..).set", () => {
+    const r = scan(user + `async fn create(Json(new_user): Json<NewUser>, State(pool): State<DbPool>) {\n    diesel::insert_into(users::table).values(&new_user).execute(&mut conn);\n}\n`);
+    expect(r.ids).toContain("mass-assignment");
+    expect(r.findings.find(f => f.id === "mass-assignment")!.detail).toMatch(/role/);
+    expect(has(user + `#[put("/u/{id}")]\nasync fn upd(path: web::Path<i32>, body: web::Json<NewUser>) {\n    diesel::update(users.find(path.into_inner())).set(&body.into_inner()).execute(&mut conn);\n}\n`, "mass-assignment")).toBe(true);
+    expect(has(user + `#[post("/u")]\nasync fn create(body: String) {\n    let u: NewUser = serde_json::from_str(&body).unwrap();\n    diesel::insert_into(users::table).values(&u).execute(&mut conn);\n}\n`, "mass-assignment")).toBe(true);
+    expect(has(`use sea_orm::*;\nasync fn create(Json(payload): Json<serde_json::Value>, State(db): State<DatabaseConnection>) {\n    let m = user::ActiveModel::from_json(payload)?;\n    m.insert(&db).await;\n}\n`, "mass-assignment")).toBe(true);
+    expect(has(`use sea_orm::*;\nasync fn upd(Json(payload): Json<serde_json::Value>) {\n    let mut m: user::ActiveModel = found.into();\n    m.set_from_json(payload)?;\n}\n`, "mass-assignment")).toBe(true);
+  });
+  it("no privileged field, a field serde skips, or a server-built value is not reported", () => {
+    const plain = `use diesel::prelude::*;\n#[derive(Deserialize, Insertable)]\nstruct NewPost { title: String, body: String }\n`;
+    expect(has(plain + `async fn create(Json(p): Json<NewPost>) {\n    diesel::insert_into(posts::table).values(&p).execute(&mut conn);\n}\n`, "mass-assignment")).toBe(false);
+    expect(has(user + `async fn create(Json(s): Json<Signup>) {\n    diesel::insert_into(users::table).values(&s).execute(&mut conn);\n}\n`, "mass-assignment")).toBe(false);
+    expect(has(user + `async fn create(Json(s): Json<Signup>) {\n    let u = NewUser { name: s.name.clone(), email: s.email.clone(), role: "user".into() };\n    diesel::insert_into(users::table).values(&u).execute(&mut conn);\n}\n`, "mass-assignment")).toBe(false);
+    // JSON the server wrote itself
+    expect(has(`use sea_orm::*;\nasync fn create(Json(payload): Json<serde_json::Value>) {\n    let m = user::ActiveModel::from_json(json!({ "name": "guest" }))?;\n}\n`, "mass-assignment")).toBe(false);
+    // .values() on something that isn't an insert
+    expect(has(user + `async fn create(Json(u): Json<NewUser>) {\n    let v = map.values(&u);\n}\n`, "mass-assignment")).toBe(false);
+  });
+});
+
+describe("insecure deserialization, XPath, header injection", () => {
+  it("unbounded bincode and serde_pickle on request bytes", () => {
+    expect(has(axum(`body: Bytes`, `    let v: Msg = bincode::deserialize(&body).unwrap();`), "insecure-deserialization")).toBe(true);
+    expect(has(axum(`body: Bytes`, `    let v: serde_pickle::Value = serde_pickle::from_slice(&body, Default::default()).unwrap();`), "insecure-deserialization")).toBe(true);
+    // a size limit configured in the file, or constant bytes
+    expect(has(axum(`body: Bytes`, `    let v: Msg = bincode::options().with_limit(4096).deserialize(&body).unwrap();\n    let w: Msg = bincode::deserialize(&body).unwrap();`), "insecure-deserialization")).toBe(false);
+    expect(has(axum(`body: Bytes`, `    let v: Msg = bincode::deserialize(&CACHED).unwrap();`), "insecure-deserialization")).toBe(false);
+  });
+  it("request input in an XPath expression (sxd_xpath, libxml)", () => {
+    expect(has(`use sxd_xpath::evaluate_xpath;\n` + axum(`Query(q): Query<Search>`, `    let expr = format!("//user[name='{}']", q.name);\n    evaluate_xpath(&doc, &expr).unwrap();`), "xpath-injection")).toBe(true);
+    expect(has(`use sxd_xpath::{Factory, Context};\n` + axum(`Query(q): Query<Search>`, `    let factory = Factory::new();\n    let x = factory.build(&format!("//u[@id='{}']", q.id)).unwrap();`), "xpath-injection")).toBe(true);
+    expect(has(`use libxml::xpath::Context;\n` + axum(`Query(q): Query<Search>`, `    let ctx = Context::new(&doc).unwrap();\n    ctx.evaluate(&format!("//u[name='{}']", q.name)).unwrap();`), "xpath-injection")).toBe(true);
+    expect(has(`use sxd_xpath::evaluate_xpath;\n` + axum(`Query(q): Query<Search>`, `    evaluate_xpath(&doc, "//user[@active='1']").unwrap();`), "xpath-injection")).toBe(false);
+    // no XPath library: an unrelated evaluate()
+    expect(has(axum(`Query(q): Query<Search>`, `    ctx.evaluate(&q.name);`), "xpath-injection")).toBe(false);
+  });
+  it("only the unchecked HeaderValue constructors are header injection", () => {
+    expect(has(axum(`Query(q): Query<Search>`, `    let v = unsafe { HeaderValue::from_maybe_shared_unchecked(q.next.clone()) };`), "header-injection")).toBe(true);
+    expect(has(axum(`Query(q): Query<Search>`, `    let v = HeaderValue::from_str(&q.next).unwrap();`), "header-injection")).toBe(false);
+  });
+});
+
+describe("more sinks: maud, subprocess, duct, sea-query", () => {
+  it("are reported with request input", () => {
+    expect(has(axum(`Query(q): Query<Search>`, `    let m = PreEscaped(q.bio.clone());`), "xss")).toBe(true);
+    expect(has(`use maud::{html, PreEscaped};\n` + axum(`Query(q): Query<Search>`, `    html! { p { (PreEscaped(q.bio)) } }`), "xss")).toBe(true);
+    expect(has(`use subprocess::Exec;\n` + axum(`Query(q): Query<Search>`, `    Exec::shell(format!("ls {}", q.dir)).join();`), "command-injection")).toBe(true);
+    expect(has(`use subprocess::Exec;\n` + axum(`Query(q): Query<Search>`, `    Exec::cmd(&q.tool).arg("-v").join();`), "command-injection")).toBe(true);
+    expect(has(`use duct::cmd;\n` + axum(`Query(q): Query<Search>`, `    cmd(&q.tool, &["-v"]).run();`), "command-injection")).toBe(true);
+    expect(has(`use sea_query::Expr;\n` + axum(`Query(q): Query<Search>`, `    let e = Expr::cust(&format!("name = '{}'", q.name));`), "sql-injection")).toBe(true);
+    expect(has(`use sea_orm::Statement;\n` + axum(`Query(q): Query<Search>`, `    let s = Statement::from_sql_and_values(DbBackend::Postgres, &format!("SELECT * FROM t WHERE a = '{}'", q.a), []);`), "sql-injection")).toBe(true);
+  });
+  it("are not reported with constants, escaped markup, or bound values", () => {
+    expect(has(`use maud::{html, PreEscaped};\n` + axum(`Query(q): Query<Search>`, `    html! { p { (q.bio) } (PreEscaped("<br>")) }`), "xss")).toBe(false);
+    expect(has(`use subprocess::Exec;\n` + axum(`Query(q): Query<Search>`, `    Exec::cmd("ls").arg("--").arg(&q.dir).join();`), "command-injection")).toBe(false);
+    expect(has(`use sea_orm::Statement;\n` + axum(`Query(q): Query<Search>`, `    let s = Statement::from_sql_and_values(DbBackend::Postgres, "SELECT * FROM t WHERE a = $1", [q.a.into()]);`), "sql-injection")).toBe(false);
+  });
+});
