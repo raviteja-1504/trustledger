@@ -17,6 +17,7 @@ import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import { dailyActivity, historyStats, reviewedCount, supersededIds, type ScanRow } from "@/lib/scanHistory";
 import type { RiskLevel } from "@/types";
+import { LoadingBlock } from "@/components/Loading";
 
 const PERIODS = [{ k: "7", l: "7 days" }, { k: "30", l: "30 days" }, { k: "90", l: "90 days" }] as const;
 type Period = (typeof PERIODS)[number]["k"];
@@ -152,7 +153,7 @@ function ScansContent() {
             <button onClick={load} className="font-bold text-xs">Retry</button>
           </div>
         )}
-        {!offline && !scans && !error && <div className="h-40 rounded-2xl bg-white border border-gray-100 animate-pulse" aria-label="Loading scans" />}
+        {!offline && !scans && !error && <LoadingBlock label="scans" rows={6} />}
 
         {scans && (
           <>

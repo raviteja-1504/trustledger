@@ -10,6 +10,7 @@
  * Built only from loaded data; a source that hasn't loaded contributes nothing (never a guessed item).
  */
 import Link from "next/link";
+import { LoadingBlock } from "@/components/Loading";
 
 export type AttentionSeverity = "critical" | "high" | "medium";
 export type AttentionKind = "sla" | "secret" | "file" | "repo" | "ai" | "evidence";
@@ -203,7 +204,7 @@ function Row({ i, group }: { i: AttentionItem; group: string }) {
 }
 
 export default function NeedsAttention({ items, ready }: { items: readonly AttentionItem[]; ready: boolean }) {
-  if (!ready) return <div className="h-40 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading what needs attention" />;
+  if (!ready) return <LoadingBlock label="what needs attention" rows={3} />;
   if (items.length === 0) {
     return (
       <section aria-label="Needs attention" className="flex items-center gap-4 rounded-3xl bg-white border border-gray-100 shadow-sm px-6 py-5">

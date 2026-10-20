@@ -16,6 +16,7 @@ import {
   type AuditCategory, type AuditRow, type AuditView,
 } from "@/lib/auditEvents";
 import type { ChainVerification } from "@/lib/audit";
+import { LoadingBlock } from "@/components/Loading";
 
 const PAGE_SIZE = 200;
 const PERIODS = [["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last 12 months"], ["all", "All time"]] as const;
@@ -233,7 +234,7 @@ export default function AuditPage() {
           </div>
         )}
 
-        {!demo && !rows && !error && <div className="h-40 rounded-2xl bg-white border border-gray-100 animate-pulse" aria-label="Loading audit log" />}
+        {!demo && !rows && !error && <LoadingBlock label="the audit log" rows={5} />}
 
         {rows && (shown.length === 0 ? (
           <div className="section-card py-14 text-center text-sm text-gray-500">{rows.length === 0 ? "No audit entries in this period." : "No loaded entries match your search."}</div>

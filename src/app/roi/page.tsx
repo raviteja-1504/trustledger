@@ -147,7 +147,7 @@ export default function ROIDashboard() {
 
   const roi = useMemo(() => metrics ? computeROI(metrics) : null, [metrics]);
 
-  if (loading) return <AuthGuard><PageSkeleton><div /></PageSkeleton></AuthGuard>;
+  if (loading) return <AuthGuard><PageSkeleton loading label="ROI" /></AuthGuard>;
 
   return (
     <AuthGuard>

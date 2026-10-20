@@ -97,7 +97,7 @@ function BillingContent() {
   const upgraded  = searchParams?.get("upgraded") === "1";
   const cancelled  = searchParams?.get("cancelled") === "1";
 
-  if (loading) return <PageSkeleton><div /></PageSkeleton>;
+  if (loading) return <PageSkeleton loading label="billing" />;
   if (!data)   return <AuthGuard><p className="text-sm text-gray-400 p-8">Could not load billing data.</p></AuthGuard>;
 
   const plan      = data.org.plan;
@@ -288,7 +288,7 @@ function BillingContent() {
 export default function BillingPage() {
   const tz = useTimezone();
   return (
-    <Suspense fallback={<PageSkeleton><div /></PageSkeleton>}>
+    <Suspense fallback={<PageSkeleton loading label="billing" />}>
       <BillingContent />
     </Suspense>
   );

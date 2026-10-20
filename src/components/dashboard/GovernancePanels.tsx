@@ -9,6 +9,7 @@ import Link from "next/link";
 import type { ShadowSummary } from "@/lib/shadowAi";
 import type { EvidenceOverview } from "@/lib/evidenceEngine";
 import type { EvidenceStatus } from "@/lib/controlEvidence";
+import { LoadingBlock } from "@/components/Loading";
 
 export type Loadable<T> = T | null | "unavailable";
 
@@ -26,7 +27,7 @@ function Panel({ title, href, cta, children, label }: { title: string; href: str
 
 function Pending({ state }: { state: null | "unavailable" }) {
   return state === null
-    ? <div className="h-24 rounded-xl bg-gray-50 animate-pulse" aria-label="Loading" />
+    ? <LoadingBlock label="this panel" rows={1} />
     : <p className="text-xs text-gray-400">Couldn&apos;t load this right now.</p>;
 }
 

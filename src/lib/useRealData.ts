@@ -14,6 +14,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./supabase";
 import { fullPageNavigate } from "./authFlow";
+import { track } from "./netActivity";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -61,10 +62,11 @@ export async function authedFetch<T>(
   init?: RequestInit,
 ): Promise<T> {
   const headers = await getAuthHeader();
-  const res = await fetch(path, {
+  // Counted while in flight, so the top bar shows the page is refreshing (lib/netActivity.ts).
+  const res = await track(fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...headers, ...(init?.headers ?? {}) },
-  });
+  }));
   if (!res.ok) {
     // API routes return { error: <code>, message: <safe human-readable text> }
     // (see src/lib/errors.ts). Prefer message -- error is a machine code like

@@ -13,6 +13,7 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import { computeReviewDebt, DEBT_WEIGHT, type DebtFinding } from "@/lib/reviewDebt";
+import { LoadingBlock } from "@/components/Loading";
 
 interface ApiViolation { id: string; file_path: string; risk_score: string; status: string; created_at: string; sla_deadline: string | null; scan_id: string;
   scans: { repo_full_name?: string; pr_number?: number | null } | Array<{ repo_full_name?: string; pr_number?: number | null }> | null }
@@ -83,7 +84,7 @@ export default function ReviewDebtPage() {
             <span>Couldn&apos;t load findings. {error}</span><button onClick={load} className="font-bold text-xs">Retry</button>
           </div>
         )}
-        {!offline && !findings && !error && <div className="h-48 rounded-3xl bg-white border border-gray-100 animate-pulse" aria-label="Loading review debt" />}
+        {!offline && !findings && !error && <LoadingBlock label="review debt" rows={4} />}
 
         {findings && (debt.items.length === 0 ? (
           <section aria-label="Review debt" className="rounded-3xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white p-8">

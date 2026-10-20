@@ -215,7 +215,7 @@ export default function CompliancePage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={4} cards={3}>
+      <PageSkeleton loading={!offline && !!profile?.org_id && !facts && !factsFailed} label="compliance evidence" rows={4} cards={3}>
       <div className="max-w-7xl mx-auto space-y-5 pb-10">
 
         {/* ── Header ── */}

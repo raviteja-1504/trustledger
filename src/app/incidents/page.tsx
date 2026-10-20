@@ -82,6 +82,8 @@ export default function IncidentsPage() {
   const orgSlug = profile?.org_slug || "";
 
   const [incidents,    setIncidents]    = useState<Incident[]>([]);
+  // False until the first load finishes, so "no incidents" is never shown while they're still being fetched.
+  const [settled,      setSettled]      = useState(false);
   const [selected,     setSelected]     = useState<string | null>(null);
   const [activeTab,    setActiveTab]    = useState<"incidents" | "playbooks">("incidents");
   const [filterStatus, setFilterStatus] = useState<IncidentStatus | "all">("active");
@@ -142,7 +144,7 @@ export default function IncidentsPage() {
       const res = await authedFetch<{ incidents: Record<string, unknown>[] }>("/api/incidents");
       setIncidents((res.incidents ?? []).map(mapRow));
     } catch { /* offline — keep whatever's currently shown */ }
-    finally { if (spinner) setRefreshing(false); }
+    finally { setSettled(true); if (spinner) setRefreshing(false); }
   }, [profile?.org_id]);
 
   useEffect(() => { fetchIncidents(); }, [fetchIncidents]);
@@ -273,7 +275,7 @@ export default function IncidentsPage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={4} cards={4}>
+      <PageSkeleton loading={!!profile?.org_id && !settled} label="incidents" rows={4} cards={4}>
       <div className="max-w-7xl mx-auto space-y-5 pb-10">
 
         {/* Header */}

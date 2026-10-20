@@ -386,7 +386,7 @@ export default function RiskRegisterPage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={5} cards={4}>
+      <PageSkeleton loading={loading} label="risks" rows={5} cards={4}>
       <div className="max-w-7xl mx-auto space-y-5 pb-10">
 
         {/* Header */}

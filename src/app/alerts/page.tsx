@@ -305,6 +305,8 @@ export default function AlertsPage() {
   const { success, info, warning } = useToastHelpers();
   const { profile } = useAuth();
   const [baseAlerts,  setBaseAlerts]  = useState<Alert[]>([]);
+  // False until the first load finishes, so "no alerts" is never shown while they're still being fetched.
+  const [settled,     setSettled]     = useState(false);
   const [loadError,   setLoadError]   = useState<string | null>(null);
   const [persisted,   setPersisted]   = useState<PersistedState>({ statuses:{}, ackBy:{}, snoozeUntil:{}, resolvedAt:{}, notes:{}, history:{} });
   const [refreshing,  setRefreshing]  = useState(false);
@@ -414,7 +416,7 @@ export default function AlertsPage() {
   }, [profile?.org_id, profile?.org_slug]);
 
   useEffect(() => {
-    fetchAlerts();
+    fetchAlerts().finally(() => setSettled(true));
     // 3min drift safety-net, skipped while hidden -- useAlertsRealtime below
     // plus the event listeners here already give instant updates.
     const id = setInterval(() => { if (!document.hidden) fetchAlerts(); }, 180_000);
@@ -877,7 +879,7 @@ export default function AlertsPage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={6} cards={4}>
+      <PageSkeleton loading={!settled} label="alerts" rows={6} cards={4}>
       <div className="max-w-5xl mx-auto space-y-5 pb-10">
 
         {/* Header */}

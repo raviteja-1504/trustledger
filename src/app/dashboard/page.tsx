@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import { Spinner } from "@/components/Loading";
 import { api } from "@/lib/api";
 import { loadPolicy } from "@/lib/policy";
 import { computeTrustScore } from "@/lib/trustScore";
@@ -504,7 +505,8 @@ export default function DashboardPage() {
         </div>
 
         {loading && !effectiveData && (
-          <div className="space-y-8" aria-label="Loading dashboard">
+          <div className="space-y-8" role="status" aria-label="Loading dashboard">
+            <p className="flex items-center gap-2 text-sm font-semibold text-indigo-600"><Spinner size={16} /> Loading your dashboard…</p>
             <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-6 gap-5">
               {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-[150px] rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
             </div>

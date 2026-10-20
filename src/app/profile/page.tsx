@@ -166,7 +166,7 @@ export default function ProfilePage() {
     } finally { setDisabling(false); }
   }
 
-  if (loading) return <AuthGuard><PageSkeleton><div /></PageSkeleton></AuthGuard>;
+  if (loading) return <AuthGuard><PageSkeleton loading label="your profile" rows={3} cards={0} /></AuthGuard>;
 
   return (
     <AuthGuard>

@@ -14,6 +14,7 @@ import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import { relativeTime, useTimezone } from "@/lib/timezone";
 import { buildApiSecurityReport, type ApiSecurityReport, type InventoryEndpoint } from "@/lib/api/apiSecurityReport";
+import { LoadingBlock } from "@/components/Loading";
 
 const METHOD_STYLE: Record<string, string> = {
   GET: "bg-sky-100 text-sky-700", POST: "bg-emerald-100 text-emerald-700", PUT: "bg-amber-100 text-amber-800", PATCH: "bg-amber-100 text-amber-800",
@@ -114,7 +115,7 @@ export default function ApiSecurityPage() {
             <button onClick={() => load(true)} className="font-bold text-xs">Retry</button>
           </div>
         )}
-        {!report && !error && <div className="h-40 rounded-2xl bg-white border border-gray-100 animate-pulse" aria-label="Loading API security" />}
+        {!report && !error && <LoadingBlock label="API endpoints" rows={5} cards={4} />}
 
         {report && c && (
           <>

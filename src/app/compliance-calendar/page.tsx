@@ -5,6 +5,7 @@ import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone, getSavedTimezone } from "@/lib/timezone";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { LoadingBlock } from "@/components/Loading";
 import { useAuth } from "@/lib/auth";
 
 interface AuditEvent {
@@ -48,6 +49,8 @@ export default function ComplianceCalendarPage() {
   const [view,        setView]        = useState<"timeline" | "list">("timeline");
   const [filter,      setFilter]      = useState<string>("all");
   const [events,      setEvents]      = useState<AuditEvent[]>([]);
+  // False until the first load finishes, so "no events" is never shown while they are still being fetched.
+  const [loaded,      setLoaded]      = useState(false);
   const [showAdd,     setShowAdd]     = useState(false);
   const [newEvent,    setNewEvent]    = useState<Partial<AuditEvent>>({ type:"reminder", status:"upcoming", framework:"Internal" });
 
@@ -57,9 +60,10 @@ export default function ComplianceCalendarPage() {
     if (isSeedMode() && !profile?.org_id) {
       try {
         const raw = localStorage.getItem(CAL_KEY);
-        if (raw) { setEvents(JSON.parse(raw) as AuditEvent[]); return; }
+        if (raw) { setEvents(JSON.parse(raw) as AuditEvent[]); setLoaded(true); return; }
       } catch {}
       setEvents([]);
+      setLoaded(true);
       return;
     }
     // Live mode: try API, then localStorage cache
@@ -71,7 +75,8 @@ export default function ComplianceCalendarPage() {
           if (cached) { setEvents(JSON.parse(cached) as AuditEvent[]); return; }
         } catch {}
         setEvents([]);
-      });
+      })
+      .finally(() => setLoaded(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.org_id]);
 
@@ -227,7 +232,8 @@ export default function ComplianceCalendarPage() {
         )}
 
         {/* Empty state */}
-        {events.length === 0 && (
+        {!loaded && <LoadingBlock label="compliance events" rows={4} />}
+        {loaded && events.length === 0 && (
           <div className="bg-white rounded-2xl border border-gray-200 py-14 text-center space-y-1 shadow-sm">
             <p className="text-sm font-bold text-gray-600">No compliance events yet</p>
             <p className="text-xs text-gray-400">Add audit deadlines, cert renewals, and policy reviews to start tracking your compliance calendar.</p>

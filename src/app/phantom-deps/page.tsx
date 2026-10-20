@@ -265,7 +265,7 @@ export default function PhantomDepsPage() {
   const criticalCount = results.filter(r => r.riskScore === "critical").length;
   const resolvedCount = results.filter(r => r.status === "phantom" && (overrides[pkgId(r)]?.status === "resolved")).length;
 
-  if (loading) return <AuthGuard><PageSkeleton rows={4} cards={4}><div /></PageSkeleton></AuthGuard>;
+  if (loading) return <AuthGuard><PageSkeleton loading label="packages" rows={4} cards={4} /></AuthGuard>;
 
   return (
     <AuthGuard>

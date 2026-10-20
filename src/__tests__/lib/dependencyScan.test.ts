@@ -7,7 +7,7 @@ jest.mock("@/lib/osvClient", () => ({
 }));
 jest.mock("@/lib/npmLicense", () => ({ lookupNpmLicense: jest.fn() }));
 
-import { deriveFindings, type ScanForDeps } from "@/lib/dependencyScan";
+import { deriveFindings, fixingVersion, isBuiltinImport, nonCveFor, packageOccurrences, type ScanForDeps } from "@/lib/dependencyScan";
 import { lookupVulnerabilities } from "@/lib/osvClient";
 import { lookupNpmLicense } from "@/lib/npmLicense";
 
@@ -190,6 +190,144 @@ describe("dependencyScan.deriveFindings -- base-image CVE lookup (Decision 2, ne
     await deriveFindings([scanWithDockerfile("FROM postgres:16\n")]);
     const lookups = mockLookupVulnerabilities.mock.calls[0][0];
     expect(lookups.some(l => l.ecosystem === "Debian:12" && l.name === "openssl")).toBe(true);
+  });
+});
+
+describe("dependencyScan: lockfiles, transitives, imports", () => {
+  const scan = (files: Array<{ file_path: string; content: string }>): ScanForDeps =>
+    ({ repo: "acme/demo", pr_number: 1, scan_id: "scan_1", files: files.map(f => ({ ...f, ai_percentage: 0 })) });
+  const pkgJson = { file_path: "package.json", content: JSON.stringify({ dependencies: { lodash: "^4.17.0" }, devDependencies: { jest: "^29.0.0" } }) };
+  const lock = { file_path: "package-lock.json", content: JSON.stringify({ lockfileVersion: 3, packages: {
+    "": { dependencies: { lodash: "^4.17.0" }, devDependencies: { jest: "^29.0.0" } },
+    "node_modules/lodash": { version: "4.17.21" },
+    "node_modules/jest": { version: "29.7.0", dev: true },
+    "node_modules/old-lib": { version: "1.0.0" },
+    "node_modules/old-lib/node_modules/lodash": { version: "4.17.15" },
+  } }) };
+  beforeEach(() => {
+    mockLookupNpmLicense.mockReset().mockResolvedValue(null);
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map());
+  });
+
+  it("a declared package's version comes from the lockfile: what's installed, not the range's floor", () => {
+    const occ = packageOccurrences(scan([pkgJson, lock]));
+    expect(occ.find(o => o.pkg === "lodash" && !o.isTransitive)).toMatchObject({ version: "4.17.21", versionSource: "lockfile", versionRange: "^4.17.0", dev: false });
+    expect(occ.find(o => o.pkg === "jest")).toMatchObject({ version: "29.7.0", dev: true, isTransitive: false });
+  });
+
+  it("other locked packages are transitive at their locked versions -- including an older nested copy", () => {
+    const t = packageOccurrences(scan([pkgJson, lock])).filter(o => o.isTransitive);
+    expect(t.map(o => `${o.pkg}@${o.version}`).sort()).toEqual(["lodash@4.17.15", "old-lib@1.0.0"]);
+    expect(t.find(o => o.pkg === "lodash")).toMatchObject({ pulledBy: "old-lib", filePath: "package-lock.json", versionSource: "lockfile" });
+  });
+
+  it("the direct copy is used for a declared package even when a nested copy comes first in the lockfile", () => {
+    const nestedFirst = { file_path: "package-lock.json", content: JSON.stringify({ packages: {
+      "": { dependencies: { lodash: "^4.17.0" } },
+      "node_modules/a/node_modules/lodash": { version: "4.17.10" },
+      "node_modules/lodash": { version: "4.17.21" },
+      "node_modules/a": { version: "1.0.0" },
+    } }) };
+    const occ = packageOccurrences(scan([{ file_path: "package.json", content: JSON.stringify({ dependencies: { lodash: "^4.17.0" } }) }, nestedFirst]));
+    expect(occ.find(o => o.pkg === "lodash" && !o.isTransitive)!.version).toBe("4.17.21");
+    expect(occ.find(o => o.pkg === "lodash" && o.isTransitive)!.version).toBe("4.17.10");
+  });
+
+  it("a lockfile alone: its own direct flags decide; with a manifest, only what the manifest declares is direct", () => {
+    const lockOnly = { file_path: "package-lock.json", content: JSON.stringify({ packages: {
+      "": { dependencies: { lodash: "^4", "left-pad": "^1" } },
+      "node_modules/lodash": { version: "4.17.21" }, "node_modules/left-pad": { version: "1.3.0" }, "node_modules/x": { version: "2.0.0" },
+    } }) };
+    const alone = packageOccurrences(scan([lockOnly]));
+    expect(alone.filter(o => !o.isTransitive).map(o => o.pkg).sort()).toEqual(["left-pad", "lodash"]);
+    expect(alone.find(o => o.pkg === "x")!.isTransitive).toBe(true);
+    // A stale lockfile still lists left-pad as direct, but the manifest no longer declares it: transitive.
+    const withManifest = packageOccurrences(scan([{ file_path: "package.json", content: JSON.stringify({ dependencies: { lodash: "^4" } }) }, lockOnly]));
+    expect(withManifest.find(o => o.pkg === "left-pad")!.isTransitive).toBe(true);
+  });
+
+  it("the nearest lockfile wins in a monorepo; a manifest without one keeps its range", () => {
+    const occ = packageOccurrences(scan([
+      { file_path: "package-lock.json", content: JSON.stringify({ packages: { "": {}, "node_modules/react": { version: "17.0.0" } } }) },
+      { file_path: "web/package.json", content: JSON.stringify({ dependencies: { react: "^18.0.0" } }) },
+      { file_path: "web/package-lock.json", content: JSON.stringify({ packages: { "": { dependencies: { react: "^18" } }, "node_modules/react": { version: "18.2.0" } } }) },
+      { file_path: "tools/requirements.txt", content: "requests>=2.0\n" },
+    ]));
+    expect(occ.find(o => o.pkg === "react" && o.filePath === "web/package.json")).toMatchObject({ version: "18.2.0", versionSource: "lockfile" });
+    expect(occ.find(o => o.pkg === "requests")).toMatchObject({ version: ">=2.0", versionSource: "manifest" });
+  });
+
+  it("imports are only used for a language with no manifest, and never for built-in modules", () => {
+    const withManifest = packageOccurrences(scan([pkgJson, { file_path: "src/a.ts", content: `import x from "left-pad";\nimport fs from "fs";` }]));
+    expect(withManifest.some(o => o.pkg === "left-pad")).toBe(false);
+    const py = packageOccurrences(scan([{ file_path: "app.py", content: "import json\nimport os.path\nimport requests\nfrom flask import Flask\n" }]));
+    expect(py.map(o => o.pkg).sort()).toEqual(["flask", "requests"]);
+    expect(py[0]).toMatchObject({ version: "", versionSource: "none" });
+    expect(isBuiltinImport("node:crypto", "javascript")).toBe(true);
+    expect(isBuiltinImport("fs/promises", "typescript")).toBe(true);
+    expect(isBuiltinImport("express", "javascript")).toBe(false);
+  });
+
+  it("new manifests: Cargo.toml, Gemfile, pyproject.toml, Pipfile, requirements-dev.txt", () => {
+    const occ = packageOccurrences(scan([
+      { file_path: "Cargo.toml", content: `[dependencies]\nserde = "1.0"\n` },
+      { file_path: "Gemfile", content: `gem "rails", "~> 7.1"\n` },
+      { file_path: "py/pyproject.toml", content: `[project]\ndependencies = ["django>=4.2"]\n` },
+      { file_path: "Pipfile", content: `[packages]\nflask = "==2.3.0"\n` },
+      { file_path: "requirements-dev.txt", content: "pytest==8.0.0\n" },
+    ]));
+    expect(occ.map(o => [o.pkg, o.eco, !!o.dev]).sort()).toEqual([
+      ["django", "python", false], ["flask", "python", false], ["pytest", "python", true], ["rails", "ruby", false], ["serde", "rust", false],
+    ]);
+  });
+
+  it("findings carry scope, version source and range; transitive ids include the version", async () => {
+    mockLookupVulnerabilities.mockResolvedValue(new Map([
+      ["npm|lodash|4.17.15", [{ id: "GHSA-a", aliases: ["CVE-2021-23337"], severity: "HIGH" as const, fixedIn: "4.17.21" }]],
+    ]));
+    const findings = await deriveFindings([scan([pkgJson, lock])]);
+    const direct = findings.find(f => f.package_name === "lodash" && !f.is_transitive)!;
+    expect(direct).toMatchObject({ type: "safe", version_used: "4.17.21", version_source: "lockfile", version_range: "^4.17.0", scope: "runtime" });
+    const nested = findings.find(f => f.package_name === "lodash" && f.is_transitive)!;
+    expect(nested).toMatchObject({ type: "transitive", risk: "HIGH", version_used: "4.17.15", pulled_by: "old-lib", id: "scan_1::package-lock.json::lodash@4.17.15-t" });
+    expect(findings.find(f => f.package_name === "jest")!.scope).toBe("dev");
+  });
+});
+
+describe("dependencyScan: advisories and fixes", () => {
+  const scan = (deps: Record<string, string>): ScanForDeps =>
+    ({ repo: "acme/demo", pr_number: 1, scan_id: "scan_1", files: [{ file_path: "package.json", content: JSON.stringify({ dependencies: deps }), ai_percentage: 0 }] });
+  beforeEach(() => mockLookupNpmLicense.mockReset().mockResolvedValue(null));
+
+  it("every advisory is kept, worst first; the fix version clears all of them", async () => {
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map([
+      ["npm|axios|0.21.0", [
+        { id: "GHSA-low", aliases: [], severity: "MEDIUM" as const, summary: "m", fixedIn: "1.6.0" },
+        { id: "GHSA-hi", aliases: ["CVE-2021-3749"], severity: "HIGH" as const, summary: "ReDoS", fixedIn: "0.21.2" },
+      ]],
+    ]));
+    const f = (await deriveFindings([scan({ axios: "0.21.0" })])).find(x => x.package_name === "axios")!;
+    expect(f).toMatchObject({ risk: "HIGH", cve: "CVE-2021-3749", latest_version: "1.6.0", fix: "Update axios to 1.6.0 or later (fixes all 2 advisories)", description: "ReDoS (+1 more advisory)" });
+    expect(f.advisories!.map(a => a.id)).toEqual(["GHSA-hi", "GHSA-low"]);
+  });
+
+  it("when an advisory has no fix, the fix says so", async () => {
+    mockLookupVulnerabilities.mockReset().mockResolvedValue(new Map([
+      ["npm|x|1.0.0", [{ id: "A", aliases: [], severity: "HIGH" as const, fixedIn: "1.2.0" }, { id: "B", aliases: [], severity: "LOW" as const }]],
+    ]));
+    const f = (await deriveFindings([scan({ x: "1.0.0" })])).find(x => x.package_name === "x")!;
+    expect(f.fix).toBe("Update x to 1.2.0 or later (fixes the most severe; 1 advisory has no fix yet)");
+  });
+
+  it("fixingVersion / nonCveFor", () => {
+    expect(fixingVersion([{ id: "a", aliases: [], severity: "LOW", fixedIn: "1.10.0" }, { id: "b", aliases: [], severity: "LOW", fixedIn: "1.9.0" }])).toBe("1.10.0");
+    expect(fixingVersion([])).toBeUndefined();
+    // "Outdated" only for a known, older version -- an up-to-date numpy isn't flagged.
+    expect(nonCveFor("numpy", "==1.20.0")?.type).toBe("outdated");
+    expect(nonCveFor("numpy", "==2.0.0")).toBeNull();
+    expect(nonCveFor("numpy", "")).toBeNull();
+    expect(nonCveFor("ml-utils-fast", "")?.type).toBe("hallucinated");
+    expect(nonCveFor("left-pad", "1.0.0")).toBeNull();
   });
 });
 

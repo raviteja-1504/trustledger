@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { authedFetch } from "@/lib/useRealData";
 import type { AttestationRecord, AttestationRecordSummary } from "@/lib/attestationRecords";
+import { LoadingBlock } from "@/components/Loading";
 
 interface Response_ { records: AttestationRecord[]; summary: AttestationRecordSummary; period: { start: string; end: string }; scope: "org" | "own" }
 
@@ -61,7 +62,7 @@ export default function PeriodAttestations({ start, end, color }: { start: strin
       </div>
 
       {error && <p role="alert" className="text-xs text-rose-600">Couldn&apos;t load sign-off records for this period. {error}</p>}
-      {!data && !error && <div className="h-24 rounded-xl bg-gray-50 animate-pulse" aria-label="Loading sign-off records" />}
+      {!data && !error && <LoadingBlock label="sign-off records" rows={2} />}
 
       {data && s && (
         <>

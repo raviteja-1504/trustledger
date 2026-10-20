@@ -168,7 +168,7 @@ export default function SLAPage() {
 
   const refreshAgo = lastRefreshed ? (() => { const s=Math.floor((Date.now()-lastRefreshed.getTime())/1000); return s<10?"just now":s<60?`${s}s ago`:`${Math.floor(s/60)}m ago`; })() : "";
 
-  if (loading) return <AuthGuard><PageSkeleton rows={4} cards={5}><div /></PageSkeleton></AuthGuard>;
+  if (loading) return <AuthGuard><PageSkeleton loading label="fix deadlines" rows={4} cards={5} /></AuthGuard>;
 
   return (
     <AuthGuard>

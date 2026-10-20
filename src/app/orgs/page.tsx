@@ -98,7 +98,7 @@ export default function OrgsPage() {
     (o.github_org ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
-  if (loading) return <PageSkeleton><div /></PageSkeleton>;
+  if (loading) return <PageSkeleton loading label="organisations" />;
 
   return (
     <AuthGuard>

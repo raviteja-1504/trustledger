@@ -15,6 +15,7 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import { buildAdvisories, filterFindings, filterOptions, NO_FILTERS, type Advisory, type AdvisoryFinding, type ThreatFilters } from "@/lib/threatIntel";
+import { LoadingBlock } from "@/components/Loading";
 
 const SELECT = "text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300 max-w-[14rem]";
 
@@ -98,7 +99,7 @@ export default function ThreatIntelPage() {
             <button onClick={load} className="font-bold text-xs">Retry</button>
           </div>
         )}
-        {!offline && !findings && !error && <div className="h-40 rounded-2xl bg-white border border-gray-100 animate-pulse" aria-label="Loading advisories" />}
+        {!offline && !findings && !error && <LoadingBlock label="advisories" rows={4} />}
 
         {findings && (
           <>

@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import AuthGuard from "@/components/AuthGuard";
+import { Spinner } from "@/components/Loading";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
@@ -119,8 +120,11 @@ export default function AnalyticsPage() {
           </div>
         )}
         {!offline && !data && !error && (
-          <div className="grid grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-4" aria-label="Loading analytics">
-            {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-32 rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
+          <div role="status" aria-label="Loading analytics" className="space-y-4">
+            <p className="flex items-center gap-2 text-sm font-semibold text-indigo-600"><Spinner size={16} /> Loading analytics…</p>
+            <div className="grid grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-4">
+              {[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-32 rounded-2xl bg-white border border-gray-100 animate-pulse" />)}
+            </div>
           </div>
         )}
 

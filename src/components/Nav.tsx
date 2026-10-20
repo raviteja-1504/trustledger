@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { useState, useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
+import { NetworkActivity } from "@/components/Loading";
 import Link from "next/link";
 import { useNotifications, type Notification, type NotifLevel } from "@/lib/notifications";
 import { useLiveAlertNotifications, type LiveNotification } from "@/lib/realtime";
@@ -455,6 +456,8 @@ export default function Nav({
             <span className="hidden lg:block text-[11px] text-gray-400">{page.sub}</span>
           </>
         )}
+        {/* "Loading…" / "Refreshing…" while this page fetches data, so a slow page never reads as empty. */}
+        <NetworkActivity page={pathname} />
       </div>
 
       {/* Right: search hint + bell */}

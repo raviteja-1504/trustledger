@@ -17,6 +17,7 @@ import { useAuth } from "@/lib/auth";
 import { useScansRealtime } from "@/lib/realtime";
 import type { RiskLevel } from "@/types";
 import type { FileStatus, RepoFile, RepoSummary } from "@/lib/repoSummary";
+import { LoadingBlock } from "@/components/Loading";
 
 interface SummaryResponse extends RepoSummary {
   repo: { name: string; default_branch: string | null; is_active: boolean; connected_at: string | null };
@@ -108,7 +109,7 @@ export default function RepoDetailPage() {
             <button onClick={load} className="font-bold text-xs">Retry</button>
           </div>
         )}
-        {!demo && !data && !error && <div className="h-40 rounded-2xl bg-white border border-gray-100 animate-pulse" aria-label="Loading repository" />}
+        {!demo && !data && !error && <LoadingBlock label="this repository" rows={5} cards={4} />}
 
         {data && (
           <>

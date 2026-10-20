@@ -142,7 +142,7 @@ export default function TrustScorePage() {
   }
 
   if (error && !score) return <AuthGuard><div className="max-w-4xl mx-auto"><div className="bg-rose-50 border border-rose-200 text-rose-700 text-sm rounded-xl px-4 py-3">{error}</div></div></AuthGuard>;
-  if (!score) return <AuthGuard><PageSkeleton rows={6} cards={3}><div /></PageSkeleton></AuthGuard>;
+  if (!score) return <AuthGuard><PageSkeleton loading label="the Trust Score" rows={6} cards={3} /></AuthGuard>;
 
   const col = scoreColor(score.total);
 

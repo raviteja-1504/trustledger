@@ -220,7 +220,7 @@ describe("governance panels", () => {
 
   it("loading and unavailable states", () => {
     const { rerender } = render(<SecretsPanel counts={null} />);
-    expect(screen.getByLabelText("Loading")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading this panel…");
     rerender(<SecretsPanel counts="unavailable" />);
     expect(screen.getByText(/Couldn.t load this right now/)).toBeInTheDocument();
   });

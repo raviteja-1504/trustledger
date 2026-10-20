@@ -10,6 +10,7 @@ import type {
 } from "@/types";
 import { supabase } from "./supabase";
 import { handleSessionError } from "./useRealData";
+import { track } from "./netActivity";
 
 // ── Auth token helper ──────────────────────────────────────────────────────────
 
@@ -24,14 +25,15 @@ async function getToken(): Promise<string | null> {
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getToken();
-  const res = await fetch(path, {
+  // Counted while in flight, so the top bar shows the page is refreshing (lib/netActivity.ts).
+  const res = await track(fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
-  });
+  }));
   if (!res.ok) {
     // API routes return { error: <code>, message: <safe human-readable text> }
     // (see src/lib/errors.ts) -- prefer message, since error is a machine code

@@ -183,7 +183,7 @@ export default function SecretsPage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={5} cards={4}>
+      <PageSkeleton loading={loading} label="secrets" rows={5} cards={4}>
       <div className="max-w-7xl mx-auto space-y-5 pb-10">
 
         {/* Header */}

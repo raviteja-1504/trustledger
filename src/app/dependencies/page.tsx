@@ -168,6 +168,13 @@ function healthBar(score: number) {
   );
 }
 
+/** How sure the version is: exactly what's installed, the lowest a range allows, or not known at all. */
+function versionSourceText(dep: DepFinding): string {
+  if (dep.version_source === "lockfile") return `Version ${dep.version_used} is what's installed, from the lockfile${dep.version_range ? ` (the manifest asks for ${dep.version_range})` : ""}.`;
+  if (dep.version_source === "manifest") return `No lockfile found: checked the lowest version ${dep.version_range ?? dep.version_used} allows. Add a lockfile for an exact result.`;
+  return "No version declared, so every published version was checked — some advisories may not apply to the version you use.";
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function DependenciesPage() {
@@ -182,6 +189,7 @@ export default function DependenciesPage() {
   const [filterEco,   setFilterEco]   = useState<LangEcosystem | "all">("all");
   const [filterRepo,  setFilterRepo]  = useState("all");
   const [filterLicense, setFilterLicense] = useState<LicenseRisk | "all">("all");
+  const [filterScope, setFilterScope] = useState<"all" | "runtime" | "dev">("all");
   const [search,      setSearch]      = useState("");
   const [showFixAll,  setShowFixAll]  = useState(false);
   const [showSbom,    setShowSbom]    = useState(false);
@@ -225,12 +233,13 @@ export default function DependenciesPage() {
     if (filterEco     !== "all" && f.ecosystem     !== filterEco)     return false;
     if (filterRepo    !== "all" && f.repo          !== filterRepo)    return false;
     if (filterLicense !== "all" && f.license_risk  !== filterLicense) return false;
+    if (filterScope   !== "all" && (f.scope ?? "runtime") !== filterScope) return false;
     if (search) { const q = search.toLowerCase(); const h = [f.package_name, f.description, f.cve??"", f.repo].join(" ").toLowerCase(); if (!h.includes(q)) return false; }
     return true;
   // Most severe first; within a severity, what the code actually uses first (vulnerable function called,
   // then reachable, ...). Stable, so the server's order is kept otherwise.
   }).sort((a, b) => RISK_RANK[a.risk] - RISK_RANK[b.risk] || reachRank(a) - reachRank(b)),
-  [findings, filterRisk, filterType, filterEco, filterRepo, filterLicense, search]);
+  [findings, filterRisk, filterType, filterEco, filterRepo, filterLicense, filterScope, search]);
 
   // Fix-all commands grouped by package manager
   const fixAll = useMemo(() => {
@@ -281,7 +290,7 @@ export default function DependenciesPage() {
 
   return (
     <AuthGuard>
-      <PageSkeleton rows={6} cards={4}>
+      <PageSkeleton loading={loading} label="dependencies" rows={6} cards={4}>
       <div className="max-w-7xl mx-auto space-y-5 pb-10">
 
         {/* Header */}
@@ -487,6 +496,12 @@ export default function DependenciesPage() {
             <option value="safe">✓ Safe (MIT/Apache)</option>
             <option value="unknown">? Unknown</option>
           </select>
+          <select aria-label="Scope" value={filterScope} onChange={e => setFilterScope(e.target.value as "all" | "runtime" | "dev")}
+            className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
+            <option value="all">Runtime and dev</option>
+            <option value="runtime">Runtime only</option>
+            <option value="dev">Dev only</option>
+          </select>
           {repos.length > 1 && (
             <select value={filterRepo} onChange={e => setFilterRepo(e.target.value)}
               className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
@@ -513,7 +528,7 @@ export default function DependenciesPage() {
           {filtered.length === 0 ? (
             <div className="py-14 text-center">
               <p className="text-sm font-bold text-gray-600">No packages match this filter</p>
-              <button onClick={() => { setSearch(""); setFilterRisk("all"); setFilterType("all"); setFilterEco("all"); setFilterRepo("all"); setFilterLicense("all"); }}
+              <button onClick={() => { setSearch(""); setFilterRisk("all"); setFilterType("all"); setFilterEco("all"); setFilterRepo("all"); setFilterLicense("all"); setFilterScope("all"); }}
                 className="mt-2 text-xs font-bold text-indigo-600">Clear filters →</button>
             </div>
           ) : filtered.map(dep => {
@@ -536,6 +551,9 @@ export default function DependenciesPage() {
                       )}
                       {dep.is_transitive && (
                         <span className="text-[8px] font-bold text-gray-400 bg-gray-100 px-1 py-0.5 rounded">transitive</span>
+                      )}
+                      {dep.scope === "dev" && (
+                        <span className="text-[8px] font-bold text-sky-700 bg-sky-50 px-1 py-0.5 rounded" title="Only used to develop, test or build — not shipped at runtime">dev</span>
                       )}
                       {dep.reachability && (
                         <span className="text-[8px] font-bold px-1 py-0.5 rounded border whitespace-nowrap" title={`${REACHABILITY_LABEL[dep.reachability.tier]}: ${REACHABILITY_DESC[dep.reachability.tier]}\n\n${dep.reachability.summary}`}
@@ -617,6 +635,24 @@ export default function DependenciesPage() {
                             )}
                           </div>
                         )}
+                        {(dep.advisories?.length ?? 0) > 1 && (
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1.5">All {dep.advisories!.length} advisories for this version</p>
+                            <ul className="space-y-1">
+                              {dep.advisories!.map(a => {
+                                const cve = a.aliases.find(x => x.startsWith("CVE-"));
+                                return (
+                                  <li key={a.id} className="flex items-baseline gap-2 text-[11px] min-w-0">
+                                    <span className="font-bold w-16 shrink-0" style={{ color: RISK_STYLE[a.severity].text }}>{a.severity}</span>
+                                    <a href={`https://osv.dev/vulnerability/${encodeURIComponent(a.id)}`} target="_blank" rel="noopener noreferrer" className="font-mono text-indigo-600 hover:underline shrink-0">{cve ?? a.id}</a>
+                                    <span className="text-gray-600 truncate min-w-0">{a.summary ?? ""}</span>
+                                    <span className="ml-auto shrink-0 font-mono text-emerald-700">{a.fixedIn ? `fixed in ${a.fixedIn}` : "no fix yet"}</span>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        )}
                         {dep.exploit_public && (
                           <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
                             <span className="text-rose-600 text-sm shrink-0">⚡</span>
@@ -687,7 +723,11 @@ export default function DependenciesPage() {
                       <span className="text-[10px] text-gray-500">AI-introduced: {dep.ai_introduced?"Yes":"Unclear"}</span>
                       {dep.version_used && <span className="text-[10px] font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded">{dep.version_used}</span>}
                       {dep.latest_version && <span className="text-[10px] font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">→ {dep.latest_version}</span>}
+                      {dep.scope && <span className="text-[10px] text-gray-500">Scope: {dep.scope === "dev" ? "development only" : "runtime"}</span>}
                     </div>
+                    {dep.version_source && (
+                      <p className="text-[10px] text-gray-500 -mt-2">{versionSourceText(dep)}</p>
+                    )}
 
                     {/* Fix */}
                     {dep.fix && (

@@ -119,7 +119,7 @@ export default function ShadowAIPage() {
     Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: `shadow-ai-${days}d.csv` }).click();
   }
 
-  if (loading && !data) return <AuthGuard><PageSkeleton rows={4} cards={5}><div /></PageSkeleton></AuthGuard>;
+  if (loading && !data) return <AuthGuard><PageSkeleton loading label="AI tool usage" rows={4} cards={5} /></AuthGuard>;
 
   const policy = data?.policy ?? null;
   const pct = (v: number | null | undefined) => v == null ? "—" : `${Math.round(v * 100)}%`;
