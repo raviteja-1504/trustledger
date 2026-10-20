@@ -6358,7 +6358,7 @@ function findAstTaintRustFindings(
     id: f.id, label: astTaintRustLabel(f.id), severity: f.severityOverride ?? astTaintRustSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
-      ? `${f.detail} [input assumed untrusted: parameter of a public function with no in-file caller and no handler extractor]`
+      ? `${f.detail} [input assumed untrusted: parameter of a function with no in-file caller and no handler extractor]`
       : f.detail,
     confidence: f.entryPointSeeded ? 70 : 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,

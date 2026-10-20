@@ -139,6 +139,31 @@ describe("sources", () => {
     expect(relaxed).toHaveLength(1);
     expect(relaxed[0].entryPointSeeded).toBe(true);
   });
+
+  it("a private function nothing in the file calls is an entry point too (shell command, SQL, SSRF)", () => {
+    // These three (from a real PR scan) were missed: only `pub` functions used to count as entry points.
+    const command = `use std::process::Command;\nfn run_tool(user_value: &str) {\n    let command = format!("reporter --input {}", user_value);\n    let _ = Command::new("sh").arg("-c").arg(command).status();\n}\n`;
+    const sql = `fn get_user(input: &str, db: &dyn QueryDb) {\n    let query = format!("SELECT * FROM users WHERE name = '{}'", input);\n    db.query(&query);\n}\ntrait QueryDb { fn query(&self, sql: &str); }\n`;
+    const ssrf = `fn fetch(user_url: &str) { let _request = reqwest::blocking::get(user_url); }\n`;
+    const only = (code: string) => scan(code, true).findings.map(f => [f.id, f.line, !!f.entryPointSeeded]);
+    expect(only(command)).toEqual([["command-injection", 4, true]]);
+    expect(only(sql)).toEqual([["sql-injection", 3, true]]);
+    expect(only(ssrf)).toEqual([["ssrf", 1, true]]);
+    expect(scan(command).ids).toEqual([]);                    // strict mode still needs a real request source
+  });
+
+  it("a private function this file calls, or passes as a value, is internal: its parameters aren't input", () => {
+    const helper = `fn run_tool(v: &str) {\n    Command::new("sh").arg("-c").arg(format!("reporter {}", v)).status();\n}\npub fn main_entry() { run_tool("fixed"); }\n`;
+    expect(scan(helper, true).ids).not.toContain("command-injection");
+    const asValue = `fn run_tool(v: &str) {\n    Command::new("sh").arg("-c").arg(format!("reporter {}", v)).status();\n}\npub fn all() { ["a", "b"].iter().for_each(|x| run_tool(x)); ["c"].into_iter().for_each(run_tool); }\n`;
+    expect(scan(asValue, true).ids).not.toContain("command-injection");
+    const referencedOnly = `fn run_tool(v: &str) {\n    Command::new("sh").arg("-c").arg(format!("reporter {}", v)).status();\n}\npub fn all() { ["c"].into_iter().for_each(run_tool); }\n`;
+    expect(scan(referencedOnly, true).ids).not.toContain("command-injection");
+    const pubCalled = `pub fn run_tool(v: &str) {\n    Command::new("sh").arg("-c").arg(format!("reporter {}", v)).status();\n}\npub fn main_entry() { run_tool("fixed"); }\n`;
+    expect(scan(pubCalled, true).ids).not.toContain("command-injection");
+    const test = `#[test]\nfn t(v: &str) {\n    Command::new("sh").arg("-c").arg(format!("x {}", v)).status();\n}\n`;
+    expect(scan(test, true).ids).not.toContain("command-injection");
+  });
 });
 
 describe("propagation", () => {

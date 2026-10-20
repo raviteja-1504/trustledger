@@ -1667,7 +1667,20 @@ const walkMain = (node: SyntaxNode, env: Env, ctx: EngineCtx) => createWalker(ct
 function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintRustFinding[] {
   const called = new Set<string>();
   for (const c of findAllNodes(ctx.root, "call_expression")) called.add(callParts(c).name);
-  const isEntry = (f: LocalFn) => withEntryPoints && !!f.body && f.isPub && !called.has(f.name) && !NON_ENTRY_FN_RE.test(f.name) && !isHandler(f)
+  // Every name used anywhere except where a function declares itself: a private function passed as a value
+  // (`.map(helper)`, `get(handler)`) is being called by this file's own code, with this file's own data.
+  const referenced = new Set<string>();
+  for (const n of findAllNodes(ctx.root, "identifier")) {
+    const p = n.parent;
+    if (p?.type === "function_item" && p.childForFieldName("name")?.id === n.id) continue;
+    referenced.add(n.text);
+  }
+  // Entry points: a `pub` function nothing in the file calls (library API), AND a private one nothing in the file
+  // calls or refers to. A Rust module is its file, so an unreferenced private function is reached from a child
+  // module (`super::f`), a test or a macro -- the compiler flags it as dead code otherwise. Only public functions
+  // used to count, so `fn run_tool(user_value: &str)` building a shell command was never analysed with its input.
+  const isEntry = (f: LocalFn) => withEntryPoints && !!f.body && !called.has(f.name) && (f.isPub || !referenced.has(f.name))
+    && !NON_ENTRY_FN_RE.test(f.name) && !isHandler(f)
     && !f.attrs.some(a => /^(?:test|tokio::test|cfg)$/.test(attrName(a)));
   for (const [, f] of ctx.fns) {
     if (!f.body) continue;
@@ -1716,7 +1729,8 @@ function drainSeeded(ctx: EngineCtx) {
 }
 
 export interface RustScanOptions {
-  /** Also treat `&str`/`String` parameters of public functions nothing in the file calls as untrusted input;
+  /** Also treat `&str`/`String` parameters of functions nothing in the file calls (public), or calls or refers to
+   * (private), as untrusted input;
    * findings that exist ONLY because of this come back with `entryPointSeeded: true`. */
   entryPoints?: boolean;
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
