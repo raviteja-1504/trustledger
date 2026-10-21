@@ -41,6 +41,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { inheritedViolations } from "@/lib/inheritedViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
 import type { ScanJob } from "@/lib/queue";
@@ -463,6 +464,8 @@ async function handle(req: NextRequest) {
           else await invalidateSecretsCache(orgId);
         }
 
+        // Inherited files whose attestation carried over to this scan; the rest may still block the merge.
+        const inheritedAttested = new Set<string>();
         if (inheritedFiles.length > 0) {
           // content is NOT re-copied here -- an unchanged file across N pushes
           // to the same PR used to store its full source N times (once per
@@ -542,6 +545,7 @@ async function handle(req: NextRequest) {
               }
               priorAtts.forEach(a => unInherited.delete(a.file_path as string));
             }
+            alreadyInherited.forEach(p => inheritedAttested.add(p));
           }
         }
 
@@ -552,12 +556,39 @@ async function handle(req: NextRequest) {
           const risk = triage.size ? calculateRisk(unsuppressed(f.indicators, triage), f.ai_percentage) : f.risk_score;
           return risk === "CRITICAL" || risk === "HIGH";
         });
-        if (violationFiles.length > 0) {
-          const slaH = overallRisk === "CRITICAL" ? 24 : 48;
-          await db.from("violations").insert(violationFiles.map(f => ({
-            org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
-            sla_deadline: new Date(Date.now() + slaH * 3600_000).toISOString(),
-          })));
+        // A delta scan inherits the PR's unchanged files; an unattested HIGH/CRITICAL one still blocks the merge
+        // (lib/inheritedViolations.ts) -- otherwise pushing any unrelated change turned the check green.
+        const slaH = overallRisk === "CRITICAL" ? 24 : 48;
+        const defaultDeadline = new Date(Date.now() + slaH * 3600_000).toISOString();
+        const inheritedCandidates = inheritedFiles.filter(f => !inheritedAttested.has(f.file_path) && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+        const priorDeadlines = new Map<string, string>();
+        if (prevScan && inheritedCandidates.length > 0) {
+          const { data: priorViolations } = await db
+            .from("violations")
+            .select("file_path, sla_deadline")
+            .eq("org_id", orgId)
+            .eq("scan_id", prevScan.id)
+            .in("file_path", inheritedCandidates.map(f => f.file_path));
+          for (const v of priorViolations ?? []) if (v.sla_deadline) priorDeadlines.set(v.file_path as string, v.sla_deadline as string);
+        }
+        const carriedViolations = inheritedViolations(
+          inheritedCandidates, inheritedAttested,
+          f => {
+            const stored = inheritedFiles.find(x => x.file_path === f.file_path);
+            // the stored findings are the scanner's own indicators, persisted as JSON
+            const indicators = Array.isArray(stored?.indicators) ? stored!.indicators as Parameters<typeof calculateRisk>[0] : [];
+            return triage.size ? calculateRisk(unsuppressed(indicators, triage), stored?.ai_percentage ?? 0) : f.risk_score;
+          },
+          priorDeadlines, defaultDeadline,
+        );
+        if (violationFiles.length > 0 || carriedViolations.length > 0) {
+          await db.from("violations").insert([
+            ...violationFiles.map(f => ({
+              org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
+              sla_deadline: defaultDeadline,
+            })),
+            ...carriedViolations.map(v => ({ ...v, org_id: orgId, scan_id: scan.id })),
+          ]);
           await invalidateViolationsCache(orgId);
 
           // ── Create a single alert per scan for the sidebar badge ──────────
@@ -573,8 +604,9 @@ async function handle(req: NextRequest) {
             .limit(1);
 
           if (!existingAlert || existingAlert.length === 0) {
-            const critCount = violationFiles.filter(f => f.risk_score === "CRITICAL").length;
-            const highCount = violationFiles.filter(f => f.risk_score === "HIGH").length;
+            const blocking = [...violationFiles, ...carriedViolations];
+            const critCount = blocking.filter(f => f.risk_score === "CRITICAL").length;
+            const highCount = blocking.filter(f => f.risk_score === "HIGH").length;
             const severity  = critCount > 0 ? "P1" : "P2";
             const repoShort = repoFullName.split("/").pop() ?? repoFullName;
             await db.from("alerts").insert({
