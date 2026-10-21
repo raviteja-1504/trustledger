@@ -97,14 +97,23 @@ export async function POST(req: NextRequest) {
   const body = validation.data;
 
   const db = createServiceClient();
+  // A signed-in reviewer attests as themselves, whatever the body says -- their GitHub login included: attestation
+  // records judge a sign-off independent when that login isn't the PR author's, so a typed-in handle could fake it.
+  // An API-key caller (CI, the CLI) has no member identity and names the reviewer in the body.
+  const reviewerEmail = auth.actor_email ?? body.reviewer_email;
+  let reviewerGithub = body.reviewer_github;
+  if (user_id) {
+    const { data: member } = await db.from("org_members").select("github_login")
+      .eq("org_id", org_id).eq("user_id", user_id).maybeSingle() as { data: { github_login?: string | null } | null };
+    reviewerGithub = member?.github_login ?? undefined;
+  }
   const result = await performAttestation(db, {
     org_id,
     user_id,
     scan_id:         body.scan_id,
     file_path:       body.file_path,
-    // A signed-in reviewer attests as themselves, whatever the body says.
-    reviewer_email:  auth.actor_email ?? body.reviewer_email,
-    reviewer_github: body.reviewer_github,
+    reviewer_email:  reviewerEmail,
+    reviewer_github: reviewerGithub,
     permissions:     await permissionsFor(auth),
   });
 
@@ -123,6 +132,8 @@ export async function POST(req: NextRequest) {
     payload_hash:   result.payload_hash,
     attested_at:    result.attested_at,
     file_path:      body.file_path,
-    reviewer_email: body.reviewer_email,
+    // who the attestation was recorded for, not who the page asked for
+    reviewer_email:  reviewerEmail,
+    reviewer_github: reviewerGithub ?? null,
   });
 }

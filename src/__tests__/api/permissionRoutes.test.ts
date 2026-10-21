@@ -107,6 +107,20 @@ describe("attestation follows the file's risk and the caller's permissions", () 
     expect(rows("attestations")).toEqual([expect.objectContaining({ file_path: "crit.ts", reviewer_email: "rev@a.test", reviewer_id: "u-rev" })]);
   });
 
+  it("the reviewer's GitHub login comes from their membership, and the response names who was recorded", async () => {
+    as(REVIEWER);
+    rows("org_members").find(m => m.user_id === "u-rev")!.github_login = "rev-gh";
+    // the page sends a stale reviewer and the PR author's handle, which would make a self-review look independent
+    const res = await attestPOST(req("/api/attest", "POST", { scan_id: SCAN, file_path: "crit.ts", reviewer_email: "old@a.test", reviewer_github: "pr-author" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ reviewer_email: "rev@a.test", reviewer_github: "rev-gh" });
+    expect(rows("attestations")).toEqual([expect.objectContaining({ reviewer_email: "rev@a.test", reviewer_github: "rev-gh" })]);
+    // a member with no GitHub login on record: unknown, never the typed-in handle
+    as(ADMIN);
+    await attestPOST(req("/api/attest", "POST", { scan_id: SCAN, file_path: "high.ts", reviewer_email: "x@a.test", reviewer_github: "pr-author" }));
+    expect(rows("attestations").find(a => a.file_path === "high.ts")).toMatchObject({ reviewer_email: "admin@a.test", reviewer_github: null });
+  });
+
   it("a custom role that may attest HIGH but not CRITICAL gets exactly that", async () => {
     as(JUNIOR);
     expect((await attest("high.ts")).status).toBe(200);

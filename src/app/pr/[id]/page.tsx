@@ -29,6 +29,7 @@ import { FindingTriageContext, type FindingTriageContextValue } from "@/componen
 import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
 import { useRole } from "@/lib/roles";
 import { buildPrSecuritySummary } from "@/lib/prSecuritySummary";
+import { resolveReviewer } from "@/lib/reviewerIdentity";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -221,10 +222,12 @@ function isValidEmail(email: string): boolean {
 
 interface TeamMember { email: string; name: string | null; github_login: string | null; role: string; }
 
-function ReviewerBar({ email, github, onSave }: {
+function ReviewerBar({ email, github, onSave, locked }: {
   email: string; github: string; onSave: (e: string, g: string) => void;
+  /** Signed in: the attestation is recorded for this account, so there is no one else to pick. */
+  locked: boolean;
 }) {
-  const [editing, setEditing]     = useState(!email);
+  const [editing, setEditing]     = useState(!email && !locked);
   const [draftEmail,  setDE]      = useState(email);
   const [draftGithub, setDG]      = useState(github);
   const [members, setMembers]     = useState<TeamMember[]>([]);
@@ -245,7 +248,7 @@ function ReviewerBar({ email, github, onSave }: {
     if (m?.github_login) setDG(m.github_login);
   }
 
-  if (!editing) {
+  if (!editing || locked) {
     const member = members.find(m => m.email === email);
     const displayName = member?.name || email.split("@")[0];
     return (
@@ -258,13 +261,15 @@ function ReviewerBar({ email, github, onSave }: {
           <span className="text-xs text-indigo-400 ml-2 truncate">{email}</span>
           {github && <span className="text-xs text-indigo-300 ml-2">· @{github}</span>}
         </div>
-        <span className="text-[10px] text-indigo-400 hidden sm:block">Attesting as</span>
-        <button
-          onClick={() => setEditing(true)}
-          className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-500 hover:text-indigo-700 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors shrink-0"
-        >
-          <PencilIcon /> Change
-        </button>
+        <span className="text-[10px] text-indigo-400 hidden sm:block">{locked ? "Attesting as you" : "Attesting as"}</span>
+        {!locked && (
+          <button
+            onClick={() => setEditing(true)}
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-500 hover:text-indigo-700 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors shrink-0"
+          >
+            <PencilIcon /> Change
+          </button>
+        )}
       </div>
     );
   }
@@ -1108,16 +1113,14 @@ function PRDetailContent() {
   useEffect(() => {
     const storedEmail  = localStorage.getItem("tl_reviewer_email") ?? "";
     const storedGithub = localStorage.getItem("tl_reviewer_github") ?? "";
-    // Auto-fill from logged-in profile when nothing valid is stored
-    const resolvedEmail  = (storedEmail && isValidEmail(storedEmail))
-      ? storedEmail
-      : (profile?.email ?? "");
-    const resolvedGithub = storedGithub || profile?.github_login || "";
+    // Signed in, you attest as yourself (lib/reviewerIdentity.ts): a reviewer remembered from an earlier sign-in
+    // in this browser is not shown.
+    const { email: resolvedEmail, github: resolvedGithub, signedIn } = resolveReviewer(profile, { email: storedEmail, github: storedGithub });
     setReviewerEmail(resolvedEmail);
     setReviewerGithub(resolvedGithub);
     // Persist auto-filled values so they survive page reload
     if (resolvedEmail)  localStorage.setItem("tl_reviewer_email",  resolvedEmail);
-    if (resolvedGithub) localStorage.setItem("tl_reviewer_github", resolvedGithub);
+    if (resolvedGithub || signedIn) localStorage.setItem("tl_reviewer_github", resolvedGithub);
     setPolicy(loadPolicy());
     // Re-sync attestedSet in case localStorage was updated while away
     try {
@@ -1877,7 +1880,7 @@ function PRDetailContent() {
         {/* ── Reviewer identity bar ───────────────────────────────────────── */}
         {scan && (
           <div className="animate-fade-up delay-50">
-            <ReviewerBar email={reviewerEmail} github={reviewerGithub} onSave={saveReviewer} />
+            <ReviewerBar email={reviewerEmail} github={reviewerGithub} onSave={saveReviewer} locked={!!profile?.email} />
           </div>
         )}
 
