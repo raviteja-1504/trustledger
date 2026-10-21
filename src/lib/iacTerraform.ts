@@ -148,7 +148,9 @@ export function findUnencryptedStorage(content: string): ScanIndicator[] {
 
 // ── iac-iam-wildcard ─────────────────────────────────────────────────────────
 
-const IAM_WILDCARD_RE = /(?:"(?:Action|Resource)"\s*:\s*"\*")|(?:\b(?:actions|resources)\s*=\s*\[[^\]]*"\*")/;
+// A policy written as JSON (`"Action": "*"` / `["*"]`), in an aws_iam_policy_document (`actions = ["*"]`), or with
+// jsonencode -- the usual modern form, HCL keys that keep the JSON names (`Action = "*"` / `["*"]`).
+const IAM_WILDCARD_RE = /"(?:Action|Resource)"\s*:\s*(?:\[[^\]]*)?"\*"|\b(?:Action|Resource|actions|resources)\s*=\s*(?:\[[^\]]*)?"\*"/;
 
 export function findIamWildcard(content: string): ScanIndicator[] {
   const lines = content.split("\n");

@@ -164,6 +164,15 @@ describe("iacTerraform.findIamWildcard", () => {
     const content = `actions = ["s3:GetObject"]`;
     expect(findIamWildcard(content)).toHaveLength(0);
   });
+
+  it("flags a jsonencode() policy and a JSON action list, on the wildcard's own line", () => {
+    const tf = `resource "aws_iam_policy" "p" {\n  policy = jsonencode({\n    Statement = [{\n      Effect   = "Allow"\n      Action   = "*"\n      Resource = "arn:aws:s3:::logs/*"\n    }]\n  })\n}\n`;
+    expect(findIamWildcard(tf).map(f => f.line)).toEqual([5]);
+    expect(findIamWildcard(`Action = ["s3:GetObject", "*"]`)).toHaveLength(1);
+    expect(findIamWildcard(`"Action": ["*"]`)).toHaveLength(1);
+    // a service-scoped wildcard and an ARN ending in /* are not '*'
+    expect(findIamWildcard(`Action = ["s3:*"]\nResource = "arn:aws:s3:::b/*"\n"Action": ["s3:*"]`)).toHaveLength(0);
+  });
 });
 
 describe("iacTerraform.findPublicDb", () => {
