@@ -111,7 +111,6 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/lib/attestation.ts", table: "scan_files", op: "select", keys: ["scan_id","file_path"], why: "parent-verified" },
   { file: "src/lib/attestation.ts", table: "attestations", op: "select", keys: ["scan_id","file_path"], why: "parent-verified" },
   { file: "src/lib/attestation.ts", table: "scan_files", op: "update", keys: ["scan_id","file_path"], why: "parent-verified" },
-  { file: "src/lib/attestation.ts", table: "violations", op: "select", keys: ["scan_id","status","risk_score"], why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "attestations", op: "select", keys: ["scan_id","risk_score"], count: 2, why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "violations", op: "select", keys: ["scan_id","risk_score"], count: 2, why: "parent-verified" },
   { file: "src/lib/dashboardAggregate.ts", table: "scan_files", op: "select", keys: ["scan_id","risk_score"], why: "parent-verified" },

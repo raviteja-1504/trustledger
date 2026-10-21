@@ -5,6 +5,7 @@ import Link from "next/link";
 import InfoTooltip from "@/components/InfoTooltip";
 import { useToastHelpers } from "@/lib/toast";
 import AuthGuard from "@/components/AuthGuard";
+import GovernanceFlow from "@/components/GovernanceFlow";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import { api } from "@/lib/api";
@@ -48,6 +49,8 @@ interface Alert {
   group_id?: string;        // alerts with same group_id are related
   notes: string[];          // reviewer notes
   history: AlertHistoryEntry[];
+  /** A PR's policy alert: how many of its CRITICAL/HIGH files still need a sign-off, of how many (live, from the API). */
+  progress?: { open: number; total: number };
 }
 
 
@@ -109,7 +112,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
   };
 
   // P1 — hardcoded secrets
-  data.top_risk_files.filter(f => !f.attested && f.risk_score === "CRITICAL").slice(0, 3).forEach(f => {
+  data.top_risk_files.filter(f => !f.attested && !f.resolved && f.risk_score === "CRITICAL").slice(0, 3).forEach(f => {
     alerts.push({
       id:`secret-${f.scan_id}-${f.file_path}`, group_id:`pr-${f.pr_number}`,
       severity:"P1", source:"secret", status:"firing", channel:"slack",
@@ -150,7 +153,7 @@ function deriveAlerts(data: DashboardData): Alert[] {
   });
 
   // P2 — HIGH unattested files
-  data.top_risk_files.filter(f => !f.attested && f.risk_score === "HIGH").slice(0, 3).forEach(f => {
+  data.top_risk_files.filter(f => !f.attested && !f.resolved && f.risk_score === "HIGH").slice(0, 3).forEach(f => {
     alerts.push({
       id:`high-${f.scan_id}-${f.file_path}`, group_id:`pr-${f.pr_number}`,
       severity:"P2", source:"policy", status:"firing", channel:"email",
@@ -163,16 +166,17 @@ function deriveAlerts(data: DashboardData): Alert[] {
     });
   });
 
-  // P2 — SLA breach
-  data.top_risk_files.filter(f => !f.attested && f.risk_score === "CRITICAL").slice(0,2).forEach(f => {
-    const firedMs = now - 50 * 3600_000;
+  // P2 — SLA breach: only once the file's real fix deadline has passed (it used to claim "50+ hours" for any file)
+  data.top_risk_files.filter(f => !f.attested && !f.resolved && f.risk_score === "CRITICAL" && !!f.sla_deadline && Date.parse(f.sla_deadline) < now).slice(0,2).forEach(f => {
+    const firedMs = Date.parse(f.sla_deadline!);
+    const overdueH = Math.max(1, Math.floor((now - firedMs) / 3_600_000));
     alerts.push({
       id:`sla-${f.scan_id}-${f.file_path}`, group_id:`pr-${f.pr_number}`,
       severity:"P2", source:"sla", status:"firing", channel:"slack",
       repo:f.repo, scan_id:f.scan_id, pr_number:f.pr_number,
       fired_at: new Date(firedMs).toISOString(),
-      title:`SLA breach — ${f.file_path.split("/").pop()} unattested 50+ hours`,
-      body:`${f.file_path.split("/").pop()} (CRITICAL) has exceeded the 24h attestation SLA. Escalating to security lead.`,
+      title:`SLA breach — ${f.file_path.split("/").pop()} overdue by ${overdueH} h`,
+      body:`${f.file_path.split("/").pop()} (CRITICAL) passed its 24 h attestation deadline ${overdueH} h ago.`,
       escalation:["security@trustledger.local","ciso@trustledger.local"],
       notes:[], history:[{ action:"Alert created", at: new Date(firedMs).toISOString() }],
     });
@@ -659,6 +663,27 @@ export default function AlertsPage() {
 
               <p className="text-sm font-bold text-gray-900 leading-snug">{alert.title}</p>
 
+              {alert.progress && alert.progress.total > 0 && (() => {
+                const signed = alert.progress.total - alert.progress.open;
+                const pct = Math.round((signed / alert.progress.total) * 100);
+                return (
+                  <div className="flex items-center gap-2 max-w-sm">
+                    <div className="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden" role="progressbar"
+                      aria-valuemin={0} aria-valuemax={alert.progress.total} aria-valuenow={signed}
+                      aria-label={`${signed} of ${alert.progress.total} files signed off`}>
+                      <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className="text-[10px] font-semibold text-gray-500 tabular-nums whitespace-nowrap">{signed}/{alert.progress.total} signed off</span>
+                    {alert.scan_id && alert.progress.open > 0 && (
+                      <Link href={`/pr/${alert.scan_id}`} onClick={e => e.stopPropagation()}
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">
+                        Review files →
+                      </Link>
+                    )}
+                  </div>
+                );
+              })()}
+
               {!open && <p className="text-xs text-gray-500 truncate">{alert.body}</p>}
 
               <div className="flex items-center gap-3 flex-wrap">
@@ -901,7 +926,7 @@ export default function AlertsPage() {
               <h1 className="text-xl font-black text-gray-900 tracking-tight">Security Alerts</h1>
               {p1 > 0 && <span className="text-xs font-black text-white bg-rose-500 px-2 py-0.5 rounded-full animate-pulse">{p1} P1 firing</span>}
             </div>
-            <p className="text-sm text-gray-400">Real-time incident management · live SLA countdowns · derived from scan data · auto-refreshes every 30 s</p>
+            <p className="text-sm text-gray-400">Notifications: what needs attention on each pull request, with live sign-off progress.</p>
           </div>
           <div className="flex flex-col items-end gap-0.5">
             <button onClick={() => fetchAlerts(true)} disabled={refreshing}
@@ -914,6 +939,8 @@ export default function AlertsPage() {
             {refreshAgo && <span className="text-[9px] text-gray-400">Updated {refreshAgo}</span>}
           </div>
         </div>
+
+        <GovernanceFlow current="alerts" />
 
         {/* Summary — clickable */}
         <div className="animate-fade-up grid grid-cols-2 sm:grid-cols-4 gap-3">

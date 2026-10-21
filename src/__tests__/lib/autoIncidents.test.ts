@@ -62,15 +62,55 @@ function fakeDb(tables: Record<string, Row[]> = {}) {
   return { db: db as never, rows: store.incidents, store };
 }
 
-type F = { repo: string; file_path: string; scan_id?: string; risk_score?: string; attested?: boolean };
+type F = { repo: string; file_path: string; scan_id?: string; risk_score?: string; attested?: boolean; sla_deadline?: string | null };
+/** A fix deadline long past: unless a test says otherwise, a file here is overdue -- what opens an incident. */
+const OVERDUE = "2026-01-01T00:00:00.000Z";
 const state = (files: F[], extra: { closed_files?: string[]; unattested_deploy_count?: number; repos?: Array<{ repo: string; attestation_rate: number }> } = {}) => ({
-  top_risk_files: files.map(f => ({ scan_id: "s1", ai_pct: 0.9, risk_score: "CRITICAL", pr_number: 1, attested: false, ...f })),
+  top_risk_files: files.map(f => ({ scan_id: "s1", ai_pct: 0.9, risk_score: "CRITICAL", pr_number: 1, attested: false, sla_deadline: OVERDUE, ...f })),
   closed_files: extra.closed_files ?? [],
   unattested_deploy_count: extra.unattested_deploy_count ?? 0, repos: extra.repos ?? [], attestation_rate: 1,
 });
 const mockState = fetchUnattestedRiskState as jest.Mock;
 
 beforeEach(() => { mockState.mockReset(); cacheStore.clear(); realCache = false; });
+
+describe("an incident is an escalation: only once a CRITICAL file is past its review deadline", () => {
+  const future = () => new Date(Date.now() + 6 * 3600_000).toISOString();
+
+  it("a file still inside its deadline is a violation, not an incident; past it, an incident opens", async () => {
+    const { db, rows } = fakeDb();
+    const f = { repo: "acme/api", file_path: "src/auth.ts" };
+    mockState.mockResolvedValueOnce(state([{ ...f, sla_deadline: future() }]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows).toHaveLength(0);
+    // no deadline on record: not judged overdue either
+    mockState.mockResolvedValueOnce(state([{ ...f, sla_deadline: null }]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows).toHaveLength(0);
+
+    mockState.mockResolvedValueOnce(state([f]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows).toEqual([expect.objectContaining({ affected_file: "src/auth.ts", status: "active", title: "CRITICAL file past review deadline: auth.ts" })]);
+  });
+
+  it("an open incident stays open while its file still needs a sign-off, even before a new deadline passes", async () => {
+    const { db, rows } = fakeDb();
+    const f = { repo: "acme/api", file_path: "src/auth.ts" };
+    mockState.mockResolvedValueOnce(state([f]));
+    await syncAutoIncidents(db, "o1");
+    // a newer scan of the file restarts its deadline; the escalation isn't over until the file is signed off
+    mockState.mockResolvedValueOnce(state([{ ...f, scan_id: "s2", sla_deadline: future() }]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows[0].status).toBe("active");
+    mockState.mockResolvedValueOnce(state([{ ...f, scan_id: "s2", attested: true }]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows[0].status).toBe("resolved");
+    // and a resolved one reopens only once the file is overdue again
+    mockState.mockResolvedValueOnce(state([{ ...f, scan_id: "s3", sla_deadline: future() }]));
+    await syncAutoIncidents(db, "o1");
+    expect(rows[0].status).toBe("resolved");
+  });
+});
 
 describe("syncAutoIncidents", () => {
   it("reuses one incident per file as it leaves and re-enters the open set, instead of inserting a new one", async () => {
@@ -87,9 +127,9 @@ describe("syncAutoIncidents", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("active");
     expect((rows[0].timeline as Array<{ action: string }>).map(t => t.action)).toEqual([
-      "CRITICAL file detected by TrustLedger scan", "P1 incident auto-created",
+      `Review deadline passed (${OVERDUE}) with the CRITICAL file still unattested`, "P1 incident auto-created",
       "Auto-resolved: attested, resolved, or no longer a CRITICAL file in the repository's latest scan",
-      "Re-opened: CRITICAL file is unattested again in the latest scan",
+      "Re-opened: CRITICAL file is unattested past its review deadline again",
     ]);
   });
 

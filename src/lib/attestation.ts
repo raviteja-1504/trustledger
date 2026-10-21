@@ -105,7 +105,7 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
 
   const { data: file } = await db
     .from("scan_files")
-    .select("risk_score")
+    .select("risk_score, content_hash")
     .eq("scan_id", scan_id)
     .eq("file_path", file_path)
     .single();
@@ -160,29 +160,79 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     .eq("scan_id", scan_id)
     .eq("file_path", file_path);
 
-  // Resolve violations for this file across ALL scans in this repo, not just
-  // the current scan — the SLA dashboard deduplicates by repo+file_path and
-  // keeps the latest scan's violation, so a stale open violation from an
-  // earlier scan would still trigger a false SLA breach.
+  // The sign-off covers this file's CONTENT: every scan of this repo where the file is byte-identical (the same
+  // content_hash) -- a newer push or PR that didn't touch it, or an older scan of the same code. It used to resolve
+  // the file's violations in EVERY scan of the repo, so another PR's different version of the file lost its
+  // violation without anyone reviewing it; and attesting through an older scan's link never reached the newer scan
+  // whose check, alert and incident were waiting on it.
   const { data: repoScans } = await db
     .from("scans")
     .select("id")
     .eq("org_id", org_id)
     .eq("repo_full_name", scan.repo_full_name);
+  const repoScanIds = (repoScans ?? []).map((s: { id: string }) => s.id).filter((id: string) => id !== scan_id);
+  const contentHash = (file as { content_hash?: string | null } | null)?.content_hash ?? null;
+  const { data: sameContentRows } = contentHash && repoScanIds.length > 0
+    ? await db.from("scan_files").select("scan_id")
+        .eq("org_id", org_id).eq("file_path", file_path).eq("content_hash", contentHash).in("scan_id", repoScanIds)
+    : { data: [] };
+  const sameContent = [...new Set((sameContentRows ?? []).map((r: { scan_id: string }) => r.scan_id))];
+  if (sameContent.length > 0) {
+    const { data: already } = await db.from("attestations").select("scan_id")
+      .eq("org_id", org_id).eq("file_path", file_path).in("scan_id", sameContent);
+    const have = new Set((already ?? []).map((a: { scan_id: string }) => a.scan_id));
+    const missing = sameContent.filter(id => !have.has(id));
+    if (missing.length > 0) {
+      // Plain INSERT: the table's rule blocks ON CONFLICT. Marked as carried from this attestation.
+      await db.from("attestations").insert(missing.map(id => ({
+        org_id, scan_id: id, file_path,
+        risk_score:      file?.risk_score ?? "UNKNOWN",
+        reviewer_id:     user_id ?? null,
+        reviewer_email,
+        reviewer_github: reviewer_github ?? null,
+        payload_hash:    `inherited:${attestation.id}`,
+      })));
+      await db.from("scan_files").update({ attested: true }).eq("org_id", org_id).eq("file_path", file_path).in("scan_id", missing);
+    }
+  }
+  const covered = [scan_id, ...sameContent];
+  await db
+    .from("violations")
+    .update({ status: "resolved", resolved_at: now, resolved_by: user_id ?? null })
+    .eq("org_id", org_id)
+    .eq("file_path", file_path)
+    .in("scan_id", covered);
 
-  const scanIds = (repoScans ?? []).map((s: { id: string }) => s.id);
-  if (scanIds.length > 0) {
-    await db
+  // Each covered scan whose CRITICAL/HIGH files are now all signed off: its PR alert is done and its GitHub check
+  // unblocks. Newest first, bounded -- a file unchanged across many pushes is covered by every one of them.
+  const { data: coveredScans } = await db
+    .from("scans")
+    .select("id, check_run_id, installation_id, created_at")
+    .eq("org_id", org_id)
+    .in("id", covered)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  for (const s of (coveredScans ?? []) as { id: string; check_run_id: number | null; installation_id: number | null }[]) {
+    const { count: remaining } = await db
       .from("violations")
-      .update({ status: "resolved", resolved_at: now, resolved_by: user_id ?? null })
+      .select("id", { count: "exact", head: true })
       .eq("org_id", org_id)
-      .eq("file_path", file_path)
-      .in("scan_id", scanIds);
+      .eq("scan_id", s.id)
+      .neq("status", "resolved")
+      .in("risk_score", ["CRITICAL", "HIGH"]);
+    if (remaining) continue;
+    await db.from("alerts")
+      .update({ status: "resolved", resolved_at: now })
+      .eq("org_id", org_id)
+      .eq("scan_id", s.id)
+      .eq("alert_type", "policy")
+      .in("status", ["firing", "acknowledged", "snoozed"]);
+    if (s.check_run_id && s.installation_id) {
+      await syncCheckRunToSuccess(db, s.id, s.installation_id, scan.repo_full_name, s.check_run_id);
+    }
   }
 
-  // Resolve alerts when there are no remaining open violations for the whole
-  // repo (see hasOpenRepoViolations' own docs for why repo-scoped, not
-  // scan-scoped — multiple scans of the same PR each create their own alert).
+  // And every policy alert of the repo once nothing in it is open (alerts of superseded scans included).
   if (!(await hasOpenRepoViolations(db, org_id, scan.repo_full_name))) {
     await db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
@@ -190,22 +240,6 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
       .eq("repo", scan.repo_full_name)
       .eq("alert_type", "policy")
       .in("status", ["firing", "acknowledged", "snoozed"]);
-  }
-
-  // If this scan came from a GitHub PR and all CRITICAL/HIGH files are now
-  // attested, flip the Check Run from "action_required" to "success" so the
-  // PR is unblocked.
-  if (scan.check_run_id && scan.installation_id) {
-    const { count: remaining } = await db
-      .from("violations")
-      .select("id", { count: "exact", head: true })
-      .eq("scan_id", scan_id)
-      .neq("status", "resolved")
-      .in("risk_score", ["CRITICAL", "HIGH"]);
-
-    if (!remaining) {
-      await syncCheckRunToSuccess(db, scan_id, scan.installation_id, scan.repo_full_name, scan.check_run_id);
-    }
   }
 
   await writeAuditLog(db, {

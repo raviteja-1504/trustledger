@@ -191,6 +191,13 @@ export interface TopRiskFile {
   pr_number: number;
   attested_by?: string;
   attested_at?: string;
+  /** When the scan that flagged it ran -- the real detection time. */
+  detected_at?: string;
+  /** The fix deadline recorded on its violation (24 h CRITICAL / 48 h HIGH from detection), when there is one. */
+  sla_deadline?: string | null;
+  /** Closed on the Violations page ("resolved") WITHOUT an attestation: no longer needs attention, but nobody
+   *  signed it off, so it never counts as attested (lib/trustScore.ts patchDataWithAttestations). */
+  resolved?: boolean;
 }
 
 export interface DashboardData {

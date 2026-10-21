@@ -32,6 +32,8 @@ export interface Violation {
   detected_at: string;
   sla_deadline?: string;
   policy_rule: string;
+  /** Closed on this page without an attestation: handled, but nobody signed it off -- the merge check still blocks. */
+  closed_without_attestation?: boolean;
 }
 
 // ── Derive violations from dashboard data ─────────────────────────────────────
@@ -47,7 +49,15 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
   const SLA_CRIT = 24 * 3600_000;
   const SLA_HIGH = 48 * 3600_000;
 
-  // Deterministic stable timestamp based on file path hash + a base offset in hours
+  // Detection time and fix deadline of a flagged file: the real ones (the scan's time and the deadline recorded on its
+  // violation). Every countdown used to be computed from "now minus a few hours", so it never moved. The stand-in
+  // below is only for payloads without them (demo data, older cached responses).
+  function fileTimes(f: DashboardData["top_risk_files"][number], hoursAgo: number, slaMs: number): { detected_at: string; sla_deadline: string } {
+    const det = f.detected_at ?? detectedAt(f.file_path, hoursAgo);
+    return { detected_at: det, sla_deadline: f.sla_deadline ?? new Date(new Date(det).getTime() + slaMs).toISOString() };
+  }
+
+  // Deterministic stable timestamp based on file path hash + a base offset in hours (stand-in, see fileTimes)
   function detectedAt(seed: string, hoursAgo: number): string {
     let h = 0;
     for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) & 0x7fffffff;
@@ -56,29 +66,17 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
     return new Date(now - hoursAgo * 3_600_000 - jitter).toISOString();
   }
 
-  // Effective unattested deploy count, reflecting whatever statuses the caller
-  // passed in (server-backed overrides — see api/violation-status/route.ts —
-  // rather than a localStorage read done here).
-  const effectiveDeployCount = (() => {
-    const riskPfx = (r: string) => r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
-    const unresolvedRepos = new Set(
-      data.top_risk_files
-        .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"))
-        .filter(f => {
-          const pfx = riskPfx(f.risk_score);
-          const s   = statuses[`${pfx}::${f.scan_id}::${f.file_path}`];
-          return s !== "resolved" && s !== "in_review";
-        })
-        .map(f => f.repo)
-    );
-    return unresolvedRepos.size;
-  })();
+  // A repo is blocked while any CRITICAL/HIGH file in its latest scan is unattested -- the same rule as the GitHub
+  // check. Marking the file's violation resolved or in review doesn't unblock the merge, so it doesn't unblock here
+  // either (it used to, and the page then disagreed with GitHub).
+  const effectiveDeployCount = new Set(
+    data.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")).map(f => f.repo),
+  ).size;
 
-  // 1. CRITICAL unattested files (detected ~6h ago — within SLA so no duplicate SLA entry needed)
+  // 1. CRITICAL unattested files (`statuses` is applied by the callers: a resolved one shows on the Resolved tab)
   data.top_risk_files
     .filter(f => f.risk_score === "CRITICAL" && !f.attested)
     .forEach(f => {
-      const det = detectedAt(f.file_path, 6);
       out.push({
         id:          `crit::${f.scan_id}::${f.file_path}`,
         type:        "unattested_critical",
@@ -89,9 +87,9 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
         file:        f.file_path,
         pr_number:   f.pr_number,
         scan_id:     f.scan_id,
-        detected_at: det,
-        sla_deadline: new Date(new Date(det).getTime() + SLA_CRIT).toISOString(),
+        ...fileTimes(f, 6, SLA_CRIT),
         policy_rule: "CC8.1 — Change Management",
+        closed_without_attestation: f.resolved || undefined,
       });
     });
 
@@ -99,7 +97,6 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
   data.top_risk_files
     .filter(f => f.risk_score === "HIGH" && !f.attested)
     .forEach(f => {
-      const det = detectedAt(f.file_path, 12);
       out.push({
         id:          `high::${f.scan_id}::${f.file_path}`,
         type:        "unattested_high",
@@ -110,9 +107,9 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
         file:        f.file_path,
         pr_number:   f.pr_number,
         scan_id:     f.scan_id,
-        detected_at: det,
-        sla_deadline: new Date(new Date(det).getTime() + SLA_HIGH).toISOString(),
+        ...fileTimes(f, 12, SLA_HIGH),
         policy_rule: "SLA Policy — HIGH files ≤ 48 h",
+        closed_without_attestation: f.resolved || undefined,
       });
     });
 
@@ -139,15 +136,19 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
 
   // 4. Deploys blocked (uses effective count that reflects local attestations)
   if (effectiveDeployCount > 0) {
-    const det = detectedAt("deploy-blocked", 4);
+    // Its clock is the earliest blocking file's: detected when that file was, due when that file is.
+    const blocking = data.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+    const earliest = (k: "detected_at" | "sla_deadline") => blocking.map(f => f[k]).filter((t): t is string => !!t).sort()[0];
+    const realDeadline = earliest("sla_deadline");
+    const det = earliest("detected_at") ?? detectedAt("deploy-blocked", 4);
     out.push({
       id:          "deploy::blocked",
       type:        "deploy_blocked",
       severity:    "CRITICAL",
       title:       `${effectiveDeployCount} repo${effectiveDeployCount > 1 ? "s" : ""} blocked from deploying`,
-      description: `${effectiveDeployCount} repositor${effectiveDeployCount > 1 ? "ies have" : "y has"} unattested CRITICAL or HIGH files blocking production deployment. Attest all required files to unblock.`,
+      description: `${effectiveDeployCount} repositor${effectiveDeployCount > 1 ? "ies have" : "y has"} unattested CRITICAL or HIGH files blocking production deployment. Attest the files to unblock -- marking a violation resolved doesn't unblock the merge.`,
       detected_at: det,
-      sla_deadline: new Date(new Date(det).getTime() + SLA_CRIT).toISOString(),
+      sla_deadline: realDeadline ?? new Date(new Date(det).getTime() + SLA_CRIT).toISOString(),
       policy_rule:  "6.4.1 — Security Vulnerabilities",
     });
   }

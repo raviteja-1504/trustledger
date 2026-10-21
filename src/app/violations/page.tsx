@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
+import GovernanceFlow from "@/components/GovernanceFlow";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { useToastHelpers } from "@/lib/toast";
@@ -224,7 +225,7 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
       <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100"
         style={{ background:"rgba(248,250,252,0.7)" }}>
         <p className="text-[10px] text-gray-400 max-w-sm leading-relaxed">
-          Review the code above for security issues. Only mark resolved once you have confirmed the risk is understood and mitigated.
+          Reviewed it and it&apos;s acceptable? Attest it — a signed review that unblocks the merge. Close it without review only for a false alarm or a file fixed in a later commit.
         </p>
         <div className="flex items-center gap-2 shrink-0">
           <button onClick={onReopen}
@@ -232,13 +233,15 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
             Re-open
           </button>
           <button onClick={onResolve}
-            className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold text-white rounded-xl transition-all active:scale-[0.98]"
-            style={{ background:"linear-gradient(135deg,#10b981,#059669)", boxShadow:"0 2px 12px rgba(16,185,129,0.35)" }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-            Mark Resolved
+            title="The file doesn't count as attested and its merge stays blocked."
+            className="px-3 py-2 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors">
+            Close without review
           </button>
+          <Link href={`/pr/${scanId}?attest=${encodeURIComponent(filePath)}`}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold text-white rounded-xl transition-all active:scale-[0.98] bg-indigo-600 hover:bg-indigo-700">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Attest
+          </Link>
         </div>
       </div>
     </div>
@@ -310,7 +313,8 @@ const REMEDIATION: Record<VType, string[]> = {
     "Confirm no hardcoded secrets, eval(), or SQL injection patterns",
     "Verify AI content percentage matches expected level",
     "Assign a designated security reviewer in the PR",
-    "Click 'Mark Resolved' once all files are attested",
+    "Attest each file on its PR — the signed review clears this violation and unblocks the merge",
+    "Only use 'Close without review' for a false alarm or a file fixed in a later commit (the merge stays blocked)",
   ],
   unattested_high:     [
     "Review the HIGH-risk file in the PR detail view",
@@ -663,7 +667,7 @@ export default function ViolationsPage() {
               )}
             </div>
             <p className="text-sm text-gray-400">
-              Active policy violations derived from live scan data — updates every 30 s.
+              Your work queue: each file or rule out of policy, from the latest scan of every repository.
             </p>
           </div>
 
@@ -694,6 +698,8 @@ export default function ViolationsPage() {
             {refreshAgo && <span className="text-[9px] text-gray-400">Updated {refreshAgo}</span>}
           </div>
         </div>
+
+        <GovernanceFlow current="violations" />
 
         {/* Recent scan origin banner — explains why violations re-appeared */}
         {recentScans.length > 0 && (() => {
@@ -928,6 +934,13 @@ export default function ViolationsPage() {
                           style={{ background:stat.bg, color:stat.text, borderColor:stat.border }}>
                           {stat.label}
                         </span>
+                        {v.status === "resolved" && v.file && (
+                          // Only unattested files are violations, so a closed file one was closed without a review.
+                          <span title="Closed without an attestation: it doesn't count as attested, and its pull request stays blocked until someone attests it."
+                            className="text-[10px] font-bold px-2 py-0.5 rounded-full border text-amber-800 bg-amber-50 border-amber-200">
+                            Not reviewed · merge still blocked
+                          </span>
+                        )}
                       </div>
                       {/* SLA indicator */}
                       {deadline && v.status !== "resolved" && (
@@ -1021,12 +1034,21 @@ export default function ViolationsPage() {
                       </svg>
                       {isEscalated ? "Escalated" : "Escalate"}
                     </button>
+                    {v.status !== "resolved" && v.scan_id && v.file && (
+                      // The way to clear a file: a signed review on its PR, which also unblocks the merge.
+                      <Link href={`/pr/${v.scan_id}?attest=${encodeURIComponent(v.file)}`}
+                        className="text-[11px] font-bold text-white bg-indigo-600 border border-indigo-600 px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition-colors whitespace-nowrap flex items-center gap-1">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        Attest
+                      </Link>
+                    )}
                     {v.status === "open" && (
                       <>
                         <button onClick={() => setStatus(v.id, "resolved")}
+                          title={v.file ? "Closes this violation without a review: the file doesn't count as attested and its merge stays blocked. Use it for a false alarm or a file fixed in a later commit." : undefined}
                           className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap flex items-center gap-1">
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                          Mark Resolved
+                          {v.file ? "Close without review" : "Mark Resolved"}
                         </button>
                         {v.scan_id && v.file ? (
                           <button onClick={() => setStatus(v.id, "in_review")}
@@ -1050,9 +1072,10 @@ export default function ViolationsPage() {
                     {v.status === "in_review" && (
                       <>
                         <button onClick={() => setStatus(v.id, "resolved")}
+                          title={v.file ? "Closes this violation without a review: the file doesn't count as attested and its merge stays blocked." : undefined}
                           className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap flex items-center gap-1">
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                          Mark Resolved
+                          {v.file ? "Close without review" : "Mark Resolved"}
                         </button>
                         {v.scan_id && v.file && (
                           <button onClick={() => setReviewingId(reviewingId === `hide::${v.id}` ? null : `hide::${v.id}`)}

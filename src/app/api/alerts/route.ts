@@ -4,6 +4,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { progressByScan, latestScanByPr, policyAlertVerdict, progressTitle } from "@/lib/alertProgress";
 import { safeError } from "@/lib/errors";
 
 // ── GET — list alerts ──────────────────────────────────────────────────────────
@@ -118,7 +119,47 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ alerts: rows.map(row => toUiAlert(row)) });
+  // A PR's policy alert, live (lib/alertProgress.ts): how many of its scan's files still need a sign-off, and done
+  // once none do or a newer push of the PR has replaced it. Its stored title kept the count from scan time.
+  const progressById = new Map<string, { open: number; total: number }>();
+  const pending = rows.filter(r => r.alert_type === "policy" && r.scan_id && ["firing", "acknowledged", "snoozed"].includes(r.status));
+  if (pending.length > 0) {
+    const scanIds = [...new Set(pending.map(r => r.scan_id as string))];
+    const [{ data: vio }, { data: alertScans }] = await Promise.all([
+      db.from("violations").select("scan_id, status").eq("org_id", org_id).in("scan_id", scanIds).in("risk_score", ["CRITICAL", "HIGH"]),
+      db.from("scans").select("id, repo_full_name, pr_number, created_at").eq("org_id", org_id).in("id", scanIds),
+    ]);
+    const scanInfo = new Map(((alertScans ?? []) as { id: string; repo_full_name: string; pr_number: number | null; created_at: string }[]).map(s => [s.id, s]));
+    const prs = [...new Set([...scanInfo.values()].filter(s => s.pr_number).map(s => s.pr_number as number))];
+    const repos = [...new Set([...scanInfo.values()].map(s => s.repo_full_name))];
+    const { data: prScans } = prs.length === 0 ? { data: [] } : await db.from("scans")
+      .select("id, repo_full_name, pr_number, created_at").eq("org_id", org_id).in("repo_full_name", repos).in("pr_number", prs);
+    const progress = progressByScan((vio ?? []) as { scan_id: string; status: string | null }[]);
+    const latest = latestScanByPr((prScans ?? []) as { id: string; repo_full_name: string; pr_number: number | null; created_at: string }[]);
+
+    const done: string[] = [];
+    for (const r of pending) {
+      const info = scanInfo.get(r.scan_id as string);
+      const verdict = policyAlertVerdict(r.scan_id as string, progress, info, latest);
+      if (!verdict) continue;
+      if (verdict.progress) {
+        progressById.set(r.id, verdict.progress);
+        r.title = progressTitle(verdict.progress, (r.repo ?? info?.repo_full_name ?? "").split("/").pop() ?? "", info?.pr_number ?? null);
+      }
+      if (verdict.state === "done") {
+        done.push(r.id);
+        r.status = "resolved";
+        r.resolved_at = new Date().toISOString();
+        if (verdict.reason === "superseded") r.body = "A newer push of this pull request replaced this scan; its own alert (if any) tracks what still needs a sign-off.";
+      }
+    }
+    if (done.length > 0) {
+      await db.from("alerts").update({ status: "resolved", resolved_at: new Date().toISOString() })
+        .eq("org_id", org_id).in("id", done).in("status", ["firing", "acknowledged", "snoozed"]);
+    }
+  }
+
+  return NextResponse.json({ alerts: rows.map(row => ({ ...toUiAlert(row), progress: progressById.get(row.id) })) });
 }
 
 // ── POST — fire a new alert + deliver it ──────────────────────────────────────

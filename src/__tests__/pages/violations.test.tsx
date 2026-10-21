@@ -20,7 +20,7 @@ describe("ViolationsPage", () => {
 
   it("shows the page heading", () => {
     render(<ViolationsPage />);
-    expect(screen.getByText("Policy Violations")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Policy Violations" })).toBeInTheDocument();
   });
 
   it("shows summary stat cards", () => {

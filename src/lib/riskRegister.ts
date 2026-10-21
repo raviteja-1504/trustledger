@@ -179,7 +179,7 @@ export function deriveRisks(data: DashboardData, scans: readonly ScanResult[], t
   const risks: RiskItem[] = [];
   const repoSlug = (r: string) => r.replace(/[^a-zA-Z0-9]/g, "-");
   const base = { auto_derived: true as const, status: "open" as const, treatment: "mitigate" as const, owner: "unassigned", identified_at: now, notes: [] as string[] };
-  const waiting = data.top_risk_files.filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+  const waiting = data.top_risk_files.filter(f => !f.attested && !f.resolved && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
 
   // Unsigned CRITICAL / HIGH files, one risk per repository per level.
   for (const [level, likelihood, impact] of [["CRITICAL", 5, 5], ["HIGH", 4, 4]] as const) {

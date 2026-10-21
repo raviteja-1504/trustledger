@@ -11,6 +11,15 @@ function riskPrefix(r: string): string {
   return r === "CRITICAL" ? "crit" : r === "HIGH" ? "high" : r === "MEDIUM" ? "med" : "low";
 }
 
+/**
+ * Two different statuses, kept apart:
+ *   "attested" -- this tab just signed the file off on the PR page (a short-lived bridge until the server's data
+ *                 shows the attestation). It counts as attested.
+ *   "resolved" -- closed on the Violations page without a sign-off (fixed later, false alarm, handled elsewhere).
+ *                 The file no longer needs attention (`resolved`), but nobody reviewed it: it never counts towards
+ *                 attestation, and the merge check and compliance evidence don't count it either.
+ * Treating "resolved" as attested made the dashboard show 100% attested while GitHub still blocked the merge.
+ */
 export function patchDataWithAttestations(data: DashboardData, injectedStatuses?: Record<string, string>): DashboardData {
   const statuses: Record<string, string> = injectedStatuses ?? readLocalStatuses();
 
@@ -18,9 +27,10 @@ export function patchDataWithAttestations(data: DashboardData, injectedStatuses?
 
   const patchedTopRisk = data.top_risk_files.map(f => {
     if (f.attested) return f;
-    const key = `${riskPrefix(f.risk_score)}::${f.scan_id}::${f.file_path}`;
-    const handled = statuses[key] === "resolved";
-    return handled ? { ...f, attested: true } : f;
+    const status = statuses[`${riskPrefix(f.risk_score)}::${f.scan_id}::${f.file_path}`];
+    if (status === "attested") return { ...f, attested: true };
+    if (status === "resolved") return { ...f, resolved: true };
+    return f;
   });
 
   const patchedRepos = data.repos.map(repo => {

@@ -86,6 +86,11 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     const backlogRepos = new Set(needsSignoff.map(f => f.repo)).size;
     const openFiles = needsSignoff.filter(f => f.risk_score === "CRITICAL");
     const stillOpenKeys = new Set(openFiles.map(f => fileKey(f.repo, f.file_path)));
+    // An incident is an escalation, not a duplicate of the violation: a CRITICAL file gets one only once it is still
+    // unattested past its fix deadline (24 h). Until then it is a violation to work on and an alert on its PR. An
+    // incident already open stays open until the file is signed off, closed, or no longer CRITICAL (above).
+    const nowMs = Date.parse(now);
+    const overdueFiles = openFiles.filter(f => !!f.sla_deadline && Date.parse(f.sla_deadline) <= nowMs);
 
     // No timeline here: it's the bulk of each row, and only the few rows actually updated need it.
     const { data: existingAuto } = await db
@@ -134,18 +139,17 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
         `Auto-resolved: ${backlogCount} CRITICAL/HIGH file${backlogCount !== 1 ? "s" : ""} now waiting for sign-off`);
     }
 
-    // 3. Reopen the existing incident for a file that is open again, rather than creating another one.
+    // 3. Reopen the existing incident for a file that is overdue again, rather than creating another one.
     //    (Its duplicates, resolved in step 0, stay resolved: only the newest row is reused.)
-    for (const f of openFiles) {
+    for (const f of overdueFiles) {
       const row = rowByKey.get(fileKey(f.repo, f.file_path));
       if (!row || row.status !== "resolved") continue;
       await transitionIncident(db, orgId, row.id, now, { status: "active", resolved_at: null },
-        "Re-opened: CRITICAL file is unattested again in the latest scan");
+        "Re-opened: CRITICAL file is unattested past its review deadline again");
     }
 
-    // 4. Create P1 incidents for CRITICAL unattested files that have never had one (max 3 at a time,
-    //    matching the original client-side behavior, to avoid noise).
-    const untracked = openFiles.filter(f => !rowByKey.has(fileKey(f.repo, f.file_path))).slice(0, 3);
+    // 4. Create P1 incidents for overdue CRITICAL files that have never had one (max 3 at a time, to avoid noise).
+    const untracked = overdueFiles.filter(f => !rowByKey.has(fileKey(f.repo, f.file_path))).slice(0, 3);
 
     for (const f of untracked) {
       const incType: IncidentType = /auth|login|oauth|session/i.test(f.file_path) ? "auth-bypass"
@@ -154,16 +158,16 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { data: incident } = await (db.from("incidents") as any).insert({
         org_id: orgId,
-        title: `CRITICAL unattested file: ${f.file_path.split("/").pop()}`,
-        description: `TrustLedger detected a CRITICAL-risk AI-generated file that has not been attested. File ${f.file_path} in ${f.repo} has AI percentage of ${(f.ai_pct * 100).toFixed(0)}% and risk score CRITICAL. This file was deployed without security review.`,
+        title: `CRITICAL file past review deadline: ${f.file_path.split("/").pop()}`,
+        description: `${f.file_path} in ${f.repo} is CRITICAL risk (${(f.ai_pct * 100).toFixed(0)}% AI) and was not attested within its 24 h review deadline (due ${f.sla_deadline}). Its pull request stays blocked until a reviewer signs it off.`,
         severity: "P1",
         status: "active",
         incident_type: incType,
         affected_repo: f.repo,
         affected_file: f.file_path,
-        impact: `Unreviewed AI-generated code in production. AI percentage: ${(f.ai_pct * 100).toFixed(0)}%. Deploy #${f.pr_number} blocked from full attestation.`,
+        impact: `Unreviewed CRITICAL code (${(f.ai_pct * 100).toFixed(0)}% AI)${f.pr_number > 0 ? ` in PR #${f.pr_number}` : ""} is past its review deadline; the merge stays blocked until it is signed off.`,
         timeline: [
-          { time: now, action: "CRITICAL file detected by TrustLedger scan", actor: "TrustLedger" },
+          { time: now, action: `Review deadline passed (${f.sla_deadline}) with the CRITICAL file still unattested`, actor: "TrustLedger" },
           { time: now, action: "P1 incident auto-created", actor: "TrustLedger" },
         ],
         playbook: PLAYBOOK_TEMPLATES[incType].steps.map(s => ({ ...s, completed: false })),
@@ -176,7 +180,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
         await writeAuditLog(db, {
           org_id: orgId, event_type: "incident_created", actor_email: "system",
           resource_type: "incident", resource_id: incident.id,
-          payload: { title: `CRITICAL unattested file: ${f.file_path.split("/").pop()}`, severity: "P1", auto_generated: true },
+          payload: { title: `CRITICAL file past review deadline: ${f.file_path.split("/").pop()}`, severity: "P1", auto_generated: true },
         });
       }
     }

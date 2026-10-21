@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import AuthGuard from "@/components/AuthGuard";
+import GovernanceFlow from "@/components/GovernanceFlow";
+import Link from "next/link";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
 import { authedFetch } from "@/lib/useRealData";
@@ -35,6 +37,8 @@ interface Incident {
   stakeholders: string[];
   related_cve?: string;
   lesson_learned?: string;
+  /** Escalated automatically (a CRITICAL file past its review deadline, or a sign-off backlog). */
+  auto?: boolean;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -128,6 +132,8 @@ export default function IncidentsPage() {
       stakeholders: Array.isArray(row.stakeholders) ? row.stakeholders as string[] : [],
       related_cve: (row.related_cve as string | null) ?? undefined,
       lesson_learned: (row.lesson_learned as string | null) ?? undefined,
+      // Auto-escalated by TrustLedger (lib/autoIncidents.ts) -- manual incidents always have a creator.
+      auto: row.created_by == null,
     };
   }
 
@@ -292,7 +298,7 @@ export default function IncidentsPage() {
               <h1 className="text-xl font-black text-gray-900 tracking-tight">Incident Response</h1>
               {p1Active > 0 && <span className="text-xs font-black text-white bg-rose-600 px-2 py-0.5 rounded-full animate-pulse">{p1Active} P1 active</span>}
             </div>
-            <p className="text-sm text-gray-400">Structured incident management with playbooks, timeline tracking, and stakeholder coordination</p>
+            <p className="text-sm text-gray-400">Escalations that need a coordinated response: an owner, a timeline and a playbook.</p>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={() => fetchIncidents(true)} disabled={refreshing}
@@ -310,6 +316,8 @@ export default function IncidentsPage() {
             </button>
           </div>
         </div>
+
+        <GovernanceFlow current="incidents" />
 
         {/* Summary */}
         <div className="animate-fade-up grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -616,6 +624,16 @@ export default function IncidentsPage() {
                             </span>
                           )}
                         </div>
+                        {selectedInc.auto && selectedInc.status !== "resolved" && (
+                          // What ends an escalation: the work it escalated, not the incident's own status buttons.
+                          <p className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2.5 py-1.5 mt-2">
+                            {selectedInc.affected_file
+                              ? <>Escalated automatically. It closes by itself once the file is attested — {selectedInc.affected_repo
+                                  ? <Link href={`/repo/${selectedInc.affected_repo}`} className="font-bold underline">open the repository to sign it off</Link>
+                                  : "sign it off on its pull request"}.</>
+                              : <>Escalated automatically because many files are waiting for sign-off. It closes by itself when the backlog drops to 3 or fewer — <Link href="/violations" className="font-bold underline">work through the violations</Link>.</>}
+                          </p>
+                        )}
                       </div>
                       {NEXT_STATUS[selectedInc.status] && (
                         <button onClick={() => advanceStatus(selectedInc.id)}

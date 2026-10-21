@@ -76,6 +76,7 @@ function baseReads(overrides: Partial<MockDbConfig["reads"]> = {}): MockDbConfig
     scans: [
       { data: { id: "scan-1", repo_full_name: "acme/repo", overall_risk: "HIGH", check_run_id: 555, installation_id: 42 } },
       { data: [{ id: "scan-1" }] }, // repoScans lookup
+      { data: [{ id: "scan-1", check_run_id: 555, installation_id: 42 }] }, // the scans this sign-off covers
     ],
     scan_files: [{ data: { risk_score: "CRITICAL" } }],
     attestations: [{ data: null }], // no existing attestation -- goes through insert

@@ -72,9 +72,28 @@ describe("local violation statuses", () => {
         { repo: "r", scan_id: "s1", file_path: "b.ts", risk_score: "HIGH", attested: false },
       ],
     } as unknown as DashboardData;
-    localStorage.setItem(LOCAL_STATUS_KEY, JSON.stringify({ "high::s1::b.ts": "resolved" }));   // stale, no timestamp
-    recordLocalStatuses({ "high::s1::a.ts": "resolved" });
+    localStorage.setItem(LOCAL_STATUS_KEY, JSON.stringify({ "high::s1::b.ts": "attested" }));   // stale, no timestamp
+    recordLocalStatuses({ "high::s1::a.ts": "attested" });
     const out = patchDataWithAttestations(data);
     expect(out.top_risk_files.map(f => f.attested)).toEqual([true, false]);
+  });
+
+  it("a file closed without review is handled, but never counts as attested", () => {
+    const data = {
+      attestation_rate: 0.5, repos: [{ repo: "r", attestation_rate: 0.5 }],
+      top_risk_files: [
+        { repo: "r", scan_id: "s1", file_path: "a.ts", risk_score: "HIGH", attested: true },
+        { repo: "r", scan_id: "s1", file_path: "b.ts", risk_score: "HIGH", attested: false },
+        { repo: "r", scan_id: "s1", file_path: "c.ts", risk_score: "CRITICAL", attested: false },
+      ],
+    } as unknown as DashboardData;
+    // b.ts closed on the Violations page; c.ts just attested in this tab
+    const out = patchDataWithAttestations(data, { "high::s1::b.ts": "resolved", "crit::s1::c.ts": "attested" });
+    expect(out.top_risk_files.map(f => [f.file_path, f.attested, !!f.resolved])).toEqual([
+      ["a.ts", true, false], ["b.ts", false, true], ["c.ts", true, false],
+    ]);
+    // 2 of 3 signed off: the closed one doesn't raise the rate (it used to make this 100%)
+    expect(out.attestation_rate).toBeCloseTo(2 / 3);
+    expect(out.repos[0].attestation_rate).toBeCloseTo(2 / 3);
   });
 });

@@ -273,6 +273,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
 
   // Top risk files — dedupe by repo+file_path, keeping each file's most
   // recent scan (riskFiles is ordered created_at desc), then rank by AI%.
+  const deadlineByFile = new Map((violations ?? []).map(v => [`${v.scan_id}::${v.file_path}`, v.sla_deadline as string | null]));
   const seenFiles = new Set<string>();
   const top_risk_files = riskFiles
     .filter(f => {
@@ -298,6 +299,8 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
         pr_number:  scan?.pr_number ?? 0, // 0 = no PR (direct push); UI guards with > 0
         attested_by: attestation?.reviewer_email,
         attested_at: attestation?.created_at,
+        detected_at: f.created_at,
+        sla_deadline: deadlineByFile.get(key) ?? null,
       };
     });
 
@@ -433,7 +436,7 @@ export async function fetchUnattestedRiskState(org_id: string) {
   })();
 
   if (latestScanIdPerRepo.length === 0) {
-    return { top_risk_files: [] as { repo: string; file_path: string; scan_id: string; ai_pct: number; risk_score: string; pr_number: number; attested: boolean }[], closed_files: [] as string[], unattested_deploy_count: 0, repos: [] as { repo: string; attestation_rate: number }[], attestation_rate: 0 };
+    return { top_risk_files: [] as { repo: string; file_path: string; scan_id: string; ai_pct: number; risk_score: string; pr_number: number; attested: boolean; sla_deadline: string | null }[], closed_files: [] as string[], unattested_deploy_count: 0, repos: [] as { repo: string; attestation_rate: number }[], attestation_rate: 0 };
   }
 
   const { data: attests } = await db
@@ -445,9 +448,10 @@ export async function fetchUnattestedRiskState(org_id: string) {
 
   const { data: violations } = await db
     .from("violations")
-    .select("scan_id, file_path, risk_score, status")
+    .select("scan_id, file_path, risk_score, status, sla_deadline")
     .in("scan_id", latestScanIdPerRepo)
     .in("risk_score", ["CRITICAL", "HIGH"]);
+  const deadlineByFile = new Map((violations ?? []).map(v => [`${v.scan_id}::${v.file_path}`, (v.sla_deadline ?? null) as string | null]));
 
   // Paged: past the 1000-row response cap, the files beyond it silently had no incident.
   type StateFileRow = { scan_id: string; file_path: string; ai_percentage: number; risk_score: string; scans: { repo_full_name: string; pr_number: number } | null };
@@ -493,6 +497,8 @@ export async function fetchUnattestedRiskState(org_id: string) {
       risk_score: f.risk_score,
       pr_number: f.scans?.pr_number ?? 0,
       attested: attestedFileSet.has(`${f.scan_id}::${f.file_path}`),
+      // the fix deadline: an incident is an escalation, opened only once it has passed (lib/autoIncidents.ts)
+      sla_deadline: deadlineByFile.get(`${f.scan_id}::${f.file_path}`) ?? null,
     }));
 
   const latestViolationByFile = new Map<string, { status: string; risk_score: string }>();

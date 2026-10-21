@@ -79,6 +79,6 @@ describe("violations page details are server-backed", () => {
     await waitFor(() => expect(patches()).toHaveLength(1));
     await new Promise(r => setTimeout(r, 20));
     expect(localStorage.getItem("tl_violation_notes")).toContain("keep me");
-    expect(screen.getByText("Policy Violations")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Policy Violations" })).toBeInTheDocument();
   });
 });

@@ -1092,7 +1092,7 @@ function PRDetailContent() {
     try {
       const statuses = readLocalStatuses();
       const paths = Object.entries(statuses)
-        .filter(([key, val]) => val === "resolved" && key.split("::")[1] === id)
+        .filter(([key, val]) => (val === "attested" || val === "resolved") && key.split("::")[1] === id)
         .map(([key]) => key.split("::").slice(2).join("::"));
       return new Set(paths);
     } catch { return new Set<string>(); }
@@ -1126,7 +1126,7 @@ function PRDetailContent() {
     try {
       const statuses = readLocalStatuses();
       const paths = Object.entries(statuses)
-        .filter(([key, val]) => val === "resolved" && key.split("::")[1] === id)
+        .filter(([key, val]) => (val === "attested" || val === "resolved") && key.split("::")[1] === id)
         .map(([key]) => key.split("::").slice(2).join("::"));
       if (paths.length > 0) setAttestedSet(prev => new Set([...Array.from(prev), ...paths]));
     } catch {}
@@ -1217,12 +1217,12 @@ function PRDetailContent() {
       if (snap?.top_risk_files) {
         (snap.top_risk_files as { scan_id:string; file_path:string; risk_score:string }[])
           .filter(f => f.scan_id === scan.scan_id && f.file_path === path)
-          .forEach(f => { updates[`${riskPfx(f.risk_score)}::${scan.scan_id}::${path}`] = "resolved"; });
+          .forEach(f => { updates[`${riskPfx(f.risk_score)}::${scan.scan_id}::${path}`] = "attested"; });
       }
       // Fallback: use scan file risk_score
       if (Object.keys(updates).length === 0) {
         const mockFile = scan.files.find(f => f.file_path === path);
-        if (mockFile) updates[`${riskPfx(mockFile.risk_score)}::${scan.scan_id}::${path}`] = "resolved";
+        if (mockFile) updates[`${riskPfx(mockFile.risk_score)}::${scan.scan_id}::${path}`] = "attested";
       }
       if (Object.keys(updates).length > 0) {
         recordLocalStatuses(updates);
@@ -1388,14 +1388,14 @@ function PRDetailContent() {
         (snap.top_risk_files as { scan_id:string; file_path:string; risk_score:string }[])
           .filter(f => f.scan_id === scanId)
           .forEach(f => {
-            updates[`${riskPfx(f.risk_score)}::${scanId}::${f.file_path}`] = "resolved";
+            updates[`${riskPfx(f.risk_score)}::${scanId}::${f.file_path}`] = "attested";
           });
       }
 
       // Also write for all current scan files to ensure full coverage
       if (scan) {
         scan.files.forEach(f => {
-          updates[`${riskPfx(f.risk_score)}::${scanId}::${f.file_path}`] = "resolved";
+          updates[`${riskPfx(f.risk_score)}::${scanId}::${f.file_path}`] = "attested";
         });
       }
 
@@ -1508,7 +1508,7 @@ function PRDetailContent() {
         if (f.attested) return false;
         if (f.risk_score !== "CRITICAL" && f.risk_score !== "HIGH") return false;
         const st = statuses[`${pfx(f.risk_score)}::${f.scan_id}::${f.file_path}`];
-        return st !== "resolved" && st !== "in_review";
+        return st !== "attested" && st !== "resolved" && st !== "in_review";
       });
       if (!next) return null;
       return { scanId: next.scan_id, repoName: next.repo.split("/").pop() ?? next.repo };
