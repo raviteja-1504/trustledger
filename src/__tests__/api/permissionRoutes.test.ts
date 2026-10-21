@@ -31,7 +31,7 @@ import { DELETE as keysDELETE } from "@/app/api/keys/route";
 import { POST as webhooksPOST } from "@/app/api/webhooks/route";
 import { PATCH as violationsPATCH } from "@/app/api/violations/route";
 import { GET as rolesGET, POST as rolesPOST, PATCH as rolesPATCH, DELETE as rolesDELETE } from "@/app/api/custom-roles/route";
-import { PATCH as teamPATCH, DELETE as teamDELETE } from "@/app/api/team/route";
+import { GET as teamGET, PATCH as teamPATCH, DELETE as teamDELETE } from "@/app/api/team/route";
 import { GET as meGET } from "@/app/api/me/route";
 import { POST as alertsPOST } from "@/app/api/alerts/route";
 import { POST as syncCheckRunPOST } from "@/app/api/sync-check-run/route";
@@ -295,6 +295,26 @@ describe("assigning roles through /api/team", () => {
     expect(rows("org_members").some(m => m.user_id === "u-admin2")).toBe(true);
     // ...but can assign a role within their own reach
     expect((await teamPATCH(req("/api/team", "PATCH", { user_id: "u-dev", custom_role_id: CR_JUNIOR }))).status).toBe(200);
+  });
+});
+
+describe("GET /api/team: what each member may attest (the violations page's reviewer list)", () => {
+  it("built-in roles, and a custom role in place of the built-in one", async () => {
+    as(DEV);
+    const { members } = await (await teamGET(req("/api/team", "GET"))).json() as { members: Array<{ email: string; can_attest: Record<string, boolean> }> };
+    const of = (email: string) => members.find(m => m.email === email)!.can_attest;
+    expect(of("admin@a.test")).toEqual({ critical: true, high: true, medium: true });
+    expect(of("rev@a.test")).toEqual({ critical: true, high: true, medium: true });
+    expect(of("dev@a.test")).toEqual({ critical: false, high: false, medium: false });
+    // a developer with the "Junior reviewer" custom role: HIGH and MEDIUM, not CRITICAL
+    expect(of("junior@a.test")).toEqual({ critical: false, high: true, medium: true });
+  });
+
+  it("a custom role that can't be found grants nothing", async () => {
+    as(ADMIN);
+    rows("org_members").find(m => m.email === "rev@a.test")!.custom_role_id = "99999999-9999-4999-8999-999999999999";
+    const { members } = await (await teamGET(req("/api/team", "GET"))).json() as { members: Array<{ email: string; can_attest: Record<string, boolean> }> };
+    expect(members.find(m => m.email === "rev@a.test")!.can_attest).toEqual({ critical: false, high: false, medium: false });
   });
 });
 

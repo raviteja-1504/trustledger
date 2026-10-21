@@ -8,7 +8,7 @@
 import { authedFetch, isSeedMode } from "./useRealData";
 import { readLocalStatuses } from "./localStatuses";
 
-export interface ServerOverride { status: string; assigned_email?: string | null; note?: string | null; escalated?: boolean; updated_at?: string }
+export interface ServerOverride { status: string; assigned_email?: string | null; note?: string | null; escalated?: boolean; updated_at?: string; repo?: string }
 
 const SHARE_MS = 3_000;
 let shared: { at: number; p: Promise<Record<string, ServerOverride>> } | null = null;
@@ -39,6 +39,38 @@ export function detailsFromOverrides(o: Record<string, ServerOverride>): Violati
     if (v.escalated) d.escalated.add(id);
   }
   return d;
+}
+
+/**
+ * Who is assigned to a file's violation. A file violation's id names its scan ("<risk>::<scan>::<path>"), so a new
+ * push gives the same file a new id and its assignee used to vanish. The violation's own assignee wins; otherwise the
+ * newest assignee of the same file in the same repository is carried forward, and `from` names the violation it was
+ * set on (clearing a carried assignee clears it there, or it would come back).
+ */
+export function assigneeFor(
+  id: string, repo: string | undefined, file: string | undefined, o: Record<string, ServerOverride>,
+): { email: string; from: string } | null {
+  const own = o[id]?.assigned_email;
+  if (own) return { email: own, from: id };
+  if (!repo || !file) return null;
+  let best: { email: string; from: string; at: string } | null = null;
+  for (const [otherId, v] of Object.entries(o)) {
+    if (otherId === id || !v.assigned_email || v.repo !== repo) continue;
+    if (otherId.split("::").slice(2).join("::") !== file) continue;
+    const at = v.updated_at ?? "";
+    if (!best || at > best.at) best = { email: v.assigned_email, from: otherId, at };
+  }
+  return best ? { email: best.email, from: best.from } : null;
+}
+
+/** A member as /api/team lists them, with what their role lets them attest. */
+export interface TeamMember { email: string; name: string | null; can_attest?: { critical: boolean; high: boolean; medium: boolean } }
+
+/** May this member sign off a file of `severity`? A repo-level violation (null) isn't attested: anyone may own it.
+ *  A member listed without `can_attest` (an older API response) isn't ruled out. */
+export function canAttestSeverity(m: TeamMember, severity: string | null): boolean {
+  if (!severity || !m.can_attest) return true;
+  return severity === "CRITICAL" ? m.can_attest.critical : severity === "HIGH" ? m.can_attest.high : m.can_attest.medium;
 }
 
 export interface OverridePatch { violation_id: string; status: string; assigned_email?: string; note?: string; escalated?: boolean }

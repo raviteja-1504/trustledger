@@ -21,7 +21,7 @@ export type AuditEventType =
   | "sla_breach" | "alert_fired" | "alert_resolved"
   | "incident_created" | "incident_resolved"
   | "api_key_created" | "api_key_revoked"
-  | "violation_resolved" | "violation_escalated"
+  | "violation_resolved" | "violation_escalated" | "violation_assigned"
   | "report_generated" | "org_settings_changed"
   | "member_invited" | "member_role_changed" | "member_removed"
   | "exception_created" | "exception_resolved"

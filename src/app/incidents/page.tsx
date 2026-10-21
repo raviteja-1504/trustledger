@@ -39,6 +39,9 @@ interface Incident {
   lesson_learned?: string;
   /** Escalated automatically (a CRITICAL file past its review deadline, or a sign-off backlog). */
   auto?: boolean;
+  /** An open file incident's pull request: the newest scan of its repo with that file (from the API). */
+  scan_id?: string;
+  pr_number?: number | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -134,6 +137,8 @@ export default function IncidentsPage() {
       lesson_learned: (row.lesson_learned as string | null) ?? undefined,
       // Auto-escalated by TrustLedger (lib/autoIncidents.ts) -- manual incidents always have a creator.
       auto: row.created_by == null,
+      scan_id: (row.scan_id as string | null) ?? undefined,
+      pr_number: (row.pr_number as number | null) ?? null,
     };
   }
 
@@ -623,12 +628,20 @@ export default function IncidentsPage() {
                               {selectedInc.affected_file.split("/").pop()}
                             </span>
                           )}
+                          {selectedInc.scan_id && (
+                            <Link href={`/pr/${selectedInc.scan_id}`}
+                              className="text-[10px] font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 px-2 py-0.5 rounded">
+                              {selectedInc.pr_number ? `Open PR #${selectedInc.pr_number}` : "Open scan"} · all files →
+                            </Link>
+                          )}
                         </div>
                         {selectedInc.auto && selectedInc.status !== "resolved" && (
                           // What ends an escalation: the work it escalated, not the incident's own status buttons.
                           <p className="text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2.5 py-1.5 mt-2">
                             {selectedInc.affected_file
-                              ? <>Escalated automatically. It closes by itself once the file is attested — {selectedInc.affected_repo
+                              ? <>Escalated automatically. It closes by itself once the file is attested — {selectedInc.scan_id
+                                  ? <Link href={`/pr/${selectedInc.scan_id}?attest=${encodeURIComponent(selectedInc.affected_file)}`} className="font-bold underline">review and attest it now</Link>
+                                  : selectedInc.affected_repo
                                   ? <Link href={`/repo/${selectedInc.affected_repo}`} className="font-bold underline">open the repository to sign it off</Link>
                                   : "sign it off on its pull request"}.</>
                               : <>Escalated automatically because many files are waiting for sign-off. It closes by itself when the backlog drops to 3 or fewer — <Link href="/violations" className="font-bold underline">work through the violations</Link>.</>}

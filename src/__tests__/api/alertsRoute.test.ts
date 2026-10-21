@@ -42,8 +42,10 @@ beforeEach(() => {
 
 it("live progress in the title; done when the scan is clear or a newer push replaced it", async () => {
   const res = await GET(new NextRequest(new URL("/api/alerts?limit=200", "https://app.example")));
-  const { alerts } = await res.json() as { alerts: Array<{ id: string; title: string; status: string; progress?: { open: number; total: number } }> };
+  const { alerts } = await res.json() as { alerts: Array<{ id: string; title: string; status: string; pr_number?: number; progress?: { open: number; total: number } }> };
   const byId = Object.fromEntries(alerts.map(a => [a.id, a]));
+  // each alert names its PR, so the page can open it with all its files
+  expect([byId.a1.pr_number, byId.a2.pr_number, byId.a3.pr_number]).toEqual([12, 12, 13]);
   // PR #12's latest push: 5 of 6 signed off
   expect(byId.a2).toMatchObject({ status: "firing", title: "1 of 6 files still needs sign-off in sast PR #12", progress: { open: 1, total: 6 } });
   // PR #12's older push: replaced by s2

@@ -14,7 +14,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES as VALID_ROLES, type AssignableRole as MemberRole } from "@/lib/memberRoles";
 import { checkGrantable } from "@/lib/permissionResolver";
-import { permissionsFromRow, type PermissionKey } from "@/lib/permissions";
+import { memberPermissions, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 
 // ── GET — list members (any authenticated member of the org) ──────────────────
 export async function GET(req: NextRequest) {
@@ -22,13 +22,29 @@ export async function GET(req: NextRequest) {
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
 
   const db = createServiceClient();
-  const { data: members } = await db
+  type MemberRow = { id: string; user_id: string | null; email: string; name: string | null; role: string; github_login: string | null; avatar_url: string | null; created_at: string; custom_role_id?: string | null };
+  let { data: members, error } = await db
+    .from("org_members")
+    .select("id, user_id, email, name, role, github_login, avatar_url, created_at, custom_role_id")
+    .eq("org_id", auth.org_id)
+    .order("created_at", { ascending: true }) as { data: MemberRow[] | null; error: unknown };
+  // Before the custom-roles migration the column doesn't exist: list members without it.
+  if (error) ({ data: members } = await db
     .from("org_members")
     .select("id, user_id, email, name, role, github_login, avatar_url, created_at")
     .eq("org_id", auth.org_id)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true }) as { data: MemberRow[] | null; error: unknown });
 
-  return NextResponse.json({ members: members ?? [] });
+  // What each member may sign off, so the violations page offers a file only to someone who can attest it.
+  const roleIds = [...new Set((members ?? []).map(m => m.custom_role_id).filter((x): x is string => !!x))];
+  const { data: roles } = roleIds.length
+    ? await db.from("custom_roles").select("*").eq("org_id", auth.org_id).in("id", roleIds) as { data: Array<{ id: string } & Partial<Record<PermissionKey, unknown>>> | null }
+    : { data: [] };
+  const roleById = new Map((roles ?? []).map(r => [r.id, r]));
+  return NextResponse.json({ members: (members ?? []).map(m => {
+    const p = memberPermissions(m.role, m.custom_role_id, m.custom_role_id ? roleById.get(m.custom_role_id) : null);
+    return { ...m, can_attest: { critical: p.can_attest_critical, high: p.can_attest_high, medium: p.can_attest_medium } };
+  }) });
 }
 
 // ── POST — invite by email ─────────────────────────────────────────────────────

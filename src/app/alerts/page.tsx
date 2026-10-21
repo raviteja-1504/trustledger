@@ -674,12 +674,6 @@ export default function AlertsPage() {
                       <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
                     </div>
                     <span className="text-[10px] font-semibold text-gray-500 tabular-nums whitespace-nowrap">{signed}/{alert.progress.total} signed off</span>
-                    {alert.scan_id && alert.progress.open > 0 && (
-                      <Link href={`/pr/${alert.scan_id}`} onClick={e => e.stopPropagation()}
-                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 whitespace-nowrap">
-                        Review files →
-                      </Link>
-                    )}
                   </div>
                 );
               })()}
@@ -692,9 +686,12 @@ export default function AlertsPage() {
                     {alert.repo.split("/").pop()}
                   </span>
                 )}
-                {alert.pr_number && alert.scan_id && (
+                {alert.scan_id && (
+                  // The PR page lists all of the scan's files, with each one's sign-off.
                   <Link href={`/pr/${alert.scan_id}`} onClick={e => e.stopPropagation()}
-                    className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800">PR #{alert.pr_number} →</Link>
+                    className="text-[10px] font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 px-1.5 py-0.5 rounded whitespace-nowrap">
+                    {alert.pr_number ? `Open PR #${alert.pr_number}` : "Open scan"} · all files →
+                  </Link>
                 )}
                 {alert.acknowledged_by && (
                   <span className="text-[10px] text-gray-500 flex items-center gap-1">

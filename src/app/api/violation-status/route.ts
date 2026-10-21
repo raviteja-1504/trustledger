@@ -49,7 +49,16 @@ export async function GET(req: NextRequest) {
     if ((page ?? []).length < PAGE) break;
   }
 
-  const overrides: Record<string, { status: string; assigned_email: string | null; note: string | null; escalated: boolean; updated_at: string }> = {};
+  // The repository of each file's override (from its scan), so the page can keep an assignee on the file when a
+  // newer push re-keys its violation -- the id names the scan, not the repo.
+  const scanIds = [...new Set(data.map(r => r.violation_id.split("::")[1]).filter(s => !!s && /^[0-9a-f-]{36}$/i.test(s)))];
+  const repoByScan = new Map<string, string>();
+  for (let i = 0; i < scanIds.length; i += 200) {
+    const { data: scans } = await db.from("scans").select("id, repo_full_name").eq("org_id", org_id).in("id", scanIds.slice(i, i + 200));
+    for (const s of (scans ?? []) as { id: string; repo_full_name: string }[]) repoByScan.set(s.id, s.repo_full_name);
+  }
+
+  const overrides: Record<string, { status: string; assigned_email: string | null; note: string | null; escalated: boolean; updated_at: string; repo?: string }> = {};
   for (const row of data) {
     overrides[row.violation_id] = {
       status:         row.status,
@@ -57,6 +66,7 @@ export async function GET(req: NextRequest) {
       note:           row.note,
       escalated:      row.escalated,
       updated_at:     row.updated_at,
+      repo:           repoByScan.get(row.violation_id.split("::")[1]),
     };
   }
 
@@ -76,6 +86,16 @@ export async function PATCH(req: NextRequest) {
 
   const db = createServiceClient();
 
+  // An assignee must be someone in this organisation: the reviewer list only offers members, and an arbitrary
+  // address would put a finding in the hands of nobody who can act on it.
+  if (body.assigned_email) {
+    const { data: member } = await db.from("org_members").select("id")
+      .eq("org_id", org_id).eq("email", body.assigned_email.toLowerCase()).maybeSingle();
+    if (!member) return NextResponse.json({ error: "not_a_member", message: "Assign someone in your organisation." }, { status: 400 });
+  }
+  const { data: before } = await db.from("violation_overrides").select("status, assigned_email, escalated")
+    .eq("org_id", org_id).eq("violation_id", body.violation_id).maybeSingle() as { data: { status: string | null; assigned_email: string | null; escalated: boolean | null } | null };
+
   // Only the fields the caller sent are written: a status change must not wipe the note, assignee or escalation
   // set earlier (an upsert leaves columns it isn't given untouched on update, and uses defaults on insert).
   // An empty string clears a note / assignee.
@@ -85,7 +105,7 @@ export async function PATCH(req: NextRequest) {
     updated_by:   user_id ?? null,
     updated_at:   new Date().toISOString(),
   };
-  if (body.assigned_email !== undefined) row.assigned_email = body.assigned_email || null;
+  if (body.assigned_email !== undefined) row.assigned_email = body.assigned_email ? body.assigned_email.toLowerCase() : null;
   if (body.note !== undefined)           row.note = body.note || null;
   if (body.escalated !== undefined)      row.escalated = body.escalated;
   const { error: upErr } = await db
@@ -97,17 +117,24 @@ export async function PATCH(req: NextRequest) {
   // A resolved (or reopened) finding can end or restart its auto-incident; keep incidents in step. Best-effort.
   await syncAutoIncidents(db, org_id);
 
-  if (body.status === "resolved") {
-    await writeAuditLog(db, {
-      org_id,
-      event_type:    "violation_resolved",
+  // "<risk>::<scan>::<path>" for a file's violation -- named in the audit entries so they say which file.
+  const [, scanPart, ...pathParts] = body.violation_id.split("::");
+  const fileRef = pathParts.length > 0 ? { scan_id: scanPart, file_path: pathParts.join("::") } : {};
+  const audit = (event_type: "violation_resolved" | "violation_assigned" | "violation_escalated", payload: Record<string, unknown>) =>
+    writeAuditLog(db, {
+      org_id, event_type,
       actor_id:      user_id ?? null,
       actor_email:   actor_email ?? null,
       resource_type: "violation",
       resource_id:   body.violation_id,
-      payload: { note: body.note ?? null },
+      payload: { ...fileRef, ...payload },
     });
-  }
+
+  if (body.status === "resolved" && before?.status !== "resolved") await audit("violation_resolved", { status: "resolved", note: body.note ?? null });
+  // Who is responsible for a finding, and who flagged it for attention, are part of the record too.
+  const assignedNow = row.assigned_email as string | null | undefined;
+  if (assignedNow !== undefined && assignedNow !== (before?.assigned_email ?? null)) await audit("violation_assigned", { assigned_email: assignedNow });
+  if (body.escalated !== undefined && body.escalated !== (before?.escalated ?? false)) await audit("violation_escalated", { escalated: body.escalated });
 
   return NextResponse.json({ ok: true });
 }

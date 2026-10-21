@@ -55,6 +55,7 @@ const META: Record<string, { label: string; category: AuditCategory; severity?: 
   merge_blocked:          { label: "Merge blocked", category: "reviews", severity: "critical" },
   violation_resolved:     { label: "Finding status changed", category: "findings" },
   violation_escalated:    { label: "Finding escalated", category: "findings", severity: "warning" },
+  violation_assigned:     { label: "Reviewer assigned", category: "findings" },
   finding_triaged:        { label: "Finding triaged", category: "findings" },
   finding_reopened:       { label: "Finding reopened", category: "findings", severity: "warning" },
   findings_baselined:     { label: "Findings baselined", category: "findings", severity: "warning" },
@@ -136,6 +137,18 @@ export function describeAuditRow(row: AuditRow): AuditView {
       link = { href: "/violations", label: "Open violations" };
       break;
     }
+    case "violation_assigned": {
+      const to = str(p.assigned_email);
+      title = to ? `${short(file ?? "Finding")} assigned to ${to}` : `Reviewer removed${file ? ` — ${short(file)}` : ""}`;
+      add("File", file); add("Assigned to", to); add("Assigned by", row.actor_email ?? null);
+      if (scanId) link = { href: `/pr/${scanId}`, label: "Open scan" };
+      break;
+    }
+    case "violation_escalated":
+      title = `Finding ${p.escalated === false ? "de-escalated" : "escalated"}${file ? ` — ${short(file)}` : ""}`;
+      add("File", file);
+      link = { href: "/violations", label: "Open violations" };
+      break;
     case "incident_created": case "incident_resolved":
       title = `${meta.label}${str(p.title) ? `: ${p.title}` : ""}`;
       add("Severity", str(p.severity)); add("Opened automatically", p.auto_generated === true ? "yes" : null);

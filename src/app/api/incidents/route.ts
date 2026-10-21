@@ -5,6 +5,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert } from "@/lib/alertDelivery";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "@/lib/incidentPlaybooks";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
+import { latestScanPerFile, fileKey, type ScanRef } from "@/lib/incidentLinks";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -40,7 +41,7 @@ export async function GET(req: NextRequest) {
 
   if (status) {
     const { data } = await base().eq("status", status).limit(MAX_INCIDENTS);
-    return NextResponse.json({ incidents: data ?? [] });
+    return NextResponse.json({ incidents: await withPullRequests(db, org_id, data ?? []) });
   }
 
   // Unfiltered: every open incident, plus the most recent closed ones -- not the org's entire history
@@ -51,7 +52,34 @@ export async function GET(req: NextRequest) {
   ]);
   const incidents = [...(open.data ?? []), ...(closed.data ?? [])]
     .sort((a, b) => String(b.detected_at).localeCompare(String(a.detected_at)));
-  return NextResponse.json({ incidents });
+  return NextResponse.json({ incidents: await withPullRequests(db, org_id, incidents) });
+}
+
+/**
+ * Each OPEN file incident gets the pull request it is about (lib/incidentLinks.ts) -- `scan_id` and `pr_number`
+ * -- so the page can open that PR with all its files. Best-effort: on any read error the incidents go out as they are.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function withPullRequests(db: ReturnType<typeof createServiceClient>, org_id: string, incidents: any[]) {
+  const wanted = incidents.filter(i => i.affected_file && i.affected_repo && OPEN_STATUSES.includes(i.status));
+  if (wanted.length === 0) return incidents;
+  try {
+    const repos = [...new Set(wanted.map(i => i.affected_repo as string))];
+    const files = [...new Set(wanted.map(i => i.affected_file as string))];
+    const { data: scans } = await db.from("scans").select("id, repo_full_name, pr_number, created_at")
+      .eq("org_id", org_id).in("repo_full_name", repos).order("created_at", { ascending: false }).limit(500);
+    const scanIds = (scans ?? []).map(s => s.id as string);
+    if (scanIds.length === 0) return incidents;
+    const { data: hits } = await db.from("scan_files").select("scan_id, file_path")
+      .eq("org_id", org_id).in("file_path", files).in("scan_id", scanIds);
+    const latest = latestScanPerFile((scans ?? []) as ScanRef[], (hits ?? []) as { scan_id: string; file_path: string }[]);
+    return incidents.map(i => {
+      const pr = i.affected_file && i.affected_repo ? latest.get(fileKey(i.affected_repo, i.affected_file)) : undefined;
+      return pr && OPEN_STATUSES.includes(i.status) ? { ...i, scan_id: pr.scan_id, pr_number: pr.pr_number } : i;
+    });
+  } catch {
+    return incidents;
+  }
 }
 
 const OPEN_STATUSES = ["active", "contained"];

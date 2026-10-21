@@ -5,7 +5,7 @@
  * critical secrets, CRITICAL/HIGH files awaiting attestation, repos pending sign-off, unapproved AI tools -- each
  * naming the actual files and repos and linking to the page where that thing is fixed:
  *   files    → the file's sign-off on its pull request (/pr/{scan}?attest=...)
- *   repos    → the repository's page (/repo/{owner}/{repo})
+ *   repos    → the pull request waiting for sign-off, with all its files (/pr/{scan})
  *   secrets  → /secrets, AI tools → /shadow-ai, audit gaps → /compliance, deadlines → /sla
  * Built only from loaded data; a source that hasn't loaded contributes nothing (never a guessed item).
  */
@@ -53,6 +53,8 @@ const SHOW = 3;
 const plural = (n: number, one: string, many = `${one}s`) => `${n === 1 ? one : many}`;
 export const attestHref = (f: { scanId: string; file: string }) => `/pr/${f.scanId}?attest=${encodeURIComponent(f.file)}`;
 export const repoHref = (repo: string) => `/repo/${repo.split("/").map(encodeURIComponent).join("/")}`;
+/** A repo pending sign-off → the pull request (its latest scan) waiting for it; the repo page only without a scan. */
+export const prHref = (r: { repo: string; scanId: string }) => r.scanId ? `/pr/${encodeURIComponent(r.scanId)}` : repoHref(r.repo);
 const base = (p: string) => p.split("/").pop() ?? p;
 const overdue = (h: number) => h >= 48 ? `${Math.floor(h / 24)}d overdue` : `${h}h overdue`;
 
@@ -89,9 +91,10 @@ export function buildAttention(a: AttentionInput): AttentionItem[] {
   if (a.awaitingRepos.length > 0) items.push({
     key: "repos", kind: "repo", severity: "high", count: a.awaitingRepos.length,
     title: `${plural(a.awaitingRepos.length, "repo")} pending sign-off`, detail: "Latest scan has HIGH/CRITICAL files nobody has signed off",
-    href: a.awaitingRepos.length === 1 ? repoHref(a.awaitingRepos[0].repo) : "#repositories",
+    // Straight to the pull request waiting for sign-off: its page lists every file with its attestation.
+    href: a.awaitingRepos.length === 1 ? prHref(a.awaitingRepos[0]) : "#repositories",
     all: { label: "Repositories", href: "#repositories" },
-    links: a.awaitingRepos.slice(0, SHOW).map(r => ({ label: r.repoName, href: repoHref(r.repo) })),
+    links: a.awaitingRepos.slice(0, SHOW).map(r => ({ label: r.repoName, href: prHref(r) })),
     more: Math.max(0, a.awaitingRepos.length - SHOW),
   });
   if (a.unreviewedHigh.length > 0) items.push({

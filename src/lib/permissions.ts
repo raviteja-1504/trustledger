@@ -81,6 +81,15 @@ export function builtinPermissions(role: string | null | undefined): Permissions
   return BUILTIN_PERMISSIONS[(role ?? "developer") as keyof typeof BUILTIN_PERMISSIONS] ?? BUILTIN_PERMISSIONS.developer;
 }
 
+/** A member's effective permissions: their custom role's flags when one is assigned (replacing the built-in set,
+ * as on the server), else their built-in role's. An assigned custom role that can't be read grants nothing. */
+export function memberPermissions(
+  role: string | null | undefined, customRoleId: string | null | undefined, customRole: Partial<Record<PermissionKey, unknown>> | null | undefined,
+): Permissions {
+  if (customRoleId) return customRole ? permissionsFromRow(customRole) : NO_PERMISSIONS;
+  return builtinPermissions(role);
+}
+
 /** The flag that allows attesting a file of the given risk score. */
 export function attestPermissionFor(risk: string | null | undefined): PermissionKey {
   const r = (risk ?? "").toUpperCase();

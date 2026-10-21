@@ -287,9 +287,9 @@ describe("needs attention", () => {
     // Files awaiting attestation go to their sign-off, never to the violations list.
     expect(items[2]).toMatchObject({ title: "CRITICAL file awaiting attestation", href: "/pr/s-crit.ts?attest=src%2Fcrit.ts", all: { href: "#review-queue" } });
     expect(items[4]).toMatchObject({ title: "HIGH-risk files awaiting attestation", href: "/pr/s-a.ts?attest=src%2Fa.ts", more: 1 });
-    // Repos go to the repository pages.
+    // Repos go straight to the pull request waiting for sign-off.
     expect(items[3]).toMatchObject({ title: "repos pending sign-off", href: "#repositories", more: 1 });
-    expect(items[3].links!.map(l => [l.label, l.href])).toEqual([["api", "/repo/acme/api"], ["web", "/repo/acme/web"], ["a", "/repo/acme/a"]]);
+    expect(items[3].links!.map(l => [l.label, l.href])).toEqual([["api", "/pr/s1"], ["web", "/pr/s2"], ["a", "/pr/s3"]]);
     expect(items.some(i => i.href === "/violations" || i.links?.some(l => l.href === "/violations"))).toBe(false);
 
     render(<NeedsAttention items={items} ready />);
@@ -306,14 +306,16 @@ describe("needs attention", () => {
     expect(within(rows[1]).getByRole("link", { name: /Rotate/ })).toHaveAttribute("href", "/secrets");
     expect(within(rows[3]).getByRole("link", { name: /Open/ })).toHaveAttribute("href", "#repositories");
     expect(within(region).getByRole("link", { name: /^pay\.ts/ })).toHaveAttribute("href", "/pr/s-pay.ts?attest=src%2Fpay.ts");
-    expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/repo/acme/web");
+    expect(within(region).getByRole("link", { name: "web" })).toHaveAttribute("href", "/pr/s2");
     expect(within(region).getAllByRole("link", { name: "+1 more" }).map(a => a.getAttribute("href"))).toEqual(["#repositories", "#review-queue"]);
     expect(within(region).getByRole("link", { name: /critical secret exposed/ })).toHaveAttribute("href", "/secrets");
   });
 
-  it("a single pending repo opens that repo directly; only groups with items are shown", () => {
+  it("a single pending repo opens its pull request directly; only groups with items are shown", () => {
     const items = buildAttention({ ...none, awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "s1" }] });
-    expect(items[0]).toMatchObject({ title: "repo pending sign-off", href: "/repo/acme/api" });
+    expect(items[0]).toMatchObject({ title: "repo pending sign-off", href: "/pr/s1" });
+    // no scan on record: the repository page
+    expect(buildAttention({ ...none, awaitingRepos: [{ repo: "acme/api", repoName: "api", scanId: "" }] })[0].href).toBe("/repo/acme/api");
     render(<NeedsAttention items={items} ready />);
     const region = screen.getByRole("region", { name: "Needs attention" });
     expect(within(region).getAllByRole("group").map(g => g.getAttribute("aria-label"))).toEqual(["Next up: 1"]);

@@ -14,7 +14,7 @@ import type { DashboardData, FileResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { readLocalStatuses } from "@/lib/localStatuses";
-import { detailsFromOverrides, fetchServerOverrides, invalidateServerStatuses, localDetailUploads, type OverridePatch, type ServerOverride } from "@/lib/violationStatuses";
+import { assigneeFor, canAttestSeverity, detailsFromOverrides, fetchServerOverrides, invalidateServerStatuses, localDetailUploads, type OverridePatch, type ServerOverride, type TeamMember } from "@/lib/violationStatuses";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
@@ -373,7 +373,10 @@ export default function ViolationsPage() {
   const [notes,        setNotes]        = useState<Record<string, string>>({});
   const [escalated,    setEscalated]    = useState<Set<string>>(new Set());
   const [selected,     setSelected]     = useState<Set<string>>(new Set());
-  const [teamMembers,  setTeamMembers]  = useState<{ email: string; name: string | null }[]>([]);
+  const [teamMembers,  setTeamMembers]  = useState<TeamMember[]>([]);
+  // The server's overrides as loaded: assignees are looked up across scans of the same file (assigneeFor).
+  const [serverOverrides, setServerOverrides] = useState<Record<string, ServerOverride>>({});
+  const [mineOnly,     setMineOnly]     = useState(false);
   const [expandedNote, setExpandedNote] = useState<string | null>(null);
   const [filterSev,    setFilterSev]    = useState<VSeverity | "all">("all");
   const [filterStat,   setFilterStat]   = useState<VStatus | "all">("open");
@@ -390,6 +393,7 @@ export default function ViolationsPage() {
     const next: Record<string, VStatus> = {};
     for (const [id, v] of Object.entries(o)) next[id] = v.status as VStatus;
     setStatuses(next);
+    setServerOverrides(o);
     const d = detailsFromOverrides(o);
     setAssignees(d.assignees); setNotes(d.notes); setEscalated(d.escalated);
   }, []);
@@ -427,7 +431,7 @@ export default function ViolationsPage() {
   // Fetch real team members for the reviewer dropdown
   useEffect(() => {
     if (!profile?.org_id) return;
-    authedFetch<{ members: { email: string; name: string | null }[] }>("/api/team")
+    authedFetch<{ members: TeamMember[] }>("/api/team")
       .then(r => setTeamMembers((r.members ?? []).filter(m => m.email)))
       .catch(() => {});
   }, [profile?.org_id]);
@@ -492,7 +496,7 @@ export default function ViolationsPage() {
   // Derive violations from live data, apply persisted statuses.
   // Active violations come from patched data (resolved files removed, repo rates correct).
   // Resolved violations are re-added from unpatched data so the "Resolved" tab shows them.
-  const violations = useMemo<(Violation & { status: VStatus; assignee?: string })[]>(() => {
+  const violations = useMemo<(Violation & { status: VStatus; assignee?: string; assigneeFrom?: string })[]>(() => {
     if (!data) return [];
     const raw     = data;
     // Server statuses plus this tab's just-made sign-offs (demo data: the browser's own).
@@ -503,12 +507,18 @@ export default function ViolationsPage() {
     const resolvedExtras = deriveViolations(raw, statuses)
       .filter(v => !activeIds.has(v.id) && statuses[v.id] === "resolved");
 
-    return [...active, ...resolvedExtras].map(v => ({
-      ...v,
-      status:   (statuses[v.id] as VStatus) ?? "open",
-      assignee: assignees[v.id] ?? undefined,
-    }));
-  }, [data, statuses, assignees]);
+    return [...active, ...resolvedExtras].map(v => {
+      // This violation's own assignee (including one just changed here, "" = removed), else the newest one set on
+      // the same file in an earlier scan of the repo -- a new push re-keys the violation.
+      const carried = v.id in assignees ? null : assigneeFor(v.id, v.repo, v.file, serverOverrides);
+      return {
+        ...v,
+        status:   (statuses[v.id] as VStatus) ?? "open",
+        assignee: (v.id in assignees ? assignees[v.id] : carried?.email) || undefined,
+        assigneeFrom: carried && carried.from !== v.id ? carried.from : undefined,
+      };
+    });
+  }, [data, statuses, assignees, serverOverrides]);
 
   function setStatus(id: string, status: VStatus) {
     const prev = statuses;
@@ -562,18 +572,26 @@ export default function ViolationsPage() {
     const prev = escalated;
     const next = new Set(Array.from(escalated));
     const on = !next.has(id);
-    if (on) { next.add(id);    success("Escalated!", "Security lead will be notified."); }
+    // Nothing is sent anywhere: escalation marks the violation for attention here and records it in the audit log.
+    if (on) { next.add(id);    success("Escalated", "Marked for attention and recorded in the audit trail."); }
     else    { next.delete(id); info("Escalation removed", "Violation de-escalated."); }
     setEscalated(next);
     saveDetail(id, { escalated: on }, ESCALATE_KEY, Array.from(next), () => setEscalated(prev));
   }
 
-  function setAssignee(id: string, email: string) {
+  function setAssignee(id: string, email: string, carriedFrom?: string) {
     const prev = assignees;
     const next = { ...assignees, [id]: email };
     setAssignees(next);
     saveDetail(id, { assigned_email: email }, ASSIGNEE_KEY, next, () => setAssignees(prev));
-    if (email) success("Reviewer assigned", `${email.split("@")[0]} has been assigned.`);
+    // An assignee carried over from an earlier scan of the file lives on that scan's violation: clear it there too,
+    // or it would be carried straight back.
+    if (!email && carriedFrom && serverOverrides[carriedFrom]) {
+      authedFetch("/api/violation-status", { method: "PATCH",
+        body: JSON.stringify({ violation_id: carriedFrom, status: serverOverrides[carriedFrom].status, assigned_email: "" }) })
+        .then(() => { invalidateServerStatuses(); fetchStatuses(); }, () => {});
+    }
+    if (email) success("Reviewer assigned", `${email.split("@")[0]} can find it under "Assigned to me".`);
     else info("Reviewer removed", "Nobody is assigned to this violation now.");
   }
 
@@ -619,12 +637,18 @@ export default function ViolationsPage() {
 
   const repos = useMemo(() => Array.from(new Set(violations.filter(v => v.repo).map(v => v.repo!))), [violations]);
 
+  // "Assigned to me": the signed-in reviewer's queue.
+  const myEmail = (profile?.email ?? "").toLowerCase();
+  const isMine = (a?: string) => !!myEmail && (a ?? "").toLowerCase() === myEmail;
+  const mineOpen = violations.filter(v => v.status !== "resolved" && isMine(v.assignee)).length;
+
   const filtered = useMemo(() => violations.filter(v => {
     if (filterSev  !== "all" && v.severity !== filterSev)  return false;
     if (filterStat !== "all" && v.status   !== filterStat) return false;
     if (filterRepo !== "all" && v.repo     !== filterRepo) return false;
+    if (mineOnly && !isMine(v.assignee)) return false;
     return true;
-  }), [violations, filterSev, filterStat, filterRepo]);
+  }), [violations, filterSev, filterStat, filterRepo, mineOnly, myEmail]);
 
   // Scope card counts to current severity + repo filters so they match the visible list
   const cardBase = violations.filter(v => {
@@ -815,8 +839,17 @@ export default function ViolationsPage() {
             </select>
           )}
 
-          {(filterStat !== "all" || filterSev !== "all" || filterRepo !== "all") && (
-            <button onClick={() => { setFilterStat("all"); setFilterSev("all"); setFilterRepo("all"); }}
+          {myEmail && (
+            <button onClick={() => setMineOnly(m => !m)} aria-pressed={mineOnly}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl border transition-colors ${mineOnly
+                ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-600 border-gray-200 hover:border-indigo-300"}`}>
+              Assigned to me
+              <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full tabular-nums ${mineOnly ? "bg-white/20 text-white" : "bg-indigo-50 text-indigo-700"}`}>{mineOpen}</span>
+            </button>
+          )}
+
+          {(filterStat !== "all" || filterSev !== "all" || filterRepo !== "all" || mineOnly) && (
+            <button onClick={() => { setFilterStat("all"); setFilterSev("all"); setFilterRepo("all"); setMineOnly(false); }}
               className="text-xs font-bold text-rose-600 hover:text-rose-800 px-2 py-1 rounded-lg hover:bg-rose-50 transition-colors">
               Clear filters
             </button>
@@ -974,12 +1007,20 @@ export default function ViolationsPage() {
                           <span className="text-[10px] font-mono text-gray-500" title={v.file}>{display}</span>
                         );
                       })()}
-                      {v.pr_number && v.scan_id && (
+                      {v.scan_id && v.file && (
+                        // The PR page lists every file of the scan with its sign-off. (`pr_number && ...` rendered a
+                        // stray "0" for a scan with no PR.)
                         <Link href={`/pr/${v.scan_id}`}
-                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5">
-                          PR #{v.pr_number} →
+                          className="text-[10px] font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 px-1.5 py-0.5 rounded flex items-center gap-0.5">
+                          {v.pr_number ? `Open PR #${v.pr_number}` : "Open scan"} · all files →
                         </Link>
                       )}
+                      {v.prs && v.prs.length > 0 && v.prs.map(p => (
+                        <Link key={p.scan_id} href={`/pr/${p.scan_id}`}
+                          className="text-[10px] font-bold text-indigo-600 bg-white border border-indigo-200 hover:bg-indigo-50 px-1.5 py-0.5 rounded whitespace-nowrap">
+                          {p.repo.split("/").pop()} {p.pr_number ? `PR #${p.pr_number}` : "scan"} →
+                        </Link>
+                      ))}
                       <span className="text-[10px] font-mono text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">
                         {v.policy_rule}
                       </span>
@@ -1003,16 +1044,29 @@ export default function ViolationsPage() {
                       {/* Assignee display / picker */}
                       <div className="flex items-center gap-1">
                         <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                        <select value={v.assignee ?? ""} onChange={e => setAssignee(v.id, e.target.value)}
-                          onClick={e => e.stopPropagation()}
-                          className="text-[10px] text-gray-500 bg-transparent border-none outline-none cursor-pointer hover:text-indigo-600 max-w-[120px] truncate">
-                          <option value="">Assign reviewer…</option>
-                          {teamMembers.map(m => (
-                            <option key={m.email} value={m.email}>
-                              {m.name || m.email.split("@")[0]}
-                            </option>
-                          ))}
-                        </select>
+                        {(() => {
+                          // A file can only be signed off by someone whose role may attest its risk level, so only
+                          // they are offered. A current assignee who can't stays visible, marked.
+                          const eligible = teamMembers.filter(m => canAttestSeverity(m, v.file ? v.severity : null));
+                          const current = v.assignee && !eligible.some(m => m.email.toLowerCase() === v.assignee!.toLowerCase())
+                            ? teamMembers.find(m => m.email.toLowerCase() === v.assignee!.toLowerCase()) ?? { email: v.assignee, name: null }
+                            : null;
+                          return (
+                            <select value={v.assignee ?? ""} onChange={e => setAssignee(v.id, e.target.value, v.assigneeFrom)}
+                              onClick={e => e.stopPropagation()}
+                              aria-label="Assign reviewer"
+                              title={v.assigneeFrom ? "Assigned on an earlier push of this file" : undefined}
+                              className={`text-[10px] bg-transparent border-none outline-none cursor-pointer hover:text-indigo-600 max-w-[160px] truncate ${isMine(v.assignee) ? "font-bold text-indigo-600" : "text-gray-500"}`}>
+                              <option value="">{eligible.length === 0 && teamMembers.length > 0 ? `Nobody can attest ${v.severity}` : "Assign reviewer…"}</option>
+                              {current && <option value={current.email}>{current.name || current.email.split("@")[0]} (can&apos;t attest {v.severity})</option>}
+                              {eligible.map(m => (
+                                <option key={m.email} value={m.email}>
+                                  {m.name || m.email.split("@")[0]}{m.email.toLowerCase() === myEmail ? " (you)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          );
+                        })()}
                       </div>
                       {violationNote && (
                         <span className="text-[10px] text-indigo-600 italic flex items-center gap-1">

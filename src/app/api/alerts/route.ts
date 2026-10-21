@@ -159,7 +159,19 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ alerts: rows.map(row => ({ ...toUiAlert(row), progress: progressById.get(row.id) })) });
+  // The PR each alert is about, so the page can open it with all its files (alert rows store only the scan).
+  const alertScanIds = [...new Set(rows.map(r => r.scan_id).filter((s): s is string => !!s))];
+  const prByScan = new Map<string, number | null>();
+  if (alertScanIds.length > 0) {
+    const { data: prRows } = await db.from("scans").select("id, pr_number").eq("org_id", org_id).in("id", alertScanIds);
+    for (const s of (prRows ?? []) as { id: string; pr_number: number | null }[]) prByScan.set(s.id, s.pr_number);
+  }
+
+  return NextResponse.json({ alerts: rows.map(row => ({
+    ...toUiAlert(row),
+    pr_number: (row.scan_id && prByScan.get(row.scan_id)) || undefined,
+    progress: progressById.get(row.id),
+  })) });
 }
 
 // ── POST — fire a new alert + deliver it ──────────────────────────────────────

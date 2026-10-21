@@ -34,6 +34,8 @@ export interface Violation {
   policy_rule: string;
   /** Closed on this page without an attestation: handled, but nobody signed it off -- the merge check still blocks. */
   closed_without_attestation?: boolean;
+  /** "Repos blocked from deploying": the blocked pull requests, so each can be opened with all its files. */
+  prs?: Array<{ repo: string; scan_id: string; pr_number: number }>;
 }
 
 // ── Derive violations from dashboard data ─────────────────────────────────────
@@ -150,6 +152,8 @@ export function deriveViolations(data: DashboardData, statuses: Record<string, s
       detected_at: det,
       sla_deadline: realDeadline ?? new Date(new Date(det).getTime() + SLA_CRIT).toISOString(),
       policy_rule:  "6.4.1 — Security Vulnerabilities",
+      // one link per blocked PR (a repo's latest scan), in the order the files rank
+      prs: [...new Map(blocking.map(f => [f.scan_id, { repo: f.repo, scan_id: f.scan_id, pr_number: f.pr_number }])).values()],
     });
   }
 

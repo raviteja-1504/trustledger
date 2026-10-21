@@ -139,7 +139,7 @@ describe("Dashboard page", () => {
     const attention = screen.getByRole("region", { name: "Needs attention" });
     await waitFor(() => expect(attention).toHaveTextContent("critical secret exposed"));
     expect(attention).toHaveTextContent("CRITICAL file awaiting attestation");
-    expect(within(attention).getByRole("link", { name: /repo pending sign-off/ })).toHaveAttribute("href", "/repo/acme/api");
+    expect(within(attention).getByRole("link", { name: /repo pending sign-off/ })).toHaveAttribute("href", "/pr/s1");   // straight to the PR waiting for sign-off
     // The headline numbers come before the Trust Score.
     const tile = screen.getByRole("link", { name: /Open secrets/ });
     expect(tile.compareDocumentPosition(screen.getByRole("region", { name: "Trust Score" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
