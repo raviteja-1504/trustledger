@@ -77,7 +77,10 @@ export default function ShadowAIPage() {
 
   const detections = useMemo(() => data?.detections ?? [], [data]);
   const violations = useMemo(() => detections.filter(d => d.violation && (statusFilter === "all" || d.status === statusFilter)), [detections, statusFilter]);
-  const needsReview = useMemo(() => detections.filter(d => d.tier === "explicit" && (d.approval === "unidentified" || d.approval === "unreviewed")), [detections]);
+  // Undecided first; what a reviewer accepted or resolved stays listed below them, with its status.
+  const needsReview = useMemo(() => detections
+    .filter(d => d.tier === "explicit" && (d.approval === "unidentified" || d.approval === "unreviewed"))
+    .sort((a, b) => Number(a.status === "acceptable" || a.status === "resolved") - Number(b.status === "acceptable" || b.status === "resolved")), [detections]);
   const approved = useMemo(() => detections.filter(d => d.tier === "explicit" && d.approval === "approved"), [detections]);
   const hints = useMemo(() => detections.filter(d => d.tier === "hint"), [detections]);
   const s = data?.summary;
@@ -107,9 +110,26 @@ export default function ShadowAIPage() {
     if (demo) return;
     try {
       const res = await authedFetch<{ status: ShadowStatus; notes: Detection["notes"] }>("/api/shadow-ai", { method: "PATCH", body: JSON.stringify({ key, ...patch }) });
-      setData(prev => prev && ({ ...prev, detections: prev.detections.map(d => d.key === key ? { ...d, status: res.status, notes: res.notes, reopened: false } : d) }));
+      // The summary (stats, "AI tools in use") is derived from the detections: recompute it with the new status, or
+      // an accepted violation kept showing as open there until the page was reloaded.
+      setData(prev => {
+        if (!prev) return prev;
+        const detections = prev.detections.map(d => d.key === key ? { ...d, status: res.status, notes: res.notes, reopened: false } : d);
+        return { ...prev, detections, summary: summarize(detections, prev.policy?.allowed ?? null) };
+      });
       if (patch.note) setNoteInput(p => ({ ...p, [key]: "" }));
     } catch (e) { setError((e as Error).message || "Saving failed."); }
+  }
+
+  /** Add one tool to the approved list (the policy editor's save, for a single tool). */
+  async function approveTool(tool: string) {
+    const current = data?.policy;
+    if (demo || !current) return;
+    setError(null);
+    try {
+      await authedFetch("/api/shadow-ai", { method: "PUT", body: JSON.stringify({ allowed: [...new Set([...current.allowed, tool])] }) });
+      await load();
+    } catch (e) { setError((e as Error).message || "Approving the tool failed."); }
   }
 
   function exportCSV() {
@@ -199,7 +219,7 @@ export default function ShadowAIPage() {
               { label: "Policy compliance", value: pct(s.compliance), color: "#4338ca", info: "Share of explicit AI-tool evidence that is for approved tools. Accepted and resolved violations are excluded." },
               { label: "Tools in use", value: s.by_tool.filter(t => t.detections > 0).length, color: "#0f766e", info: "Distinct AI tools with evidence in this window, including hints." },
               { label: "Developers affected", value: s.developers_with_violations, color: "#b45309", info: "Pull request authors with at least one open violation." },
-              { label: "Needs review", value: s.unidentified + (s.policy_configured ? 0 : s.unreviewed), color: "#92400e", info: "AI use with no identifiable tool (e.g. AGENTS.md), or tools nobody has approved or rejected yet." },
+              { label: "Needs review", value: s.needs_review ?? s.unidentified, color: "#92400e", info: "AI use with no identifiable tool (e.g. AGENTS.md), or tools nobody has approved or rejected yet -- minus what a reviewer has accepted or resolved." },
             ].map(c => (
               <div key={c.label} className="rounded-2xl p-4 border border-gray-200 bg-white">
                 <p className="text-2xl font-black tabular-nums" style={{ color: c.color }}>{c.value}</p>
@@ -214,16 +234,32 @@ export default function ShadowAIPage() {
           <div className="animate-fade-up section-card overflow-hidden">
             <div className="px-5 py-3 border-b border-gray-100 bg-gray-50"><p className="text-xs font-black text-gray-700 uppercase tracking-wider">AI tools in use · last {data?.window_days} days</p></div>
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-xs text-gray-500 border-b border-gray-100"><th className="px-5 py-2 font-semibold">Tool</th><th className="px-3 py-2 font-semibold">Policy</th><th className="px-3 py-2 font-semibold text-right">Detections</th><th className="px-5 py-2 font-semibold text-right">Violations</th></tr></thead>
+              <thead><tr className="text-left text-xs text-gray-500 border-b border-gray-100">
+                <th className="px-5 py-2 font-semibold">Tool</th><th className="px-3 py-2 font-semibold">Policy</th>
+                <th className="px-3 py-2 font-semibold text-right">Detections</th>
+                <th className="px-3 py-2 font-semibold text-right">Open violations</th>
+                <th className="px-3 py-2 font-semibold text-right">Accepted</th>
+                <th className="px-5 py-2 font-semibold text-right">Resolved</th>
+              </tr></thead>
               <tbody>
-                {s.by_tool.map(t => (
-                  <tr key={t.tool} className="border-b border-gray-50 last:border-0">
-                    <td className="px-5 py-2.5 font-bold text-gray-900">{t.label}</td>
-                    <td className="px-3 py-2.5"><span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${APPROVAL_STYLE[t.approval].cls}`}>{APPROVAL_STYLE[t.approval].label}</span></td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-gray-700">{t.detections}</td>
-                    <td className={`px-5 py-2.5 text-right tabular-nums font-bold ${t.violations ? "text-rose-600" : "text-gray-400"}`}>{t.violations}</td>
-                  </tr>
-                ))}
+                {s.by_tool.map(t => {
+                  // A tool not on the list whose every violation was accepted is in use with an exception, not a problem.
+                  const acceptedOnly = t.approval === "unapproved" && t.violations > 0 && (t.open ?? t.violations) === 0 && (t.accepted ?? 0) > 0;
+                  return (
+                    <tr key={t.tool} className="border-b border-gray-50 last:border-0">
+                      <td className="px-5 py-2.5 font-bold text-gray-900">{t.label}</td>
+                      <td className="px-3 py-2.5">
+                        {acceptedOnly
+                          ? <span className="text-[11px] font-bold px-2 py-0.5 rounded-full border" style={{ background: STATUS_STYLE.acceptable.bg, color: STATUS_STYLE.acceptable.text, borderColor: STATUS_STYLE.acceptable.border }}>Not approved · accepted</span>
+                          : <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${APPROVAL_STYLE[t.approval].cls}`}>{APPROVAL_STYLE[t.approval].label}</span>}
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-gray-700">{t.detections}</td>
+                      <td className={`px-3 py-2.5 text-right tabular-nums font-bold ${(t.open ?? t.violations) ? "text-rose-600" : "text-gray-400"}`}>{t.open ?? t.violations}</td>
+                      <td className={`px-3 py-2.5 text-right tabular-nums ${t.accepted ? "font-bold text-sky-700" : "text-gray-400"}`}>{t.accepted ?? 0}</td>
+                      <td className={`px-5 py-2.5 text-right tabular-nums ${t.resolved ? "font-bold text-green-700" : "text-gray-400"}`}>{t.resolved ?? 0}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -243,7 +279,8 @@ export default function ShadowAIPage() {
             {violations.length === 0 ? <p className="py-8 text-center text-sm text-gray-500">No violations with this status</p> : (
               <div className="divide-y divide-gray-50">
                 {violations.map(d => <DetectionRow key={d.key} d={d} tz={tz} open={expanded === d.key} onToggle={() => setExpanded(expanded === d.key ? null : d.key)}
-                  canTriage={canTriage && !demo} onTriage={triage} note={noteInput[d.key] ?? ""} setNote={v => setNoteInput(p => ({ ...p, [d.key]: v }))} />)}
+                  canTriage={canTriage && !demo} onTriage={triage} note={noteInput[d.key] ?? ""} setNote={v => setNoteInput(p => ({ ...p, [d.key]: v }))}
+                  onApprove={canEditPolicy && !demo && policy ? () => approveTool(d.tool) : undefined} />)}
               </div>
             )}
           </div>
@@ -252,7 +289,10 @@ export default function ShadowAIPage() {
         {/* Needs review */}
         {needsReview.length > 0 && (
           <div className="animate-fade-up section-card overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-100 bg-amber-50"><p className="text-xs font-black text-amber-800 uppercase tracking-wider">Needs review · {needsReview.length}</p></div>
+            <div className="px-5 py-3 border-b border-gray-100 bg-amber-50">
+              <p className="text-xs font-black text-amber-800 uppercase tracking-wider">Needs review · {s?.needs_review ?? needsReview.length}</p>
+              <p className="text-[11px] text-amber-700 mt-0.5">AI use with no identifiable tool, or no policy yet. Accept it if it&apos;s fine, or resolve it once it&apos;s removed.</p>
+            </div>
             <div className="divide-y divide-gray-50">
               {needsReview.map(d => <DetectionRow key={d.key} d={d} tz={tz} open={expanded === d.key} onToggle={() => setExpanded(expanded === d.key ? null : d.key)}
                 canTriage={canTriage && !demo} onTriage={triage} note={noteInput[d.key] ?? ""} setNote={v => setNoteInput(p => ({ ...p, [d.key]: v }))} />)}
@@ -319,13 +359,19 @@ export default function ShadowAIPage() {
   );
 }
 
-function DetectionRow({ d, tz, open, onToggle, canTriage, onTriage, note, setNote }: {
+function DetectionRow({ d, tz, open, onToggle, canTriage, onTriage, note, setNote, onApprove }: {
   d: Detection; tz: string; open: boolean; onToggle: () => void; canTriage: boolean;
   onTriage: (key: string, patch: { status?: ShadowStatus; note?: string }) => void; note: string; setNote: (v: string) => void;
+  /** Approve this tool for the whole organisation (people who manage policies). */
+  onApprove?: () => void;
 }) {
   const st = STATUS_STYLE[d.status];
   const ap = APPROVAL_STYLE[d.approval];
   const isCommit = d.location.startsWith("commit:");
+  // A decision can be recorded on an unapproved tool AND on evidence nobody has decided about (an unidentified tool,
+  // or any tool before a policy exists) -- those used to accept notes only, so they stayed "to review" forever.
+  const triageable = d.violation || (d.tier === "explicit" && (d.approval === "unidentified" || d.approval === "unreviewed"));
+  const showStatus = d.violation || d.status !== "open";
   return (
     <div>
       <div className="flex items-center gap-4 px-5 py-3.5 cursor-pointer hover:bg-gray-50/60" onClick={onToggle}>
@@ -333,7 +379,7 @@ function DetectionRow({ d, tz, open, onToggle, canTriage, onTriage, note, setNot
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-bold text-gray-900">{d.tool_label}</span>
             <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${ap.cls}`}>{ap.label}</span>
-            {d.violation && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border" style={{ background: st.bg, color: st.text, borderColor: st.border }}>{st.label}</span>}
+            {showStatus && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border" style={{ background: st.bg, color: st.text, borderColor: st.border }}>{st.label}</span>}
             {d.reopened && <span className="text-[10px] font-bold text-rose-600">Seen again after it was resolved</span>}
             {d.notes.length > 0 && <span className="text-[10px] text-gray-400">{d.notes.length} note{d.notes.length > 1 ? "s" : ""}</span>}
           </div>
@@ -353,15 +399,25 @@ function DetectionRow({ d, tz, open, onToggle, canTriage, onTriage, note, setNot
               First seen {formatDateOnly(d.first_seen, tz)}{d.pull_requests.length ? ` · pull request${d.pull_requests.length > 1 ? "s" : ""} ${d.pull_requests.map(n => `#${n}`).join(", ")}` : ""}
             </p>
           </div>
-          {canTriage && d.violation && (
-            <div className="flex items-end gap-3">
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</p>
-                <select value={d.status} onChange={e => onTriage(d.key, { status: e.target.value as ShadowStatus })}
-                  className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
-                  {(Object.keys(STATUS_STYLE) as ShadowStatus[]).map(k => <option key={k} value={k}>{STATUS_STYLE[k].label}</option>)}
-                </select>
-              </div>
+          {((canTriage && triageable) || onApprove) && (
+            <div className="flex items-end gap-3 flex-wrap">
+              {canTriage && triageable && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</p>
+                  <select value={d.status} onChange={e => onTriage(d.key, { status: e.target.value as ShadowStatus })}
+                    aria-label="Detection status"
+                    className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
+                    {(Object.keys(STATUS_STYLE) as ShadowStatus[]).map(k => <option key={k} value={k}>{STATUS_STYLE[k].label}</option>)}
+                  </select>
+                  <p className="text-[10px] text-gray-400 mt-1 max-w-xs">Accepted: allowed here as an exception (no more warnings for this evidence). Resolved: removed; flagged again if it comes back.</p>
+                </div>
+              )}
+              {onApprove && d.violation && (
+                <button onClick={onApprove}
+                  className="text-xs font-bold text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-lg hover:bg-green-100">
+                  Approve {d.tool_label} for everyone
+                </button>
+              )}
             </div>
           )}
           <div>

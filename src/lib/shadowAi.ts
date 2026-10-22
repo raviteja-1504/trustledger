@@ -58,16 +58,22 @@ export interface Detection {
 
 export const HINT_MIN_CONFIDENCE = 0.6;
 
-/** Unapproved AI tools in ONE scan's explicit evidence, grouped by tool. Empty without a policy. */
+/**
+ * Unapproved AI tools in ONE scan's explicit evidence, grouped by tool. Empty without a policy. Evidence a reviewer
+ * has ACCEPTED for this repository (triage "acceptable" on its detection) is left out: it used to be flagged on the
+ * PR check, and raise an alert, again on every pull request.
+ */
 export function unapprovedToolsInScan(
   aiTooling: ReadonlyArray<{ tool?: string; file?: string; label?: string }> | null | undefined,
   policy: readonly string[] | null,
+  accepted?: { repo: string; triage: ReadonlyMap<string, Pick<TriageRow, "status">> },
 ): Array<{ tool: string; label: string; evidence: string[] }> {
   if (!policy) return [];
   const byTool = new Map<string, string[]>();
   for (const a of aiTooling ?? []) {
     const tool = toolId(a.tool);
     if (!tool || !a.file || approvalOf(tool, policy) !== "unapproved") continue;
+    if (accepted && accepted.triage.get(detectionKey(accepted.repo, tool, a.file))?.status === "acceptable") continue;
     const where = a.file.startsWith("commit:") ? `commit ${a.file.slice(7)}` : `\`${a.file}\``;
     const list = byTool.get(tool) ?? [];
     list.push(a.label ? `${where} (${a.label})` : where);
@@ -175,9 +181,13 @@ export interface ShadowSummary {
   approved_usage: number;
   unreviewed: number;
   unidentified: number;
+  /** Explicit evidence nobody has decided on: no identifiable tool, or (without a policy) any tool -- minus what a
+   *  reviewer has accepted or resolved. */
+  needs_review: number;
   hints: number;
   developers_with_violations: number;
-  by_tool: Array<{ tool: string; label: string; detections: number; violations: number; approval: Approval }>;
+  /** Per tool: its violations split by triage status, so an accepted one doesn't read as an open violation. */
+  by_tool: Array<{ tool: string; label: string; detections: number; violations: number; open: number; accepted: number; resolved: number; approval: Approval }>;
   /** Share of explicit tool evidence that is for approved tools (null until a policy exists or nothing is seen). */
   compliance: number | null;
 }
@@ -186,12 +196,17 @@ export function summarize(detections: readonly Detection[], policy: readonly str
   const explicit = detections.filter(d => d.tier === "explicit" && d.approval !== "unidentified");
   const violations = detections.filter(d => d.violation);
   const isOpen = (d: Detection) => d.status === "open" || d.status === "investigating";
-  const tools = new Map<string, { detections: number; violations: number }>();
+  const tools = new Map<string, { detections: number; violations: number; open: number; accepted: number; resolved: number }>();
   for (const d of detections) {
-    const t = tools.get(d.tool) ?? { detections: 0, violations: 0 };
-    t.detections++; if (d.violation) t.violations++;
+    const t = tools.get(d.tool) ?? { detections: 0, violations: 0, open: 0, accepted: 0, resolved: 0 };
+    t.detections++;
+    if (d.violation) {
+      t.violations++;
+      if (isOpen(d)) t.open++; else if (d.status === "acceptable") t.accepted++; else t.resolved++;
+    }
     tools.set(d.tool, t);
   }
+  const decided = (d: Detection) => d.status === "acceptable" || d.status === "resolved";
   const counted = explicit.filter(d => !(d.violation && (d.status === "acceptable" || d.status === "resolved")));
   return {
     policy_configured: !!policy,
@@ -200,10 +215,11 @@ export function summarize(detections: readonly Detection[], policy: readonly str
     approved_usage: detections.filter(d => d.approval === "approved" && d.tier === "explicit").length,
     unreviewed: detections.filter(d => d.approval === "unreviewed" && d.tier === "explicit").length,
     unidentified: detections.filter(d => d.approval === "unidentified").length,
+    needs_review: detections.filter(d => d.tier === "explicit" && (d.approval === "unidentified" || d.approval === "unreviewed") && !decided(d)).length,
     hints: detections.filter(d => d.tier === "hint").length,
     developers_with_violations: new Set(violations.filter(isOpen).flatMap(d => d.developers)).size,
     by_tool: [...tools.entries()].map(([tool, v]) => ({ tool, label: toolLabel(tool), ...v, approval: approvalOf(tool, policy) }))
-      .sort((a, b) => b.violations - a.violations || b.detections - a.detections),
+      .sort((a, b) => b.open - a.open || b.violations - a.violations || b.detections - a.detections),
     compliance: !policy || counted.length === 0 ? null : counted.filter(d => !d.violation).length / counted.length,
   };
 }

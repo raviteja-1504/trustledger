@@ -36,7 +36,7 @@ import { safeEqual } from "@/lib/safeEqual";
 import { internalSecret } from "@/lib/internalSecret";
 import { detectCommitEvidence, type CommitEvidence } from "@/lib/aiTools";
 import { unapprovedToolsInScan, shadowAiCheckMarkdown } from "@/lib/shadowAi";
-import { loadPolicy, notifyUnapprovedTools } from "@/lib/shadowAiStore";
+import { loadPolicy, loadTriage as loadShadowTriage, notifyUnapprovedTools } from "@/lib/shadowAiStore";
 import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
@@ -769,7 +769,9 @@ async function handle(req: NextRequest) {
     let unapproved: ReturnType<typeof unapprovedToolsInScan> = [];
     if (orgId) {
       try {
-        unapproved = unapprovedToolsInScan(result.ai_tooling, (await loadPolicy(db, orgId))?.allowed ?? null);
+        // Evidence a reviewer has accepted for this repository isn't flagged again on every pull request.
+        const [shadowPolicy, shadowTriage] = await Promise.all([loadPolicy(db, orgId), loadShadowTriage(db, orgId)]);
+        unapproved = unapprovedToolsInScan(result.ai_tooling, shadowPolicy?.allowed ?? null, { repo: repoFullName, triage: shadowTriage });
         if (prNumber) await notifyUnapprovedTools(db, orgId, { repo: repoFullName, pr_number: prNumber, scan_id: result.scan_id, author: prAuthor ?? null }, unapproved);
       } catch { /* best-effort */ }
     }

@@ -27,9 +27,10 @@ describe("Threat intel page", () => {
     expect(rows[0]).toHaveTextContent("axios@0.21.0");
     expect(rows[0]).toHaveTextContent("Public exploit");
     expect(rows[0]).toHaveTextContent("Reachable");
-    expect(within(rows[0]).getByRole("link", { name: "GHSA-4w2v-q235-vp99" })).toHaveAttribute("href", "https://github.com/advisories/GHSA-4w2v-q235-vp99");
-    expect(within(rows[1]).getByRole("link", { name: "CVE-2020-8203" })).toHaveAttribute("href", "https://nvd.nist.gov/vuln/detail/CVE-2020-8203");
-    expect(within(rows[1]).getByRole("link", { name: "acme/api" })).toHaveAttribute("href", "/repo/acme/api");
+    expect(within(rows[0]).getByRole("link", { name: /^GHSA-4w2v-q235-vp99/ })).toHaveAttribute("href", "https://github.com/advisories/GHSA-4w2v-q235-vp99");
+    expect(within(rows[1]).getByRole("link", { name: /^CVE-2020-8203/ })).toHaveAttribute("href", "https://nvd.nist.gov/vuln/detail/CVE-2020-8203");
+    // each repository links to the PR whose scan found it
+    expect(within(rows[1]).getByRole("link", { name: "acme/api" })).toHaveAttribute("href", "/pr/s1");
     expect(screen.getByRole("region", { name: "Supply-chain risks" })).toHaveTextContent("react-utils-proDoesn't exist");
     // No static catalogue: nothing about threats that don't touch these packages.
     expect(document.body.textContent).not.toMatch(/Jenkins|runc|XZ Utils|SLA BREACHED/);

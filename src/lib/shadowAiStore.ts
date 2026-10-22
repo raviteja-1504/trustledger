@@ -63,6 +63,32 @@ export async function notifyUnapprovedTools(
   return true;
 }
 
+/** Repositories with no open (or investigating) unapproved-tool detection left -- whose Shadow AI alerts are done. */
+export function clearedRepos(detections: readonly Detection[], repos: readonly string[]): string[] {
+  const open = new Set(detections.filter(d => d.violation && (d.status === "open" || d.status === "investigating")).map(d => d.repo));
+  return repos.filter(r => !open.has(r));
+}
+
+/**
+ * Resolve firing Shadow AI alerts of repositories that no longer have an open unapproved-tool detection -- after a
+ * reviewer accepts or resolves them, or the tool is approved. They used to stay firing forever. Best-effort.
+ */
+export async function resolveClearedShadowAlerts(db: Db, orgId: string): Promise<string[]> {
+  try {
+    const { data: firing } = await db.from("alerts").select("repo").eq("org_id", orgId).eq("alert_type", "shadow_ai")
+      .in("status", ["firing", "acknowledged", "snoozed"]) as { data: Array<{ repo: string | null }> | null };
+    const repos = [...new Set((firing ?? []).map(a => a.repo).filter((r): r is string => !!r))];
+    if (repos.length === 0) return [];
+    const { detections } = await loadShadowAi(db, orgId, 180);
+    const done = clearedRepos(detections, repos);
+    if (done.length > 0) {
+      await db.from("alerts").update({ status: "resolved", resolved_at: new Date().toISOString() })
+        .eq("org_id", orgId).eq("alert_type", "shadow_ai").in("repo", done).in("status", ["firing", "acknowledged", "snoozed"]);
+    }
+    return done;
+  } catch { return []; }
+}
+
 const IN_CHUNK = 200;
 export const MAX_SHADOW_SCANS = 1000;
 

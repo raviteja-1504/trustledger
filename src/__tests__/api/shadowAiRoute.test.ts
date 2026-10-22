@@ -44,6 +44,7 @@ beforeEach(() => {
     scan_files: [{ scan_id: "s2", org_id: "org-1", file_path: "src/a.ts", attribution: { model: "gemini", confidence: 0.9 } }],
     shadow_ai_triage: [],
     audit_log: [],
+    alerts: [],
   });
 });
 
@@ -124,6 +125,47 @@ describe("PATCH triage", () => {
     expect((await PATCH(req("PATCH", { key: "no-pipes", status: "resolved" }))).status).toBe(400);
     expect((await PATCH(req("PATCH", { key }))).status).toBe(400);
     expect(rows("shadow_ai_triage")).toEqual([]);
+  });
+});
+
+describe("Shadow AI alerts end when nothing is open in the repository", () => {
+  const alert = (id: string, repo: string) => ({ id, org_id: "org-1", alert_type: "shadow_ai", status: "firing", repo, title: id });
+  beforeEach(() => {
+    rows("organizations").find(o => o.id === "org-1")!.ai_tool_policy = { allowed: ["github-copilot"] };
+    rows("alerts").push(alert("a-app", "acme/app"), alert("a-web", "acme/web"));
+    // acme/app's older Windsurf evidence (60 days ago) was already dealt with -- the alerts look back 180 days
+    rows("shadow_ai_triage").push({ org_id: "org-1", detection_key: "acme/app|windsurf|.windsurfrules", status: "resolved", notes: [], updated_at: new Date().toISOString() });
+    // acme/web has its own open Windsurf evidence
+    rows("scans").push({ id: "s4", org_id: "org-1", repo_full_name: "acme/web", pr_number: 4, pr_author: "x", created_at: recent, ai_tooling: [{ tool: "Windsurf", file: ".windsurfrules" }] });
+  });
+  const status = (id: string) => rows("alerts").find(a => a.id === id)!.status;
+
+  it("accepting the last open detection resolves the repository's alerts; another repo's stay firing", async () => {
+    caller = { ...REVIEWER };
+    await PATCH(req("PATCH", { key: "acme/app|cursor|.cursorrules", status: "acceptable" }));
+    expect(status("a-app")).toBe("firing");                 // the Claude commit is still open
+    await PATCH(req("PATCH", { key: "acme/app|claude|commit:abc1234", status: "resolved" }));
+    expect([status("a-app"), status("a-web")]).toEqual(["resolved", "firing"]);
+  });
+
+  it("a detection still under investigation keeps the alert firing", async () => {
+    caller = { ...REVIEWER };
+    await PATCH(req("PATCH", { key: "acme/app|cursor|.cursorrules", status: "investigating" }));
+    await PATCH(req("PATCH", { key: "acme/app|claude|commit:abc1234", status: "acceptable" }));
+    expect(status("a-app")).toBe("firing");
+  });
+
+  it("older evidence that is still open keeps it firing too (the alert looks back further than the page)", async () => {
+    caller = { ...REVIEWER };
+    rows("shadow_ai_triage").splice(0);               // the 60-day-old Windsurf evidence is open again
+    await PATCH(req("PATCH", { key: "acme/app|cursor|.cursorrules", status: "acceptable" }));
+    await PATCH(req("PATCH", { key: "acme/app|claude|commit:abc1234", status: "acceptable" }));
+    expect(status("a-app")).toBe("firing");
+  });
+
+  it("approving the tools resolves the alerts of repositories left with nothing open", async () => {
+    await PUT(req("PUT", { allowed: ["github-copilot", "cursor", "claude"] }));
+    expect([status("a-app"), status("a-web")]).toEqual(["resolved", "firing"]);
   });
 });
 

@@ -15,7 +15,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { normalizePolicy, AI_TOOLS } from "@/lib/aiTools";
 import { summarize, type ShadowStatus } from "@/lib/shadowAi";
-import { loadPolicy, loadTriage, loadShadowAi } from "@/lib/shadowAiStore";
+import { loadPolicy, loadTriage, loadShadowAi, resolveClearedShadowAlerts } from "@/lib/shadowAiStore";
 
 const STATUSES: readonly ShadowStatus[] = ["open", "investigating", "acceptable", "resolved"];
 
@@ -67,6 +67,8 @@ export async function PUT(req: NextRequest) {
     resource_type: "ai_tool_policy", resource_id: auth.org_id,
     payload: { allowed, previous: previous?.allowed ?? null },
   });
+  // Approving a tool can leave a repository with nothing open: its Shadow AI alerts are done.
+  await resolveClearedShadowAlerts(db, auth.org_id);
   return NextResponse.json({ policy: value });
 }
 
@@ -102,5 +104,7 @@ export async function PATCH(req: NextRequest) {
     resource_type: "shadow_ai_detection", resource_id: key,
     payload: { status: row.status, previous_status: existing?.status ?? null, note_added: !!note },
   });
+  // Accepting or resolving the last open detection in a repository ends its Shadow AI alerts.
+  if (status === "acceptable" || status === "resolved") await resolveClearedShadowAlerts(db, auth.org_id);
   return NextResponse.json({ key, status: row.status, notes: row.notes, updated_at: now });
 }

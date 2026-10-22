@@ -128,6 +128,20 @@ describe("pull request warning", () => {
     ]);
   });
 
+  it("leaves out evidence a reviewer accepted for this repository (other repos and other statuses still warn)", () => {
+    const triage = new Map<string, Pick<TriageRow, "status">>([
+      [detectionKey("acme/app", "cursor", ".cursorrules"), { status: "acceptable" }],
+      [detectionKey("acme/app", "cursor", "commit:9f2c1a4"), { status: "resolved" }],
+    ]);
+    expect(unapprovedToolsInScan(tooling, ["claude"], { repo: "acme/app", triage })).toEqual([
+      { tool: "cursor", label: "Cursor", evidence: ["commit 9f2c1a4 (Cursor co-author trailer on commit)"] },
+    ]);
+    expect(unapprovedToolsInScan(tooling, ["claude"], { repo: "acme/web", triage })[0].evidence).toHaveLength(2);
+    // everything accepted: no warning at all
+    triage.set(detectionKey("acme/app", "cursor", "commit:9f2c1a4"), { status: "acceptable" });
+    expect(unapprovedToolsInScan(tooling, ["claude"], { repo: "acme/app", triage })).toEqual([]);
+  });
+
   it("says nothing without a policy, or when everything is approved", () => {
     expect(unapprovedToolsInScan(tooling, null)).toEqual([]);
     expect(unapprovedToolsInScan(tooling, ["cursor", "claude"])).toEqual([]);
@@ -158,5 +172,40 @@ describe("summarize", () => {
     expect(summarize(ds, null).compliance).toBeNull();
     expect(summarize([], ["claude"]).compliance).toBeNull();
     expect(approvalOf("claude", null)).toBe("unreviewed");
+  });
+
+  it("per tool, violations are split by status: an accepted one is not an open violation", () => {
+    const scans = [
+      scan("s1", { ai_tooling: [{ tool: "Cursor", file: ".cursorrules" }, { tool: "cursor", file: "commit:a1" }, { tool: "cursor", file: "commit:b2" }, { tool: "cursor", file: "commit:c3" }] }),
+      scan("s2", { ai_tooling: [{ tool: "Windsurf", file: ".windsurfrules" }] }),
+    ];
+    const t = (status: TriageRow["status"]) => ({ status, notes: [], updated_at: "2027-01-01T00:00:00Z" });
+    const triage = new Map([
+      [detectionKey("acme/app", "cursor", ".cursorrules"), t("acceptable")],
+      [detectionKey("acme/app", "cursor", "commit:a1"), t("resolved")],
+      [detectionKey("acme/app", "cursor", "commit:b2"), t("investigating")],
+      [detectionKey("acme/app", "windsurf", ".windsurfrules"), t("acceptable")],
+    ]);
+    const s = summarize(buildDetections(scans, [], ["claude"], triage), ["claude"]);
+    expect(s.by_tool.map(x => [x.tool, x.violations, x.open, x.accepted, x.resolved])).toEqual([
+      // cursor: c3 open + b2 investigating = 2 open; windsurf: accepted only, so it sorts after
+      ["cursor", 4, 2, 1, 1], ["windsurf", 1, 0, 1, 0],
+    ]);
+    // open violations sort first, whatever the total: 3 accepted Devin files come after 1 open Windsurf file
+    const many = [scan("s3", { ai_tooling: [{ tool: "Devin", file: "a" }, { tool: "Devin", file: "b" }, { tool: "Devin", file: "c" }, { tool: "Windsurf", file: "w" }] })];
+    const accepted = new Map(["a", "b", "c"].map(f => [detectionKey("acme/app", "devin", f), t("acceptable")]));
+    expect(summarize(buildDetections(many, [], ["claude"], accepted), ["claude"]).by_tool.map(x => x.tool)).toEqual(["windsurf", "devin"]);
+  });
+
+  it("'needs review' leaves out what a reviewer accepted or resolved", () => {
+    const scans = [scan("s1", { ai_tooling: [{ tool: "AI Agents", file: "AGENTS.md" }, { tool: "AI Agents", file: "docs/AGENTS.md" }, { tool: "AI Agents", file: "x/AGENTS.md" }] })];
+    const triage = new Map([
+      [detectionKey("acme/app", UNSPECIFIED_TOOL, "AGENTS.md"), { status: "acceptable" as const, notes: [], updated_at: "2027-01-01T00:00:00Z" }],
+      [detectionKey("acme/app", UNSPECIFIED_TOOL, "docs/AGENTS.md"), { status: "resolved" as const, notes: [], updated_at: "2027-01-01T00:00:00Z" }],
+    ]);
+    const s = summarize(buildDetections(scans, [], ["claude"], triage), ["claude"]);
+    expect([s.unidentified, s.needs_review]).toEqual([3, 1]);
+    // without a policy every identified tool is undecided too
+    expect(summarize(buildDetections([scan("s2", { ai_tooling: [{ tool: "Cursor", file: ".cursorrules" }] })], [], null, new Map()), null).needs_review).toBe(1);
   });
 });
