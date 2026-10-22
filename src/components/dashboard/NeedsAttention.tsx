@@ -4,13 +4,15 @@
  * The first thing on the dashboard: what needs someone's action now, worst first -- files past their fix deadline,
  * critical secrets, CRITICAL/HIGH files awaiting attestation, repos pending sign-off, unapproved AI tools -- each
  * naming the actual files and repos and linking to the page where that thing is fixed:
- *   files    → the file's sign-off on its pull request (/pr/{scan}?attest=...)
+ *   files    → the file's sign-off on its pull request (/pr/{scan}?attest=...); for a viewer who can't sign it
+ *              off (a developer), the file itself (?file=...)
  *   repos    → the pull request waiting for sign-off, with all its files (/pr/{scan})
  *   secrets  → /secrets, AI tools → /shadow-ai, audit gaps → /compliance, deadlines → /sla
  * Built only from loaded data; a source that hasn't loaded contributes nothing (never a guessed item).
  */
 import Link from "next/link";
 import { LoadingBlock } from "@/components/Loading";
+import { fileReviewHref } from "@/lib/reviewLinks";
 
 export type AttentionSeverity = "critical" | "high" | "medium";
 export type AttentionKind = "sla" | "secret" | "file" | "repo" | "ai" | "evidence";
@@ -33,7 +35,7 @@ export interface AttentionItem {
   more?: number;
 }
 
-interface FileRef { file: string; scanId: string; repo: string; overdueHours?: number | null }
+interface FileRef { file: string; scanId: string; repo: string; risk?: string; overdueHours?: number | null }
 
 export interface AttentionInput {
   slaOverdue: number;
@@ -47,21 +49,23 @@ export interface AttentionInput {
   unapprovedAiTools: number | null;
   /** Evidence checks (lib/controlEvidence.ts) whose status is "fail" -- counted once, not per framework. */
   failingControls: number | null;
+  /** Whether the viewer's role may sign off a file of this risk: if not, file links open the file, not its
+   *  sign-off. Omitted: every file links to its sign-off. */
+  canAttestRisk?: (risk: string | undefined) => boolean;
 }
 
 const SHOW = 3;
 const plural = (n: number, one: string, many = `${one}s`) => `${n === 1 ? one : many}`;
-export const attestHref = (f: { scanId: string; file: string }) => `/pr/${f.scanId}?attest=${encodeURIComponent(f.file)}`;
 export const repoHref = (repo: string) => `/repo/${repo.split("/").map(encodeURIComponent).join("/")}`;
 /** A repo pending sign-off → the pull request (its latest scan) waiting for it; the repo page only without a scan. */
 export const prHref = (r: { repo: string; scanId: string }) => r.scanId ? `/pr/${encodeURIComponent(r.scanId)}` : repoHref(r.repo);
 const base = (p: string) => p.split("/").pop() ?? p;
 const overdue = (h: number) => h >= 48 ? `${Math.floor(h / 24)}d overdue` : `${h}h overdue`;
 
-function fileLinks(files: FileRef[], withOverdue = false): Pick<AttentionItem, "links" | "more"> {
+function fileLinks(files: FileRef[], href: (f: FileRef) => string, withOverdue = false): Pick<AttentionItem, "links" | "more"> {
   return {
     links: files.slice(0, SHOW).map(f => ({
-      label: base(f.file), href: attestHref(f),
+      label: base(f.file), href: href(f),
       note: withOverdue && f.overdueHours != null ? overdue(f.overdueHours) : base(f.repo),
     })),
     more: Math.max(0, files.length - SHOW),
@@ -71,11 +75,13 @@ function fileLinks(files: FileRef[], withOverdue = false): Pick<AttentionItem, "
 /** Items in priority order: they are added worst first. */
 export function buildAttention(a: AttentionInput): AttentionItem[] {
   const items: AttentionItem[] = [];
+  // A file's link: its sign-off for someone who may attest it, otherwise the file itself.
+  const fileHref = (f: FileRef) => fileReviewHref(f.scanId, f.file, a.canAttestRisk ? a.canAttestRisk(f.risk) : true);
   if (a.slaOverdue > 0) items.push({
     key: "sla", kind: "sla", severity: "critical", count: a.slaOverdue,
     title: `${plural(a.slaOverdue, "file")} past the fix deadline`, detail: "HIGH/CRITICAL findings beyond their SLA",
-    href: a.overdueFiles[0] ? attestHref(a.overdueFiles[0]) : "/sla", all: { label: "SLA tracker", href: "/sla" },
-    ...fileLinks(a.overdueFiles, true),
+    href: a.overdueFiles[0] ? fileHref(a.overdueFiles[0]) : "/sla", all: { label: "SLA tracker", href: "/sla" },
+    ...fileLinks(a.overdueFiles, fileHref, true),
   });
   if (a.openCriticalSecrets) items.push({
     key: "secrets-critical", kind: "secret", severity: "critical", count: a.openCriticalSecrets,
@@ -85,8 +91,8 @@ export function buildAttention(a: AttentionInput): AttentionItem[] {
   if (a.unreviewedCritical.length > 0) items.push({
     key: "critical", kind: "file", severity: "critical", count: a.unreviewedCritical.length,
     title: `CRITICAL ${plural(a.unreviewedCritical.length, "file")} awaiting attestation`, detail: "Merges are held until a reviewer signs off",
-    href: attestHref(a.unreviewedCritical[0]), all: { label: "Review queue", href: "#review-queue" },
-    ...fileLinks(a.unreviewedCritical),
+    href: fileHref(a.unreviewedCritical[0]), all: { label: "Review queue", href: "#review-queue" },
+    ...fileLinks(a.unreviewedCritical, fileHref),
   });
   if (a.awaitingRepos.length > 0) items.push({
     key: "repos", kind: "repo", severity: "high", count: a.awaitingRepos.length,
@@ -100,8 +106,8 @@ export function buildAttention(a: AttentionInput): AttentionItem[] {
   if (a.unreviewedHigh.length > 0) items.push({
     key: "high", kind: "file", severity: "high", count: a.unreviewedHigh.length,
     title: `HIGH-risk ${plural(a.unreviewedHigh.length, "file")} awaiting attestation`, detail: "Waiting for a reviewer",
-    href: attestHref(a.unreviewedHigh[0]), all: { label: "Review queue", href: "#review-queue" },
-    ...fileLinks(a.unreviewedHigh),
+    href: fileHref(a.unreviewedHigh[0]), all: { label: "Review queue", href: "#review-queue" },
+    ...fileLinks(a.unreviewedHigh, fileHref),
   });
   if (a.unapprovedAiTools) items.push({
     key: "ai", kind: "ai", severity: "high", count: a.unapprovedAiTools,

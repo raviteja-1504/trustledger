@@ -8,8 +8,10 @@ import type { DashboardData } from "@/types";
 
 jest.mock("@/components/AuthGuard", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/components/BrandLogo", () => ({ BrandWordmark: () => null }));
-jest.mock("next/navigation", () => ({ useSearchParams: () => null, useRouter: () => ({ push: jest.fn() }) }));
-jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_name: "Acme", email: "ada@acme.test" } }) }));
+const push = jest.fn();
+jest.mock("next/navigation", () => ({ useSearchParams: () => null, useRouter: () => ({ push }) }));
+let role = "admin";
+jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_name: "Acme", email: "ada@acme.test", role } }) }));
 jest.mock("@/lib/useRealData", () => ({
   isSeedMode: () => false,
   authedFetch: jest.fn(async (url: string) => {
@@ -53,9 +55,32 @@ const generateButton = () => screen.findByRole("button", { name: /Generate Signe
 
 beforeEach(() => {
   dashFails = false;
+  role = "admin";
+  push.mockClear();
   (api.generateReport as jest.Mock).mockClear();
   (URL as unknown as { createObjectURL: unknown }).createObjectURL = jest.fn(() => "blob:x");
   (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = jest.fn();
+});
+
+describe("an unattested file's button follows the viewer's role", () => {
+  it("a developer can't sign the CRITICAL file off: 'View' opens the file, not the attestation form", async () => {
+    role = "developer";
+    render(<ReportsPage />);
+    // The row re-mounts while the page's sources load, so click the button as it is now until it takes.
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "View" }));
+      expect(push).toHaveBeenCalledWith("/pr/s1?file=src%2Fpay.ts");
+    }, { timeout: 10_000 });
+    expect(screen.queryByRole("button", { name: "Attest" })).not.toBeInTheDocument();
+  });
+
+  it("someone who may sign it off gets Attest, which opens the sign-off", async () => {
+    render(<ReportsPage />);
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Attest" }));
+      expect(push).toHaveBeenCalledWith("/pr/s1?attest=src%2Fpay.ts");
+    }, { timeout: 10_000 });
+  });
 });
 
 describe("Reports page", () => {

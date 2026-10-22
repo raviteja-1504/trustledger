@@ -322,6 +322,20 @@ describe("needs attention", () => {
     expect(region).toHaveTextContent("Nothing urgent, but reviewers are needed");
   });
 
+  it("a viewer who can't sign a file off (a developer) is linked to the file, never its attestation", () => {
+    const file = (n: string, risk: string) => ({ file: `src/${n}`, scanId: `s-${n}`, repo: "acme/api", risk });
+    const items = buildAttention({
+      ...none, slaOverdue: 1, overdueFiles: [{ ...file("late.ts", "CRITICAL"), overdueHours: 5 }],
+      unreviewedCritical: [file("crit.ts", "CRITICAL")], unreviewedHigh: [file("high.ts", "HIGH")],
+      // may attest HIGH, not CRITICAL
+      canAttestRisk: r => r === "HIGH",
+    });
+    const by = (k: string) => items.find(i => i.key === k)!;
+    expect(by("sla")).toMatchObject({ href: "/pr/s-late.ts?file=src%2Flate.ts", links: [expect.objectContaining({ href: "/pr/s-late.ts?file=src%2Flate.ts" })] });
+    expect(by("critical")).toMatchObject({ href: "/pr/s-crit.ts?file=src%2Fcrit.ts", links: [expect.objectContaining({ href: "/pr/s-crit.ts?file=src%2Fcrit.ts" })] });
+    expect(by("high")).toMatchObject({ href: "/pr/s-high.ts?attest=src%2Fhigh.ts", links: [expect.objectContaining({ href: "/pr/s-high.ts?attest=src%2Fhigh.ts" })] });
+  });
+
   it("unknown sources add nothing; not ready shows a placeholder, not 'all clear'", () => {
     expect(buildAttention({ ...none, openCriticalSecrets: null, openOtherSecrets: null, unapprovedAiTools: null, failingControls: null })).toEqual([]);
     expect(buildAttention({ ...none, slaOverdue: 1 })[0]).toMatchObject({ href: "/sla", links: [], more: 0 });

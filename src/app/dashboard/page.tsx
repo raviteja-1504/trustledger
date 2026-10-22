@@ -129,7 +129,7 @@ export default function DashboardPage() {
   /** Newest locally recorded sign-off at the last check; null until the first check. */
   const lastLocalSig = useRef<string | null>(null);
 
-  const { role, permissions } = useRole();
+  const { role, permissions, perms, canAttestRisk } = useRole();
   const roleColor = ROLE_COLORS[role];
   const { profile } = useAuth();
   const isDeveloperView = role === "developer";
@@ -312,9 +312,9 @@ export default function DashboardPage() {
     const overdueFiles = (d.sla_breach_files ?? [])
       .filter(b => !signedOff.has(`${b.scan_id}::${b.file_path}`))
       .sort((a, b) => a.sla_deadline.localeCompare(b.sla_deadline))
-      .map(b => ({ file: b.file_path, scanId: b.scan_id, repo: b.repo, overdueHours: Math.max(0, Math.floor((now - Date.parse(b.sla_deadline)) / 3600_000)) }));
+      .map(b => ({ file: b.file_path, scanId: b.scan_id, repo: b.repo, risk: b.risk_score, overdueHours: Math.max(0, Math.floor((now - Date.parse(b.sla_deadline)) / 3600_000)) }));
     // Awaiting attestation: the review queue (worst first; files someone is already reviewing are left out).
-    const ref = (f: (typeof queue)[number]) => ({ file: f.file_path, scanId: f.scan_id, repo: f.repo });
+    const ref = (f: (typeof queue)[number]) => ({ file: f.file_path, scanId: f.scan_id, repo: f.repo, risk: f.risk_score });
     return buildAttention({
       slaOverdue: d.sla_breach_files ? overdueFiles.length : (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0),
       overdueFiles,
@@ -325,8 +325,11 @@ export default function DashboardPage() {
       openOtherSecrets: secrets ? secrets.HIGH + secrets.MEDIUM : null,
       unapprovedAiTools: shadow && shadow !== "unavailable" ? shadow.open_violations : null,
       failingControls: evidence && evidence !== "unavailable" ? evidence.gaps.filter(g => g.status === "fail").length : null,
+      canAttestRisk,
     });
-  }, [effectiveData, secretCounts, queue, unresolvedRepoScans, shadow, evidence]);
+  // canAttestRisk is rebuilt every render; the permissions it reads are its dependency.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveData, secretCounts, queue, unresolvedRepoScans, shadow, evidence, perms]);
 
   const repoRows = useMemo(() => effectiveData
     ? buildRepoRows(effectiveData.repos, trust && trust !== "unavailable" ? trust.score.repos : null)
@@ -524,7 +527,7 @@ export default function DashboardPage() {
               <SectionHeading title="Risk & review" sub={`What was flagged ${periodLabel}, and what's waiting for a reviewer`} />
               <div className="space-y-6">
                 <RiskPanel data={effectiveData} periodLabel={periodLabel} />
-                <ReviewQueue items={queue} />
+                <ReviewQueue items={queue} canAttestRisk={canAttestRisk} />
               </div>
             </section>
 

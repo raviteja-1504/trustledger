@@ -8,7 +8,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 jest.mock("@/components/AuthGuard",    () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/components/PageSkeleton", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/lib/toast", () => ({ useToastHelpers: () => ({ success: jest.fn(), error: jest.fn(), info: jest.fn(), warn: jest.fn() }) }));
-jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_slug: "acme" } }) }));
+let role = "developer";
+jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_slug: "acme", role } }) }));
 jest.mock("@/lib/realtime", () => ({ useViolationsRealtime: () => {} }));
 jest.mock("@/lib/offlineData", () => ({ readSeed: () => null }));
 
@@ -41,7 +42,22 @@ import { invalidateServerStatuses } from "@/lib/violationStatuses";
 
 const patches = () => calls.filter(c => c.init?.method === "PATCH").map(c => JSON.parse(c.init!.body!));
 
-beforeEach(() => { calls.length = 0; localStorage.clear(); invalidateServerStatuses(); server = {}; });
+beforeEach(() => { calls.length = 0; localStorage.clear(); invalidateServerStatuses(); server = {}; role = "developer"; });
+
+describe("the file's action follows the viewer's role", () => {
+  it("a developer can't sign the CRITICAL file off: the button opens it in its PR, never the attestation form", async () => {
+    render(<ViolationsPage />);
+    const open = await screen.findByRole("link", { name: "Open in PR" });
+    expect(open).toHaveAttribute("href", "/pr/s1?file=src%2Fpay.ts");
+    expect(screen.queryByRole("link", { name: "Attest" })).not.toBeInTheDocument();
+  });
+
+  it("a security lead may: the button is Attest and opens the sign-off", async () => {
+    role = "admin";
+    render(<ViolationsPage />);
+    expect(await screen.findByRole("link", { name: "Attest" })).toHaveAttribute("href", "/pr/s1?attest=src%2Fpay.ts");
+  });
+});
 
 describe("violations page details are server-backed", () => {
   it("uploads this browser's old assignee / note / escalation once, keeping the server's status, then clears them", async () => {

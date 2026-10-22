@@ -7,6 +7,7 @@
  */
 import { useState } from "react";
 import Link from "next/link";
+import { fileReviewHref } from "@/lib/reviewLinks";
 import type { DashboardData, TopRiskFile } from "@/types";
 
 export interface QueueItem extends TopRiskFile { overdueHours: number | null }
@@ -30,7 +31,11 @@ function overdueLabel(h: number) {
   return h >= 48 ? `${Math.floor(h / 24)}d overdue` : `${h}h overdue`;
 }
 
-export default function ReviewQueue({ items, limit = 6 }: { items: readonly QueueItem[]; limit?: number }) {
+export default function ReviewQueue({ items, limit = 6, canAttestRisk }: {
+  items: readonly QueueItem[]; limit?: number;
+  /** Whether the viewer may sign off a file of this risk; if not, the row opens the file rather than its sign-off. */
+  canAttestRisk?: (risk: string) => boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? items : items.slice(0, limit);
   const hidden = items.length - shown.length;
@@ -65,7 +70,7 @@ export default function ReviewQueue({ items, limit = 6 }: { items: readonly Queu
             const crit = f.risk_score === "CRITICAL";
             return (
               <li key={`${f.scan_id}::${f.file_path}`}>
-                <Link href={`/pr/${f.scan_id}?attest=${encodeURIComponent(f.file_path)}`}
+                <Link href={fileReviewHref(f.scan_id, f.file_path, canAttestRisk ? canAttestRisk(f.risk_score) : true)}
                   title={f.file_path}
                   className="flex items-start gap-3 px-6 py-3.5 hover:bg-gray-50/70 transition-colors">
                   <span className={`mt-0.5 text-[9px] font-black px-1.5 py-0.5 rounded shrink-0 ${crit ? "bg-violet-100 text-violet-700" : "bg-orange-100 text-orange-700"}`}>

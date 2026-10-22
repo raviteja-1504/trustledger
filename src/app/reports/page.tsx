@@ -12,6 +12,8 @@ import { authedFetch } from "@/lib/useRealData";
 import { readLocalStatuses } from "@/lib/localStatuses";
 import { loadStatuses } from "@/lib/violationStatuses";
 import { useAuth } from "@/lib/auth";
+import { useRole } from "@/lib/roles";
+import { fileReviewHref } from "@/lib/reviewLinks";
 import { BrandWordmark } from "@/components/BrandLogo";
 import PeriodAttestations from "@/components/reports/PeriodAttestations";
 import {
@@ -375,6 +377,7 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
   violationStatuses: Record<string, string>;
 }) {
   const router = useRouter();
+  const { canAttestRisk } = useRole();
 
   // Optimistic local set — keeps instant feedback when Attest is clicked in-page
   const [localAttested, setLocalAttested] = useState<Set<string>>(() => {
@@ -462,9 +465,9 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
             <button
               onClick={e => {
                 e.preventDefault(); e.stopPropagation();
-                router.push(`/pr/${f.scan_id}?attest=${encodeURIComponent(f.file_path)}`);
+                router.push(fileReviewHref(f.scan_id, f.file_path, canAttestRisk(f.risk_score)));
               }}
-              title="Review the source code before attesting"
+              title={canAttestRisk(f.risk_score) ? "Review the source code before attesting" : `A reviewer signs off ${f.risk_score} files; open it in the PR`}
               className="inline-flex items-center gap-1 text-[10px] font-bold text-white px-2 py-1.5 rounded-lg whitespace-nowrap transition-opacity hover:opacity-90 active:scale-95 w-full justify-center"
               style={{
                 background: f.risk_score==="CRITICAL"
@@ -477,7 +480,7 @@ function AttestationRecords({ data, fw, start, color, violationStatuses }: {
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
               </svg>
-              Attest
+              {canAttestRisk(f.risk_score) ? "Attest" : "View"}
             </button>
           )}
         </div>

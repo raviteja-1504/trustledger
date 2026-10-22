@@ -27,7 +27,8 @@ import { findingMeta } from "@/lib/findingCatalog";
 import ScanStatusPanel from "@/components/ScanStatusPanel";
 import { FindingTriageContext, type FindingTriageContextValue } from "@/components/FindingTriage";
 import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
-import { useRole } from "@/lib/roles";
+import { useRole, ROLE_LABELS } from "@/lib/roles";
+import { deepLinkAction } from "@/lib/reviewLinks";
 import { buildPrSecuritySummary } from "@/lib/prSecuritySummary";
 import { resolveReviewer } from "@/lib/reviewerIdentity";
 
@@ -1027,7 +1028,9 @@ function PRDetailContent() {
   const [scan,    setScan]    = useState<ScanResult | null>(null);
   const [error,   setError]   = useState<string | null>(null);
   const [syncRetrying, setSyncRetrying] = useState(false);
-  const { permissions: rolePerms, canAttestRisk } = useRole();
+  const { permissions: rolePerms, canAttestRisk, role, isDemo } = useRole();
+  /** A file someone linked here to attest, which this viewer's role can't sign off: shown read-only with a note. */
+  const [viewOnly, setViewOnly] = useState<FileResult | null>(null);
   const canTriage = rolePerms.canTriage;
   const [attestError, setAttestError] = useState<string | null>(null);
 
@@ -1135,15 +1138,28 @@ function PRDetailContent() {
 
   // Deep link from Reports/Dashboard: ?attest=<file_path> opens the
   // Review & Attest modal for that file once the scan has loaded, so
-  // reviewers always see the source code before attesting.
+  // reviewers always see the source code before attesting. A viewer whose
+  // role can't sign it off (a developer) -- and ?file=<file_path> -- gets
+  // the file opened in place instead, never the attestation form.
+  const deepLinked = useRef<string | null>(null);
   useEffect(() => {
-    const target = searchParams?.get("attest");
-    if (!target || !scan) return;
+    const attestPath = searchParams?.get("attest");
+    const target = attestPath ?? searchParams?.get("file");
+    // Wait for the role: before the profile loads everyone looks like a developer.
+    if (!target || !scan || (!isDemo && !profile)) return;
     const file = scan.files.find(f => f.file_path === target);
-    if (file && !(file.attested || attestedSet.has(file.file_path))) {
-      setAttestTarget(file);
-    }
-  }, [searchParams, scan, attestedSet]);
+    if (!file) return;
+    const action = deepLinkAction(attestPath ? "attest" : "file", file.attested || attestedSet.has(file.file_path), canAttestRisk(file.risk_score));
+    if (action === "attest") { setAttestTarget(file); return; }
+    if (deepLinked.current === target) return;
+    deepLinked.current = target;
+    if (action === "open-read-only") setViewOnly(file);
+    // The default filter shows HIGH/CRITICAL files; widen it for anything else.
+    if (file.risk_score !== "HIGH" && file.risk_score !== "CRITICAL") setRiskFilter("all");
+    setTimeout(() => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file: file.file_path } })), 80);
+  // canAttestRisk is rebuilt every render; the role it reads is covered by profile.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, scan, attestedSet, profile, isDemo]);
 
   useEffect(() => {
     api.getScan(id).then(setScan).catch(() => setError("404 Not Found"));
@@ -2019,6 +2035,16 @@ function PRDetailContent() {
               </div>
             </div>
 
+            {viewOnly && (
+              <div role="status" className="flex items-start justify-between gap-3 px-5 py-3 border-b border-amber-100 bg-amber-50/70">
+                <p className="text-xs text-amber-900 leading-relaxed">
+                  <strong>{viewOnly.file_path.split("/").pop()}</strong> is {viewOnly.risk_score} risk and needs a reviewer&apos;s sign-off.
+                  Your role ({ROLE_LABELS[role] ?? role}) can&apos;t attest it — it&apos;s opened below so you can read the findings and fix them.
+                </p>
+                <button onClick={() => setViewOnly(null)} aria-label="Dismiss" className="text-amber-700 hover:text-amber-900 text-sm leading-none">✕</button>
+              </div>
+            )}
+
             {/* Table */}
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -2089,7 +2115,7 @@ function PRDetailContent() {
       </div>
 
       {/* ── Attest review modal ───────────────────────────────────────────── */}
-      {attestTarget && (
+      {attestTarget && canAttestRisk(attestTarget.risk_score) && (
         <AttestReviewModal
           file={attestTarget}
           reviewerEmail={reviewerEmail || "reviewer@trustledger.dev"}

@@ -17,6 +17,8 @@ import { readLocalStatuses } from "@/lib/localStatuses";
 import { assigneeFor, canAttestSeverity, detailsFromOverrides, fetchServerOverrides, invalidateServerStatuses, localDetailUploads, type OverridePatch, type ServerOverride, type TeamMember } from "@/lib/violationStatuses";
 import { useViolationsRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
+import { useRole } from "@/lib/roles";
+import { fileReviewHref } from "@/lib/reviewLinks";
 import { deriveViolations, type Violation, type VSeverity, type VType, type VStatus } from "@/lib/violations";
 import { realReachability, REACH_COLORS, REACH_LABEL, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL } from "@/lib/signalClassification";
 
@@ -66,6 +68,8 @@ interface InlineCodeReviewProps {
   filePath: string;
   onResolve: () => void;
   onReopen: () => void;
+  /** Whether the viewer's role may sign this file off; otherwise the button only opens the file. */
+  canAttest: boolean;
 }
 
 // Derive risk indicators from file content — used when backend scan is unavailable
@@ -119,7 +123,7 @@ function detectIndicators(content: string): string[] {
   return Array.from(new Set(found));
 }
 
-function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeReviewProps) {
+function InlineCodeReview({ scanId, filePath, onResolve, onReopen, canAttest }: InlineCodeReviewProps) {
   const [copied, setCopied] = useState(false);
   const [file, setFile] = useState<FileResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -225,7 +229,9 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
       <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100"
         style={{ background:"rgba(248,250,252,0.7)" }}>
         <p className="text-[10px] text-gray-400 max-w-sm leading-relaxed">
-          Reviewed it and it&apos;s acceptable? Attest it — a signed review that unblocks the merge. Close it without review only for a false alarm or a file fixed in a later commit.
+          {canAttest
+            ? <>Reviewed it and it&apos;s acceptable? Attest it — a signed review that unblocks the merge. Close it without review only for a false alarm or a file fixed in a later commit.</>
+            : <>A reviewer has to sign this file off; your role can&apos;t attest it. Open it in the PR to see the findings and fix them.</>}
         </p>
         <div className="flex items-center gap-2 shrink-0">
           <button onClick={onReopen}
@@ -237,10 +243,10 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen }: InlineCodeR
             className="px-3 py-2 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors">
             Close without review
           </button>
-          <Link href={`/pr/${scanId}?attest=${encodeURIComponent(filePath)}`}
+          <Link href={fileReviewHref(scanId, filePath, canAttest)}
             className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold text-white rounded-xl transition-all active:scale-[0.98] bg-indigo-600 hover:bg-indigo-700">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            Attest
+            {canAttest ? "Attest" : "Open in PR"}
           </Link>
         </div>
       </div>
@@ -366,6 +372,7 @@ interface RecentScan {
 export default function ViolationsPage() {
   const { success, info, error: toastError } = useToastHelpers();
   const { profile } = useAuth();
+  const { canAttestRisk } = useRole();
   const [data,         setData]         = useState<DashboardData | null>(null);
   const [loading,      setLoading]      = useState(true);
   const [statuses,     setStatuses]     = useState<Record<string, VStatus>>({});
@@ -1090,10 +1097,10 @@ export default function ViolationsPage() {
                     </button>
                     {v.status !== "resolved" && v.scan_id && v.file && (
                       // The way to clear a file: a signed review on its PR, which also unblocks the merge.
-                      <Link href={`/pr/${v.scan_id}?attest=${encodeURIComponent(v.file)}`}
+                      <Link href={fileReviewHref(v.scan_id, v.file, canAttestRisk(v.severity))}
                         className="text-[11px] font-bold text-white bg-indigo-600 border border-indigo-600 px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition-colors whitespace-nowrap flex items-center gap-1">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                        Attest
+                        {canAttestRisk(v.severity) ? "Attest" : "Open in PR"}
                       </Link>
                     )}
                     {v.status === "open" && (
@@ -1203,6 +1210,7 @@ export default function ViolationsPage() {
                     filePath={v.file}
                     onResolve={() => setStatus(v.id, "resolved")}
                     onReopen={() => setStatus(v.id, "open")}
+                    canAttest={canAttestRisk(v.severity)}
                   />
                 )}
               </div>
