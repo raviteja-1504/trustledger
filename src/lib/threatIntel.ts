@@ -62,6 +62,12 @@ export function priorityOf(a: Pick<Advisory, "exploit_public" | "reachable" | "r
   return "plan";
 }
 
+/** A fixed-in value you can upgrade to: OSV git ranges give a commit hash, which is not a package version. */
+export function asVersion(v: string | undefined): string | undefined {
+  // All-digit values ("20230101") are date versions, not hashes.
+  return v && !(/^[0-9a-f]{7,40}$/i.test(v) && /[a-f]/i.test(v)) ? v : undefined;
+}
+
 const RISK_ORDER: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 const REACHABLE = new Set(["called", "reachable"]);
 const NOT_REACHABLE = new Set(["not-called", "test-only", "not-imported"]);
@@ -103,7 +109,7 @@ export function buildAdvisories(findings: readonly AdvisoryFinding[]): {
       transitive: !!f.is_transitive, pulled_by: f.pulled_by, dev_only: f.scope === "dev", ai_introduced: !!f.ai_introduced,
     };
     const listed = f.advisories && f.advisories.length > 0
-      ? f.advisories.map(x => ({ id: x.id, severity: x.severity, summary: x.summary, fixedIn: x.fixedIn }))
+      ? f.advisories.map(x => ({ id: x.id, severity: x.severity, summary: x.summary, fixedIn: asVersion(x.fixedIn) }))
       : f.cve ? [{ id: f.cve, severity: f.risk }] : [];
     const cur = byKey.get(key);
     if (!cur) {
@@ -112,7 +118,7 @@ export function buildAdvisories(findings: readonly AdvisoryFinding[]): {
         cvss: f.cvss ?? null, exploit_public: f.exploit_public, exploit_detail: f.exploit_detail, reachable: reach,
         reach_summary: f.reachability?.summary,
         description: f.description, fix: f.fix, repos: [f.repo],
-        all_advisories: listed, fix_version: f.latest_version, usages: [usage],
+        all_advisories: listed, fix_version: asVersion(f.latest_version), usages: [usage],
         dev_only: usage.dev_only, transitive_only: usage.transitive, ai_introduced: usage.ai_introduced,
         priority: "plan",
       });

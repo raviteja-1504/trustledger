@@ -32,6 +32,10 @@ const SEV: Record<string, string> = {
 const PRIORITY_STYLE: Record<Priority, string> = {
   "fix-now": "bg-rose-600 text-white", plan: "bg-amber-100 text-amber-800", monitor: "bg-gray-100 text-gray-600",
 };
+/** One-line pill: never wraps "Fix now" across two lines in a narrow column. */
+const BADGE = "inline-block whitespace-nowrap text-[11px] font-black leading-5 px-2 rounded";
+/** Versions the scan actually resolved ("unknown" means the manifest didn't pin one). */
+const knownVersions = (vs: string[]) => vs.filter(v => v && v !== "unknown");
 const PRIORITY_HELP: Record<Priority, string> = {
   "fix-now": "A public exploit exists, or the vulnerable code is reachable and the advisory is HIGH or CRITICAL.",
   plan: "Affects code you ship; schedule the upgrade.",
@@ -183,10 +187,14 @@ export default function ThreatIntelPage() {
                     <tbody>
                       {plan.slice(0, 8).map(p => (
                         <tr key={`${p.ecosystem}:${p.package_name}`} className="border-b border-gray-50 last:border-0 align-top">
-                          <td className="px-6 py-3"><span className={`text-[11px] font-black px-2 py-0.5 rounded ${PRIORITY_STYLE[p.priority]}`}>{PRIORITY_LABEL[p.priority]}</span></td>
-                          <td className="px-3 py-3 font-mono font-bold text-gray-900 break-all">{p.package_name}<span className="font-sans font-normal text-gray-400"> · {p.ecosystem}</span></td>
+                          <td className="px-6 py-3"><span className={`${BADGE} ${PRIORITY_STYLE[p.priority]}`}>{PRIORITY_LABEL[p.priority]}</span></td>
+                          <td className="px-3 py-3 min-w-[12rem]">
+                            <span className="block font-mono font-bold text-gray-900 break-words">{p.package_name}</span>
+                            <span className="block text-xs text-gray-400">{p.ecosystem}</span>
+                          </td>
                           <td className="px-3 py-3 font-mono text-xs text-gray-700 whitespace-nowrap">
-                            {p.from.join(", ")} → {p.to ? <strong className="text-emerald-700">{p.to}</strong> : <span className="font-sans text-amber-700">no fixed version yet</span>}
+                            {knownVersions(p.from).length > 0 ? <>{knownVersions(p.from).join(", ")} → </> : <span className="font-sans">Upgrade to </span>}
+                            {p.to ? <strong className="text-emerald-700">{p.to}</strong> : <span className="font-sans text-amber-700">no fixed version yet</span>}
                           </td>
                           <td className="px-3 py-3 text-right tabular-nums font-bold text-gray-800">
                             {p.advisories}{p.unfixed > 0 && <span className="block text-[11px] font-normal text-amber-700">{p.unfixed} without a fix</span>}
@@ -233,7 +241,7 @@ export default function ThreatIntelPage() {
                       <li key={a.key} className="px-6 py-5 flex flex-col lg:flex-row lg:items-start gap-4">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span title={PRIORITY_HELP[a.priority]} className={`text-[11px] font-black px-2 py-0.5 rounded ${PRIORITY_STYLE[a.priority]}`}>{PRIORITY_LABEL[a.priority]}</span>
+                            <span title={PRIORITY_HELP[a.priority]} className={`${BADGE} ${PRIORITY_STYLE[a.priority]}`}>{PRIORITY_LABEL[a.priority]}</span>
                             <span className={`text-[11px] font-black px-2 py-0.5 rounded ${SEV[a.risk] ?? SEV.LOW}`}>{a.risk}</span>
                             {a.cvss != null && <span className="text-xs font-bold text-gray-700">CVSS {a.cvss.toFixed(1)}</span>}
                             {a.exploit_public && <span className="text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded">Public exploit</span>}

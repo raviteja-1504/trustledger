@@ -93,6 +93,20 @@ describe("Threat intel page", () => {
     expect(screen.getByLabelText("Repository")).toHaveValue("all");
   });
 
+  it("fix plan: an unresolved version reads 'Upgrade to', not 'unknown →'; the priority pill stays on one line", async () => {
+    findings = [
+      { ...base, id: "1", type: "vulnerable", package_name: "next", version_used: "unknown", risk: "HIGH", repo: "acme/web", description: "SSRF", cve: "CVE-1", exploit_public: true, latest_version: "16.3.8" },
+      { ...base, id: "2", type: "vulnerable", package_name: "lodash", version_used: "4.17.15", risk: "HIGH", repo: "acme/api", description: "PP", cve: "CVE-2", latest_version: "4.17.21" },
+    ];
+    render(<ThreatIntelPage />);
+    const plan = await screen.findByRole("region", { name: "Fix plan" });
+    const [next, lodash] = within(plan).getAllByRole("row").slice(1);
+    expect(next).toHaveTextContent("Upgrade to 16.3.8");
+    expect(next).not.toHaveTextContent("unknown");
+    expect(lodash).toHaveTextContent("4.17.15 → 4.17.21");
+    expect(within(next).getByText("Fix now")).toHaveClass("whitespace-nowrap");
+  });
+
   it("no vulnerable packages → says so", async () => {
     findings = [];
     render(<ThreatIntelPage />);

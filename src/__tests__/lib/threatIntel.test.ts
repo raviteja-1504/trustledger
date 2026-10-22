@@ -2,7 +2,7 @@
  * Threat intel (lib/threatIntel.ts): advisories from real dependency findings, one per advisory + package version
  * with every repo that uses it; exploitable + reachable first.
  */
-import { buildAdvisories, filterFindings, filterOptions, fixPlan, priorityOf, type AdvisoryFinding } from "@/lib/threatIntel";
+import { asVersion, buildAdvisories, filterFindings, filterOptions, fixPlan, priorityOf, type AdvisoryFinding } from "@/lib/threatIntel";
 import { compareVersions } from "@/lib/lockfiles";
 
 const f = (o: Partial<AdvisoryFinding>): AdvisoryFinding => ({
@@ -129,6 +129,27 @@ describe("fixPlan", () => {
       // one advisory has no fix: no single target version
       ["minimist", "plan", ["1.2.0"], undefined, 2, ["acme/api"], 1],
     ]);
+  });
+});
+
+describe("asVersion: only real versions are offered as upgrades", () => {
+  const adv = (id: string, fixedIn?: string) => ({ id, aliases: [], severity: "HIGH" as const, fixedIn });
+
+  it("a git commit hash (OSV git ranges) is not a version; date and semver versions are", () => {
+    expect(asVersion("c45d7c49ea75133e52ab22a8e9e13173938e36ff")).toBeUndefined();
+    expect(asVersion("c45d7c4")).toBeUndefined();
+    expect(asVersion("20230101")).toBe("20230101");
+    expect(asVersion("2.32.0")).toBe("2.32.0");
+    expect(asVersion("abc")).toBe("abc");
+    expect(asVersion(undefined)).toBeUndefined();
+  });
+
+  it("a hash fix leaves the plan without a target instead of showing the hash", () => {
+    const hash = "c45d7c49ea75133e52ab22a8e9e13173938e36ff";
+    const { advisories } = buildAdvisories([f({ package_name: "requests", advisories: [adv("R1", hash)], latest_version: hash })]);
+    expect(advisories[0].fix_version).toBeUndefined();
+    expect(advisories[0].all_advisories[0].fixedIn).toBeUndefined();
+    expect(fixPlan(advisories, compareVersions)[0]).toMatchObject({ to: undefined, unfixed: 1 });
   });
 });
 
