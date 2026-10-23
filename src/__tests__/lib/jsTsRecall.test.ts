@@ -46,6 +46,25 @@ describe("propagation through builtins", () => {
     expect(has(handler(`res.redirect(encodeURIComponent(x));`), "open-redirect")).toBe(false);
   });
 
+  it("a typeof x !== 'string' early return rules out operator objects (NoSQL) -- not SQL or XSS", () => {
+    const guarded = (sink: string) => handler(`const id = req.body.id;\n  if (typeof id !== "string") { res.status(400).send(); return; }\n  ${sink}`);
+    // without the guard it is reported (so the checks below aren't vacuous)
+    expect(has(handler(`const id = req.body.id;\n  await db.reviewsCollection.updateOne({ _id: id }, { $set: { m: 1 } });`), "nosql-injection")).toBe(true);
+    expect(has(guarded(`await db.reviewsCollection.updateOne({ _id: id }, { $set: { m: 1 } });`), "nosql-injection")).toBe(false);
+    expect(has(guarded(`db.query("SELECT * FROM r WHERE id = '" + id + "'");`), "sql-injection")).toBe(true);
+    expect(has(guarded(`res.send(id);`), "xss")).toBe(true);
+    // negated, it still clears only NoSQL
+    const negated = (sink: string) => handler(`const id = req.body.id;\n  if (!(typeof id === "string")) return;\n  ${sink}`);
+    expect(has(negated(`await db.reviewsCollection.updateOne({ _id: id }, {});`), "nosql-injection")).toBe(false);
+    expect(has(negated(`db.query("SELECT * FROM r WHERE id = '" + id + "'");`), "sql-injection")).toBe(true);
+    // the positive form, and && keeps it
+    expect(has(handler(`const id = req.body.id;\n  if (typeof id === "string" && id.length < 40) { await db.reviewsCollection.updateOne({ _id: id }, {}); }`), "nosql-injection")).toBe(false);
+    // no early exit: the non-string path still reaches the query
+    expect(has(handler(`const id = req.body.id;\n  if (typeof id !== "string") { console.log("odd"); }\n  await db.reviewsCollection.updateOne({ _id: id }, {});`), "nosql-injection")).toBe(true);
+    // number/boolean guards still clear everything
+    expect(has(handler(`const n = req.body.n;\n  if (typeof n !== "number") return;\n  db.query("S " + n);`), "sql-injection")).toBe(false);
+  });
+
   it("String() defeats operator-object (NoSQL) injection but not SQL", () => {
     expect(has(handler(`mongo.find({ u: String(x) });`), "nosql-injection")).toBe(false);
     expect(has(handler(`mongo.find({ u: x });`), "nosql-injection")).toBe(true);
@@ -148,6 +167,20 @@ describe("NoSQL, RegExp, dynamic code", () => {
   it("mongo-style find/update with a request-derived filter", () => {
     expect(has(handler(`await mongo.find({ u: x });`), "nosql-injection")).toBe(true);
     expect(has(handler(`await users.updateOne({ id: x }, { $set: {} });`), "nosql-injection")).toBe(true);
+  });
+  it("an ORM's { where } query options are bound SQL parameters, not a NoSQL filter (Sequelize / TypeORM / Prisma)", () => {
+    // Juice Shop routes/address.ts, routes/wallet.ts: Sequelize models
+    expect(has(handler(`await AddressModel.findOne({ where: { id: x, UserId: req.body.UserId } });`), "nosql-injection")).toBe(false);
+    expect(has(handler(`await BasketModel.findOne({ where: { id: x }, include: [{ model: ProductModel }] });`), "nosql-injection")).toBe(false);
+    expect(has(handler(`await this.users.findOne({ where: { email: x } });`), "nosql-injection")).toBe(false);
+    expect(has(handler(`await UserModel.findOne({ "where": { email: x } });`), "nosql-injection")).toBe(false);
+    // a join's filter (Juice Shop routes/resetPassword.ts)
+    expect(has(handler(`await SecurityAnswerModel.findOne({ include: [{ model: UserModel, where: { email: x } }] });`), "nosql-injection")).toBe(false);
+    // still a document query: a field filter, a $where clause, an explicit Mongo collection
+    expect(has(handler(`await UserModel.findOne({ email: x });`), "nosql-injection")).toBe(true);
+    expect(has(handler(`await users.find({ $where: "this.name == '" + x + "'" });`), "nosql-injection")).toBe(true);
+    expect(has(handler(`await this.users.findOne({ email: x });`), "nosql-injection")).toBe(true);
+    expect(has(handler(`await client.db("app").collection("users").findOne({ where: x });`), "nosql-injection")).toBe(true);
   });
   it("Array.find with a callback is not NoSQL", () => {
     expect(has(handler(`const found = users.find(u => u.id === x);`), "nosql-injection")).toBe(false);

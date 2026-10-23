@@ -268,6 +268,22 @@ describe("API endpoint inventory and auth consistency", () => {
     const checks = `router.post("/notes", (req, res) => { if (!req.isAuthenticated()) return res.sendStatus(401); db.save(req.body) })\n`;
     expect(extractEndpoints("notes.ts", checks)[0].auth).toBe("required");
   });
+  it("middleware that attaches the caller's identity from their token is auth (Juice Shop security.appendUserId())", () => {
+    const src = [
+      "app.post('/api/Cards', security.appendUserId())",
+      "app.get('/api/Cards', security.appendUserId(), payment.getPaymentMethods())",
+      "app.put('/api/Cards/:id', security.denyAll())",
+      "app.delete('/api/Cards/:id', security.appendUserId(), payment.delPaymentMethodById())",
+      "app.post('/api/Addresss', attachUser, address.create())",
+      "app.put('/api/Addresss/:id', injectCurrentUser, address.update())",
+    ].join("\n") + "\n";
+    const eps = extractEndpoints("server.ts", src);
+    expect(eps.map(e => `${e.method} ${e.auth}`)).toEqual(["POST required", "GET required", "PUT required", "DELETE required", "POST required", "PUT required"]);
+    expect(inconsistentAuth(eps)).toEqual([]);
+    // optional-identity names are not counted: a forgotten check next to them is still reported
+    const optional = "app.get('/a', isAuthorized(), a)\napp.get('/b', isAuthorized(), b)\napp.get('/c', isAuthorized(), c)\napp.post('/d', loadUser, d)\n";
+    expect(inconsistentAuth(extractEndpoints("server.ts", optional)).map(e => e.path)).toEqual(["/d"]);
+  });
   it("Go: a wrapped handler (crAPI's middlewares.SetMiddlewareAuthentication); a public landing path is never flagged", () => {
     const src = `r.HandleFunc("/community/home", controllers.Home).Methods("GET")\nr.HandleFunc("/community/api/v2/community/posts/{postID}", middlewares.SetMiddlewareAuthentication(s.GetPost)).Methods("GET")\nr.HandleFunc("/community/api/v2/community/posts/recent", middlewares.SetMiddlewareAuthentication(s.Recent)).Methods("GET")\n`;
     const eps = extractEndpoints("routes.go", src);

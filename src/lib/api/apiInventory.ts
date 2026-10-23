@@ -32,9 +32,11 @@ export interface ApiEndpoint {
  * Is this identifier an authentication/authorization CHECK? Judged by its last segment's shape -- a check
  * verb or an auth noun at the end -- not by merely containing "auth": `security.isAuthorized`, `requireUser`,
  * `AuthRequired()`, `passport.authenticate`, `SetMiddlewareAuthentication` are checks;
- * `updateAuthenticatedUsers`, `authorName`, `oauthCallback` are not.
+ * `updateAuthenticatedUsers`, `authorName`, `oauthCallback` are not. Middleware that attaches the caller's
+ * identity from their token (`security.appendUserId()`, `attachUser`) rejects a request without one, so it is a
+ * check too; `loadUser` / `setUser` are left out -- they are as often optional.
  */
-const AUTH_LAST_SEGMENT_RE = /^(?:denyAll|deny|hasRole|hasAnyRole|hasPermission|hasScope|checkRole|checkPermissions?|roleRequired|is(?:Admin|Owner|Staff|Member|Manager|Accounting|Superuser)|auth|authn|authz|authenticated?|authorized?|isAuthenticated|isAuthorized|isLoggedIn|isAdmin|loggedIn|protect(?:ed|Route)?|checkJwt|jwtCheck|jwt|withAuth|clerkMiddleware|mustBeLoggedIn|ensure(?:LoggedIn|Authenticated|Auth\w*)|require[A-Z]\w*|verify(?:Token|Jwt|JWT|Session|User|Auth\w*)|(?:\w*?)(?:Auth|Authentication|Authorization|Authorized|Authenticated|Jwt|JWT|Guard)(?:Middleware|Required|Check|Handler|Guard)?|guard|authGuard)$/;
+const AUTH_LAST_SEGMENT_RE = /^(?:(?:append|attach|inject|populate)(?:Current)?User(?:Id)?|denyAll|deny|hasRole|hasAnyRole|hasPermission|hasScope|checkRole|checkPermissions?|roleRequired|is(?:Admin|Owner|Staff|Member|Manager|Accounting|Superuser)|auth|authn|authz|authenticated?|authorized?|isAuthenticated|isAuthorized|isLoggedIn|isAdmin|loggedIn|protect(?:ed|Route)?|checkJwt|jwtCheck|jwt|withAuth|clerkMiddleware|mustBeLoggedIn|ensure(?:LoggedIn|Authenticated|Auth\w*)|require[A-Z]\w*|verify(?:Token|Jwt|JWT|Session|User|Auth\w*)|(?:\w*?)(?:Auth|Authentication|Authorization|Authorized|Authenticated|Jwt|JWT|Guard)(?:Middleware|Required|Check|Handler|Guard)?|guard|authGuard)$/;
 
 function authNameIn(text: string): string | null {
   for (const tok of text.match(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/g) ?? []) {

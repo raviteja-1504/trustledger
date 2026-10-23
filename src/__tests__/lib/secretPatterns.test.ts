@@ -5,6 +5,18 @@ function indicatorIds(content: string, path = "internal/service.go") {
   return result.indicators.filter(i => i.id === "hardcoded-secret").map(i => i.detail);
 }
 
+describe("generic secret patterns skip values built from a variable", () => {
+  it("a Terraform interpolation names a resource, it is not a hardcoded token (Juice Shop networking.tf)", () => {
+    const tf = `resource "aws_efs_file_system" "juice_shop_data" {\n  creation_token = "\${var.project_name}-sqlite-data"\n  encrypted      = var.efs_encrypted\n}\n`;
+    expect(indicatorIds(tf, "terraform/networking.tf")).toEqual([]);
+    expect(indicatorIds(`const api_token = "{{ .Values.apiToken }}-x9Qz";\n`, "deploy/chart.ts")).toEqual([]);
+  });
+  it("a literal value under the same key is still reported, and so is a literal key next to a template", () => {
+    expect(indicatorIds(`resource "aws_efs_file_system" "juice_shop_data" {\n  creation_token = "h7Gk2pQx9LmZ4rTv8sWb"\n  encrypted      = var.efs_encrypted\n}\n`, "terraform/networking.tf")).toHaveLength(1);
+    expect(indicatorIds(`const secret = "h7Gk2pQx9LmZ4rTv8sWb";\nconst name = "\${prefix}-db";\n`, "src/config.ts")).toHaveLength(1);
+  });
+});
+
 describe("HashiCorp Vault token pattern", () => {
   it("does not flag Go method calls on a single-letter receiver named s", () => {
     // s.MethodName(...) is idiomatic Go (s *Server, s *Service) and is

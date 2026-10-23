@@ -630,14 +630,24 @@ export function joinArms(arms: readonly Arm[]): Arm {
  * (literal-collection membership, strict numeric/type checks, equality with
  * a literal) -- a wrongly recognized guard silently hides a real finding.
  */
-export interface Guard { name: string; holds: "true" | "false" }
+export interface Guard {
+  name: string; holds: "true" | "false";
+  /** The classes the guard proves safe; every injection class unless narrower (`typeof x === "string"` rules out
+   *  an operator object -- NoSQL -- but a string still carries a SQL quote or a script tag). */
+  clears?: number;
+}
 
 /** Mark `names` as validated in `env`: clears injection classes, remembers it in the shadow bits (regex-veto data). */
-export function applyGuards(env: TaintEnv, names: readonly string[]): void {
+export function applyGuards(env: TaintEnv, names: readonly string[], clears = INJECTION): void {
   for (const name of names) {
     const m = env.get(name);
-    if (m) env.set(name, applyClears(m, INJECTION));
+    if (m) env.set(name, applyClears(m, clears));
   }
+}
+
+/** Apply the guards that hold on `side`, each clearing only its own classes. */
+export function applyGuardSet(env: TaintEnv, guards: readonly Guard[], side: "true" | "false"): void {
+  for (const g of guards) if (g.holds === side) applyGuards(env, [g.name], g.clears ?? INJECTION);
 }
 
 /** Names guarded in the arm where the condition evaluates to `side`. */
@@ -674,10 +684,10 @@ export function walkIfChain(env: TaintEnv, branches: readonly Branch[]): boolean
       br.visitCond(fall);
       const guards = br.guards?.() ?? [];
       const armEnv = cloneEnv(fall);
-      applyGuards(armEnv, guardedNames(guards, "true"));
+      applyGuardSet(armEnv, guards, "true");
       arms.push({ env: armEnv, terminated: br.body(armEnv) });
       fall = cloneEnv(fall);
-      applyGuards(fall, guardedNames(guards, "false"));
+      applyGuardSet(fall, guards, "false");
     } else {
       hasElse = true;
       const armEnv = cloneEnv(fall);

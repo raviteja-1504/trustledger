@@ -441,6 +441,9 @@ const DUMMY_SECRET_VALUES_RE = /^(?:12345678|01234567890?|0{6,}|1{6,}|abcdefgh\w
 // unambiguous from their structure and don't need it.
 function looksLikeRealSecret(value: string): boolean {
   if (/\s/.test(value)) return false;                       // secrets don't contain spaces
+  // A template built from a variable (Terraform/JS/shell `${...}`, Helm/Jinja `{{...}}`) is not a literal:
+  // `creation_token = "${var.project_name}-sqlite-data"` names a resource; the secret, if any, is the variable.
+  if (/\$\{[^}]{0,200}\}|\{\{[^}]{0,200}\}\}/.test(value)) return false;
   if (DUMMY_SECRET_VALUES_RE.test(value)) return false;      // known placeholder values
   if (/^(.)\1{5,}$/.test(value)) return false;               // repeated-char filler (aaaaaa, xxxxxx)
   const hasUpper  = /[A-Z]/.test(value);
@@ -1322,6 +1325,10 @@ const XSS_RE = [
   /\$\([^)]+\)\.html\s*\(\s*\w+\s*\)/,
   /\.insertAdjacentHTML\s*\([^,]+,\s*\w+/,
   /\bbypassSecurityTrustHtml\s*\(/i,
+  // Angular's other trust bypasses that run or load code: a script, a resource URL (iframe/script src) or a URL
+  // (javascript: links). A constant argument -- embedding a fixed video URL -- is the common safe use. Style is
+  // left out: CSS injection, not script execution.
+  /\bbypassSecurityTrust(?:Script|ResourceUrl|Url)\s*\(\s*(?!["'`][^"'`]*["'`]\s*\))/,
   // C# Razor — Html.Raw()/@Html.Raw() and Response.Write() are the only two
   // dangerous escape hatches in a template engine that auto-encodes output
   // by default. Deliberately NOT a broad interpolation-based pattern like

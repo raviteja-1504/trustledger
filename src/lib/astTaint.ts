@@ -27,7 +27,7 @@
 
 import * as ts from "typescript";
 import {
-  ALL, FIXED_POINT_CAP, applyGuards, applySanitizer, assignEnv, classOf, cloneEnv, guardedNames, isTaintedMask, joinArms, joinEnvs,
+  ALL, FIXED_POINT_CAP, applyGuards, applyGuardSet, applySanitizer, assignEnv, classOf, cloneEnv, isTaintedMask, joinArms, joinEnvs, SinkClass,
   SHADOW, mergeSinkFacts, wasCleared, buildBackwardTraceGeneric, crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
@@ -185,6 +185,20 @@ const NOSQL_RECEIVER_RE = /mongo|collection|coll\b|nosql|couch|dynamo|cosmos|\bd
 // that is unmistakably a document collection.
 const NOSQL_LEGACY_TAILS = new Set(["update", "remove", "count", "findAndModify"]);
 const NOSQL_COLLECTION_RE = /mongo|collection|coll\b|nosql|\bdb\.[A-Za-z_$]/i;
+
+/**
+ * `AddressModel.findOne({ where: { id: req.params.id }, include: [...] })` passes an ORM's query OPTIONS
+ * (Sequelize, TypeORM, Prisma), not a MongoDB filter: the ORM binds the `where` values as SQL parameters, so a
+ * receiver named like a model or a table is no sign of a document database. The same for `include: [{ model,
+ * where }]` (a join, its filter bound the same way). A Mongo filter names fields, and its JavaScript clause is
+ * `$where`, which is a different key.
+ */
+const ORM_OPTION_KEYS = new Set(["where", "include"]);
+function isOrmQueryOptions(arg: ts.Expression): boolean {
+  const u = unwrapExpr(arg);
+  return ts.isObjectLiteralExpression(u) && u.properties.some(p =>
+    (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && ORM_OPTION_KEYS.has(p.name.getText().replace(/^["']|["']$/g, "")));
+}
 const GLOBAL_OBJECTS = new Set(["globalThis", "window", "global", "self"]);
 
 const isFunctionExpr = (e: ts.Node): e is ts.ArrowFunction | ts.FunctionExpression =>
@@ -430,7 +444,7 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return { id: "redos", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) &&
-      !ts.isStringLiteral(call.arguments[0]) && NOSQL_RECEIVER_RE.test(parts.slice(0, -1).join("."))) {
+      !ts.isStringLiteral(call.arguments[0]) && !isOrmQueryOptions(call.arguments[0]) && NOSQL_RECEIVER_RE.test(parts.slice(0, -1).join("."))) {
     return { id: "nosql-injection", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (parts.length > 1 && NOSQL_LEGACY_TAILS.has(tail) && call.arguments[0] && ts.isObjectLiteralExpression(unwrapExpr(call.arguments[0])) &&
@@ -527,7 +541,7 @@ function classHeldClientSink(call: ts.CallExpression): SinkMatch | null {
   const receiver = `this.${names.join(".")}`;
   const sinkExpr = `${receiver}.${tail}`;
   if (NOSQL_TAILS.has(tail) && call.arguments[0] && !isFunctionExpr(call.arguments[0]) && !ts.isStringLiteral(call.arguments[0]) &&
-      NOSQL_RECEIVER_RE.test(names.join("."))) {
+      !isOrmQueryOptions(call.arguments[0]) && NOSQL_RECEIVER_RE.test(names.join("."))) {
     return { id: "nosql-injection", sinkExpr, args: [call.arguments[0]] };
   }
   if (DB_SINK_METHODS.has(tail)) {
@@ -1126,7 +1140,7 @@ function isLiteralCollection(e: ts.Expression, sf: ts.SourceFile, depth = 0): bo
   return false;
 }
 
-const invert = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+const invert = (g: Guard): Guard => ({ ...g, holds: g.holds === "true" ? "false" : "true" });
 
 /** Expression text of `cond` proven to be a literal when `cond` is true (holds "true") or false ("false"):
  * `LIST.includes(E)` / `SET.has(E)` against a literal-only collection, or `E === literal`. Same closed guard set
@@ -1199,6 +1213,10 @@ function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
       const lit = typeofSide === left ? right : left;
       if (typeofSide && ts.isIdentifier(typeofSide.expression) && ts.isStringLiteral(lit) && (lit.text === "number" || lit.text === "boolean")) {
         return [{ name: typeofSide.expression.text, holds }];
+      }
+      // typeof x === "string": not an operator object ({ $ne: "" }), so no NoSQL injection -- still SQL/XSS/...
+      if (typeofSide && ts.isIdentifier(typeofSide.expression) && ts.isStringLiteral(lit) && lit.text === "string") {
+        return [{ name: typeofSide.expression.text, holds, clears: SinkClass.NOSQL }];
       }
     }
     // COLL.indexOf(x) !== -1 / >= 0 / > -1   (and the negations)
@@ -1324,8 +1342,8 @@ function createWalker(h: WalkerHooks) {
     if (ts.isIfStatement(node)) {
       handleExpr(node.expression, env);
       const guards = guardsOfCondition(node.expression, sf);
-      const thenEnv = cloneEnv(env); applyGuards(thenEnv, guardedNames(guards, "true"));
-      const elseEnv = cloneEnv(env); applyGuards(elseEnv, guardedNames(guards, "false"));
+      const thenEnv = cloneEnv(env); applyGuardSet(thenEnv, guards, "true");
+      const elseEnv = cloneEnv(env); applyGuardSet(elseEnv, guards, "false");
       const thenTerm = walkNode(node.thenStatement, thenEnv);
       const elseTerm = node.elseStatement ? walkNode(node.elseStatement, elseEnv) : false;
       const joined = joinArms([{ env: thenEnv, terminated: thenTerm }, { env: elseEnv, terminated: elseTerm }]);
