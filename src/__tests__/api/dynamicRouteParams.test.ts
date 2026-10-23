@@ -19,7 +19,7 @@ jest.mock("@/app/api/_middleware", () => ({
 jest.mock("@/lib/audit", () => ({ writeAuditLog: jest.fn(async () => {}) }));
 jest.mock("@/lib/opsEvents", () => ({ recordEvent: jest.fn(async () => {}) }));
 jest.mock("@/lib/queue", () => ({ enqueueScan: jest.fn(async () => ({ queued: true })) }));
-jest.mock("@/lib/github", () => ({ getInstallationToken: jest.fn(), getPRHeadSha: jest.fn(), createCheckRun: jest.fn() }));
+jest.mock("@/lib/github", () => ({ getInstallationToken: jest.fn(), getPRHeadSha: jest.fn(), getPullRequest: jest.fn(), createCheckRun: jest.fn() }));
 
 import { POST as rescanPOST } from "@/app/api/scans/[id]/rescan/route";
 import { GET as scimGET, PATCH as scimPATCH, DELETE as scimDELETE } from "@/app/api/scim/v2/Users/[id]/route";
@@ -53,6 +53,35 @@ describe("POST /api/scans/[id]/rescan", () => {
 
   it("another org's scan id is not found", async () => {
     expect((await rescanPOST(req("/api/scans/s-other/rescan", "POST"), ctx("s-other"))).status).toBe(404);
+  });
+
+  describe("a GitHub PR's rescan", () => {
+    const github = jest.requireMock("@/lib/github") as Record<string, jest.Mock>;
+    const { enqueueScan } = jest.requireMock("@/lib/queue") as { enqueueScan: jest.Mock };
+    beforeEach(() => {
+      jest.clearAllMocks();
+      rows("scans").push({ id: "s-gh", org_id: "org-1", repo_full_name: "acme/juice", pr_number: 1, installation_id: 7, commit_sha: "old", branch: "main", pr_author: "dev", created_at: "2026-01-01T00:00:00Z" });
+      github.getInstallationToken.mockResolvedValue({ token: "t" });
+      github.createCheckRun.mockResolvedValue({ id: 99 });
+      github.getPRHeadSha.mockResolvedValue("head-from-sha");
+    });
+
+    it("carries the PR's size and commits, as a webhook scan does (PR behaviour / author baseline read them)", async () => {
+      github.getPullRequest.mockResolvedValue({ head_sha: "head-1", additions: 37146, deletions: 0, commits: 1, changed_files: 470, created_at: "2026-10-23T14:00:00Z" });
+      expect((await rescanPOST(req("/api/scans/s-gh/rescan", "POST"), ctx("s-gh"))).status).toBe(200);
+      expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({
+        head_sha: "head-1", force: true, action: "rescan", check_run_id: 99,
+        pr_additions: 37146, pr_deletions: 0, pr_commits: 1, pr_changed_files: 470, pr_created_at: "2026-10-23T14:00:00Z",
+      }));
+    });
+
+    it("if GitHub can't return the PR, still rescans the head it can find, without invented sizes", async () => {
+      github.getPullRequest.mockRejectedValue(new Error("502"));
+      expect((await rescanPOST(req("/api/scans/s-gh/rescan", "POST"), ctx("s-gh"))).status).toBe(200);
+      const job = enqueueScan.mock.calls[0][0];
+      expect(job.head_sha).toBe("head-from-sha");
+      expect(job).not.toHaveProperty("pr_additions");
+    });
   });
 });
 

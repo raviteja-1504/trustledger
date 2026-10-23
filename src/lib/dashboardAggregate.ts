@@ -123,7 +123,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // Build repo stats
   const repoMap = new Map<string, {
     ai_sum: number; ai_count: number; ai_weighted: number; ai_weight: number; scan_count: number;
-    file_count: number; last_scan: string; latest_scan_id: string;
+    file_count: number; last_scan: string; latest_scan_id: string; latest_ai_pct: number;
   }>();
 
   const attestedFileSet = new Set((attests ?? []).map(a => `${a.scan_id}::${a.file_path}`));
@@ -134,7 +134,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   scans.forEach(s => {
     const r = repoMap.get(s.repo_full_name) ?? {
       ai_sum: 0, ai_count: 0, ai_weighted: 0, ai_weight: 0, scan_count: 0, file_count: 0,
-      last_scan: s.created_at, latest_scan_id: s.id,
+      last_scan: s.created_at, latest_scan_id: s.id, latest_ai_pct: s.total_ai_percentage,
     };
     r.ai_sum   += s.total_ai_percentage;
     r.ai_count += 1;
@@ -145,7 +145,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     r.ai_weight   += w;
     r.scan_count += 1;
     r.file_count += s.file_count;
-    if (s.created_at > r.last_scan) { r.last_scan = s.created_at; r.latest_scan_id = s.id; }
+    if (s.created_at > r.last_scan) { r.last_scan = s.created_at; r.latest_scan_id = s.id; r.latest_ai_pct = s.total_ai_percentage; }
     repoMap.set(s.repo_full_name, r);
   });
 
@@ -182,10 +182,13 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
       repo,
       ai_pct:           r.ai_count === 0 ? 0 : r.ai_weight > 0 ? r.ai_weighted / r.ai_weight : r.ai_sum / r.ai_count,
       attestation_rate: attestRate,
-      last_scan:        r.last_scan.split("T")[0],
+      // the full timestamp: Recent activity and "last scanned" show the time of the scan, not midnight of its day
+      last_scan:        r.last_scan,
       scan_count:       r.scan_count,
       file_count:       r.file_count,
       latest_scan_id:   r.latest_scan_id,
+      // the latest scan's own AI share (ai_pct is the repo's average over the period)
+      latest_ai_pct:    r.latest_ai_pct,
       // CRITICAL/HIGH file count in the latest scan -- already computed
       // above for attestRate's denominator; exposing it lets the UI rank
       // repos by concentration of actionable risk (see "Top Risk Repos").

@@ -41,7 +41,9 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
-import { blockingRisks, blocksMerge, countOpenBlocking, loadGate } from "@/lib/mergeGate";
+import { blockingRisks, countOpenBlocking, loadGate } from "@/lib/mergeGate";
+import { ensurePolicyAlerts } from "@/lib/policyAlerts";
+import { openSlaDeadlines } from "@/lib/slaCarryover";
 import { inheritedViolations } from "@/lib/inheritedViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
@@ -577,52 +579,26 @@ async function handle(req: NextRequest) {
           },
           priorDeadlines, defaultDeadline,
         );
+        // A file still waiting for review from an earlier scan of this PR keeps its deadline: a rescan or a new
+        // push must not restart the clock (it used to, so a rescan postponed every overdue CRITICAL file's incident).
+        const openDeadlines = violationFiles.length > 0
+          ? await openSlaDeadlines(db, orgId, repoFullName, prNumber, scan.id, violationFiles.map(f => f.file_path))
+          : new Map<string, string>();
         if (violationFiles.length > 0 || carriedViolations.length > 0) {
-          await db.from("violations").insert([
+          const { error: violationsErr } = await db.from("violations").insert([
             ...violationFiles.map(f => ({
               org_id: orgId, scan_id: scan.id, file_path: f.file_path, risk_score: f.risk_score,
-              sla_deadline: defaultDeadline,
+              sla_deadline: openDeadlines.get(f.file_path) ?? defaultDeadline,
             })),
             ...carriedViolations.map(v => ({ ...v, org_id: orgId, scan_id: scan.id })),
           ]);
+          if (violationsErr) logger.error("violations insert failed", { scan_id: scan.id, detail: violationsErr.message });
           await invalidateViolationsCache(orgId);
 
-          // ── Create a single alert per scan for the sidebar badge ──────────
-          // One P1/P2 alert per scan (not per file) so the alerts page shows
-          // a meaningful entry and the sidebar badge reflects the real state.
-          // Skip if an open alert already exists for this scan (idempotent).
-          const { data: existingAlert } = await db
-            .from("alerts")
-            .select("id")
-            .eq("org_id", orgId)
-            .eq("scan_id", scan.id)
-            .in("status", ["firing", "acknowledged", "snoozed"])
-            .limit(1);
-
-          // The alert says "merge blocked": only the files the org's gate blocks on count, and with none
-          // (HIGH files under a gate that doesn't block HIGH) there is no alert -- they're still listed to review.
-          const gate = await loadGate(db, orgId);
-          const blocking = [...violationFiles, ...carriedViolations].filter(f => blocksMerge(f.risk_score, gate));
-          if ((!existingAlert || existingAlert.length === 0) && blocking.length > 0) {
-            const critCount = blocking.filter(f => f.risk_score === "CRITICAL").length;
-            const highCount = blocking.filter(f => f.risk_score === "HIGH").length;
-            const severity  = critCount > 0 ? "P1" : "P2";
-            const repoShort = repoFullName.split("/").pop() ?? repoFullName;
-            await db.from("alerts").insert({
-              org_id:     orgId,
-              alert_type: "policy",
-              severity,
-              status:     "firing",
-              title:      `${critCount + highCount} unattested file${critCount + highCount > 1 ? "s" : ""} in ${repoShort} PR #${prNumber}`,
-              body:       [
-                critCount > 0 ? `${critCount} CRITICAL` : "",
-                highCount > 0 ? `${highCount} HIGH` : "",
-              ].filter(Boolean).join(" and ") + ` file${critCount + highCount > 1 ? "s" : ""} require attestation before merge.`,
-              repo:       repoFullName,
-              scan_id:    scan.id,
-              fired_at:   new Date().toISOString(),
-            });
-          }
+          // The PR's "merge blocked" alert, from the open blocking violations just recorded (lib/policyAlerts.ts):
+          // only what the org's gate blocks on counts, and with none there is no alert. Also re-checked whenever
+          // the alerts are read, so an alert that fails here isn't lost.
+          await ensurePolicyAlerts(db, orgId, { scanIds: [scan.id] });
         }
 
         // Auto-generate/resolve incidents for CRITICAL unattested files and
@@ -742,7 +718,9 @@ async function handle(req: NextRequest) {
         // After each scan, update the author's historical metrics so future
         // scans can detect deviation. Uses exponential moving average to
         // give more weight to recent PRs and handle new developers gracefully.
-        if (prAuthor && prMeta) {
+        // Not on a rescan (force): it is the same pull request again, already counted in the author's averages --
+        // counting it once per rescan skewed the baseline every later PR is compared with.
+        if (prAuthor && prMeta && !force) {
           const prev = developerBaseline;
           const n    = (prev?.pr_count ?? 0) + 1;
           const alpha = Math.min(0.3, 1 / n); // decaying weight; caps at 30%

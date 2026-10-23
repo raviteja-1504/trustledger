@@ -179,6 +179,8 @@ export interface RepoStat {
   // CRITICAL/HIGH file count in the latest scan. Optional so older
   // cached/seed payloads without it still type-check.
   high_crit_count?: number;
+  /** The latest scan's own AI share (ai_pct averages the period). Optional for older cached payloads. */
+  latest_ai_pct?: number;
 }
 
 export interface TopRiskFile {

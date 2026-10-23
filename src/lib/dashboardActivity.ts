@@ -35,7 +35,8 @@ export function deriveActivity(data: DashboardData, limit = 15): ActivityEvent[]
     events.push({
       type: "scan", timestamp: new Date(r.last_scan).toISOString(), repo: r.repo,
       pr_number: 0, scan_id: r.latest_scan_id,
-      overall_risk: "", file_count: 0, total_ai_pct: r.ai_pct,
+      // this scan's own AI share; the repo's period average only for payloads cached before it was sent
+      overall_risk: "", file_count: 0, total_ai_pct: r.latest_ai_pct ?? r.ai_pct,
       file_path: "", reviewer_email: "",
     });
   }

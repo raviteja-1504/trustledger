@@ -77,6 +77,7 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/scan-worker/route.ts", table: "attestations", op: "select", keys: ["scan_id","file_path"], why: "system-job" },
   { file: "src/app/api/scan-worker/route.ts", table: "violations", op: "update", keys: ["scan_id","file_path"], why: "system-job" },
   { file: "src/app/api/scan-worker/route.ts", table: "developer_baselines", op: "upsert", keys: [], why: "payload-has-org" },
+  { file: "src/lib/policyAlerts.ts", table: "alerts", op: "insert", keys: [], why: "payload-has-org" },
   { file: "src/app/api/scans/bulk/route.ts", table: "attestations", op: "select", keys: ["scan_id"], why: "parent-verified" },
   { file: "src/app/api/scans/bulk/route.ts", table: "violations", op: "update", keys: ["scan_id","file_path"], why: "parent-verified" },
   { file: "src/app/api/scans/compare/route.ts", table: "scan_files", op: "select", keys: ["scan_id"], count: 2, why: "parent-verified" },

@@ -5,6 +5,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
 import { blockingRisks, loadGate } from "@/lib/mergeGate";
+import { ensurePolicyAlerts } from "@/lib/policyAlerts";
 import { progressByScan, latestScanByPr, policyAlertVerdict, progressTitle } from "@/lib/alertProgress";
 import { safeError } from "@/lib/errors";
 
@@ -65,6 +66,9 @@ export async function GET(req: NextRequest) {
   const limit  = parseInt(url.searchParams.get("limit") ?? "50");
 
   const db = createServiceClient();
+  // Each PR's latest scan with open blocking files has its "merge blocked" alert, even if the scan that should
+  // have raised it didn't finish (lib/policyAlerts.ts).
+  await ensurePolicyAlerts(db, org_id);
   let query = db
     .from("alerts")
     .select("*")

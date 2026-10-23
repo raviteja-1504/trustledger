@@ -85,6 +85,14 @@ it("a repo's AI share is weighted by files the same way, so repo and org figures
   expect(d.overall_ai_pct).toBeCloseTo((0.9 * 30 + 0.1 * 10) / 40, 6);
 });
 
+it("each repo's latest scan: its full timestamp and its own AI share (Recent activity showed midnight and the average)", async () => {
+  seed();
+  const api = (await fetchDashboard(ORG, 90, null)).repos.find(r => r.repo === "o/api")!;
+  const a2 = (db.client.from("scans") as unknown as { rows: Array<{ id: string; created_at: string }> }).rows.find(s => s.id === "a2")!;
+  expect(api).toMatchObject({ latest_scan_id: "a2", last_scan: a2.created_at, latest_ai_pct: 0.8 });
+  expect(api.ai_pct).toBeCloseTo(0.85, 6);   // the period average stays as it was
+});
+
 it("reports every connected repo, scanned in the period or not (for coverage)", async () => {
   seed();
   const d = await fetchDashboard(ORG, 90, null);

@@ -14,7 +14,7 @@ import { verifyApiKey, requirePermission } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { enqueueScan } from "@/lib/queue";
-import { getInstallationToken, getPRHeadSha, createCheckRun } from "@/lib/github";
+import { getInstallationToken, getPRHeadSha, getPullRequest, createCheckRun } from "@/lib/github";
 import { runWithTrace, traceIdFrom, currentTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
 
@@ -59,8 +59,11 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ id: string }> }
   try {
     const [owner, repo] = scan.repo_full_name.split("/");
     const { token } = await getInstallationToken(scan.installation_id);
-    // Rescan what the PR is NOW -- a stored commit the PR has moved past would be skipped as superseded.
-    const headSha = (await getPRHeadSha(token, owner, repo, scan.pr_number)) ?? scan.commit_sha;
+    // Rescan what the PR is NOW -- a stored commit the PR has moved past would be skipped as superseded. Its size
+    // and commit count feed the AI-likelihood PR-behaviour and author-baseline signals, the same as a webhook
+    // scan; without them a rescan scored both 0% and changed the PR's AI likelihood.
+    const pr = await getPullRequest(token, owner, repo, scan.pr_number).catch(() => null);
+    const headSha = pr?.head_sha ?? (await getPRHeadSha(token, owner, repo, scan.pr_number)) ?? scan.commit_sha;
     let checkRunId: number | null = null;
     try {
       const check = await createCheckRun(token, owner, repo, {
@@ -75,6 +78,10 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ id: string }> }
       pr_number: scan.pr_number, head_sha: headSha, branch: scan.branch ?? "main", pr_author: scan.pr_author ?? null,
       before_sha: null, action: "rescan", check_run_id: checkRunId, delivery_id: null, force: true,
       trace_id: currentTrace()?.trace_id,
+      ...(pr ? {
+        pr_additions: pr.additions, pr_deletions: pr.deletions, pr_commits: pr.commits,
+        pr_changed_files: pr.changed_files, pr_created_at: pr.created_at,
+      } : {}),
     });
     await recordEvent({ kind: "scan.queued", org_id: auth.org_id, repo: scan.repo_full_name, pr_number: scan.pr_number, message: "Rescan requested", data: { head_sha: headSha, check_run_id: checkRunId, previous_scan_id: scan.id } });
 

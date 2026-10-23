@@ -429,6 +429,13 @@ describe("recent activity", () => {
     expect(deriveActivity(data, 1)).toHaveLength(1);
   });
 
+  it("a scan shows at its own time with its own AI share (it showed midnight and the repo's average)", () => {
+    const withLatest = { ...data, repos: [{ ...data.repos[0], last_scan: "2026-10-23T16:31:50Z", latest_ai_pct: 0.38 }] } as DashboardData;
+    expect(deriveActivity(withLatest).find(e => e.type === "scan")).toMatchObject({ timestamp: "2026-10-23T16:31:50.000Z", total_ai_pct: 0.38 });
+    // a payload cached before latest_ai_pct existed still shows something real: the average
+    expect(deriveActivity(data).find(e => e.type === "scan")?.total_ai_pct).toBe(0.4);
+  });
+
   it("each sign-off and scan appears once: the PR page's local copy (browser clock) and the server's merge", () => {
     const server = deriveActivity(data);
     const local = [
