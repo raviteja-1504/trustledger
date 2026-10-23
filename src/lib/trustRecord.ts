@@ -39,6 +39,9 @@ export interface TrustRecordInput {
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
+/** Stored AI shares are fractions (0.57); the record states a percentage with one decimal (57.0). */
+const asPercent = (fraction: number) => Math.round(fraction * 1000) / 10;
+
 export function buildTrustRecord(input: TrustRecordInput) {
   const now = new Date(input.generated_at);
   const findings = input.files.flatMap(f => f.indicators
@@ -75,7 +78,7 @@ export function buildTrustRecord(input: TrustRecordInput) {
     },
     verdict: {
       overall_risk: input.scan.overall_risk,
-      ai_share_percent: Math.round(input.scan.total_ai_percentage * 10) / 10,
+      ai_share_percent: asPercent(input.scan.total_ai_percentage),
       merge_gate: input.open_blocking_violations > 0 ? "blocked" : "clear",
       open_blocking_violations: input.open_blocking_violations,
     },
@@ -87,7 +90,7 @@ export function buildTrustRecord(input: TrustRecordInput) {
       files: input.files.length,
       files_attested: new Set(input.attestations.map(a => a.file_path)).size,
     },
-    files: input.files.map(f => ({ path: f.file_path, risk: f.risk_score, ai_share_percent: Math.round(f.ai_percentage * 10) / 10 }))
+    files: input.files.map(f => ({ path: f.file_path, risk: f.risk_score, ai_share_percent: asPercent(f.ai_percentage) }))
       .sort((a, b) => a.path.localeCompare(b.path)),
     findings,
     attestations: input.attestations

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { blockingRisks, loadGate } from "@/lib/mergeGate";
 
 /**
  * POST /api/alerts/recheck
@@ -46,7 +47,8 @@ export async function POST(req: NextRequest) {
   // a LATER scan no longer flags (renamed/removed/fixed), is never touched
   // since the user only ever attests files visible in the current scan's
   // file list. That stale row kept the count above zero forever.
-  if (await hasOpenRepoViolations(db, org_id, scan.repo_full_name)) {
+  // Policy alerts mean "merge blocked": only what the org's gate blocks on keeps them open (lib/mergeGate.ts).
+  if (await hasOpenRepoViolations(db, org_id, scan.repo_full_name, blockingRisks(await loadGate(db, org_id)))) {
     return NextResponse.json({ resolved: false });
   }
 

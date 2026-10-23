@@ -12,6 +12,7 @@ import { verifyApiKey } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
+import { countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { buildTrustRecord, buildTrustRecordSignature } from "@/lib/trustRecord";
 import type { ScanHealth } from "@/lib/scanHealth";
 import type { FileIndicator } from "@/types";
@@ -29,10 +30,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       .eq("id", params.id).eq("org_id", auth.org_id).single();
     if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-    const [{ data: files }, { data: atts }, { count: blocking }, { data: org }, triage, health] = await Promise.all([
+    const [{ data: files }, { data: atts }, blocking, { data: org }, triage, health] = await Promise.all([
       db.from("scan_files").select("file_path, risk_score, ai_percentage, indicators").eq("scan_id", scan.id).eq("org_id", auth.org_id),
       db.from("attestations").select("file_path, reviewer_email, reviewer_github, payload_hash, created_at").eq("scan_id", scan.id),
-      db.from("violations").select("id", { count: "exact", head: true }).eq("scan_id", scan.id).neq("status", "resolved").in("risk_score", ["CRITICAL", "HIGH"]),
+      // the org's merge gate, the same count the GitHub check uses (lib/mergeGate.ts)
+      loadGate(db, auth.org_id).then(gate => countOpenBlocking(db, scan.id, gate, auth.org_id)),
       db.from("organizations").select("name").eq("id", auth.org_id).single(),
       loadTriage(db, auth.org_id, scan.repo_full_name),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

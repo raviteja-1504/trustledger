@@ -9,6 +9,7 @@
 import crypto from "crypto";
 import type { CheckAnnotation } from "./checkAnnotations";
 import { findingMeta } from "./findingCatalog";
+import { DEFAULT_GATE, blockingRisks, blocksMerge, type GateSettings } from "./mergeGate";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -340,14 +341,16 @@ export function buildCheckSummary(scan: {
   overall_risk: string;
   total_ai_percentage: number;
   files: Array<{ file_path: string; risk_score: string; risk_indicators: string[] }>;
-}): { title: string; summary: string; conclusion: CheckConclusion } {
-  const blocked = scan.overall_risk === "CRITICAL" || scan.overall_risk === "HIGH";
+}, gate: GateSettings = DEFAULT_GATE): { title: string; summary: string; conclusion: CheckConclusion } {
   const critFiles = scan.files.filter(f => f.risk_score === "CRITICAL");
   const highFiles = scan.files.filter(f => f.risk_score === "HIGH");
+  // Blocked by the org's merge gate (lib/mergeGate.ts): HIGH files hold the merge only while "Block HIGH" is on.
+  const blockingCount = scan.files.filter(f => blocksMerge(f.risk_score, gate)).length;
+  const blocked = blockingCount > 0;
   const aiPct     = (scan.total_ai_percentage * 100).toFixed(0);
 
   const title = blocked
-    ? `TrustLedger: ${scan.overall_risk} risk — ${critFiles.length + highFiles.length} file(s) require attestation`
+    ? `TrustLedger: ${scan.overall_risk} risk — ${blockingCount} file(s) require attestation`
     : `TrustLedger: ${scan.overall_risk} — ${aiPct}% AI content`;
 
   const lines = [
@@ -363,13 +366,13 @@ export function buildCheckSummary(scan: {
     lines.push("");
   }
   if (highFiles.length > 0) {
-    lines.push("### 🟠 HIGH Risk Files");
+    lines.push(gate.block_on_high ? "### 🟠 HIGH Risk Files" : "### 🟠 HIGH Risk Files (review recommended; your policy doesn't block on them)");
     highFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${findingTitles(f.risk_indicators)}`));
     lines.push("");
   }
 
   if (blocked) {
-    lines.push("**Action required:** Attest all CRITICAL and HIGH files in TrustLedger before this PR can merge.");
+    lines.push(`**Action required:** Attest all ${blockingRisks(gate).join(" and ")} files in TrustLedger before this PR can merge.`);
     lines.push(`Review at: ${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}`);
   }
 

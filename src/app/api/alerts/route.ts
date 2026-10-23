@@ -4,6 +4,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { deliverAlert, type AlertPayload } from "@/lib/alertDelivery";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { blockingRisks, loadGate } from "@/lib/mergeGate";
 import { progressByScan, latestScanByPr, policyAlertVerdict, progressTitle } from "@/lib/alertProgress";
 import { safeError } from "@/lib/errors";
 
@@ -99,19 +100,26 @@ export async function GET(req: NextRequest) {
       .map(r => r.repo as string),
   )].slice(0, 10);
 
+  // A policy alert means "merge blocked", so it heals once nothing the org's gate blocks on is open (lib/mergeGate.ts);
+  // an SLA alert is about review deadlines and waits for every flagged file.
+  const gateRisks = blockingRisks(await loadGate(db, org_id));
   if (activeRepos.length > 0) {
     const now = new Date().toISOString();
-    const openChecks = await Promise.all(activeRepos.map(repo => hasOpenRepoViolations(db, org_id, repo)));
-    const staleRepos = activeRepos.filter((_, i) => !openChecks[i]);
-    if (staleRepos.length > 0) {
+    for (const type of SELF_HEAL_TYPES) {
+      const repos = [...new Set(rows.filter(r => r.alert_type === type && r.repo && ["firing", "acknowledged", "snoozed"].includes(r.status)).map(r => r.repo as string))]
+        .filter(repo => activeRepos.includes(repo));
+      if (repos.length === 0) continue;
+      const openChecks = await Promise.all(repos.map(repo => hasOpenRepoViolations(db, org_id, repo, type === "policy" ? gateRisks : undefined)));
+      const staleRepos = repos.filter((_, i) => !openChecks[i]);
+      if (staleRepos.length === 0) continue;
       await db.from("alerts")
         .update({ status: "resolved", resolved_at: now })
         .eq("org_id", org_id)
-        .in("alert_type", [...SELF_HEAL_TYPES])
+        .eq("alert_type", type)
         .in("repo", staleRepos)
         .in("status", ["firing", "acknowledged", "snoozed"]);
       for (const r of rows) {
-        if (r.alert_type && SELF_HEAL_TYPES.has(r.alert_type) && r.repo && staleRepos.includes(r.repo) && r.status !== "resolved") {
+        if (r.alert_type === type && r.repo && staleRepos.includes(r.repo) && r.status !== "resolved") {
           r.status = "resolved";
           r.resolved_at = now;
         }
@@ -126,7 +134,9 @@ export async function GET(req: NextRequest) {
   if (pending.length > 0) {
     const scanIds = [...new Set(pending.map(r => r.scan_id as string))];
     const [{ data: vio }, { data: alertScans }] = await Promise.all([
-      db.from("violations").select("scan_id, status").eq("org_id", org_id).in("scan_id", scanIds).in("risk_score", ["CRITICAL", "HIGH"]),
+      // the files that hold the merge (the gate), not every flagged file
+      gateRisks.length === 0 ? Promise.resolve({ data: [] })
+        : db.from("violations").select("scan_id, status").eq("org_id", org_id).in("scan_id", scanIds).in("risk_score", gateRisks),
       db.from("scans").select("id, repo_full_name, pr_number, created_at").eq("org_id", org_id).in("id", scanIds),
     ]);
     const scanInfo = new Map(((alertScans ?? []) as { id: string; repo_full_name: string; pr_number: number | null; created_at: string }[]).map(s => [s.id, s]));

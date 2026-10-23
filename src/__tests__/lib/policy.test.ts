@@ -1,4 +1,4 @@
-import { DEFAULT_POLICY, PRESETS, loadPolicy, savePolicy, evaluatePolicy } from "@/lib/policy";
+import { DEFAULT_POLICY, PRESETS, loadPolicy, savePolicy, evaluatePolicy, withOrgSettings } from "@/lib/policy";
 
 const makeFiles = (overrides: Partial<{ risk_score: string; attested: boolean; ai_percentage: number }>[]) =>
   overrides.map((o, i) => ({
@@ -80,6 +80,42 @@ describe("policy lib", () => {
     const files  = makeFiles([{ risk_score:"HIGH", attested:false, ai_percentage:0.8 }]);
     const result = evaluatePolicy(policy, files, new Set());
     expect(result.pass).toBe(false);
+  });
+
+  it("the AI reason never reads 'X% exceeds X%': decimals only when whole percents would hide the excess", () => {
+    const policy = { ...DEFAULT_POLICY, block_on_high: false, ai_flag_threshold: 0.8 };
+    const reason = (ai: number) => evaluatePolicy(policy, makeFiles([{ risk_score: "HIGH", attested: false, ai_percentage: ai }]), new Set()).violations[0].reason;
+    expect(reason(0.99)).toBe("AI content 99% exceeds org threshold of 80%");
+    // rounded down, never up: 80.5 is shown as 80.5, not 81
+    expect(reason(0.805)).toBe("AI content 80.5% exceeds org threshold of 80%");
+    expect(reason(0.81)).toBe("AI content 81% exceeds org threshold of 80%");
+    expect(reason(0.8049)).toBe("AI content 80.4% exceeds org threshold of 80%");
+    expect(reason(0.80012)).toBe("AI content 80.01% exceeds org threshold of 80%");
+    expect(reason(0.8000001)).toBe("AI content 80.00% exceeds org threshold of 80%");
+  });
+
+  it("counts which violations block the merge; the AI-threshold ones are to review", () => {
+    const files = makeFiles([
+      { risk_score: "CRITICAL", attested: false, ai_percentage: 0.1 },
+      { risk_score: "HIGH", attested: false, ai_percentage: 0.95 },
+      { risk_score: "HIGH", attested: false, ai_percentage: 0.1 },
+    ]);
+    const noHigh = evaluatePolicy({ ...DEFAULT_POLICY, block_on_high: false, ai_flag_threshold: 0.8 }, files, new Set());
+    expect(noHigh.violations.map(v => v.severity)).toEqual(["critical", "medium"]);
+    expect([noHigh.blocking, noHigh.gated]).toEqual([1, true]);
+    const both = evaluatePolicy({ ...DEFAULT_POLICY, block_on_high: true, ai_flag_threshold: 0.8 }, files, new Set());
+    expect([both.violations.length, both.blocking]).toEqual([3, 3]);
+    const none = evaluatePolicy({ ...DEFAULT_POLICY, block_on_critical: false, block_on_high: false, ai_flag_threshold: 0.8 }, files, new Set());
+    expect([none.blocking, none.gated, none.pass]).toEqual([0, false, false]);
+  });
+
+  it("the org's server settings win over this browser's copy; missing ones keep it", () => {
+    const local = { ...DEFAULT_POLICY, block_on_high: true, ai_flag_threshold: 0.5 };
+    expect(withOrgSettings(local, { block_on_critical: true, block_on_high: false, ai_threshold: 0.8 }))
+      .toMatchObject({ block_on_critical: true, block_on_high: false, ai_flag_threshold: 0.8 });
+    expect(withOrgSettings(local, { block_on_high: null })).toMatchObject({ block_on_high: true, ai_flag_threshold: 0.5 });
+    expect(withOrgSettings(local, { block_on_critical: false })).toMatchObject({ block_on_critical: false, block_on_high: true });
+    expect(withOrgSettings(local, undefined)).toBe(local);
   });
 
   it("passes when all files are LOW risk with no threshold breach", () => {

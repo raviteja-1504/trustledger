@@ -120,6 +120,24 @@ describe("check summary", () => {
     expect(summary).toContain("SQL Injection, Cross-Site Scripting");
     expect(summary).not.toContain("sql-injection");
   });
+
+  it("follows the org's merge gate: HIGH files are listed but don't block while \"Block HIGH\" is off", () => {
+    const scan = { overall_risk: "HIGH", total_ai_percentage: 0.2, files: [
+      { file_path: "a.ts", risk_score: "HIGH", risk_indicators: ["xss"] },
+      { file_path: "b.ts", risk_score: "CRITICAL", risk_indicators: ["sql-injection"] },
+    ] };
+    const both = buildCheckSummary(scan);
+    expect(both).toMatchObject({ conclusion: "action_required", title: expect.stringContaining("2 file(s) require attestation") });
+    expect(both.summary).toContain("Attest all CRITICAL and HIGH files");
+    const noHigh = buildCheckSummary(scan, { block_on_critical: true, block_on_high: false });
+    expect(noHigh).toMatchObject({ conclusion: "action_required", title: expect.stringContaining("1 file(s) require attestation") });
+    expect(noHigh.summary).toContain("Attest all CRITICAL files");
+    expect(noHigh.summary).toContain("HIGH Risk Files (review recommended; your policy doesn't block on them)");
+    // only HIGH files and HIGH not blocking: the check passes
+    const highOnly = { ...scan, files: [scan.files[0]] };
+    expect(buildCheckSummary(highOnly, { block_on_critical: true, block_on_high: false }).conclusion).toBe("success");
+    expect(buildCheckSummary(highOnly).conclusion).toBe("action_required");
+  });
 });
 
 describe("markdown safety", () => {

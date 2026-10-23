@@ -55,7 +55,7 @@ function seed() {
     scans: [{ id: SCAN_ID, org_id: "org-1", repo_full_name: "acme/shop", pr_number: 7, commit_sha: "abcdef1234567", branch: "main", overall_risk: f.risk_score, total_ai_percentage: 0, created_at: "2026-09-30T08:00:00Z", triggered_by: "webhook", duration_ms: 1200, evidence_breakdown: null, ai_tooling: [], check_run_sync_error: null, health: r.health, telemetry: r.telemetry }],
     scan_files: [{ scan_id: SCAN_ID, org_id: "org-1", file_path: f.file_path, language: f.language, ai_percentage: f.ai_percentage, risk_score: f.risk_score, risk_indicators: f.risk_indicators, content_hash: "h1", line_count: f.line_count, content: SRC, indicators: stored, attribution: null }],
     finding_triage: [{ org_id: "org-1", repo_full_name: "acme/shop", fingerprint: redirect.fingerprint, rule_id: "open-redirect", file_path: f.file_path, status: "accepted", reason: "gateway allow-list", expires_at: null, set_by_email: "lead@acme.dev", set_at: "2026-09-29T00:00:00Z" }],
-    attestations: [], violations: [{ scan_id: SCAN_ID, status: "open", risk_score: "CRITICAL" }],
+    attestations: [], violations: [{ org_id: "org-1", scan_id: SCAN_ID, status: "open", risk_score: "CRITICAL" }],
     organizations: [{ id: "org-1", name: "Acme" }],
   });
 }
@@ -99,6 +99,24 @@ describe("Trust Record: valid -> modify one byte -> tampered -> unknown key", ()
     const oldCron = process.env.CRON_SECRET; delete process.env.CRON_SECRET;
     expect((await verify(doc)).status).toBe("not_configured");
     process.env.CRON_SECRET = oldCron;
+  });
+});
+
+describe("Trust Record merge gate follows the org's settings, like the GitHub check (lib/mergeGate.ts)", () => {
+  const gate = async (blockHigh: boolean | undefined) => {
+    seed();
+    const org = (db.client.from("organizations") as unknown as { rows: Record<string, unknown>[] }).rows[0];
+    if (blockHigh !== undefined) Object.assign(org, { block_on_critical: true, block_on_high: blockHigh });
+    const v = (db.client.from("violations") as unknown as { rows: Record<string, unknown>[] }).rows;
+    v.splice(0, v.length, { org_id: "org-1", scan_id: SCAN_ID, status: "open", risk_score: "HIGH" }, { org_id: "org-2", scan_id: SCAN_ID, status: "open", risk_score: "CRITICAL" });
+    const { record } = await (await getTrustRecord(req(`/api/scans/${SCAN_ID}/trust-record`), { params: Promise.resolve({ id: SCAN_ID }) })).json();
+    return record.verdict as { merge_gate: string; open_blocking_violations: number };
+  };
+
+  it("an open HIGH violation blocks while \"Block HIGH\" is on (or unset), and not while it is off; another org's row never counts", async () => {
+    expect(await gate(true)).toMatchObject({ merge_gate: "blocked", open_blocking_violations: 1 });
+    expect(await gate(undefined)).toMatchObject({ merge_gate: "blocked", open_blocking_violations: 1 });
+    expect(await gate(false)).toMatchObject({ merge_gate: "clear", open_blocking_violations: 0 });
   });
 });
 

@@ -32,6 +32,7 @@ beforeEach(() => {
       { id: "s3", org_id: ORG, repo_full_name: "acme/sast", pr_number: 13, created_at: "2026-10-02T00:00:00Z" },
     ],
     alerts: [alert("a1", "s1"), alert("a2", "s2"), alert("a3", "s3")],
+    organizations: [],
     violations: [
       vio("s1", "x.ts", "open"),
       ...["a", "b", "c", "d", "e"].map(f => vio("s2", `${f}.ts`, "resolved")), vio("s2", "f.ts", "open"),
@@ -54,4 +55,21 @@ it("live progress in the title; done when the scan is clear or a newer push repl
   expect(byId.a3).toMatchObject({ status: "resolved", progress: { open: 0, total: 1 } });
   // and the closures are stored, not just shown
   expect(rows("alerts").filter(a => a.status === "resolved").map(a => a.id).sort()).toEqual(["a1", "a3"]);
+});
+
+it("with \"Block HIGH\" off, only the files that block the merge count: the PR's alert closes with a HIGH file still open", async () => {
+  rows("organizations").push({ id: ORG, block_on_critical: true, block_on_high: false });
+  rows("violations").push({ id: "s2-crit", org_id: ORG, scan_id: "s2", file_path: "crit.ts", risk_score: "CRITICAL", status: "resolved" });
+  const res = await GET(new NextRequest(new URL("/api/alerts?limit=200", "https://app.example")));
+  const { alerts } = await res.json() as { alerts: Array<{ id: string; status: string; progress?: { open: number; total: number } }> };
+  expect(alerts.find(a => a.id === "a2")).toMatchObject({ status: "resolved", progress: { open: 0, total: 1 } });
+  // the HIGH file itself is still open to review
+  expect(rows("violations").find(v => v.id === "s2-f.ts")?.status).toBe("open");
+});
+
+it("with it on, the HIGH files count as before", async () => {
+  rows("organizations").push({ id: ORG, block_on_critical: true, block_on_high: true });
+  rows("violations").push({ id: "s2-crit", org_id: ORG, scan_id: "s2", file_path: "crit.ts", risk_score: "CRITICAL", status: "resolved" });
+  const { alerts } = await (await GET(new NextRequest(new URL("/api/alerts?limit=200", "https://app.example")))).json() as { alerts: Array<{ id: string; status: string; progress?: { open: number; total: number } }> };
+  expect(alerts.find(a => a.id === "a2")).toMatchObject({ status: "firing", progress: { open: 1, total: 7 } });
 });

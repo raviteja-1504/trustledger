@@ -68,6 +68,36 @@ it("another PR's different version of the file keeps its violation, alert and bl
   expect((updateCheckRun as jest.Mock).mock.calls.map(c => c[3])).not.toContain(13);
 });
 
+describe("the org's merge gate decides what still holds a scan (lib/mergeGate.ts)", () => {
+  const waitingOnHigh = (blockHigh: boolean | null) => {
+    const db = seed();
+    rows(db, "violations").push({ id: "v-other", org_id: ORG, scan_id: "s2", file_path: "db.ts", risk_score: "HIGH", status: "open" });
+    (db.client.from("organizations") as unknown as { rows: Record<string, unknown>[] }).rows.push({ id: ORG, block_on_critical: true, block_on_high: blockHigh });
+    return db;
+  };
+  const attestAuth = (db: ReturnType<typeof fakeSupabase>) => performAttestation(db.client as never, {
+    org_id: ORG, user_id: "u1", scan_id: "s1", file_path: "auth.ts", reviewer_email: "rev@a.test", permissions: ALL_PERMISSIONS,
+  });
+
+  it("with \"Block HIGH\" off, an open HIGH file doesn't hold the check or alert -- and stays open to review", async () => {
+    const db = waitingOnHigh(false);
+    await attestAuth(db);
+    expect(rows(db, "alerts").find(a => a.scan_id === "s2")?.status).toBe("resolved");
+    expect((updateCheckRun as jest.Mock).mock.calls.map(c => c[3]).sort()).toEqual([11, 12]);
+    expect(rows(db, "violations").find(v => v.id === "v-other")?.status).toBe("open");
+  });
+
+  it("with it on (or not set), the HIGH file still holds them", async () => {
+    for (const setting of [true, null]) {
+      jest.clearAllMocks();
+      const db = waitingOnHigh(setting);
+      await attestAuth(db);
+      expect(rows(db, "alerts").find(a => a.scan_id === "s2")?.status).toBe("firing");
+      expect((updateCheckRun as jest.Mock).mock.calls.map(c => c[3])).toEqual([11]);
+    }
+  });
+});
+
 it("a scan still waiting on another file keeps its alert and check", async () => {
   const db = seed();
   rows(db, "violations").push({ id: "v-other", org_id: ORG, scan_id: "s2", file_path: "db.ts", risk_score: "HIGH", status: "open" });

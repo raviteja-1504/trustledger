@@ -86,6 +86,18 @@ export function savePolicy(p: OrgPolicy): void {
   }
 }
 
+/** The org's server-side settings (/api/settings) win over this browser's copy: they are what the GitHub check
+ *  enforces (lib/mergeGate.ts), so a page judging a PR must use them too. Missing fields keep the local value. */
+export function withOrgSettings(local: OrgPolicy, org: { block_on_critical?: boolean | null; block_on_high?: boolean | null; ai_threshold?: number | null } | null | undefined): OrgPolicy {
+  if (!org) return local;
+  return {
+    ...local,
+    ...(typeof org.block_on_critical === "boolean" ? { block_on_critical: org.block_on_critical } : {}),
+    ...(typeof org.block_on_high === "boolean" ? { block_on_high: org.block_on_high } : {}),
+    ...(typeof org.ai_threshold === "number" ? { ai_flag_threshold: org.ai_threshold } : {}),
+  };
+}
+
 export interface PolicyViolation {
   file: string;
   reason: string;
@@ -103,6 +115,8 @@ export interface PolicyResult {
   pass: boolean;
   violations: PolicyViolation[];
   gated: boolean; // would actually block merge
+  /** How many of `violations` block the merge; the rest are to review (e.g. AI content over the threshold). */
+  blocking: number;
 }
 
 interface FileIndicator {
@@ -140,6 +154,19 @@ function explainedReason(fallback: string, ind: FileIndicator | undefined): Pick
     reason: suffix ? `${parts.join(" — ")} (${suffix})` : parts.join(" — "),
     indicator_id: ind.id, cwe: ind.cwe, confidence: ind.confidence,
   };
+}
+
+/** A share just over the threshold rounds to the threshold itself ("80% exceeds 80%"): show as many decimals
+ *  (up to two) as it takes to read above it (80.4%, 80.01%), whole percents otherwise. Rounded down, so the
+ *  text never overstates the share. */
+function aiPctText(share: number, threshold: number): string {
+  const limit = threshold * 100;
+  for (const digits of [0, 1, 2]) {
+    const f = 10 ** digits;
+    const shown = Math.floor(share * 100 * f + 1e-9) / f;
+    if (shown > limit || digits === 2) return shown.toFixed(digits);
+  }
+  return (share * 100).toFixed(2);
 }
 
 export function evaluatePolicy(
@@ -204,18 +231,18 @@ export function evaluatePolicy(
       if (!already) {
         violations.push({
           file: f.file_path,
-          reason: `AI content ${(f.ai_percentage * 100).toFixed(0)}% exceeds org threshold of ${(policy.ai_flag_threshold * 100).toFixed(0)}%`,
+          reason: `AI content ${aiPctText(f.ai_percentage, policy.ai_flag_threshold)}% exceeds org threshold of ${(policy.ai_flag_threshold * 100).toFixed(0)}%`,
           severity: "medium",
         });
       }
     }
   }
 
-  const gated = violations.some(v =>
+  const blocks = (v: PolicyViolation) =>
     (v.severity === "critical" && policy.block_on_critical) ||
     (v.severity === "high"     && policy.block_on_high)     ||
-    (v.severity === "medium"   && policy.block_on_medium)
-  );
+    (v.severity === "medium"   && policy.block_on_medium);
+  const blocking = violations.filter(blocks).length;
 
-  return { pass: violations.length === 0, violations, gated };
+  return { pass: violations.length === 0, violations, gated: blocking > 0, blocking };
 }

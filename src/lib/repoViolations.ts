@@ -21,7 +21,8 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DB = any;
 
-export async function hasOpenRepoViolations(db: DB, orgId: string, repoFullName: string): Promise<boolean> {
+/** `risks`: only violations of these risk levels count (the org's merge gate, lib/mergeGate.ts); default all. */
+export async function hasOpenRepoViolations(db: DB, orgId: string, repoFullName: string, risks?: readonly string[]): Promise<boolean> {
   const { data: repoScans } = await db
     .from("scans")
     .select("id, created_at")
@@ -37,21 +38,22 @@ export async function hasOpenRepoViolations(db: DB, orgId: string, repoFullName:
 
   const { data: violations } = await db
     .from("violations")
-    .select("file_path, status, scan_id")
+    .select("file_path, status, scan_id, risk_score")
     .eq("org_id", orgId)
     .in("scan_id", scanIds);
 
-  const latestByFile = new Map<string, { status: string; scan_id: string }>();
-  for (const v of (violations ?? []) as { file_path: string; status: string; scan_id: string }[]) {
+  const latestByFile = new Map<string, { status: string; scan_id: string; risk_score?: string }>();
+  for (const v of (violations ?? []) as { file_path: string; status: string; scan_id: string; risk_score?: string }[]) {
     const created  = scanCreatedAt.get(v.scan_id) ?? "";
     const existing = latestByFile.get(v.file_path);
     const existingCreated = existing ? (scanCreatedAt.get(existing.scan_id) ?? "") : "";
     if (!existing || created > existingCreated) {
-      latestByFile.set(v.file_path, { status: v.status, scan_id: v.scan_id });
+      latestByFile.set(v.file_path, { status: v.status, scan_id: v.scan_id, risk_score: v.risk_score });
     }
   }
 
   for (const v of latestByFile.values()) {
+    if (risks && !risks.includes(String(v.risk_score ?? "").toUpperCase())) continue;
     if (v.status !== "resolved") return true;
   }
   return false;

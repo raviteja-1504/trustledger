@@ -60,10 +60,11 @@ describe("Trust Record", () => {
   const aiSignal: FileIndicator = { id: "ai-style-uniformity", label: "Uniform style", severity: "low" };
   const input: TrustRecordInput = {
     org_name: "Acme",
-    scan: { id: "s1", repo: "acme/shop", pr_number: 7, commit_sha: "abc1234def", created_at: "2026-09-30T10:00:00Z", overall_risk: "CRITICAL", total_ai_percentage: 41.26, triggered_by: "webhook", duration_ms: 3200 },
+    scan: { id: "s1", repo: "acme/shop", pr_number: 7, commit_sha: "abc1234def", created_at: "2026-09-30T10:00:00Z", overall_risk: "CRITICAL", total_ai_percentage: 0.4126, triggered_by: "webhook", duration_ms: 3200 },
     engine_version: "6.5",
     health: { status: "complete", engine_version: "6.5", gap_counts: {}, engines_unavailable: [], gaps: [] },
-    files: [{ file_path: "src/r.ts", risk_score: "CRITICAL", ai_percentage: 41.26, indicators: [redirect, aiSignal, sqli] }],
+    // AI shares are stored as fractions (scanner / scans.total_ai_percentage)
+    files: [{ file_path: "src/r.ts", risk_score: "CRITICAL", ai_percentage: 0.987, indicators: [redirect, aiSignal, sqli] }],
     attestations: [{ file_path: "src/r.ts", reviewer_email: "lead@acme.dev", reviewer_github: "lead", payload_hash: "h", created_at: "2026-09-30T11:00:00Z" }],
     triage: new Map([["fp2", { status: "accepted", reason: "gateway allow-list", expires_at: null, set_by_email: "lead@acme.dev", set_at: "2026-09-30T09:00:00Z" }]]),
     open_blocking_violations: 1,
@@ -76,7 +77,9 @@ describe("Trust Record", () => {
     expect(r.findings.map(f => f.rule)).toEqual(["sql-injection", "open-redirect"]);   // AI signal excluded
     expect(r.findings[0]).toMatchObject({ confidence: "confirmed", analysis: "data-flow", introduced_by_pr: true, decision: null });
     expect(r.findings[1].decision).toMatchObject({ status: "accepted", reason: "gateway allow-list" });
+    // stated as a percentage: 0.4126 -> 41.3, not 0.4 (the record used to round the raw fraction)
     expect(r.verdict).toEqual({ overall_risk: "CRITICAL", ai_share_percent: 41.3, merge_gate: "blocked", open_blocking_violations: 1 });
+    expect(r.files).toEqual([{ path: "src/r.ts", risk: "CRITICAL", ai_share_percent: 98.7 }]);
     expect(r.summary).toMatchObject({ findings: 2, critical: 1, introduced_by_pr: 1, accepted_or_false_positive: 1, files_attested: 1 });
   });
 

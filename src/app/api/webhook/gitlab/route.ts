@@ -26,6 +26,7 @@ import { cacheDel, cacheKeys, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import crypto from "crypto";
 import { logger } from "@/lib/logger";
+import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
@@ -257,11 +258,12 @@ export async function POST(req: NextRequest) {
 
     // Post status back to GitLab
     if (gitlabToken && headSha) {
-      const blocked   = result.overall_risk === "CRITICAL" || result.overall_risk === "HIGH";
-      const critFiles = result.files.filter(f => f.risk_score === "CRITICAL").length;
-      const highFiles = result.files.filter(f => f.risk_score === "HIGH").length;
+      // The org's merge gate, see lib/mergeGate.ts: HIGH files block only while "Block HIGH" is on.
+      const gate      = await loadGate(db, orgId);
+      const blocking  = result.files.filter(f => blocksMerge(f.risk_score, gate)).length;
+      const blocked   = blocking > 0;
       const desc      = blocked
-        ? `Blocked: ${critFiles + highFiles} file(s) need attestation (${result.overall_risk})`
+        ? `Blocked: ${blocking} file(s) need attestation (${result.overall_risk})`
         : `Passed: ${result.files.length} files · ${(result.total_ai_percentage * 100).toFixed(0)}% AI`;
 
       await postGitLabStatus(

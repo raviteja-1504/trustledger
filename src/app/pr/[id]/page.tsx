@@ -11,7 +11,8 @@ import CodeViewer from "@/components/CodeViewer";
 import type { FileNavigation } from "@/components/InlineFinding";
 import { crossFileMarks, type CrossFileMark } from "@/lib/dataFlowEvidence";
 import { api } from "@/lib/api";
-import { loadPolicy, evaluatePolicy, type OrgPolicy, type PolicyResult } from "@/lib/policy";
+import { loadPolicy, evaluatePolicy, withOrgSettings, type OrgPolicy, type PolicyResult } from "@/lib/policy";
+import { DEFAULT_GATE, blocksMerge } from "@/lib/mergeGate";
 import type { FileResult, ScanResult, RiskLevel } from "@/types";
 import { useAttestationsRealtime } from "@/lib/realtime";
 import { authedFetch } from "@/lib/useRealData";
@@ -983,7 +984,11 @@ function PolicyGate({ result, policy }: { result: PolicyResult; policy: OrgPolic
             <span className="mx-2 text-gray-300">·</span>
             {result.pass
               ? "All requirements met — this PR is clear to merge"
-              : `${result.violations.length} violation${result.violations.length !== 1 ? "s" : ""} — resolve before merging`}
+              : result.blocking === result.violations.length
+                ? `${result.blocking} violation${result.blocking !== 1 ? "s" : ""} — resolve before merging`
+                : result.blocking > 0
+                  ? `${result.blocking} block the merge · ${result.violations.length - result.blocking} more to review`
+                  : `${result.violations.length} to review — none block the merge`}
           </p>
         </div>
 
@@ -1125,6 +1130,12 @@ function PRDetailContent() {
     if (resolvedEmail)  localStorage.setItem("tl_reviewer_email",  resolvedEmail);
     if (resolvedGithub || signedIn) localStorage.setItem("tl_reviewer_github", resolvedGithub);
     setPolicy(loadPolicy());
+    // The org's settings decide what blocks the merge (the GitHub check uses them), not this browser's copy.
+    if (profile?.org_id) {
+      authedFetch<{ org?: { block_on_critical?: boolean; block_on_high?: boolean; ai_threshold?: number } }>("/api/settings")
+        .then(res => setPolicy(withOrgSettings(loadPolicy(), res.org)))
+        .catch(() => {});
+    }
     // Re-sync attestedSet in case localStorage was updated while away
     try {
       const statuses = readLocalStatuses();
@@ -1619,6 +1630,8 @@ function PRDetailContent() {
   const highCount   = highFiles.length;
   const highAttested = highFiles.filter(f => f.attested || attestedSet.has(f.file_path)).length;
   const unattested   = highFiles.filter(f => !f.attested && !attestedSet.has(f.file_path)).length;
+  // Of those, the ones the org's merge gate blocks on (CRITICAL, and HIGH unless "Block HIGH" is off).
+  const unattestedBlocking = highFiles.filter(f => !f.attested && !attestedSet.has(f.file_path) && blocksMerge(f.risk_score, policy ?? DEFAULT_GATE)).length;
   const attestableNow = highFiles.filter(f => !f.attested && !attestedSet.has(f.file_path) && canAttestRisk(f.risk_score)).length;
   const allClear     = highCount > 0 && unattested === 0;
 
@@ -1911,7 +1924,11 @@ function PRDetailContent() {
                 {unattested} file{unattested !== 1 ? "s" : ""} pending attestation
               </p>
               <p className="text-xs text-rose-600 mt-0.5">
-                HIGH and CRITICAL files require reviewer sign-off before deployment
+                {unattestedBlocking === unattested
+                  ? "HIGH and CRITICAL files require reviewer sign-off before merging"
+                  : unattestedBlocking > 0
+                    ? `${unattestedBlocking} of them block the merge under your policy; the other ${unattested - unattestedBlocking} need review but don't block`
+                    : "They need review, but none block the merge under your policy"}
                 {attestableNow < unattested && (attestableNow === 0
                   ? " — your role can't sign these off; a security reviewer or admin needs to."
                   : ` — you can sign off ${attestableNow} of them.`)}

@@ -11,6 +11,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { blockingRisks, countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { attestPermissionFor, type Permissions } from "@/lib/permissions";
 
@@ -203,8 +204,10 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     .eq("file_path", file_path)
     .in("scan_id", covered);
 
-  // Each covered scan whose CRITICAL/HIGH files are now all signed off: its PR alert is done and its GitHub check
-  // unblocks. Newest first, bounded -- a file unchanged across many pushes is covered by every one of them.
+  // Each covered scan whose blocking files (the org's merge gate: CRITICAL, and HIGH unless the org turned that
+  // off) are now all signed off: its PR alert is done and its GitHub check unblocks. Newest first, bounded -- a
+  // file unchanged across many pushes is covered by every one of them.
+  const gate = await loadGate(db, org_id);
   const { data: coveredScans } = await db
     .from("scans")
     .select("id, check_run_id, installation_id, created_at")
@@ -213,14 +216,7 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     .order("created_at", { ascending: false })
     .limit(20);
   for (const s of (coveredScans ?? []) as { id: string; check_run_id: number | null; installation_id: number | null }[]) {
-    const { count: remaining } = await db
-      .from("violations")
-      .select("id", { count: "exact", head: true })
-      .eq("org_id", org_id)
-      .eq("scan_id", s.id)
-      .neq("status", "resolved")
-      .in("risk_score", ["CRITICAL", "HIGH"]);
-    if (remaining) continue;
+    if (await countOpenBlocking(db, s.id, gate, org_id)) continue;
     await db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
       .eq("org_id", org_id)
@@ -233,7 +229,7 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
   }
 
   // And every policy alert of the repo once nothing in it is open (alerts of superseded scans included).
-  if (!(await hasOpenRepoViolations(db, org_id, scan.repo_full_name))) {
+  if (!(await hasOpenRepoViolations(db, org_id, scan.repo_full_name, blockingRisks(gate)))) {
     await db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
       .eq("org_id", org_id)

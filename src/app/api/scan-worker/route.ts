@@ -41,6 +41,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys, invalidateSecretsCache, invalidateViolationsCache } from "@/lib/cache";
 import { isScannablePath as isScannable } from "@/lib/scannableFiles";
 import { hasOpenRepoViolations } from "@/lib/repoViolations";
+import { blockingRisks, blocksMerge, countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { inheritedViolations } from "@/lib/inheritedViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
@@ -176,14 +177,9 @@ async function handle(req: NextRequest) {
     if (checkRunId) {
       try {
         const { token: retryToken } = await getInstallationToken(installationId);
-        const { count: openViolations } = await db
-          .from("violations")
-          .select("id", { count: "exact", head: true })
-          .eq("scan_id", existing.id)
-          .neq("status", "resolved")
-          .in("risk_score", ["CRITICAL", "HIGH"]);
-        const retryConcl: "success" | "action_required" =
-          (openViolations ?? 0) > 0 ? "action_required" : "success";
+        // (no org can't happen here -- `existing` was found by org -- but if it did, stay blocked)
+        const openViolations = orgId ? await countOpenBlocking(db, existing.id, await loadGate(db, orgId), orgId) : 1;
+        const retryConcl: "success" | "action_required" = openViolations > 0 ? "action_required" : "success";
         await updateCheckRun(retryToken, owner, repoName, checkRunId, {
           name: "TrustLedger AI Governance", status: "completed",
           conclusion: retryConcl,
@@ -603,8 +599,11 @@ async function handle(req: NextRequest) {
             .in("status", ["firing", "acknowledged", "snoozed"])
             .limit(1);
 
-          if (!existingAlert || existingAlert.length === 0) {
-            const blocking = [...violationFiles, ...carriedViolations];
+          // The alert says "merge blocked": only the files the org's gate blocks on count, and with none
+          // (HIGH files under a gate that doesn't block HIGH) there is no alert -- they're still listed to review.
+          const gate = await loadGate(db, orgId);
+          const blocking = [...violationFiles, ...carriedViolations].filter(f => blocksMerge(f.risk_score, gate));
+          if ((!existingAlert || existingAlert.length === 0) && blocking.length > 0) {
             const critCount = blocking.filter(f => f.risk_score === "CRITICAL").length;
             const highCount = blocking.filter(f => f.risk_score === "HIGH").length;
             const severity  = critCount > 0 ? "P1" : "P2";
@@ -718,7 +717,7 @@ async function handle(req: NextRequest) {
               // (check repo-wide, not just this scan, because multiple scans of the
               // same PR each create their own alert). Dedup-aware: see
               // lib/repoViolations.ts for why a naive row count is wrong here.
-              if (!(await hasOpenRepoViolations(db, orgId, repoFullName))) {
+              if (!(await hasOpenRepoViolations(db, orgId, repoFullName, blockingRisks(await loadGate(db, orgId))))) {
                 await db.from("alerts")
                   .update({ status: "resolved", resolved_at: now })
                   .eq("org_id", orgId)
@@ -828,19 +827,15 @@ async function handle(req: NextRequest) {
 
     if (checkRunId) {
       let conclusion: "success" | "action_required" | "neutral" = "success";
+      // The org's merge gate: HIGH files block only while "Block HIGH" is on (lib/mergeGate.ts).
+      const gate = await loadGate(db, orgId);
       if (orgId) {
-        const { count } = await db
-          .from("violations")
-          .select("id", { count: "exact", head: true })
-          .eq("scan_id", result.scan_id)
-          .neq("status", "resolved")
-          .in("risk_score", ["CRITICAL", "HIGH"]);
-        if ((count ?? 0) > 0) conclusion = "action_required";
+        if (await countOpenBlocking(db, result.scan_id, gate, orgId)) conclusion = "action_required";
       } else {
-        const { conclusion: c } = buildCheckSummary(mergedResult);
+        const { conclusion: c } = buildCheckSummary(mergedResult, gate);
         conclusion = c === "action_required" ? "action_required" : c === "neutral" ? "neutral" : "success";
       }
-      const { title, summary: baseSummary } = buildCheckSummary(mergedResult);
+      const { title, summary: baseSummary } = buildCheckSummary(mergedResult, gate);
       // Regression check after every scan: new security findings since this PR's previous scan (securityRegression.ts).
       let summary = baseSummary;
       if (orgId) {

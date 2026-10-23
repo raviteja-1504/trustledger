@@ -4,6 +4,7 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { getInstallationToken, updateCheckRun } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { blockingRisks, loadGate } from "@/lib/mergeGate";
 
 /**
  * POST /api/sync-check-run
@@ -158,27 +159,32 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── Count CRITICAL/HIGH files and their attestations ─────────────────────
-  const { count: totalHighCrit } = await db
+  // ── Count the files the org's merge gate blocks on, and their attestations ──
+  // (CRITICAL, and HIGH unless "Block HIGH" is off -- lib/mergeGate.ts). Other HIGH files still need review;
+  // they just don't hold the check.
+  const risks = blockingRisks(await loadGate(db, org_id));
+  const { count: totalBlocking } = risks.length === 0 ? { count: 0 } : await db
     .from("scan_files")
     .select("id", { count: "exact", head: true })
+    .eq("org_id", org_id)
     .eq("scan_id", scan.id)
-    .in("risk_score", ["CRITICAL", "HIGH"]);
+    .in("risk_score", risks);
 
-  const { count: attestedCount } = await db
+  const { count: attestedCount } = risks.length === 0 ? { count: 0 } : await db
     .from("attestations")
     .select("id", { count: "exact", head: true })
+    .eq("org_id", org_id)
     .eq("scan_id", scan.id)
-    .in("risk_score", ["CRITICAL", "HIGH"]);
+    .in("risk_score", risks);
 
-  const total    = totalHighCrit ?? 0;
+  const total    = totalBlocking ?? 0;
   const attested = attestedCount ?? 0;
 
   if (total > 0 && attested < total && !body.force) {
     return NextResponse.json({
       synced:   false,
       reason:   "files_pending",
-      message:  `${total - attested} of ${total} HIGH/CRITICAL files still need attestation. Pass force:true to override.`,
+      message:  `${total - attested} of ${total} ${risks.join("/")} files still need attestation. Pass force:true to override.`,
       attested,
       total,
       scan_id:  scan.id,
@@ -197,20 +203,23 @@ export async function POST(req: NextRequest) {
       output: {
         title:   conclusion === "success"
           ? "TrustLedger: All required files attested"
-          : "TrustLedger: No CRITICAL/HIGH files detected",
+          : "TrustLedger: No files block this merge",
         summary: conclusion === "success"
-          ? "All CRITICAL and HIGH risk files in this PR have been reviewed and attested."
-          : "No CRITICAL or HIGH risk AI-generated files were detected in this PR.",
+          ? `All ${risks.join(" and ")} risk files in this PR have been reviewed and attested.`
+          : `No ${risks.length ? risks.join(" or ") : "blocking"} risk files in this PR under this organization's merge policy.`,
       },
     });
 
-    // Resolve any open violations for this scan
-    await db
-      .from("violations")
-      .update({ status: "resolved", resolved_at: new Date().toISOString() })
-      .eq("scan_id", scan.id)
-      .neq("status", "resolved")
-      .in("risk_score", ["CRITICAL", "HIGH"]);
+    // Resolve this scan's open blocking violations -- only those: a HIGH file the gate doesn't block on was
+    // never signed off, so it stays open to review.
+    if (risks.length > 0) {
+      await db
+        .from("violations")
+        .update({ status: "resolved", resolved_at: new Date().toISOString() })
+        .eq("scan_id", scan.id)
+        .neq("status", "resolved")
+        .in("risk_score", risks);
+    }
 
     // Clear any previously-recorded sync failure now that this manual
     // retry succeeded — see attestation.ts's syncCheckRunToSuccess for
