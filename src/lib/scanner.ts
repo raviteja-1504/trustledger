@@ -447,6 +447,9 @@ function looksLikeRealSecret(value: string): boolean {
   // `creation_token = "${var.project_name}-sqlite-data"` names a resource; the secret, if any, is the variable.
   if (/\$\{[^}]{0,200}\}|\{\{[^}]{0,200}\}\}/.test(value)) return false;
   if (DUMMY_SECRET_VALUES_RE.test(value)) return false;      // known placeholder values
+  // An environment-variable NAME used as a placeholder (`keystorePassword="TLS_KEYSTORE_PASS"`, replaced by sed
+  // at build time) is not a password: upper-case words joined by underscores.
+  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return false;
   if (/^(.)\1{5,}$/.test(value)) return false;               // repeated-char filler (aaaaaa, xxxxxx)
   const hasUpper  = /[A-Z]/.test(value);
   const hasLower  = /[a-z]/.test(value);
@@ -3428,12 +3431,24 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// The URL built on line `i` is connected to: on the same line (`new URL(x).openStream()`), or through the variable
+// it was assigned to within the next 15 lines (`u.openConnection()`, `fetch(u)`).
+const NEW_URL_SINK_RE = /new\s+URL\s*\(\s*\w+/;
+const URL_FETCH_CALL_RE = /\.\s*(?:openConnection|openStream|getContent)\s*\(/;
+function urlIsFetched(lines: string[], i: number): boolean {
+  if (URL_FETCH_CALL_RE.test(lines[i]) || /\b(?:fetch|axios|got|request)\s*\(\s*new\s+URL/.test(lines[i])) return true;
+  const v = /(\w+)\s*=\s*new\s+URL\s*\(/.exec(lines[i])?.[1];
+  if (!v) return false;
+  const use = new RegExp(`\\b${v}\\s*\\.\\s*(?:openConnection|openStream|getContent)\\s*\\(|\\b(?:fetch|axios(?:\\.\\w+)?|got|request|https?\\.(?:get|request))\\s*\\(\\s*${v}\\b`);
+  return lines.slice(i + 1, i + 16).some(l => use.test(l));
+}
+
 // Enhanced SSRF with multi-line taint
 function findSSRFTainted(lines: string[]): ScanIndicator[] {
   const HTTP_SINK_RE = [
     /\b(?:fetch|axios|got|needle|superagent|request)\s*\(\s*\w+/i,
     /https?\.(?:get|request)\s*\(\s*\w+/,
-    /new\s+URL\s*\(\s*\w+/,
+    NEW_URL_SINK_RE,
   ];
   const found: ScanIndicator[] = [];
   const seen = new Set<number>();
@@ -3444,6 +3459,8 @@ function findSSRFTainted(lines: string[]): ScanIndicator[] {
       if (!re.test(lines[i])) continue;
       // Skip if already caught by direct SSRF patterns
       if (SSRF_RE.some(r => r.test(lines[i]))) continue;
+      // `new URL(x)` only parses: SecurityShepherd checks `new URL(input).getHost()` and never connects.
+      if (re === NEW_URL_SINK_RE && !urlIsFetched(lines, i)) continue;
       if (hasTaintNearby(lines, i, 10)) {
         seen.add(i);
         found.push({ id:"ssrf", label:"SSRF via Taint Propagation", severity:"critical", line:i+1,
@@ -3594,6 +3611,10 @@ function withoutStringLiterals(line: string): string {
   return line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, m => m[0] + m[0]);
 }
 
+// new File(Database.class.getResource("/challenges/x.properties").getFile()) / new File("/etc/app.conf")
+const CONSTANT_FILE_ARG_RE =
+  /new\s+File\s*\(\s*(?:(?:\w+\.class|getClass\s*\(\s*\))(?:\s*\.\s*getClassLoader\s*\(\s*\))?\s*\.\s*getResource\s*\(\s*"[^"]*"\s*\)[^,()]*(?:\(\s*\))?|"[^"]*")\s*\)/;
+
 function findPathTraversalTainted(lines: string[]): ScanIndicator[] {
   const FS_SINK_RE = [
     /Paths\s*\.\s*get\s*\(/,
@@ -3609,6 +3630,8 @@ function findPathTraversalTainted(lines: string[]): ScanIndicator[] {
       // the call itself, not text that mentions it (WebGoat checks an answer for `"new File(\"x.xml\")"`)
       if (!re.test(withoutStringLiterals(lines[i]))) continue;
       if (PATH_TRAVERSAL_RE.some(r => r.test(lines[i]))) continue;
+      // A fixed path: a classpath resource by name, or a plain literal -- input nearby doesn't reach it.
+      if (CONSTANT_FILE_ARG_RE.test(lines[i])) continue;
       if (hasTaintNearby(lines, i, 10)) {
         seen.add(i);
         found.push({ id:"path-traversal", label:"Path Traversal", severity:"critical", line:i+1,

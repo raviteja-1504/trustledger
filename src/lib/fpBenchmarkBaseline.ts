@@ -104,8 +104,6 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "new URL(req.url).origin only builds the SCIM base URL shown back to the admin who made the request (display text). No outbound request is made with it." },
   { file: "src/app/api/sso/domains/route.ts", id: "ssrf", lineHash: "51a3fb808ac7", line: 114, severity: "critical",
     reason: "new URL(req.url).searchParams.get(\"domain\") reads the DELETE request's own query string; the value is normalised to a bare domain name and only filters an org-scoped sso_domains delete. No outbound request is made with it." },
-  { file: "src/lib/supabaseSso.ts", id: "ssrf", lineHash: "84ddcbb2b387", line: 127, severity: "critical",
-    reason: "new URL(input.metadata_url) only parses the IdP metadata URL to check it is https before it is handed to the Supabase Management API; TrustLedger never fetches it (Supabase Auth does, on its own infrastructure). The only outbound call in this module goes to the fixed api.supabase.com host." },
   { file: "src/app/api/custom-roles/route.ts", id: "ssrf", lineHash: "44ed02815ff5", line: 128, severity: "critical",
     reason: "new URL(req.url).searchParams.get(\"id\") reads the DELETE request's own query string; the id only filters a custom_roles query (scoped to the caller's org). The route makes no outbound request." },
   { file: "src/app/api/alerts/route.ts", id: "ssrf", lineHash: "5ae001042f4e", line: 60, severity: "critical",

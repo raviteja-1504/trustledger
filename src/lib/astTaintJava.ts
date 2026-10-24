@@ -1176,9 +1176,13 @@ function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
 // An undeclared receiver (a chained `conn.createStatement().execute(q)`, an injected field) still counts.
 const SQL_RECEIVER_TYPE_RE = /Statement|Connection|Jdbc|EntityManager|Session|Query|DSLContext|DataSource/;
 const XPATH_RECEIVER_TYPE_RE = /XPath/;
+// DirContext / InitialDirContext / LdapContext / Spring's LdapTemplate / UnboundID's LDAPConnection
+const LDAP_RECEIVER_TYPE_RE = /DirContext|Ldap|LDAP/;
 function receiverMayBe(info: CallInfo, ctx: EngineCtx, typeRe: RegExp): boolean {
   if (info.selfCall) return false;
-  const type = info.receiverName ? ctx.varTypes.get(info.receiverName) : undefined;
+  const recv = info.receiverName;
+  // A static call names its class: `FindXSS.search(term)` is FindXSS's own search, not an LDAP query.
+  const type = recv ? (ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined)) : undefined;
   return type === undefined || typeRe.test(type);
 }
 
@@ -1254,7 +1258,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fire("path-traversal");
   } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
     fireArgs("path-traversal", [0]);
-  } else if (tail === "search") {
+  } else if (tail === "search" && receiverMayBe(info, ctx, LDAP_RECEIVER_TYPE_RE)) {
     // DirContext.search(name, filter[, filterArgs | controls]): the filter only -- filterArgs are the bound
     // ({0}) form, the safe way to put values in a filter.
     fireArgs("ldap-injection", args.length >= 2 ? [1] : [0]);
