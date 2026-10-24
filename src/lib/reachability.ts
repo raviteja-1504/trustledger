@@ -201,6 +201,10 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0.56, I:0.22, A:0.22, cwe:"CWE-611",
   },
+  "trust-boundary": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0, cwe:"CWE-501",
+  },
   "mass-assignment": {
     AV:"NETWORK", AC:"LOW", PR:"LOW",  UI:"NONE", S:"UNCHANGED",
     C:0.22, I:0.56, A:0, cwe:"CWE-915",

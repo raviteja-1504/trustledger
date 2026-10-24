@@ -76,7 +76,7 @@ export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti"
   | "xss" | "header-injection" | "nosql-injection" | "ldap-injection" | "xpath-injection" | "redos" | "eval-exec"
   | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check"
-  | "argument-injection" | "xxe";
+  | "argument-injection" | "xxe" | "trust-boundary";
 
 export interface AstTaintPyFinding {
   id:         AstTaintPyId;
@@ -220,7 +220,8 @@ export function findEnclosingFunctionNamePy(node: SyntaxNode): string {
 
 // ── Taint sources ─────────────────────────────────────────────────────────
 
-const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body"]);
+// ... plus the raw request line: query_string (bytes of everything after "?"), full_path, url
+const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body", "query_string", "full_path", "url"]);
 /** `request`, `req`, `request_obj`, `http_request`, ... -- a request object passed as a parameter is as attacker-controlled as the Flask global. */
 const REQUEST_NAME_RE = /^(?:\w+_)?(?:request|req)(?:_\w+)?$/i;
 const isRequestName = (name: string): boolean => REQUEST_NAME_RE.test(name);
@@ -285,10 +286,52 @@ function hasRequestParam(fn: SyntaxNode): boolean {
   return paramNamesOf(fn).some(isRequestName);
 }
 
+// Request containers whose VALUES are always strings (form/query/cookie/header fields, the raw request line):
+// one value read out of them -- `.get(...)`, `.getlist(...)`, `[...]` -- can't carry a query-operator object, so it
+// isn't NoSQL-capable. The container itself still is (`db.find(request.args.to_dict())` lets the attacker pick
+// `$where`), and JSON bodies (json / get_json / data) carry objects.
+const STRING_VALUED_SOURCES_PY = new Set(["args", "form", "values", "cookies", "headers", "query_string", "full_path", "url"]);
+// A cookie or header value already passed HTTP header parsing: it holds no CR/LF, so it can't split a header it is
+// copied into. (A query/form value can: %0d%0a decodes to a line break.)
+const HEADER_SAFE_SOURCES_PY = new Set(["cookies", "headers"]);
+
+/** The classes a single value read from a request container (see isStringRequestValuePy) can still exploit. */
+function stringRequestValueMaskPy(node: SyntaxNode): number {
+  const container = node.type === "call" ? attributeParts(node.childForFieldName("function")!).object : node.childForFieldName("value");
+  const attribute = container?.type === "attribute" ? attributeParts(container).attribute : null;
+  return ALL & ~classOf("nosql-injection") & (attribute && HEADER_SAFE_SOURCES_PY.has(attribute) ? ~classOf("header-injection") : ALL);
+}
+
+/** A single value read from a string-valued request container: `request.cookies.get(k)` / `request.args["k"]`. */
+function isStringRequestValuePy(node: SyntaxNode): boolean {
+  let container: SyntaxNode | null = null;
+  if (node.type === "call") {
+    const fn = node.childForFieldName("function");
+    if (fn?.type !== "attribute") return false;
+    const { object, attribute } = attributeParts(fn);
+    if (!["get", "getlist", "decode"].includes(attribute ?? "")) return false;
+    container = object;
+  } else if (node.type === "subscript") {
+    container = node.childForFieldName("value");
+  }
+  if (container?.type !== "attribute") return false;
+  const { object, attribute } = attributeParts(container);
+  return isRequestObjectPy(object) && !!attribute && STRING_VALUED_SOURCES_PY.has(attribute);
+}
+
+/** `request` / `req`, or a request held on the instance: `self.request` (a wrapper that stored the request). */
+function isRequestObjectPy(o: SyntaxNode | null): boolean {
+  if (!o) return false;
+  if (o.type === "identifier") return isRequestName(o.text);
+  if (o.type !== "attribute") return false;
+  const { object, attribute } = attributeParts(o);
+  return object?.type === "identifier" && object.text === "self" && !!attribute && isRequestName(attribute);
+}
+
 function isTaintSourceExprPy(node: SyntaxNode, inDjangoRequestFn: boolean): boolean {
   if (node.type === "attribute") {
     const { object, attribute } = attributeParts(node);
-    if (object?.type === "identifier" && isRequestName(object.text) && attribute && FLASK_ATTR_SOURCES.has(attribute)) {
+    if (isRequestObjectPy(object) && attribute && FLASK_ATTR_SOURCES.has(attribute)) {
       return true;
     }
     return object ? isTaintSourceExprPy(object, inDjangoRequestFn) : false;
@@ -297,7 +340,7 @@ function isTaintSourceExprPy(node: SyntaxNode, inDjangoRequestFn: boolean): bool
     const fn = node.childForFieldName("function");
     if (fn?.type === "attribute") {
       const { object, attribute } = attributeParts(fn);
-      if (object?.type === "identifier" && isRequestName(object.text) && attribute && FLASK_CALL_SOURCES.has(attribute)) {
+      if (isRequestObjectPy(object) && attribute && FLASK_CALL_SOURCES.has(attribute)) {
         return true;
       }
       // Django's dict-.get() convenience form: request.GET.get("x") /
@@ -604,13 +647,49 @@ const XSS_RESPONSES_PY = new Set(["Response", "flask.Response", "make_response",
 const PATH_FUNCS_PY = new Set([
   "send_file", "os.remove", "os.unlink", "os.rename", "os.listdir", "os.rmdir", "os.makedirs", "os.mkdir", "os.chmod",
   "shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", "shutil.rmtree", "shutil.copytree",
+  // open() under another name: codecs.open / io.open / the low-level os.open
+  "codecs.open", "io.open", "os.open",
+  // file-existence / metadata probes: an attacker-chosen path tells them what exists outside the intended directory
+  "os.path.exists", "os.path.isfile", "os.path.isdir", "os.path.getsize", "os.stat",
 ]);
+// pathlib.Path methods that touch the file system (the receiver is the path)
+const PATH_OBJECT_METHODS_PY = new Set([
+  "open", "read_text", "read_bytes", "write_text", "write_bytes", "unlink", "rmdir", "mkdir", "touch", "exists",
+  "is_file", "is_dir", "iterdir", "stat", "rename", "replace", "glob", "rglob", "readlink", "chmod",
+]);
+
+/** Is `n` (an identifier) bound, in its function, to a pathlib path: `Path(...)`, `base / x`, `.joinpath(...)`? */
+function isPathObjectPy(n: SyntaxNode | null, depth = 0): boolean {
+  if (!n || depth > 3) return false;
+  if (n.type === "parenthesized_expression") return isPathObjectPy(n.namedChildren[0] ?? null, depth + 1);
+  if (n.type === "call") {
+    const fn = n.childForFieldName("function");
+    const text = fn ? calleeTextPy(fn) : null;
+    return !!text && (/(?:^|\.)(?:Pure)?(?:Posix|Windows)?Path$/.test(text) || /\.(?:joinpath|with_name|with_suffix|resolve|absolute)$/.test(text));
+  }
+  if (n.type === "binary_operator") return n.childForFieldName("operator")?.text === "/" && isPathObjectPy(n.childForFieldName("left"), depth + 1);
+  if (n.type !== "identifier") return false;
+  let scope: SyntaxNode | null = n.parent;
+  while (scope && scope.type !== "function_definition" && scope.type !== "module") scope = scope.parent;
+  let found = false;
+  const visit = (c: SyntaxNode) => {
+    if (found || (c !== scope && c.type === "function_definition")) return;
+    if (c.type === "assignment" && c.childForFieldName("left")?.text === n.text && c.startIndex < n.startIndex) {
+      if (isPathObjectPy(c.childForFieldName("right"), depth + 1)) found = true;
+    }
+    for (const x of c.namedChildren) if (x) visit(x);
+  };
+  if (scope) visit(scope);
+  return found;
+}
 
 const TWO_PATH_FUNCS_PY = new Set(["rename", "copy", "copyfile", "copy2", "move", "copytree"]);
 
 /** xml.sax / xml.dom.pulldom / xml.dom.minidom / lxml.etree entry points that parse a document with a parser. */
 const XML_PARSE_TAILS_PY = new Set(["parseString", "parse", "fromstring", "XML", "iterparse"]);
-const SAX_EXTERNAL_ENTITIES_RE = /(?:feature_external_ges|feature_external_pes|["']http:\/\/xml\.org\/sax\/features\/external-(?:general|parameter)-entities["'])\s*,\s*True/;
+// The feature constant bare (`from xml.sax.handler import feature_external_ges`) or qualified
+// (`xml.sax.handler.feature_external_ges`, `handler.feature_external_ges`).
+const SAX_EXTERNAL_ENTITIES_RE = /(?:(?:[\w.]+\.)?feature_external_ges|(?:[\w.]+\.)?feature_external_pes|["']http:\/\/xml\.org\/sax\/features\/external-(?:general|parameter)-entities["'])\s*,\s*True/;
 
 /**
  * Does `parserName`, in the function (or module) enclosing `call`, have external entity resolution turned on?
@@ -695,6 +774,15 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   if (text === "os.path.join" || (resolvedModule === "os.path" && tail === "join")) {
     return { id: "path-traversal", sinkExpr: text, args: positional };
   }
+  // p.read_text() / p.exists() / ... on a pathlib path: the path is the receiver (`p = base / name`)
+  if (fnNode.type === "attribute" && PATH_OBJECT_METHODS_PY.has(tail)) {
+    const recv = attributeParts(fnNode).object;
+    if (recv && isPathObjectPy(recv)) return { id: "path-traversal", sinkExpr: text, args: [recv] };
+  }
+  // pathlib.Path(x): the path a later p.open()/read_text()/write_text()/unlink() acts on (like Java's new File(x))
+  if ((text === "pathlib.Path" || text === "pathlib.PurePath" || ((text === "Path" || text === "PurePath") && resolvedModule === "pathlib")) && first) {
+    return { id: "path-traversal", sinkExpr: text, args: positional };
+  }
   if (text === "open" || PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file"))) {
     // The path(s) only -- not the mode, permissions, mimetype or flags. rename/copy/move take two paths.
     const paths = TWO_PATH_FUNCS_PY.has(tail) ? positional.slice(0, 2) : positional.slice(0, 1);
@@ -742,7 +830,9 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   if (XSS_RESPONSES_PY.has(text) && !resolvedModule.startsWith("rest_framework")) {
     const mime = keywordArg(args, "mimetype") ?? keywordArg(args, "content_type");
     if (mime && isLiteralPy(mime) && !/html/i.test(mime.text)) return null;
-    return first ? { id: "xss", sinkExpr: text, args: [first] } : null;
+    // make_response((body, headers)) / make_response((body, status, headers)): only the body is HTML
+    const body = first?.type === "tuple" ? first.namedChildren[0] ?? null : first;
+    return body ? { id: "xss", sinkExpr: text, args: [body] } : null;
   }
   // response.headers.add/set(name, value)
   if (/\.headers\.(?:add|set|extend|update|setdefault)$/.test(text)) {
@@ -774,6 +864,14 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
   // XPath
   if (parts.length > 1 && tail === "xpath" && first) return { id: "xpath-injection", sinkExpr: text, args: [first] };
   if ((tail === "XPath" || tail === "XPathEvaluator") && first) return { id: "xpath-injection", sinkExpr: text, args: [first] };
+  // elementpath.select(root, path) / iter_select / Selector(path): the path expression
+  if ((parts[0] === "elementpath" || resolvedModule === "elementpath") && ["select", "iter_select"].includes(tail)) {
+    const path = positional[1] ?? keywordArgPy(args, ["path"]);
+    return path ? { id: "xpath-injection", sinkExpr: text, args: [path] } : null;
+  }
+  if ((parts[0] === "elementpath" || resolvedModule === "elementpath") && tail === "Selector" && first) {
+    return { id: "xpath-injection", sinkExpr: text, args: [first] };
+  }
   if (parts.length === 1 && /^(?:select_xpath|xpath_query|evaluate_xpath|run_xpath|xpath_search)$/i.test(tail) && first) {
     return { id: "xpath-injection", sinkExpr: text, args: [first] };
   }
@@ -886,7 +984,9 @@ function selfShift(callee: LocalFn | undefined, viaAttribute: boolean): number {
   const first = callee?.paramShapes[0]?.name;
   return viaAttribute && (first === "self" || first === "cls") ? 1 : 0;
 }
-const PY_MUTATING_METHODS = new Set(["append", "extend", "insert", "add", "update", "setdefault", "appendleft", "extendleft", "put"]);
+// ... and stores that hand the value back later: ConfigParser.set(section, key, v) -> .get(), StringIO/BytesIO
+// .write(v) -> .getvalue()/.read(), a cache's .set(k, v) -> .get(k).
+const PY_MUTATING_METHODS = new Set(["append", "extend", "insert", "add", "update", "setdefault", "appendleft", "extendleft", "put", "set", "write", "writelines"]);
 const PY_GLOBAL_LOOKUPS = new Set(["globals", "locals", "vars"]);
 
 /** Every identifier bound inside an assignment target / loop target pattern. */
@@ -998,22 +1098,335 @@ function isGlobalsLookupPy(n: SyntaxNode | null): boolean {
   return fn?.type === "identifier" && PY_GLOBAL_LOOKUPS.has(fn.text);
 }
 
+// ── Constant folding (branch pruning) ───────────────────────────────────────
+// `num = 106; bar = "safe" if 7 * 18 + num > 200 else param` always takes the first arm: a branch whose condition
+// is a compile-time constant is walked alone (or not at all). Literals, arithmetic, comparisons, string indexing,
+// and names assigned exactly once -- from a constant -- in the same function. Anything else is "unknown" and both
+// arms are walked as before.
+
+const NOT_CONST: unique symbol = Symbol("not-const");
+type ConstPy = number | string | boolean | null;
+type ConstResult = ConstPy | typeof NOT_CONST;
+
+function makeConstEvalPy() {
+  // function (or module) node id -> name -> its assignments' right-hand sides (null: rebound some other way)
+  const bindings = new Map<number, Map<string, Array<SyntaxNode | null>>>();
+  const bindingsOf = (scope: SyntaxNode) => {
+    let m = bindings.get(scope.id);
+    if (m) return m;
+    m = new Map();
+    const add = (name: string, rhs: SyntaxNode | null) => { const l = m!.get(name) ?? []; l.push(rhs); m!.set(name, l); };
+    const visit = (n: SyntaxNode) => {
+      if (n !== scope && (n.type === "function_definition" || n.type === "class_definition" || n.type === "lambda")) return;
+      if (n.type === "assignment") {
+        const l = n.childForFieldName("left");
+        if (l?.type === "identifier") add(l.text, n.childForFieldName("right"));
+        else for (const id of bindingIdentifiersPy(l)) add(id, null);
+      } else if (n.type === "augmented_assignment" || n.type === "for_statement" || n.type === "named_expression" ||
+                 n.type === "with_item" || n.type === "global_statement" || n.type === "nonlocal_statement") {
+        const target = n.childForFieldName("left") ?? n.childForFieldName("name") ?? n;
+        for (const id of bindingIdentifiersPy(target)) add(id, null);
+        if (n.type !== "for_statement") for (const c of n.namedChildren) if (c?.type === "identifier") add(c.text, null);
+      }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(scope);
+    if (scope.type === "function_definition") for (const p of paramNamesOf(scope)) add(p, null);
+    bindings.set(scope.id, m);
+    return m;
+  };
+  const scopeOf = (n: SyntaxNode): SyntaxNode | null => {
+    let cur: SyntaxNode | null = n.parent;
+    while (cur && cur.type !== "function_definition" && cur.type !== "module") cur = cur.parent;
+    return cur;
+  };
+
+  const evalNode = (n: SyntaxNode | null, depth: number): ConstResult => {
+    if (!n || depth > 8) return NOT_CONST;
+    switch (n.type) {
+      case "integer": { const v = Number(n.text.replace(/_/g, "")); return Number.isFinite(v) ? v : NOT_CONST; }
+      case "float": { const v = Number(n.text.replace(/_/g, "")); return Number.isFinite(v) ? v : NOT_CONST; }
+      case "true": return true;
+      case "false": return false;
+      case "none": return null;
+      case "string": return isLiteralPy(n) ? stringLiteralContentPy(n) : NOT_CONST;
+      case "parenthesized_expression": return evalNode(n.namedChildren[0] ?? null, depth + 1);
+      case "not_operator": { const v = evalNode(n.childForFieldName("argument"), depth + 1); return v === NOT_CONST ? v : !v; }
+      case "unary_operator": {
+        const v = evalNode(n.childForFieldName("argument"), depth + 1);
+        const op = n.childForFieldName("operator")?.text;
+        return typeof v === "number" ? (op === "-" ? -v : op === "+" ? v : NOT_CONST) : NOT_CONST;
+      }
+      case "binary_operator": {
+        const a = evalNode(n.childForFieldName("left"), depth + 1);
+        const b = evalNode(n.childForFieldName("right"), depth + 1);
+        const op = n.childForFieldName("operator")?.text;
+        if (typeof a === "number" && typeof b === "number") {
+          switch (op) {
+            case "+": return a + b; case "-": return a - b; case "*": return a * b;
+            case "//": return b === 0 ? NOT_CONST : Math.floor(a / b);
+            case "%": return b === 0 ? NOT_CONST : ((a % b) + b) % b;
+            case "/": return b === 0 ? NOT_CONST : a / b;
+          }
+        }
+        if (typeof a === "string" && typeof b === "string" && op === "+") return a + b;
+        return NOT_CONST;
+      }
+      case "boolean_operator": {
+        const a = evalNode(n.childForFieldName("left"), depth + 1);
+        if (a === NOT_CONST) return a;
+        const op = n.childForFieldName("operator")?.text;
+        if (op === "and") return a ? evalNode(n.childForFieldName("right"), depth + 1) : a;
+        if (op === "or") return a ? a : evalNode(n.childForFieldName("right"), depth + 1);
+        return NOT_CONST;
+      }
+      case "comparison_operator": {
+        const [l, r] = n.namedChildren;
+        if (n.namedChildren.length !== 2 || !l || !r) return NOT_CONST;
+        const a = evalNode(l, depth + 1), b = evalNode(r, depth + 1);
+        if (a === NOT_CONST || b === NOT_CONST) return NOT_CONST;
+        const op = n.text.slice(l.endIndex - n.startIndex, r.startIndex - n.startIndex).trim();
+        if (op === "==") return a === b;
+        if (op === "!=") return a !== b;
+        if ((op === "in" || op === "not in") && typeof a === "string" && typeof b === "string") return b.includes(a) === (op === "in");
+        if (typeof a === "number" && typeof b === "number" || typeof a === "string" && typeof b === "string") {
+          if (op === "<") return a < b; if (op === ">") return a > b; if (op === "<=") return a <= b; if (op === ">=") return a >= b;
+        }
+        return NOT_CONST;
+      }
+      case "subscript": {
+        // "ABC"[1]
+        const v = evalNode(n.childForFieldName("value"), depth + 1);
+        const i = evalNode(n.childForFieldName("subscript"), depth + 1);
+        if (typeof v === "string" && typeof i === "number" && Number.isInteger(i)) {
+          const k = i < 0 ? v.length + i : i;
+          return k >= 0 && k < v.length ? v[k] : NOT_CONST;
+        }
+        return NOT_CONST;
+      }
+      case "identifier": {
+        const scope = scopeOf(n);
+        if (!scope) return NOT_CONST;
+        const rhs = bindingsOf(scope).get(n.text);
+        if (!rhs || rhs.length !== 1 || !rhs[0]) return NOT_CONST;   // unbound here, rebound, or bound by something else
+        return evalNode(rhs[0], depth + 1);
+      }
+      default:
+        return NOT_CONST;
+    }
+  };
+  return (n: SyntaxNode | null): ConstResult => evalNode(n, 0);
+}
+
+/** Does a `case` pattern (`'A'`, `'C' | 'D'`, `5`, `_`) match the constant `v`? null when the pattern isn't literal. */
+function casePatternMatchesPy(patText: string, v: ConstPy): boolean | null {
+  if (patText === "_") return true;
+  const alts = patText.split("|").map(s => s.trim());
+  let any = false;
+  for (const a of alts) {
+    if (/^(['"]).*\1$/.test(a)) { if (typeof v === "string" && a.slice(1, -1).replace(/\\(.)/g, "$1") === v) any = true; }
+    else if (/^-?\d+$/.test(a)) { if (v === Number(a)) any = true; }
+    else if (a === "True" || a === "False" || a === "None") { if (v === (a === "True" ? true : a === "False" ? false : null)) any = true; }
+    else return null;
+  }
+  return any;
+}
+
+/** The key of `d["k"]` / `d[3]` when it is a plain literal (its source text), else null. */
+function literalKeyPy(sub: SyntaxNode): string | null {
+  const index = sub.childForFieldName("subscript");
+  return index && (index.type === "string" || index.type === "integer") && isLiteralPy(index) ? index.text : null;
+}
+
+/**
+ * `d["k"]` for a dict that has had values stored under literal keys: what was stored under "k", plus whatever d
+ * itself carries (a tainted dict, writes under computed keys) -- not the values stored under its OTHER literal
+ * keys. Benchmark-style `m["keyB"] = param; bar = m["keyA"]` reads a constant. Null when d has no literal-key
+ * writes in scope (the plain container rule applies).
+ */
+function keyedReadPy(sub: SyntaxNode, env: Env, sticky?: Map<string, number>): number | null {
+  const value = sub.childForFieldName("value");
+  const key = literalKeyPy(sub);
+  if (value?.type !== "identifier" || key === null) return null;
+  const keyPrefix = `${value.text}[`;
+  let hasKeyed = false;
+  for (const k of env.keys()) if (k.startsWith(keyPrefix)) { hasKeyed = true; break; }
+  if (!hasKeyed) return null;
+  const own = (env.get(value.text) ?? 0) | (sticky && !isLocalNamePy(value) ? (sticky.get(value.text) ?? 0) : 0);
+  return (env.get(`${value.text}[${key}]`) ?? 0) | own;
+}
+
+// ── Proven constants (pattern-layer veto) ───────────────────────────────────
+// A variable is a PROVEN constant at a point when it was assigned a literal on some path reaching it and nothing
+// else on any path: two env markers, each joined by union like every other key ("literal on some path", "non-
+// literal on some path"). Parameters and anything never assigned carry neither, so they are never "proven". The
+// regex layer's `eval(`/`pickle.loads(` rules fire on any argument; when the engine proves the argument is a
+// constant it vetoes that line (suppressedOut), the same way a sanitizer does.
+const LIT_MARK = (name: string) => `\u0000lit:${name}`;
+const NONLIT_MARK = (name: string) => `\u0000nonlit:${name}`;
+
+function markAssignedPy(env: Env, slot: string, literal: boolean): void {
+  if (literal) { env.set(LIT_MARK(slot), 0); env.delete(NONLIT_MARK(slot)); }
+  else { env.set(NONLIT_MARK(slot), 0); env.delete(LIT_MARK(slot)); }
+}
+
+function provenLiteralPy(n: SyntaxNode | null, env: Env, depth = 0): boolean {
+  if (!n || depth > 6) return false;
+  const slotProven = (slot: string) => env.has(LIT_MARK(slot)) && !env.has(NONLIT_MARK(slot));
+  switch (n.type) {
+    case "integer": case "float": case "true": case "false": case "none": return true;
+    case "string":
+      return n.namedChildren.every(c => c?.type !== "interpolation" || c.namedChildren.every(x => provenLiteralPy(x, env, depth + 1)));
+    case "concatenated_string": case "parenthesized_expression":
+      return n.namedChildren.every(c => provenLiteralPy(c, env, depth + 1));
+    case "identifier": return slotProven(n.text);
+    case "binary_operator":
+      return provenLiteralPy(n.childForFieldName("left"), env, depth + 1) && provenLiteralPy(n.childForFieldName("right"), env, depth + 1);
+    case "subscript": {
+      const v = n.childForFieldName("value");
+      const key = literalKeyPy(n);
+      if (v?.type === "identifier" && key !== null && env.has(LIT_MARK(`${v.text}[${key}]`))) return slotProven(`${v.text}[${key}]`);
+      const element = listElementAtPy(n);
+      if (element !== undefined) return element === null || provenLiteralPy(element, env, depth + 1);
+      return provenLiteralPy(v, env, depth + 1) && provenLiteralPy(n.childForFieldName("subscript"), env, depth + 1);
+    }
+    case "conditional_expression": {
+      // `a if c else b`: the arm a constant condition picks, else both arms
+      const [a, c, b] = n.namedChildren;
+      const cv = makeConstEvalPy()(c ?? null);
+      if (cv !== NOT_CONST) return provenLiteralPy(cv ? a ?? null : b ?? null, env, depth + 1);
+      return provenLiteralPy(a ?? null, env, depth + 1) && provenLiteralPy(b ?? null, env, depth + 1);
+    }
+    case "call": {
+      // a pure transform of constants: str(...), base64.b64decode(...), "x".encode(), ...
+      const fn = n.childForFieldName("function");
+      const text = fn ? calleeTextPy(fn) : null;
+      const args = argListOf(n);
+      if (text && PY_PASSTHROUGH.has(text)) return args.every(a => provenLiteralPy(a, env, depth + 1));
+      if (fn?.type === "attribute") {
+        const { object, attribute } = attributeParts(fn);
+        return !!attribute && ["encode", "decode", "lower", "upper", "strip", "lstrip", "rstrip", "format", "replace"].includes(attribute) &&
+          provenLiteralPy(object, env, depth + 1) && args.every(a => provenLiteralPy(a, env, depth + 1));
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * `lst[k]` (literal k) for a list built in straight-line code in the same block: `lst = [...]`, then only
+ * `lst.append(x)` / `lst.insert(i, x)` / `lst.pop([i])` statements before the read. The element expression at k,
+ * null when k is out of range (no value), undefined when the list's contents can't be followed this way.
+ */
+function listElementAtPy(sub: SyntaxNode): SyntaxNode | null | undefined {
+  const value = sub.childForFieldName("value");
+  const idx = sub.childForFieldName("subscript");
+  if (value?.type !== "identifier" || idx?.type !== "integer" && !(idx?.type === "unary_operator" && idx.namedChildren[0]?.type === "integer")) return undefined;
+  const k = Number(idx.text);
+  if (!Number.isInteger(k)) return undefined;
+  // the statement holding the read, and its block
+  let stmt: SyntaxNode | null = sub;
+  while (stmt && stmt.parent && stmt.parent.type !== "block" && stmt.parent.type !== "module") stmt = stmt.parent;
+  const block = stmt?.parent;
+  if (!stmt || !block) return undefined;
+  const name = value.text;
+  const mentions = new RegExp(`\\b${name}\\b`);
+  let seq: SyntaxNode[] | null = null;
+  for (const st of block.namedChildren) {
+    // (tree-sitter hands out a fresh wrapper per access: compare ids, not objects)
+    if (!st || st.id === stmt.id) break;
+    if (!mentions.test(st.text)) continue;
+    const e = st.type === "expression_statement" ? st.namedChildren[0] : null;
+    if (e?.type === "assignment" && e.childForFieldName("left")?.text === name) {
+      const r = e.childForFieldName("right");
+      if (r?.type !== "list") return undefined;
+      seq = r.namedChildren.filter((c): c is SyntaxNode => !!c);
+      if (seq.some(c => c.type === "list_splat")) return undefined;
+      continue;
+    }
+    if (!seq || e?.type !== "call") return undefined;
+    const fn = e.childForFieldName("function");
+    if (fn?.type !== "attribute" || attributeParts(fn).object?.text !== name) return undefined;
+    const method = attributeParts(fn).attribute;
+    const args = argListOf(e);
+    const intArg = (n: SyntaxNode | undefined) => (n && /^-?\d+$/.test(n.text) ? Number(n.text) : null);
+    if (method === "append" && args.length === 1) seq.push(args[0]);
+    else if (method === "insert" && args.length === 2 && intArg(args[0]) !== null) seq.splice(intArg(args[0])!, 0, args[1]);
+    else if (method === "pop" && args.length === 0) seq.pop();
+    else if (method === "pop" && args.length === 1 && intArg(args[0]) !== null) {
+      const i = intArg(args[0])!;
+      seq.splice(i < 0 ? seq.length + i : i, 1);
+    } else return undefined;
+  }
+  if (!seq) return undefined;
+  const at = k < 0 ? seq.length + k : k;
+  return at >= 0 && at < seq.length ? seq[at] : null;
+}
+
+/** `obj.set("section", "key", value)` (ConfigParser) with literal section and key: the slot it writes. */
+function keyedSetCallPy(call: SyntaxNode): { slot: string; value: SyntaxNode | null } | null {
+  const fn = call.childForFieldName("function");
+  if (fn?.type !== "attribute") return null;
+  const { object, attribute } = attributeParts(fn);
+  if (attribute !== "set" || object?.type !== "identifier") return null;
+  const args = argListOf(call).filter(a => a.type !== "keyword_argument");
+  if (args.length !== 3 || !isLiteralPy(args[0]) || !isLiteralPy(args[1]) || args[0].type !== "string") return null;
+  return { slot: `${object.text}[${args[0].text}|${args[1].text}]`, value: args[2] };
+}
+
+/**
+ * The value read back from a keyed slot: ConfigParser `conf.get("section", "key")` after keyed sets, or a dict's
+ * `d.get("k"[, default])` after literal-key writes -- what was stored there (plus the default, plus whatever the
+ * object itself carries), not its other slots. Null when the object has no keyed slots (normal method rule).
+ */
+function keyedGetCallPy(call: SyntaxNode, env: Env, sticky?: Map<string, number>): { mask: number; fallback: SyntaxNode | null } | null {
+  const fn = call.childForFieldName("function");
+  if (fn?.type !== "attribute") return null;
+  const { object, attribute } = attributeParts(fn);
+  if (object?.type !== "identifier" || (attribute !== "get" && attribute !== "pop")) return null;
+  const all = argListOf(call);
+  const args = all.filter(a => a.type !== "keyword_argument");
+  const prefix = `${object.text}[`;
+  let hasKeyed = false;
+  for (const k of env.keys()) if (k.startsWith(prefix)) { hasKeyed = true; break; }
+  if (!hasKeyed) return null;
+  let slot: string | null = null;
+  let fallback: SyntaxNode | null = null;
+  if (args.length >= 2 && args[0].type === "string" && isLiteralPy(args[0]) && isLiteralPy(args[1]) && env.has(`${prefix}${args[0].text}|${args[1].text}]`)) {
+    slot = `${prefix}${args[0].text}|${args[1].text}]`;   // ConfigParser get(section, option[, fallback=])
+    fallback = all.find(a => a.type === "keyword_argument" && a.childForFieldName("name")?.text === "fallback")?.childForFieldName("value") ?? null;
+  } else if (args.length >= 1 && isLiteralPy(args[0]) && (args[0].type === "string" || args[0].type === "integer")) {
+    slot = `${prefix}${args[0].text}]`;   // dict get(key[, default])
+    fallback = args[1] ?? null;
+  }
+  if (slot === null) return null;
+  const own = (env.get(object.text) ?? 0) | (sticky && !isLocalNamePy(object) ? (sticky.get(object.text) ?? 0) : 0);
+  return { mask: (env.get(slot) ?? 0) | own, fallback };
+}
+
 function makeTaintMaskPy(
   localFns: Map<string, LocalFn>, propagating: PropagatingPy, inDjangoRequestFn: boolean,
   sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>, storedProvenance?: StoredProvenanceIO,
+  sourceCall?: (call: SyntaxNode) => number,
 ) {
   let fnValueDepth = 0;
+  const constEval = makeConstEvalPy();
   const taintMask = (node: SyntaxNode, env: Env): number => {
     const orAll = (nodes: (SyntaxNode | null | undefined)[]) =>
       nodes.reduce((m: number, c) => (c ? m | taintMask(c, env) : m), 0);
+    if (isStringRequestValuePy(node)) return stringRequestValueMaskPy(node);
     if (isTaintSourceExprPy(node, inDjangoRequestFn)) return ALL;
     if (node.type === "identifier") {
       let m = env.get(node.text) ?? 0;
       const st = sticky?.get(node.text);
       if (st && !isLocalNamePy(node)) m |= st;
-      // a bare object also carries the fields written onto it (`u.host = h; u`)
+      // a bare object also carries the fields written onto it (`u.host = h; u`) and the values stored under
+      // literal keys (`d["k"] = v; d`)
       const prefix = node.text + ".";
-      for (const [k, v] of env) if (v && k.startsWith(prefix)) m |= v;
+      const keyPrefix = node.text + "[";
+      for (const [k, v] of env) if (v && (k.startsWith(prefix) || k.startsWith(keyPrefix))) m |= v;
       return m;
     }
     if (node.type === "attribute") {
@@ -1031,6 +1444,11 @@ function makeTaintMaskPy(
       // attacker-chosen key selects an attacker-chosen member.
       const value = node.childForFieldName("value");
       const index = node.childForFieldName("subscript");
+      const keyed = keyedReadPy(node, env, sticky);
+      if (keyed !== null) return keyed;
+      // lst = []; lst.append(a); lst.append(b); lst.pop(0); lst[1] -- the element actually at that index
+      const element = listElementAtPy(node);
+      if (element !== undefined) return element ? taintMask(element, env) : 0;
       return (value ? taintMask(value, env) : 0) | (isGlobalsLookupPy(value) && index ? taintMask(index, env) : 0);
     }
     if (node.type === "await") return node.namedChildren[0] ? taintMask(node.namedChildren[0], env) : 0;
@@ -1045,7 +1463,8 @@ function makeTaintMaskPy(
       const op = node.childForFieldName("operator")?.text;
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
-      if ((op === "+" || op === "%") && left && right) return taintMask(left, env) | taintMask(right, env);
+      // + / % build strings; `/` joins pathlib paths (`base / name`)
+      if ((op === "+" || op === "%" || op === "/") && left && right) return taintMask(left, env) | taintMask(right, env);
       return 0;
     }
     if (node.type === "string") {
@@ -1095,6 +1514,9 @@ function makeTaintMaskPy(
     // of the two arms, the CONDITION is deliberately excluded.
     if (node.type === "conditional_expression") {
       const parts = node.namedChildren;
+      // a constant condition picks one arm
+      const c = constEval(parts[1] ?? null);
+      if (c !== NOT_CONST) return c ? (parts[0] ? taintMask(parts[0], env) : 0) : (parts[2] ? taintMask(parts[2], env) : 0);
       return (parts[0] ? taintMask(parts[0], env) : 0) | (parts[2] ? taintMask(parts[2], env) : 0);
     }
     // `a or b` / `a and b` evaluate to one of their operands.
@@ -1108,6 +1530,9 @@ function makeTaintMaskPy(
     args.reduce((m, a) => (a.type === "lambda" ? m : m | taintMask(a, env)), 0);
 
   const callMask = (node: SyntaxNode, env: Env): number => {
+    // a helper in another file that returns request data (computeSourceFunctionsPy)
+    const helperMask = sourceCall?.(node) ?? 0;
+    if (helperMask) return helperMask;
     const fn = node.childForFieldName("function");
     const args = argListOf(node);
     // Stored provenance read: `UserModel.objects.filter(...)` etc -- the result is as tainted as anything
@@ -1189,7 +1614,17 @@ function makeTaintMaskPy(
       if (held) return held;
     }
     if (attr) {
+      const keyed = keyedGetCallPy(node, env, sticky);
+      if (keyed !== null) return keyed.mask | (keyed.fallback ? taintMask(keyed.fallback, env) : 0);
       const recv = attr.object ? taintMask(attr.object, env) : 0;
+      // x.replace("'", "&apos;") / x.replace("'", "''"): the quote can no longer close a quoted SQL/XPath literal
+      if (attr.attribute === "replace" && args.length >= 2 && args[0].type === "string" && args[1].type === "string" &&
+          isLiteralPy(args[0]) && isLiteralPy(args[1])) {
+        const from = stringLiteralContentPy(args[0]), to = stringLiteralContentPy(args[1]);
+        if ((from === "'" || from === '"') && (!to.includes(from) || to === from + from)) {
+          return applySanitizer(recv, classOf("sql-injection") | classOf("xpath-injection"));
+        }
+      }
       // "...{}...".format(x) / sep.join(items) / d.get(k, default): the result also includes the arguments
       const withArgs = attr.attribute && PY_ARG_CARRYING_METHODS.has(attr.attribute) ? argsMask(args, env)
         : attr.attribute && PY_DEFAULT_CARRYING_METHODS.has(attr.attribute) && args[1] ? taintMask(args[1], env) : 0;
@@ -1228,7 +1663,82 @@ function isLiteralCollectionPy(n: SyntaxNode, root: SyntaxNode, depth = 0): bool
   return false;
 }
 
-const invertPy = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+const invertPy = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true", clears: g.clears });
+
+/** `x` when `name = urlparse(x)` / `urlsplit(x)` (any module prefix) is assigned in the function enclosing `from`. */
+function urlParsedFromPy(from: SyntaxNode, name: string): string | null {
+  let scope: SyntaxNode | null = from.parent;
+  while (scope && scope.type !== "function_definition" && scope.type !== "module") scope = scope.parent;
+  let found: string | null = null;
+  const visit = (n: SyntaxNode) => {
+    if (found || (n !== scope && n.type === "function_definition")) return;
+    if (n.type === "assignment" && n.childForFieldName("left")?.text === name) {
+      const r = n.childForFieldName("right");
+      const fnText = r?.type === "call" ? calleeTextPy(r.childForFieldName("function")!) : null;
+      const arg = r?.type === "call" ? argListOf(r)[0] : null;
+      if (fnText && /(?:^|\.)url(?:parse|split)$/.test(fnText) && arg?.type === "identifier") found = arg.text;
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  if (scope) visit(scope);
+  return found;
+}
+
+/** The text of a plain string literal (prefix, quotes and backslash escapes removed). */
+function stringLiteralContentPy(s: SyntaxNode): string {
+  return s.text.replace(/^[a-zA-Z]*/, "").replace(/^('''|"""|'|")([\s\S]*)\1$/, "$2").replace(/\\(.)/g, "$1");
+}
+
+/**
+ * The classes a "this sequence is not in the value" check makes safe: without `..` a path can't climb out of its
+ * directory; without a quote the value can't close a quoted SQL/XPath string literal; without `<` it can't open a
+ * tag. Null for any other substring -- it proves nothing.
+ */
+function substringGuardClearsPy(sub: string): number | null {
+  let clears = 0;
+  if (sub.includes("..")) clears |= classOf("path-traversal");
+  if (sub.includes("'") || sub.includes('"')) clears |= classOf("sql-injection") | classOf("xpath-injection");
+  if (sub.includes("<")) clears |= classOf("xss");
+  return clears || null;
+}
+
+/**
+ * `not x.startswith(q) or not x.endswith(q) or q in x[1:-1]` (q a quote): when that is false, x is one plain quoted
+ * string literal -- eval()/exec() of it yields a string, never code.
+ */
+function quotedLiteralGuardPy(cond: SyntaxNode): Guard | null {
+  const parts: SyntaxNode[] = [];
+  const flatten = (n: SyntaxNode) => {
+    if (n.type === "boolean_operator" && n.childForFieldName("operator")?.text === "or") {
+      for (const side of [n.childForFieldName("left"), n.childForFieldName("right")]) if (side) flatten(side);
+    } else parts.push(n.type === "parenthesized_expression" && n.namedChildren[0] ? n.namedChildren[0] : n);
+  };
+  flatten(cond);
+  const seen = new Map<string, Set<string>>();   // variable -> which of the three checks it has
+  for (const p of parts) {
+    if (p.type === "not_operator") {
+      const call = p.childForFieldName("argument");
+      const fn = call?.type === "call" ? call.childForFieldName("function") : null;
+      const arg = call?.type === "call" ? argListOf(call)[0] : null;
+      if (fn?.type !== "attribute" || !arg || arg.type !== "string" || !/^['"]$/.test(stringLiteralContentPy(arg))) continue;
+      const { object, attribute } = attributeParts(fn);
+      if (object?.type !== "identifier" || (attribute !== "startswith" && attribute !== "endswith")) continue;
+      (seen.get(object.text) ?? seen.set(object.text, new Set()).get(object.text)!).add(attribute);
+    } else if (p.type === "comparison_operator" && p.namedChildren.length === 2) {
+      const [l, r] = p.namedChildren;
+      const op = l && r ? p.text.slice(l.endIndex - p.startIndex, r.startIndex - p.startIndex).trim() : "";
+      if (op !== "in" || l?.type !== "string" || !/^['"]$/.test(stringLiteralContentPy(l)) || r?.type !== "subscript") continue;
+      const v = r.childForFieldName("value");
+      if (v?.type === "identifier" && /^\[\s*1\s*:\s*-\s*1\s*\]$/.test(r.text.slice(v.endIndex - r.startIndex))) {
+        (seen.get(v.text) ?? seen.set(v.text, new Set()).get(v.text)!).add("inner");
+      }
+    }
+  }
+  for (const [name, checks] of seen) {
+    if (checks.has("startswith") && checks.has("endswith") && checks.has("inner")) return { name, holds: "false", clears: classOf("eval-exec") };
+  }
+  return null;
+}
 
 /**
  * The variables a condition PROVES safe, and on which side -- a closed set:
@@ -1252,12 +1762,31 @@ function guardsOfConditionPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
       const all = [...guardsOfConditionPy(l, root), ...guardsOfConditionPy(r, root)];
+      const quoted = op === "or" ? quotedLiteralGuardPy(cond) : null;
+      if (quoted) all.push(quoted);
       return op === "and" ? all.filter(g => g.holds === "true") : op === "or" ? all.filter(g => g.holds === "false") : [];
     }
     case "comparison_operator": {
       const [l, r] = cond.namedChildren;
       if (cond.namedChildren.length !== 2 || !l || !r) return [];
       const op = cond.text.slice(l.endIndex - cond.startIndex, r.startIndex - cond.startIndex).trim();
+      // `u = urlparse(x); if u.netloc not in ["a.com"]: ...` -- a host allowlist on the parsed URL: x (and u) can only
+      // send the user / the request to an allowed host
+      if (l.type === "attribute") {
+        const { object, attribute } = attributeParts(l);
+        const hostCheck = (op === "in" || op === "not in") && isLiteralCollectionPy(r, root) ? (op === "in" ? "true" : "false")
+          : (op === "==" || op === "!=") && isLiteralPy(r) ? (op === "==" ? "true" : "false") : null;
+        if (object?.type === "identifier" && (attribute === "netloc" || attribute === "hostname") && hostCheck) {
+          const parsed = urlParsedFromPy(cond, object.text);
+          const clears = classOf("open-redirect") | classOf("ssrf");
+          return [object.text, ...(parsed ? [parsed] : [])].map(name => ({ name, holds: hostCheck, clears }));
+        }
+      }
+      // `'../' in x` / `"'" not in x`: the dangerous sequence is absent -- safe for the injection that needs it only
+      if (l.type === "string" && isLiteralPy(l) && r.type === "identifier" && (op === "in" || op === "not in")) {
+        const clears = substringGuardClearsPy(stringLiteralContentPy(l));
+        if (clears) return [{ name: r.text, holds: op === "in" ? "false" : "true", clears }];
+      }
       if (l.type === "identifier") {
         if (op === "in" && isLiteralCollectionPy(r, root)) return [{ name: l.text, holds: "true" }];
         if (op === "not in" && isLiteralCollectionPy(r, root)) return [{ name: l.text, holds: "false" }];
@@ -1324,13 +1853,16 @@ interface WalkHooksPy {
   crossFileShapes?: Map<string, ParamShape[]>;
   /** Stored/second-order provenance (Django ORM), main scan only -- see taintCore.ts's own docblock. */
   storedProvenance?: StoredProvenanceIO;
+  /** Cross-file request-source helpers (main scan only; see makeSourceCallResolverPy). */
+  sourceCall?: (call: SyntaxNode) => number;
 }
 
 function createWalkerPy(h: WalkHooksPy) {
+  const constEval = makeConstEvalPy();
   const masks = new Map<boolean, TaintMaskFnPy>();
   const maskFor = (django: boolean): TaintMaskFnPy => {
     let m = masks.get(django);
-    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance); masks.set(django, m); }
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance, h.sourceCall); masks.set(django, m); }
     return m;
   };
 
@@ -1384,7 +1916,17 @@ function createWalkerPy(h: WalkHooksPy) {
 
       case "if_statement": {
         const branches: Branch[] = [];
+        // A constant condition: false drops its arm; true makes it the arm every remaining path takes.
+        let decided = false;
         const addCond = (condNode: SyntaxNode | null, bodyNode: SyntaxNode | null) => {
+          if (decided) return;
+          const c = constEval(condNode);
+          if (c !== NOT_CONST && !c) return;
+          if (c !== NOT_CONST) {
+            decided = true;
+            branches.push({ body: (e) => (bodyNode ? walk(bodyNode, e, django) : false) });
+            return;
+          }
           branches.push({
             visitCond: (e) => { if (condNode) walk(condNode, e, django); },
             guards: () => (condNode ? guardsOfConditionPy(condNode, h.root) : []),
@@ -1393,7 +1935,7 @@ function createWalkerPy(h: WalkHooksPy) {
         };
         addCond(node.childForFieldName("condition"), node.childForFieldName("consequence"));
         for (const alt of node.childrenForFieldName("alternative")) {
-          if (!alt) continue;
+          if (!alt || decided) continue;
           if (alt.type === "elif_clause") {
             addCond(alt.childForFieldName("condition"), alt.childForFieldName("consequence"));
           } else if (alt.type === "else_clause") {
@@ -1401,6 +1943,10 @@ function createWalkerPy(h: WalkHooksPy) {
             branches.push({ body: (e) => (body ? walk(body, e, django) : false) });
           }
         }
+        // every arm was constant-false and there is no else: nothing runs
+        if (branches.length === 0) return false;
+        // only one arm can run: it is plain straight-line code
+        if (branches.length === 1 && !branches[0].visitCond) return branches[0].body(env);
         return walkIfChain(env, branches);
       }
 
@@ -1408,7 +1954,7 @@ function createWalkerPy(h: WalkHooksPy) {
         const right = node.childForFieldName("right");
         if (right) walk(right, env, django);
         const rmask = right ? taintMask(right, env) : 0;
-        for (const name of identifiersIn(node.childForFieldName("left"))) env.set(name, rmask);
+        for (const name of identifiersIn(node.childForFieldName("left"))) { markAssignedPy(env, name, false); env.set(name, rmask); }
         const body = node.childForFieldName("body");
         return walkLoop(env, (e) => (body ? walk(body, e, django) : false));
       }
@@ -1449,6 +1995,23 @@ function createWalkerPy(h: WalkHooksPy) {
         if (subject) walk(subject, env, django);
         const subjectName = subject?.type === "identifier" ? subject.text : null;
         const cases = (node.childForFieldName("body")?.namedChildren ?? []).filter(c => c?.type === "case_clause");
+        // `guess = "ABC"[1]; match guess:` -- a constant subject runs the first case that matches it, alone
+        const sv = constEval(subject ?? null);
+        if (sv !== NOT_CONST) {
+          let chosen: SyntaxNode | null | undefined;
+          let decidable = true;
+          for (const cl of cases) {
+            const pattern = cl!.namedChildren.find(x => x?.type === "case_pattern");
+            const hasGuard = cl!.namedChildren.some(x => x?.type === "if_clause");
+            const m = hasGuard ? null : casePatternMatchesPy(pattern?.text.trim() ?? "", sv);
+            if (m === null) { decidable = false; break; }
+            if (m) { chosen = cl; break; }
+          }
+          if (decidable) {
+            const body = chosen?.childForFieldName("consequence");
+            return body ? walk(body, env, django) : false;
+          }
+        }
         return walkSwitch(env, cases.map(cl => {
           const pattern = cl!.namedChildren.find(x => x?.type === "case_pattern");
           const patText = pattern?.text.trim() ?? "";
@@ -1482,16 +2045,23 @@ function createWalkerPy(h: WalkHooksPy) {
       if (left && right) {
         const mask = taintMask(right, env);
         if (left.type === "identifier") {
+          markAssignedPy(env, left.text, provenLiteralPy(right, env));
           env.set(left.text, mask);
-        } else if ((left.type === "pattern_list" || left.type === "tuple_pattern") && (mask & ALL)) {
-          for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, mask);
+        } else if (left.type === "pattern_list" || left.type === "tuple_pattern") {
+          for (const id of bindingIdentifiersPy(left)) markAssignedPy(env, id, false);
+          if (mask & ALL) for (const el of left.namedChildren) if (el?.type === "identifier") env.set(el.text, mask);
         } else if (left.type === "subscript") {
           // `d[k] = v` -- the container now holds the value (additive: a write never de-taints).
           // `obj.field[k] = v` taints the FIELD (`obj.field`), not the whole object.
           const target = left.childForFieldName("value");
+          const key = literalKeyPy(left);
           if (target?.type === "attribute") {
             const path = calleeTextPy(target);
             if (path) env.set(path, (env.get(path) ?? 0) | mask);
+          } else if (target?.type === "identifier" && key !== null) {
+            // `d["k"] = v` with a literal key: remembered per key, so d["other"] is not v (see keyedReadPy)
+            markAssignedPy(env, `${target.text}[${key}]`, provenLiteralPy(right, env));
+            env.set(`${target.text}[${key}]`, mask);
           } else {
             const root = rootIdentifierPy(left);
             if (root) env.set(root.text, (env.get(root.text) ?? 0) | mask);
@@ -1511,6 +2081,7 @@ function createWalkerPy(h: WalkHooksPy) {
       const right = node.childForFieldName("right");
       if (left && right) {
         const mask = taintMask(right, env);
+        if (left.type === "identifier" && !provenLiteralPy(right, env)) markAssignedPy(env, left.text, false);
         if (left.type === "identifier") env.set(left.text, mask | (env.get(left.text) ?? 0));
         else if (left.type === "subscript") {
           const root = rootIdentifierPy(left);
@@ -1526,7 +2097,11 @@ function createWalkerPy(h: WalkHooksPy) {
       h.onCall?.(node, env, taintMask);
       // `items.append(x)` / `d.update(y)`: the receiver container now holds the arguments
       const fnNode = node.childForFieldName("function");
-      if (fnNode?.type === "attribute" && PY_MUTATING_METHODS.has(attributeParts(fnNode).attribute ?? "")) {
+      const keyedWrite = keyedSetCallPy(node);
+      if (keyedWrite) {
+        // conf.set("section", "key", v): remembered under that section/key (see keyedGetCallPy)
+        env.set(keyedWrite.slot, keyedWrite.value ? taintMask(keyedWrite.value, env) : 0);
+      } else if (fnNode?.type === "attribute" && PY_MUTATING_METHODS.has(attributeParts(fnNode).attribute ?? "")) {
         const root = rootIdentifierPy(attributeParts(fnNode).object);
         if (root) {
           const m = argListOf(node).reduce((acc, a) => (a.type === "lambda" ? acc : acc | taintMask(a, env)), 0);
@@ -2455,6 +3030,94 @@ function classMethodsPy(root: SyntaxNode): Array<{ cls: string; name: string; fn
   return out;
 }
 
+/**
+ * Cross-file request SOURCES: this file's module-level functions and class methods whose return value is request
+ * data even when called with nothing tainted -- `def get_param(name): return request.args.get(name)`, or a wrapper
+ * class `request_wrapper(request)` whose `get_form_parameter(name)` returns `self.request.form.get(name)`. Names are
+ * `func` / `Class.method`; scanner.ts prefixes the module path. A method returning a constant (`get_safe_value`) is
+ * not listed, so calls to it stay clean.
+ */
+export function computeSourceFunctionsPy(content: string, filePath: string, presparsed?: SyntaxNode | null): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  try {
+    const root = presparsed ?? parsePythonSourceSync(content, filePath);
+    if (!root) return out;
+    const localFns = collectLocalFunctionsPy(root);
+    const propagating = buildPropagatingMapPy(localFns, root);
+    // the classes still dangerous in what the function returns (a cookie value: everything but NoSQL)
+    const returnedMask = (fn: LocalFn): number => {
+      let mask = 0;
+      const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: false, onReturn: (expr, env, tm) => { mask |= tm(expr, env); } });
+      walker.walk(fn.body, new Map(), false);
+      return mask & ALL;
+    };
+    for (const name of moduleLevelFunctionNamesPy(root)) {
+      const fn = localFns.get(name);
+      const m = fn ? returnedMask(fn) : 0;
+      if (m) out.push([name, m]);
+    }
+    for (const m of classMethodsPy(root)) {
+      const mask = returnedMask(m.fn);
+      if (mask) out.push([`${m.cls}.${m.name}`, mask]);
+    }
+  } catch (err) {
+    console.error(`[astTaintPython] threw computing source functions for ${filePath}:`, err);
+  }
+  return out;
+}
+
+/**
+ * Resolves a call against the batch's cross-file request sources (computeSourceFunctionsPy, prefixed by module):
+ * `pkg.helpers.get_param(...)` / `get_param(...)` (from-imported), or a method on an instance built from an imported
+ * class -- `w = helpers.separate_request.request_wrapper(request); w.get_form_parameter("x")`.
+ */
+function makeSourceCallResolverPy(sourceFns: ReadonlyMap<string, number>, edges: readonly ImportEdgePy[]) {
+  // local name -> what it names: `from m import f [as g]` -> m.f, `import a.b as c` -> a.b
+  const bound = new Map<string, string>();
+  for (const e of edges) {
+    const fq = e.namespace ? e.dotted : `${e.dotted}.${e.importedName}`;
+    if (fq) bound.set(e.localName, fq);
+  }
+  const qualify = (text: string): string => {
+    const [head, ...rest] = text.split(".");
+    const fq = bound.get(head);
+    return fq ? [fq, ...rest].join(".") : text;
+  };
+  // the mask a known helper returns (0: not a known helper)
+  const known = (fq: string): number => {
+    const direct = sourceFns.get(fq);
+    if (direct) return direct;
+    for (const [k, m] of sourceFns) if (k.endsWith(`.${fq}`)) return m;
+    return 0;
+  };
+  return (call: SyntaxNode): number => {
+    const fn = call.childForFieldName("function");
+    if (!fn) return 0;
+    const text = calleeTextPy(fn);
+    const byName = text && text.includes(".") ? known(qualify(text)) : 0;
+    if (byName) return byName;
+    if (fn.type === "identifier" && bound.has(fn.text)) { const m = known(qualify(fn.text)); if (m) return m; }
+    if (fn.type !== "attribute") return 0;
+    const { object, attribute } = attributeParts(fn);
+    if (object?.type !== "identifier" || !attribute) return 0;
+    // the instance's constructor, in the same function
+    let scope: SyntaxNode | null = call.parent;
+    while (scope && scope.type !== "function_definition" && scope.type !== "module") scope = scope.parent;
+    let ctor: string | null = null;
+    const visit = (n: SyntaxNode) => {
+      if (ctor || (n !== scope && n.type === "function_definition")) return;
+      if (n.type === "assignment" && n.childForFieldName("left")?.text === object.text && n.startIndex < call.startIndex) {
+        const r = n.childForFieldName("right");
+        const rf = r?.type === "call" ? r.childForFieldName("function") : null;
+        ctor = rf ? calleeTextPy(rf) : null;
+      }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    if (scope) visit(scope);
+    return ctor ? known(`${qualify(ctor)}.${attribute}`) : 0;
+  };
+}
+
 /** `user_service = UserService()` at module level: class name -> the instance names that expose its methods. */
 function moduleLevelInstancesPy(root: SyntaxNode): Map<string, string[]> {
   const out = new Map<string, string[]>();
@@ -2490,7 +3153,7 @@ const SEVERITY: Record<AstTaintPyId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "timing-attack": "medium", "jwt-none-alg": "critical",
   // Fallback only -- collectBolaFindingsPy always passes a severityOverride (medium for a read-shaped
   // function name, high otherwise), same convention as every other engine's BOLA detector.
-  "bola-missing-ownership-check": "high", "argument-injection": "high", "xxe": "high",
+  "bola-missing-ownership-check": "high", "argument-injection": "high", "xxe": "high", "trust-boundary": "medium",
 };
 const LABEL: Record<AstTaintPyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -2501,7 +3164,7 @@ const LABEL: Record<AstTaintPyId, string> = {
   "eval-exec": "Arbitrary Code Execution", "insecure-deserialization": "Insecure Deserialization",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)", "argument-injection": "Argument Injection",
-  "xxe": "XML External Entity (XXE)",
+  "xxe": "XML External Entity (XXE)", "trust-boundary": "Trust Boundary Violation",
 };
 
 function isFastApiHandler(fn: SyntaxNode): boolean {
@@ -2530,12 +3193,15 @@ export function scanAstTaintPython(
   // Stored/second-order provenance (Django ORM) -- see taintCore.ts's own docblock. Optional, same
   // "existing callers unaffected" shape as suppressedOut.
   storedProvenance?: StoredProvenanceIO,
+  // Batch-wide helpers that return request data (computeSourceFunctionsPy, module-qualified by scanner.ts).
+  sourceFns?: ReadonlyMap<string, number>,
 ): AstTaintPyFinding[] {
   try {
     const root = presparsed ?? parsePythonSourceSync(content, filePath);
     if (!root) return [];
 
     const importMap = buildImportMapPy(root);
+    const sourceCall = sourceFns && sourceFns.size > 0 ? makeSourceCallResolverPy(sourceFns, collectImportEdgesPy(root)) : undefined;
     const localFns = collectLocalFunctionsPy(root);
     const propagating = buildPropagatingMapPy(localFns, root, crossFileShapes);
 
@@ -2798,6 +3464,8 @@ export function scanAstTaintPython(
           emit("xss", node, sourceLabelPy(a), match.sinkExpr,
             "HTML-escaped value is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')");
         } else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(node) });
+        // every exploitable argument is a proven constant: the pattern layer's same-line hit is vetoed too
+        else if (match.args.length > 0 && match.args.every(a => provenLiteralPy(a, env))) suppressedOut?.push({ id: match.id, line: lineOf(node) });
       }
       const fnNode = node.childForFieldName("function");
       const seedAttr = fnNode?.type === "attribute" ? attributeParts(fnNode) : null;
@@ -2928,6 +3596,14 @@ export function scanAstTaintPython(
             if (m & classOf("header-injection")) emit("header-injection", n, sourceLabelPy(right), "response.headers[...]");
             else if (wasCleared(m, classOf("header-injection"))) suppressedOut?.push({ id: "header-injection", line: lineOf(n) });
           }
+          // session[k] = v (Flask's session / flask.session, Django's request.session) with the request choosing the
+          // key or the value: request data saved as trusted server-side state (CWE-501)
+          if (targetText && (targetText === "session" || targetText.endsWith(".session"))) {
+            const key = left.childForFieldName("subscript");
+            const km = key ? taintMask(key, env) : 0;
+            const vm = taintMask(right, env);
+            if ((km | vm) & ALL) emit("trust-boundary", n, sourceLabelPy(km & ALL ? key! : right), `${targetText}[...]`);
+          }
           // for k, v in tainted.items(): target[k] = v  -- the request decides which keys the object gets
           const idx = left.childForFieldName("subscript");
           if (idx?.type === "identifier" && right.type === "identifier") {
@@ -2983,7 +3659,7 @@ export function scanAstTaintPython(
       if (m & classOf("xss")) emit("xss", expr, sourceLabelPy(expr), "handler return value");
     };
 
-    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance });
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance, sourceCall });
     const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
 
     walk(root, new Map(), false);

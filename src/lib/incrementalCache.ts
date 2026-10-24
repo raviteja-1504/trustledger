@@ -31,7 +31,9 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 8: Kotlin AST engine (astTaintKotlin.ts), Java facts shared with Kotlin.
 // 9: Rust AST engine (astTaintRust.ts).
 // 10: hostile-input limits (long runs cut, too-deep trees skip the AST engines), LDAP template rule narrowed.
-export const SCAN_CACHE_VERSION = 10;
+// 11: Python precision/recall from BenchmarkPython (constant folding, keyed dict/ConfigParser slots, substring and
+//     URL-allowlist guards, new sinks, trust-boundary, weak hash/random/cookie rules, request-source helpers).
+export const SCAN_CACHE_VERSION = 11;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

@@ -57,8 +57,10 @@ describe("propagation through builtins and stdlib", () => {
     expect(has(sql("{'a': 'b'}.get(x)"), "sql-injection")).toBe(false);
   });
   it("str() defeats NoSQL operator injection but not SQL", () => {
-    expect(has(view(`users.find_one({"u": str(x)})`), "nosql-injection")).toBe(false);
-    expect(has(view(`users.find_one({"u": x})`), "nosql-injection")).toBe(true);
+    // (a JSON body field can be an object such as {"$ne": ""}; a query-string value is always a str)
+    expect(has(view(`j = request_obj.get_json()["q"]\nusers.find_one({"u": str(j)})`), "nosql-injection")).toBe(false);
+    expect(has(view(`j = request_obj.get_json()["q"]\nusers.find_one({"u": j})`), "nosql-injection")).toBe(true);
+    expect(has(view(`users.find_one({"u": x})`), "nosql-injection")).toBe(false);
   });
 });
 
@@ -179,8 +181,10 @@ describe("new sinks", () => {
     expect(has(view(`r = Response("ok")\nr.headers["X-A"] = x\nreturn r`), "xss")).toBe(false);
   });
   it("pymongo-style find/update with a request-derived filter", () => {
-    expect(has(view(`mongo.users.find({"u": x})`), "nosql-injection")).toBe(true);
-    expect(has(view(`collection.update_one({"id": x}, {"$set": {}})`), "nosql-injection")).toBe(true);
+    expect(has(view(`j = request_obj.get_json()["q"]\nmongo.users.find({"u": j})`), "nosql-injection")).toBe(true);
+    expect(has(view(`j = request_obj.get_json()["q"]\ncollection.update_one({"id": j}, {"$set": {}})`), "nosql-injection")).toBe(true);
+    // the whole query dict as the filter: the attacker picks the keys, $where included
+    expect(has(view(`collection.find(request_obj.args.to_dict())`), "nosql-injection")).toBe(true);
   });
   it("LDAP and XPath", () => {
     expect(has(view(`conn.search_s("dc=x", 2, "(uid=" + x + ")")`), "ldap-injection")).toBe(true);

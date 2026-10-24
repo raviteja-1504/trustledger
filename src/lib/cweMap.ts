@@ -49,6 +49,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "missing-security-headers":   { id: "CWE-693",  title: "Protection Mechanism Failure" },
   "backdoor-detection":         { id: "CWE-506",  title: "Embedded Malicious Code" },
   "xxe":                        { id: "CWE-611",  title: "XML External Entity Reference" },
+  "trust-boundary":             { id: "CWE-501",  title: "Trust Boundary Violation" },
   "ldap-injection":             { id: "CWE-90",   title: "LDAP Injection" },
   "idor":                       { id: "CWE-639",  title: "Authorization Bypass Through User-Controlled Key" },
   "php-missing-session-guard":  { id: "CWE-306",  title: "Missing Authentication for Critical Function" },

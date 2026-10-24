@@ -22,6 +22,7 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "argument-injection":       { title: "Argument Injection",             description: "Attacker-controlled value passed as a bare argv element, with no `--` end-of-options marker, letting it be read as a flag by the target program instead of data.", cwe: "CWE-88" },
   "path-traversal":           { title: "Path Traversal",                 description: "File path built from unsanitised input without canonicalisation.", cwe: "CWE-22" },
   "xxe":                      { title: "XML External Entity (XXE)",      description: "XML parser configured to resolve external entities/DTDs from untrusted input.", cwe: "CWE-611" },
+  "trust-boundary":           { title: "Trust Boundary Violation",       description: "Request data stored in the server-side session as if it were trusted state -- later code reads it back without re-validating.", cwe: "CWE-501" },
   "insecure-file-upload":     { title: "Insecure File Upload",           description: "File upload accepted with no MIME-type/extension validation or size limit.", cwe: "CWE-434" },
   "eval-exec":                { title: "Dynamic Code Execution",         description: "eval()/Function() constructor executing dynamic code.", cwe: "CWE-95" },
   "weak-crypto":              { title: "Weak Cryptographic Hash",        description: "MD5/SHA-1 used where a collision-resistant hash is required.", cwe: "CWE-327" },

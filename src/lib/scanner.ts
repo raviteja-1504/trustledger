@@ -54,7 +54,7 @@ import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
-  computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy,
+  computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy, computeSourceFunctionsPy,
   isModelFilePy, modelLocalNamesInFilePy,
 } from "./astTaintPython";
 import type { ParamShape as PyParamShape } from "./astTaintPython";
@@ -2498,6 +2498,76 @@ function findInsecureRandomnessCSharpFunc(lines: string[]): ScanIndicator[] {
     if (CSHARP_INSECURE_RANDOM_CALL_RE.test(line)) {
       found.push({ id:"insecure-randomness", label:"Insecure Randomness", severity:"high", line:i+1,
         detail:"System.Random used inside a security-sounding method — use RandomNumberGenerator (System.Security.Cryptography) for tokens, session ids, or anything security-sensitive" });
+    }
+  }
+  return found;
+}
+
+// Python: the `random` module (Mersenne Twister -- predictable from its output) producing a value that is then
+// stored as a session/cookie/token value, or assigned to a security-named variable. `secrets` and
+// `random.SystemRandom()` (OS entropy) are the safe sources. A random value used for anything else (sampling,
+// jitter, games) is not flagged.
+const PY_WEAK_RANDOM_CALL_RE = /\brandom\.(?!SystemRandom\b)(?:random|randint|randrange|randbytes|getrandbits|choice|choices|sample|shuffle|uniform|normalvariate|gauss|triangular|betavariate|expovariate|lognormvariate|vonmisesvariate|paretovariate|weibullvariate)\s*\(/;
+const PY_SECURITY_NAME_RE = /token|secret|password|passwd|salt|nonce|csrf|otp|session|cookie|api_?key|auth/i;
+
+function findInsecureRandomnessPython(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || !PY_WEAK_RANDOM_CALL_RE.test(line)) continue;
+    if (INSECURE_RANDOM_RE.some(r => r.test(line))) continue;   // already caught
+    const assigned = /^\s*([A-Za-z_]\w*)\s*=/.exec(line)?.[1];
+    let stored = !!assigned && PY_SECURITY_NAME_RE.test(assigned);
+    if (!stored && assigned) {
+      // the value goes into a session / cookie within the next 25 lines of the same block
+      const use = new RegExp(`\\b\\w*session\\w*\\s*\\[[^\\]]+\\]\\s*=\\s*${assigned}\\b|set_cookie\\s*\\([^)]*\\b${assigned}\\b|\\b(?:token|secret|password|nonce|csrf|otp)\\w*\\s*=\\s*${assigned}\\b`, "i");
+      stored = lines.slice(i + 1, i + 26).some(l => use.test(l));
+    }
+    if (!stored) continue;
+    found.push({ id: "insecure-randomness", label: "Insecure Randomness", severity: "high", line: i + 1,
+      detail: "A value from Python's `random` module (predictable from its output) is used as a session/cookie/token value -- use `secrets` (token_hex, token_urlsafe, randbelow) or random.SystemRandom()" });
+  }
+  return found;
+}
+
+// Python: MD5 / SHA-1 (and MD4) through hashlib -- collision-broken. A use the code marks as not
+// security-related (`usedforsecurity=False`, Python 3.9+) is left alone.
+const PY_WEAK_HASH_RE = /\bhashlib\.(?:md5|sha1)\s*\(|\bhashlib\.new\s*\(\s*["'](?:md5|sha1|md4|md5-sha1)["']/i;
+
+function findWeakHashPython(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || !PY_WEAK_HASH_RE.test(line)) continue;
+    if (WEAK_CRYPTO_RE.some(r => r.test(line))) continue;   // the password-context rule already reports it
+    if (/usedforsecurity\s*=\s*False/.test(line)) continue;
+    found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
+      detail: "MD5/SHA-1 are collision-broken -- use SHA-256 or stronger (and a slow KDF such as hashlib.scrypt or argon2 for passwords); pass usedforsecurity=False for a non-security checksum" });
+  }
+  return found;
+}
+
+// Python (Flask/Werkzeug/Django set_cookie): a cookie explicitly sent without Secure or HttpOnly. Only the explicit
+// `secure=False` / `httponly=False` -- an omitted flag is a framework/config default this line can't see.
+function findCookieFlagsPython(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !/\bset_cookie\s*\(/.test(lines[i])) continue;
+    // the call's argument list, across lines, up to its closing parenthesis
+    let depth = 0, call = "";
+    for (let j = i; j < Math.min(lines.length, i + 15); j++) {
+      const text = j === i ? lines[j].slice(lines[j].search(/\bset_cookie\s*\(/)) : lines[j];
+      for (const ch of text) { call += ch; if (ch === "(") depth++; else if (ch === ")" && --depth === 0) break; }
+      if (depth === 0 && call.includes("(")) break;
+      call += " ";
+    }
+    if (/\bsecure\s*=\s*False\b/.test(call)) {
+      found.push({ id: "cookie-no-secure", label: "Cookie Without Secure Flag", severity: "low", line: i + 1,
+        detail: "set_cookie(..., secure=False): the cookie is also sent over plain HTTP -- set secure=True" });
+    }
+    if (/\bhttponly\s*=\s*False\b/.test(call)) {
+      found.push({ id: "cookie-no-httponly", label: "Cookie Without HttpOnly", severity: "medium", line: i + 1,
+        detail: "set_cookie(..., httponly=False): page scripts (and so XSS) can read the cookie -- set httponly=True" });
     }
   }
   return found;
@@ -5780,6 +5850,13 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  'DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();\ndbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);',
     cwe: "CWE-611", effort: "low",
   },
+  "trust-boundary": {
+    title: "Validate before storing request data in the session",
+    description: "Keep session keys fixed and validate (or allowlist) any request value before saving it as server-side state; code reading the session treats it as trusted.",
+    code_before: "session[request.args['key']] = request.args['value']",
+    code_after:  "if role not in ALLOWED_ROLES: abort(400)\nsession['role'] = role",
+    cwe: "CWE-501", effort: "low",
+  },
   "insecure-file-upload": {
     title: "Validate uploaded file type and size",
     description: "Check file extension and content-type against an allowlist, enforce a size limit, and store outside the web root with a generated filename.",
@@ -6342,8 +6419,9 @@ function findAstTaintPythonFindings(
   crossFileShapes?: Map<string, PyParamShape[]>,
   crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
   storedProvenance?: StoredProvenanceIO,
+  sourceFns?: ReadonlyMap<string, number>,
 ): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks, storedProvenance).map(f => ({
+  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks, storedProvenance, sourceFns).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: f.severityOverride ?? astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -6519,6 +6597,8 @@ export function analyzeFile(
   crossFileKotlin?: { tree?: KotlinSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for Rust (handlers -> services / repositories / free functions in other modules).
   crossFileRust?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Python helpers anywhere in the batch that return request data (module.func / module.Class.method).
+  crossFilePySources?: ReadonlyMap<string, number>,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6654,7 +6734,7 @@ export function analyzeFile(
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
@@ -6714,6 +6794,7 @@ export function analyzeFile(
     ...findInsecureRandomness(lines),
     ...findInsecureRandomnessGoFunc(lines),
     ...findInsecureRandomnessCSharpFunc(lines),
+    ...(lang === "python" ? [...findInsecureRandomnessPython(lines), ...findWeakHashPython(lines), ...findCookieFlagsPython(lines)] : []),
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
     ...findNamedTaintOpenRedirectJS(lines),
@@ -7762,6 +7843,17 @@ export function runScan(input: ScanInput): ScanOutput {
   for (const [path, entries] of crossFileShapesPyByFile) {
     pyShapesOnly.set(path, new Map([...entries].map(([name, info]) => [name, info.shapes])));
   }
+  // Python helpers that return request data, named by module path ("helpers.separate_request.request_wrapper.
+  // get_form_parameter"); call sites match them by dotted suffix (makeSourceCallResolverPy). One batch-wide set.
+  const pySourceFns = new Map<string, number>();
+  const contentByPathPy = new Map(allFiles.filter(f => pySourceFiles.has(f.path)).map(f => [f.path, f.content]));
+  for (const [path, root] of pySourceFiles) {
+    const mod = path.replace(/\.py$/, "").replace(/\/__init__$/, "").split("/").join(".");
+    const content = contentByPathPy.get(path);
+    if (content === undefined) continue;
+    for (const [name, mask] of computeSourceFunctionsPy(content, path, root)) pySourceFns.set(`${mod}.${name}`, mask);
+  }
+  const pySourceFnsDigest = pySourceFns.size ? [...pySourceFns].map(([k, m]) => `${k}=${m}`).sort().join("\n") : "";
 
   // ── Stored/second-order provenance (Sequelize/Mongoose + Django ORM) -- see taintCore.ts's
   // StoredProvenanceIO docblock. A batch-wide registry, built AFTER the cross-file bridges above so
@@ -7940,7 +8032,9 @@ export function runScan(input: ScanInput): ScanOutput {
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
       serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
-        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : rustTrees.has(f.path) ? rustFactsDigest : undefined,
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : rustTrees.has(f.path) ? rustFactsDigest
+        // a Python file's result also depends on which helpers elsewhere return request data
+        : pySourceFiles.has(f.path) ? `pysrc:${crypto.createHash("sha256").update(pySourceFnsDigest).digest("hex")}` : undefined,
     });
     const cached = input.prev_results?.[f.path];
     const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
@@ -7956,6 +8050,7 @@ export function runScan(input: ScanInput): ScanOutput {
           rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,
           kotlinTrees.has(f.path) ? { tree: kotlinTrees.get(f.path), facts: javaFacts } : undefined,
           rustTrees.has(f.path) ? { tree: rustTrees.get(f.path), facts: rustFacts } : undefined,
+          pySourceFiles.has(f.path) ? pySourceFns : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
