@@ -68,6 +68,59 @@ describe("AI use is not penalised; ungoverned AI is", () => {
   });
 });
 
+describe("a repository's own score: how governed what was scanned is, not how recently", () => {
+  it("every file signed off scores 1000 even when last scanned 40 days ago; the org's Scan coverage still counts it", () => {
+    const s = computeGovernanceScore(base({
+      scans: [{ id: "a1", repo: "acme/app", pr_number: 1, created_at: daysAgo(40) }, { id: "b1", repo: "acme/api", pr_number: 1, created_at: daysAgo(1) }],
+      riskyFiles: [{ scan_id: "a1", file_path: "x.ts", risk_score: "CRITICAL", ai_percentage: 0 }],
+      attested: [{ scan_id: "a1", file_path: "x.ts" }],
+    }));
+    expect(s.repos.find(r => r.repo === "acme/app")!.score).toBe(1000);
+    expect(dim(s, "coverage").value).toBe(0.5);
+  });
+
+  it("age doesn't change a risky repo's score either; a repo never scanned keeps coverage in it (786)", () => {
+    const risky = (age: number) => computeGovernanceScore(base({
+      repos: ["acme/app", "acme/api", "acme/new"],
+      scans: [{ id: "a1", repo: "acme/app", pr_number: 1, created_at: daysAgo(age) }, { id: "b1", repo: "acme/api", pr_number: 1, created_at: daysAgo(1) }],
+      violations: [{ scan_id: "a1", file_path: "c.ts", risk_score: "CRITICAL", status: "open", sla_deadline: null }],
+    })).repos;
+    expect(risky(1).find(r => r.repo === "acme/app")!.score).toBe(risky(40).find(r => r.repo === "acme/app")!.score);
+    // exposure 1/(1+1) = 0.5: (0.5×0.25 + 0.2 + 0.1) / 0.55
+    expect(risky(40).find(r => r.repo === "acme/app")!.score).toBe(Math.round((0.5 * 0.25 + 0.2 + 0.1) / 0.55 * 1000));
+    expect(risky(40).find(r => r.repo === "acme/new")!.score).toBe(786);
+  });
+});
+
+describe("open risk counts each PR's latest scan, like review and the dashboard", () => {
+  it("a file a rescan no longer flags doesn't keep counting from the older scan's open row (63 vs 62)", () => {
+    const s = computeGovernanceScore(base({
+      scans: [...base().scans, { id: "a0", repo: "acme/app", pr_number: 1, created_at: daysAgo(3) }],
+      violations: [
+        // the original scan: two files flagged
+        { scan_id: "a0", file_path: "nosql.ts", risk_score: "CRITICAL", status: "open", sla_deadline: null },
+        { scan_id: "a0", file_path: "sqli.ts", risk_score: "CRITICAL", status: "open", sla_deadline: null },
+        // the rescan (latest): only the real one is still flagged
+        { scan_id: "a1", file_path: "sqli.ts", risk_score: "CRITICAL", status: "open", sla_deadline: null },
+      ],
+    }));
+    expect(s.repos.find(r => r.repo === "acme/app")).toMatchObject({ open_critical: 1, open_high: 0 });
+    expect(dim(s, "exposure").facts[0]).toBe("1 open critical file, 0 open high-risk files across 1 repository");
+  });
+
+  it("another open PR's latest scan still counts; a file open in two PRs counts once", () => {
+    const s = computeGovernanceScore(base({
+      scans: [...base().scans, { id: "p2", repo: "acme/app", pr_number: 2, created_at: daysAgo(2) }],
+      violations: [
+        { scan_id: "a1", file_path: "a.ts", risk_score: "HIGH", status: "open", sla_deadline: null },
+        { scan_id: "p2", file_path: "b.ts", risk_score: "CRITICAL", status: "open", sla_deadline: null },
+        { scan_id: "p2", file_path: "a.ts", risk_score: "HIGH", status: "open", sla_deadline: null },
+      ],
+    }));
+    expect(s.repos.find(r => r.repo === "acme/app")).toMatchObject({ open_critical: 1, open_high: 1 });
+  });
+});
+
 describe("open risk", () => {
   it("per repo 1/(1 + critical + 0.3 × high), averaged over scanned repos", () => {
     const s = computeGovernanceScore(base({

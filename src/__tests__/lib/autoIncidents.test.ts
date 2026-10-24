@@ -25,7 +25,7 @@ function fakeDb(tables: Record<string, Row[]> = {}) {
     from: (table: string) => {
       const rows = (store[table] ??= []);
       const filters: Array<(r: Row) => boolean> = [];
-      let pending: { kind: "update"; patch: Record<string, unknown> } | null = null;
+      let pending: { kind: "update"; patch: Record<string, unknown> } | { kind: "delete" } | null = null;
       let desc: string | null = null, max: number | null = null;
       const pick = () => {
         let hit = rows.filter(r => filters.every(f => f(r)));
@@ -45,6 +45,7 @@ function fakeDb(tables: Record<string, Row[]> = {}) {
         single: () => { const r = pick()[0]; return Promise.resolve({ data: r ? structuredCopy(r) : null }); },
         maybeSingle: () => { const r = pick()[0]; return Promise.resolve({ data: r ? structuredCopy(r) : null, error: null }); },
         update: (patch: Record<string, unknown>) => { pending = { kind: "update", patch }; return b; },
+        delete: () => { pending = { kind: "delete" }; return b; },
         insert: (row: Record<string, unknown>) => {
           const r = { id: `i${++seq}`, ...row } as Row;
           rows.push(r);
@@ -52,14 +53,15 @@ function fakeDb(tables: Record<string, Row[]> = {}) {
         },
         then: (res: (v: unknown) => unknown) => {
           const hit = pick();
-          if (pending) for (const r of hit) Object.assign(r, pending.patch);
+          if (pending?.kind === "update") for (const r of hit) Object.assign(r, pending.patch);
+          if (pending?.kind === "delete") for (const r of hit) rows.splice(rows.indexOf(r), 1);
           return Promise.resolve({ data: hit.map(structuredCopy), error: null }).then(res);
         },
       };
       return b;
     },
   };
-  return { db: db as never, rows: store.incidents, store };
+  return { db: db as never, rows: store.incidents, store, inserts: () => seq };
 }
 
 type F = { repo: string; file_path: string; scan_id?: string; risk_score?: string; attested?: boolean; sla_deadline?: string | null };
@@ -211,6 +213,48 @@ describe("syncAutoIncidents", () => {
     await syncAutoIncidents(db, "o1");
     expect(backlog(rows)!.title).toBe("5 CRITICAL/HIGH files unattested across 1 repo");
     expect(backlog(rows)!.description).toMatch(/^5 CRITICAL\/HIGH files/);
+  });
+
+  it("a failed read of the existing incidents creates nothing (each failure used to add a backlog copy)", async () => {
+    const { db, rows } = fakeDb();
+    const real = (db as unknown as { from: (t: string) => Record<string, unknown> }).from;
+    let failIncidentsRead = true;
+    const failing = { from: (t: string) => {
+      const b = real(t);
+      if (t !== "incidents" || !failIncidentsRead) return b;
+      failIncidentsRead = false;
+      const chain: Record<string, unknown> = {};
+      for (const k of ["select", "eq", "is", "order", "limit", "neq", "in"]) chain[k] = () => chain;
+      chain.then = (res: (v: unknown) => unknown) => Promise.resolve({ data: null, error: { code: "57014" } }).then(res);
+      return chain;
+    } } as never;
+    mockState.mockResolvedValue(state(high("acme/api", 79)));
+    await syncAutoIncidents(failing, "o1");
+    expect(rows).toHaveLength(0);
+    // the next, healthy sync creates the one backlog incident
+    await syncAutoIncidents(db, "o1");
+    expect(rows.filter(r => r.incident_type === "policy-violation")).toHaveLength(1);
+  });
+
+  it("syncs running at once (several pages load together) create one backlog incident, not one each", async () => {
+    const { db, rows, inserts } = fakeDb();
+    mockState.mockResolvedValue(state(high("acme/api", 79)));
+    await Promise.all([syncAutoIncidents(db, "o1"), syncAutoIncidents(db, "o1"), syncAutoIncidents(db, "o1")]);
+    expect(rows.filter(r => r.incident_type === "policy-violation")).toHaveLength(1);
+    // in one server instance they run one after another: one insert, nothing to clean up
+    expect(inserts()).toBe(1);
+  });
+
+  it("...and two server instances racing agree on the oldest copy: the newer one deletes itself", async () => {
+    const { db, rows } = fakeDb();
+    mockState.mockResolvedValue(state(high("acme/api", 79)));
+    // a second, independent copy of the module: its own in-flight lock, like another server instance
+    let other!: typeof syncAutoIncidents;
+    jest.isolateModules(() => { other = (jest.requireActual("@/lib/autoIncidents") as { syncAutoIncidents: typeof syncAutoIncidents }).syncAutoIncidents; });
+    await Promise.all([syncAutoIncidents(db, "o1"), other(db, "o1")]);
+    const left = rows.filter(r => r.incident_type === "policy-violation");
+    expect(left).toHaveLength(1);
+    expect(left[0].id).toBe("i1");
   });
 
   it("the backlog incident resolves at 3 waiting files and reopens (with a current title) above that", async () => {

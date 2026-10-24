@@ -48,7 +48,36 @@ async function transitionIncident(
   }).eq("id", id).eq("org_id", orgId);
 }
 
-export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
+/**
+ * After inserting an auto-incident, keep only the OLDEST row for the same thing (`same` narrows the query to it):
+ * a sync in another server instance may have inserted one in the same moment. Every racer deletes its own newer
+ * copy -- a row seconds old that nobody has touched -- so they all agree on the survivor.
+ */
+async function keepOldest(
+  db: SupabaseClient<Database>, orgId: string, mine: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  same: (q: any) => any,
+): Promise<void> {
+  try {
+    const { data } = await same(db.from("incidents").select("id, detected_at").eq("org_id", orgId).is("created_by", null)) as
+      { data: Array<{ id: string; detected_at: string }> | null };
+    const oldest = [...(data ?? [])].sort((a, b) => a.detected_at.localeCompare(b.detected_at) || a.id.localeCompare(b.id))[0];
+    if (oldest && oldest.id !== mine) await db.from("incidents").delete().eq("id", mine).eq("org_id", orgId).is("created_by", null);
+  } catch { /* best-effort: the next sync resolves a leftover duplicate (step 0) */ }
+}
+
+/** One sync per org at a time in this server instance: pages that load together each trigger one, and running
+ *  them side by side is what let each insert its own copy of the same incident. */
+const inFlight = new Map<string, Promise<void>>();
+
+export function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
+  const run = (inFlight.get(orgId) ?? Promise.resolve()).then(() => syncAutoIncidentsOnce(db, orgId));
+  inFlight.set(orgId, run);
+  void run.finally(() => { if (inFlight.get(orgId) === run) inFlight.delete(orgId); });
+  return run;
+}
+
+async function syncAutoIncidentsOnce(db: SupabaseClient<Database>, orgId: string): Promise<void> {
   try {
     // fetchUnattestedRiskState() is a full org-wide aggregation (every scan,
     // repo, attestation, violation and up to 1000 scan_files rows, joined and
@@ -93,12 +122,15 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
     const overdueFiles = openFiles.filter(f => !!f.sla_deadline && Date.parse(f.sla_deadline) <= nowMs);
 
     // No timeline here: it's the bulk of each row, and only the few rows actually updated need it.
-    const { data: existingAuto } = await db
+    const { data: existingAuto, error: existingErr } = await db
       .from("incidents")
       .select("id, status, affected_repo, affected_file, incident_type, detected_at")
       .eq("org_id", orgId)
       .is("created_by", null)
       .order("detected_at", { ascending: false });
+    // Without the existing incidents every one looks new: a failed read (a timeout under load) used to create a
+    // fresh copy of the backlog incident each time, which the next sync then resolved as a duplicate.
+    if (existingErr || !existingAuto) return;
 
     const autoRows = (existingAuto ?? []) as Pick<IncidentRow, "id" | "status" | "affected_repo" | "affected_file" | "incident_type" | "detected_at">[];
     // One row per repo+file, reused for its whole life. Scans of different PRs in the same repo take turns
@@ -177,6 +209,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
       }).select("id").single() as { data: { id: string } | null };
 
       if (incident) {
+        await keepOldest(db, orgId, incident.id, q => q.eq("affected_repo", f.repo).eq("affected_file", f.file_path));
         await writeAuditLog(db, {
           org_id: orgId, event_type: "incident_created", actor_email: "system",
           resource_type: "incident", resource_id: incident.id,
@@ -225,6 +258,7 @@ export async function syncAutoIncidents(db: SupabaseClient<Database>, orgId: str
       }).select("id").single() as { data: { id: string } | null };
 
       if (incident) {
+        await keepOldest(db, orgId, incident.id, q => q.eq("incident_type", "policy-violation").is("affected_file", null));
         await writeAuditLog(db, {
           org_id: orgId, event_type: "incident_created", actor_email: "system",
           resource_type: "incident", resource_id: incident.id,

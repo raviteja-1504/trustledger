@@ -12,11 +12,18 @@ import type { DashboardData, TopRiskFile } from "@/types";
 
 export interface QueueItem extends TopRiskFile { overdueHours: number | null }
 
-/** `inReview` marks files someone has already picked up (left out: they aren't waiting for a reviewer). */
+/** Files awaiting a sign-off: CRITICAL/HIGH in the latest scan, not attested, not closed without review. The one
+ *  count every page shows -- Needs attention, the Trust Score's open risk, the repository table. */
+export function awaitingSignoff(data: Pick<DashboardData, "top_risk_files">): TopRiskFile[] {
+  return data.top_risk_files.filter(f => !f.attested && !f.resolved && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+}
+
+/** `inReview` marks files someone has already picked up (left out of the queue: they aren't waiting for a
+ *  reviewer -- but they still await a sign-off, so they stay in the counts, see awaitingSignoff). */
 export function buildQueue(data: Pick<DashboardData, "top_risk_files" | "sla_breach_files">, now = Date.now(), inReview: (f: TopRiskFile) => boolean = () => false): QueueItem[] {
   const deadline = new Map((data.sla_breach_files ?? []).map(b => [`${b.scan_id}::${b.file_path}`, b.sla_deadline]));
-  return data.top_risk_files
-    .filter(f => !f.attested && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !inReview(f))
+  return awaitingSignoff(data)
+    .filter(f => !inReview(f))
     .map(f => {
       const d = deadline.get(`${f.scan_id}::${f.file_path}`);
       return { ...f, overdueHours: d ? Math.max(0, Math.floor((now - Date.parse(d)) / 3600_000)) : null };

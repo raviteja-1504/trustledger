@@ -38,6 +38,7 @@ const dashboard: DashboardData = {
 
 let fail = new Set<string>();
 const fetched: string[] = [];
+let overrides: Record<string, { status: string }> = {};
 jest.mock("@/lib/api", () => ({ api: { dashboard: jest.fn(async () => dashboard) } }));
 jest.mock("@/lib/useRealData", () => ({
   isSeedMode: () => false,
@@ -45,7 +46,7 @@ jest.mock("@/lib/useRealData", () => ({
     fetched.push(url);
     const key = url.split("?")[0];
     if (fail.has(key)) throw new Error("down");
-    if (key === "/api/violation-status") return { overrides: {} };
+    if (key === "/api/violation-status") return { overrides };
     if (key === "/api/secrets") return { findings: [{ status: "open", severity: "CRITICAL" }] };
     if (key === "/api/trust-score") return {
       score: { total: 612, band: "Fair", computed_at: "x", repos: [{ repo: "acme/api", score: 480, open_critical: 1, open_high: 0, review_coverage: 0.5, open_secrets: 1, last_scan: null }],
@@ -64,7 +65,7 @@ import { api } from "@/lib/api";
 const dashboardCalls = () => (api.dashboard as jest.Mock).mock.calls;
 
 beforeEach(() => {
-  fail = new Set(); fetched.length = 0; role = "admin";
+  fail = new Set(); fetched.length = 0; role = "admin"; overrides = {};
   (api.dashboard as jest.Mock).mockClear();
   localStorage.clear(); sessionStorage.clear();
 });
@@ -144,6 +145,14 @@ describe("Dashboard page", () => {
     const tile = screen.getByRole("link", { name: /Open secrets/ });
     expect(tile.compareDocumentPosition(screen.getByRole("region", { name: "Trust Score" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(attention).getAllByRole("link", { name: /auth\.ts/ })[0]).toHaveAttribute("href", "/pr/s1?attest=src%2Fauth.ts");
+  });
+
+  it("a file someone is reviewing leaves the review queue but still counts as awaiting attestation (the same count as the Trust Score)", async () => {
+    overrides = { "crit::s1::src/auth.ts": { status: "in_review" } };
+    render(<DashboardPage />);
+    const queue = await screen.findByRole("region", { name: "Review queue" });
+    await waitFor(() => expect(within(queue).queryByRole("link", { name: /auth\.ts/ })).not.toBeInTheDocument());
+    expect(screen.getByRole("region", { name: "Needs attention" })).toHaveTextContent("CRITICAL file awaiting attestation");
   });
 
   // The server's unattested_deploy_count is a FILE count; dashboardLiveState replaces it with the repo count.

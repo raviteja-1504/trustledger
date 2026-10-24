@@ -313,13 +313,15 @@ export default function DashboardPage() {
       .filter(b => !signedOff.has(`${b.scan_id}::${b.file_path}`))
       .sort((a, b) => a.sla_deadline.localeCompare(b.sla_deadline))
       .map(b => ({ file: b.file_path, scanId: b.scan_id, repo: b.repo, risk: b.risk_score, overdueHours: Math.max(0, Math.floor((now - Date.parse(b.sla_deadline)) / 3600_000)) }));
-    // Awaiting attestation: the review queue (worst first; files someone is already reviewing are left out).
+    // Awaiting attestation: every file still waiting for a sign-off -- including ones someone is reviewing, so the
+    // count matches the Trust Score and repository table -- worst first, in the review queue's order.
     const ref = (f: (typeof queue)[number]) => ({ file: f.file_path, scanId: f.scan_id, repo: f.repo, risk: f.risk_score });
+    const awaiting = buildQueue(d, now);
     return buildAttention({
       slaOverdue: d.sla_breach_files ? overdueFiles.length : (d.sla_breach_critical_count ?? 0) + (d.sla_breach_high_count ?? 0),
       overdueFiles,
-      unreviewedCritical: queue.filter(f => f.risk_score === "CRITICAL").map(ref),
-      unreviewedHigh: queue.filter(f => f.risk_score === "HIGH").map(ref),
+      unreviewedCritical: awaiting.filter(f => f.risk_score === "CRITICAL").map(ref),
+      unreviewedHigh: awaiting.filter(f => f.risk_score === "HIGH").map(ref),
       awaitingRepos: unresolvedRepoScans,
       openCriticalSecrets: secrets ? secrets.CRITICAL : null,
       openOtherSecrets: secrets ? secrets.HIGH + secrets.MEDIUM : null,
@@ -329,7 +331,7 @@ export default function DashboardPage() {
     });
   // canAttestRisk is rebuilt every render; the permissions it reads are its dependency.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveData, secretCounts, queue, unresolvedRepoScans, shadow, evidence, perms]);
+  }, [effectiveData, secretCounts, unresolvedRepoScans, shadow, evidence, perms]);
 
   const repoRows = useMemo(() => effectiveData
     ? buildRepoRows(effectiveData.repos, trust && trust !== "unavailable" ? trust.score.repos : null)

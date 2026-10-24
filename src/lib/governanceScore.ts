@@ -97,9 +97,13 @@ export function computeGovernanceScore(input: ScoreInput): GovernanceScore {
   for (const s of input.scans) if (!lastScan.has(s.repo) || s.created_at > lastScan.get(s.repo)!) lastScan.set(s.repo, s.created_at);
   const scannedRepos = [...active].filter(r => lastScan.has(r));
 
-  // Open violations: latest row per (repo, file), like repoViolations.ts -- superseded rows don't count.
+  // Open violations: from each pull request's LATEST scan only, the same scans the review dimension and the
+  // dashboard's "awaiting sign-off" use. A file a newer scan no longer flags (a fix, or a rescan with a better
+  // engine) has no row there; its open row from the older scan used to keep counting (63 here vs 62 there).
+  // One row per (repo, file) when a file is open in several PRs.
   const latestViolation = new Map<string, { repo: string; risk: string; status: string; sla: string | null; created: string }>();
   for (const v of input.violations) {
+    if (!latestIds.has(v.scan_id)) continue;
     const s = scanById.get(v.scan_id);
     if (!s || !active.has(s.repo)) continue;
     const k = `${s.repo}::${v.file_path}`;
@@ -225,13 +229,18 @@ export function computeGovernanceScore(input: ScoreInput): GovernanceScore {
 
   const total = dims.reduce((a, d) => a + d.points, 0);
 
-  // Per-repo score: the repo-scoped dimensions, reweighted to 1000.
-  const repoW = WEIGHTS.exposure + WEIGHTS.review + WEIGHTS.coverage + WEIGHTS.secrets;
+  // Per-repo score: how governed what was scanned is -- open risk, review, secrets -- reweighted to 1000. How
+  // recently it was scanned is the org's "Scan coverage" (and the table's Last scan), not the repo's risk: a repo
+  // with every file signed off scored 786 just for having no new pull requests. A repo never scanned has nothing
+  // to judge, so coverage stays in its score (nothing found there means "never looked", not "clean").
+  const repoW = WEIGHTS.exposure + WEIGHTS.review + WEIGHTS.secrets;
   const repos: RepoScore[] = [...active].map(repo => {
     const r = reviewByRepo.get(repo);
     const rv = r && r.want ? r.got / r.want : 1;
     const pr = perRepo.get(repo);
-    const score = Math.round(((lastScan.has(repo) ? exposureOf(repo) : 1) * WEIGHTS.exposure + rv * WEIGHTS.review + freshness(repo) * WEIGHTS.coverage + (lastScan.has(repo) ? secretOf(repo) : 1) * WEIGHTS.secrets) / repoW * 1000);
+    const score = lastScan.has(repo)
+      ? Math.round((exposureOf(repo) * WEIGHTS.exposure + rv * WEIGHTS.review + secretOf(repo) * WEIGHTS.secrets) / repoW * 1000)
+      : Math.round((WEIGHTS.exposure + WEIGHTS.review + WEIGHTS.secrets) / (repoW + WEIGHTS.coverage) * 1000);
     return { repo, score, open_critical: pr?.crit ?? 0, open_high: pr?.high ?? 0, review_coverage: r && r.want ? rv : null, open_secrets: secretsByRepo.get(repo)?.n ?? 0, last_scan: lastScan.get(repo) ?? null };
   }).sort((a, b) => a.score - b.score);
 

@@ -5,7 +5,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import TrustHero, { bandFor, scoreDelta, topActions } from "@/components/dashboard/TrustHero";
 import KpiStrip, { buildKpis, type KpiInput } from "@/components/dashboard/KpiStrip";
-import ReviewQueue, { buildQueue } from "@/components/dashboard/ReviewQueue";
+import ReviewQueue, { awaitingSignoff, buildQueue } from "@/components/dashboard/ReviewQueue";
 import { EvidencePanel, SecretsPanel, ShadowAiPanel, countSecrets } from "@/components/dashboard/GovernancePanels";
 import RepoTable, { buildRepoRows, sortRepoRows } from "@/components/dashboard/RepoTable";
 import RiskPanel, { fillTrendWeeks, riskDirection } from "@/components/dashboard/RiskPanel";
@@ -129,6 +129,13 @@ describe("review queue", () => {
     // Same tier: the more AI-written file first.
     const tie = buildQueue({ top_risk_files: [file({ file_path: "low.ts", ai_pct: 0.1 }), file({ file_path: "hi.ts", ai_pct: 0.8 })], sla_breach_files: [] }, now);
     expect(tie.map(f => f.file_path)).toEqual(["hi.ts", "low.ts"]);
+  });
+
+  it("awaiting sign-off -- the count every page shows: picked-up files included, closed-without-review ones not", () => {
+    const withClosed = { ...data, top_risk_files: [...data.top_risk_files, file({ file_path: "src/closed.ts", resolved: true })] };
+    expect(awaitingSignoff(withClosed).map(f => f.file_path).sort()).toEqual(["src/crit.ts", "src/high.ts", "src/late.ts", "src/taken.ts"]);
+    // the queue (who still needs a reviewer) leaves out the picked-up one, and the closed one too
+    expect(buildQueue(withClosed, now, f => f.file_path === "src/taken.ts").map(f => f.file_path)).toEqual(["src/late.ts", "src/crit.ts", "src/high.ts"]);
   });
 
   it("rows open the file's sign-off on its PR page", () => {
