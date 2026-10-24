@@ -32,6 +32,7 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "weak-cors":                { title: "Permissive CORS Policy",         description: "Access-Control-Allow-Origin set to a wildcard.", cwe: "CWE-942" },
   "missing-security-headers": { title: "Security Header Explicitly Removed", description: "A known security response header (X-Frame-Options, CSP, etc.) is explicitly removed.", cwe: "CWE-693" },
   "jwt-none-alg":             { title: "JWT Algorithm Confusion",        description: "JWT verification accepts the 'none' algorithm.", cwe: "CWE-347" },
+  "tls-verification-disabled": { title: "TLS Verification Disabled",     description: "TLS certificate verification turned off in application code (an HTTP client told not to verify, Go's insecure-skip-verify, Node's reject-unauthorized switched off).", cwe: "CWE-295" },
   "timing-attack":            { title: "Timing Side-Channel",            description: "Non-constant-time comparison of a secret value." },
   "toctou":                   { title: "Time-of-Check to Time-of-Use",   description: "Race condition between a check and its corresponding use." },
   "cookie-no-httponly":       { title: "Cookie Missing HttpOnly",        description: "Session cookie set without the HttpOnly flag.", cwe: "CWE-1004" },

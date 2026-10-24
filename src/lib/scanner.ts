@@ -414,8 +414,10 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /(?:eyJ[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]+/,                       label: "Hardcoded JWT",               severity: "high"     },
   { re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY/,                   label: "Private key",                 severity: "critical" },
   { re: /(?:private_key|private_key_id)\s*:\s*["'][-\w /+]+["']/i,            label: "Service account key",         severity: "critical" },
-  { re: /postgresql:\/\/[^@\s]+:[^@\s]+@/,                                     label: "Postgres credentials",        severity: "critical" },
-  { re: /mongodb(?:\+srv)?:\/\/[^@\s]+:[^@\s]+@/,                              label: "MongoDB credentials",         severity: "critical" },
+  // A template's placeholders (%s, %v, {user}, ${PASS}) are filled in from variables -- "mongodb://%s:%s@%s" names no
+  // credential. A URL-encoded real password (p%40ss) still matches: only format verbs and braces are skipped.
+  { re: /postgresql:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,             label: "Postgres credentials",        severity: "critical" },
+  { re: /mongodb(?:\+srv)?:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,      label: "MongoDB credentials",         severity: "critical" },
   { re: /mysql:\/\/[^@\s]+:[^@\s]+@/,                                          label: "MySQL credentials",           severity: "critical" },
   { re: /jdbc:[a-z]+:\/\/[^\s"']+password=[^\s&"']+/i,                         label: "DB connection string",        severity: "critical" },
   // Generic word-keyed patterns — value captured in group 1, checked by
@@ -767,7 +769,9 @@ const SQL_INJECTION_RE = [
   // Anchored: a pure "both appear on the line" check. Unanchored, the engine re-ran both lookaheads from
   // every position -- quadratic, and minutes on a single minified line.
   /^(?=[\s\S]*["']\s*\+\s*\w+)(?=[\s\S]*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b))/i,
-  /cursor\.execute\s*\(\s*(?:f["']|["'][^?])/i,
+  // a string BUILT on the line -- f-string, + concatenation, % formatting, .format(); a constant query
+  // (cursor.execute("select nextval('seq')")) or a parameterised one ("... %s", (x,)) is not injection
+  /cursor\.execute\s*\(\s*(?:f["']|["'][^"']*["']\s*(?:%\s*[\w(]|\+|\.format\s*\())/i,
   /db\.query\s*\(\s*(?:`[^`]*\$\{|['"][^?][^'"]*\+)/i,
   /(?:execute|query)\s*\(\s*["'].*\+\s*\w/i,
   /(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{/i,
@@ -815,8 +819,25 @@ const EVAL_EXEC_RE = [
 // "ignoreExpiration" must be set to true to be a bypass — the bare keyword
 // also appears when explicitly disabled (ignoreExpiration: false), which is
 // the secure default and must NOT be flagged.
+// `verify=False` is a JWT bypass only on a jwt.decode call (PyJWT 1.x); on requests/httpx/aiohttp it turns off
+// TLS certificate checks -- a different weakness, reported by findTlsVerificationDisabled (it was 11 of 12
+// "JWT Algorithm Confusion" CRITICALs testing OWASP crAPI).
+// Java (crAPI's identity service): Nimbus JWTParser.parse(t).getJWTClaimsSet() reads claims with no signature check;
+// jjwt's parseClaimsJwt accepts UNSIGNED tokens; header.getJWKURL() fetches the verification key from a URL the
+// token itself names (jku injection) -- each lets a forged token through.
 const JWT_BYPASS_RE =
-  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False)/i;
+  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|jwt\.decode\s*\([^)]*verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False|JWTParser\.parse\s*\([^)]*\)\s*\.getJWTClaimsSet\s*\(|\.parseClaimsJwt\s*\(|\.getJWKURL\s*\(\s*\))/i;
+
+// TLS certificate verification turned off in application code: the connection can be intercepted and served by
+// anyone. Python requests/httpx/aiohttp (verify=False, ssl=False on aiohttp calls), Go (InsecureSkipVerify: true),
+// Node (rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED = "0"), Python's ssl CERT_NONE / unverified context.
+const TLS_VERIFY_OFF_RE = [
+  /\bverify\s*=\s*False\b/,
+  /\bInsecureSkipVerify\s*:\s*true\b/,
+  /\brejectUnauthorized\s*:\s*false\b/,
+  /NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["']?0["']?/,
+  /\bverify_mode\s*=\s*ssl\.CERT_NONE\b|ssl\._create_unverified_context\s*\(/,
+];
 
 // A hardcoded JWT/session signing secret -- unlike the SECRET_PATTERNS
 // generic-word detectors above (which require the value to LOOK like a real
@@ -1931,7 +1952,24 @@ function findJwtBypass(lines: string[]): ScanIndicator[] {
     if (isNonExecutableLine(lines[i])) continue;
     if (JWT_BYPASS_RE.test(lines[i]))
       found.push({ id:"jwt-none-alg", label:"JWT None Algorithm", severity:"critical", line:i+1,
-        detail:"JWT configured to accept 'none' algorithm — signature bypass" });
+        detail: /getJWKURL/i.test(lines[i])
+          ? "The JWT's verification key is fetched from a URL named in the token's own jku header -- an attacker signs with their own key; pin the key or the key-set URL"
+          : /JWTParser\.parse|parseClaimsJwt|verify_signature|verify\s*=\s*False/i.test(lines[i])
+            ? "JWT claims are read without verifying the token's signature -- a forged token is accepted; verify with the expected key and algorithm first"
+            : "JWT configured to accept 'none' algorithm — signature bypass" });
+  }
+  return found;
+}
+
+function findTlsVerificationDisabled(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line)) continue;
+    if (JWT_BYPASS_RE.test(line)) continue;           // a JWT decode with verification off is the JWT finding instead
+    if (!TLS_VERIFY_OFF_RE.some(re => re.test(line))) continue;
+    found.push({ id: "tls-verification-disabled", label: "TLS Verification Disabled", severity: "high", line: i + 1,
+      detail: "TLS certificate verification is turned off, so anyone on the network path can impersonate the server -- keep verification on and trust the needed CA instead" });
   }
   return found;
 }
@@ -3518,8 +3556,10 @@ function findReflectedXSSTainted(lines: string[]): ScanIndicator[] {
       // .body(x)/res.send(x) are used constantly for plain JSON/text
       // responses, so without this extra corroboration this would be far
       // noisier than the other taint-proximity checks here.
+      // The tag must be inside a string literal: a bare `<Word>` is Java/TS generics (ResponseEntity<JwtResponse>),
+      // which made every Spring controller returning .body(dto) "HTML" (33 false XSS findings testing crAPI).
       const window = lines.slice(Math.max(0, i - 8), i + 1);
-      if (!window.some(l => /<\w+[ >]/.test(l))) continue;
+      if (!window.some(l => /["'`][^"'`]*<[a-z][\w-]*[\s>/]/i.test(l))) continue;
       if (hasTaintNearby(lines, i, 8)) {
         seen.add(i);
         found.push({ id:"xss", label:"Reflected XSS", severity:"high", line:i+1,
@@ -6602,6 +6642,7 @@ export function analyzeFile(
     ...(lang === "ruby" ? findRubyTaintFindings(lines) : []),
     ...findEvalExec(lines),
     ...findJwtBypass(lines),
+    ...findTlsVerificationDisabled(lines),
     ...findWeakSigningSecret(lines),
     ...findWeakSigningSecretPHPHmac(lines),
     ...findWeakSigningSecretSplitLine(lines),

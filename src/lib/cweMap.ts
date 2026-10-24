@@ -61,6 +61,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "pii-in-logs":                { id: "CWE-532",  title: "Insertion of Sensitive Information into Log File" },
   "mass-assignment":            { id: "CWE-915",  title: "Improperly Controlled Modification of Object Attributes" },
   "jwt-none-alg":                { id: "CWE-347",  title: "Improper Verification of Cryptographic Signature" },
+  "tls-verification-disabled":   { id: "CWE-295",  title: "Improper Certificate Validation" },
   "insecure-randomness":        { id: "CWE-330",  title: "Use of Insufficiently Random Values" },
   "redos":                       { id: "CWE-1333", title: "Inefficient Regular Expression Complexity" },
   "timing-attack":               { id: "CWE-208",  title: "Observable Timing Discrepancy" },

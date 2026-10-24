@@ -737,8 +737,9 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     if (loader && /Safe/.test(loader.text)) return null;
     return first ? { id: "insecure-deserialization", sinkExpr: text, args: [first] } : null;
   }
-  // HTML responses: Flask's Response/make_response default to text/html
-  if (XSS_RESPONSES_PY.has(text)) {
+  // HTML responses: Flask's Response/make_response default to text/html. Django REST Framework's Response (imported
+  // from rest_framework) serializes its data to JSON -- not HTML, so not XSS (it was every crAPI workshop view).
+  if (XSS_RESPONSES_PY.has(text) && !resolvedModule.startsWith("rest_framework")) {
     const mime = keywordArg(args, "mimetype") ?? keywordArg(args, "content_type");
     if (mime && isLiteralPy(mime) && !/html/i.test(mime.text)) return null;
     return first ? { id: "xss", sinkExpr: text, args: [first] } : null;

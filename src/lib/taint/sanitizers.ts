@@ -66,6 +66,8 @@ const TABLES: Record<SanitizerLang, Table> = {
   go: {
     exact: {
       "html.EscapeString": XSS, "template.HTMLEscapeString": XSS, "template.JSEscapeString": XSS,
+      // encoding/json escapes < > & as < > & by default: its output can't carry markup
+      "json.Marshal": XSS, "json.MarshalIndent": XSS,
       "url.QueryEscape": URL_SAFE, "url.PathEscape": URL_SAFE,
       "filepath.Base": C.PATH, "path.Base": C.PATH,
       "strconv.Atoi": NUMERIC, "strconv.ParseInt": NUMERIC, "strconv.ParseUint": NUMERIC,
