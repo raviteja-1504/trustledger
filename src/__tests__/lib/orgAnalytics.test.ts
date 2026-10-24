@@ -33,6 +33,18 @@ function rows(over: Partial<AnalyticsRows> = {}): AnalyticsRows {
   };
 }
 
+describe("files, not rows: rescans and sign-offs that cover several scans count once", () => {
+  it("one sign-off resolving the file in three scans of its content is one closed; three rescans flagging it, one found", () => {
+    const scans = ["r1", "r2", "r3"].map((id, i) => ({ id, repo: "acme/juice", pr_number: 1, pr_author: "dev", created_at: at("2026-10-06T10:00:00Z", i), total_ai_percentage: 0, file_count: 1 }));
+    const v = (id: string, scan_id: string, h: number) => ({ id, scan_id, file_path: "login.ts", risk_score: "CRITICAL", status: "resolved", created_at: at("2026-10-06T10:00:00Z", h), resolved_at: at("2026-10-08T10:00:00Z", h), sla_deadline: null });
+    const r = computeAnalytics(rows({ scans, violations: [v("a", "r1", 0), v("b", "r2", 1), v("c", "r3", 2)], attestations: [] }));
+    expect([r.totals.opened, r.totals.closed]).toEqual([1, 1]);
+    expect(r.repos.find(x => x.repo === "acme/juice")).toMatchObject({ opened: 1, closed: 1, open: 0 });
+    // and counted in the week the file was FIRST flagged / closed
+    expect(r.weeks[0]).toMatchObject({ closed: 1, opened: { total: 1, critical: 1 } });
+  });
+});
+
 describe("computeAnalytics", () => {
   const a = computeAnalytics(rows());
 

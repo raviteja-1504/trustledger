@@ -17,6 +17,9 @@ export interface AnalyticsRows {
   attestations: ReadonlyArray<{ scan_id: string; file_path: string; risk_score: string; reviewer_email: string | null; reviewer_github: string | null; created_at: string }>;
   /** Scans outside the period that attestations in the period refer to (for review time only). */
   extraScans?: AnalyticsRows["scans"];
+  /** Every scan of the pull requests above (id, repo, PR, time): which scan is each PR's latest. Defaults to the
+   *  scans above. */
+  prScans?: ReadonlyArray<{ id: string; repo: string; pr_number: number | null; created_at: string }>;
 }
 
 export interface AnalyticsWeek {
@@ -113,21 +116,33 @@ export function computeAnalytics(rows: AnalyticsRows): Analytics {
     w.prs = new Set(list.map(prKey)).size;
     w.ai_share = weightedAi(list);
   }
-  let opened = 0, closed = 0;
+  // A FILE, not a row: every scan of a pull request -- each push, each rescan -- records its still-flagged files
+  // again, and one sign-off resolves the file's row in every scan of the same content. Counting rows counted a
+  // 79-file PR scanned three times as 237 found. Found = a file first flagged in the period (once, when first
+  // flagged); closed = a file closed in the period (once, when first closed).
+  const fileOf = (v: { scan_id: string; file_path: string }) => `${scanById.get(v.scan_id)?.repo ?? ""}::${v.file_path}`;
+  const firstFlag = new Map<string, AnalyticsRows["violations"][number]>();
+  const firstClose = new Map<string, AnalyticsRows["violations"][number]>();
   for (const v of rows.violations) {
-    if (inPeriod(v.created_at)) {
-      const w = weekOf(v.created_at);
-      if (w) {
-        const sev = v.risk_score.toUpperCase();
-        if (sev === "CRITICAL") w.opened.critical++; else if (sev === "HIGH") w.opened.high++; else if (sev === "MEDIUM") w.opened.medium++;
-        w.opened.total++; opened++;
-      }
-    }
+    const k = fileOf(v);
+    const f = firstFlag.get(k);
+    if (!f || v.created_at < f.created_at) firstFlag.set(k, v);
     if (v.resolved_at && inPeriod(v.resolved_at) && !OPEN.has(v.status)) {
-      const w = weekOf(v.resolved_at);
-      if (w) { w.closed++; closed++; }
+      const c = firstClose.get(k);
+      if (!c || v.resolved_at < c.resolved_at!) firstClose.set(k, v);
     }
   }
+  const openedRows = [...firstFlag.values()].filter(v => inPeriod(v.created_at));
+  const closedRows = [...firstClose.values()];
+  let opened = 0, closed = 0;
+  for (const v of openedRows) {
+    const w = weekOf(v.created_at);
+    if (!w) continue;
+    const sev = v.risk_score.toUpperCase();
+    if (sev === "CRITICAL") w.opened.critical++; else if (sev === "HIGH") w.opened.high++; else if (sev === "MEDIUM") w.opened.medium++;
+    w.opened.total++; opened++;
+  }
+  for (const v of closedRows) { const w = weekOf(v.resolved_at!); if (w) { w.closed++; closed++; } }
   const periodAttestations = rows.attestations.filter(a => inPeriod(a.created_at));
   for (const a of periodAttestations) { const w = weekOf(a.created_at); if (w) w.signoffs++; }
 
@@ -151,17 +166,27 @@ export function computeAnalytics(rows: AnalyticsRows): Analytics {
     return { severity, count: hours.length, median_hours: med == null ? null : round1(med), p90_hours: p90 == null ? null : round1(p90), with_deadline, on_time };
   });
 
-  // ── Backlog: the latest finding per (repo, file), if still open ──
-  const latest = new Map<string, AnalyticsRows["violations"][number] & { repo: string }>();
-  for (const v of rows.violations) {
-    const scan = scanById.get(v.scan_id);
-    const repo = scan?.repo ?? "";
-    const k = `${repo}::${v.file_path}`;
-    const cur = latest.get(k);
-    if (!cur || v.created_at > cur.created_at) latest.set(k, { ...v, repo });
+  // ── Backlog: open findings in each pull request's LATEST scan, one per (repo, file) -- the same files the
+  // dashboard and Trust Score count as waiting. A file a newer scan no longer flags has no row there; its open row
+  // from an older scan used to keep counting (84 here vs 79 there). Aged from when the file was first flagged:
+  // a rescan doesn't make it new.
+  const latestByPr = new Map<string, { id: string; created_at: string }>();
+  for (const s of rows.prScans ?? [...scanById.values()]) {
+    const k = prKey(s);
+    const cur = latestByPr.get(k);
+    if (!cur || s.created_at > cur.created_at) latestByPr.set(k, s);
   }
-  const openNow = [...latest.values()].filter(v => OPEN.has(v.status));
-  const age = (v: { created_at: string }) => (now - Date.parse(v.created_at)) / DAY;
+  const latestIds = new Set([...latestByPr.values()].map(s => s.id));
+  const open = new Map<string, AnalyticsRows["violations"][number] & { repo: string }>();
+  for (const v of rows.violations) {
+    if (!OPEN.has(v.status) || !latestIds.has(v.scan_id)) continue;
+    const repo = scanById.get(v.scan_id)?.repo ?? "";
+    const k = `${repo}::${v.file_path}`;
+    if (!open.has(k)) open.set(k, { ...v, repo });
+  }
+  const openNow = [...open.values()];
+  const firstSeen = (v: { scan_id: string; file_path: string; created_at: string }) => firstFlag.get(fileOf(v))?.created_at ?? v.created_at;
+  const age = (v: { scan_id: string; file_path: string; created_at: string }) => (now - Date.parse(firstSeen(v))) / DAY;
   const by_age: Analytics["backlog"]["by_age"] = [
     { key: "lt1d", label: "Under 1 day", count: openNow.filter(v => age(v) < 1).length },
     { key: "d1_2", label: "1–2 days", count: openNow.filter(v => age(v) >= 1 && age(v) < 2).length },
@@ -191,11 +216,8 @@ export function computeAnalytics(rows: AnalyticsRows): Analytics {
   const repoStats = new Map<string, { scans: typeof periodScans; opened: number; closed: number; open: number }>();
   const repo = (name: string) => { let r = repoStats.get(name); if (!r) { r = { scans: [], opened: 0, closed: 0, open: 0 }; repoStats.set(name, r); } return r; };
   for (const s of periodScans) repo(s.repo).scans.push(s);
-  for (const v of rows.violations) {
-    const name = scanById.get(v.scan_id)?.repo; if (!name) continue;
-    if (inPeriod(v.created_at)) repo(name).opened++;
-    if (v.resolved_at && inPeriod(v.resolved_at) && !OPEN.has(v.status)) repo(name).closed++;
-  }
+  for (const v of openedRows) { const name = scanById.get(v.scan_id)?.repo; if (name) repo(name).opened++; }
+  for (const v of closedRows) { const name = scanById.get(v.scan_id)?.repo; if (name) repo(name).closed++; }
   for (const v of openNow) if (v.repo) repo(v.repo).open++;
   const repos = [...repoStats.entries()].map(([name, r]) => ({
     repo: name, scans: r.scans.length, prs: new Set(r.scans.map(prKey)).size, opened: r.opened, closed: r.closed, open: r.open, ai_share: weightedAi(r.scans),

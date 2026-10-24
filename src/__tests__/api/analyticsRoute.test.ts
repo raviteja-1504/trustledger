@@ -15,12 +15,17 @@ jest.mock("@/app/api/_middleware", () => ({ verifyApiKey: async () => auth }));
 import { GET } from "@/app/api/analytics/route";
 
 const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
-const scan = (id: string, org: string, author: string, hoursAgo: number) =>
-  ({ id, org_id: org, repo_full_name: `${org}/api`, pr_number: 1, pr_author: author, created_at: ago(hoursAgo), total_ai_percentage: 0.5, file_count: 2 });
+const scan = (id: string, org: string, author: string, hoursAgo: number, pr = 1, repo = `${org}/api`) =>
+  ({ id, org_id: org, repo_full_name: repo, pr_number: pr, pr_author: author, created_at: ago(hoursAgo), total_ai_percentage: 0.5, file_count: 2 });
 
 function seed(extraScans: Record<string, unknown>[] = []) {
   db = fakeSupabase({
-    scans: [scan("s1", "org-1", "alice", 50), scan("s2", "org-1", "bob", 30), scan("x1", "org-2", "eve", 10), ...extraScans],
+    repositories: [
+      { org_id: "org-1", repo_full_name: "org-1/api", is_active: true },
+      { org_id: "org-1", repo_full_name: "acme/payments-api", is_active: false },   // a disconnected demo repo
+      { org_id: "org-2", repo_full_name: "org-2/api", is_active: true },
+    ],
+    scans: [scan("s1", "org-1", "alice", 50), scan("s2", "org-1", "bob", 30, 2), scan("x1", "org-2", "eve", 10), ...extraScans],
     violations: [
       { id: "v1", org_id: "org-1", scan_id: "s1", file_path: "a.ts", risk_score: "CRITICAL", status: "open", created_at: ago(50), resolved_at: null, sla_deadline: ago(26) },
       { id: "v2", org_id: "org-1", scan_id: "s2", file_path: "b.ts", risk_score: "HIGH", status: "resolved", created_at: ago(30), resolved_at: ago(5), sla_deadline: ago(-10) },
@@ -71,6 +76,41 @@ describe("GET /api/analytics", () => {
     seed(Array.from({ length: 2400 }, (_, i) => scan(`bulk-${i}`, "org-1", "bob", 1 + (i % 100))));
     const { body } = await get();
     expect(body.totals.scans).toBe(2402);
+  });
+
+  it("a disconnected repository's findings don't count (acme/payments-api showed 1 waiting)", async () => {
+    const rows = (t: string) => (db.client.from(t) as unknown as { rows: Record<string, unknown>[] }).rows;
+    rows("scans").push(scan("demo", "org-1", "x", 20, 1, "acme/payments-api"));
+    rows("violations").push({ id: "vd", org_id: "org-1", scan_id: "demo", file_path: "d.ts", risk_score: "CRITICAL", status: "open", created_at: ago(20), resolved_at: null, sla_deadline: null });
+    const { body } = await get();
+    expect(body.repos.map((r: { repo: string }) => r.repo)).toEqual(["org-1/api"]);
+    expect(body.backlog.open).toBe(1);
+    expect(body.totals).toMatchObject({ opened: 2, scans: 2 });   // nor in the totals
+  });
+
+  it("a PR's newer scan that flags nothing clears its older open finding -- even when that scan is outside the period", async () => {
+    const rows = (t: string) => (db.client.from(t) as unknown as { rows: Record<string, unknown>[] }).rows;
+    // PR #3: flagged 60 days ago and never resolved; rescanned 40 days ago with nothing flagged (fixed)
+    rows("scans").push(scan("p3-old", "org-1", "dan", 24 * 60, 3), scan("p3-new", "org-1", "dan", 24 * 40, 3));
+    rows("violations").push({ id: "v3", org_id: "org-1", scan_id: "p3-old", file_path: "p.ts", risk_score: "CRITICAL", status: "open", created_at: ago(24 * 60), resolved_at: null, sla_deadline: null });
+    const { body } = await get();
+    expect(body.backlog.open).toBe(1);   // still only alice's a.ts
+  });
+
+  it("waiting now is the PR's latest scan: a rescan that no longer flags a file takes it off (84 vs 79)", async () => {
+    const rows = (t: string) => (db.client.from(t) as unknown as { rows: Record<string, unknown>[] }).rows;
+    // alice's PR #1 rescanned: a.ts is no longer flagged, c.ts still is (and was already flagged in s1)
+    rows("scans").push(scan("s1b", "org-1", "alice", 2));
+    rows("violations").push(
+      { id: "vc1", org_id: "org-1", scan_id: "s1", file_path: "c.ts", risk_score: "HIGH", status: "open", created_at: ago(50), resolved_at: null, sla_deadline: null },
+      { id: "vc2", org_id: "org-1", scan_id: "s1b", file_path: "c.ts", risk_score: "HIGH", status: "open", created_at: ago(2), resolved_at: null, sla_deadline: null },
+    );
+    const { body } = await get();
+    expect(body.backlog.open).toBe(1);                        // c.ts only: a.ts's old open row doesn't count
+    // aged from when c.ts was first flagged (50 h), not from the rescan
+    expect(body.backlog.by_age.find((b: { key: string }) => b.key === "d2_7").count).toBe(1);
+    // found counts the file once: c.ts, a.ts and b.ts -- not c.ts again for the rescan
+    expect(body.totals.opened).toBe(3);
   });
 
   it("only 7, 30 or 90 days", async () => {

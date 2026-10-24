@@ -77,15 +77,38 @@ export async function GET(req: NextRequest) {
       extraScans.push(...(data ?? []).map(toScan));
     }
 
+    // Connected (active) repositories only, as on the dashboard and the Trust Score: a disconnected or demo repo's
+    // old findings showed up here as work "waiting now".
+    const { data: activeRows, error: activeErr } = await db.from("repositories").select("repo_full_name").eq("org_id", org_id).eq("is_active", true) as
+      { data: Array<{ repo_full_name: string }> | null; error: unknown };
+    if (activeErr) throw activeErr;
+    const active = new Set((activeRows ?? []).map(r => r.repo_full_name));
+
     // Developers: only findings and sign-offs on their own pull requests.
     const scanById = new Map([...scans, ...extraScans].map(s => [s.id, s]));
-    const mine = (scanId: string) => !ownLogin || scanById.get(scanId)?.pr_author === ownLogin;
+    const counted = (scanId: string) => {
+      const s = scanById.get(scanId);
+      return !!s && active.has(s.repo) && (!ownLogin || s.pr_author === ownLogin);
+    };
+
+    // Every scan of those repositories' pull requests (id, PR, time only): which scan is each PR's latest, so what
+    // is waiting comes from the latest scan -- also when that scan is newer than any row loaded above.
+    const repos = [...new Set([...scanById.values()].map(s => s.repo).filter(r => active.has(r)))];
+    const prScans: Array<{ id: string; repo: string; pr_number: number | null; created_at: string }> = [];
+    for (let i = 0; i < repos.length; i += IN_CHUNK) {
+      const rowsOf = await all((f, t) => db.from("scans").select("id, repo_full_name, pr_number, created_at").eq("org_id", org_id)
+        .in("repo_full_name", repos.slice(i, i + IN_CHUNK)).order("created_at", { ascending: false }).range(f, t) as unknown as
+        Page<{ id: string; repo_full_name: string; pr_number: number | null; created_at: string }>);
+      prScans.push(...rowsOf.map(s => ({ id: s.id, repo: s.repo_full_name, pr_number: s.pr_number, created_at: s.created_at })));
+    }
 
     const result = computeAnalytics({
       now: now.toISOString(), start, end: now.toISOString(),
-      scans, extraScans: extraScans.filter(s => !ownLogin || s.pr_author === ownLogin),
-      violations: violations.filter(v => mine(v.scan_id)),
-      attestations: attestations.filter(a => mine(a.scan_id)),
+      scans: scans.filter(s => active.has(s.repo)),
+      extraScans: extraScans.filter(s => active.has(s.repo) && (!ownLogin || s.pr_author === ownLogin)),
+      prScans,
+      violations: violations.filter(v => counted(v.scan_id)),
+      attestations: attestations.filter(a => counted(a.scan_id)),
     });
     return NextResponse.json({ ...result, scope: ownLogin ? "own" : "org" }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
