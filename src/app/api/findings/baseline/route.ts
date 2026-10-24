@@ -15,6 +15,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { validateBody, FindingBaselineSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
+import { allRows } from "@/lib/allRows";
 
 const MAX_BASELINE = 5000;
 
@@ -31,7 +32,9 @@ export async function POST(req: NextRequest) {
   const { data: scan } = await db.from("scans").select("id, repo_full_name").eq("id", v.data.scan_id).eq("org_id", auth.org_id).single();
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-  const { data: files } = await db.from("scan_files").select("file_path, indicators").eq("scan_id", scan.id).eq("org_id", auth.org_id);
+  // Paged (lib/allRows.ts): past 1000 files the rest of the scan was never baselined.
+  const { data: files } = await allRows((f, t) => db.from("scan_files").select("file_path, indicators")
+    .eq("scan_id", scan.id).eq("org_id", auth.org_id).order("file_path", { ascending: true }).range(f, t));
   const existing = await loadTriage(db, auth.org_id, scan.repo_full_name);
   const reason = v.data.reason ?? "Baseline";
   const now = new Date().toISOString();

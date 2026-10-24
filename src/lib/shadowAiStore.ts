@@ -6,6 +6,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizePolicy } from "./aiTools";
 import { deliverAlert } from "./alertDelivery";
+import { allRows } from "./allRows";
 import { buildDetections, summarize, type ScanRow, type FileRow, type TriageRow, type ShadowStatus, type Detection, type ShadowSummary } from "./shadowAi";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,8 +109,11 @@ export async function loadShadowAi(db: Db, orgId: string, days: number, prAuthor
   const ids = (scans ?? []).map(s => s.id);
   const files: FileRow[] = [];
   for (let i = 0; i < ids.length; i += IN_CHUNK) {
-    const { data } = await db.from("scan_files").select("scan_id, file_path, attribution").eq("org_id", orgId).in("scan_id", ids.slice(i, i + IN_CHUNK)) as { data: FileRow[] | null };
-    files.push(...(data ?? []));
+    // paged (lib/allRows.ts): a chunk of scans easily holds more than the 1000 rows one request returns
+    const { data } = await allRows((f, t) => db.from("scan_files").select("scan_id, file_path, attribution").eq("org_id", orgId)
+      .in("scan_id", ids.slice(i, i + IN_CHUNK)).order("scan_id", { ascending: true }).order("file_path", { ascending: true })
+      .order("id", { ascending: true }).range(f, t)) as { data: FileRow[] };
+    files.push(...data);
   }
   const [policy, triage] = await Promise.all([loadPolicy(db, orgId), loadTriage(db, orgId)]);
   const detections = buildDetections(scans ?? [], files, policy?.allowed ?? null, triage);

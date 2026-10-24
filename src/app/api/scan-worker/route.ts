@@ -49,6 +49,7 @@ import { inheritedViolations } from "@/lib/inheritedViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
 import { insertInChunks, type Inserter } from "@/lib/chunkedInsert";
+import { allRows } from "@/lib/allRows";
 import type { ScanJob } from "@/lib/queue";
 import { runWithTrace, newTraceId, adoptTraceId, annotateTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
@@ -250,13 +251,18 @@ async function handle(req: NextRequest) {
         .single();
 
       if (prevScanRow) {
-        const { data: prevFiles } = await db
+        // Paged (lib/allRows.ts): with one plain select a push to a 1000+ file PR inherited only the first 1000
+        // unchanged files -- the rest silently left the scan.
+        const { data: prevFiles } = await allRows((f, t) => db
           .from("scan_files")
           // No `content`: inherited rows are stored without it (see below), and pulling every file's source
           // on every delta scan was pure database egress.
           .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, indicators, attribution")
-          .eq("scan_id", prevScanRow.id);
-        prevScan = { id: prevScanRow.id, files: (prevFiles ?? []) as PrevScanFile[] };
+          .eq("scan_id", prevScanRow.id)
+          .eq("org_id", orgId!)
+          .order("file_path", { ascending: true })
+          .range(f, t));
+        prevScan = { id: prevScanRow.id, files: prevFiles as PrevScanFile[] };
       }
     }
 
@@ -842,7 +848,8 @@ async function handle(req: NextRequest) {
             .eq("org_id", orgId).eq("repo_full_name", repoFullName).eq("pr_number", prNumber).neq("id", result.scan_id)
             .order("created_at", { ascending: false }).limit(1);
           const previous = prior?.[0]
-            ? ((await db.from("scan_files").select("file_path, indicators").eq("scan_id", prior[0].id)).data ?? [])
+            ? (await allRows((f, t) => db.from("scan_files").select("file_path, indicators").eq("scan_id", prior[0].id).eq("org_id", orgId)
+                .order("file_path", { ascending: true }).range(f, t))).data
                 .map(f => ({ file_path: f.file_path as string, indicators: Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [] }))
             : null;
           summary += regressionMarkdown(securityRegression(evidenceFilesWithSuppressed, previous, triage));

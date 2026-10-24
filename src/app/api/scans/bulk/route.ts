@@ -16,6 +16,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { fireOrgWebhooks } from "@/lib/outboundWebhook";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
+import { allRows } from "@/lib/allRows";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -48,23 +49,29 @@ export async function POST(req: NextRequest) {
     body.reviewer_email = actor_email ?? body.reviewer_email;
 
     // Get all un-attested files in this scan
-    const { data: files } = await db
+    // Paged (lib/allRows.ts): "attest all" stopped at the first 1000 files of a larger scan.
+    const { data: files } = await allRows((f, t) => db
       .from("scan_files")
       .select("file_path, risk_score")
       .eq("scan_id", body.scan_id)
-      .eq("org_id", org_id) as { data: Array<{ file_path: string; risk_score: string }> | null };
+      .eq("org_id", org_id)
+      .order("file_path", { ascending: true })
+      .range(f, t)) as { data: Array<{ file_path: string; risk_score: string }> };
 
     if (!files || files.length === 0) {
       return NextResponse.json({ error:"no_files_found" }, { status:404 });
     }
 
     // Check which are already attested
-    const { data: existing } = await db
+    // (paged: past 1000 attestations, already-attested files would be attested a second time)
+    const { data: existing } = await allRows((f, t) => db
       .from("attestations")
       .select("file_path")
-      .eq("scan_id", body.scan_id) as { data: Array<{ file_path: string }> | null };
+      .eq("scan_id", body.scan_id)
+      .order("file_path", { ascending: true })
+      .range(f, t)) as { data: Array<{ file_path: string }> };
 
-    const attestedPaths = new Set((existing ?? []).map(a => a.file_path));
+    const attestedPaths = new Set(existing.map(a => a.file_path));
     const pending       = files.filter(f => !attestedPaths.has(f.file_path));
     // Files above what this role may sign off (e.g. CRITICAL for a HIGH-only reviewer) are left for someone who can.
     const toAttest      = pending.filter(f => perms[attestPermissionFor(f.risk_score)]);

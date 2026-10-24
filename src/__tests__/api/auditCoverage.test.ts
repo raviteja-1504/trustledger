@@ -74,7 +74,7 @@ beforeEach(() => {
     github_installations: [{ org_id: "org-1", installation_id: 7, github_org: "acme" }],
     violations: [{ id: "v1", org_id: "org-1", scan_id: "s1", file_path: "a.ts", risk_score: "HIGH", status: "open", created_at: "2026-10-01" }],
     scans: [{ id: "s1", org_id: "org-1", repo_full_name: "acme/existing" }],
-    scan_files: [{ scan_id: "s1", file_path: "a.ts", indicators: [{ id: "sql-injection", severity: "critical", line: 3, label: "SQLi", detail: "d" }] }],
+    scan_files: [{ scan_id: "s1", org_id: "org-1", file_path: "a.ts", indicators: [{ id: "sql-injection", severity: "critical", line: 3, label: "SQLi", detail: "d" }] }],
   });
 });
 afterAll(() => { if (savedKey === undefined) delete process.env.EXPORT_SIGNING_KEY; else process.env.EXPORT_SIGNING_KEY = savedKey; });

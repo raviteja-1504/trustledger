@@ -15,6 +15,7 @@ import { loadTriage } from "@/lib/findingTriageStore";
 import { attachTriage } from "@/lib/findingLifecycle";
 import { getFixSuggestions } from "@/lib/scanner";
 import { writeAuditLog } from "@/lib/audit";
+import { allRows } from "@/lib/allRows";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -37,10 +38,14 @@ export async function GET(req: NextRequest) {
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-  const { data: files } = await db
+  // Paged (lib/allRows.ts): past 1000 files the export silently dropped the rest.
+  const { data: files } = await allRows((f, t) => db
     .from("scan_files")
     .select("file_path, indicators")
-    .eq("scan_id", scanId) as { data: SarifSourceFile[] | null };
+    .eq("scan_id", scanId)
+    .eq("org_id", org_id)
+    .order("file_path", { ascending: true })
+    .range(f, t)) as { data: SarifSourceFile[] };
 
   // Same triage decisions the dashboard and Trust Record apply, as SARIF suppressions.
   const withTriage = attachTriage(files ?? [], await loadTriage(db, org_id, scan.repo_full_name));

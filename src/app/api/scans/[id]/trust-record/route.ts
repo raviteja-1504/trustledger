@@ -12,6 +12,7 @@ import { verifyApiKey } from "../../../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
+import { allRows } from "@/lib/allRows";
 import { countOpenBlocking, loadGate } from "@/lib/mergeGate";
 import { buildTrustRecord, buildTrustRecordSignature } from "@/lib/trustRecord";
 import type { ScanHealth } from "@/lib/scanHealth";
@@ -31,8 +32,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
     const [{ data: files }, { data: atts }, blocking, { data: org }, triage, health] = await Promise.all([
-      db.from("scan_files").select("file_path, risk_score, ai_percentage, indicators").eq("scan_id", scan.id).eq("org_id", auth.org_id),
-      db.from("attestations").select("file_path, reviewer_email, reviewer_github, payload_hash, created_at").eq("scan_id", scan.id),
+      // Paged (lib/allRows.ts): the signed record of a 1,242-file scan listed only 1000 files.
+      allRows((f, t) => db.from("scan_files").select("file_path, risk_score, ai_percentage, indicators")
+        .eq("scan_id", scan.id).eq("org_id", auth.org_id).order("file_path", { ascending: true }).range(f, t)),
+      allRows((f, t) => db.from("attestations").select("file_path, reviewer_email, reviewer_github, payload_hash, created_at")
+        .eq("scan_id", scan.id).order("file_path", { ascending: true }).range(f, t)),
       // the org's merge gate, the same count the GitHub check uses (lib/mergeGate.ts)
       loadGate(db, auth.org_id).then(gate => countOpenBlocking(db, scan.id, gate, auth.org_id)),
       db.from("organizations").select("name").eq("id", auth.org_id).single(),

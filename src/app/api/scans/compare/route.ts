@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
+import { allRows } from "@/lib/allRows";
 
 const RISK_RANK: Record<string, number> = {
   LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3, UNKNOWN:-1,
@@ -39,8 +40,9 @@ export async function GET(req: NextRequest) {
   const [rA, rB, rFA, rFB] = await Promise.all([
     db.from("scans").select("id, repo_full_name, pr_number, commit_sha, overall_risk, total_ai_percentage, created_at").eq("id", scanA).eq("org_id", org_id).single(),
     db.from("scans").select("id, repo_full_name, pr_number, commit_sha, overall_risk, total_ai_percentage, created_at").eq("id", scanB).eq("org_id", org_id).single(),
-    db.from("scan_files").select("file_path, risk_score, ai_percentage, risk_indicators").eq("scan_id", scanA),
-    db.from("scan_files").select("file_path, risk_score, ai_percentage, risk_indicators").eq("scan_id", scanB),
+    // paged (lib/allRows.ts): past 1000 files a comparison saw only part of each scan
+    allRows((f, t) => db.from("scan_files").select("file_path, risk_score, ai_percentage, risk_indicators").eq("scan_id", scanA).eq("org_id", org_id).order("file_path", { ascending: true }).range(f, t)),
+    allRows((f, t) => db.from("scan_files").select("file_path, risk_score, ai_percentage, risk_indicators").eq("scan_id", scanB).eq("org_id", org_id).order("file_path", { ascending: true }).range(f, t)),
   ]);
 
   const scanAMeta = rA.data as Record<string, unknown> | null;

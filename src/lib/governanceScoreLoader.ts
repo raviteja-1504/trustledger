@@ -5,6 +5,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeGovernanceScore, type GovernanceScore, type ScoreInput } from "./governanceScore";
 import { loadShadowAi } from "./shadowAiStore";
+import { allRows } from "./allRows";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Db = SupabaseClient<any>;
@@ -14,9 +15,10 @@ export const SCORE_WINDOW_DAYS = 90;
 const MAX_SCANS = 2000;
 const IN_CHUNK = 200;
 
-async function inChunks<T>(ids: string[], fetch: (chunk: string[]) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
+// Each chunk is paged too (lib/allRows.ts): one chunk of scans can hold more than the 1000 rows a request returns.
+async function inChunks<T>(ids: string[], fetch: (chunk: string[], from: number, to: number) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
   const out: T[] = [];
-  for (let i = 0; i < ids.length; i += IN_CHUNK) out.push(...((await fetch(ids.slice(i, i + IN_CHUNK))).data ?? []));
+  for (let i = 0; i < ids.length; i += IN_CHUNK) out.push(...(await allRows<T>((from, to) => fetch(ids.slice(i, i + IN_CHUNK), from, to))).data);
   return out;
 }
 
@@ -31,10 +33,10 @@ export async function loadScoreInput(db: Db, orgId: string, now = new Date()): P
   const ids = scans.map(s => s.id);
 
   const [riskyFiles, attested, violations, secrets, shadow] = await Promise.all([
-    inChunks(ids, c => db.from("scan_files").select("scan_id, file_path, risk_score, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]) as unknown as PromiseLike<{ data: ScoreInput["riskyFiles"][number][] | null }>),
-    inChunks(ids, c => db.from("attestations").select("scan_id, file_path").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: ScoreInput["attested"][number][] | null }>),
-    inChunks(ids, c => db.from("violations").select("scan_id, file_path, risk_score, status, sla_deadline").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: ScoreInput["violations"][number][] | null }>),
-    inChunks(ids, c => db.from("secret_findings").select("scan_id, severity").eq("org_id", orgId).eq("status", "open").in("scan_id", c) as unknown as PromiseLike<{ data: ScoreInput["secrets"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("scan_files").select("scan_id, file_path, risk_score, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: ScoreInput["riskyFiles"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("attestations").select("scan_id, file_path").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: ScoreInput["attested"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("violations").select("scan_id, file_path, risk_score, status, sla_deadline").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: ScoreInput["violations"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("secret_findings").select("scan_id, severity").eq("org_id", orgId).eq("status", "open").in("scan_id", c).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: ScoreInput["secrets"][number][] | null }>),
     loadShadowAi(db, orgId, SCORE_WINDOW_DAYS).then(r => r.summary, () => null),
   ]);
 

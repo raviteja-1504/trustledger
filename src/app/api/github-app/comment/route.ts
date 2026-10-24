@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../../_middleware";
 import { getInstallationToken } from "@/lib/github";
+import { allRows } from "@/lib/allRows";
 
 const RISK_EMOJI: Record<string, string> = {
   CRITICAL:"🔴", HIGH:"🟠", MEDIUM:"🟡", LOW:"🟢", UNKNOWN:"⚪",
@@ -185,15 +186,21 @@ export async function POST(req: NextRequest) {
 
   if (!scan) return NextResponse.json({ error: "scan_not_found" }, { status: 404 });
 
-  const { data: files } = await db
+  // Paged (lib/allRows.ts): past 1000 rows the comment described part of the scan.
+  const { data: files } = await allRows((f, t) => db
     .from("scan_files")
     .select("file_path, risk_score, ai_percentage, risk_indicators")
-    .eq("scan_id", body.scan_id) as { data: Array<{ file_path: string; risk_score: string; ai_percentage: number; risk_indicators: string[] }> | null };
+    .eq("scan_id", body.scan_id)
+    .eq("org_id", org_id)
+    .order("file_path", { ascending: true })
+    .range(f, t)) as { data: Array<{ file_path: string; risk_score: string; ai_percentage: number; risk_indicators: string[] }> };
 
-  const { data: attests } = await db
+  const { data: attests } = await allRows((f, t) => db
     .from("attestations")
     .select("file_path")
-    .eq("scan_id", body.scan_id) as { data: Array<{ file_path: string }> | null };
+    .eq("scan_id", body.scan_id)
+    .order("file_path", { ascending: true })
+    .range(f, t)) as { data: Array<{ file_path: string }> };
 
   const attestedPaths = new Set((attests ?? []).map(a => a.file_path));
 

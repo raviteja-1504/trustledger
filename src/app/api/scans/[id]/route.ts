@@ -8,6 +8,7 @@ import { findingStatus, fixedSincePrevious, summarize, type FindingStatus, type 
 import type { ScanHealth, ScanTelemetry } from "@/lib/scanHealth";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { fetchContentByHash } from "@/lib/contentByHash";
+import { allRows } from "@/lib/allRows";
 import { filesWithCrossFileContext } from "@/lib/findingCorrelation";
 import { cached, cacheGet, cacheSet, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
@@ -68,13 +69,16 @@ interface ScanFileRow {
 /** A scan's file rows, with the source of files inherited across incremental scans (stored without their
  * own `content`, see api/scan-worker/route.ts) backfilled by content_hash -- one copy per hash. */
 async function loadScanFiles(db: ReturnType<typeof createServiceClient>, orgId: string, scanId: string): Promise<ScanFileRow[]> {
-  const { data } = await db
+  // Paged: a 1,242-file scan was cut to 1000 files by the per-request row cap (lib/allRows.ts).
+  const { data } = await allRows<ScanFileRow>((from, to) => db
     .from("scan_files")
     .select("file_path, language, ai_percentage, risk_score, risk_indicators, content_hash, line_count, content, indicators, attribution")
     .eq("scan_id", scanId)
     .eq("org_id", orgId)
-    .order("ai_percentage", { ascending: false });
-  const rows = (data ?? []) as ScanFileRow[];
+    .order("ai_percentage", { ascending: false })
+    .order("file_path", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: ScanFileRow[] | null; error: unknown }>);
+  const rows = data;
   const missing = rows.filter(f => !f.content && f.content_hash).map(f => f.content_hash);
   if (missing.length > 0) {
     const byHash = await fetchContentByHash(db, orgId, missing);
@@ -105,10 +109,14 @@ async function loadPrHistory(
       .order("created_at", { ascending: false })
       .limit(MAX_HISTORY_SCANS);
     if (!prior?.length) return empty;
-    const { data: rows } = await db
+    const { data: rows } = await allRows((from, to) => db
       .from("scan_files")
       .select("scan_id, file_path, indicators")
-      .in("scan_id", prior.map(s => s.id));
+      .eq("org_id", orgId)
+      .in("scan_id", prior.map(s => s.id))
+      .order("scan_id", { ascending: true })
+      .order("file_path", { ascending: true })
+      .range(from, to));
     const byScan = new Map<string, Array<{ file_path: string; indicators: StoredIndicatorLite[] }>>();
     for (const r of rows ?? []) {
       const list = byScan.get(r.scan_id) ?? [];
@@ -162,19 +170,22 @@ export async function GET(
   // cache instead of re-downloading every file's source from the database each time.
   // Never caches an empty result: the scan row is written before its files, and a view in between must
   // not pin an empty file list for the whole TTL.
-  const filesKey = `scanfiles:v1:${params.id}`;
+  // v2: v1 entries could hold a list cut to 1000 rows (before lib/allRows.ts paging).
+  const filesKey = `scanfiles:v2:${params.id}`;
   let files = await cacheGet<ScanFileRow[]>(filesKey);
   if (!files) {
     files = await loadScanFiles(db, org_id, params.id);
     if (files.length > 0) await cacheSet(filesKey, files, TTL.SCAN);
   }
 
-  const { data: attests } = await db
+  const { data: attests } = await allRows((from, to) => db
     .from("attestations")
     .select("file_path")
-    .eq("scan_id", params.id);
+    .eq("scan_id", params.id)
+    .order("file_path", { ascending: true })
+    .range(from, to));
 
-  const attestedSet = new Set((attests ?? []).map(a => a.file_path));
+  const attestedSet = new Set(attests.map(a => a.file_path));
 
   // Files whose stored findings depend on other files (a flow crosses them, a backlink, a folded duplicate):
   // they must not be re-analysed in isolation below.

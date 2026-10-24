@@ -11,6 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyAuditChain } from "@/lib/audit";
 import { loadShadowAi } from "@/lib/shadowAiStore";
+import { allRows } from "@/lib/allRows";
 import { builtinPermissions, canAttestAny, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 import {
   FRAMEWORKS, STATUS_LABEL, countStatuses, deriveFacts, evaluateChecks, evaluateFramework, normalizeFrameworkId,
@@ -68,9 +69,10 @@ export interface EvidencePackage {
 const MAX_SCANS = 2000;
 const IN_CHUNK = 200;
 
-async function inChunks<T>(ids: string[], fetch: (chunk: string[]) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
+// Each chunk is paged too (lib/allRows.ts): one chunk of scans can hold more than the 1000 rows a request returns.
+async function inChunks<T>(ids: string[], fetch: (chunk: string[], from: number, to: number) => PromiseLike<{ data: T[] | null }>): Promise<T[]> {
   const out: T[] = [];
-  for (let i = 0; i < ids.length; i += IN_CHUNK) out.push(...((await fetch(ids.slice(i, i + IN_CHUNK))).data ?? []));
+  for (let i = 0; i < ids.length; i += IN_CHUNK) out.push(...(await allRows<T>((from, to) => fetch(ids.slice(i, i + IN_CHUNK), from, to))).data);
   return out;
 }
 
@@ -105,9 +107,9 @@ export async function loadFactRows(db: Db, orgId: string, periodStart: string, p
   const days = Math.max(1, Math.ceil((now.getTime() - new Date(periodStart).getTime()) / 86400_000));
 
   const [riskyFiles, attestations, violations, openSecrets, openCritical, resolvedSecrets, filesAnalyzed, audit, members, ai] = await Promise.all([
-    inChunks(ids, c => db.from("scan_files").select("scan_id, file_path, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]) as unknown as PromiseLike<{ data: FactRows["riskyFiles"][number][] | null }>),
-    inChunks(ids, c => db.from("attestations").select("scan_id, file_path, reviewer_github").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: FactRows["attestations"][number][] | null }>),
-    inChunks(ids, c => db.from("violations").select("scan_id, file_path, status, sla_deadline").eq("org_id", orgId).in("scan_id", c) as unknown as PromiseLike<{ data: FactRows["violations"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("scan_files").select("scan_id, file_path, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["riskyFiles"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("attestations").select("scan_id, file_path, reviewer_github").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["attestations"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("violations").select("scan_id, file_path, status, sla_deadline").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["violations"][number][] | null }>),
     db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "open"),
     db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "open").eq("severity", "CRITICAL"),
     db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "resolved").gte("resolved_at", periodStart).lte("resolved_at", periodEnd),
