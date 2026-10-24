@@ -826,7 +826,9 @@ const EVAL_EXEC_RE = [
 // jjwt's parseClaimsJwt accepts UNSIGNED tokens; header.getJWKURL() fetches the verification key from a URL the
 // token itself names (jku injection) -- each lets a forged token through.
 const JWT_BYPASS_RE =
-  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|jwt\.decode\s*\([^)]*verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False|JWTParser\.parse\s*\([^)]*\)\s*\.getJWTClaimsSet\s*\(|\.parseClaimsJwt\s*\(|\.getJWKURL\s*\(\s*\))/i;
+  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|jwt\.decode\s*\([^)]*verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False|JWTParser\.parse\s*\([^)]*\)\s*\.getJWTClaimsSet\s*\(|\.parseClaimsJwt\s*\(|\.getJWKURL\s*\(\s*\)|\bJwts\.parser(?:Builder)?\s*\(\s*\)[^;]*?\.parse\s*\()/i;
+// The last alternative: jjwt's generic parse() also accepts an UNSIGNED token (alg "none") even with a signing key
+// set -- WebGoat's JWT lessons; parseClaimsJws (signed only) is the safe call.
 
 // TLS certificate verification turned off in application code: the connection can be intercepted and served by
 // anyone. Python requests/httpx/aiohttp (verify=False, ssl=False on aiohttp calls), Go (InsecureSkipVerify: true),
@@ -1533,6 +1535,14 @@ function runDetector(
 const PROPERTIES_SECRET_RE =
   /^\s*[\w.]*(?:password|passwd|pwd|secret|token|api[._]?key)[\w.]*\s*=\s*(\S{8,})\s*$/i;
 
+// Key material follows the header: base64 on the same line (after a "-----" and an escaped or real newline), or on
+// one of the next lines (a multi-line literal, a text block, a concatenation of quoted lines).
+const PEM_BODY_RE = /[A-Za-z0-9+/]{40,}/;
+function hasPemKeyBody(lines: string[], i: number, afterHeader: number): boolean {
+  if (PEM_BODY_RE.test(lines[i].slice(afterHeader))) return true;
+  return lines.slice(i + 1, i + 3).some(l => PEM_BODY_RE.test(l));
+}
+
 function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const isTestFile = TEST_FILE_RE.test(file_path);
@@ -1549,6 +1559,11 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       const m = re.exec(lines[i]);
       if (!m) continue;
       if (genericValue && !looksLikeRealSecret(m[1] ?? "")) continue;
+      // `"API_KEY=" + UUID.randomUUID()`: the literal only starts a value built at runtime.
+      if (genericValue && /^\s*\+/.test(lines[i].slice(m.index + m[0].length))) continue;
+      // A PEM header with no key after it is code that builds or strips one (WebGoat's CryptoUtil writes
+      // "-----BEGIN PRIVATE KEY-----\n" + base64(key)), not an embedded key.
+      if (label === "Private key" && !hasPemKeyBody(lines, i, m.index + m[0].length)) continue;
       found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
     }
   }
@@ -1956,6 +1971,8 @@ function findJwtBypass(lines: string[]): ScanIndicator[] {
           ? "The JWT's verification key is fetched from a URL named in the token's own jku header -- an attacker signs with their own key; pin the key or the key-set URL"
           : /JWTParser\.parse|parseClaimsJwt|verify_signature|verify\s*=\s*False/i.test(lines[i])
             ? "JWT claims are read without verifying the token's signature -- a forged token is accepted; verify with the expected key and algorithm first"
+          : /\bJwts\.parser/i.test(lines[i])
+            ? "jjwt's parse() accepts an unsigned token (alg \"none\") even with a signing key set -- a forged token is accepted; use parseClaimsJws()"
             : "JWT configured to accept 'none' algorithm — signature bypass" });
   }
   return found;
@@ -3479,7 +3496,9 @@ function findSQLInjectionJavaTainted(lines: string[]): ScanIndicator[] {
   const SQL_SINK_RE = [
     /\bexecuteQuery\s*\(\s*\w+\s*\)/,
     /\bexecuteUpdate\s*\(\s*\w+\s*\)/,
-    /\.execute\s*\(\s*\w+\s*\)/,
+    // execute() is a common method name (WebGoat's super.execute(file, ...), service.execute(cmd)): only on
+    // something named like a JDBC statement / connection
+    /\b(?:stmt|statement|st|ps|pstmt|conn|connection|\w*(?:Statement|Connection|Jdbc\w*))\s*\.\s*execute\s*\(\s*\w+\s*\)/i,
     /jdbcTemplate\s*\.\s*(?:query|update|execute)\s*\(\s*\w+/,
   ];
   const found: ScanIndicator[] = [];
@@ -3570,6 +3589,11 @@ function findReflectedXSSTainted(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+/** `line` with every "..." / '...' literal emptied (escapes honoured), for matching code rather than text. */
+function withoutStringLiterals(line: string): string {
+  return line.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, m => m[0] + m[0]);
+}
+
 function findPathTraversalTainted(lines: string[]): ScanIndicator[] {
   const FS_SINK_RE = [
     /Paths\s*\.\s*get\s*\(/,
@@ -3582,7 +3606,8 @@ function findPathTraversalTainted(lines: string[]): ScanIndicator[] {
     for (let i = 0; i < lines.length; i++) {
       if (seen.has(i)) continue;
       if (isNonExecutableLine(lines[i])) continue;
-      if (!re.test(lines[i])) continue;
+      // the call itself, not text that mentions it (WebGoat checks an answer for `"new File(\"x.xml\")"`)
+      if (!re.test(withoutStringLiterals(lines[i]))) continue;
       if (PATH_TRAVERSAL_RE.some(r => r.test(lines[i]))) continue;
       if (hasTaintNearby(lines, i, 10)) {
         seen.add(i);
@@ -6685,7 +6710,8 @@ export function analyzeFile(
     ...findNamedTaintIDORCSharp(lines),
     ...findNamedTaintIDORPHP(lines),
     ...findAuthenticatedIdentityIgnored(lines),
-    ...findPHPMissingSessionGuard(lines),
+    // $_SESSION guards only exist in PHP: elsewhere every INSERT/UPDATE looked "unguarded" (Java/JS/Python)
+    ...(lang === "php" ? findPHPMissingSessionGuard(lines) : []),
     ...findSensitiveDataInURL(lines),
     ...findNamedTaintSSRF(lines),
     ...findNamedTaintSSRFPHP(lines),

@@ -629,6 +629,8 @@ const MUTATOR_TAILS = new Set(["put", "add", "addAll", "putAll", "push", "offer"
 const FUNCTIONAL_TAILS = new Set(["apply", "accept", "test", "call", "applyAsInt", "applyAsLong", "applyAsDouble", "applyAsBoolean"]);
 const CALLBACK_TAILS = new Set(["thenApply", "thenApplyAsync", "thenCompose", "thenComposeAsync", "thenAccept", "map", "flatMap", "supplyAsync", "orElseGet", "ifPresent"]);
 const HTTP_HEADER_NAME_RE = /^(?:X-[\w-]+|Content-[\w-]+|Location|Set-Cookie|Refresh|Link|Cache-Control|Access-Control-[\w-]+|Authorization|Cookie|Retry-After|WWW-Authenticate|Referer|Origin|Host)$/i;
+// Header names that are just as often plain data keys in a JSON/DTO map.
+const DATA_KEY_HEADER_NAME_RE = /^(?:Origin|Host|Referer|Link|Location|Authorization|Cookie|Refresh)$/i;
 const SECRET_NAME_JAVA_RE = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
 const TEMPLATE_PLACEHOLDER_RE = /\$\{[^}]*\}|\{\{[^}]*\}\}|%\{[^}]*\}|#\{[^}]*\}|<%/;
 
@@ -914,6 +916,8 @@ function walkPrimaryChain(
   let receiverSoFar: string | undefined;
   const receiverOf = () => (nameParts.length >= 2 ? nameParts[nameParts.length - 2] : receiverSoFar);
   const isNewURL = isNewExprOf === "URL";
+  const prefixIsThis = tokenKids(prefix, "This").length > 0;
+  let calls = 0;
 
   for (const suffix of allNodes(primary, "primarySuffix")) {
     const dotId = firstTok(suffix, "Identifier");
@@ -946,6 +950,7 @@ function walkPrimaryChain(
       if (clears !== null) {
         chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
         onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf() });
+        calls++;
         nameParts = [];
         continue;
       }
@@ -956,7 +961,9 @@ function walkPrimaryChain(
       }
       // Static/utility carriers (Path.of, String.join, URLDecoder.decode, Base64...decode, URI.create, ...)
       if (ARG_CARRYING_TAILS.has(tail) || ((tail === "get") && (rootVar === "Paths" || rootVar === "Path"))) {
-        chainTaint |= anyArgMask;
+        // map.getOrDefault(key, fallback): the result is an entry of the map or the fallback -- never the key
+        // (a request-chosen id looked up in a fixed table of destinations returns one of those destinations).
+        chainTaint |= tail === "getOrDefault" && args.length === 2 ? argMasks[1] : anyArgMask;
         // a decoder RESTORES what an earlier encoder/sanitizer cleared
         if (tail === "decode" && /URLDecoder|Base64|Decoder/.test(calleeName || (rootVar ?? ""))) {
           chainTaint |= (anyArgMask >>> SHADOW) & ALL;
@@ -1010,7 +1017,10 @@ function walkPrimaryChain(
         if (m) chainTaint |= m;
       }
 
-      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf() });
+      // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
+      const selfCall = calls === 0 && nameParts.length === 1 && !receiverOf() && (parts.length === 1 || prefixIsThis);
+      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall });
+      calls++;
 
       // Generic passthrough: any other call keeps existing chain taint sticky
       // (a normal method's return isn't assumed tainted just because some
@@ -1027,6 +1037,8 @@ interface CallInfo {
   chainTaintBefore: number; node: CstNode; isNewURL: boolean; isNewOf: string | null;
   /** The name the method is called ON -- `svc` for `svc.find()` and `this.svc.find()`, `Svc` for `Svc.find()`. */
   receiverName?: string;
+  /** A call to the class's own method: `execute(x)`, `super.execute(x)`, `this.execute(x)`. */
+  selfCall?: boolean;
 }
 
 function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
@@ -1158,6 +1170,31 @@ function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
   }
 }
 
+// `execute` / `evaluate` are common method names: they are a JDBC / XPath sink only on a receiver that can be
+// one. Never the class's own method (WebGoat's `super.execute(file, name, user)` was reported as SQL injection),
+// and never a receiver whose declared type is something else (`service.evaluate(config)` as XPath injection).
+// An undeclared receiver (a chained `conn.createStatement().execute(q)`, an injected field) still counts.
+const SQL_RECEIVER_TYPE_RE = /Statement|Connection|Jdbc|EntityManager|Session|Query|DSLContext|DataSource/;
+const XPATH_RECEIVER_TYPE_RE = /XPath/;
+function receiverMayBe(info: CallInfo, ctx: EngineCtx, typeRe: RegExp): boolean {
+  if (info.selfCall) return false;
+  const type = info.receiverName ? ctx.varTypes.get(info.receiverName) : undefined;
+  return type === undefined || typeRe.test(type);
+}
+
+// `pw` opened on a file (`new PrintWriter(logFile)`, a FileWriter...) writes to disk, not to the browser: WebGoat's
+// XXE lesson logging a line to a file was reported as XSS. A writer from the response is still a sink.
+function writesToFile(name: string, ctx: EngineCtx): boolean {
+  const esc = name.replace(/[$]/g, "\\$&");
+  const decl = new RegExp(`\\b${esc}\\s*=\\s*new\\s+(?:[\\w.]+\\.)?(?:PrintWriter|PrintStream|BufferedWriter|OutputStreamWriter)\\s*\\(\\s*([^;]*)`);
+  for (const line of ctx.lines) {
+    const m = decl.exec(line);
+    if (m) return !/response|resp\b|res\b|getWriter|getOutputStream|System\.out/.test(m[1]);
+    if (new RegExp(`\\b${esc}\\s*=\\s*new\\s+(?:[\\w.]+\\.)?(?:FileWriter|FileOutputStream)\\b`).test(line)) return true;
+  }
+  return false;
+}
+
 function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   checkCrossFileCallJava(info, env, ctx);
   const { tail, rootVar, args, chainTaintBefore, node, calleeName } = info;
@@ -1192,7 +1229,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     }
   };
 
-  if (tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") {
+  if ((tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") && receiverMayBe(info, ctx, SQL_RECEIVER_TYPE_RE)) {
     fireArgs("sql-injection", [0]);
   } else if ((tail === "query" || tail === "update") && /jdbcTemplate/i.test(rootVar ?? "")) {
     fireArgs("sql-injection", [0]);
@@ -1221,7 +1258,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     // DirContext.search(name, filter[, filterArgs | controls]): the filter only -- filterArgs are the bound
     // ({0}) form, the safe way to put values in a filter.
     fireArgs("ldap-injection", args.length >= 2 ? [1] : [0]);
-  } else if (tail === "evaluate") {
+  } else if (tail === "evaluate" && receiverMayBe(info, ctx, XPATH_RECEIVER_TYPE_RE)) {
     // XPath.evaluate(expression, item[, returnType]): the expression only.
     fireArgs("xpath-injection", [0]);
   } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
@@ -1241,8 +1278,15 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   if (["setHeader", "addHeader", "setIntHeader", "setDateHeader", "addDateHeader"].includes(tail) && args.length >= 2) {
     fire("header-injection", argMasks[0] | argMasks[1], culpritText(args[1], env, ctx));
   } else if ((tail === "put" || tail === "add" || tail === "set" || tail === "header") && args.length >= 2) {
+    // A name that is also an everyday data key (origin, host, link...) counts only on something that holds
+    // headers (`headers.add(...)`, an HttpHeaders, a builder's .header(...)): WebAuthn's
+    // clientData.put("origin", o) is JSON, not a response header. Header-only names (X-*, Content-*) count anywhere.
     const key = literalStringOf(arg0);
-    if (key && HTTP_HEADER_NAME_RE.test(key)) fire("header-injection", argMasks[1], culpritText(args[1], env, ctx));
+    const recv = info.receiverName ?? rootVar ?? "";
+    const holdsHeaders = tail === "header" || /header/i.test(recv) || /Header/.test(ctx.varTypes.get(recv) ?? "");
+    if (key && HTTP_HEADER_NAME_RE.test(key) && (holdsHeaders || !DATA_KEY_HEADER_NAME_RE.test(key))) {
+      fire("header-injection", argMasks[1], culpritText(args[1], env, ctx));
+    }
   }
   // path traversal: Path.of / Paths.get and the wider java.nio.file.Files surface
   if ((rootVar === "Path" || rootVar === "Paths") && (tail === "of" || tail === "get")) fire("path-traversal");
@@ -1291,7 +1335,8 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
       `MessageDigest.getInstance("${literalStringOf(arg0)}") is a broken/weak hash — use SHA-256+ (and a slow KDF such as bcrypt/Argon2 for passwords)`);
   }
   // servlet writer / print stream
-  if (["println", "print", "write", "append", "printf"].includes(tail) && /^(?:response|resp|res|out|writer|pw|printWriter)$/i.test(rootVar ?? "") && arg0) {
+  if (["println", "print", "write", "append", "printf"].includes(tail) && /^(?:response|resp|res|out|writer|pw|printWriter)$/i.test(rootVar ?? "") && arg0 &&
+      !writesToFile(rootVar!, ctx)) {
     fire("xss", argMasks[0], nodeText(arg0));
   }
   // for (var e : tainted.entrySet()) t.put(e.getKey(), e.getValue()): the request decides which keys are set
@@ -1370,6 +1415,10 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   // an attacker chooses where the server fetches keys from (and which keys it trusts).
   if (className === "JwkProviderBuilder" || className === "UrlJwkProvider") fire("ssrf", `new ${className}`, [0]);
   if (className === "BasicDBObject") fire("nosql-injection", "new BasicDBObject");
+  // Spring MVC redirects: new RedirectView(url), and a view name of "redirect:" + url (WebGoat's open-redirect
+  // lesson) -- the request decides where the browser is sent. A plain view name renders a template instead.
+  if (className === "RedirectView") fire("open-redirect", "new RedirectView", [0]);
+  if (className === "ModelAndView" && args[0] && /^\s*"redirect:/.test(tokensText(args[0]))) fire("open-redirect", "new ModelAndView(\"redirect:\" + ...)", [0]);
 }
 
 /**
@@ -2315,10 +2364,18 @@ const BOLA_REPO_WRITE_METHODS = new Set(["deleteById", "delete", "save"]);
 // calls on the same field, independently).
 const BOLA_MAP_ACCESS_METHODS = new Set(["get", "getOrDefault", "put", "remove"]);
 
+// A field initialised as an immutable table (`DESTINATIONS = Map.of(1, "/a", 2, "/b")`) is a fixed allowlist, not
+// a store of anyone's records: looking an id up in it is how a safe redirect works (WebGoat's
+// OpenRedirectSecureController), not a missing ownership check.
+function isImmutableTable(field: string, fileText: string): boolean {
+  if (!/^\w+$/.test(field)) return false;
+  return new RegExp(`\\b${field}\\s*=\\s*(?:[\\w.]+\\.)?(?:Map\\.(?:of|ofEntries|copyOf)|ImmutableMap\\.|Collections\\.unmodifiableMap)\\b`).test(fileText);
+}
+
 function checkBolaSinkCandidate(
   info: { calleeName: string; tail: string; rootVar: string | null; args: CstNode[]; node: CstNode },
   resourceIdParamNames: Set<string>, classFieldNames: Set<string>, localInits: Map<string, CstNode>,
-  candidates: BolaSinkCandidate[],
+  candidates: BolaSinkCandidate[], fileText = "",
 ) {
   const { tail, rootVar, args, node, calleeName } = info;
   if (args.length === 0) return;
@@ -2327,7 +2384,7 @@ function checkBolaSinkCandidate(
     if (idNames.size > 0) candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName, idNames });
     return;
   }
-  if (BOLA_MAP_ACCESS_METHODS.has(tail) && rootVar !== null && classFieldNames.has(rootVar)) {
+  if (BOLA_MAP_ACCESS_METHODS.has(tail) && rootVar !== null && classFieldNames.has(rootVar) && !isImmutableTable(rootVar, fileText)) {
     const idNames = resourceIdsIn(args[0], resourceIdParamNames, localInits);
     if (idNames.size > 0) candidates.push({ node, sourceExpr: nodeText(args[0]), sinkExpr: calleeName, idNames });
   }
@@ -2536,9 +2593,10 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   ]);
 
   const candidates: BolaSinkCandidate[] = [];
+  const fileText = ctx.lines.join("\n");
   for (const primary of findAllNodes(method.body, "primary")) {
     walkPrimaryChain(primary, new Map(), ctx, (info) => {
-      checkBolaSinkCandidate(info, method.resourceIdParamNames, ctx.classFieldNames, localInits, candidates);
+      checkBolaSinkCandidate(info, method.resourceIdParamNames, ctx.classFieldNames, localInits, candidates, fileText);
     });
   }
   checkBolaConstructorSinkCandidates(method, method.resourceIdParamNames, localInits, candidates);
