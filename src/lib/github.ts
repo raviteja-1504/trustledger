@@ -10,6 +10,7 @@ import crypto from "crypto";
 import type { CheckAnnotation } from "./checkAnnotations";
 import { findingMeta } from "./findingCatalog";
 import { DEFAULT_GATE, blockingRisks, blocksMerge, type GateSettings } from "./mergeGate";
+import { readTarGz } from "./tarArchive";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -126,13 +127,93 @@ export interface GitHubFile { path: string; content: string }
 
 const FILE_FETCH_CONCURRENCY = 15;
 
+// From this many files up, the commit is fetched as one tarball instead of one contents-API call per file: a
+// 2,800-file PR made 2,800 calls per attempt, and with the queue's retries that exhausted the installation's
+// 5,000/hour quota, so every read failed. Below it, per-file reads fetch less than the whole repository would.
+export const ARCHIVE_MIN_FILES = 100;
+// Caps for the tarball: past them it is not read (the per-file path is used instead) rather than exhausting the
+// function's memory on a very large repository.
+const ARCHIVE_MAX_DOWNLOAD_BYTES = 150 * 1024 * 1024;
+const ARCHIVE_MAX_UNPACKED_BYTES = 600 * 1024 * 1024;
+// The contents API returns no content for files over 1 MB; the archive path leaves them out too.
+const MAX_FILE_BYTES = 1024 * 1024;
+
+async function readCapped(res: Response, max: number): Promise<Buffer | null> {
+  const declared = Number(res.headers.get("content-length") ?? 0);
+  if (declared > max) { await res.body?.cancel(); return null; }
+  if (!res.body) return Buffer.from(await res.arrayBuffer());
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) { await reader.cancel(); return null; }
+    parts.push(value);
+  }
+  return Buffer.concat(parts);
+}
+
+/**
+ * The given paths at `ref`, from the repository's tarball (one request). Null when the archive can't be
+ * fetched or read, or is over the size caps -- the caller then reads file by file.
+ */
+export async function fetchFilesFromArchive(
+  token: string | undefined,
+  owner: string,
+  repo: string,
+  ref: string,
+  paths: string[],
+): Promise<GitHubFile[] | null> {
+  try {
+    // GitHub answers with a redirect to a short-lived codeload URL that carries its own credential.
+    const res = await fetch(`${GITHUB_API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tarball/${encodeURIComponent(ref)}`, {
+      headers: {
+        ...(token ? { Authorization: `token ${token}` } : {}),
+        Accept:        "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (!res.ok) { await res.body?.cancel(); return null; }
+    const gz = await readCapped(res, ARCHIVE_MAX_DOWNLOAD_BYTES);
+    if (!gz) return null;
+    const files = readTarGz(gz, new Set(paths), { maxUnpackedBytes: ARCHIVE_MAX_UNPACKED_BYTES, maxFileBytes: MAX_FILE_BYTES });
+    return paths.filter(p => files.has(p)).map(p => ({ path: p, content: files.get(p)!.toString("utf8") }));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fetch file contents for a list of paths at a given commit.
  * `token` is optional so whole-repo scans of a public repo with no
  * connected GitHub App installation can still fetch content (unauthenticated
  * GitHub API access works for public repos, just at a lower rate limit).
+ * Paths missing from the result could not be read (callers report them, see scan-worker).
  */
 export async function fetchFileContents(
+  token: string | undefined,
+  owner: string,
+  repo: string,
+  ref: string,
+  paths: string[],
+): Promise<GitHubFile[]> {
+  if (paths.length >= ARCHIVE_MIN_FILES) {
+    const archived = await fetchFilesFromArchive(token, owner, repo, ref, paths);
+    if (archived) return archived;
+  }
+  return fetchEachFile(token, owner, repo, ref, paths);
+}
+
+/** The check-run text for PR files that couldn't be fetched from GitHub (and so weren't scanned). */
+export function unreadSummary(unread: number, requested: number): string {
+  return `TrustLedger couldn't read ${unread} of ${requested} files in this PR from GitHub (rate limit, timeout or an outage), ` +
+    `so ${unread === requested ? "nothing was" : "those files weren't"} scanned. The scan is retried automatically; ` +
+    `if this persists, re-run it from the PR page or push a new commit.`;
+}
+
+async function fetchEachFile(
   token: string | undefined,
   owner: string,
   repo: string,

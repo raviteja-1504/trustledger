@@ -21,6 +21,7 @@ import {
   fetchFileContents,
   updateCheckRun,
   buildCheckSummary,
+  unreadSummary,
 } from "@/lib/github";
 import { runScan, getFixSuggestions, calculateRisk } from "@/lib/scanner";
 import { ensureTaintEngines } from "@/lib/engineWarmup";
@@ -47,6 +48,7 @@ import { openSlaDeadlines } from "@/lib/slaCarryover";
 import { inheritedViolations } from "@/lib/inheritedViolations";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { safeError } from "@/lib/errors";
+import { insertInChunks, type Inserter } from "@/lib/chunkedInsert";
 import type { ScanJob } from "@/lib/queue";
 import { runWithTrace, newTraceId, adoptTraceId, annotateTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
@@ -278,6 +280,23 @@ async function handle(req: NextRequest) {
       ? await fetchFileContents(token, owner, repoName, headSha, pathsToFetch)
       : [];
     void recordEvent({ kind: "scan.files_fetched", duration_ms: Date.now() - fetchStarted, data: { pr_files: prFiles.length, scannable: allScannablePaths.length, requested: pathsToFetch.length, fetched: fileContents.length, delta: isDelta } });
+    const fetchedPaths = new Set(fileContents.map(f => f.path));
+    const unreadPaths = pathsToFetch.filter(p => !fetchedPaths.has(p));
+
+    // Files to scan but none readable (rate limit, timeout, GitHub outage) is NOT "no scannable files": that
+    // used to complete the check as neutral, so an unscanned PR could merge. Fail closed and let the queue retry.
+    if (pathsToFetch.length > 0 && fileContents.length === 0) {
+      const summary = unreadSummary(unreadPaths.length, pathsToFetch.length);
+      if (checkRunId) {
+        await updateCheckRun(token, owner, repoName, checkRunId, {
+          name: "TrustLedger AI Governance", status: "completed", conclusion: "failure",
+          output: { title: "Couldn't read this PR's files", summary },
+        });
+      }
+      await markDelivery(db, deliveryId, { processed: false, error: `could not read any of ${pathsToFetch.length} files` });
+      await recordEvent({ kind: "scan.failed", duration_ms: Date.now() - startedAt, message: summary, data: { requested: pathsToFetch.length, fetched: 0 } });
+      return NextResponse.json({ error: "files_unreadable", requested: pathsToFetch.length }, { status: 503 });
+    }
 
     if (fileContents.length === 0 && (!prevScan || allScannablePaths.length === 0)) {
       if (checkRunId) {
@@ -343,11 +362,10 @@ async function handle(req: NextRequest) {
     // Load the data-flow engines first: on a cold start they may still be loading (see engineWarmup.ts).
     const warm = await ensureTaintEngines();
     if (!warm.ready) logger.warn("Data-flow engines not all ready; scan health will report it", { engines_warm_ms: warm.ms });
-    const fetchedPaths = new Set(fileContents.map(f => f.path));
 
     const result = runScan({
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
-      missing_content_paths: pathsToFetch.filter(p => !fetchedPaths.has(p)),
+      missing_content_paths: unreadPaths,
       pr_metadata:         prMeta,
       developer_baseline:  developerBaseline ?? undefined,
       git_log:             gitLog,
@@ -422,7 +440,7 @@ async function handle(req: NextRequest) {
 
         if (result.files.length > 0) {
           const contentByPath = new Map(fileContents.map(f => [f.path, f.content]));
-          await db.from("scan_files").insert(result.files.map(f => ({
+          const fileErrors = await insertInChunks(db as unknown as Inserter, "scan_files", result.files.map(f => ({
             scan_id: scan.id, org_id: orgId,
             file_path: f.file_path, language: f.language,
             ai_percentage: f.ai_percentage, risk_score: f.risk_score,
@@ -432,7 +450,8 @@ async function handle(req: NextRequest) {
             // can show exact locations without re-running the scanner.
             indicators: toStoredIndicators(f.indicators),
             attribution: f.attribution,
-          })));
+          })), { size: r => (r.content?.length ?? 0) + 2048 });
+          if (fileErrors.length) logger.error("scan_files insert failed", { scan_id: scan.id, batches_failed: fileErrors.length, detail: fileErrors[0] });
         }
 
         // Create secret finding records — mirrors the manual/API scan path
@@ -476,7 +495,7 @@ async function handle(req: NextRequest) {
           // indicators IS still forwarded from the previous scan's row so
           // this file's findings keep showing up without needing content at
           // all -- they can't have changed either, since the content hasn't.
-          await db.from("scan_files").insert(inheritedFiles.map(f => ({
+          const inheritErrors = await insertInChunks(db as unknown as Inserter, "scan_files", inheritedFiles.map(f => ({
             scan_id: scan.id, org_id: orgId,
             file_path: f.file_path, language: f.language,
             ai_percentage: f.ai_percentage, risk_score: f.risk_score,
@@ -485,6 +504,7 @@ async function handle(req: NextRequest) {
             indicators: f.indicators ?? [],
             attribution: f.attribution ?? null,
           })));
+          if (inheritErrors.length) logger.error("inherited scan_files insert failed", { scan_id: scan.id, batches_failed: inheritErrors.length, detail: inheritErrors[0] });
 
           // For inherited (unchanged) files, copy attestations from any prior
           // scan of this same PR — not just the immediately previous scan.
@@ -829,6 +849,11 @@ async function handle(req: NextRequest) {
         } catch { /* best-effort: the check run still completes without the section */ }
         // Unapproved AI tools in this PR: a warning section only -- never changes the conclusion.
         summary += shadowAiCheckMarkdown(unapproved, process.env.NEXT_PUBLIC_APP_URL ? `${process.env.NEXT_PUBLIC_APP_URL}/shadow-ai` : "");
+      }
+      // Files that couldn't be read weren't scanned: the check can't pass on them.
+      if (unreadPaths.length > 0) {
+        if (conclusion === "success") conclusion = "action_required";
+        summary += `\n\n### ⚠️ Not every file was scanned\n${unreadSummary(unreadPaths.length, pathsToFetch.length)}`;
       }
       await updateCheckRun(token, owner, repoName, checkRunId, {
         name: "TrustLedger AI Governance", status: "completed", conclusion,

@@ -24,9 +24,11 @@ import crypto from "crypto";
 import { logger } from "@/lib/logger";
 import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
+import { coverageFailure, scanCoverage } from "@/lib/scanCoverage";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
+const MAX_FILES_READ = 50;
 
 function verifyBitbucketSignature(rawBody: string, signature: string | null, secret: string): boolean {
   if (!signature || !secret) return !secret; // if no secret configured, allow all
@@ -54,7 +56,7 @@ async function fetchBitbucketFiles(
   repoSlug: string,
   prId: number,
   headSha: string,
-): Promise<Array<{ path: string; content: string }>> {
+): Promise<{ files: Array<{ path: string; content: string }>; wanted: number } | null> {
   const BBAPI  = "https://api.bitbucket.org/2.0";
   const user   = process.env.BITBUCKET_USERNAME ?? "";
   const authHdr = `Basic ${Buffer.from(`${user}:${token}`).toString("base64")}`;
@@ -65,15 +67,18 @@ async function fetchBitbucketFiles(
     `${BBAPI}/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/diffstat`,
     { headers },
   );
-  if (!diffRes.ok) return [];
+  // null: the list itself couldn't be read -- not the same as a PR with nothing to scan
+  if (!diffRes.ok) return null;
   const diff = await diffRes.json() as { values?: Array<{ new: { path: string }; status: string }> };
 
-  const paths = (diff.values ?? [])
+  const scannable = (diff.values ?? [])
     .filter(f => f.status !== "removed" && isScannablePath(f.new?.path ?? ""))
-    .map(f => f.new.path)
-    .slice(0, 50);
+    .map(f => f.new.path);
+  // At most 50 are read here (this runs inside the webhook request); `wanted` counts them all, so the rest
+  // show up as unscanned instead of the status passing on a partial read.
+  const paths = scannable.slice(0, MAX_FILES_READ);
 
-  if (paths.length === 0) return [];
+  if (paths.length === 0) return { files: [], wanted: 0 };
 
   const files = await Promise.all(
     paths.map(async p => {
@@ -87,7 +92,7 @@ async function fetchBitbucketFiles(
       } catch { return null; }
     }),
   );
-  return files.filter(Boolean) as Array<{ path: string; content: string }>;
+  return { files: files.filter(Boolean) as Array<{ path: string; content: string }>, wanted: scannable.length };
 }
 
 async function postBitbucketBuildStatus(
@@ -173,11 +178,19 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const files = bbToken ? await fetchBitbucketFiles(bbToken, workspace, repoSlug, prId, headSha) : [];
+    const fetched = bbToken ? await fetchBitbucketFiles(bbToken, workspace, repoSlug, prId, headSha) : null;
+    const files = fetched?.files ?? [];
+    const wanted = fetched?.wanted ?? 0;
+    const coverage = scanCoverage(!!fetched, wanted, files.length);
 
-    if (files.length === 0) {
-      if (bbToken) await postBitbucketBuildStatus(bbToken, workspace, repoSlug, headSha, "SUCCESSFUL", "No scannable files");
+    if (coverage === "none") {
+      await postBitbucketBuildStatus(bbToken!, workspace, repoSlug, headSha, "SUCCESSFUL", "No scannable files");
       return NextResponse.json({ ok: true, files_scanned: 0 });
+    }
+    if (coverage === "unlisted" || coverage === "unreadable") {
+      // A failed status, not a passing one; still a 200 so Bitbucket doesn't count the hook as failing.
+      if (bbToken) await postBitbucketBuildStatus(bbToken, workspace, repoSlug, headSha, "FAILED", coverageFailure(coverage, wanted, 0)!);
+      return NextResponse.json({ ok: false, reason: bbToken ? "files_unreadable" : "no_token", files_scanned: 0 });
     }
 
     await ensureTaintEngines();
@@ -241,11 +254,14 @@ export async function POST(req: NextRequest) {
       // The org's merge gate, see lib/mergeGate.ts: HIGH files block only while "Block HIGH" is on.
       const gate    = await loadGate(db, orgId);
       const count   = result.files.filter(f => blocksMerge(f.risk_score, gate)).length;
-      const blocked = count > 0;
+      // Files that weren't read weren't scanned: the status can't pass on them.
+      const partial = coverageFailure(coverage, wanted, files.length);
+      const blocked = count > 0 || !!partial;
       await postBitbucketBuildStatus(
         bbToken, workspace, repoSlug, headSha,
         blocked ? "FAILED" : "SUCCESSFUL",
-        blocked ? `${count} file(s) need attestation — ${result.overall_risk}` : `Passed · ${result.files.length} files · ${(result.total_ai_percentage*100).toFixed(0)}% AI`,
+        count > 0 ? `${count} file(s) need attestation — ${result.overall_risk}${partial ? `; ${files.length} of ${wanted} files scanned` : ""}`
+          : partial ?? `Passed · ${result.files.length} files · ${(result.total_ai_percentage*100).toFixed(0)}% AI`,
         `${apiUrl}/pr/${result.scan_id}`,
       );
     }

@@ -28,9 +28,11 @@ import crypto from "crypto";
 import { logger } from "@/lib/logger";
 import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
+import { coverageFailure, scanCoverage } from "@/lib/scanCoverage";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
+const MAX_FILES_READ = 50;
 
 async function getGitLabToken(db: ReturnType<typeof createServiceClient>, orgId: string): Promise<string | null> {
   const { data } = await db
@@ -47,21 +49,23 @@ async function fetchGitLabFiles(
   projectId: string | number,
   mrIid: number,
   headSha: string,
-): Promise<Array<{ path: string; content: string }>> {
+): Promise<{ files: Array<{ path: string; content: string }>; wanted: number } | null> {
   const GITLAB_API = "https://gitlab.com/api/v4";
   const headers = { "PRIVATE-TOKEN": token };
 
-  // Get MR changes
+  // Get MR changes (null: the list itself couldn't be read -- not the same as an MR with nothing to scan)
   const changesRes = await fetch(`${GITLAB_API}/projects/${projectId}/merge_requests/${mrIid}/changes`, { headers });
-  if (!changesRes.ok) return [];
+  if (!changesRes.ok) return null;
 
   const changesData = await changesRes.json() as { changes?: Array<{ new_path: string; deleted_file: boolean }> };
-  const paths = (changesData.changes ?? [])
+  const scannable = (changesData.changes ?? [])
     .filter(c => !c.deleted_file && isScannable(c.new_path))
-    .map(c => c.new_path)
-    .slice(0, 50);
+    .map(c => c.new_path);
+  // At most 50 are read here (this runs inside the webhook request); `wanted` counts them all, so the rest
+  // show up as unscanned instead of the status passing on a partial read.
+  const paths = scannable.slice(0, MAX_FILES_READ);
 
-  if (paths.length === 0) return [];
+  if (paths.length === 0) return { files: [], wanted: 0 };
 
   // Fetch file contents
   const files = await Promise.all(
@@ -78,7 +82,7 @@ async function fetchGitLabFiles(
     }),
   );
 
-  return files.filter(Boolean) as Array<{ path: string; content: string }>;
+  return { files: files.filter(Boolean) as Array<{ path: string; content: string }>, wanted: scannable.length };
 }
 
 async function postGitLabStatus(
@@ -165,15 +169,21 @@ export async function POST(req: NextRequest) {
 
   try {
     // Fetch files
-    const files = gitlabToken
+    const fetched = gitlabToken
       ? await fetchGitLabFiles(gitlabToken, projectId, mrIid, headSha)
-      : [];
+      : null;
+    const files = fetched?.files ?? [];
+    const wanted = fetched?.wanted ?? 0;
+    const coverage = scanCoverage(!!fetched, wanted, files.length);
 
-    if (files.length === 0) {
-      if (gitlabToken) {
-        await postGitLabStatus(gitlabToken, projectId, headSha, "success", "TrustLedger: No scannable files");
-      }
+    if (coverage === "none") {
+      await postGitLabStatus(gitlabToken!, projectId, headSha, "success", "TrustLedger: No scannable files");
       return NextResponse.json({ ok: true, files_scanned: 0 });
+    }
+    if (coverage === "unlisted" || coverage === "unreadable") {
+      // A failed status, not a passing one; still a 200 so GitLab doesn't count the hook as failing.
+      if (gitlabToken) await postGitLabStatus(gitlabToken, projectId, headSha, "failed", coverageFailure(coverage, wanted, 0)!);
+      return NextResponse.json({ ok: false, reason: gitlabToken ? "files_unreadable" : "no_token", files_scanned: 0 });
     }
 
     // Run scanner (with the data-flow engines loaded -- see engineWarmup.ts)
@@ -261,10 +271,12 @@ export async function POST(req: NextRequest) {
       // The org's merge gate, see lib/mergeGate.ts: HIGH files block only while "Block HIGH" is on.
       const gate      = await loadGate(db, orgId);
       const blocking  = result.files.filter(f => blocksMerge(f.risk_score, gate)).length;
-      const blocked   = blocking > 0;
-      const desc      = blocked
-        ? `Blocked: ${blocking} file(s) need attestation (${result.overall_risk})`
-        : `Passed: ${result.files.length} files · ${(result.total_ai_percentage * 100).toFixed(0)}% AI`;
+      // Files that weren't read weren't scanned: the status can't pass on them.
+      const partial   = coverageFailure(coverage, wanted, files.length);
+      const blocked   = blocking > 0 || !!partial;
+      const desc      = blocking > 0
+        ? `Blocked: ${blocking} file(s) need attestation (${result.overall_risk})${partial ? `; ${files.length} of ${wanted} files scanned` : ""}`
+        : partial ?? `Passed: ${result.files.length} files · ${(result.total_ai_percentage * 100).toFixed(0)}% AI`;
 
       await postGitLabStatus(
         gitlabToken, projectId, headSha,
