@@ -52,10 +52,11 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  ALL, FIXED_POINT_CAP, INJECTION, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { anchoredPatternClears } from "./taint/charClass";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
 // See astTaintPython.ts's identical helper for why: require.resolve(...)
@@ -313,7 +314,8 @@ const GO_PASSTHROUGH = new Set([
   "path.Join", "path.Clean", "path.Dir", "json.Marshal", "json.MarshalIndent", "json.NewDecoder", "xml.NewDecoder",
   "gob.NewDecoder", "yaml.NewDecoder", "io.ReadAll", "ioutil.ReadAll", "bufio.NewReader", "bufio.NewScanner",
   "html.UnescapeString", "hex.DecodeString", "hex.EncodeToString", "strconv.Quote", "template.HTML", "template.JS",
-  "template.JSStr", "template.URL", "template.CSS", "template.HTMLAttr", "textwrap.Dedent",
+  "template.JSStr", "template.URL", "template.CSS", "template.HTMLAttr", "textwrap.Dedent", "strconv.Itoa", "strconv.FormatInt",
+  "strconv.FormatUint",
 ]);
 const GO_DECODERS = new Set(["url.QueryUnescape", "url.PathUnescape", "html.UnescapeString", "hex.DecodeString"]);
 const GO_BASE64_RE = /(?:^|\.)base64\.\w+\.(?:DecodeString|EncodeToString)$|(?:^|\.)base64\.(?:StdEncoding|URLEncoding|RawStdEncoding|RawURLEncoding)\.(?:DecodeString|EncodeToString)$/;
@@ -430,20 +432,35 @@ const DYNAMIC_VALUE_TYPES_GO = new Set(["identifier", "index_expression", "type_
  * document is exposed whole.
  */
 function nosqlInjectablePartsGo(doc: SyntaxNode): SyntaxNode[] {
+  // `filter := bson.M{...}; coll.Find(ctx, filter)`: judge the literal it was built as (if it is never added to)
+  if (doc.type === "identifier") {
+    const def = lastAssignmentGo(doc.text, doc);
+    const fn = enclosingFnGo(doc);
+    const writes = fn ? findAllNodesGo(fn, "index_expression").filter(ix => ix.childForFieldName("operand")?.text === doc.text &&
+      ix.parent?.type === "expression_list" && ix.parent.parent?.type === "assignment_statement") : [];
+    if (def?.type === "composite_literal" && writes.length === 0) return nosqlInjectablePartsGo(def);
+  }
   if (doc.type !== "composite_literal") return [doc];
   const out: SyntaxNode[] = [];
   const body = doc.namedChildren.find(c => c?.type === "literal_value");
   if (!body) return [doc];
+  // primitive.Regex{Pattern: p}: the pattern is the query
+  if (/(?:^|\.)Regex$/.test(doc.childForFieldName("type")?.text ?? "")) {
+    return body.namedChildren.flatMap(el => (el ? [el.type === "keyed_element" ? el.namedChildren[el.namedChildren.length - 1] ?? el : el] : []));
+  }
   for (const el of body.namedChildren) {
     if (el?.type !== "keyed_element") continue;
     const kids = el.namedChildren.filter((c): c is SyntaxNode => !!c);
     const keyNode = kids[0], valNode = kids[kids.length - 1];
     if (!valNode || kids.length < 2) continue;
-    const key = goStringLiteralValue(keyNode.type === "literal_element" ? keyNode.namedChildren[0] ?? keyNode : keyNode);
+    const keyExpr = keyNode.type === "literal_element" ? keyNode.namedChildren[0] ?? keyNode : keyNode;
+    const key = goStringLiteralValue(keyExpr);
     const val = valNode.type === "literal_element" ? valNode.namedChildren[0] ?? valNode : valNode;
+    // bson.M{field: v}: a caller-chosen key can be an operator itself ("$where")
+    if (key === null && keyExpr.type !== "field_identifier" && !/^[A-Z]/.test(keyExpr.text)) out.push(keyExpr);
     if (key !== null && NOSQL_STRING_OPERATORS_GO.has(key)) out.push(val);
     else if (val.type === "composite_literal") out.push(...nosqlInjectablePartsGo(val));
-    else if (DYNAMIC_VALUE_TYPES_GO.has(val.type)) out.push(val);
+    else if (DYNAMIC_VALUE_TYPES_GO.has(val.type) && !isStringTypedGo(val)) out.push(val);
   }
   // bson.D{{Key: "k", Value: v}} -- positional elements
   for (const el of body.namedChildren) {
@@ -462,11 +479,39 @@ function nosqlInjectablePartsGo(doc: SyntaxNode): SyntaxNode[] {
       if (!vNode) continue;
       if (kv !== null && NOSQL_STRING_OPERATORS_GO.has(kv)) out.push(vNode);
       else if (vNode.type === "composite_literal") out.push(...nosqlInjectablePartsGo(vNode));
-      else if (DYNAMIC_VALUE_TYPES_GO.has(vNode.type)) out.push(vNode);
+      else if (DYNAMIC_VALUE_TYPES_GO.has(vNode.type) && !isStringTypedGo(vNode)) out.push(vNode);
     }
   }
   return out;
 }
+/** Calls that return a plain string (request accessors, string helpers): their result is matched literally by mongo. */
+const STRING_RESULT_CALL_RE_GO = /(?:^|\.)(?:Get|FormValue|PostFormValue|Param|Query|DefaultQuery|PostForm|DefaultPostForm|GetHeader|QueryParam|FormValue|Cookie|Sprintf|Itoa|Quote|TrimSpace|Trim|TrimPrefix|TrimSuffix|ToLower|ToUpper|ReplaceAll|Replace|Join|Repeat|EscapeString|QueryEscape|PathEscape)$/;
+/** Is this value statically a string (so it can't be a `{"$ne": ...}` operator document)? */
+function isStringTypedGo(n: SyntaxNode, depth = 0): boolean {
+  if (depth > 4) return false;
+  if (n.type === "interpreted_string_literal" || n.type === "raw_string_literal") return true;
+  if (n.type === "parenthesized_expression") return !!n.namedChildren[0] && isStringTypedGo(n.namedChildren[0], depth + 1);
+  if (n.type === "binary_expression" && n.childForFieldName("operator")?.type === "+") {
+    return [n.childForFieldName("left"), n.childForFieldName("right")].some(x => !!x && isStringTypedGo(x, depth + 1));
+  }
+  if (n.type === "call_expression") {
+    // the callee's own text: `r.URL.Query().Get` has a call inside its selector chain
+    const t = (n.childForFieldName("function")?.text ?? "").replace(/\s+/g, "");
+    if (t === "string") return true;
+    return STRING_RESULT_CALL_RE_GO.test(t) && !/\.Cookie$/.test(t);
+  }
+  if (n.type === "identifier") {
+    const fn = enclosingFnGo(n);
+    // `func h(name string)` / `var name string`
+    for (const p of fn?.childForFieldName("parameters")?.namedChildren ?? []) {
+      if (p?.type === "parameter_declaration" && p.childrenForFieldName("name").some(nm => nm?.text === n.text)) return p.childForFieldName("type")?.text === "string";
+    }
+    const def = lastAssignmentGo(n.text, n);
+    return !!def && isStringTypedGo(def, depth + 1);
+  }
+  return false;
+}
+
 // The conventional names of a gin/echo/fiber handler's context parameter.
 const FRAMEWORK_CTX_RE = /^(?:c|ctx|context|gc|ec)$/;
 const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download"]);
@@ -479,6 +524,8 @@ const SENSITIVE_FIELD_RE_GO = /^(?:role|roles|admin|is_?admin|permissions?|privi
 const SECRET_NAME_RE_GO = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
 
 const SHELL_PROGRAMS_GO = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
+/** Programs whose options only change how their own arguments are echoed back: an injected option is harmless. */
+const OPTION_SAFE_PROGRAMS_GO = /^(?:(?:\/usr)?\/bin\/)?(?:echo|basename|dirname|true|false)$/;
 const SHELL_COMMAND_FLAGS_GO = /^(?:-c|\/c|\/k|-command|-encodedcommand)$/i;
 
 /**
@@ -647,8 +694,151 @@ function matchSqlInjectionGo(call: SyntaxNode): SinkMatch | null {
   if (!text) return null;
   const tail = text.split(".").pop();
   if (tail !== "Query" && tail !== "QueryRow" && tail !== "Exec") return null;
+  // stmt.Exec(x) on a prepared statement: the query text is fixed, every argument is a bind value
+  const recv = fnNode?.type === "selector_expression" ? fnNode.childForFieldName("operand") : null;
+  if (recv?.type === "identifier" && isPreparedStmtGo(recv)) return null;
   const args = argListOfGo(call);
   return args[0] ? { id: "sql-injection", sinkExpr: text, args: [args[0]] } : null;
+}
+
+const PREPARE_TAILS_GO = /^(?:Prepare|PrepareContext|Preparex|PreparexContext|PrepareNamed|PrepareNamedContext|Stmt|StmtContext)$/;
+/** Is `id` a prepared statement: bound from `db.Prepare(...)` / `tx.Stmt(...)`, or a `*sql.Stmt` parameter? */
+function isPreparedStmtGo(id: SyntaxNode): boolean {
+  const def = lastAssignmentGo(id.text, id);
+  if (def?.type === "call_expression") {
+    const t = calleeTextGo(def.childForFieldName("function") ?? def);
+    return !!t && PREPARE_TAILS_GO.test(t.split(".").pop() ?? "");
+  }
+  const fn = enclosingFnGo(id);
+  for (const list of fn ? [fn.childForFieldName("parameters"), fn.childForFieldName("receiver")] : []) {
+    for (const p of list?.namedChildren ?? []) {
+      if (p?.type === "parameter_declaration" && p.childrenForFieldName("name").some(nm => nm?.text === id.text)) {
+        return /(?:^|\.)(?:Stmt|NamedStmt)$/.test((p.childForFieldName("type")?.text ?? "").replace(/^\*/, ""));
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The value `name` was last bound to before `at` in its function (`x := v`, `x = v`, `var x = v`, the first
+ * target of `x, err := f()`), or at package level when the function never binds it. Null when unknown.
+ */
+function lastAssignmentGo(name: string, at: SyntaxNode): SyntaxNode | null {
+  const fn = enclosingFnGo(at);
+  let scope: SyntaxNode | null = fn?.childForFieldName("body") ?? null;
+  let best: SyntaxNode | null = null;
+  const consider = (names: readonly SyntaxNode[], values: readonly SyntaxNode[]) => {
+    const i = names.findIndex(n => n.text === name);
+    if (i < 0) return;
+    best = values.length === names.length ? values[i] ?? null : i === 0 ? values[0] ?? null : null;
+  };
+  const visit = (n: SyntaxNode) => {
+    if (n.startIndex >= at.startIndex && scope !== null) return;
+    if (n.type === "func_literal" && n.id !== fn?.id) return;
+    if (n.type === "short_var_declaration" || n.type === "assignment_statement") {
+      const l = n.childForFieldName("left"), r = n.childForFieldName("right");
+      if (l && r) consider(l.namedChildren.filter((c): c is SyntaxNode => !!c), r.namedChildren.filter((c): c is SyntaxNode => !!c));
+    } else if (n.type === "var_spec" || n.type === "const_spec") {
+      const v = n.childForFieldName("value");
+      consider(n.childrenForFieldName("name").filter((c): c is SyntaxNode => !!c), v?.namedChildren.filter((c): c is SyntaxNode => !!c) ?? []);
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  if (scope) visit(scope);
+  if (best || fn && localNamesOfGo(fn).has(name)) return best;
+  // package-level `var` / `const`
+  let root: SyntaxNode = at;
+  while (root.parent) root = root.parent;
+  scope = null;
+  for (const decl of root.namedChildren) if (decl && (decl.type === "var_declaration" || decl.type === "const_declaration")) visit(decl);
+  return best;
+}
+
+/** `m["k"]` with a literal key on a local map -> its env slot `m["k"]`, else null. */
+function literalKeySlotGo(n: SyntaxNode): string | null {
+  const operand = n.childForFieldName("operand");
+  const index = n.childForFieldName("index");
+  const key = index ? goStringLiteralValue(index) ?? (index.type === "int_literal" ? index.text : null) : null;
+  return operand?.type === "identifier" && key !== null ? `${operand.text}[${JSON.stringify(key)}]` : null;
+}
+const KEYED_MARK_GO = (map: string) => `\u0000keyed:${map}`;
+
+// ── Proven constants (pattern-layer veto) ──
+// A slot is a PROVEN constant at a point when it was assigned a literal on some path reaching it and nothing else on
+// any path: two env markers, each joined by union like every other key. Parameters and anything never assigned carry
+// neither, so they are never "proven". The regex layer's SQL rules fire on any concatenation; when the engine proves
+// the query text is a constant it vetoes that line (suppressedOut).
+const LIT_MARK_GO = (slot: string) => `\u0000lit:${slot}`;
+const NONLIT_MARK_GO = (slot: string) => `\u0000nonlit:${slot}`;
+function markAssignedGo(env: Env, slot: string, literal: boolean): void {
+  if (literal) { env.set(LIT_MARK_GO(slot), 0); env.delete(NONLIT_MARK_GO(slot)); }
+  else { env.set(NONLIT_MARK_GO(slot), 0); env.delete(LIT_MARK_GO(slot)); }
+}
+/** A map literal (`map[string]string{"a": "x"}`, or a name bound only to one) whose values are all literals. */
+function isLiteralValuedMapGo(n: SyntaxNode, root: SyntaxNode): boolean {
+  if (!isLiteralCollectionGo(n, root)) return false;
+  const lit = n.type === "identifier" ? lastAssignmentGo(n.text, n) : n;
+  const body = lit?.type === "composite_literal" ? lit.childForFieldName("body") : null;
+  const els = body?.namedChildren.filter((c): c is SyntaxNode => !!c) ?? [];
+  return els.length > 0 && els.every(el => el.type === "keyed_element" && !!el.namedChildren[1] && isLiteralGo(el.namedChildren[1]));
+}
+function provenLiteralGo(n: SyntaxNode | null, env: Env, depth = 0): boolean {
+  if (!n || depth > 6) return false;
+  const slotProven = (slot: string) => env.has(LIT_MARK_GO(slot)) && !env.has(NONLIT_MARK_GO(slot));
+  switch (n.type) {
+    case "interpreted_string_literal": case "raw_string_literal": case "int_literal": case "float_literal": case "rune_literal": case "true": case "false":
+      return true;
+    case "parenthesized_expression": return provenLiteralGo(n.namedChildren[0] ?? null, env, depth + 1);
+    case "binary_expression":
+      return n.childForFieldName("operator")?.type === "+" && provenLiteralGo(n.childForFieldName("left"), env, depth + 1) && provenLiteralGo(n.childForFieldName("right"), env, depth + 1);
+    case "identifier": {
+      if (slotProven(n.text)) return true;
+      if (!n.parent || env.has(NONLIT_MARK_GO(n.text))) return false;
+      // a package-level const
+      const def = isLocalNameGo(n) ? null : lastAssignmentGo(n.text, n);
+      return !!def && def.parent?.parent?.type === "const_spec" && isLiteralGo(def);
+    }
+    case "selector_expression": { const p = calleeTextGo(n); return !!p && slotProven(p); }
+    case "index_expression": {
+      const slot = literalKeySlotGo(n);
+      if (slot && env.has(LIT_MARK_GO(slot))) return slotProven(slot);
+      const operand = n.childForFieldName("operand");
+      return !!operand && isLiteralValuedMapGo(operand, n.tree.rootNode);
+    }
+    case "call_expression": {
+      const t = calleeTextGo(n.childForFieldName("function") ?? n);
+      return !!t && /^(?:strconv\.Itoa|fmt\.Sprint|fmt\.Sprintf|strings\.ToLower|strings\.ToUpper|strings\.TrimSpace)$/.test(t) && argListOfGo(n).every(a => provenLiteralGo(a, env, depth + 1));
+    }
+    default: return false;
+  }
+}
+
+/** Is the variable this Join call is bound to later passed (by name) to a file sink this engine models? */
+function boundPathReachesFsSinkGo(call: SyntaxNode): boolean {
+  let decl: SyntaxNode | null = call.parent;
+  while (decl && decl.type !== "short_var_declaration" && decl.type !== "assignment_statement" && decl.type !== "var_spec") decl = decl.parent;
+  const target = decl?.childForFieldName("left")?.namedChildren[0] ?? decl?.childForFieldName("name");
+  const fn = enclosingFnGo(call);
+  if (!target || target.type !== "identifier" || !fn) return false;
+  const mentions = new RegExp(`\\b${escapeRe(target.text)}\\b`);
+  return findAllNodesGo(fn, "call_expression").some(c => c.startIndex > call.endIndex &&
+    matchSinkGo(c)?.id === "path-traversal" && matchSinkGo(c)?.sinkExpr !== "filepath.Join" && argListOfGo(c).some(a => mentions.test(a.text)));
+}
+
+/** Is this call's value (through passthrough wrappers like filepath.Clean) bound to a variable rather than used inline? */
+function joinResultIsBoundGo(call: SyntaxNode): boolean {
+  let cur: SyntaxNode = call;
+  for (let p = cur.parent; p; cur = p, p = p.parent) {
+    if (p.type === "expression_list" || p.type === "argument_list" || p.type === "parenthesized_expression") continue;
+    if (p.type === "call_expression") {
+      const t = calleeTextGo(p.childForFieldName("function") ?? p);
+      if (t && (GO_PASSTHROUGH.has(t) || t === "filepath.EvalSymlinks")) continue;
+      return false;
+    }
+    return p.type === "short_var_declaration" || p.type === "assignment_statement" || p.type === "var_spec";
+  }
+  return false;
 }
 
 /** Mirrors GO_IDOR_SINK_RE's three shapes (db.QueryRow/.First/.Where),
@@ -982,9 +1172,9 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       let m = env.get(node.text) ?? 0;
       const st = sticky?.get(node.text);
       if (st && !isLocalNameGo(node)) m |= st;
-      // a bare object also carries the fields written onto it (`u.host = h; u`)
-      const prefix = node.text + ".";
-      for (const [k, v] of env) if (v && k.startsWith(prefix)) m |= v;
+      // a bare object also carries the fields written onto it (`u.host = h; u`), a map what it holds under literal keys
+      const prefix = node.text + ".", keyed = node.text + "[";
+      for (const [k, v] of env) if (v && (k.startsWith(prefix) || k.startsWith(keyed))) m |= v;
       return m;
     }
     if (node.type === "binary_expression") {
@@ -995,6 +1185,11 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       return 0;
     }
     if (node.type === "call_expression") return callMask(node, env);
+    if (node.type === "index_expression") {
+      // `m["k"]` on a map written under literal keys: that key's slot (plus the map itself), not the other keys
+      const slot = literalKeySlotGo(node);
+      if (slot && env.has(KEYED_MARK_GO(slot.slice(0, slot.indexOf("["))))) return (env.get(slot) ?? 0) | (env.get(slot.slice(0, slot.indexOf("["))) ?? 0);
+    }
     if (node.type === "index_expression" || node.type === "slice_expression" || node.type === "type_assertion_expression" ||
         node.type === "type_conversion_expression") {
       const operand = node.childForFieldName("operand") ?? node.namedChildren[0];
@@ -1263,7 +1458,106 @@ function isLiteralCollectionGo(n: SyntaxNode, root: SyntaxNode, depth = 0): bool
 }
 
 function invertGo(g: Guard): Guard {
-  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+  return { ...g, holds: g.holds === "true" ? "false" : "true" };
+}
+
+/**
+ * The classes a "this sequence is not in the value" check makes safe: without `..` a path can't climb out of its
+ * directory; without a quote the value can't close a quoted SQL/XPath string literal; without `<` it can't open a
+ * tag. Null for any other substring -- it proves nothing.
+ */
+function substringGuardClearsGo(sub: string): number | null {
+  let clears = 0;
+  if (sub.includes("..")) clears |= SinkClass.PATH;
+  if (sub.includes("'") || sub.includes('"')) clears |= SinkClass.SQL | SinkClass.XPATH;
+  if (sub.includes("<")) clears |= SinkClass.XSS;
+  return clears || null;
+}
+
+/** The pattern text of a regexp held in `re` (`re := regexp.MustCompile(\`...\`)`, local or package-level). */
+function regexpPatternOfGo(re: SyntaxNode): string | null {
+  const def = re.type === "identifier" ? lastAssignmentGo(re.text, re) : re;
+  if (def?.type !== "call_expression") return null;
+  const t = calleeTextGo(def.childForFieldName("function") ?? def);
+  const a = argListOfGo(def)[0];
+  return t && /^regexp\.(?:MustCompile|Compile)$/.test(t) && a ? goStringLiteralValue(a) : null;
+}
+
+/** `p` and the value it was parsed from, for `p, err := url.Parse(src)` (else just `p`). */
+function urlParseNamesGo(p: SyntaxNode): string[] {
+  const def = lastAssignmentGo(p.text, p);
+  const t = def?.type === "call_expression" ? calleeTextGo(def.childForFieldName("function") ?? def) : null;
+  const src = t && /^url\.(?:Parse|ParseRequestURI)$/.test(t) ? argListOfGo(def!)[0] : null;
+  return src?.type === "identifier" ? [p.text, src.text] : [p.text];
+}
+
+type ConstGo = number | boolean | string;
+const NOT_CONST_GO: unique symbol = Symbol("not-const");
+/** Compile-time value of a constant expression (`7*42 > 200`, `len("abc") > 5`, a local bound once to one). */
+function constValueGo(n: SyntaxNode | null, depth = 0): ConstGo | typeof NOT_CONST_GO {
+  if (!n || depth > 8) return NOT_CONST_GO;
+  switch (n.type) {
+    case "int_literal": { const v = Number(n.text.replace(/_/g, "")); return Number.isFinite(v) ? v : NOT_CONST_GO; }
+    case "true": return true;
+    case "false": return false;
+    case "interpreted_string_literal": case "raw_string_literal": return goStringLiteralValue(n) ?? NOT_CONST_GO;
+    case "parenthesized_expression": return constValueGo(n.namedChildren[0] ?? null, depth + 1);
+    case "unary_expression": {
+      const v = constValueGo(n.namedChildren[0] ?? null, depth + 1);
+      const op = n.child(0)?.type;
+      if (op === "!" && typeof v === "boolean") return !v;
+      if (op === "-" && typeof v === "number") return -v;
+      return NOT_CONST_GO;
+    }
+    case "call_expression": {
+      // len("abcdefghij")
+      const a = argListOfGo(n);
+      const v = calleeTextGo(n.childForFieldName("function") ?? n) === "len" && a.length === 1 ? constValueGo(a[0], depth + 1) : NOT_CONST_GO;
+      return typeof v === "string" ? v.length : NOT_CONST_GO;
+    }
+    case "identifier": {
+      // bound exactly once (`num := len("abc")`) and never reassigned
+      const fn = enclosingFnGo(n);
+      const body = fn?.childForFieldName("body");
+      if (!body) return NOT_CONST_GO;
+      const writes = findAllNodesGo(body, "identifier").filter(i => i.text === n.text && (i.parent?.type === "expression_list" &&
+        (i.parent.parent?.type === "short_var_declaration" || i.parent.parent?.type === "assignment_statement") && i.parent.parent.childForFieldName("left")?.id === i.parent.id ||
+        i.parent?.type === "inc_statement" || i.parent?.type === "dec_statement" || i.parent?.type === "unary_expression" && i.parent.child(0)?.type === "&"));
+      if (writes.length !== 1) return NOT_CONST_GO;
+      const def = lastAssignmentGo(n.text, n);
+      return def ? constValueGo(def, depth + 1) : NOT_CONST_GO;
+    }
+    case "binary_expression": {
+      const op = n.childForFieldName("operator")?.type;
+      const a = constValueGo(n.childForFieldName("left"), depth + 1);
+      if (a === NOT_CONST_GO) return a;
+      if (op === "&&" && typeof a === "boolean") return a ? constValueGo(n.childForFieldName("right"), depth + 1) : false;
+      if (op === "||" && typeof a === "boolean") return a ? true : constValueGo(n.childForFieldName("right"), depth + 1);
+      const b = constValueGo(n.childForFieldName("right"), depth + 1);
+      if (b === NOT_CONST_GO) return b;
+      if (op === "==") return a === b;
+      if (op === "!=") return a !== b;
+      if (typeof a === "number" && typeof b === "number") {
+        switch (op) {
+          case "+": return a + b; case "-": return a - b; case "*": return a * b;
+          case "/": return b === 0 ? NOT_CONST_GO : Math.trunc(a / b);
+          case "%": return b === 0 ? NOT_CONST_GO : a % b;
+          case "<": return a < b; case ">": return a > b; case "<=": return a <= b; case ">=": return a >= b;
+        }
+      }
+      if (typeof a === "string" && typeof b === "string" && op === "+") return a + b;
+      return NOT_CONST_GO;
+    }
+    default: return NOT_CONST_GO;
+  }
+}
+
+/** `[]byte(x)` / `string(x)` -> x (either parse shape); anything else unchanged. */
+function unwrapByteConversionGo(a: SyntaxNode | undefined): SyntaxNode | null {
+  if (!a) return null;
+  if (a.type === "type_conversion_expression") return a.childForFieldName("operand");
+  if (a.type === "call_expression" && /^(?:\[\]byte|string)$/.test(a.childForFieldName("function")?.text ?? "")) return argListOfGo(a)[0] ?? null;
+  return a;
 }
 
 function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: ReadonlyMap<string, ValidationAliasGo>): Guard[] {
@@ -1301,12 +1595,69 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       }
       return [];
     }
+    case "index_expression": {
+      // `if !allowed[x]` -- a literal map[string]bool allowlist
+      const operand = cond.childForFieldName("operand");
+      const index = cond.childForFieldName("index");
+      if (!operand || !index || !isLiteralCollectionGo(operand, root)) return [];
+      if (index.type === "identifier") return [{ name: index.text, holds: "true" }];
+      // `allowed[u.Host]` / `allowed[u.Hostname()]` after `u, _ := url.Parse(src)`: the destination is vetted
+      const hostOf = index.type === "call_expression" ? index.childForFieldName("function") : index;
+      const p = hostOf?.type === "selector_expression" ? hostOf.childForFieldName("operand") : null;
+      const fld = hostOf?.type === "selector_expression" ? hostOf.childForFieldName("field")?.text : null;
+      if (p?.type === "identifier" && (fld === "Host" || fld === "Hostname")) {
+        return urlParseNamesGo(p).map(name => ({ name, holds: "true" as const, clears: SinkClass.SSRF | SinkClass.REDIRECT }));
+      }
+      return [];
+    }
     case "call_expression": {
       const fn = cond.childForFieldName("function");
       const text = fn ? calleeTextGo(fn) : null;
       const args = argListOfGo(cond);
       if (text === "slices.Contains" && args.length === 2 && args[1].type === "identifier" && isLiteralCollectionGo(args[0], root)) {
         return [{ name: args[1].text, holds: "true" }];
+      }
+      // strings.Contains(x, "..") -- when false, x lacks that sequence
+      if (text === "strings.Contains" && args.length === 2 && args[0].type === "identifier") {
+        const sub = goStringLiteralValue(args[1]);
+        const clears = sub !== null ? substringGuardClearsGo(sub) : null;
+        return clears ? [{ name: args[0].text, holds: "false", clears }] : [];
+      }
+      // strings.HasPrefix(p, base) after p := filepath.Clean/Abs(...): p resolves inside base
+      if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier") {
+        const def = lastAssignmentGo(args[0].text, cond);
+        const dt = def?.type === "call_expression" ? calleeTextGo(def.childForFieldName("function") ?? def) : null;
+        if (dt && /^(?:filepath\.(?:Clean|Abs|EvalSymlinks)|path\.Clean)$/.test(dt)) return [{ name: args[0].text, holds: "true", clears: SinkClass.PATH }];
+        // HasPrefix(next, "/app/"): a path on this origin -- "/" then a name character can't become "//host" or "/\host"
+        const prefix = goStringLiteralValue(args[1]);
+        return prefix !== null && /^\/[\w.-]/.test(prefix) ? [{ name: args[0].text, holds: "true", clears: SinkClass.REDIRECT }] : [];
+      }
+      // hmac.Equal(sig, expected) where expected is the MAC of x (`mac.Write([]byte(x))`): x was signed by the server
+      if ((text === "hmac.Equal" || text === "subtle.ConstantTimeCompare") && args.length === 2) {
+        const fnNode = enclosingFnGo(cond);
+        const macs = new Set<string>();
+        for (const c of fnNode ? findAllNodesGo(fnNode, "short_var_declaration") : []) {
+          const v = c.childForFieldName("right")?.namedChildren[0];
+          const t = v?.type === "call_expression" ? calleeTextGo(v.childForFieldName("function") ?? v) : null;
+          const id = c.childForFieldName("left")?.namedChildren[0];
+          if (t === "hmac.New" && id) macs.add(id.text);
+        }
+        const signed: Guard[] = [];
+        for (const c of fnNode && macs.size ? findAllNodesGo(fnNode, "call_expression") : []) {
+          const f2 = c.childForFieldName("function");
+          if (f2?.type !== "selector_expression" || f2.childForFieldName("field")?.text !== "Write" || !macs.has(f2.childForFieldName("operand")?.text ?? "")) continue;
+          const root2 = rootIdentGo(unwrapByteConversionGo(argListOfGo(c)[0]));
+          if (root2) signed.push({ name: root2.text, holds: "true", clears: SinkClass.REDIRECT | SinkClass.SSRF });
+        }
+        return signed;
+      }
+      // re.MatchString(x) / regexp.MatchString(`^[a-z0-9]+$`, x)
+      const field = fn?.type === "selector_expression" ? fn.childForFieldName("field")?.text : null;
+      if (field === "MatchString" && args.length >= 1) {
+        const subject = args[args.length - 1];
+        const pattern = text === "regexp.MatchString" ? goStringLiteralValue(args[0]) : regexpPatternOfGo(fn!.childForFieldName("operand")!);
+        const clears = pattern !== null ? anchoredPatternClears(pattern) : null;
+        return subject.type === "identifier" && clears ? [{ name: subject.text, holds: "true", clears }] : [];
       }
       return [];
     }
@@ -1335,6 +1686,8 @@ interface WalkHooksGo {
   descendFunctions: boolean;
   /** Package-level container memory shared across functions (main scan only). */
   sticky?: Map<string, number>;
+  /** Called for an arm a constant condition proves never runs. */
+  onDead?: (node: SyntaxNode) => void;
   /** Called for every visited node with the env at that point (string shapes, comparisons, mutation recording). */
   onNode?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
 }
@@ -1399,18 +1752,22 @@ function createWalkerGo(h: WalkHooksGo) {
 
   /** Bind `targets` (env keys, null = unrecognized/blank) from `rightVals`; `compound` ORs with the existing value. */
   const bind = (targets: readonly (string | null)[], rightVals: readonly SyntaxNode[], env: Env, compound: boolean) => {
-    const put = (key: string | null, mask: number) => {
-      if (key) env.set(key, compound ? mask | (env.get(key) ?? 0) : mask);
+    const put = (key: string | null, mask: number, rhs: SyntaxNode | null) => {
+      if (!key) return;
+      const literal = !!rhs && provenLiteralGo(rhs, env) && (!compound || (env.has(LIT_MARK_GO(key)) && !env.has(NONLIT_MARK_GO(key))));
+      env.set(key, compound ? mask | (env.get(key) ?? 0) : mask);
+      markAssignedGo(env, key, literal);
     };
     if (targets.length > 0 && rightVals.length === 1) {
       // Single RHS value (possibly Go's multi-return form binding N LHS
       // targets to one call's multiple return values) -- only the FIRST
       // target is marked tainted, never trailing ones (by strong Go
       // convention those are `err`/`ok`, not real data).
-      put(targets[0], taintMask(rightVals[0], env));
+      put(targets[0], taintMask(rightVals[0], env), rightVals[0]);
+      targets.slice(1).forEach(k => { if (k) markAssignedGo(env, k, false); });
     } else {
       // Positional 1:1 multi-assignment (`a, b = x, y`) -- assign independently.
-      targets.forEach((key, i) => { if (rightVals[i]) put(key, taintMask(rightVals[i], env)); });
+      targets.forEach((key, i) => { if (rightVals[i]) put(key, taintMask(rightVals[i], env), rightVals[i]); });
     }
   };
 
@@ -1438,6 +1795,21 @@ function createWalkerGo(h: WalkHooksGo) {
           const init = cur.childForFieldName("initializer");
           const cond = cur.childForFieldName("condition");
           const cons = cur.childForFieldName("consequence");
+          // `if 7*42 > 200 {`: a constant condition decides the arm (no initializer to evaluate)
+          const cv = !init && cond ? constValueGo(cond) : NOT_CONST_GO;
+          if (cv === true) {
+            const alt: SyntaxNode | null = cur.childForFieldName("alternative");
+            if (alt) h.onDead?.(alt);
+            branches.push({ body: (e) => (cons ? walk(cons, e) : false) });
+            break;
+          }
+          if (cv === false) {
+            if (cons) h.onDead?.(cons);
+            const alt: SyntaxNode | null = cur.childForFieldName("alternative");
+            if (alt && alt.type !== "if_statement") { branches.push({ body: (e) => walk(alt, e) }); break; }
+            cur = alt;
+            continue;
+          }
           branches.push({
             visitCond: (e) => { if (init) walk(init, e); if (cond) walk(cond, e); },
             guards: () => (cond ? guardsOfConditionGo(cond, h.root, aliases) : []),
@@ -1568,14 +1940,38 @@ function createWalkerGo(h: WalkHooksGo) {
         rememberAliases(identifiersOf(left), right.namedChildren.filter((n): n is SyntaxNode => !!n));
         bind(targets.map(assignmentKeyOfGo), right.namedChildren.filter((n): n is SyntaxNode => !!n), env,
           op !== "=" && op !== ":=");
-        // `m[k] = v`: the container now holds the value (additive: a write never de-taints)
+        // `m[k] = v`: the container now holds the value (additive: a write never de-taints) -- under a literal
+        // key, in that key's own slot, so `m["other"]` doesn't read it
         const rightList = right.namedChildren.filter((n): n is SyntaxNode => !!n);
         left.namedChildren.forEach((t, i) => {
           if (t?.type !== "index_expression") return;
           const root = rootIdentGo(t);
           const rv = rightList[i] ?? rightList[0];
-          if (root && rv) env.set(root.text, (env.get(root.text) ?? 0) | taintMask(rv, env));
+          const slot = literalKeySlotGo(t);
+          if (slot && rv) {
+            env.set(slot, taintMask(rv, env));
+            env.set(KEYED_MARK_GO(slot.slice(0, slot.indexOf("["))), 0);
+            markAssignedGo(env, slot, provenLiteralGo(rv, env));
+          } else if (root && rv) env.set(root.text, (env.get(root.text) ?? 0) | taintMask(rv, env));
         });
+        // `req := T{ID: param}`: each field in its own slot, so a later `req.ID = "1"` replaces just that one
+        const targetIds = left.namedChildren.filter((n): n is SyntaxNode => !!n);
+        if (targetIds.length === 1 && targetIds[0].type === "identifier" && rightList.length === 1) {
+          const lit = rightList[0].type === "unary_expression" ? rightList[0].namedChildren[0] : rightList[0];
+          const body = lit?.type === "composite_literal" ? lit.childForFieldName("body") : null;
+          const fields = body?.namedChildren.filter((el): el is SyntaxNode => el?.type === "keyed_element") ?? [];
+          const fieldName = (el: SyntaxNode) => { const k = el.namedChildren[0]; const id = k?.type === "literal_element" ? k.namedChildren[0] : k; return id && (id.type === "identifier" || id.type === "field_identifier") ? id.text : null; };
+          if (fields.length > 0 && fields.length === (body?.namedChildren.filter(Boolean).length ?? 0) && fields.every(el => fieldName(el) !== null)) {
+            const name = targetIds[0].text;
+            for (const el of fields) {
+              const val = el.namedChildren[el.namedChildren.length - 1];
+              if (!val) continue;
+              env.set(`${name}.${fieldName(el)}`, taintMask(val, env));
+              markAssignedGo(env, `${name}.${fieldName(el)}`, provenLiteralGo(val, env));
+            }
+            env.set(name, 0);
+          }
+        }
       }
     }
 
@@ -1870,7 +2266,12 @@ export function scanAstTaintGo(
       if (crossFileFacts && crossFileFacts.size > 0 && fn?.type === "selector_expression") checkCrossPackageCall(node, fn, args, env, taintMask);
 
       const match = matchSinkGo(node);
-      if (match) {
+      // `p := filepath.Join(base, name)`: building a path reads nothing -- p is judged where it is used
+      if (match?.sinkExpr === "filepath.Join" && joinResultIsBoundGo(node)) {
+        // no finding here; the file call that uses the bound path carries it -- and when that call is one this engine
+        // models, it answers for the regex layer's Join-line finding too
+        if (boundPathReachesFsSinkGo(node)) suppressedOut?.push({ id: "path-traversal", line: lineOf(node) });
+      } else if (match) {
         const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
         if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
         // Tainted data only in arguments that can't be exploited here (a request body, an argv element with
@@ -1878,10 +2279,14 @@ export function scanAstTaintGo(
         else if (args.some(a => !match.args.some(m => m.startIndex === a.startIndex) && (taintMask(a, env) & ALL))) {
           suppressedOut?.push({ id: match.id, line: lineOf(node) });
         }
+        // every argument a proven constant (`arg = "-la"` on the only path that runs)
+        else if (args.length > 0 && args.every(a => provenLiteralGo(a, env))) suppressedOut?.push({ id: match.id, line: lineOf(node) });
       }
       if (match?.id === "command-injection") {
         const argv = execCommandArgvGo(node)?.argv ?? [];
-        const hit = argv.length ? sinkHit(node, argv, "argument-injection", env, taintMask) : undefined;
+        const program = goStringLiteralValue(execCommandArgvGo(node)?.command[0] ?? node);
+        const hit = program !== null && OPTION_SAFE_PROGRAMS_GO.test(program) ? undefined
+          : argv.find(a => { const m = taintMask(a, env); return (m & SinkClass.CONTROL) !== 0 && (m & SinkClass.CMD) !== 0; });
         if (hit) {
           emit("argument-injection", node, sourceLabelGo(hit), match.sinkExpr,
             `Tainted expression '${sourceLabelGo(hit)}' is passed to ${match.sinkExpr}(...) as an argv element with no preceding "--" — no shell runs, but a value starting with "-" is read as an option by the program`);
@@ -1892,6 +2297,7 @@ export function scanAstTaintGo(
       if (sqlMatch) {
         const hit = sinkHit(node, [sqlMatch.args[0]], "sql-injection", env, taintMask);
         if (hit) emit("sql-injection", node, sourceLabelGo(sqlMatch.args[0]), sqlMatch.sinkExpr);
+        else if (provenLiteralGo(sqlMatch.args[0], env)) suppressedOut?.push({ id: "sql-injection", line: lineOf(node) });
       }
 
       // IDOR asks "is this id attacker-CONTROLLED", not "is it injectable":
@@ -2138,7 +2544,13 @@ export function scanAstTaintGo(
       if (n.type === "assignment_statement" || n.type === "send_statement" || n.type === "call_expression") recordSticky(n, env, mask);
     };
 
-    const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall, onNode, sticky });
+    // Code a constant condition proves never runs: whatever the regex layer sees there is not reachable.
+    const onDead = (dead: SyntaxNode) => {
+      for (let line = dead.startPosition.row + 1; line <= dead.endPosition.row + 1; line++) {
+        for (const id of Object.keys(SEVERITY)) suppressedOut?.push({ id, line });
+      }
+    };
+    const walker = createWalkerGo({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onDead, sticky });
 
     const drainSeeded = () => {
       const walkedSignatures = new Set<string>();

@@ -14,6 +14,7 @@
  */
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
+import { charClassClears, delimitedPatternBody } from "./charClass";
 
 export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs";
 
@@ -72,6 +73,8 @@ const TABLES: Record<SanitizerLang, Table> = {
       "filepath.Base": C.PATH, "path.Base": C.PATH,
       "strconv.Atoi": NUMERIC, "strconv.ParseInt": NUMERIC, "strconv.ParseUint": NUMERIC,
       "strconv.ParseFloat": NUMERIC, "strconv.ParseBool": NUMERIC,
+      // a parsed IP is digits, dots and colons: no injection syntax -- but still a network destination
+      "net.ParseIP": NUMERIC & ~C.SSRF,
     },
     tail: {},
   },
@@ -108,7 +111,21 @@ const TABLES: Record<SanitizerLang, Table> = {
       htmlspecialchars: XSS, htmlentities: XSS, strip_tags: XSS,
       escapeshellarg: C.CMD, escapeshellcmd: C.CMD,
       mysqli_real_escape_string: C.SQL,
-      basename: C.PATH,
+      // the last path segment: no directory, so it can't climb out of (or include from outside) its directory
+      basename: C.PATH | C.INCLUDE,
+      pathinfo: (_callee, args) => (/PATHINFO_(?:EXTENSION|FILENAME|BASENAME)/.test(args[1] ?? "") ? C.PATH | C.INCLUDE : 0),
+      // preg_replace('/[^a-z0-9_-]/', '', $x) leaves only that alphabet; removing CR/LF leaves one header line
+      preg_replace: (_callee, args) => {
+        if (!/^(['"])\1$/.test((args[1] ?? "").trim())) return 0;
+        const body = delimitedPatternBody(args[0] ?? "");
+        const negated = body ? /^\[\^((?:\\.|[^\]\\])+)\][+*]?$/.exec(body) : null;
+        if (negated) return charClassClears(negated[1]) ?? 0;
+        // a class or alternation of nothing but \r / \n / \0 escapes, removing both CR and LF
+        const crlf = body?.replace(/[+*]$/, "") ?? "";
+        const onlyLineBreaks = /^\[(?:\\[rn0])+\]$/.test(crlf) || /^\(?\\r\|\\n\)?$/.test(crlf) || /^\(?\\n\|\\r\)?$/.test(crlf);
+        return onlyLineBreaks && /\\r/.test(crlf) && /\\n/.test(crlf) ? C.HEADER : 0;
+      },
+      str_replace: (_callee, args) => (/\\r/.test(args[0] ?? "") && /\\n/.test(args[0] ?? "") && /^(['"])\1$/.test((args[1] ?? "").trim()) ? C.HEADER : 0),
       urlencode: URL_SAFE, rawurlencode: URL_SAFE,
       intval: NUMERIC, floatval: NUMERIC, boolval: NUMERIC, abs: NUMERIC,
       // filter_var neutralizes nothing by itself: what it does depends
@@ -116,7 +133,9 @@ const TABLES: Record<SanitizerLang, Table> = {
       // FILTER_UNSAFE_RAW / an omitted filter clear nothing.
       filter_var: (_callee, args) => {
         const f = args[1] ?? "";
-        if (/FILTER_VALIDATE_(?:INT|FLOAT|BOOLEAN|BOOL|IP|EMAIL|MAC)\b/.test(f)) return NUMERIC;
+        // an IP is digits, dots and colons -- but still a network destination unless private/reserved ranges are refused
+        if (/FILTER_VALIDATE_IP\b/.test(f)) return /FILTER_FLAG_NO_PRIV_RANGE/.test(args[2] ?? "") && /FILTER_FLAG_NO_RES_RANGE/.test(args[2] ?? "") ? NUMERIC : NUMERIC & ~C.SSRF;
+        if (/FILTER_VALIDATE_(?:INT|FLOAT|BOOLEAN|BOOL|EMAIL|MAC)\b/.test(f)) return NUMERIC;
         if (/FILTER_SANITIZE_NUMBER_(?:INT|FLOAT)\b/.test(f)) return NUMERIC;
         if (/FILTER_SANITIZE_(?:SPECIAL_CHARS|FULL_SPECIAL_CHARS|ENCODED)\b/.test(f)) return XSS;
         return 0;

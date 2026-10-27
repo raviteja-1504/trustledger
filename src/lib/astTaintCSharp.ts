@@ -61,10 +61,11 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { anchoredPatternClears } from "./taint/charClass";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
@@ -1048,6 +1049,37 @@ function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNo
   }
 }
 
+/** The variable a call's value is bound to, directly or through path wrappers (`var p = Path.GetFullPath(<call>)`), else null. */
+function boundVariableOfCS(call: SyntaxNode): string | null {
+  let cur: SyntaxNode = call;
+  for (let p = cur.parent; p; cur = p, p = p.parent) {
+    if (p.type === "argument" || p.type === "argument_list") continue;
+    if (p.type === "invocation_expression" && /^Path\.(?:GetFullPath|Combine|Join)$/.test(calleeTextCSharp(p.childForFieldName("function") ?? p) ?? "")) continue;
+    if (p.type === "equals_value_clause") return p.parent?.namedChildren.find(c => c?.type === "identifier")?.text ?? null;
+    if (p.type === "assignment_expression" && p.childForFieldName("left")?.type === "identifier") return p.childForFieldName("left")!.text;
+    return null;
+  }
+  return null;
+}
+
+/** Is `name` later passed to a file operation this engine models (File/Directory/FileInfo calls, ExtractToFile, PhysicalFile)? */
+function boundPathReachesFsSinkCS(name: string, after: SyntaxNode): boolean {
+  let scope: SyntaxNode | null = after.parent;
+  while (scope && !/^(?:method_declaration|constructor_declaration|local_function_statement|lambda_expression)$/.test(scope.type)) scope = scope.parent;
+  if (!scope) return false;
+  const mentions = new RegExp(`\\b${name}\\b`);
+  const calls: SyntaxNode[] = [];
+  const visit = (n: SyntaxNode) => { if (n.type === "invocation_expression" && n.startIndex > after.endIndex) calls.push(n); for (const c of n.namedChildren) if (c) visit(c); };
+  visit(scope);
+  return calls.some(c => {
+    const t = calleeTextCSharp(c.childForFieldName("function") ?? c) ?? "";
+    const parts = t.split(".");
+    const tail = parts[parts.length - 1], owner = parts[parts.length - 2] ?? "";
+    const fsCall = (CS_FS_CLASSES.has(owner) && owner !== "Path" && CS_FS_TAILS.has(tail)) || tail === "ExtractToFile" || tail === "PhysicalFile";
+    return fsCall && argListOfCSharp(c).some(a => mentions.test(a.text));
+  });
+}
+
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
@@ -1097,6 +1129,10 @@ function checkCallSink(
               || tail === "ExecuteNonQueryAsync" || tail === "ExecuteScalarAsync" || tail === "Fill")
              && CS_SQL_COMMAND_TYPES.has(ctx.varTypes.get(rootVar) ?? "")) {
     fire("sql-injection", env.get(rootVar) ?? 0, rootVar);
+    // the command was created with constant text: the regex layer's "input near a query" heuristic is wrong here
+    const created = lastAssignmentCS(rootVar, node);
+    const commandText = created?.type === "object_creation_expression" ? argListOfCSharp(created)[0] : undefined;
+    if (commandText && !(env.get(rootVar) ?? 0) && provenConstantCS(commandText, node)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
   } else if (CS_DAPPER_TAILS.has(tail) && owner && /conn|db|sql|database/i.test(owner) && args[0]) {
     fire("sql-injection", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Start" && owner === "Process") {
@@ -1115,7 +1151,11 @@ function checkCallSink(
              || ((tail === "Create" || tail === "CreateHttp") && (owner === "WebRequest" || owner === "HttpWebRequest"))) {
     fireArgs("ssrf", [0]);
   } else if (tail === "Combine" && owner === "Path") {
-    fire("path-traversal");
+    // `var p = Path.GetFullPath(Path.Combine(dir, name))`: building a path reads nothing -- p is judged (with any
+    // StartsWith check on it) at the file call that uses it, which then also answers for the regex layer here
+    const bound = boundVariableOfCS(node);
+    if (!bound) fire("path-traversal");
+    else if (boundPathReachesFsSinkCS(bound, node)) ctx.suppressed?.push({ id: "path-traversal", line: lineOf(node) });
   } else if (CS_FS_CLASSES.has(owner) && CS_FS_TAILS.has(tail)) {
     fireArgs("path-traversal", tail === "Copy" || tail === "Move" ? [0, 1] : [0]);
   } else if (tail === "PhysicalFile") {
@@ -1124,7 +1164,8 @@ function checkCallSink(
     // Path static-class checks above (an instance-method call with no
     // meaningful rootVar of its own).
     fireArgs("path-traversal", [0]);
-  } else if (tail === "Deserialize") {
+  } else if (tail === "Deserialize" && !/^(?:System\.Text\.Json\.)?JsonSerializer$/.test(owner)) {
+    // (System.Text.Json's static JsonSerializer binds to the declared type only -- no type names in the payload)
     fireArgs("insecure-deserialization", [0]);
   } else if ((tail === "DeserializeObject" || tail === "PopulateObject") && args.some(a => /TypeNameHandling\s*\.\s*(?:All|Auto|Objects|Arrays)/.test(a.text))) {
     fire("insecure-deserialization", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
@@ -1193,6 +1234,8 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   if (!className) return;
   const args = argListOfCSharp(node);
   const argMasks = args.map(a => taintMask(a, env));
+  // command text built only from constants: the regex layer's "input near a query" heuristic is wrong here
+  if (CS_SQL_COMMAND_TYPES.has(className) && args[0] && provenConstantCS(args[0], node)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
   // Any bit (taint OR shadow) counts so a tainted-then-sanitized value
   // still reaches the suppression record below.
   const firstIdx = argMasks.findIndex(m => m !== 0);
@@ -1299,7 +1342,84 @@ function isLiteralPatternCS(p: SyntaxNode): boolean {
 }
 
 function invertCS(g: Guard): Guard {
-  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+  return { ...g, holds: g.holds === "true" ? "false" : "true" };
+}
+
+/** Case/whitespace normalizers a check may wrap its variable in. */
+const CS_NORMALIZERS_RE = /^(?:ToLower|ToUpper|ToLowerInvariant|ToUpperInvariant|Trim|TrimStart|TrimEnd)$/;
+
+/** The variable a check is about: `x`, `x?.ToLower()`, `x.Trim()`, `x ?? ""`. */
+function guardedIdentifierCS(n: SyntaxNode | null | undefined): string | null {
+  let cur = n ?? null;
+  for (let i = 0; cur && i < 4; i++) {
+    if (cur.type === "identifier") return cur.text;
+    if (cur.type === "parenthesized_expression") { cur = cur.namedChildren[0] ?? null; continue; }
+    if (cur.type === "binary_expression" && cur.childForFieldName("operator")?.type === "??") { cur = cur.childForFieldName("left"); continue; }
+    const bindingName = (b: SyntaxNode | null | undefined) => (b?.type === "member_binding_expression" ? b.namedChildren[b.namedChildren.length - 1]?.text ?? null : null);
+    // x.ToLower() / x?.ToLower() (an invocation whose function is the conditional access)
+    if (cur.type === "invocation_expression") {
+      const fn = cur.childForFieldName("function");
+      let name: string | null = null, next: SyntaxNode | null = null;
+      if (fn?.type === "member_access_expression") { name = fn.childForFieldName("name")?.text ?? null; next = fn.childForFieldName("expression"); }
+      else if (fn?.type === "conditional_access_expression") { name = bindingName(fn.namedChildren[fn.namedChildren.length - 1]); next = fn.childForFieldName("condition") ?? fn.namedChildren[0] ?? null; }
+      if (!name || !CS_NORMALIZERS_RE.test(name)) return null;
+      cur = next;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** The value `name` was last bound to before `at` in its method (`var x = v` / `x = v`), or null. */
+function lastAssignmentCS(name: string, at: SyntaxNode): SyntaxNode | null {
+  let scope: SyntaxNode | null = at.parent;
+  while (scope && !/^(?:method_declaration|constructor_declaration|local_function_statement|lambda_expression|accessor_declaration)$/.test(scope.type)) scope = scope.parent;
+  if (!scope) return null;
+  let best: SyntaxNode | null = null;
+  const visit = (n: SyntaxNode) => {
+    if (n.startIndex >= at.startIndex) return;
+    if (n.type === "variable_declarator" && n.namedChildren.find(c => c?.type === "identifier")?.text === name) {
+      best = n.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0] ?? null;
+    } else if (n.type === "assignment_expression" && n.childForFieldName("left")?.text === name) {
+      best = n.childForFieldName("right");
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+  };
+  visit(scope);
+  return best;
+}
+
+/** A value built only from constants: literals, `const` locals, `+` of those, locals bound only to those. */
+function provenConstantCS(n: SyntaxNode | null, at: SyntaxNode, depth = 0): boolean {
+  if (!n || depth > 6) return false;
+  if (isLiteralCS(n)) return true;
+  if (n.type === "parenthesized_expression") return provenConstantCS(n.namedChildren[0] ?? null, at, depth + 1);
+  if (n.type === "binary_expression" && n.childForFieldName("operator")?.type === "+") {
+    return provenConstantCS(n.childForFieldName("left"), at, depth + 1) && provenConstantCS(n.childForFieldName("right"), at, depth + 1);
+  }
+  if (n.type === "identifier") {
+    // every assignment to it in the method is itself a constant
+    let scope: SyntaxNode | null = at.parent;
+    while (scope && !/^(?:method_declaration|constructor_declaration|local_function_statement|lambda_expression)$/.test(scope.type)) scope = scope.parent;
+    if (!scope) return false;
+    const rhs: SyntaxNode[] = [];
+    let opaque = false;
+    const visit = (x: SyntaxNode) => {
+      if (x.type === "variable_declarator" && x.namedChildren.find(c => c?.type === "identifier")?.text === n.text) {
+        const v = x.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0];
+        if (v) rhs.push(v); else opaque = true;
+      } else if ((x.type === "assignment_expression" && x.childForFieldName("left")?.text === n.text) ||
+                 (x.type === "parameter" && x.childForFieldName("name")?.text === n.text)) {
+        if (x.type === "parameter") opaque = true;
+        else if (x.childForFieldName("operator")?.text === "=") rhs.push(x.childForFieldName("right")!); else opaque = true;
+      }
+      for (const c of x.namedChildren) if (c) visit(c);
+    };
+    visit(scope);
+    return !opaque && rhs.length > 0 && rhs.every(v => provenConstantCS(v, at, depth + 1));
+  }
+  return false;
 }
 
 function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Guard[] {
@@ -1322,8 +1442,9 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       if (op === "||") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "false");
       if (op === "==" || op === "!=") {
         const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
-        if (l.type === "identifier" && isLiteralCS(r)) return [{ name: l.text, holds: holdsWhenEqual }];
-        if (r.type === "identifier" && isLiteralCS(l)) return [{ name: r.text, holds: holdsWhenEqual }];
+        const ln = guardedIdentifierCS(l), rn = guardedIdentifierCS(r);
+        if (ln && isLiteralCS(r)) return [{ name: ln, holds: holdsWhenEqual }];
+        if (rn && isLiteralCS(l)) return [{ name: rn, holds: holdsWhenEqual }];
       }
       return [];
     }
@@ -1356,9 +1477,31 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       if (name === "TryParse" && STRICT_PARSE_TYPES_CS.has(recv.text) && args[0]?.type === "identifier") {
         return [{ name: args[0].text, holds: "true" }];
       }
-      // ALLOWED.Contains(x) / new[] {"a"}.Contains(x)
-      if (name === "Contains" && args.length === 1 && args[0].type === "identifier" && isLiteralCollectionCS(recv, root)) {
-        return [{ name: args[0].text, holds: "true" }];
+      // ALLOWED.Contains(x) / new[] {"a"}.Contains(x) / allowed.Contains(x?.ToLower())
+      const a0 = guardedIdentifierCS(args[0]);
+      if (name === "Contains" && args.length === 1 && a0 && isLiteralCollectionCS(recv, root)) {
+        return [{ name: a0, holds: "true" }];
+      }
+      // Regex.IsMatch(x, @"^[a-z0-9]+$") / re.IsMatch(x) with re = new Regex(@"...")
+      if (name === "IsMatch" && args.length >= 1) {
+        const subject = args[0];
+        let pattern: string | null = null;
+        if (recv.text === "Regex" || recv.text.endsWith(".Regex")) pattern = args[1] ? csStringValue(args[1]) : null;
+        else if (recv.type === "identifier") {
+          const def = lastAssignmentCS(recv.text, cond);
+          const p0 = def?.type === "object_creation_expression" ? argListOfCSharp(def)[0] : undefined;
+          pattern = p0 ? csStringValue(p0) : null;
+        }
+        const n = guardedIdentifierCS(subject);
+        const clears = pattern !== null ? anchoredPatternClears(pattern) : null;
+        if (n && clears) return [{ name: n, holds: "true", clears }];
+      }
+      // full.StartsWith(base) after full = Path.GetFullPath(...): the resolved path stays under base
+      if (name === "StartsWith" && recv.type === "identifier") {
+        const def = lastAssignmentCS(recv.text, cond);
+        if (def && /\bPath\.GetFullPath\s*\(|\bnew\s+(?:FileInfo|DirectoryInfo)\s*\([^)]*\)\.FullName|\.FullName$/.test(def.text)) {
+          return [{ name: recv.text, holds: "true", clears: SinkClass.PATH }];
+        }
       }
       if (name === "Equals") {
         // x.Equals("lit") / "lit".Equals(x) / string.Equals(x, "lit")

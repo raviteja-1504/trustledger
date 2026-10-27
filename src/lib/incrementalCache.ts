@@ -33,7 +33,10 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 10: hostile-input limits (long runs cut, too-deep trees skip the AST engines), LDAP template rule narrowed.
 // 11: Python precision/recall from BenchmarkPython (constant folding, keyed dict/ConfigParser slots, substring and
 //     URL-allowlist guards, new sinks, trust-boundary, weak hash/random/cookie rules, request-source helpers).
-export const SCAN_CACHE_VERSION = 11;
+// 12: Go/Rust/PHP/Ruby/C#/Kotlin precision/recall from the 0llino sast-benchmark and vulnerable-app corpora (request
+//     wrappers and Android sources, constant folding, literal-key maps, substring/alphabet/prefix/host/HMAC guards,
+//     proven-constant vetoes, argument injection that respects validation, new sinks, PHP/Ruby weak-crypto rules).
+export const SCAN_CACHE_VERSION = 12;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

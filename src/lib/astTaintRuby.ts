@@ -56,6 +56,7 @@ import {
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { anchoredPatternClears } from "./taint/charClass";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
@@ -68,7 +69,7 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintRubyId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect"
   | "insecure-deserialization" | "eval-exec" | "ssti" | "mass-assignment" | "header-injection" | "redos"
-  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg";
+  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg" | "ldap-injection";
 
 export interface AstTaintRubyFinding {
   id:         AstTaintRubyId;
@@ -239,6 +240,11 @@ const REQUEST_INPUT_MEMBERS = new Set([
   "body", "raw_post", "headers", "env", "referer", "referrer", "url", "original_url", "fullpath", "original_fullpath",
   "path", "query_string", "host", "host_with_port", "user_agent", "cookies", "content_type", "accept",
 ]);
+/** Rack-style request objects a handler is handed (`def call(req)`, `req = Rack::Request.new(env)`): the members above
+ * plus the common accessor names of request wrappers. */
+const RACK_REQUEST_MEMBERS = new Set([...REQUEST_INPUT_MEMBERS, "param", "post", "cookie", "header", "get_header", "body_str", "file", "files", "[]"]);
+const RACK_REQUEST_NAME_RE = /^(?:req|request|rack_request)$/;
+const RACK_REQUEST_CTOR_RE = /^(?:::)?(?:Rack::Request|ActionDispatch::Request|Sinatra::Request|Rack::Request::Helpers)\.new$/;
 const PARAMS_SOURCE = "params";
 const COOKIES_SOURCE = "cookies";
 
@@ -323,7 +329,7 @@ const SEVERITY: Record<AstTaintRubyId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "high", "ssrf": "critical", "path-traversal": "critical",
   "open-redirect": "medium", "insecure-deserialization": "critical", "eval-exec": "critical", "ssti": "critical",
   "mass-assignment": "high", "header-injection": "high", "redos": "high", "bola-missing-ownership-check": "high",
-  "timing-attack": "medium", "jwt-none-alg": "critical",
+  "timing-attack": "medium", "jwt-none-alg": "critical", "ldap-injection": "critical",
 };
 const LABEL: Record<AstTaintRubyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Cross-Site Scripting (XSS)",
@@ -331,7 +337,7 @@ const LABEL: Record<AstTaintRubyId, string> = {
   "insecure-deserialization": "Insecure Deserialization", "eval-exec": "Code Execution / Unsafe Reflection",
   "ssti": "Server-Side Template Injection", "mass-assignment": "Mass Assignment", "header-injection": "HTTP Header Injection",
   "redos": "ReDoS — Regex DoS", "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
-  "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
+  "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "ldap-injection": "LDAP Injection",
 };
 
 export function astTaintRubySeverity(id: AstTaintRubyId): "critical" | "high" | "medium" { return SEVERITY[id]; }
@@ -513,6 +519,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     // request.<input>
     if (recv?.type === "identifier" && recv.text === "request" && !env.has("request") && REQUEST_INPUT_MEMBERS.has(name)) return ALL;
+    // a handler's request parameter (`def handle(req)`) or a Rack::Request built from the env
+    if (recv?.type === "identifier" && RACK_REQUEST_MEMBERS.has(name) && isRackRequestRb(recv)) return ALL;
     // cookies.signed / cookies.encrypted are tamper-proof: what the server itself set.
     if (recv?.type === "identifier" && recv.text === COOKIES_SOURCE && !env.has(COOKIES_SOURCE)) {
       return name === "signed" || name === "encrypted" ? 0 : ALL;
@@ -577,6 +585,18 @@ function bindArgument(method: LocalMethod, call: SyntaxNode, index: number): Syn
 }
 
 // ── Method collection ──────────────────────────────────────────────────────────────────────────────────────
+
+/** `req` / `request` as a parameter of the enclosing method, or a local bound to `Rack::Request.new(env)`. */
+function isRackRequestRb(id: SyntaxNode): boolean {
+  if (!RACK_REQUEST_NAME_RE.test(id.text)) return false;
+  const def = lastAssignment(id.text, id);
+  if (def) return def.type === "call" && RACK_REQUEST_CTOR_RE.test(calleeTextRuby(def) ?? "");
+  for (let cur = id.parent; cur; cur = cur.parent) {
+    if (cur.type !== "method" && cur.type !== "singleton_method") continue;
+    return named(cur.childForFieldName("parameters")).some(p => (p.type === "identifier" ? p.text : p.childForFieldName("name")?.text) === id.text);
+  }
+  return false;
+}
 
 function enclosingClassName(n: SyntaxNode): string | null {
   const parts: string[] = [];
@@ -662,7 +682,46 @@ const unwrapParens = (n: SyntaxNode): SyntaxNode => {
   while (cur.type === "parenthesized_statements" && named(cur).length === 1) cur = named(cur)[0];
   return cur;
 };
-const invert = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+const invert = (g: Guard): Guard => ({ ...g, holds: g.holds === "true" ? "false" : "true" });
+
+/** `/\A[a-z0-9_-]+\z/i` -> what a full match proves (see taint/charClass.ts), else null. */
+function anchoredRegexClearsRb(literal: string): number | null {
+  const m = /^\/([\s\S]*)\/[imxounse]*$/.exec(literal);
+  if (!m) return null;
+  const body = m[1].replace(/^\\A/, "^").replace(/\\[zZ]$/, "$");
+  return body.startsWith("^") && body.endsWith("$") ? anchoredPatternClears(body) : null;
+}
+
+/** Was `name` resolved to a real/normalized path before this check (File.expand_path / File.realpath / Pathname#realpath|cleanpath)? */
+function isResolvedPathRb(name: string, at: SyntaxNode): boolean {
+  const def = lastAssignment(name, at);
+  return !!def && /\b(?:File\.(?:expand_path|realpath|absolute_path)|realpath|cleanpath|expand_path)\b/.test(def.text);
+}
+
+/** `expr rescue nil` -> expr. */
+const unwrapRescueRb = (n: SyntaxNode | null): SyntaxNode | null => (n?.type === "rescue_modifier" ? named(n)[0] ?? null : n);
+
+/** `uri.host` of `uri = URI.parse(src)` -> [uri, src] (or just [uri]); null when the argument isn't a parsed host. */
+function parsedHostNamesRb(arg: SyntaxNode): string[] | null {
+  // `host = URI.parse(url).host rescue nil` -- a local bound to the parsed host
+  if (arg.type === "identifier") {
+    const def = unwrapRescueRb(lastAssignment(arg.text, arg));
+    const inner = def ? parsedHostNamesRb(def) : null;
+    return inner ? [arg.text, ...inner] : null;
+  }
+  if (arg.type !== "call" || !/^(?:host|hostname)$/.test(methodNameOf(arg))) return null;
+  const recv = receiverOf(arg);
+  if (!recv) return null;
+  if (recv.type === "call" && /^(?:URI\.parse|URI)$/.test(calleeTextRuby(recv) ?? "")) {
+    const src = positionalArgs(recv)[0];
+    return src && guardName(src) ? [guardName(src)!] : [];
+  }
+  const n = guardName(recv);
+  if (!n) return null;
+  const def = unwrapRescueRb(lastAssignment(n, arg));
+  const src = def?.type === "call" && /^(?:URI\.parse|URI)$/.test(calleeTextRuby(def) ?? "") ? positionalArgs(def)[0] : null;
+  return src && guardName(src) ? [n, guardName(src)!] : [n];
+}
 const guardName = (n: SyntaxNode | null): string | null =>
   n && (n.type === "identifier" || n.type === "instance_variable") ? n.text : null;
 
@@ -704,6 +763,12 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
       const ln = guardName(l);
       if (ln) return [{ name: ln, holds: "true" }];
     }
+    // x =~ /\A[a-z0-9_\-]+\.(pdf|csv)\z/ -- an anchored alphabet
+    if (op === "=~") {
+      const ln = guardName(l);
+      const clears = r.type === "regex" ? anchoredRegexClearsRb(r.text) : null;
+      if (ln && clears) return [{ name: ln, holds: "true", clears }];
+    }
     return [];
   }
   if (c.type === "call") {
@@ -712,8 +777,22 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
     const args = positionalArgs(c);
     // ALLOWED.include?(x) / %w[a b].include?(x)
     if ((name === "include?" || name === "member?") && recv && args[0] && isLiteralCollection(recv, root)) {
+      // ALLOWED_HOSTS.include?(uri.host) after uri = URI.parse(url): the destination is vetted
+      const hostNames = parsedHostNamesRb(args[0]);
       const n = guardName(args[0]);
-      return n ? [{ name: n, holds: "true" }] : [];
+      const host = (hostNames ?? []).filter(h => h !== n).map(h => ({ name: h, holds: "true" as const, clears: SinkClass.SSRF | SinkClass.REDIRECT }));
+      return n ? [{ name: n, holds: "true" }, ...host] : host;
+    }
+    // resolved.start_with?(base) after resolved = File.expand_path(...) / realpath: confined to base
+    if (name === "start_with?" && recv && args[0]) {
+      const n = guardName(recv);
+      if (n && isResolvedPathRb(n, c)) return [{ name: n, holds: "true", clears: SinkClass.PATH }];
+    }
+    // x.match?(/\A[a-z0-9]+\z/)
+    if (name === "match?" && recv && args[0]?.type === "regex") {
+      const n = guardName(recv);
+      const clears = anchoredRegexClearsRb(args[0].text);
+      if (n && clears) return [{ name: n, holds: "true", clears }];
     }
     // x.in?(%w[a b])
     if (name === "in?" && recv && args[0] && isLiteralCollection(args[0], root)) {
@@ -750,6 +829,8 @@ function statementTerminates(n: SyntaxNode | null | undefined): boolean {
   if (!n) return false;
   if (n.type === "return" || n.type === "break" || n.type === "next" || n.type === "redo" || n.type === "retry") return true;
   if (n.type === "call" && !receiverOf(n) && TERMINATING_CALLS.has(methodNameOf(n))) return true;
+  // a bare `raise` / `abort` (no arguments) parses as an identifier, not a call
+  if (n.type === "identifier" && TERMINATING_CALLS.has(n.text)) return true;
   // `head :forbidden and return` / `redirect_to x and return`
   if (n.type === "binary" && (operatorOf(n) === "and" || operatorOf(n) === "&&")) return statementTerminates(n.childForFieldName("right"));
   return false;
@@ -984,6 +1065,17 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       return statementTerminates(node);
     }
 
+    // A Rack-style headers hash: `[302, { 'Location' => url }, body]` / `Response.new(302, '', { 'Location' => url })`
+    if (node.type === "pair" && node.parent?.type === "hash" && /^location$/i.test(pairKeyText(node) ?? "")) {
+      const value = node.childForFieldName("value");
+      if (value) {
+        for (const c of named(node)) walk(c, env);
+        const verdict = assessSsrfUrl(decomposeString(resolveUnguarded(value, SinkClass.REDIRECT, env, mask), ctx), n => mask(n, env));
+        if (verdict.verdict === "safe") ctx.suppressed?.push({ id: "open-redirect", line: lineOf(node) });
+        else fireOn(ctx, "open-redirect", node, value, mask(value, env), "Location header");
+        return false;
+      }
+    }
     if (node.type === "subshell") {
       for (const c of named(node)) walk(c, env);
       ctx.refine = (src, cls) => culpritOf(src, cls, env, mask, ctx);
@@ -1072,6 +1164,9 @@ function lastAssignment(name: string, at: SyntaxNode): SyntaxNode | null {
   return best;
 }
 const resolveVar = (n: SyntaxNode): SyntaxNode => (n.type === "identifier" ? lastAssignment(n.text, n) ?? n : n);
+/** resolveVar, unless a guard has already cleared `cls` on the variable itself (`raise unless ALLOWED.include?(uri.host)`). */
+const resolveUnguarded = (n: SyntaxNode, cls: number, env: Env, mask: TaintMaskFn): SyntaxNode =>
+  (n.type === "identifier" && !(mask(n, env) & cls) && wasCleared(mask(n, env), cls) ? n : resolveVar(n));
 
 /** A SQL argument in Rails' safe forms: keyword-hash / hash conditions, or a placeholder template with no
  * interpolation (`"name = ?"`, `["name = ?", x]`). Returns the node that actually holds SQL text, or null if none. */
@@ -1161,7 +1256,7 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (SSRF_CALL_RE.test(callee)) {
     const urlArg = keywordArg(node, "url") ?? pos[0];
     if (urlArg) {
-      const parts = decomposeString(resolveVar(urlArg), ctx);
+      const parts = decomposeString(resolveUnguarded(urlArg, SinkClass.SSRF, env, mask), ctx);
       const verdict = assessSsrfUrl(parts, n => mask(n, env));
       if (verdict.verdict === "vulnerable") emit(ctx, "ssrf", node, (verdict.culprit ?? urlArg).text, sinkName);
       else if (verdict.verdict === "no-taint") fireOn(ctx, "ssrf", node, urlArg, mask(urlArg, env), sinkName);
@@ -1176,7 +1271,7 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const pairs = argsOf(node).filter(a => a.type === "pair" && !/^(?:status|notice|alert|flash|allow_other_host|turbolinks)$/.test(pairKeyText(a) ?? ""));
     const target = first ?? (pairs.length ? pairs[0] : null);
     if (target && !explicitlyInternal) {
-      const parts = decomposeString(resolveVar(target), ctx);
+      const parts = decomposeString(resolveUnguarded(target, SinkClass.REDIRECT, env, mask), ctx);
       const verdict = assessSsrfUrl(parts, n => mask(n, env));     // same host-position rule: a fixed host is internal
       const m = first ? mask(first, env) : pairs.reduce((acc, p) => acc | mask(p, env), 0);
       if (verdict.verdict === "safe") ctx.suppressed?.push({ id: "open-redirect", line: lineOf(node) });
@@ -1202,6 +1297,26 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
   if (recv && (name === "constantize" || name === "safe_constantize")) {
     fireOn(ctx, "eval-exec", node, recv, mask(recv, env), `.${name}`, `Request input '${recv.text.slice(0, 60)}' is turned into a class (.${name}) — map input to an explicit allow-list of classes`);
+  }
+
+  // ── LDAP ──
+  // ldap.search(filter: "(cn=#{x})") / ldap.bind_as(filter: ...) / Net::LDAP::Filter.construct(str): the filter text
+  if (recv && /^(?:search|bind_as|search_subschema_entry)$/.test(name) && /ldap/i.test(recv.text)) {
+    const f = keywordArg(node, "filter");
+    if (f) fireOn(ctx, "ldap-injection", node, f, mask(f, env), `${recv.text}.${name}(filter:)`);
+  }
+  if (/^(?:::)?Net::LDAP::Filter\.(?:construct|from_rfc2254|from_rfc4515)$/.test(callee) && pos[0]) {
+    fireOn(ctx, "ldap-injection", node, pos[0], mask(pos[0], env), sinkName);
+  }
+
+  // `SomeResponse.html(markup)` / `SomeResponse.redirect(url)`: served as HTML / sent as the Location
+  if (recv && /Response$/.test(recv.text) && pos[0]) {
+    if (name === "html") fireOn(ctx, "xss", node, pos[0], mask(pos[0], env), `${recv.text}.html`);
+    else if (name === "redirect" || name === "redirect_to") {
+      const verdict = assessSsrfUrl(decomposeString(resolveUnguarded(pos[0], SinkClass.REDIRECT, env, mask), ctx), n => mask(n, env));
+      if (verdict.verdict === "safe") ctx.suppressed?.push({ id: "open-redirect", line: lineOf(node) });
+      else fireOn(ctx, "open-redirect", node, pos[0], mask(pos[0], env), `${recv.text}.${name}`);
+    }
   }
 
   // ── XSS ──

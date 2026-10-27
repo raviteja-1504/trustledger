@@ -82,9 +82,10 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { anchoredPatternClears, delimitedPatternBody } from "./taint/charClass";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { assessSqlInjection, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -275,6 +276,39 @@ const SUPERGLOBAL_NAMES = new Set(["_GET", "_POST", "_REQUEST", "_COOKIE", "_FIL
 // parameter has no attribute this engine can reliably read without
 // re-probing a parameter type-hint field shape that wasn't confirmed.
 const LARAVEL_REQUEST_METHODS = new Set(["input", "query", "all", "post", "get"]);
+// Accessors that read client input on a parameter TYPED as a request (`Request $request`, PSR-7
+// `ServerRequestInterface $request`, an app's own `ApiRequest $req`): Laravel's cookie()/header()/route()/file(),
+// PSR-7's getQueryParams()/getParsedBody()/..., and the common param()/post()/cookie()/header() wrapper shape.
+const TYPED_REQUEST_METHODS = new Set([
+  "param", "params", "post", "cookie", "cookies", "header", "headers", "file", "files", "route", "json", "body", "bodyStr",
+  "getContent", "getQueryParams", "getParsedBody", "getCookieParams", "getUploadedFiles", "getHeader", "getHeaderLine",
+  "getHeaders", "getBody", "getUri", "getServerParams", "getAttribute", "getQueryString", "getRequestUri", "getPathInfo",
+]);
+const REQUEST_TYPE_RE_PHP = /(?:^|\\)\w*Request(?:Interface)?$/;
+
+/** `$req->param('x')` on a parameter typed as a request (see TYPED_REQUEST_METHODS). */
+function isTypedRequestAccessorPHP(n: SyntaxNode): boolean {
+  if (n.type !== "member_call_expression") return false;
+  const method = n.childForFieldName("name")?.text ?? "";
+  if (!TYPED_REQUEST_METHODS.has(method) && !LARAVEL_REQUEST_METHODS.has(method)) return false;
+  const recv = n.namedChildren[0];
+  const name = recv?.type === "variable_name" ? variableBareName(recv) : null;
+  const type = name ? paramTypeOfPHP(name, n) : null;
+  return !!type && REQUEST_TYPE_RE_PHP.test(type);
+}
+
+/** The declared type of `$name`'s parameter in the function enclosing `at` (`Request $request` -> "Request"), or null. */
+function paramTypeOfPHP(name: string, at: SyntaxNode): string | null {
+  for (let cur: SyntaxNode | null = at.parent; cur; cur = cur.parent) {
+    if (cur.type !== "function_definition" && cur.type !== "method_declaration" && cur.type !== "anonymous_function_creation_expression" && cur.type !== "arrow_function") continue;
+    for (const p of cur.childForFieldName("parameters")?.namedChildren ?? []) {
+      const nm = p?.childForFieldName("name");
+      if (nm?.type === "variable_name" && variableBareName(nm) === name) return p!.childForFieldName("type")?.text.replace(/^\?/, "") ?? null;
+    }
+    return null;
+  }
+  return null;
+}
 
 // Set into env by \`extract($tainted)\` -- see makeTaintMaskPHP's variable_name case. An impossible PHP
 // variable name, so it can never collide with a real one.
@@ -463,6 +497,10 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       // A literal-indexed element a guard has proven safe (`is_numeric($octet[0])`) has its own key.
       const key = elementKeyPHP(node);
       if (key && env.has(key)) return env.get(key)!;
+      // `$routes[$name]` of an array literal holding no input: the index only chooses among the app's own values
+      const base = node.namedChildren[0];
+      const baseName = base?.type === "variable_name" ? variableBareName(base) : null;
+      if (baseName && !env.get(baseName) && lastAssignmentPHP(baseName, node)?.type === "array_creation_expression") return 0;
     }
     if (node.type === "member_access_expression") {
       // Field-sensitive read: OR the full dotted path composite key (set by
@@ -483,7 +521,8 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         // Known sanitizer: the argument's taint passes THROUGH minus only
         // the classes it neutralizes (filter_var depends on its constant).
         const clears = sanitizerClears("php", fnName, args.map(a => a.text));
-        if (clears !== null) {
+        // a replace that removes nothing dangerous is plain string plumbing (passthrough below)
+        if (clears !== null && !(clears === 0 && PHP_PASSTHROUGH.has(fnName))) {
           const data = args[sanitizerDataArgPHP(fnName, args.length)];
           return data ? applySanitizer(taintMask(data, env), clears) : 0;
         }
@@ -528,6 +567,12 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         if (clears !== null) return args[0] ? (methodName === "quote" ? applyClears : applySanitizer)(taintMask(args[0], env), clears) : 0;
       }
       if (methodName && LARAVEL_REQUEST_METHODS.has(methodName)) return ALL;
+      if (methodName && TYPED_REQUEST_METHODS.has(methodName)) {
+        const recv = node.namedChildren[0];
+        const name = recv?.type === "variable_name" ? variableBareName(recv) : null;
+        const type = name ? paramTypeOfPHP(name, node) : null;
+        if (type && REQUEST_TYPE_RE_PHP.test(type)) return ALL;
+      }
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. $dirty->trim()).
       const receiver = node.namedChildren[0];
@@ -758,6 +803,36 @@ function recordGlobalStickyPHP(name: string | null, mask: number, ctx: EngineCtx
 // ── Sink checks ──────────────────────────────────────────────────────────
 
 const SQL_CALL_TAILS = new Set(["query", "exec", "prepare"]);
+// Reads that also accept a URL (allow_url_fopen): a path or a request, depending on what precedes the value.
+/** Builtins that call a callable they are given, by the callable's argument position. */
+const CALLABLE_ARG_PHP = new Map<string, number>([
+  ["call_user_func", 0], ["call_user_func_array", 0], ["forward_static_call", 0], ["forward_static_call_array", 0],
+  ["array_map", 0], ["usort", 1], ["uasort", 1], ["uksort", 1], ["array_walk", 1], ["array_walk_recursive", 1],
+  ["array_filter", 1], ["array_reduce", 1], ["iterator_apply", 1], ["register_shutdown_function", 0],
+  ["set_error_handler", 0], ["set_exception_handler", 0], ["spl_autoload_register", 0],
+]);
+const URL_CAPABLE_READS_PHP = new Set(["fopen", "file_get_contents", "readfile", "file", "parse_ini_file"]);
+const PATH_FIRST_ARG_PHP = new Set([
+  "unlink", "rmdir", "mkdir", "glob", "stat", "lstat", "touch", "chmod", "chown", "chgrp", "scandir", "opendir", "dir",
+  "highlight_file", "show_source", "fpassthru", "readlink", "realpath_cache_get", "tempnam", "is_writable", "disk_free_space",
+]);
+const PATH_TWO_ARGS_PHP = new Set(["copy", "rename", "link", "symlink", "move_uploaded_file"]);
+
+/** The literal text a string value starts with (`'http://x/' . $p` -> "http://x/"), following one `$var = '...'` hop. */
+function leadingLiteralPHP(node: SyntaxNode): string {
+  const first = decomposeSqlPHP(node)[0];
+  if (!first) return "";
+  if (first.kind === "literal") return first.text;
+  // DVWA_WEB_PAGE_TO_ROOT . "x" / __DIR__ . "/x": a constant base is a local directory, not a URL
+  if (first.node.type === "name" || first.node.type === "qualified_name") return "./";
+  if (first.node.type === "variable_name") {
+    const name = variableBareName(first.node);
+    const def = name ? lastAssignmentPHP(name, node) : null;
+    const v = def ? phpStringValue(def) : null;
+    if (v !== null) return v;
+  }
+  return "";
+}
 const SQL_FUNCTIONS = new Set(["mysqli_query", "mysql_query", "pg_query"]);
 const CMD_FUNCTIONS = new Set(["shell_exec", "system", "passthru", "popen", "proc_open", "exec"]);
 // MongoDB-driver-shaped array-query calls. Deliberately overlaps with
@@ -771,6 +846,7 @@ const NOSQL_CALL_TAILS = new Set(["find", "findOne", "findMany", "updateOne", "d
  * FIRST and the value second (`mysqli_real_escape_string($link, $str)`); everything else takes the value first. */
 function sanitizerDataArgPHP(fnName: string, argCount: number): number {
   if (fnName === "mysqli_real_escape_string") return argCount >= 2 ? 1 : 0;
+  if (fnName === "preg_replace" || fnName === "str_replace" || fnName === "str_ireplace") return argCount >= 3 ? 2 : 0;
   if (fnName === "pg_escape_string" || fnName === "pg_escape_literal" || fnName === "pg_escape_identifier") return argCount >= 2 ? 1 : 0;
   return 0;
 }
@@ -882,9 +958,21 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // function_call_expression -- kept as a harmless defensive fallback
     // only, matching checkIncludeExpressionSink below for the real path.
     fire("file-inclusion");
-  } else if (fnName === "fopen" || fnName === "file_get_contents" || fnName === "readfile" || fnName === "file_put_contents") {
-    // The path only -- not fopen's mode, nor the data file_put_contents writes.
+  } else if (URL_CAPABLE_READS_PHP.has(fnName)) {
+    // The path only -- not fopen's mode. PHP's URL wrappers make these fetch `http://...` too: after a URL scheme the
+    // value picks the request (SSRF); after a local path prefix, the file; a value starting the argument picks either.
+    const lead = args[0] ? leadingLiteralPHP(args[0]) : "";
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(lead)) fireArg("path-traversal", 0);
+    if (lead === "" || /^(?:https?|ftps?):\/\//i.test(lead)) fireArg("ssrf", 0);
+  } else if (fnName === "file_put_contents" || PATH_FIRST_ARG_PHP.has(fnName)) {
+    // The path only -- not the data file_put_contents writes, nor mkdir's mode.
     fireArg("path-traversal", 0);
+  } else if (PATH_TWO_ARGS_PHP.has(fnName)) {
+    // copy($from, $to) / rename / link / symlink: either path; move_uploaded_file($tmp, $dest): the destination
+    if (fnName !== "move_uploaded_file") fireArg("path-traversal", 0);
+    fireArg("path-traversal", 1);
+  } else if (fnName === "fsockopen" || fnName === "pfsockopen" || fnName === "stream_socket_client") {
+    fireArg("ssrf", 0);
   } else if (fnName === "header") {
     // header("Location: " . $tainted) is open-redirect; header("X-Anything:
     // " . $tainted) for any other header name is header-injection -- same
@@ -897,8 +985,17 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // $link/$base_dn args could themselves be tainted in a contrived case
     // without that being the real vulnerability).
     if (args.length >= 3) fire("ldap-injection", argMasks[2], args[2].text);
-  } else if (fnName === "eval") {
+  } else if (fnName === "eval" || fnName === "assert") {
+    // assert("<string>") evaluates its argument as PHP (before PHP 8)
     fireArg("eval-exec", 0);
+  } else if (CALLABLE_ARG_PHP.has(fnName)) {
+    // the callable itself: a request value names any function (system, passthru, ...)
+    fireArg("eval-exec", CALLABLE_ARG_PHP.get(fnName)!);
+  } else if (fnName === "create_function") {
+    fireArg("eval-exec", 1);
+  } else if (fnName === "preg_replace" && /^(['"])([^\w\s\\])[\s\S]*\2[a-zA-Z]*e[a-zA-Z]*\1$/.test(args[0]?.text ?? "")) {
+    // the /e modifier evaluates the replacement as PHP code
+    fireArg("eval-exec", 1);
   } else if (fnName === "curl_init") {
     if (args[0]) fire("ssrf", argMasks[0], args[0].text);
   } else if ((fnName === "preg_match" || fnName === "preg_match_all" || fnName === "preg_replace" || fnName === "preg_replace_callback" || fnName === "preg_split")
@@ -992,6 +1089,22 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
   }
 }
 
+/**
+ * `SomeResponse::html($markup)` / `SomeResponse::redirect($url)`: a response factory whose body is served as HTML or
+ * whose argument becomes the Location -- the same sinks as echo and header("Location: ...").
+ */
+function checkResponseFactorySinkPHP(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
+  const cls = node.namedChildren[0]?.text ?? "";
+  const method = node.childForFieldName("name")?.text ?? "";
+  if (!/Response$/.test(cls)) return;
+  const id: AstTaintPHPId | null = /^html$/i.test(method) ? "xss" : /^redirect(?:To)?$/i.test(method) ? "open-redirect" : null;
+  const arg = argListOfPHP(node)[0];
+  if (!id || !arg) return;
+  const m = taintMask(arg, env);
+  if (m & classOf(id)) emit(ctx, id, node, arg.text, `${cls}::${method}`);
+  else if (wasCleared(m, classOf(id))) ctx.suppressed?.push({ id, line: lineOf(node) });
+}
+
 /** The body of the function/method lexically enclosing \`node\`, or null (top-level code). */
 function enclosingFunctionBodyPHP(node: SyntaxNode): SyntaxNode | null {
   for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) {
@@ -1015,7 +1128,7 @@ function isEverAssignedFromSourcePHP(body: SyntaxNode | null, varName: string): 
     const right = assign.childForFieldName("right");
     if (!right) continue;
     if (right.type === "anonymous_function_creation_expression" || right.type === "arrow_function") { everCallable = true; continue; }
-    if (isTaintSourceExprPHP(right)) { fromSource = true; continue; }
+    if (isTaintSourceExprPHP(right) || isTypedRequestAccessorPHP(right)) { fromSource = true; continue; }
     if (right.type === "variable_name") {
       const nm = variableBareName(right);
       if (nm && SUPERGLOBAL_NAMES.has(nm)) fromSource = true;
@@ -1108,7 +1221,60 @@ function isLiteralArrayRefPHP(
 }
 
 function invertPHP(g: Guard): Guard {
-  return { name: g.name, holds: g.holds === "true" ? "false" : "true" };
+  return { ...g, holds: g.holds === "true" ? "false" : "true" };
+}
+
+/** The value `$url` a host/scheme check is about: `parse_url($url, PHP_URL_HOST)` itself, a variable bound to it, or
+ * `$p['host']` (`?? ''`) of `$p = parse_url($url)`. Null otherwise. */
+function parsedUrlSourcePHP(n: SyntaxNode, at: SyntaxNode): string | null {
+  let cur = n;
+  while (cur.type === "parenthesized_expression" && cur.namedChildren[0]) cur = cur.namedChildren[0]!;
+  if (cur.type === "binary_expression" && cur.childForFieldName("operator")?.type === "??") cur = cur.childForFieldName("left") ?? cur;
+  const fromCall = (call: SyntaxNode | null, part: string | null): string | null => {
+    if (call?.type !== "function_call_expression" || call.childForFieldName("function")?.text !== "parse_url") return null;
+    const [src, comp] = argListOfPHP(call);
+    if (src?.type !== "variable_name") return null;
+    if (part !== null ? part !== "host" : comp?.text !== "PHP_URL_HOST") return null;
+    return variableBareName(src);
+  };
+  if (cur.type === "function_call_expression") return fromCall(cur, null);
+  if (cur.type === "variable_name") { const nm = variableBareName(cur); return nm ? fromCall(lastAssignmentPHP(nm, at), null) : null; }
+  if (cur.type === "subscript_expression") {
+    const [base, idx] = cur.namedChildren;
+    const nm = base?.type === "variable_name" ? variableBareName(base) : null;
+    const key = idx ? phpStringValue(idx) : null;
+    return nm && key ? fromCall(lastAssignmentPHP(nm, at), key) : null;
+  }
+  return null;
+}
+
+/**
+ * The classes a "this sequence is not in the value" check makes safe: without `..` a path can't climb out of its
+ * directory; without a quote the value can't close a quoted SQL/XPath string literal; without `<` it can't open a
+ * tag. Null for any other substring -- it proves nothing.
+ */
+function substringGuardClearsPHP(sub: string): number | null {
+  let clears = 0;
+  if (sub.includes("..")) clears |= SinkClass.PATH | SinkClass.INCLUDE;
+  if (sub.includes("'") || sub.includes('"')) clears |= SinkClass.SQL | SinkClass.XPATH;
+  if (sub.includes("<")) clears |= SinkClass.XSS;
+  return clears || null;
+}
+
+/** The variable an equality check is about: `$x`, or `$x` under a case/whitespace normalizer (`strtolower($x)`). */
+function guardedVariablePHP(n: SyntaxNode): string | null {
+  if (n.type === "variable_name") return variableBareName(n);
+  if (n.type === "function_call_expression" && /^(?:strtolower|strtoupper|mb_strtolower|mb_strtoupper|trim|ltrim|rtrim)$/i.test(n.childForFieldName("function")?.text ?? "")) {
+    const a = argListOfPHP(n)[0];
+    return a?.type === "variable_name" ? variableBareName(a) : null;
+  }
+  return null;
+}
+
+/** Was `$name` last bound to realpath(...) (so a prefix check on it confines the real file)? */
+function isRealpathResultPHP(name: string, at: SyntaxNode): boolean {
+  const def = lastAssignmentPHP(name, at);
+  return def?.type === "function_call_expression" && def.childForFieldName("function")?.text === "realpath";
 }
 
 /** `$a[0]` / `$a['k']` -> "a[0]" / "a['k']": an environment key for one literal-indexed element. */
@@ -1151,14 +1317,33 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
       if (op === "&&" || op === "and") return [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "true");
-      if (op === "||" || op === "or") return [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "false");
+      if (op === "||" || op === "or") {
+        const lg = guardsOfConditionPHP(l, root), rg = guardsOfConditionPHP(r, root);
+        // `$x == 'jpg' || $x == 'png'`: when it holds, $x is one of the literals
+        const only = (gs: Guard[]) => (gs.length === 1 && gs[0].holds === "true" && gs[0].clears === undefined ? gs[0].name : null);
+        if (only(lg) !== null && only(lg) === only(rg)) return [{ name: only(lg)!, holds: "true" }];
+        return [...lg, ...rg].filter(g => g.holds === "false");
+      }
       const strict = op === "===" || op === "!==";
       const loose = op === "==" || op === "!=";
+      // strpos($real, $base) === 0 after $real = realpath(...); strpos($x, '..') !== false
+      const call = l.type === "function_call_expression" ? l : r.type === "function_call_expression" ? r : null;
+      const other = call === l ? r : l;
+      if ((strict || loose) && call?.childForFieldName("function")?.text === "strpos") {
+        const [hay, needle] = argListOfPHP(call);
+        const hayName = hay?.type === "variable_name" ? variableBareName(hay) : null;
+        const whenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
+        if (hayName && other.text === "0" && isRealpathResultPHP(hayName, cond)) return [{ name: hayName, holds: whenEqual, clears: SinkClass.PATH | SinkClass.INCLUDE }];
+        const sub = needle ? phpStringValue(needle) : null;
+        const clears = sub !== null ? substringGuardClearsPHP(sub) : null;
+        // `!== false` holds when the sequence is there: safe on the other side
+        if (hayName && clears && other.text.toLowerCase() === "false") return [{ name: hayName, holds: whenEqual, clears }];
+      }
       if (strict || loose) {
         const holdsWhenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
         const litOk = (n: SyntaxNode) => (strict ? isLiteralPHP(n) : isStringLiteralPHP(n));
-        const lName = l.type === "variable_name" ? variableBareName(l) : null;
-        const rName = r.type === "variable_name" ? variableBareName(r) : null;
+        const lName = guardedVariablePHP(l);
+        const rName = guardedVariablePHP(r);
         if (lName && litOk(r)) return [{ name: lName, holds: holdsWhenEqual }];
         if (rName && litOk(l)) return [{ name: rName, holds: holdsWhenEqual }];
       }
@@ -1171,6 +1356,45 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
       if (!fnName || args.length === 0) return [];
       const a0 = args[0].type === "variable_name" ? variableBareName(args[0]) : null;
       if (NUMERIC_CHECK_FUNCTIONS_PHP.has(fnName) && a0) return [{ name: a0, holds: "true" }];
+      // ctype_alnum($x): letters/digits only
+      if (/^ctype_(?:alnum|alpha|xdigit|lower|upper)$/.test(fnName) && a0) return [{ name: a0, holds: "true" }];
+      // preg_match('/^[a-z0-9_-]+$/', $x): an anchored alphabet
+      if (fnName === "preg_match" && args.length >= 2 && args[1].type === "variable_name") {
+        const body = delimitedPatternBody(args[0].text);
+        const clears = body !== null ? anchoredPatternClears(body) : null;
+        const nm = variableBareName(args[1]);
+        if (nm && clears) return [{ name: nm, holds: "true", clears }];
+      }
+      // filter_var($x, FILTER_VALIDATE_IP|INT|...): what the validated value can't carry
+      if (fnName === "filter_var" && a0) {
+        const clears = sanitizerClears("php", "filter_var", args.map(a => a.text));
+        if (clears) return [{ name: a0, holds: "true", clears }];
+      }
+      // str_starts_with($real, $base) after realpath(); str_contains($x, '..')
+      if (fnName === "str_starts_with" && a0 && isRealpathResultPHP(a0, cond)) return [{ name: a0, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
+      if (fnName === "str_contains" && a0 && args[1]) {
+        const sub = phpStringValue(args[1]);
+        const clears = sub !== null ? substringGuardClearsPHP(sub) : null;
+        if (clears) return [{ name: a0, holds: "false", clears }];
+      }
+      // hash_equals(hash_hmac($algo, $x, $key), $sig): $x is what the server signed
+      if (fnName === "hash_equals" && args.length === 2) {
+        for (const a of args) {
+          const mac = a.type === "variable_name" ? lastAssignmentPHP(variableBareName(a) ?? "", cond) : a;
+          if (mac?.type === "function_call_expression" && mac.childForFieldName("function")?.text === "hash_hmac") {
+            const signed = argListOfPHP(mac)[1];
+            const nm = signed?.type === "variable_name" ? variableBareName(signed) : null;
+            if (nm) return [{ name: nm, holds: "true", clears: SinkClass.REDIRECT | SinkClass.SSRF | SinkClass.HEADER }];
+          }
+        }
+      }
+      // in_array(parse_url($url, PHP_URL_HOST), $allowedHosts): the URL's destination is vetted
+      if (fnName === "in_array" && args.length >= 2 && isLiteralArrayRefPHP(args[1], root, { stringsOnly: true })) {
+        const src = parsedUrlSourcePHP(args[0], cond);
+        if (src) {
+          return [...(a0 ? [{ name: a0, holds: "true" as const }] : []), { name: src, holds: "true", clears: SinkClass.SSRF | SinkClass.REDIRECT }];
+        }
+      }
       // is_numeric($parts[0]) -- a literal-indexed element (see elementKeyPHP / seedElementKeysPHP)
       const el0 = args[0].type === "subscript_expression" ? elementKeyPHP(args[0]) : null;
       if (NUMERIC_CHECK_FUNCTIONS_PHP.has(fnName) && el0) return [{ name: el0, holds: "true" }];
@@ -1649,7 +1873,12 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
     if (node.type === "scoped_call_expression") {
       const key = classMethodKeyPHP(node, ctx);
       if (key && !ctx.localClassMethods.has(key.toLowerCase())) checkCrossFileCallPHP(node, key, ctx, taintMask, env);
+      checkResponseFactorySinkPHP(node, ctx, taintMask, env);
     }
+    // `$obj->$method()` / `new $className()`: the caller picks which method or class runs
+    const dynamicName = node.type === "member_call_expression" ? node.childForFieldName("name")
+      : node.type === "object_creation_expression" ? node.namedChildren.find(c => c?.type !== "arguments") ?? null : null;
+    if (dynamicName?.type === "variable_name") checkDynamicCallSink(node, dynamicName, ctx, taintMask, env);
     if (node.type === "member_call_expression") {
       // A method of a class this code declares (here or in an included file) is user code: its own body
       // decides what is a sink, not a library method that happens to share its name (`->find()`).

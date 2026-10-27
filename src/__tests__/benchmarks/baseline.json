@@ -935,7 +935,7 @@
         "xss"
       ],
       "29": [
-        "path-traversal"
+        "ssrf"
       ],
       "30": [
         "path-traversal"

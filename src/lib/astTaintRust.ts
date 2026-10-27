@@ -36,11 +36,12 @@ const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tr
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT, Tree } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough, treeTooDeep } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
+  ALL, FIXED_POINT_CAP, INJECTION, SinkClass, applyClears, applySanitizer, applyGuards, applyGuardSet, buildBackwardTraceGeneric, classOf, cloneEnv,
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch,
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { anchoredPatternClears } from "./taint/charClass";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
@@ -328,8 +329,10 @@ const DB_METHODS = new Set([
 const DB_RECEIVER_RE = /^(?:conn|connection|db|database|client|pool|tx|txn|transaction|pg|mysql|sqlite|store|session)$|(?:conn|connection|db|pool|client|tx)$/i;
 const DB_TYPE_RE = /^(?:Connection|Transaction|Client|Pool|PgPool|MySqlPool|SqlitePool|PgConnection|SqliteConnection|MySqlConnection|PooledConn|Conn|DatabaseConnection|DbConn|Object)$/;
 const SHELL_PROGRAMS = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
+/** Programs whose options only change how their own arguments are echoed back: an injected option is harmless. */
+const OPTION_SAFE_PROGRAMS = /^(?:(?:\/usr)?\/bin\/)?(?:echo|basename|dirname|true|false)$/;
 const SHELL_COMMAND_FLAGS = /^(?:-c|\/c|\/C|\/k|-command|-Command|-encodedcommand)$/;
-const FS_FIRST_ARG = /(?:^|::)(?:File::open|File::create|File::create_new|fs::read|fs::read_to_string|fs::write|fs::remove_file|fs::remove_dir|fs::remove_dir_all|fs::create_dir|fs::create_dir_all|fs::read_dir|fs::metadata|fs::symlink_metadata|fs::canonicalize|fs::set_permissions|fs::read_link|NamedFile::open|NamedFile::open_async|ServeFile::new|ServeDir::new|NamedFile::new|File::options)$/;
+const FS_FIRST_ARG = /(?:^|::)(?:File::open|File::create|File::create_new|fs::read|fs::read_to_string|fs::write|fs::remove_file|fs::remove_dir|fs::remove_dir_all|fs::create_dir|fs::create_dir_all|fs::read_dir|fs::metadata|fs::symlink_metadata|fs::set_permissions|fs::read_link|NamedFile::open|NamedFile::open_async|ServeFile::new|ServeDir::new|NamedFile::new|File::options)$/;
 const FS_TWO_ARGS = /(?:^|::)fs::(?:copy|rename|hard_link|soft_link|symlink)$/;
 const HTTP_FREE_FNS = /^(?:reqwest::get|reqwest::blocking::get|ureq::get|ureq::post|ureq::put|ureq::delete|ureq::request|surf::get|surf::post|isahc::get|isahc::post|attohttpc::get|attohttpc::post|minreq::get|minreq::post|TcpStream::connect|UdpSocket::connect|tokio::net::TcpStream::connect)$/;
 const HTTP_CLIENT_METHODS = new Set(["get", "post", "put", "delete", "patch", "head", "request"]);
@@ -484,6 +487,21 @@ function macroArgs(m: SyntaxNode): { args: SyntaxNode[]; captures: Map<string, S
   return res;
 }
 
+/**
+ * `format!("'{}'", s.replace('\'', "'\\''"))`: the POSIX single-quote idiom (close the quote, an escaped quote,
+ * reopen) -- the result is one shell word whatever s holds.
+ */
+function isPosixShellQuote(m: SyntaxNode): boolean {
+  const parts = formatParts(m);
+  if (!parts || parts.length !== 3 || parts[0].kind !== "literal" || parts[2].kind !== "literal" || parts[1].kind !== "opaque") return false;
+  if (parts[0].text !== "'" || parts[2].text !== "'") return false;
+  const inner = unwrapExpr(parts[1].node);
+  if (inner.type !== "call_expression") return false;
+  const { name } = callParts(inner);
+  const [from, to] = argNodes(inner);
+  return name === "replace" && charOrStringValue(from ?? null) === "'" && stringValue(to ?? null) === String.raw`'\\''`;
+}
+
 /** format!-family: the format string's literal text and the value parts, in output order. */
 function formatParts(m: SyntaxNode): UrlPart<SyntaxNode>[] | null {
   const { args, captures } = macroArgs(m);
@@ -524,7 +542,7 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
   const mask = (node: SyntaxNode, env: Env): number => {
     if (ZERO_TYPES.has(node.type)) return 0;
     switch (node.type) {
-      case "identifier": return env.get(node.text) ?? 0;
+      case "identifier": return (env.get(node.text) ?? 0) | keyedUnion(env, node.text);
       case "field_expression": {
         const v = field(node, "value");
         return v ? mask(v, env) : 0;
@@ -549,11 +567,18 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         if (/^(?:==|!=|<|>|<=|>=|&&|\|\|)$/.test(op)) return 0;
         return (mask(field(node, "left")!, env)) | (mask(field(node, "right")!, env));
       }
-      case "index_expression": { const v = named(node)[0]; return v ? mask(v, env) : 0; }
+      case "index_expression": {
+        const element = vecElementAt(node);
+        if (element !== undefined) return element ? mask(element, env) : 0;
+        const v = named(node)[0]; return v ? mask(v, env) : 0;
+      }
       case "if_expression": {
         const cond = field(node, "condition");
-        const guards = cond ? guardsOf(cond, ctx) : [];
         const cons = field(node, "consequence"), alt = field(node, "alternative");
+        // `if 7 * 6 > 40 { a } else { b }`: only the arm a constant condition picks
+        const cv = cond && cond.type !== "let_condition" ? constValueRs(cond) : NOT_CONST_RS;
+        if (typeof cv === "boolean") return cv ? valueMask(cons, env) : alt ? valueMask(alt, env) : 0;
+        const guards = cond ? guardsOf(cond, ctx) : [];
         return valueMask(cons, guarded(env, guards.filter(g => g.holds === "true")))
           | (alt ? valueMask(alt, guarded(env, guards.filter(g => g.holds === "false"))) : 0);
       }
@@ -608,6 +633,7 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     for (const c of captures.values()) out |= mask(c, env);
     // doc! { "k": v } -- a string value can't become a query operator; a whole request document still can
     if (name === "doc" || name === "bson") out = applyClears(out, SinkClass.NOSQL);
+    if (name === "format" && isPosixShellQuote(m)) out = applyClears(out, SinkClass.CMD);
     return out;
   };
 
@@ -619,6 +645,11 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     // request accessors: req.headers() / req.match_info() / request.uri()
     if (recv && REQUEST_INPUT_METHODS.has(name) && isRequestValue(recv, env, ctx)) return ALL;
+    // m.get("k") on a map written under literal keys: what was stored under "k" (plus the map itself), not its other keys
+    if (recv && /^(?:get|get_mut|remove)$/.test(name)) {
+      const kc = literalKeyCall(node);
+      if (kc && hasKeyedSlots(env, kc.map)) return (env.get(keySlot(kc.map, kc.key)) ?? 0) | (env.get(kc.map) ?? 0);
+    }
 
     if (recv) {
       if (name === "parse") {
@@ -695,7 +726,8 @@ function isRequestValue(recv: SyntaxNode, env: Env, ctx: EngineCtx): boolean {
   const base = recv.type === "reference_expression" ? named(recv)[0] : recv;
   if (base?.type !== "identifier") return false;
   const t = ctx.varTypes.get(base.text);
-  return !!t && REQUEST_TYPES.has(t) && !env.has(`!shadow:${base.text}`);
+  // an app's own request wrapper (`ApiRequest`, `BenchmarkRequest`) read through the same accessor names
+  return !!t && (REQUEST_TYPES.has(t) || /^[A-Z]\w*Request$/.test(t)) && !env.has(`!shadow:${base.text}`);
 }
 
 function closureParams(cl: SyntaxNode): string[] {
@@ -825,7 +857,7 @@ function guardName(n: SyntaxNode): string | null {
   }
   return null;
 }
-const invert = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true" });
+const invert = (g: Guard): Guard => ({ ...g, holds: g.holds === "true" ? "false" : "true" });
 
 function isLiteralCollection(n: SyntaxNode, ctx: EngineCtx): boolean {
   const c = unwrapExpr(n);
@@ -836,20 +868,170 @@ function isLiteralCollection(n: SyntaxNode, ctx: EngineCtx): boolean {
     const v = decl ? field(decl, "value") : null;
     return !!v && isLiteralCollection(v, ctx);
   }
+  // `let allowed = ["a", "b"];` -- a local bound once to a literal list
+  if (c.type === "identifier") {
+    const def = lastAssignment(c.text, c);
+    return !!def && def.type !== "identifier" && isLiteralCollection(def, ctx);
+  }
   return false;
 }
-/** An anchored character-class pattern: `^[a-z0-9_-]+$` (no `.` / `/` inside the class). */
-const SAFE_CLASS_RE = /^\^\[[A-Za-z0-9_\\\- ]+\][+*](?:\{\d+(?:,\d*)?\})?\$$/;
 
-function guardsOf(cond: SyntaxNode, ctx: EngineCtx): Guard[] {
+/**
+ * The classes a "this sequence is not in the value" check makes safe: without `..` a path can't climb out of its
+ * directory; without a quote the value can't close a quoted SQL/XPath string literal; without `<` it can't open a
+ * tag. Null for any other substring -- it proves nothing.
+ */
+function substringGuardClears(sub: string): number | null {
+  let clears = 0;
+  if (sub.includes("..")) clears |= SinkClass.PATH;
+  if (sub.includes("'") || sub.includes('"')) clears |= SinkClass.SQL | SinkClass.XPATH;
+  if (sub.includes("<")) clears |= SinkClass.XSS;
+  return clears || null;
+}
+/** `'x'` / `'\''` / `"x"` -> its character(s). */
+function charOrStringValue(n: SyntaxNode | null | undefined): string | null {
+  if (!n) return null;
+  if (n.type === "char_literal") return n.text.slice(1, -1).replace(/^\\(.)$/, "$1");
+  return stringValue(n);
+}
+
+/**
+ * `x.chars().all(|c| c.is_alphanumeric() || c == '_')`: what the allowed alphabet rules out. Every injection class,
+ * except that a `-` in it still lets the value be an option (CMD stays: argument injection), and `/` or `\` still
+ * lets it be a nested path.
+ */
+function charAllowlistClears(closure: string): number {
+  const extras = [...closure.matchAll(/==\s*'(\\.|[^'])'/g)].map(m => m[1].replace(/^\\/, ""));
+  let clears = INJECTION;
+  if (extras.includes("-")) clears &= ~SinkClass.CMD;
+  if (extras.includes("/") || extras.includes("\\")) clears &= ~SinkClass.PATH;
+  return clears;
+}
+
+/** A guard on a helper's parameter that holds only when the caller's argument was itself canonicalized. */
+const CANON_PARAM = (name: string) => `\u0000canon:${name}`;
+
+type ConstRs = number | boolean | string;
+const NOT_CONST_RS: unique symbol = Symbol("not-const");
+/** Compile-time value of a literal expression (`7 * 6 > 40`, `"a" == "b"`, `!true`), else NOT_CONST_RS. */
+function constValueRs(n: SyntaxNode | null, depth = 0): ConstRs | typeof NOT_CONST_RS {
+  if (!n || depth > 8) return NOT_CONST_RS;
+  switch (n.type) {
+    case "integer_literal": { const v = Number(n.text.replace(/_/g, "").replace(/(?:[iu](?:8|16|32|64|128|size))$/, "")); return Number.isFinite(v) ? v : NOT_CONST_RS; }
+    case "boolean_literal": return n.text === "true";
+    case "string_literal": return stringValue(n) ?? NOT_CONST_RS;
+    case "parenthesized_expression": return constValueRs(named(n)[0] ?? null, depth + 1);
+    case "unary_expression": {
+      const v = constValueRs(named(n)[0] ?? null, depth + 1);
+      const op = operatorOf(n);
+      if (op === "!" && typeof v === "boolean") return !v;
+      if (op === "-" && typeof v === "number") return -v;
+      return NOT_CONST_RS;
+    }
+    case "binary_expression": {
+      const op = operatorOf(n);
+      const a = constValueRs(field(n, "left"), depth + 1);
+      if (a === NOT_CONST_RS) return a;
+      if (op === "&&" && typeof a === "boolean") return a ? constValueRs(field(n, "right"), depth + 1) : false;
+      if (op === "||" && typeof a === "boolean") return a ? true : constValueRs(field(n, "right"), depth + 1);
+      const b = constValueRs(field(n, "right"), depth + 1);
+      if (b === NOT_CONST_RS) return b;
+      if (op === "==") return a === b;
+      if (op === "!=") return a !== b;
+      if (typeof a === "number" && typeof b === "number") {
+        switch (op) {
+          case "+": return a + b; case "-": return a - b; case "*": return a * b;
+          case "/": return b === 0 ? NOT_CONST_RS : Math.trunc(a / b);
+          case "%": return b === 0 ? NOT_CONST_RS : a % b;
+          case "<": return a < b; case ">": return a > b; case "<=": return a <= b; case ">=": return a >= b;
+        }
+      }
+      return NOT_CONST_RS;
+    }
+    default: return NOT_CONST_RS;
+  }
+}
+
+/** The local a `.insert(k, v)` / `.get(k)` call is keyed on, with its literal key; null otherwise. */
+function literalKeyCall(call: SyntaxNode): { map: string; key: string } | null {
+  const { recv } = callParts(call);
+  const k = argNodes(call)[0];
+  const base = recv ? unwrapExpr(recv) : null;
+  const key = k ? stringValue(unwrapExpr(k)) ?? (unwrapExpr(k).type === "integer_literal" ? unwrapExpr(k).text : null) : null;
+  return base?.type === "identifier" && key !== null ? { map: base.text, key } : null;
+}
+const keySlot = (map: string, key: string) => `${map}[${JSON.stringify(key)}]`;
+/** Set once a map has a literal-key slot, so whole-map reads only scan the env for maps that have them. */
+const KEYED_MARK = (map: string) => `\u0000keyed:${map}`;
+/** Everything stored in a map under literal keys (what a whole-map read carries). */
+function keyedUnion(env: Env, map: string): number {
+  if (!env.has(KEYED_MARK(map))) return 0;
+  const prefix = `${map}[`;
+  let m = 0;
+  for (const [k, v] of env) if (k.startsWith(prefix)) m |= v;
+  return m;
+}
+function hasKeyedSlots(env: Env, map: string): boolean {
+  return env.has(KEYED_MARK(map));
+}
+
+/**
+ * `v[k]` (literal k) for a Vec built in straight-line code in the same block: `let mut v = vec![...]`, then only
+ * `v.push(x)` / `v.insert(i, x)` / `v.remove(i)` / `v.pop()` statements before the read. The element expression
+ * at k, null when k is out of range, undefined when the contents can't be followed this way.
+ */
+function vecElementAt(index: SyntaxNode): SyntaxNode | null | undefined {
+  const [value, idx] = named(index);
+  if (value?.type !== "identifier" || idx?.type !== "integer_literal") return undefined;
+  const k = Number(idx.text.replace(/_/g, ""));
+  let stmt: SyntaxNode | null = index;
+  while (stmt?.parent && stmt.parent.type !== "block") stmt = stmt.parent;
+  const block = stmt?.parent;
+  if (!stmt || !block) return undefined;
+  const name = value.text;
+  const mentions = new RegExp(`\\b${name}\\b`);
+  let seq: SyntaxNode[] | null = null;
+  for (const st of named(block)) {
+    if (st.id === stmt.id) break;
+    if (!mentions.test(st.text)) continue;
+    if (st.type === "let_declaration" && field(st, "pattern")?.text.replace(/^mut\s+/, "") === name) {
+      const v = field(st, "value");
+      if (!v || v.type !== "macro_invocation" || macroName(v) !== "vec") return undefined;
+      seq = [...macroArgs(v).args];
+      if (/;/.test(named(v).find(c => c.type === "token_tree")?.text ?? "")) return undefined;   // vec![x; n]
+      continue;
+    }
+    const e = st.type === "expression_statement" ? named(st)[0] : null;
+    if (!seq || e?.type !== "call_expression") return undefined;
+    const { name: method, recv } = callParts(e);
+    if (!recv || unwrapExpr(recv).text !== name) return undefined;
+    const args = argNodes(e);
+    const intArg = (n: SyntaxNode | undefined) => (n?.type === "integer_literal" ? Number(n.text.replace(/_/g, "")) : null);
+    if (method === "push" && args.length === 1) seq.push(args[0]);
+    else if (method === "insert" && args.length === 2 && intArg(args[0]) !== null) seq.splice(intArg(args[0])!, 0, args[1]);
+    else if (method === "pop" && args.length === 0) seq.pop();
+    else if (method === "remove" && args.length === 1 && intArg(args[0]) !== null) seq.splice(intArg(args[0])!, 1);
+    else return undefined;
+  }
+  if (!seq) return undefined;
+  return k >= 0 && k < seq.length ? seq[k] : null;
+}
+
+function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
   const c = unwrapExpr(cond);
-  if (c.type === "unary_expression" && operatorOf(c) === "!") { const v = named(c)[0]; return v ? guardsOf(v, ctx).map(invert) : []; }
+  if (depth > 4) return [];
+  if (c.type === "unary_expression" && operatorOf(c) === "!") { const v = named(c)[0]; return v ? guardsOf(v, ctx, depth + 1).map(invert) : []; }
+  // `let ok = x.chars().all(..); if !ok { return }` -- a boolean local bound to a check
+  if (c.type === "identifier") {
+    const def = lastAssignment(c.text, c);
+    return def && def.type !== "identifier" ? guardsOf(def, ctx, depth + 1) : [];
+  }
   if (c.type === "binary_expression") {
     const op = operatorOf(c);
     const l = field(c, "left"), r = field(c, "right");
     if (!l || !r) return [];
-    if (op === "&&") return [...guardsOf(l, ctx), ...guardsOf(r, ctx)].filter(g => g.holds === "true");
-    if (op === "||") return [...guardsOf(l, ctx), ...guardsOf(r, ctx)].filter(g => g.holds === "false");
+    if (op === "&&") return [...guardsOf(l, ctx, depth + 1), ...guardsOf(r, ctx, depth + 1)].filter(g => g.holds === "true");
+    if (op === "||") return [...guardsOf(l, ctx, depth + 1), ...guardsOf(r, ctx, depth + 1)].filter(g => g.holds === "false");
     if (op === "==" || op === "!=") {
       const holds = op === "==" ? "true" : "false";
       const ln = guardName(l), rn = guardName(r);
@@ -870,10 +1052,43 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx): Guard[] {
     const { name, recv } = callParts(c);
     const args = argNodes(c);
     if (name === "contains" && recv && args[0] && isLiteralCollection(recv, ctx)) { const n = guardName(args[0]); return n ? [{ name: n, holds: "true" }] : []; }
+    // x.contains("..") / x.contains('\'') -- when false, x lacks that sequence
+    if (name === "contains" && recv && args[0]) {
+      const sub = charOrStringValue(unwrapExpr(args[0]));
+      const clears = sub !== null ? substringGuardClears(sub) : null;
+      const n = guardName(recv);
+      return n && clears ? [{ name: n, holds: "false", clears }] : [];
+    }
     // x.chars().all(|c| c.is_ascii_digit())
     if (name === "all" && recv?.type === "call_expression" && callParts(recv).name === "chars" && /is_ascii_(?:digit|alphanumeric|hexdigit)|is_numeric|is_alphanumeric/.test(args[0]?.text ?? "")) {
       const n = callParts(recv).recv ? guardName(callParts(recv).recv!) : null;
-      return n ? [{ name: n, holds: "true" }] : [];
+      return n ? [{ name: n, holds: "true", clears: charAllowlistClears(args[0]?.text ?? "") }] : [];
+    }
+    // p.strip_prefix(&base).is_err() after p = ...canonicalize() -- false when p is inside base
+    if ((name === "is_err" || name === "is_ok") && recv?.type === "call_expression" && callParts(recv).name === "strip_prefix") {
+      const inner = callParts(recv).recv;
+      const n = inner ? guardName(inner) : null;
+      const def = n ? lastAssignment(n, c) : null;
+      return n && def && /canonicalize|normalize|clean/.test(def.text) ? [{ name: n, holds: name === "is_ok" ? "true" : "false" }] : [];
+    }
+    // a same-file boolean helper: `fn is_safe(s: &str) -> bool { !s.contains("..") && ... }`
+    if (!recv && ctx.fns.get(name)?.body && depth < 3) {
+      const fn = ctx.fns.get(name)!;
+      const kids = named(fn.body).filter(k => !/comment$/.test(k.type));
+      const tail = kids[kids.length - 1];
+      if (!tail || tail.type === "expression_statement" || tail.type === "let_declaration") return [];
+      const out: Guard[] = [];
+      for (const g of guardsOf(tail, ctx, depth + 1)) {
+        const canon = g.name.startsWith(CANON_PARAM(""));
+        const pname = canon ? g.name.slice(CANON_PARAM("").length) : g.name;
+        const p = fn.params.find(q => q.name === pname);
+        const a = p ? args[p.index] : undefined;
+        const an = a ? guardName(a) : null;
+        if (!an) continue;
+        if (canon) { const def = lastAssignment(an, c); if (!def || !/canonicalize|normalize|clean/.test(def.text)) continue; }
+        out.push({ ...g, name: an });
+      }
+      return out;
     }
     // x.parse::<i64>().is_ok()
     if (name === "is_ok" && recv?.type === "call_expression" && callParts(recv).name === "parse") {
@@ -884,12 +1099,15 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx): Guard[] {
     if (name === "is_match" && recv && args[0]) {
       const n = guardName(args[0]);
       const pattern = regexLiteralOf(recv, ctx);
-      return n && pattern && SAFE_CLASS_RE.test(pattern) ? [{ name: n, holds: "true" }] : [];
+      // an anchored alphabet (`^[a-z0-9_-]+$`); a `-` in it still lets the value be an option
+      const clears = pattern ? anchoredPatternClears(pattern) : null;
+      return n && clears ? [{ name: n, holds: "true", clears }] : [];
     }
     // p.starts_with(&base) after p = base.join(x).canonicalize()?
     if (name === "starts_with" && recv) {
       const n = guardName(recv);
       const def = n ? lastAssignment(n, c) : null;
+      if (n && !def && ctx.fns.get(findEnclosingFunctionNameRust(c))?.params.some(p => p.name === n)) return [{ name: CANON_PARAM(n), holds: "true" }];
       return n && def && /canonicalize|normalize|clean/.test(def.text) ? [{ name: n, holds: "true" }] : [];
     }
   }
@@ -911,7 +1129,7 @@ function regexLiteralOf(recv: SyntaxNode, ctx: EngineCtx): string | null {
 function guarded(env: Env, guards: readonly Guard[]): Env {
   if (guards.length === 0) return env;
   const e = cloneEnv(env);
-  applyGuards(e, guards.map(g => g.name));
+  applyGuardSet(e, guards, guards[0].holds);
   return e;
 }
 
@@ -955,7 +1173,23 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     const branches: Branch[] = [];
     let cur: SyntaxNode | null = node;
     while (cur) {
-      branches.push(condBranch(field(cur, "condition"), field(cur, "consequence")));
+      const cond = field(cur, "condition");
+      const cv = cond && cond.type !== "let_condition" ? constValueRs(cond) : NOT_CONST_RS;
+      if (cv === true) {
+        // a constant-true condition: its arm is the only one that runs (earlier arms already joined in)
+        const cons = field(cur, "consequence");
+        branches.push({ body: (e) => (cons ? walk(cons, e) : false) });
+        break;
+      }
+      if (cv === false) {
+        const alt: SyntaxNode | null = field(cur, "alternative");
+        const inner: SyntaxNode | null = alt ? named(alt)[0] ?? null : null;
+        if (!inner) break;
+        if (inner.type === "if_expression") { cur = inner; continue; }
+        branches.push({ body: (e) => walk(inner, e) });
+        break;
+      }
+      branches.push(condBranch(cond, field(cur, "consequence")));
       const alt: SyntaxNode | null = field(cur, "alternative");
       const inner: SyntaxNode | null = alt ? named(alt)[0] ?? null : null;
       if (!inner) break;
@@ -1040,7 +1274,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
               bindPattern(pat, sm, e);
               if (subjectName && pat && patternIsLiteral(pat)) applyGuards(e, [subjectName]);
               const guard = pat ? field(pat, "condition") : null;
-              if (guard) { walk(guard, e); applyGuards(e, guardsOf(guard, ctx).filter(g => g.holds === "true").map(g => g.name)); }
+              if (guard) { walk(guard, e); applyGuardSet(e, guardsOf(guard, ctx), "true"); }
             },
             body: (e: Env) => { const v = field(arm, "value"); return v ? walk(v, e) : false; },
           };
@@ -1087,7 +1321,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
           const target = args[0];
           if (target) assignTo(target, args.slice(1).reduce((m, a) => m | mask(a, env), 0) | [...macroArgs(node).captures.values()].reduce((m, a) => m | mask(a, env), 0), env, true);
         }
-        if (name === "ensure" && args[0]) applyGuards(env, guardsOf(args[0], ctx).filter(g => g.holds === "true").map(g => g.name));
+        if (name === "ensure" && args[0]) applyGuardSet(env, guardsOf(args[0], ctx), "true");
         return TERMINATING_MACROS.has(name);
       }
       case "call_expression": {
@@ -1098,7 +1332,13 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         checkCallSink(node, env, ctx, mask);
         seedLocalFn(node, env, ctx, mask);
         checkCrossFileCall(node, env, ctx, mask);
-        if (recv && MUTATOR_METHODS.has(name)) {
+        const kc = recv && name === "insert" && argNodes(node).length === 2 ? literalKeyCall(node) : null;
+        if (kc) {
+          // m.insert("k", v): the value lives under its own key
+          const slot = keySlot(kc.map, kc.key);
+          env.set(slot, (env.get(slot) ?? 0) | mask(argNodes(node)[1], env));
+          env.set(KEYED_MARK(kc.map), 0);
+        } else if (recv && MUTATOR_METHODS.has(name)) {
           const am = argNodes(node).reduce((m, a) => m | mask(a, env), 0);
           if (am) assignTo(recv, am, env, true);
         }
@@ -1321,8 +1561,10 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
         const pos = idx >= 0 ? idx : chain.args.length;
         if (shellAt >= 0 && pos > shellAt) { if (fireOn(ctx, "command-injection", node, a, mask(a, env), `${program} -c`)) break; continue; }
         if (endOfOptions >= 0 && pos > endOfOptions) continue;
+        if (program !== null && OPTION_SAFE_PROGRAMS.test(program)) continue;
         const m = mask(a, env);
-        if (m & ALL) { emit(ctx, "argument-injection", node, culpritOf(a, ALL, env, mask).text, "Command.arg", `Request input '${a.text.slice(0, 60)}' is passed as an argument to ${program ?? "a command"} — no shell runs, but a value starting with '-' becomes an option; put "--" before it or validate it`); break; }
+        // attacker-chosen AND still able to start with "-" (a number, an allowlisted word or a "-"-free alphabet can not)
+        if ((m & SinkClass.CONTROL) && (m & SinkClass.CMD)) { emit(ctx, "argument-injection", node, culpritOf(a, ALL, env, mask).text, "Command.arg", `Request input '${a.text.slice(0, 60)}' is passed as an argument to ${program ?? "a command"} — no shell runs, but a value starting with '-' becomes an option; put "--" before it or validate it`); break; }
       }
     }
   }

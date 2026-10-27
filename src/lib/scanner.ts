@@ -2547,6 +2547,59 @@ function findWeakHashPython(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// PHP: MD5 / MD4 / MD2 / SHA-1 (md5(), sha1(), hash('md5', ...), hash_file), HMAC-MD5, any fast general-purpose hash
+// over a password (hash('sha256', $salt . $pass) -- use password_hash), and openssl_encrypt with ECB mode or a broken
+// cipher (DES, RC2, RC4, Blowfish). The password-context md5($password) case is already WEAK_CRYPTO_RE's.
+const PHP_WEAK_HASH_RE = /(?<![\w$>:])(?:md5|sha1|md5_file|sha1_file)\s*\(|\bhash(?:_file|_init)?\s*\(\s*["'](?:md2|md4|md5|sha1)["']|\bhash_hmac\s*\(\s*["'](?:md2|md4|md5)["']/i;
+const PHP_FAST_PASSWORD_HASH_RE = /\bhash\s*\(\s*["'](?:sha\d+(?:\/\d+)?|sha3-\d+|ripemd\d+|whirlpool|tiger\w*|crc32\w*|adler32|fnv\w*|xxh\w*|murmur\w*)["']\s*,[^)]*\$\w*(?:pass(?:word|wd)?|pwd)\w*/i;
+const PHP_WEAK_CIPHER_RE = /\bopenssl_(?:encrypt|decrypt)\s*\([^)]*["'](?:[\w-]*-ecb|des(?:-[\w-]+)?|des-ede3?(?:-[\w-]+)?|rc2(?:-[\w-]+)?|rc4(?:-[\w-]+)?|bf(?:-[\w-]+)?|blowfish)["']|\bmcrypt_(?:encrypt|decrypt|module_open)\s*\(|\bMCRYPT_(?:DES|3DES|RC2|BLOWFISH|MODE_ECB)\b/i;
+
+function findWeakCryptoPHP(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line)) continue;
+    if (WEAK_CRYPTO_RE.some(r => r.test(line))) continue;   // the password-context rule already reports it
+    if (PHP_WEAK_CIPHER_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Weak Cipher", severity: "high", line: i + 1,
+        detail: "ECB mode leaks plaintext patterns, and DES/RC2/RC4/Blowfish are broken -- use openssl_encrypt with AES-256-GCM (or sodium_crypto_secretbox)" });
+    } else if (PHP_WEAK_HASH_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
+        detail: "MD5/MD4/SHA-1 are collision-broken -- use hash('sha256', ...) (and password_hash() for passwords, hash_hmac('sha256', ...) for MACs)" });
+    } else if (PHP_FAST_PASSWORD_HASH_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Fast Hash for a Password", severity: "high", line: i + 1,
+        detail: "A fast general-purpose hash over a password (even salted) can be brute-forced at billions of guesses per second -- use password_hash() / password_verify()" });
+    }
+  }
+  return found;
+}
+
+// Ruby: MD5 / MD4 / SHA-1 (Digest::MD5, OpenSSL::Digest.new('MD5'), OpenSSL::Digest::SHA1), any fast general-purpose
+// digest over a password (Digest::SHA256.hexdigest(password) -- use BCrypt/Argon2), and OpenSSL::Cipher with ECB mode
+// or a broken cipher (DES/3DES, RC2, RC4, Blowfish).
+const RB_WEAK_HASH_RE = /\b(?:OpenSSL::)?Digest::(?:MD5|MD4|SHA1)\b|\bOpenSSL::Digest\.new\s*\(\s*["'](?:MD5|MD4|SHA1)["']/i;
+const RB_FAST_PASSWORD_HASH_RE = /\b(?:OpenSSL::)?Digest::(?:SHA\d+|SHA2|RMD160)\.(?:hexdigest|digest|base64digest)\s*\(\s*[^)]*\b\w*(?:pass(?:word|wd)?|pwd)\w*/i;
+const RB_WEAK_CIPHER_RE = /\bOpenSSL::Cipher(?:::Cipher)?\.new\s*\(\s*["'](?:[\w-]*-ECB|DES(?:-[\w-]+)?|DES-EDE3?(?:-[\w-]+)?|RC2(?:-[\w-]+)?|RC4(?:-[\w-]+)?|BF(?:-[\w-]+)?|Blowfish)["']|\bOpenSSL::Cipher::(?:DES|RC2|RC4|BF)\.new\b/i;
+
+function findWeakCryptoRuby(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || WEAK_CRYPTO_RE.some(r => r.test(line))) continue;
+    if (RB_WEAK_CIPHER_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Weak Cipher", severity: "high", line: i + 1,
+        detail: "ECB mode leaks plaintext patterns, and DES/3DES/RC2/RC4/Blowfish are broken -- use OpenSSL::Cipher.new('aes-256-gcm') (or RbNaCl)" });
+    } else if (RB_WEAK_HASH_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
+        detail: "MD5/MD4/SHA-1 are collision-broken -- use Digest::SHA256 (and BCrypt::Password.create for passwords, OpenSSL::HMAC with SHA256 for MACs)" });
+    } else if (RB_FAST_PASSWORD_HASH_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "Fast Hash for a Password", severity: "high", line: i + 1,
+        detail: "A fast general-purpose digest over a password (even salted) can be brute-forced at billions of guesses per second -- use BCrypt::Password.create or Argon2" });
+    }
+  }
+  return found;
+}
+
 // Python (Flask/Werkzeug/Django set_cookie): a cookie explicitly sent without Secure or HttpOnly. Only the explicit
 // `secure=False` / `httponly=False` -- an omitted flag is a framework/config default this line can't see.
 function findCookieFlagsPython(lines: string[]): ScanIndicator[] {
@@ -6795,6 +6848,8 @@ export function analyzeFile(
     ...findInsecureRandomnessGoFunc(lines),
     ...findInsecureRandomnessCSharpFunc(lines),
     ...(lang === "python" ? [...findInsecureRandomnessPython(lines), ...findWeakHashPython(lines), ...findCookieFlagsPython(lines)] : []),
+    ...(lang === "php" ? findWeakCryptoPHP(lines) : []),
+    ...(lang === "ruby" ? findWeakCryptoRuby(lines) : []),
     ...findReDoS(lines),
     ...findOpenRedirect(lines),
     ...findNamedTaintOpenRedirectJS(lines),

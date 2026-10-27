@@ -322,6 +322,31 @@ const SERVLET_SOURCE_PROPS = new Set([
 ]);
 const REQUEST_VAR_RE = /^(?:request|req|httpRequest|servletRequest|httpServletRequest|serverRequest)$/;
 const REQUEST_TYPE_RE = /^(?:Http)?ServletRequest(?:Wrapper)?$|^WebRequest$|^NativeWebRequest$|^ServerHttpRequest$|^ServerRequest$/;
+/** Android: text a user types into an input view (`EditText.text`), what another app put in an Intent, a deep link's query
+ * (a method on that Uri -- getQueryParameter -- carries its receiver's taint like any other). */
+const ANDROID_INPUT_VIEW_RE = /^(?:EditText|AppCompatEditText|TextInputEditText|AutoCompleteTextView|MultiAutoCompleteTextView|SearchView)$/;
+const INTENT_INPUT_CALLS = new Set([
+  "getStringExtra", "getStringArrayExtra", "getStringArrayListExtra", "getCharSequenceExtra", "getCharSequenceArrayExtra",
+  "getBundleExtra", "getParcelableExtra", "getSerializableExtra", "getDataString",
+]);
+const INTENT_INPUT_PROPS = new Set(["data", "dataString", "extras"]);
+
+/** `intent` / `getIntent()` / `activity.intent` / an Intent-typed local (not one this code builds with Intent(...)). */
+function isIncomingIntent(recv: SyntaxNode | null, ctx: EngineCtx): boolean {
+  if (!recv) return false;
+  const text = calleeText(recv) ?? recv.text;
+  if (/^(?:intent|getIntent|activity\.intent|requireActivity\(\)\.intent|this\.intent)$/.test(text.replace(/\s+/g, ""))) {
+    if (recv.type !== "simple_identifier") return true;
+    // a local this code builds (`val intent = Intent(this, X::class.java)`) is outgoing, not what another app sent;
+    // the Activity's `intent` property or an `intent: Intent` parameter (onReceive / onNewIntent) is incoming
+    let fn: SyntaxNode | null = recv.parent;
+    while (fn && fn.type !== "function_declaration" && fn.type !== "lambda_literal") fn = fn.parent;
+    if (fn && new RegExp(`\\b(?:val|var)\\s+${recv.text}\\b[^=\\n]*=\\s*Intent\\s*\\(`).test(fn.text)) return false;
+    return !ctx.varTypes.has(recv.text) || bareType(ctx.varTypes.get(recv.text)!) === "Intent";
+  }
+  return recv.type === "call_expression" && callParts(recv).name === "getIntent";
+}
+
 /** Ktor: `call.<member>` members that are what the client sent. */
 const KTOR_INPUT_MEMBERS = new Set(["parameters", "request", "receive", "receiveText", "receiveParameters", "receiveMultipart", "receiveNullable", "receiveOrNull", "receiveChannel", "receiveStream"]);
 
@@ -377,6 +402,8 @@ const SQL_UNAMBIGUOUS = new Set([
   "executeQuery", "executeUpdate", "executeLargeUpdate", "prepareStatement", "prepareCall", "createQuery", "createNativeQuery",
   "createSQLQuery", "queryForObject", "queryForList", "queryForMap", "queryForRowSet", "queryForStream", "batchUpdate", "addBatch",
   "nativeQuery", "createUpdate", "resultQuery",
+  // android.database.sqlite.SQLiteDatabase
+  "rawQuery", "rawQueryWithFactory", "execSQL",
 ]);
 /** Only on a database-looking receiver: these names are common elsewhere (`executor.execute`, `cache.update`). */
 const SQL_GATED = new Set(["execute", "query", "update", "exec", "fetch", "sql", "select", "queryForInt", "queryForLong"]);
@@ -482,6 +509,14 @@ const UNION_TYPES = new Set([
   "value_argument", "value_arguments", "annotated_lambda",
 ]);
 
+/** `findViewById<EditText>(R.id.x)` / `requireViewById<EditText>(...)` -> "EditText". */
+function viewLookupType(value: SyntaxNode): string | null {
+  if (value.type !== "call_expression" || !/^(?:findViewById|requireViewById)$/.test(callParts(value).name)) return null;
+  const typeArg = findAllNodes(value, "type_arguments")[0];
+  const ut = typeArg ? findAllNodes(typeArg, "user_type")[0] : null;
+  return ut ? typeNameOf(ut) : null;
+}
+
 function isShadowed(name: string, env: Env, ctx: EngineCtx): boolean {
   return env.has(name) || ctx.fields.has(name);
 }
@@ -524,6 +559,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         if (recv.type === "callable_reference" || OPAQUE_PROPS.has(member)) return 0;
         if (recv.type === "this_expression") return ident(member, env);
         if (SERVLET_SOURCE_PROPS.has(member) && isRequestReceiver(recv, env, ctx)) return ALL;
+        if (member === "text" && recv.type === "simple_identifier" && ANDROID_INPUT_VIEW_RE.test(bareType(ctx.varTypes.get(recv.text) ?? ""))) return ALL;
+        if (INTENT_INPUT_PROPS.has(member) && isIncomingIntent(recv, ctx)) return ALL;
         const rm = mask(recv, env);
         // File(x).name / Paths.get(x).fileName: only the last path segment is left
         if (NAME_ONLY_MEMBERS.has(member)) return applyClears(rm, SinkClass.PATH);
@@ -606,6 +643,7 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     if (isKtorInput(node, env)) return ALL;
     if (recv && SERVLET_SOURCE_CALLS.has(name) && isRequestReceiver(recv, env, ctx)) return ALL;
+    if (recv && INTENT_INPUT_CALLS.has(name) && isIncomingIntent(recv, ctx)) return ALL;
 
     if (recv) {
       const clears = RECEIVER_CLEARS[name];
@@ -995,7 +1033,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (nm) {
         env.set(nm, m);
         const declared = named(vd).find(k => k.type === "user_type" || k.type === "nullable_type");
-        const t = declared ? typeNameOf(declared) : value ? constructedClass(value) : null;
+        const t = declared ? typeNameOf(declared) : value ? constructedClass(value) ?? viewLookupType(value) : null;
         if (t) ctx.varTypes.set(nm, t);
       }
     }
@@ -1323,6 +1361,16 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
       emit(ctx, "sql-injection", node, verdict.culprit!.text, ct, `Escaped value '${verdict.culprit!.text}' is placed outside a quoted SQL string literal — string-escaping only protects a value inside quotes`);
     } else {
       fireOn(ctx, "sql-injection", node, arg0, mask(arg0, env), ct);
+    }
+  }
+
+  // ── WebView ──
+  if (recv && (recvType === "WebView" || /^(?:web[vV]iew|wv|mWebView|binding\.web[vV]iew)$/.test(recvText))) {
+    if ((name === "loadData" || name === "loadDataWithBaseURL" || name === "evaluateJavascript") && pos[name === "loadDataWithBaseURL" ? 1 : 0]) {
+      const a = pos[name === "loadDataWithBaseURL" ? 1 : 0];
+      fireOn(ctx, "xss", node, a, mask(a, env), `WebView.${name}`, `Untrusted input '${a.text.slice(0, 60)}' is rendered as HTML/JS inside the app's WebView -- encode it, or load only trusted content`);
+    } else if (name === "loadUrl" && pos[0]) {
+      fireOn(ctx, "open-redirect", node, pos[0], mask(pos[0], env), "WebView.loadUrl", `The app's WebView navigates to an attacker-chosen URL '${pos[0].text.slice(0, 60)}' (a javascript: URL runs in the WebView) -- allow only known hosts/schemes`);
     }
   }
 
