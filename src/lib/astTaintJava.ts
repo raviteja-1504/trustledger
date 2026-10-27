@@ -49,6 +49,7 @@ import {
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { evalConstExpr, type ConstVal } from "./taint/constEval";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
 export type AstTaintJavaId =
@@ -56,7 +57,7 @@ export type AstTaintJavaId =
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "bola-missing-ownership-check"
   | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "argument-injection"
-  | "weak-crypto" | "eval-exec" | "nosql-injection";
+  | "weak-crypto" | "eval-exec" | "nosql-injection" | "trust-boundary";
 
 export interface AstTaintJavaFinding {
   id:         AstTaintJavaId;
@@ -486,7 +487,7 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "header-injection": "high", "redos": "high", "ssti": "critical", "mass-assignment": "high", "timing-attack": "medium",
   "jwt-none-alg": "critical", "weak-crypto": "high", "eval-exec": "critical", "nosql-injection": "critical",
-  "argument-injection": "high",
+  "argument-injection": "high", "trust-boundary": "medium",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -497,7 +498,7 @@ const LABEL: Record<AstTaintJavaId, string> = {
   "header-injection": "HTTP Header Injection", "redos": "ReDoS — Regex DoS", "ssti": "Server-Side Template Injection",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "weak-crypto": "Weak Cryptography", "eval-exec": "Arbitrary Code Execution", "nosql-injection": "NoSQL Injection",
-  "argument-injection": "Argument Injection",
+  "argument-injection": "Argument Injection", "trust-boundary": "Trust Boundary Violation",
 };
 
 // lowercase tag names only, and not glued to an identifier: `Map<String, Object>` is a generic, not markup
@@ -727,6 +728,9 @@ function checkConcatShapes(bin: CstNode, env: Env, ctx: EngineCtx): void {
     if (m & classOf("sql-injection") && SQL_START_RE.test(prefix)) {
       emit(ctx, "sql-injection", bin, src, "SQL string concatenation", undefined,
         `Untrusted '${src}' is concatenated into a SQL statement — use a PreparedStatement with bind parameters`);
+    } else if (wasCleared(m, classOf("sql-injection")) && SQL_START_RE.test(prefix)) {
+      // the operand is proven not to carry input here (a sanitizer, or a never-run arm): the line rule's match is too
+      ctx.suppressed?.push({ id: "sql-injection", line: lineOf(bin) });
     }
     if (m & classOf("ldap-injection") && (LDAP_SHAPE_RE.test(prefix) || LDAP_URL_RE.test(prefix))) {
       emit(ctx, "ldap-injection", bin, src, "LDAP filter concatenation", undefined,
@@ -814,7 +818,11 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
   const paren = firstNode(prefix, "parenthesisExpression");
   if (paren) {
     const inner = firstNode(paren, "expression");
-    return { parts: [], taint: inner ? taintMask(inner, env, ctx) : 0, rootVar: null, isNewExprOf: null };
+    // `(new Helper()).run(x)`: the receiver is a fresh instance of a known class, as for `new Helper().run(x)`
+    const innerText = inner ? tokensText(inner) : "";
+    const ucs = inner && /^new\s*[\w.]+\s*(?:<[^>]*>)?\s*\([^()]*\)$/.test(innerText) ? findAllNodes(inner, "unqualifiedClassInstanceCreationExpression") : [];
+    const className = ucs.length === 1 ? extractInstantiatedClassName(ucs[0]) : null;
+    return { parts: className ? [className] : [], taint: inner ? taintMask(inner, env, ctx) : 0, rootVar: null, isNewExprOf: className };
   }
   // `(String) header.get("kid")` keeps the operand's taint; `(int) x` yields a number, which no longer carries
   // any injection class (same rule as the PHP/C# engines' numeric casts).
@@ -1017,6 +1025,12 @@ function walkPrimaryChain(
         if (m) chainTaint |= m;
       }
 
+      // list.get(1) / map.get("keyA") on a collection whose literal slots are known: that slot's value, not the whole receiver
+      const slotRead = calls === 0 && rootVar && receiverOf() === rootVar
+        ? collectionOpJava(rootVar, tail, args, argMasks, startOf(suffix), ctx) : undefined;
+      // the rest of the collection's taint is proven not to be this slot: recorded as cleared
+      if (slotRead !== undefined) chainTaint = slotRead | (((env.get(rootVar!) ?? 0) & ALL & ~slotRead) << SHADOW);
+
       // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
       const selfCall = calls === 0 && nameParts.length === 1 && !receiverOf() && (parts.length === 1 || prefixIsThis);
       onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall });
@@ -1073,7 +1087,17 @@ function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
         }
         return m;
       }
-      return allNodes(node, "expression").reduce((m, e) => m | taintMask(e, env, ctx), 0);
+      // a constant condition (`(7 * 18) + num > 200 ? "safe" : param`): only the arm that runs
+      const arms = allNodes(node, "expression");
+      const cond = firstNode(node, "binaryExpression");
+      const c = cond && arms.length === 2 ? constValueJava(cond, ctx) : undefined;
+      if (typeof c === "boolean") {
+        // the arm that can't run is positively proven not to reach here: its taint is recorded as cleared
+        const taken = taintMask(c ? arms[0] : arms[1], env, ctx);
+        const dead = taintMask(c ? arms[1] : arms[0], env, ctx) & ALL & ~taken;
+        return taken | (dead << SHADOW);
+      }
+      return arms.reduce((m, e) => m | taintMask(e, env, ctx), 0);
     }
     case "switchStatement": {
       // A switch used as an EXPRESSION: value = union of the arm results, not the subject.
@@ -1199,6 +1223,166 @@ function writesToFile(name: string, ctx: EngineCtx): boolean {
   return false;
 }
 
+/**
+ * Every value in `node` is a constant: string/number literals joined by `+`, and locals of the current method that
+ * are only ever assigned literals (`data = "foo"; ... "where name='" + data + "'"`). Proves the sink safe, so the
+ * regex layer's line-level SQL match is dropped too. A parameter or a field is never proven.
+ */
+function provenConstantJava(node: CstNode, ctx: EngineCtx): boolean {
+  const toks: IToken[] = [];
+  const visit = (n: CstNode) => {
+    for (const key of Object.keys(n.children)) for (const el of n.children[key]) { if (isToken(el)) toks.push(el); else visit(el as unknown as CstNode); }
+  };
+  visit(node);
+  if (toks.length === 0) return false;
+  const body = ctx.currentBody ? tokensText(ctx.currentBody) : "";
+  const LITERAL_RE = /^"(?:[^"\\]|\\.)*"$|^-?\d+$|^null$/;
+  // `names = data.split("-")` / `s = t.trim()`: a constant transformed by a string method with constant arguments
+  const STRING_METHOD_RE = /^([A-Za-z_]\w*)\s*\.\s*(?:split|trim|strip|toLowerCase|toUpperCase|substring|replace|toString)\s*\(\s*((?:"(?:[^"\\]|\\.)*"|-?\d+)(?:\s*,\s*(?:"(?:[^"\\]|\\.)*"|-?\d+))*)?\s*\)$/;
+  const constantLocal = (name: string, depth: number): boolean => {
+    if (depth > 4 || ctx.currentParams?.has(name) || ctx.classFieldNames.has(name)) return false;
+    const assigned = [...body.matchAll(new RegExp(`(?<![\\w.])${name}\\s*(?:\\[\\s*\\])?\\s*=(?!=)\\s*([^;]*);`, "g"))].map(m => m[1].trim());
+    return assigned.length > 0 && assigned.every(v => {
+      if (LITERAL_RE.test(v)) return true;
+      const call = STRING_METHOD_RE.exec(v);
+      return !!call && constantLocal(call[1], depth + 1);
+    });
+  };
+  let bracket = 0;
+  for (const t of toks) {
+    // names[i]: the index picks an element, it adds no text
+    if (t.image === "[") { bracket++; continue; }
+    if (t.image === "]") { bracket--; continue; }
+    if (bracket > 0) continue;
+    if (/Literal$|^TextBlock$/.test(t.tokenType.name) || t.image === "+" || t.image === "(" || t.image === ")") continue;
+    if (t.tokenType.name !== "Identifier" || !constantLocal(t.image, 0)) return false;
+  }
+  return true;
+}
+
+// ── Constant folding and literal-slot collections (the method being walked) ──
+
+const constLocalsCache = new WeakMap<CstNode, Map<string, ConstVal>>();
+
+/** Locals of the current method assigned exactly once, at their declaration, from a constant expression:
+ * `int num = 106;`, `String guess = "ABC";`, `char switchTarget = guess.charAt(2);`. */
+function constLocalsJava(ctx: EngineCtx): Map<string, ConstVal> {
+  const body = ctx.currentBody;
+  if (!body) return new Map();
+  const cached = constLocalsCache.get(body);
+  if (cached) return cached;
+  const text = tokensText(body);
+  const out = new Map<string, ConstVal>();
+  for (const m of text.matchAll(/(?<=^|[;{}])\s*(?:final\s+)?(?:int|long|short|byte|char|String|boolean|double|float|var)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);/g)) {
+    const name = m[1];
+    if (ctx.currentParams?.has(name) || ctx.classFieldNames.has(name)) continue;
+    const writes = text.match(new RegExp(`(?<![\\w.])${name}\\s*(?:[-+*/%]?=(?!=)|\\+\\+|--)|(?:\\+\\+|--)\\s*${name}\\b`, "g"))?.length ?? 0;
+    if (writes !== 1) continue;
+    const v = evalConstExpr(m[2], n => out.get(n));
+    if (v !== undefined) out.set(name, v);
+  }
+  constLocalsCache.set(body, out);
+  return out;
+}
+
+/** The value of `node` when it is a compile-time constant of this method (see constLocalsJava), else undefined. */
+function constValueJava(node: CstNode, ctx: EngineCtx): ConstVal | undefined {
+  const locals = constLocalsJava(ctx);
+  return evalConstExpr(tokensText(node), n => locals.get(n));
+}
+
+type CollOp = { kind: "add" | "addAt" | "remove" | "put" | "removeKey" | "poison"; idx?: number; key?: string; mask?: number };
+const collOpsCache = new WeakMap<CstNode, Map<string, Map<number, CollOp>>>();
+const collKindCache = new WeakMap<CstNode, Map<string, "list" | "map" | null>>();
+const branchRangesCache = new WeakMap<CstNode, { loops: Array<[number, number]>; branches: Array<[number, number]> }>();
+const LIST_CTOR_RE = /^new\s*(?:java\s*\.\s*util\s*\.\s*)?(?:ArrayList|LinkedList|Vector)\s*(?:<[^>]*>)?\s*\(\s*\)$/;
+const MAP_CTOR_RE = /^new\s*(?:java\s*\.\s*util\s*\.\s*)?(?:HashMap|LinkedHashMap|TreeMap|Hashtable)\s*(?:<[^>]*>)?\s*\(\s*\)$/;
+
+/** A local created empty in this method (`List<String> l = new ArrayList<>();`) and never reassigned. */
+function collectionKindJava(name: string, ctx: EngineCtx): "list" | "map" | null {
+  const body = ctx.currentBody;
+  if (!body || ctx.currentParams?.has(name) || ctx.classFieldNames.has(name)) return null;
+  let kinds = collKindCache.get(body);
+  if (!kinds) collKindCache.set(body, kinds = new Map());
+  if (kinds.has(name)) return kinds.get(name)!;
+  const text = tokensText(body);
+  const writes = [...text.matchAll(new RegExp(`(?<![\\w.])${name}\\s*=(?!=)\\s*([^;]+);`, "g"))].map(m => m[1].trim());
+  const kind = writes.length !== 1 ? null : LIST_CTOR_RE.test(writes[0]) ? "list" : MAP_CTOR_RE.test(writes[0]) ? "map" : null;
+  kinds.set(name, kind);
+  return kind;
+}
+
+function branchRangesJava(body: CstNode) {
+  let r = branchRangesCache.get(body);
+  if (!r) {
+    const range = (n: CstNode): [number, number] => [startOf(n), endOf(n)];
+    r = {
+      loops: ["whileStatement", "doStatement", "basicForStatement", "enhancedForStatement"].flatMap(k => findAllNodes(body, k)).map(range),
+      // every expression is wrapped in a conditionalExpression node: only a real `?:` is a branch
+      branches: [
+        ...["ifStatement", "switchStatement", "tryStatement"].flatMap(k => findAllNodes(body, k)),
+        ...findAllNodes(body, "conditionalExpression").filter(n => tokenKids(n, "QuestionMark").length > 0),
+      ].map(range),
+    };
+    branchRangesCache.set(body, r);
+  }
+  return r;
+}
+
+/**
+ * Record (idempotently, by source offset) a list/map operation on a literal-slot collection, or answer a read:
+ * `list.get(1)` after `add("safe"); add(param); add("moresafe"); remove(0)` is "moresafe"'s mask; `map.get("keyA")`
+ * is whatever the last `put("keyA", v)` stored. Returns the read's mask, or undefined (not a read, or unknowable).
+ */
+function collectionOpJava(rootVar: string, tail: string, args: CstNode[], argMasks: number[], at: number, ctx: EngineCtx): number | undefined {
+  const kind = collectionKindJava(rootVar, ctx);
+  const body = ctx.currentBody;
+  if (!kind || !body) return undefined;
+  let byVar = collOpsCache.get(body);
+  if (!byVar) collOpsCache.set(body, byVar = new Map());
+  let ops = byVar.get(rootVar);
+  if (!ops) byVar.set(rootVar, ops = new Map());
+  const intArg = (n: CstNode | undefined) => { const v = n ? constValueJava(n, ctx) : undefined; return typeof v === "number" && Number.isInteger(v) ? v : undefined; };
+  const strArg = (n: CstNode | undefined) => { const v = n ? constValueJava(n, ctx) : undefined; return typeof v === "string" ? v : undefined; };
+  let read: { idx?: number; key?: string } | null = null;
+  if (kind === "list") {
+    if (tail === "add" && args.length === 1) ops.set(at, { kind: "add", mask: argMasks[0] });
+    else if (tail === "add" && args.length === 2 && intArg(args[0]) !== undefined) ops.set(at, { kind: "addAt", idx: intArg(args[0]), mask: argMasks[1] });
+    else if (tail === "remove" && args.length === 1 && intArg(args[0]) !== undefined) ops.set(at, { kind: "remove", idx: intArg(args[0]) });
+    else if (tail === "get" && args.length === 1 && intArg(args[0]) !== undefined) read = { idx: intArg(args[0]) };
+    else if (MUTATOR_TAILS.has(tail) || /^(?:set|addAll|clear|remove\w*|replaceAll|sort|retainAll)$/.test(tail)) ops.set(at, { kind: "poison" });
+  } else {
+    if (tail === "put" && args.length === 2 && strArg(args[0]) !== undefined) ops.set(at, { kind: "put", key: strArg(args[0]), mask: argMasks[1] });
+    else if (tail === "remove" && args.length === 1 && strArg(args[0]) !== undefined) ops.set(at, { kind: "removeKey", key: strArg(args[0]) });
+    else if (tail === "get" && args.length === 1 && strArg(args[0]) !== undefined) read = { key: strArg(args[0]) };
+    else if (MUTATOR_TAILS.has(tail) || /^(?:putAll|clear|remove|compute\w*|merge|putIfAbsent|replace\w*)$/.test(tail)) ops.set(at, { kind: "poison" });
+  }
+  if (!read) return undefined;
+  // replay the operations before the read; one inside a loop, or in a branch the read isn't in, makes it unknowable
+  const { loops, branches } = branchRangesJava(body);
+  const inside = (p: number, [s, e]: [number, number]) => p >= s && p <= e;
+  const before = [...ops].filter(([p]) => p < at).sort((a, b) => a[0] - b[0]);
+  const list: number[] = [];
+  const map = new Map<string, number>();
+  for (const [p, op] of before) {
+    if (op.kind === "poison" || loops.some(r => inside(p, r)) || branches.some(r => inside(p, r) && !inside(at, r))) return undefined;
+    if (op.kind === "add") list.push(op.mask ?? 0);
+    else if (op.kind === "addAt") { if (op.idx! > list.length) return undefined; list.splice(op.idx!, 0, op.mask ?? 0); }
+    else if (op.kind === "remove") { if (op.idx! >= list.length) return undefined; list.splice(op.idx!, 1); }
+    else if (op.kind === "put") map.set(op.key!, op.mask ?? 0);
+    else if (op.kind === "removeKey") map.delete(op.key!);
+  }
+  if (kind === "list") return read.idx! < list.length ? list[read.idx!] : undefined;
+  return map.has(read.key!) ? map.get(read.key!) : undefined;
+}
+
+/** `request.getSession().setAttribute(...)`, or a receiver held as an HttpSession / named `session`. */
+function isSessionReceiver(info: CallInfo, ctx: EngineCtx): boolean {
+  const recv = info.rootVar ?? "";
+  if (/^(?:session|httpSession|sess)$/i.test(recv) || /HttpSession$/.test(ctx.varTypes.get(recv) ?? "")) return true;
+  return /getSession\s*\(\s*(?:true|false)?\s*\)\s*\.\s*(?:setAttribute|putValue)\s*\(/.test(ctx.lines[lineOf(info.node) - 1] ?? "");
+}
+
 function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   checkCrossFileCallJava(info, env, ctx);
   const { tail, rootVar, args, chainTaintBefore, node, calleeName } = info;
@@ -1229,6 +1413,8 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     // Tainted data only in an argument that can't be exploited here (a bound parameter, the bytes written):
     // a positive proof for this sink, so the regex layer's line-level duplicate is dropped too.
     if (!(mask & classOf(id)) && args.some((_, i) => !present.includes(i) && (argMasks[i] & ALL))) {
+      ctx.suppressed?.push({ id, line: lineOf(node) });
+    } else if (!(mask & ALL) && present.every(i => provenConstantJava(args[i], ctx))) {
       ctx.suppressed?.push({ id, line: lineOf(node) });
     }
   };
@@ -1267,6 +1453,9 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fireArgs("xpath-injection", [0]);
   } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
     fire("xss");
+  } else if ((tail === "setAttribute" || tail === "putValue") && args.length >= 2 && isSessionReceiver(info, ctx)) {
+    // session.setAttribute(name, value): request data stored as server-side state that later code trusts
+    fireArgs("trust-boundary", [0, 1]);
   }
 
   // ── Additional sinks (independent of the else-if chain above) ─────────────────
@@ -1274,6 +1463,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   // SQL: statement/query factories and String.format around SQL text
   if (["prepareStatement", "prepareCall", "createQuery", "createNativeQuery", "queryForObject", "queryForList", "queryForMap", "batchUpdate", "addBatch"].includes(tail) && arg0) {
     fire("sql-injection", argMasks[0], nodeText(arg0));
+    if (!(argMasks[0] & ALL) && provenConstantJava(arg0, ctx)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
   }
   if (tail === "format" && rootVar === "String" && args.length >= 2 && SQL_START_RE.test(literalStringOf(arg0) ?? "")) {
     fire("sql-injection", argMasks.slice(1).reduce((m, x) => m | x, 0), culpritText(args[1], env, ctx), "String.format");
@@ -1856,6 +2046,22 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
   const mask = (n: CstNode, e: Env) => taintMask(n, e, ctx);
   const guardsOf = (cond: CstNode | undefined): Guard[] => (cond && guardHandlers ? condSidesJava(cond, guardHandlers) : []);
 
+  /** A never-run arm (constant condition) that would have assigned tainted data: the variables it assigns are
+   * positively proven not to hold that data -- recorded as cleared, so the regex layer's duplicate is vetoed too. */
+  const markPruned = (arms: readonly CstNode[], env: Env) => {
+    for (const arm of arms) {
+      const text = tokensText(arm);
+      let m = 0;
+      for (const id of text.match(/[A-Za-z_]\w*/g) ?? []) m |= env.get(id) ?? 0;
+      m &= ALL;
+      if (!m) continue;
+      for (const a of text.matchAll(/(?<![\w.])([A-Za-z_]\w*)\s*=(?!=)/g)) {
+        const cur = env.get(a[1]) ?? 0;
+        env.set(a[1], cur | ((m & ~cur & ALL) << SHADOW));
+      }
+    }
+  };
+
   const walkStmts = (nodes: readonly CstNode[], env: Env): boolean => {
     for (const n of nodes) if (walk(n, env)) return true; // dead code after a terminator is not walked
     return false;
@@ -1885,6 +2091,16 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
       case "ifStatement": {
         const cond = firstNode(node, "expression");
         const stmts = nodeKids(node, "statement");
+        // `if ((500 / 42) + num > 200)` with `int num = 196`: only the arm that runs
+        const c = cond ? constValueJava(cond, ctx) : undefined;
+        if (typeof c === "boolean") {
+          walk(cond!, env);
+          const taken = c ? stmts[0] : stmts[1];
+          const dead = c ? stmts[1] : stmts[0];
+          const term = taken ? walk(taken, env) : false;
+          if (dead) markPruned([dead], env);
+          return term;
+        }
         const branches: Branch[] = [{
           visitCond: (e) => { if (cond) walk(cond, e); },
           guards: () => guardsOf(cond),
@@ -1973,6 +2189,28 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
         const clauses = block
           ? [...nodeKids(block, "switchBlockStatementGroup"), ...nodeKids(block, "switchRule")].sort((a, b) => startOf(a) - startOf(b))
           : [];
+        const clauseBody = (cl: CstNode) => cl.name === "switchBlockStatementGroup"
+          ? nodeKids(cl, "blockStatements")
+          : orderedNodeKids(cl).filter(n => n.name !== "switchLabel");
+        // switch on a constant (`guess.charAt(2)` with `String guess = "ABC"`): only the matching case, falling through
+        // to the next break -- when every label is a constant too, so "no case matched" is provable
+        const sv = subject ? constValueJava(subject, ctx) : undefined;
+        if (sv !== undefined) {
+          const labelValues = clauses.map(cl => nodeKids(cl, "switchLabel").flatMap(l => nodeKids(l, "caseConstant").map(cc => constValueJava(cc, ctx))));
+          if (labelValues.every(vs => vs.every(v => v !== undefined))) {
+            let idx = labelValues.findIndex(vs => vs.includes(sv));
+            if (idx < 0) idx = clauses.findIndex(cl => nodeKids(cl, "switchLabel").some(l => tokenKids(l, "Default").length > 0));
+            const ran = new Set<number>();
+            let term = false;
+            for (let k = idx; k >= 0 && k < clauses.length; k++) {
+              ran.add(k);
+              if (walkStmts(clauseBody(clauses[k]), env)) { term = true; break; }
+              if (clauses[k].name === "switchRule" || /\bbreak\b/.test(tokensText(clauses[k]))) break;
+            }
+            markPruned(clauses.filter((_, k) => !ran.has(k)), env);
+            return term;
+          }
+        }
         return walkSwitch(env, clauses.map(cl => {
           const labels = nodeKids(cl, "switchLabel");
           const isDefault = labels.some(l => tokenKids(l, "Default").length > 0);
@@ -2632,6 +2870,8 @@ export interface JavaScanOptions {
   entryPoints?: boolean;
   /** Parameter -> sink facts for other classes' methods in the batch (see computeJavaMethodSinkFacts). */
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
+  /** `Class.method` keys another file of the batch calls: not entry points (their callers say what they get). */
+  calledElsewhere?: ReadonlySet<string>;
 }
 
 export function scanAstTaintJava(
@@ -2643,7 +2883,7 @@ export function scanAstTaintJava(
 ): AstTaintJavaFinding[] {
   const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts);
   if (!opts?.entryPoints) return strict;
-  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts);
+  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts, opts?.calledElsewhere);
   const have = new Set(strict.map(f => `${f.id}:${f.line}`));
   return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
 }
@@ -2678,9 +2918,12 @@ function makeJavaCtx(
 function runJavaScan(
   content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined, withEntryPoints: boolean,
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+  calledElsewhere?: ReadonlySet<string>,
 ): AstTaintJavaFinding[] {
   try {
     const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, suppressedOut, crossFileFacts);
+    const declaredClasses = calledElsewhere?.size ? [...content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]) : [];
+    const calledFromAnotherFile = (name: string) => declaredClasses.some(c => calledElsewhere!.has(`${c}.${name}`));
 
     // Which local methods are called from elsewhere in the file? The rest are ENTRY POINTS: their
     // String/collection/byte[] parameters are the untrusted input (library/handler code without framework annotations).
@@ -2692,7 +2935,7 @@ function runJavaScan(
       }
     }
     const isEntryPoint = (m: LocalMethod): boolean =>
-      !!m.body && !m.isPrivate && m.springParamNames.size === 0 && !calledNames.has(m.name) &&
+      !!m.body && !m.isPrivate && m.springParamNames.size === 0 && !calledNames.has(m.name) && !calledFromAnotherFile(m.name) &&
       !NON_ENTRY_METHOD_RE.test(m.name) && m.paramShapes.some(p => !p.annotated && STRINGY_PARAM_TYPE_RE.test(p.type));
 
     const enter = (m: LocalMethod) => {

@@ -28,6 +28,10 @@
 import type { FpBaselineEntry } from "./fpBenchmark";
 
 export const FP_BASELINE: FpBaselineEntry[] = [
+  { file: "src/app/api/scans/pr/route.ts", id: "log-injection", lineHash: "2551c8526f84", line: 97, severity: "medium",
+    reason: "recordEvent({ kind: \"scan.queued\", org_id: auth.org_id, ... }): the logged message is the literal kind. The engine taints the whole object literal because one field (auth.org_id, a UUID from the session) is tainted; the context fields themselves are logged as structured JSON." },
+  { file: "src/app/api/scans/[id]/rescan/route.ts", id: "log-injection", lineHash: "abbe7b15e136", line: 86, severity: "medium",
+    reason: "Same shape as scans/pr/route.ts: recordEvent's message is the literal event kind; only the object as a whole is tainted (auth.org_id), and the logger serializes its context as JSON." },
   { file: "src/lib/seedFileSamples.ts", id: "command-injection", lineHash: "e5aa10162c73", line: 450, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
   { file: "src/app/pr/[id]/page.tsx", id: "eval-exec", lineHash: "007720b07a0e", line: 32, severity: "critical",

@@ -76,6 +76,24 @@ export function anchoredPatternClears(pattern: string): number | null {
   return sawClass || sawLiteral ? clears : null;
 }
 
+/**
+ * Does a regex body match CR and LF each on its own (`[\r\n]`, `\r|\n`, `(\r\n|\r|\n)+`)? Replacing every match
+ * with text free of line breaks then leaves none: the value is one header line / one log entry.
+ * `\r\n` alone or `\r?\n` don't qualify -- a bare CR survives them.
+ */
+export function removesLineBreaks(body: string): boolean {
+  let b = body.replace(/[+*]$/, "");
+  const grp = /^\((?:\?:)?(.*)\)$/.exec(b);
+  if (grp) b = grp[1];
+  const singles = new Set<string>();
+  for (const alt of b.split("|")) {
+    if (/^\[(?:\\[rn0])+\]$/.test(alt)) for (const m of alt.matchAll(/\\([rn0])/g)) singles.add(m[1]);
+    else if (!/^(?:\\[rn0])+$/.test(alt)) return false;
+    else if (alt.length === 2) singles.add(alt[1]);
+  }
+  return singles.has("r") && singles.has("n");
+}
+
 /** A PHP/JS-style delimited pattern literal (`/^[a-z]+$/i`, `#...#`) -> its body, else null. */
 export function delimitedPatternBody(text: string): string | null {
   const m = /^(['"])([^\w\s\\])([\s\S]*)\2[imsxuADSUXJ]*\1$/.exec(text.trim());

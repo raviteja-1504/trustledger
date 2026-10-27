@@ -70,6 +70,7 @@ export const SINK_ROLE: Record<string, string> = {
   "ldap-injection": "the LDAP search filter",
   "xpath-injection": "the XPath expression",
   "header-injection": "the response header value",
+  "log-injection": "the log message",
   "xxe": "the XML document",
   "redos": "the regular expression pattern",
   "mass-assignment": "the fields bound onto the model",

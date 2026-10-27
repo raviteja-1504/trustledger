@@ -47,7 +47,7 @@ describe("JS/TS: reusing module_cache is a no-op on the result, and files ARE ac
     expect(findings(first, "src/route.ts")).toEqual(["sql-injection:4:id"]);
 
     // db.ts's wrapper no longer sinks its parameter at all -- runQuery(id) should stop being reported.
-    const SAFE_WRAPPER = `export function runQuery(sql) {\n  console.log(sql);\n}`;
+    const SAFE_WRAPPER = `export function runQuery(sql) {\n  metrics.record(sql);\n}`;
     const files2 = [{ path: "src/db.ts", content: SAFE_WRAPPER }, { path: "src/route.ts", content: ROUTE }];
     const second = scan(files2, first.module_cache);
     expect(findings(second, "src/route.ts")).toEqual([]);
@@ -73,7 +73,7 @@ describe("JS/TS: reusing module_cache is a no-op on the result, and files ARE ac
     const first = scan(files1);
     expect(findings(first, "src/a.ts")).toEqual(["sql-injection:3:req.query.id"]);
 
-    const C2 = `export function raw(sql) {\n  console.log(sql);\n}`; // no longer sinks
+    const C2 = `export function raw(sql) {\n  metrics.record(sql);\n}`; // no longer sinks
     const files2 = [{ path: "src/c.ts", content: C2 }, { path: "src/b.ts", content: B }, { path: "src/a.ts", content: A }];
     const second = scan(files2, first.module_cache);
     expect(findings(second, "src/a.ts")).toEqual([]);

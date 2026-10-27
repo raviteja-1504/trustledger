@@ -33,13 +33,15 @@ import {
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { charClassClears, removesLineBreaks } from "./taint/charClass";
+import { hasNestedQuantifier } from "./taint/regexShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type SsrfAssessment, type UrlPart } from "./taint/sinkShape";
 
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack"
-  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check" | "argument-injection";
+  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check" | "argument-injection" | "log-injection";
 
 export interface AstTaintFinding {
   id:         AstTaintId;
@@ -69,6 +71,25 @@ export function parseSourceFile(content: string, filePath: string): ts.SourceFil
     /* setParentNodes */ true, // required: enclosing-function lookup walks node.parent
     scriptKindFor(filePath),
   );
+}
+
+/** Every block comment in a parsed JS/TS file as [start, end), from the tokens' own comment trivia -- a `/*`
+ * inside a string, template or regex literal is never mistaken for one (scanner.ts blanks these for its
+ * line-pattern detectors). */
+export function blockCommentSpans(sf: ts.SourceFile): Array<[number, number]> {
+  const text = sf.text;
+  const spans = new Map<number, number>();
+  const add = (rs: ts.CommentRange[] | undefined) => {
+    for (const r of rs ?? []) if (r.kind === ts.SyntaxKind.MultiLineCommentTrivia) spans.set(r.pos, r.end);
+  };
+  const visit = (n: ts.Node) => {
+    if (n.kind === ts.SyntaxKind.JsxText || (n.kind >= ts.SyntaxKind.FirstJSDocNode && n.kind <= ts.SyntaxKind.LastJSDocNode)) return;
+    const kids = n.getChildren(sf);
+    if (kids.length === 0) { add(ts.getLeadingCommentRanges(text, n.pos)); add(ts.getTrailingCommentRanges(text, n.end)); return; }
+    for (const k of kids) visit(k);
+  };
+  visit(sf);
+  return [...spans];
 }
 
 // ── Node-at-position / enclosing-function lookup (shared with reachability.ts) ──
@@ -165,6 +186,7 @@ const FS_SINK_NAMES = new Set([
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
 ]);
 const HTTP_SINK_NAMES = new Set(["get", "post", "put", "delete", "patch", "request"]);
+const HTTP_CLIENT_MODULES = new Set(["needle", "got", "request", "superagent", "node-fetch", "undici", "cross-fetch"]);
 const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare"]);
 
 interface SinkMatch { id: AstTaintId; sinkExpr: string; args: readonly ts.Expression[] }
@@ -278,6 +300,20 @@ function fluentResponseText(callee: ts.Expression): string | null {
 function buildImportMap(sourceFile: ts.SourceFile): Map<string, string> {
   const map = new Map<string, string>();
   ts.forEachChild(sourceFile, node => {
+    // CommonJS: `const needle = require("needle")` / `const { exec } = require("child_process")`
+    if (ts.isVariableStatement(node)) {
+      for (const d of node.declarationList.declarations) {
+        const init = d.initializer && unwrapExpr(d.initializer);
+        if (!init || !ts.isCallExpression(init) || !ts.isIdentifier(init.expression) || init.expression.text !== "require") continue;
+        const spec = init.arguments[0];
+        if (!spec || !ts.isStringLiteral(spec)) continue;
+        if (ts.isIdentifier(d.name)) map.set(d.name.text, spec.text);
+        else if (ts.isObjectBindingPattern(d.name)) {
+          for (const el of d.name.elements) if (ts.isIdentifier(el.name)) map.set(el.name.text, spec.text);
+        }
+      }
+      return;
+    }
     if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) return;
     const moduleName = node.moduleSpecifier.text;
     const clause = node.importClause;
@@ -285,6 +321,7 @@ function buildImportMap(sourceFile: ts.SourceFile): Map<string, string> {
     if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
       for (const spec of clause.namedBindings.elements) map.set(spec.name.text, moduleName);
     }
+    if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) map.set(clause.namedBindings.name.text, moduleName);
     if (clause.name) map.set(clause.name.text, moduleName); // default import
   });
   return map;
@@ -379,19 +416,116 @@ function mongoCollectionVerb(callee: ts.Expression): string | null {
   return NOSQL_TAILS.has(verb) || NOSQL_LEGACY_TAILS.has(verb) ? verb : null;
 }
 
+/** Body of a constant regex: a literal, `new RegExp("lit")` / `RegExp("lit")`, or a `const` in an enclosing scope bound to one. */
+function constRegexBody(e: ts.Expression, depth = 0): string | null {
+  e = unwrapExpr(e);
+  if (ts.isRegularExpressionLiteral(e)) return /^\/([\s\S]*)\/[a-z]*$/.exec(e.text)?.[1] ?? null;
+  if ((ts.isNewExpression(e) || ts.isCallExpression(e)) && ts.isIdentifier(e.expression) && e.expression.text === "RegExp") {
+    const a = e.arguments?.[0];
+    return a && ts.isStringLiteralLike(a) ? a.text : null;
+  }
+  if (!ts.isIdentifier(e) || depth > 2) return null;
+  for (let scope: ts.Node | undefined = e.parent; scope; scope = scope.parent) {
+    if (!ts.isBlock(scope) && !ts.isSourceFile(scope)) continue;
+    for (const st of scope.statements) {
+      if (!ts.isVariableStatement(st) || !(st.declarationList.flags & ts.NodeFlags.Const)) continue;
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.name.text === e.text) return d.initializer ? constRegexBody(d.initializer, depth + 1) : null;
+      }
+    }
+  }
+  return null;
+}
+
+/** `RE.test(s)` / `s.match(RE)` with a constant RE that backtracks exponentially (see taint/regexShape.ts): `s` is the sink argument. */
+function staticReDoSSink(call: ts.CallExpression): SinkMatch | null {
+  const callee = unwrapExpr(call.expression);
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const method = callee.name.text;
+  let pattern: string | null = null, subject: ts.Expression | undefined;
+  if (method === "test" || method === "exec") {
+    pattern = constRegexBody(callee.expression);
+    subject = call.arguments[0];
+  } else if (REGEX_ARG_METHODS.has(method) && call.arguments[0]) {
+    pattern = constRegexBody(call.arguments[0]);
+    subject = callee.expression;
+  }
+  if (pattern === null || !subject || !hasNestedQuantifier(pattern)) return null;
+  return { id: "redos", sinkExpr: `${method}(/${pattern.slice(0, 40)}/)`, args: [subject] };
+}
+const REGEX_ARG_METHODS = new Set(["match", "matchAll", "search", "replace", "replaceAll", "split"]);
+
+const CONSOLE_LOG_METHODS = new Set(["log", "info", "warn", "error", "debug", "trace"]);
+const LOGGER_METHODS = new Set(["log", "info", "warn", "warning", "error", "debug", "trace", "fatal", "verbose", "silly", "notice", "critical"]);
+const LOGGER_RECEIVER_RE = /^(?:\w*logger|log|winston|pino|bunyan)$/i;
+const REQUEST_CONTAINERS = new Set(["body", "query", "params", "headers", "cookies"]);
+
+/** console.log / logger.info: a CR/LF in a logged string forges a separate log entry. A whole request object
+ * (`req.body`) is printed by util.inspect, which quotes strings and escapes their line breaks. */
+function logSink(call: ts.CallExpression): SinkMatch | null {
+  // `this.logger.info(...)` (an injected logger) is named too
+  const callee = unwrapExpr(call.expression);
+  const text = ts.isPropertyAccessExpression(callee) && callee.expression.kind === ts.SyntaxKind.ThisKeyword
+    ? `this.${callee.name.text}`
+    : ts.isPropertyAccessExpression(callee) && ts.isPropertyAccessExpression(callee.expression) && callee.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+      ? `this.${callee.expression.name.text}.${callee.name.text}`
+      : calleeText(callee);
+  if (!text) return null;
+  const parts = text.split(".");
+  const tail = parts[parts.length - 1];
+  const isLog = parts.length === 2 && parts[0] === "console" ? CONSOLE_LOG_METHODS.has(tail)
+    : parts.length >= 2 && LOGGER_METHODS.has(tail) && LOGGER_RECEIVER_RE.test(parts[parts.length - 2]);
+  if (!isLog) return null;
+  const args = call.arguments.filter(a => {
+    const u = unwrapExpr(a);
+    // logger.error("msg", { org_id, detail }): structured context is serialized (JSON / util.inspect), its strings quoted
+    if (ts.isObjectLiteralExpression(u)) return false;
+    if (ts.isIdentifier(u)) return !SOURCE_ROOTS.has(u.text);
+    return !(ts.isPropertyAccessExpression(u) && ts.isIdentifier(u.expression) && SOURCE_ROOTS.has(u.expression.text) && REQUEST_CONTAINERS.has(u.name.text));
+  });
+  return args.length ? { id: "log-injection", sinkExpr: text, args } : null;
+}
+
+/** What `s.replace(/PATTERN/g, "lit")` removes for good, the literal adding nothing back: CR/LF (one header line,
+ * one log entry), or everything outside a safe alphabet (`/[^a-z0-9]/g, ""`). */
+function replaceClears(call: ts.CallExpression): number {
+  const [pat, rep] = call.arguments;
+  if (!pat || !rep || !ts.isRegularExpressionLiteral(pat) || !ts.isStringLiteralLike(rep)) return 0;
+  const m = /^\/([\s\S]*)\/([a-z]*)$/.exec(pat.text);
+  if (!m || !m[2].includes("g") || /[\r\n]/.test(rep.text)) return 0;
+  if (removesLineBreaks(m[1])) return SinkClass.HEADER;
+  const negated = /^\[\^((?:\\.|[^\]\\])+)\][+*]?$/.exec(m[1]);
+  return negated && rep.text === "" ? charClassClears(negated[1]) ?? 0 : 0;
+}
+
+/** `require("child_process").exec`: the module a callee is read straight off, without a binding. */
+function inlineRequireModule(callee: ts.Expression): string | null {
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const recv = unwrapExpr(callee.expression);
+  if (!ts.isCallExpression(recv) || !ts.isIdentifier(recv.expression) || recv.expression.text !== "require") return null;
+  const spec = recv.arguments[0];
+  return spec && ts.isStringLiteral(spec) ? spec.text : null;
+}
+
 function matchSink(call: ts.CallExpression, importMap: Map<string, string>): SinkMatch | null {
   const callee = call.expression;
+  const redos = staticReDoSSink(call);
+  if (redos) return redos;
+  const log = logSink(call);
+  if (log) return log;
   const mongoVerb = mongoCollectionVerb(callee);
   if (mongoVerb && call.arguments[0] && !isFunctionExpr(call.arguments[0]) && !ts.isStringLiteral(call.arguments[0])) {
     const recvText = (callee as ts.PropertyAccessExpression).expression.getText().replace(/\s+/g, "");
     return { id: "nosql-injection", sinkExpr: `${recvText}.${mongoVerb}`, args: [call.arguments[0]] };
   }
-  const text = calleeText(callee) ?? fluentResponseText(callee);
+  const inlineModule = inlineRequireModule(callee);
+  const text = calleeText(callee) ?? fluentResponseText(callee) ??
+    (inlineModule && ts.isPropertyAccessExpression(callee) ? `${inlineModule}.${callee.name.text}` : null);
   if (!text) return classHeldClientSink(call);
   const parts = text.split(".");
   const head = parts[0];
   const tail = parts[parts.length - 1];
-  const resolvedModule = importMap.get(head);
+  const resolvedModule = importMap.get(head) ?? inlineModule ?? undefined;
 
   // eval / new Function is handled separately (NewExpression), this only
   // covers the bare eval(...) call form.
@@ -416,6 +550,14 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     (resolvedModule === "http" || resolvedModule === "https") && HTTP_SINK_NAMES.has(tail)
   ) {
     const target = requestTargetArgs(call);
+    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
+  }
+  // HTTP client packages: got(url) / needle.get(url) / request.post(url) / superagent.get(url)
+  if (resolvedModule && HTTP_CLIENT_MODULES.has(resolvedModule) && (parts.length === 1 || HTTP_SINK_NAMES.has(tail) || tail === "head" || tail === "fetch")) {
+    // needle("get", url) / needle.request("get", url) / superagent("GET", url): the method comes first
+    const m0 = call.arguments.length >= 2 ? unwrapExpr(call.arguments[0]) : undefined;
+    const methodFirst = !!m0 && ts.isStringLiteralLike(m0) && /^(?:get|post|put|delete|patch|head|options)$/i.test(m0.text);
+    const target = requestTargetArgs(call, methodFirst ? 1 : 0);
     return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
   }
   if (parts[0] === "fs" && FS_SINK_NAMES.has(tail)) {
@@ -474,15 +616,16 @@ function objectPropInit(obj: ts.Expression, names: readonly string[]): ts.Expres
  * for a config-object call (`axios({ url })`, `http.request({ host, path })`) -- its destination properties.
  * The body, headers and other config are sent to that destination, so tainting them is not SSRF.
  */
-function requestTargetArgs(call: ts.CallExpression): ts.Expression[] {
-  const first = call.arguments[0];
+function requestTargetArgs(call: ts.CallExpression, from = 0): ts.Expression[] {
+  const args = call.arguments.slice(from);
+  const first = args[0];
   if (!first) return [];
   if (ts.isObjectLiteralExpression(unwrapExpr(first))) {
-    return ["url", "baseURL", "host", "hostname", "path", "socketPath", "proxy"]
+    return ["url", "uri", "baseURL", "host", "hostname", "path", "socketPath", "proxy"]
       .map(n => objectPropInit(first, [n])).filter((e): e is ts.Expression => !!e);
   }
   // A config object after the URL can still route the request through a chosen proxy.
-  const proxies = call.arguments.slice(1).map(a => objectPropInit(a, ["proxy"])).filter((e): e is ts.Expression => !!e);
+  const proxies = args.slice(1).map(a => objectPropInit(a, ["proxy"])).filter((e): e is ts.Expression => !!e);
   return [first, ...proxies];
 }
 
@@ -565,7 +708,8 @@ const PASSTHROUGH_CALLS = new Set([
   "Promise.all", "Promise.race", "Promise.allSettled", "String.raw", "structuredClone", "url.format",
   "querystring.stringify", "querystring.parse", "decodeURIComponent", "decodeURI", "unescape", "atob", "btoa",
 ]);
-const DECODERS = new Set(["decodeURIComponent", "decodeURI", "unescape", "atob"]);
+// JSON.parse undoes JSON.stringify's escaping: a CR/LF escaped as \r\n is a real line break again
+const DECODERS = new Set(["decodeURIComponent", "decodeURI", "unescape", "atob", "JSON.parse"]);
 const PASSTHROUGH_NEW = new Set(["URL", "URLSearchParams", "Buffer", "String", "Array", "Set", "Map", "Error"]);
 // Methods whose result also includes their ARGUMENTS (replacement text, appended strings).
 const ARG_CARRYING_METHODS = new Set(["replace", "replaceAll", "concat", "padStart", "padEnd"]);
@@ -1004,6 +1148,9 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       // anything referencing a tainted value" recall bias already
       // established in extractTaintedVars' second-hop rule (scanner.ts),
       // not a claim that every such method is unsafe on its own.
+      // `s.replace(/[\r\n]/g, "_")` / `s.replace(/[^a-z0-9]/g, "")`: every match replaced by a literal that adds nothing back
+      const replaced = name === "replace" || name === "replaceAll" ? replaceClears(expr) : 0;
+      if (replaced) return applySanitizer(recv, replaced);
       const withArgs = ARG_CARRYING_METHODS.has(name) ? argsMask(expr.arguments, env) : 0;
       // `Promise.resolve(x)`-style receivers are namespaces, not values: their args are handled above.
       return recv | withArgs;
@@ -2070,6 +2217,7 @@ const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   // verb, high for write/unknown), same convention as every other engine's BOLA detector.
   "bola-missing-ownership-check": "high",
   "argument-injection": "high",
+  "log-injection": "medium",
 };
 const LABEL: Record<AstTaintId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -2080,6 +2228,7 @@ const LABEL: Record<AstTaintId, string> = {
   "prototype-pollution": "Prototype Pollution", "jwt-none-alg": "JWT Signature Not Verified",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "argument-injection": "Argument Injection",
+  "log-injection": "Log Injection",
 };
 
 /**
@@ -3086,6 +3235,8 @@ export function scanAstTaint(
         const name = nameOfOperand(secretSide);
         if (!name || !SECRET_NAME_RE.test(name)) continue;
         if (isLiteralNode(unwrapExpr(otherSide))) continue;
+        // `password !== verify` (both from the signup form): the caller already knows both sides -- no secret to leak
+        if (taintMask(secretSide, env) & ALL) continue;
         if (taintMask(otherSide, env) & ALL) {
           emit("timing-attack", node, sourceLabel(otherSide), "===", otherSide,
             `Secret '${sourceLabel(secretSide)}' is compared to attacker-supplied '${sourceLabel(otherSide)}' with an ordinary equality operator — use crypto.timingSafeEqual`);

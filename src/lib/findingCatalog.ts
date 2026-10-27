@@ -81,6 +81,7 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "ldap-injection":           { title: "LDAP Injection",                 description: "LDAP filter built from unescaped input.", cwe: "CWE-90" },
   "xpath-injection":          { title: "XPath Injection",                description: "XPath expression built from unvalidated input.", cwe: "CWE-643" },
   "header-injection":         { title: "HTTP Header Injection",          description: "Request-controlled value written into a response header without CR/LF stripping.", cwe: "CWE-113" },
+  "log-injection":            { title: "Log Injection",                  description: "Request-controlled value written to the log without CR/LF stripping, so a line break forges a separate log entry.", cwe: "CWE-117" },
   "redos":                    { title: "Regular Expression DoS",         description: "Request-controlled input matched by a regex prone to catastrophic backtracking.", cwe: "CWE-1333" },
   "mass-assignment":          { title: "Mass Assignment",                description: "Request body bound wholesale onto a data model with no field allowlist.", cwe: "CWE-915" },
   "idor":                     { title: "Insecure Direct Object Reference", description: "Request-controlled identifier selects a record with no ownership check.", cwe: "CWE-639" },

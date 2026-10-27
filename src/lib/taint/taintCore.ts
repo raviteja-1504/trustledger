@@ -54,6 +54,8 @@ const ID_TO_CLASS: Record<string, number> = {
   "xpath-injection": SinkClass.XPATH,
   "nosql-injection": SinkClass.NOSQL,
   "header-injection": SinkClass.HEADER,
+  // CR/LF in a log line forges an entry: the same line-break class a response header needs
+  "log-injection": SinkClass.HEADER,
   "eval-exec": SinkClass.EVAL,
   "ssti": SinkClass.SSTI,
   "idor": SinkClass.CONTROL,

@@ -181,6 +181,11 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0.22, I:0.22, A:0, cwe:"CWE-113",
   },
+  // A forged entry misleads whoever reads the log: integrity only.
+  "log-injection": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0.22, A:0, cwe:"CWE-117",
+  },
   "nosql-injection": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0, cwe:"CWE-943",

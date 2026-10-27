@@ -62,6 +62,7 @@ const SINK_SEMANTICS: Record<string, SinkSemantics> = {
   "ldap-injection":           { effect: "it is used in an LDAP filter",                       defense: "LDAP filter escaping" },
   "xpath-injection":          { effect: "it is used in an XPath expression",                  defense: "XPath parameterisation" },
   "header-injection":         { effect: "it is written into an HTTP response header",         defense: "CR/LF stripping" },
+  "log-injection":            { effect: "it is written into the application log",             defense: "CR/LF stripping or structured (JSON) logging" },
   "xxe":                      { effect: "it is parsed as XML with external entities enabled", defense: "disabling external entity resolution" },
   "redos":                    { effect: "it is matched by a regex prone to catastrophic backtracking", defense: "an input length limit or a linear-time pattern" },
   "prototype-pollution":      { effect: "it controls object keys in a merge or assignment",   defense: "a key allowlist or __proto__ check" },

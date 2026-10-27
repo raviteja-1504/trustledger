@@ -72,7 +72,7 @@ describe("core: a wrapper that sinks its parameter and returns nothing", () => {
 
 describe("binding is per PARAMETER, not per call", () => {
   const helper = `export function run(label, sql) {
-  console.log(label);
+  metrics.record(label);
   db.execute(sql);
 }`;
   const imp = `import { run } from "./db";`;

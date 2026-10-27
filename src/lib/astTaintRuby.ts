@@ -281,6 +281,7 @@ const PASSTHROUGH_CALLS = new Set([
 /** Decoders re-taint what an encoder cleared (an encode/decode round trip undoes the encoding). */
 const DECODER_CALLS = new Set(["Base64.decode64", "Base64.strict_decode64", "Base64.urlsafe_decode64", "CGI.unescape", "URI.decode_www_form_component", "Rack::Utils.unescape"]);
 /** Block-taking iterators whose block parameters are the receiver's elements. */
+const SINATRA_ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete"]);
 const ITERATOR_METHODS = new Set([
   "each", "each_with_index", "each_with_object", "map", "flat_map", "collect", "select", "filter", "reject", "find", "detect",
   "each_pair", "each_key", "each_value", "map!", "select!", "reject!", "filter_map", "group_by", "partition", "sort_by",
@@ -384,6 +385,8 @@ interface EngineCtx {
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
   /** Lower-cased keys of methods declared in this file. */
   localKeys: Set<string>;
+  /** A Sinatra app: a route block's value is the (text/html) response body. */
+  sinatra?: boolean;
   /** Variables holding an unrestricted params hash (permit! / to_unsafe_h / privileged permit). */
   unsafeParamVars: Set<string>;
   /** Set by the walker at each sink check (it holds the env): narrows a reported source to its tainted operand. */
@@ -869,14 +872,23 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
   /** Walk a block body: its parameters are the receiver's elements for an iterator, else untainted; Ruby
    * blocks read and write the enclosing scope's variables, and may run zero or more times. */
-  const walkBlock = (block: SyntaxNode, elementMask: number, env: Env) => {
+  const walkBlock = (block: SyntaxNode, elementMask: number, env: Env, sinatraRoute = false) => {
     const params = findAllNodes(block.childForFieldName("parameters") ?? block, "identifier")
       .filter(id => id.parent?.type === "block_parameters" || id.parent?.type === "destructured_parameter" || id.parent?.type === "lambda_parameters");
     const saved = new Map(params.map(p => [p.text, env.get(p.text)]));
     walkLoop(env, (e) => {
       for (const p of params) e.set(p.text, elementMask);
       const body = block.childForFieldName("body");
-      return body ? walk(body, e) : false;
+      const terminated = body ? walk(body, e) : false;
+      // get '/greet' do ... "<h1>Hello, #{name}</h1>" end: the block's last string is the HTML body sent back
+      if (sinatraRoute && body) {
+        const kids = named(body).filter(n => n.type !== "comment");
+        const last = kids[kids.length - 1];
+        if (last?.type === "string" && named(last).some(c => c.type === "interpolation")) {
+          fireOn(ctx, "xss", last, last, mask(last, e), "Sinatra route body");
+        }
+      }
+      return terminated;
     });
     for (const [k, v] of saved) { if (v === undefined) env.delete(k); else env.set(k, v); }
   };
@@ -1046,7 +1058,9 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       }
       if (block) {
         const elementMask = recv && ITERATOR_METHODS.has(name) ? mask(recv, env) : 0;
-        walkBlock(block, elementMask, env);
+        const firstArg = argsOf(node)[0];
+        const route = !!ctx.sinatra && !recv && SINATRA_ROUTE_VERBS.has(name) && !!firstArg && /^["']\//.test(firstArg.text);
+        walkBlock(block, elementMask, env, route);
       }
       return statementTerminates(node);
     }
@@ -1657,6 +1671,7 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
     suppressed, findings: [], seen: new Set(), sticky: new Map(), stickyDirty: false, varTypes: new Map(),
     heredocs: heredocBodies(root), crossFileFacts, localKeys: new Set(all.map(m => m.key).filter((k): k is string => !!k)),
     unsafeParamVars: new Set(),
+    sinatra: /^\s*require\s+["']sinatra["']|<\s*Sinatra::(?:Base|Application)\b/m.test(content),
   };
   buildSummaries(ctx);
   return ctx;

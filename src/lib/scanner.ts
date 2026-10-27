@@ -28,7 +28,7 @@ import type { ReachabilityReport } from "./reachability";
 import {
   parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
   computeExportTaintSummary, computeExportSinkSummary, buildImportBindings, collectReexports,
-  isModelFile, modelLocalNamesInFile,
+  isModelFile, modelLocalNamesInFile, blockCommentSpans,
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
 import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
@@ -381,6 +381,9 @@ interface SecretPattern {
   // phrases, validation messages, and readable test fixtures. The regex must
   // capture the value in group 1 when this is set.
   genericValue?: boolean;
+  // The pattern captures the credential itself in group 1 among other quoted text (a connection string's own
+  // `Password=` key, a JDBC user name): only that value is judged a placeholder or not, not the whole line.
+  ownValue?: boolean;
 }
 
 const SECRET_PATTERNS: SecretPattern[] = [
@@ -420,6 +423,12 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /mongodb(?:\+srv)?:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,      label: "MongoDB credentials",         severity: "critical" },
   { re: /mysql:\/\/[^@\s]+:[^@\s]+@/,                                          label: "MySQL credentials",           severity: "critical" },
   { re: /jdbc:[a-z]+:\/\/[^\s"']+password=[^\s&"']+/i,                         label: "DB connection string",        severity: "critical" },
+  // ADO.NET / ODBC: "Server=db;Database=app;User Id=sa;Password=s3cr3t;" -- a templated value ({0}, $(VAR), %VAR%, <pw>) names none
+  { re: /["'][^"'\n]*\b(?:Server|Data Source|Host|Address)\s*=[^"'\n]*\b(?:Password|Pwd)\s*=\s*(?![{$%<])([^;"'\s]{4,})/i, label: "DB connection string", severity: "critical", ownValue: true },
+  // JDBC: DriverManager.getConnection(url, "root", "s3cr3t")
+  { re: /\bDriverManager\.getConnection\s*\([^)]*,\s*["'][^"']*["']\s*,\s*["']([^"'\s]{3,})["']\s*\)/, label: "DB password", severity: "critical", ownValue: true },
+  // PHP: define('DB_PASSWORD', '...')
+  { re: /\bdefine\s*\(\s*["']\w*(?:PASSWORD|PASSWD|PWD|SECRET|API_?KEY|TOKEN)\w*["']\s*,\s*["']([^"']{6,})["']\s*\)/i, label: "secret constant", severity: "high", genericValue: true },
   // Generic word-keyed patterns — value captured in group 1, checked by
   // looksLikeRealSecret() in findSecrets() before being reported. Variable
   // name allows a _KEY/_TOKEN/_VALUE suffix to catch real-world names like
@@ -1504,6 +1513,35 @@ function isNonExecutableLine(line: string): boolean {
   return false;
 }
 
+/** Blank [start, end) spans of `text` to spaces, keeping every line break so line numbers don't move. */
+function blankSpans(text: string, spans: Iterable<[number, number]>): string {
+  const chars = text.split("");
+  for (const [s, e] of spans) for (let i = s; i < e; i++) if (chars[i] !== "\n" && chars[i] !== "\r") chars[i] = " ";
+  return chars.join("");
+}
+
+// HTML whose text is shown, never run: comments, and <pre>/<code> samples (a tutorial page explaining `eval()`).
+// A <script> element inside a <pre> still runs, so a block holding one is kept.
+const HTML_DISPLAY_TEXT_RE = /<!--[\s\S]*?-->|<(pre|code)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+
+/**
+ * The lines the line-pattern detectors read: block comments (JS/TS) and displayed-only HTML text blanked out.
+ * Those detectors judge a line by its text alone, so a commented-out block -- NodeGoat keeps each vulnerable
+ * line's fixed version right beside it inside a comment -- or a code sample in a docs page read as live code.
+ * Secrets are still searched for in the original lines: a key in a comment is still a leaked key.
+ */
+function codeOnlyLines(content: string, lines: string[], filePath: string, sf: ts.SourceFile | null): string[] {
+  let spans: Array<[number, number]> = [];
+  if (sf) spans = blockCommentSpans(sf);
+  else if (/\.html?$/i.test(filePath)) {
+    for (const m of content.matchAll(HTML_DISPLAY_TEXT_RE)) {
+      if (!m[0].startsWith("<!--") && /<script\b/i.test(m[0])) continue;
+      spans.push([m.index!, m.index! + m[0].length]);
+    }
+  }
+  return spans.length ? blankSpans(content, spans).split("\n") : lines;
+}
+
 function runDetector(
   lines: string[],
   patterns: RegExp[],
@@ -1551,16 +1589,17 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   const isTestFile = TEST_FILE_RE.test(file_path);
   const isPropertiesFile = /\.properties$/i.test(file_path);
   const found: ScanIndicator[] = [];
-  for (const { re, label, severity, genericValue } of SECRET_PATTERNS) {
+  for (const { re, label, severity, genericValue, ownValue } of SECRET_PATTERNS) {
     // Generic word-keyed patterns are suppressed in test/fixture/mock files —
     // branded/structural patterns still run there since a real leaked key is
     // real regardless of which file it's in.
     if (genericValue && isTestFile) continue;
     for (let i = 0; i < lines.length; i++) {
       if (isNonExecutableLine(lines[i])) continue;
-      if (isPlaceholderSecretLine(lines[i])) continue;
+      if (!ownValue && isPlaceholderSecretLine(lines[i])) continue;
       const m = re.exec(lines[i]);
       if (!m) continue;
+      if (ownValue && (PLACEHOLDER_VALUE_RE.test(m[1]) || DUMMY_SECRET_VALUES_RE.test(m[1]) || KNOWN_PLACEHOLDER_SECRET_RE.test(lines[i]))) continue;
       if (genericValue && !looksLikeRealSecret(m[1] ?? "")) continue;
       // `"API_KEY=" + UUID.randomUUID()`: the literal only starts a value built at runtime.
       if (genericValue && /^\s*\+/.test(lines[i].slice(m.index + m[0].length))) continue;
@@ -2530,15 +2569,69 @@ function findInsecureRandomnessPython(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Java: java.util.Random / Math.random() / ThreadLocalRandom -- predictable from a few outputs. Reported only when the
+// value (or a variable derived from it in the next lines) becomes a cookie, a session attribute or a secret-named
+// variable; SecureRandom (which subclasses java.util.Random) is the safe source.
+const JAVA_WEAK_RANDOM_RE = /\bnew\s+(?:java\.util\.)?Random\s*\(|\bMath\.random\s*\(|\bThreadLocalRandom\.current\s*\(/;
+const JAVA_SECRET_NAME_RE = /token|secret|password|passwd|salt|nonce|csrf|otp|session|cookie|remember|api_?key|auth|key$/i;
+
+function findInsecureRandomnessJava(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || !JAVA_WEAK_RANDOM_RE.test(line) || /SecureRandom/.test(line)) continue;
+    const assigned = /(?:^|[\s(])([A-Za-z_]\w*)\s*=(?!=)/.exec(line)?.[1];
+    let stored = !!assigned && JAVA_SECRET_NAME_RE.test(assigned);
+    // follow the value a few hops: rand -> rememberMeKey -> new Cookie(name, rememberMeKey)
+    const tracked = new Set(assigned ? [assigned] : []);
+    for (let j = i + 1; j < Math.min(lines.length, i + 26) && !stored && tracked.size > 0; j++) {
+      const l = lines[j];
+      const uses = [...tracked].some(t => new RegExp(`\\b${t}\\b`).test(l));
+      if (!uses) continue;
+      if (/\bnew\s+(?:javax?\.servlet\.http\.)?Cookie\s*\(|\.setAttribute\s*\(|\.putValue\s*\(|\.setValue\s*\(/.test(l)) stored = true;
+      const lhs = /(?:^|[\s(])([A-Za-z_]\w*)\s*=(?!=)/.exec(l)?.[1];
+      if (lhs) { tracked.add(lhs); if (JAVA_SECRET_NAME_RE.test(lhs)) stored = true; }
+    }
+    if (!stored) continue;
+    found.push({ id: "insecure-randomness", label: "Insecure Randomness", severity: "high", line: i + 1,
+      detail: "A java.util.Random value (predictable from its earlier outputs) becomes a cookie or session value here -- use java.security.SecureRandom" });
+  }
+  return found;
+}
+
+// Java servlet cookie with a security flag explicitly switched off -- whatever its name, that is a deliberate downgrade.
+function findCookieFlagsJava(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    if (/\.setSecure\s*\(\s*false\s*\)/.test(lines[i])) {
+      found.push({ id: "cookie-no-secure", label: "Cookie Without Secure Flag", severity: "low", line: i + 1,
+        detail: "setSecure(false): the cookie is also sent over plain HTTP -- set it to true" });
+    }
+    if (/\.setHttpOnly\s*\(\s*false\s*\)/.test(lines[i])) {
+      found.push({ id: "cookie-no-httponly", label: "Cookie Without HttpOnly", severity: "medium", line: i + 1,
+        detail: "setHttpOnly(false): page scripts (and so XSS) can read the cookie -- set it to true" });
+    }
+  }
+  return found;
+}
+
 // Python: MD5 / SHA-1 (and MD4) through hashlib -- collision-broken. A use the code marks as not
 // security-related (`usedforsecurity=False`, Python 3.9+) is left alone.
 const PY_WEAK_HASH_RE = /\bhashlib\.(?:md5|sha1)\s*\(|\bhashlib\.new\s*\(\s*["'](?:md5|sha1|md4|md5-sha1)["']/i;
 
 function findWeakHashPython(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
+  // `from hashlib import md5` -- then a bare md5(...) call is hashlib's
+  const imported = new Set<string>();
+  for (const l of lines) {
+    const m = /^\s*from\s+hashlib\s+import\s+(.+)$/.exec(l);
+    if (m) for (const n of m[1].replace(/[()]/g, "").split(",")) { const name = n.trim().split(/\s+as\s+/).pop(); if (name && /^(?:md5|sha1)$/.test(n.trim().split(/\s+/)[0])) imported.add(name); }
+  }
+  const bareRe = imported.size ? new RegExp(`(?<![\\w.])(?:${[...imported].join("|")})\\s*\\(`) : null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (isNonExecutableLine(line) || !PY_WEAK_HASH_RE.test(line)) continue;
+    if (isNonExecutableLine(line) || !(PY_WEAK_HASH_RE.test(line) || (bareRe?.test(line) && !/^\s*(?:from|import)\b/.test(line)))) continue;
     if (WEAK_CRYPTO_RE.some(r => r.test(line))) continue;   // the password-context rule already reports it
     if (/usedforsecurity\s*=\s*False/.test(line)) continue;
     found.push({ id: "weak-crypto", label: "Weak Cryptographic Hash", severity: "medium", line: i + 1,
@@ -2912,6 +3005,9 @@ const IDOR_SINK_RE = /\b\w*(?:DAO|Repository|Repo|Model)\w*\.(?:find|get|update|
 // Extended again with PHP/Laravel auth vocabulary -- safe, suppression-only.
 const IDOR_AUTH_CHECK_NEARBY_RE = /session\.\w*(?:userId|user_id|\bid\b)|req\.user\.|isOwner|checkOwnership|hasPermission|\.equals\s*\(|===\s*(?:req|current|session)\b|\badmin\b|\brole\b|\bpermission\b|@PreAuthorize|hasRole|before_action\s*:\s*:administrative|is_admin|c\.MustGet\s*\(|c\.GetString\s*\(\s*["'](?:user|userId|userID|uid)["']\s*\)|\[Authorize\b|Auth::\w+|Gate::authorize|->\s*can\s*\(|\$_SESSION\s*\[\s*['"]\w*(?:user_?id)['"]\s*\]/i;
 
+const LOGIN_KEY_NAME_RE = /^(?:user_?name|login|email|e_?mail_?address)$/i;
+const LOGIN_KEY_LOOKUP_RE = /\.\w*By(?:User_?Name|Username|Login|Email)\s*\(/i;
+
 function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
   const tainted = extractTaintedVars(lines);
   if (tainted.size === 0) return [];
@@ -2920,6 +3016,9 @@ function findNamedTaintIDOR(lines: string[]): ScanIndicator[] {
     if (isNonExecutableLine(lines[i])) continue;
     const m = IDOR_SINK_RE.exec(lines[i]);
     if (!m || !tainted.has(m[1])) continue;
+    // a lookup by login name / email (`getUserByUserName(userName)` at signup or login) finds an account by its
+    // public key, not an object the caller must own
+    if (LOGIN_KEY_NAME_RE.test(m[1]) || LOGIN_KEY_LOOKUP_RE.test(lines[i])) continue;
     if (IDOR_RE.some(r => r.test(lines[i]))) continue; // already caught inline
     const windowStart = Math.max(0, i - 15);
     const hasAuthCheck = lines.slice(windowStart, i + 1).some(l => IDOR_AUTH_CHECK_NEARBY_RE.test(l));
@@ -3410,6 +3509,57 @@ function findCookieInsecurity(lines: string[]): ScanIndicator[] {
     }
   }
   return found;
+}
+
+// express-session / cookie-session: the cookie's httpOnly defaults to true but secure to false, so the session
+// id also travels over plain HTTP unless `cookie: { secure: ... }` turns it on.
+const SESSION_MIDDLEWARE_IMPORT_RE = /(?:(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*|import\s+(\w+)\s+from\s+)["'](?:express-session|cookie-session)["']/;
+
+function findSessionCookieFlags(lines: string[]): ScanIndicator[] {
+  let local: string | undefined;
+  for (const l of lines) { const m = SESSION_MIDDLEWARE_IMPORT_RE.exec(l); if (m) { local = m[1] ?? m[2]; break; } }
+  if (!local) return [];
+  const callRe = new RegExp(`\\b${local}\\s*\\(\\s*\\{`);
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const at = lines[i].search(callRe);
+    if (at < 0) continue;
+    // the options object, brace-balanced, up to 40 lines
+    let depth = 0, opts = "", done = false;
+    for (let j = i; j < Math.min(lines.length, i + 40) && !done; j++) {
+      for (const ch of j === i ? lines[j].slice(at) : lines[j]) {
+        opts += ch;
+        if (ch === "{") depth++;
+        else if (ch === "}" && --depth === 0) { done = true; break; }
+      }
+      opts += " ";
+    }
+    if (/\bhttpOnly\s*:\s*false\b/.test(opts)) {
+      found.push({ id: "cookie-no-httponly", label: "Auth Cookie Missing HttpOnly", severity: "medium", line: i + 1,
+        detail: `${local}({ cookie: { httpOnly: false } }): page scripts (and so XSS) can read the session cookie` });
+    } else if (!/\bsecure\s*:\s*(?!false\b)\S/.test(opts)) {
+      found.push({ id: "cookie-no-secure", label: "Auth Cookie Missing Secure Flag", severity: "low", line: i + 1,
+        detail: `${local}(...) sets no cookie.secure: the session cookie is also sent over plain HTTP -- set cookie: { secure: true } (with app.set("trust proxy", 1) behind a TLS proxy)` });
+    }
+  }
+  return found;
+}
+
+// Server-side template engines with output escaping switched off: every {{ value }} renders as raw HTML.
+const AUTOESCAPE_OFF_RE = [
+  // swig.setDefaults / nunjucks.configure / new nunjucks.Environment
+  /\bautoescape\s*:\s*false\b/,
+  // Jinja2 Environment(autoescape=False)
+  /\bautoescape\s*=\s*False\b/,
+  // Twig ['autoescape' => false]
+  /["']autoescape["']\s*=>\s*false\b/i,
+  // Handlebars.compile(src, { noEscape: true })
+  /\bnoEscape\s*:\s*true\b/,
+];
+
+function findTemplateAutoescapeOff(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, AUTOESCAPE_OFF_RE, "xss", "Template Auto-Escaping Disabled", "high",
+    "Template output escaping is switched off: every interpolated value renders as raw HTML, so stored or reflected input becomes XSS -- leave autoescape on and mark only trusted markup safe");
 }
 
 // Splits a call's raw argument-list text on top-level commas only (depth-
@@ -5915,6 +6065,13 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     description: "Check file extension and content-type against an allowlist, enforce a size limit, and store outside the web root with a generated filename.",
     cwe: "CWE-434", effort: "low",
   },
+  "log-injection": {
+    title: "Strip line breaks before logging request input",
+    description: "Replace CR/LF in user-supplied values before they reach the log, or log structured JSON so each value stays one field of one entry.",
+    code_before: 'console.log("login failed for", userName)',
+    code_after:  'console.log("login failed for", userName.replace(/[\\r\\n]/g, "_"))',
+    cwe: "CWE-117", effort: "low",
+  },
   "ldap-injection": {
     title: "Escape LDAP special characters or use parameterised filters",
     description: "Never concatenate user input into an LDAP filter string — escape special characters (*, (, ), \\, NUL) first.",
@@ -6481,6 +6638,31 @@ function findAstTaintPythonFindings(
   }));
 }
 
+/**
+ * `Class.method` keys of Java methods some OTHER file of the batch calls: `(new C()).m(`, `v = new C(); v.m(`,
+ * or a static `C.m(`. Such a method isn't an unexplained entry point -- its callers say what it receives (and a
+ * tainted argument is reported at the caller through the cross-file facts) -- so its parameters aren't assumed
+ * untrusted. Textual on purpose: cheap, and a missed call only keeps today's assumption.
+ */
+function javaMethodsCalledFromOtherFiles(files: ReadonlyArray<{ path: string; content: string }>): Set<string> {
+  const declaredIn = new Map<string, string>();
+  for (const f of files) for (const m of f.content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)) if (!declaredIn.has(m[1])) declaredIn.set(m[1], f.path);
+  const out = new Set<string>();
+  const add = (cls: string, method: string, from: string) => {
+    const home = declaredIn.get(cls);
+    if (home && home !== from) out.add(`${cls}.${method}`);
+  };
+  for (const f of files) {
+    const text = f.content;
+    for (const m of text.matchAll(/\bnew\s+([A-Z]\w*)\s*\([^()]*\)\s*\)?\s*\.\s*([a-z]\w*)\s*\(/g)) add(m[1], m[2], f.path);
+    for (const m of text.matchAll(/\b([A-Z]\w*)\s*\.\s*([a-z]\w*)\s*\(/g)) add(m[1], m[2], f.path);
+    for (const m of text.matchAll(/\b([a-z]\w*)\s*=\s*new\s+([A-Z]\w*)\s*\(/g)) {
+      for (const c of text.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*([a-z]\\w*)\\s*\\(`, "g"))) add(m[2], c[1], f.path);
+    }
+  }
+  return out;
+}
+
 // Same wrapper for astTaintJava.ts's Phase 3 engine -- see its own
 // docblock. No warm-cache concern here (java-parser is pure JS,
 // synchronous, no WASM -- this mirrors astTaint.ts's simplicity, not
@@ -6488,8 +6670,9 @@ function findAstTaintPythonFindings(
 function findAstTaintJavaFindings(
   content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+  calledElsewhere?: ReadonlySet<string>,
 ): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts }).map(f => ({
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -6637,7 +6820,7 @@ export function analyzeFile(
   storedProvenance?: StoredProvenanceIO,
   // Cross-file service-layer facts for Java (see astTaintJava.ts computeJavaMethodSinkFacts), computed by
   // runScan() over the whole batch, plus the CST it already parsed for this file.
-  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string> },
   // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
   crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
@@ -6788,7 +6971,7 @@ export function analyzeFile(
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
@@ -6796,106 +6979,111 @@ export function analyzeFile(
     ...(kotlinTree ? findAstTaintKotlinFindings(content, file_path, kotlinTree, suppressedSinks, crossFileKotlin?.facts) : []),
     ...(rustTree ? findAstTaintRustFindings(content, file_path, rustTree, suppressedSinks, crossFileRust?.facts) : []),
   ];
+  // Comment and displayed-only text blanked: see codeOnlyLines.
+  const codeLines = codeOnlyLines(content, lines, file_path, tsSourceFile);
   const regexVulnIndicatorsRaw: ScanIndicator[] = [
-    ...findXSS(lines),
-    ...findInsecureDeserialization(lines),
-    ...findInsecureDeserializationGoDecoder(lines),
-    ...findInsecureDeserializationCSharp(lines),
-    ...findInsecureDeserializationCSharpJsonNet(lines),
-    ...findNamedTaintDeserializationPHP(lines),
-    ...findDeserializationPHPWrapped(lines),
-    ...findPHPPharDeserialization(lines),
-    ...findWeakCrypto(lines),
-    ...findPIIInLogs(lines),
-    ...findMassAssignment(lines),
-    ...findMassAssignmentCSharp(lines),
-    ...findMassAssignmentPHPLoop(lines),
-    ...findSQLInjection(lines),
-    ...findSQLInjectionTainted(lines),
-    ...findSQLInjectionPHPInterpolated(lines),
-    ...findSQLInjectionPHPMultilineBuild(lines),
-    ...findSQLInjectionJavaTainted(lines),
-    ...findSQLInjectionGoSprintf(lines),
-    ...findSQLInjectionCSharpTainted(lines),
+    ...findXSS(codeLines),
+    ...findInsecureDeserialization(codeLines),
+    ...findInsecureDeserializationGoDecoder(codeLines),
+    ...findInsecureDeserializationCSharp(codeLines),
+    ...findInsecureDeserializationCSharpJsonNet(codeLines),
+    ...findNamedTaintDeserializationPHP(codeLines),
+    ...findDeserializationPHPWrapped(codeLines),
+    ...findPHPPharDeserialization(codeLines),
+    ...findWeakCrypto(codeLines),
+    ...findPIIInLogs(codeLines),
+    ...findMassAssignment(codeLines),
+    ...findMassAssignmentCSharp(codeLines),
+    ...findMassAssignmentPHPLoop(codeLines),
+    ...findSQLInjection(codeLines),
+    ...findSQLInjectionTainted(codeLines),
+    ...findSQLInjectionPHPInterpolated(codeLines),
+    ...findSQLInjectionPHPMultilineBuild(codeLines),
+    ...findSQLInjectionJavaTainted(codeLines),
+    ...findSQLInjectionGoSprintf(codeLines),
+    ...findSQLInjectionCSharpTainted(codeLines),
     // Kotlin: input as annotated parameters and string templates (the Java engine can't parse Kotlin)
-    ...(lang === "kotlin" ? findKotlinTaintFindings(lines) : []),
+    ...(lang === "kotlin" ? findKotlinTaintFindings(codeLines) : []),
     // Ruby: input read into variables, calls without parentheses, backticks, Rails-specific sinks
-    ...(lang === "ruby" ? findRubyTaintFindings(lines) : []),
-    ...findEvalExec(lines),
-    ...findJwtBypass(lines),
-    ...findTlsVerificationDisabled(lines),
-    ...findWeakSigningSecret(lines),
-    ...findWeakSigningSecretPHPHmac(lines),
-    ...findWeakSigningSecretSplitLine(lines),
-    ...findCommandInjection(lines),
-    ...findNamedTaintCommandInjectionPHP(lines),
-    ...findNamedTaintCommandInjectionPython(lines),
-    ...findNamedTaintCommandInjectionJS(lines),
-    ...findNamedTaintCommandInjectionGo(lines),
-    ...findCommandInjectionTainted(lines),
-    ...findSSRF(lines),
-    ...findSSRFTainted(lines),
-    ...findPathTraversal(lines),
-    ...findNamedTaintPathTraversalJS(lines),
-    ...findNamedTaintPathTraversalGo(lines),
-    ...findNamedTaintPathTraversalCSharp(lines),
-    ...findNamedTaintPathTraversalPHP(lines),
-    ...findPathTraversalTainted(lines),
-    ...findZipSlip(lines),
-    ...findPHPFileInclusion(lines),
-    ...findPrototypePollution(lines),
-    ...findInsecureRandomness(lines),
-    ...findInsecureRandomnessGoFunc(lines),
-    ...findInsecureRandomnessCSharpFunc(lines),
-    ...(lang === "python" ? [...findInsecureRandomnessPython(lines), ...findWeakHashPython(lines), ...findCookieFlagsPython(lines)] : []),
-    ...(lang === "php" ? findWeakCryptoPHP(lines) : []),
-    ...(lang === "ruby" ? findWeakCryptoRuby(lines) : []),
-    ...findReDoS(lines),
-    ...findOpenRedirect(lines),
-    ...findNamedTaintOpenRedirectJS(lines),
-    ...findNamedTaintOpenRedirectGo(lines),
-    ...findTimingAttack(lines),
-    ...findPlaintextPasswordStorage(lines),
-    ...findPlaintextPasswordStorageCSharpCall(lines),
-    ...findSSTI(lines),
-    ...findHeaderInjection(lines),
-    ...findWeakCORS(lines),
-    ...findMissingSecurityHeaders(lines),
-    ...findDebugModeEnabled(lines),
-    ...findIDOR(lines),
-    ...findIDORJava(lines),
-    ...findNamedTaintIDOR(lines),
-    ...findNamedTaintIDORGo(lines),
-    ...findNamedTaintIDORCSharp(lines),
-    ...findNamedTaintIDORPHP(lines),
-    ...findAuthenticatedIdentityIgnored(lines),
+    ...(lang === "ruby" ? findRubyTaintFindings(codeLines) : []),
+    ...findEvalExec(codeLines),
+    ...findJwtBypass(codeLines),
+    ...findTlsVerificationDisabled(codeLines),
+    ...findWeakSigningSecret(codeLines),
+    ...findWeakSigningSecretPHPHmac(codeLines),
+    ...findWeakSigningSecretSplitLine(codeLines),
+    ...findCommandInjection(codeLines),
+    ...findNamedTaintCommandInjectionPHP(codeLines),
+    ...findNamedTaintCommandInjectionPython(codeLines),
+    ...findNamedTaintCommandInjectionJS(codeLines),
+    ...findNamedTaintCommandInjectionGo(codeLines),
+    ...findCommandInjectionTainted(codeLines),
+    ...findSSRF(codeLines),
+    ...findSSRFTainted(codeLines),
+    ...findPathTraversal(codeLines),
+    ...findNamedTaintPathTraversalJS(codeLines),
+    ...findNamedTaintPathTraversalGo(codeLines),
+    ...findNamedTaintPathTraversalCSharp(codeLines),
+    ...findNamedTaintPathTraversalPHP(codeLines),
+    ...findPathTraversalTainted(codeLines),
+    ...findZipSlip(codeLines),
+    ...findPHPFileInclusion(codeLines),
+    ...findPrototypePollution(codeLines),
+    ...findInsecureRandomness(codeLines),
+    ...findInsecureRandomnessGoFunc(codeLines),
+    ...findInsecureRandomnessCSharpFunc(codeLines),
+    ...(lang === "python" ? [...findInsecureRandomnessPython(codeLines), ...findWeakHashPython(codeLines), ...findCookieFlagsPython(codeLines)] : []),
+    ...(lang === "php" ? findWeakCryptoPHP(codeLines) : []),
+    ...(lang === "java" ? [...findInsecureRandomnessJava(codeLines), ...findCookieFlagsJava(codeLines)] : []),
+    ...(lang === "ruby" ? findWeakCryptoRuby(codeLines) : []),
+    ...findReDoS(codeLines),
+    ...findOpenRedirect(codeLines),
+    ...findNamedTaintOpenRedirectJS(codeLines),
+    ...findNamedTaintOpenRedirectGo(codeLines),
+    ...findTimingAttack(codeLines),
+    ...findPlaintextPasswordStorage(codeLines),
+    ...findPlaintextPasswordStorageCSharpCall(codeLines),
+    ...findSSTI(codeLines),
+    ...findHeaderInjection(codeLines),
+    ...findWeakCORS(codeLines),
+    ...findMissingSecurityHeaders(codeLines),
+    ...findDebugModeEnabled(codeLines),
+    ...findIDOR(codeLines),
+    ...findIDORJava(codeLines),
+    ...findNamedTaintIDOR(codeLines),
+    ...findNamedTaintIDORGo(codeLines),
+    ...findNamedTaintIDORCSharp(codeLines),
+    ...findNamedTaintIDORPHP(codeLines),
+    ...findAuthenticatedIdentityIgnored(codeLines),
     // $_SESSION guards only exist in PHP: elsewhere every INSERT/UPDATE looked "unguarded" (Java/JS/Python)
-    ...(lang === "php" ? findPHPMissingSessionGuard(lines) : []),
-    ...findSensitiveDataInURL(lines),
-    ...findNamedTaintSSRF(lines),
-    ...findNamedTaintSSRFPHP(lines),
-    ...findSSRFGoNewRequest(lines),
-    ...findNamedTaintSSRFCSharp(lines),
-    ...findSSRFCSharpNewRequest(lines),
-    ...findNamedTaintXSS(lines),
-    ...findNamedTaintXSSCSharp(lines),
-    ...findNamedTaintXSSPHP(lines),
-    ...findNamedTaintReflectedXSS(lines),
-    ...findReflectedXSSTainted(lines),
-    ...findNoSQLInjection(lines),
-    ...findVerboseErrors(lines),
-    ...findGraphQLInjection(lines),
-    ...findGraphQLIntrospectionEnabled(lines),
-    ...findXXE(lines),
-    ...findXXECSharp(lines),
-    ...findLDAPInjection(lines),
-    ...findXPathInjection(lines),
-    ...findCSRFDisabled(lines),
-    ...findInsecureFileUpload(lines),
-    ...findInsecureFileUploadCSharp(lines),
-    ...findTOCTOU(lines),
-    ...findCookieInsecurity(lines),
-    ...findCookieInsecurityOtherLangs(lines),
+    ...(lang === "php" ? findPHPMissingSessionGuard(codeLines) : []),
+    ...findSensitiveDataInURL(codeLines),
+    ...findNamedTaintSSRF(codeLines),
+    ...findNamedTaintSSRFPHP(codeLines),
+    ...findSSRFGoNewRequest(codeLines),
+    ...findNamedTaintSSRFCSharp(codeLines),
+    ...findSSRFCSharpNewRequest(codeLines),
+    ...findNamedTaintXSS(codeLines),
+    ...findNamedTaintXSSCSharp(codeLines),
+    ...findNamedTaintXSSPHP(codeLines),
+    ...findNamedTaintReflectedXSS(codeLines),
+    ...findReflectedXSSTainted(codeLines),
+    ...findNoSQLInjection(codeLines),
+    ...findVerboseErrors(codeLines),
+    ...findGraphQLInjection(codeLines),
+    ...findGraphQLIntrospectionEnabled(codeLines),
+    ...findXXE(codeLines),
+    ...findXXECSharp(codeLines),
+    ...findLDAPInjection(codeLines),
+    ...findXPathInjection(codeLines),
+    ...findCSRFDisabled(codeLines),
+    ...findInsecureFileUpload(codeLines),
+    ...findInsecureFileUploadCSharp(codeLines),
+    ...findTOCTOU(codeLines),
+    ...findCookieInsecurity(codeLines),
+    ...findCookieInsecurityOtherLangs(codeLines),
+    ...findSessionCookieFlags(codeLines),
+    ...findTemplateAutoescapeOff(codeLines),
   ];
   const suppressedKeys = new Set(suppressedSinks.map(x => `${x.id}:${x.line}`));
   const vulnIndicatorsRaw: ScanIndicator[] = [
@@ -8000,7 +8188,10 @@ export function runScan(input: ScanInput): ScanOutput {
   ]);
   const javaFacts = convergeServiceFacts(jvmTrees, allFiles, (content, path, t, incoming) =>
     t.kind === "java" ? computeJavaMethodSinkFacts(content, path, t.cst, incoming) : computeKotlinMethodSinkFacts(content, path, t.tree, incoming));
-  const javaFactsDigest = javaFacts.size > 0 ? factsDigest(javaFacts) : "";
+  const javaCalledElsewhere = javaMethodsCalledFromOtherFiles(allFiles.filter(f => javaCsts.has(f.path)));
+  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0
+    ? factsDigest(javaFacts) + ":" + crypto.createHash("sha256").update([...javaCalledElsewhere].sort().join(",")).digest("hex")
+    : "";
 
   // Same for C# (ASP.NET controllers -> injected services -> repositories).
   const csTrees = new Map<string, CSharpSyntaxNode>();
@@ -8098,7 +8289,7 @@ export function runScan(input: ScanInput): ScanOutput {
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
-          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts } : undefined,
+          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere } : undefined,
           csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts } : undefined,
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,

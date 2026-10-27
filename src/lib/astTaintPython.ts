@@ -221,11 +221,13 @@ export function findEnclosingFunctionNamePy(node: SyntaxNode): string {
 // ── Taint sources ─────────────────────────────────────────────────────────
 
 // ... plus the raw request line: query_string (bytes of everything after "?"), full_path, url
-const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body", "query_string", "full_path", "url"]);
+// aiohttp: request.query / match_info (path segments) / rel_url
+const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body", "query_string", "full_path", "url", "query", "match_info", "rel_url"]);
 /** `request`, `req`, `request_obj`, `http_request`, ... -- a request object passed as a parameter is as attacker-controlled as the Flask global. */
 const REQUEST_NAME_RE = /^(?:\w+_)?(?:request|req)(?:_\w+)?$/i;
 const isRequestName = (name: string): boolean => REQUEST_NAME_RE.test(name);
-const FLASK_CALL_SOURCES = new Set(["get_json", "get_data"]);
+// aiohttp: `await request.post()` (form), `.json()`, `.text()`, `.read()` (raw body)
+const FLASK_CALL_SOURCES = new Set(["get_json", "get_data", "post", "json", "text", "read"]);
 // Django's request dictionaries: query, form, cookies, uploaded files, and META (which carries every header).
 const DJANGO_DICT_SOURCES = new Set(["GET", "POST", "COOKIES", "FILES", "META", "REQUEST"]);
 const FASTAPI_DECORATOR_RE = /^@(?:\w+\.)?(?:router|app)\.(?:get|post|put|delete|patch|options|head)\s*\(/;
@@ -290,7 +292,7 @@ function hasRequestParam(fn: SyntaxNode): boolean {
 // one value read out of them -- `.get(...)`, `.getlist(...)`, `[...]` -- can't carry a query-operator object, so it
 // isn't NoSQL-capable. The container itself still is (`db.find(request.args.to_dict())` lets the attacker pick
 // `$where`), and JSON bodies (json / get_json / data) carry objects.
-const STRING_VALUED_SOURCES_PY = new Set(["args", "form", "values", "cookies", "headers", "query_string", "full_path", "url"]);
+const STRING_VALUED_SOURCES_PY = new Set(["args", "form", "values", "cookies", "headers", "query_string", "full_path", "url", "query", "match_info"]);
 // A cookie or header value already passed HTTP header parsing: it holds no CR/LF, so it can't split a header it is
 // copied into. (A query/form value can: %0d%0a decodes to a line break.)
 const HEADER_SAFE_SOURCES_PY = new Set(["cookies", "headers"]);
@@ -824,6 +826,13 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     const loader = keywordArg(args, "Loader") ?? positional[1] ?? null;
     if (loader && /Safe/.test(loader.text)) return null;
     return first ? { id: "insecure-deserialization", sinkExpr: text, args: [first] } : null;
+  }
+  // aiohttp: web.Response(text=..., content_type="text/html") -- text= is text/plain unless the type says HTML
+  if (text === "web.Response" || text === "aiohttp.web.Response" || (text === "Response" && resolvedModule.startsWith("aiohttp"))) {
+    const mime = keywordArg(args, "content_type");
+    if (!mime || !isLiteralPy(mime) || !/html/i.test(mime.text)) return null;
+    const body = keywordArg(args, "text") ?? keywordArg(args, "body") ?? first;
+    return body ? { id: "xss", sinkExpr: text, args: [body] } : null;
   }
   // HTML responses: Flask's Response/make_response default to text/html. Django REST Framework's Response (imported
   // from rest_framework) serializes its data to JSON -- not HTML, so not XSS (it was every crAPI workshop view).

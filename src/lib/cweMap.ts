@@ -67,6 +67,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "redos":                       { id: "CWE-1333", title: "Inefficient Regular Expression Complexity" },
   "timing-attack":               { id: "CWE-208",  title: "Observable Timing Discrepancy" },
   "header-injection":            { id: "CWE-113",  title: "CRLF Injection in HTTP Headers" },
+  "log-injection":               { id: "CWE-117",  title: "Improper Output Neutralization for Logs" },
   "sensitive-url-data":          { id: "CWE-598",  title: "Use of GET Request With Sensitive Query Strings" },
   "verbose-error":                { id: "CWE-209",  title: "Generation of Error Message Containing Sensitive Information" },
   "insecure-file-upload":        { id: "CWE-434",  title: "Unrestricted Upload of File With Dangerous Type" },

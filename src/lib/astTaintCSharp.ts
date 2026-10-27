@@ -86,7 +86,7 @@ export type AstTaintCSharpId =
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg"
   | "eval-exec" | "ssti" | "argument-injection"
-  | "bola-missing-ownership-check";
+  | "bola-missing-ownership-check" | "log-injection";
 
 export interface AstTaintCSharpFinding {
   id:         AstTaintCSharpId;
@@ -513,22 +513,31 @@ const RESOURCE_ID_NAME_RE = /^(?:id|ID|pk|.*_id|.*Id)$/;
 // astTaintCSharp.ts's own docblock).
 const CSHARP_SIMPLE_TYPE_RE = /^(?:string|int|long|short|byte|bool|double|float|decimal|char|Guid|DateTime|byte\[\])\??$/;
 // Raw HttpContext/HttpRequest access -- the ASP.NET Core Servlet-API analog.
-const RAW_SOURCE_MEMBER_TAILS = new Set(["Query", "Form", "Headers", "Cookies", "QueryString"]);
+// System.Web's Params / ServerVariables merge query, form, cookies and server variables.
+const RAW_SOURCE_MEMBER_TAILS = new Set(["Query", "Form", "Headers", "Cookies", "QueryString", "Params", "ServerVariables"]);
+// `HttpRequest req` / `HttpRequestBase request` (System.Web, MVC 5) / `HttpRequest request` (ASP.NET Core)
+const REQUEST_DECL_RE = /\b(?:HttpRequest|HttpRequestBase|HttpRequestWrapper)\s+([A-Za-z_]\w*)\s*[,)=;]/g;
 
-function isTaintSourceExprCSharp(node: SyntaxNode): boolean {
+function isTaintSourceExprCSharp(node: SyntaxNode, requestNames?: ReadonlySet<string>): boolean {
+  // The receiver: the Web Forms / controller `Request` property, or a name declared as a request
+  const isRequest = (text: string): boolean => {
+    const parts = text.split(".");
+    const recv = parts[parts.length - 2];
+    return recv === "Request" || (parts.length === 2 && !!requestNames?.has(recv));
+  };
   if (node.type === "member_access_expression") {
     const text = calleeTextCSharp(node);
     if (!text) return false;
     // Request.QueryString / Request.Path / Request.Body ... (bare, no indexer); Query/Form/Headers/
     // Cookies are usually indexed, handled below.
-    return /(?:^|\.)Request\.(?:QueryString|Path|PathBase|Body|Host|Query|Form|Headers|Cookies)$/.test(text);
+    return /\.(?:QueryString|Path|PathBase|Body|Host|Query|Form|Headers|Cookies|Params|RawUrl|PathInfo)$/.test(text) && isRequest(text);
   }
   if (node.type === "element_access_expression") {
     const expr = node.childForFieldName("expression") ?? node.namedChildren[0];
     const text = expr ? calleeTextCSharp(expr) : null;
     if (!text) return false;
     const tail = text.split(".").pop() ?? "";
-    return RAW_SOURCE_MEMBER_TAILS.has(tail) && /(?:^|\.)Request\./.test(text + ".");
+    return RAW_SOURCE_MEMBER_TAILS.has(tail) && isRequest(text);
   }
   return false;
 }
@@ -550,7 +559,7 @@ const SEVERITY: Record<AstTaintCSharpId, "critical" | "high" | "medium"> = {
   "ldap-injection": "critical", "xpath-injection": "critical", "open-redirect": "medium",
   "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical", "eval-exec": "critical", "ssti": "critical",
-  "argument-injection": "high",
+  "argument-injection": "high", "log-injection": "medium",
   // Fallback only -- collectBolaFindings always passes a severityOverride
   // (medium for read endpoints, high for write/unknown).
   "bola-missing-ownership-check": "high",
@@ -563,7 +572,7 @@ const LABEL: Record<AstTaintCSharpId, string> = {
   "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection", "mass-assignment": "Mass Assignment",
   "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
-  "argument-injection": "Argument Injection",
+  "argument-injection": "Argument Injection", "log-injection": "Log Injection",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
@@ -610,6 +619,8 @@ interface EngineCtx {
   stickyDirty: boolean;
   recordSticky: boolean;
   classFieldNames: Set<string>;
+  /** Names declared with a request type (`HttpRequest req`): their QueryString / Form / Params / Cookies are input. */
+  requestNames?: Set<string>;
 }
 
 function emit(
@@ -646,7 +657,7 @@ function resolveLocalCalleeCS(fn: SyntaxNode | null | undefined, ctx: EngineCtx)
 
 function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
   const taintMask = (node: SyntaxNode, env: Env): number => {
-    if (isTaintSourceExprCSharp(node)) return ALL;
+    if (isTaintSourceExprCSharp(node, ctx.requestNames)) return ALL;
     if (node.type === "identifier") {
       const m = env.get(node.text);
       if (m !== undefined) return m;
@@ -922,7 +933,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       // param of a real controller action (authMeta.isEndpoint) -- a
       // private helper method's params are never HTTP-bound at all, so
       // this deliberately does NOT apply file-wide.
-      if (!hasExplicitSource && attrs.length === 0 && authMeta.isEndpoint) {
+      if (!hasExplicitSource && attrs.length === 0 && (authMeta.isEndpoint || isConventionalActionCS(methodDecl, attrNames))) {
         const typeText = param.childForFieldName("type")?.text;
         if (typeText && CSHARP_SIMPLE_TYPE_RE.test(typeText)) {
           sourceParamNames.add(pName.text);
@@ -934,6 +945,22 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   }
   const body = methodDecl.childForFieldName("body") ?? methodDecl.namedChildren.find(c => c?.type === "arrow_expression_clause") ?? null;
   return { name: nameNode.text, paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null };
+}
+
+/**
+ * A public instance method of an MVC controller (`class HomeController : Controller`) with no verb attribute is
+ * still an action: conventional routing (`{controller}/{action}/{id?}`) reaches it, and its simple-type parameters
+ * are bound from the query string / form. [NonAction] opts out.
+ */
+function isConventionalActionCS(methodDecl: SyntaxNode, attrNames: readonly string[]): boolean {
+  if (attrNames.includes("NonAction")) return false;
+  const mods = methodDecl.namedChildren.filter(c => c?.type === "modifier").map(c => c!.text);
+  if (!mods.includes("public") || mods.includes("static") || mods.includes("abstract")) return false;
+  const cls = methodDecl.parent?.parent;
+  if (!cls || cls.type !== "class_declaration") return false;
+  const name = cls.childForFieldName("name")?.text ?? "";
+  const bases = cls.namedChildren.find(c => c?.type === "base_list")?.text ?? "";
+  return /Controller$/.test(name) && /\b(?:Controller|ControllerBase)\b/.test(bases);
 }
 
 function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
@@ -986,6 +1013,13 @@ const CS_DAPPER_TAILS = new Set([
   "QuerySingleOrDefault", "Execute", "ExecuteAsync", "ExecuteScalar", "ExecuteScalarAsync", "ExecuteReader",
 ]);
 const CS_EVAL_OWNERS = new Set(["CSharpScript", "CSScript", "Assembly", "Activator", "AppDomain", "Type"]);
+// Microsoft.Extensions.Logging / NLog / log4net / Serilog write methods, on a receiver named like a logger
+const CS_LOG_TAILS = new Set([
+  "Log", "LogInformation", "LogWarning", "LogError", "LogDebug", "LogTrace", "LogCritical",
+  "Info", "Warn", "Error", "Debug", "Fatal", "Trace", "Information", "Warning", "Verbose",
+  "InfoFormat", "WarnFormat", "ErrorFormat", "DebugFormat", "FatalFormat",
+]);
+const CS_LOGGER_OWNER_RE = /^_?(?:\w*[Ll]ogger|[Ll]og)$/;
 const CS_EVAL_TAILS = new Set([
   "EvaluateAsync", "RunAsync", "Create", "Evaluate", "Load", "LoadFrom", "LoadFile", "UnsafeLoadFrom", "GetType", "CreateInstance",
   "CreateInstanceFrom", "CreateComInstanceFrom",
@@ -1186,6 +1220,10 @@ function checkCallSink(
     fire("ldap-injection");
   } else if (owner === "Headers" && (tail === "Add" || tail === "Append" || tail === "TryAdd" || tail === "Set")) {
     fire("header-injection");
+  } else if (CS_LOG_TAILS.has(tail) && CS_LOGGER_OWNER_RE.test(owner)) {
+    // _logger.LogWarning("... " + input) / IO.Logger.Log(level, e, msg): a CR/LF in it forges a separate log entry.
+    // An anonymous object (`new { user }`) is structured context, serialized with its strings quoted.
+    fireArgs("log-injection", args.map((_, i) => i).filter(i => args[i].type !== "anonymous_object_creation_expression"));
   } else if (CS_EVAL_OWNERS.has(owner) && CS_EVAL_TAILS.has(tail) && args[0]) {
     fire("eval-exec", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Invoke" && reflective) {
@@ -1391,12 +1429,25 @@ function lastAssignmentCS(name: string, at: SyntaxNode): SyntaxNode | null {
 }
 
 /** A value built only from constants: literals, `const` locals, `+` of those, locals bound only to those. */
+const CS_CONSTANT_PRESERVING_METHODS = new Set(["Split", "Trim", "TrimStart", "TrimEnd", "ToLower", "ToUpper", "ToLowerInvariant", "ToUpperInvariant", "Substring", "Replace", "ToString"]);
+
 function provenConstantCS(n: SyntaxNode | null, at: SyntaxNode, depth = 0): boolean {
   if (!n || depth > 6) return false;
-  if (isLiteralCS(n)) return true;
+  // a null adds no text (Juliet's dead `data = null;` arm)
+  if (isLiteralCS(n) || n.type === "null_literal") return true;
   if (n.type === "parenthesized_expression") return provenConstantCS(n.namedChildren[0] ?? null, at, depth + 1);
   if (n.type === "binary_expression" && n.childForFieldName("operator")?.type === "+") {
     return provenConstantCS(n.childForFieldName("left"), at, depth + 1) && provenConstantCS(n.childForFieldName("right"), at, depth + 1);
+  }
+  // names[i] where names is a constant array: every element is a constant
+  if (n.type === "element_access_expression") return provenConstantCS(n.childForFieldName("expression") ?? n.namedChildren[0] ?? null, at, depth + 1);
+  // data.Split('-') / s.Trim() / s.Replace("a", "b") on a constant, with constant arguments
+  if (n.type === "invocation_expression") {
+    const fn = n.childForFieldName("function");
+    const method = fn?.type === "member_access_expression" ? fn.childForFieldName("name")?.text : undefined;
+    if (!fn || !method || !CS_CONSTANT_PRESERVING_METHODS.has(method)) return false;
+    const recv = fn.childForFieldName("expression") ?? fn.namedChildren[0] ?? null;
+    return provenConstantCS(recv, at, depth + 1) && argListOfCSharp(n).every(a => isLiteralCS(a));
   }
   if (n.type === "identifier") {
     // every assignment to it in the method is itself a constant
@@ -1407,12 +1458,14 @@ function provenConstantCS(n: SyntaxNode | null, at: SyntaxNode, depth = 0): bool
     let opaque = false;
     const visit = (x: SyntaxNode) => {
       if (x.type === "variable_declarator" && x.namedChildren.find(c => c?.type === "identifier")?.text === n.text) {
+        // `string data;` (no initializer) gives it no value: only its later assignments count
         const v = x.namedChildren.find(c => c?.type === "equals_value_clause")?.namedChildren[0];
-        if (v) rhs.push(v); else opaque = true;
+        if (v) rhs.push(v);
       } else if ((x.type === "assignment_expression" && x.childForFieldName("left")?.text === n.text) ||
                  (x.type === "parameter" && x.childForFieldName("name")?.text === n.text)) {
         if (x.type === "parameter") opaque = true;
-        else if (x.childForFieldName("operator")?.text === "=") rhs.push(x.childForFieldName("right")!); else opaque = true;
+        else if ((x.childForFieldName("operator") ?? x.namedChildren.find(c => c?.type === "assignment_operator"))?.text === "=") rhs.push(x.childForFieldName("right")!);
+        else opaque = true;
       }
       for (const c of x.namedChildren) if (c) visit(c);
     };
@@ -1803,8 +1856,9 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         // undefined for `var` (implicit_type), so the receiver-typed sink
         // check (SqlCommand.ExecuteReader) needs the type inferred from the
         // initializer's own constructor instead, when there is one.
-        const inferredTypeName = declaredTypeSimpleName
-          ?? (initExpr?.type === "object_creation_expression" ? initExpr.childForFieldName("type")?.text : undefined);
+        // `new System.Diagnostics.Process()`: typed checks compare simple names
+        const createdType = initExpr?.type === "object_creation_expression" ? initExpr.childForFieldName("type")?.text : undefined;
+        const inferredTypeName = declaredTypeSimpleName ?? (createdType ? stripGenerics(createdType).split(".").pop() : undefined);
         if (inferredTypeName) ctx.varTypes.set(nameTok.text, inferredTypeName);
       }
     }
@@ -1848,12 +1902,16 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
           if (rootId) recordFieldStickyCS(rootId.text, mask, ctx, rootId);
           // cmd.CommandText = tainted, psi.FileName / psi.Arguments = tainted: property-setter sinks
           const setterSink = key.endsWith(".CommandText") ? "sql-injection" as const
-            : ((key.endsWith(".FileName") || key.endsWith(".Arguments")) && rootId && ctx.varTypes.get(rootId.text) === "ProcessStartInfo") ? "command-injection" as const
+            : ((key.endsWith(".FileName") || key.endsWith(".Arguments")) && rootId &&
+                (ctx.varTypes.get(rootId.text) === "ProcessStartInfo" ||
+                 (ctx.varTypes.get(rootId.text) === "Process" && /\.StartInfo\.(?:FileName|Arguments)$/.test(key)))) ? "command-injection" as const
             : null;
           if (setterSink) {
             const cls = classOf(setterSink);
             if (mask & cls) emit(ctx, setterSink, node, right!.text, key);
-            else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id: setterSink, line: lineOf(node) });
+            else if (wasCleared(mask, cls) || (setterSink === "sql-injection" && provenConstantCS(right, node))) {
+              ctx.suppressed?.push({ id: setterSink, line: lineOf(node) });
+            }
           }
           // Structural sink: `xxx.Filter = tainted` (System.DirectoryServices
           // DirectorySearcher.Filter) -- an assignment-target-IS-the-sink
@@ -2259,6 +2317,7 @@ function makeCSharpCtx(
     varTypes: collectMemberTypesCS(root), root, findings: [], seen: new Set(), suppressed: suppressedOut,
     sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     crossFileFacts,
+    requestNames: new Set([...content.matchAll(REQUEST_DECL_RE)].map(m => m[1])),
   };
   return { ctx, localMethods };
 }

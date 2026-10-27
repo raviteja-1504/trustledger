@@ -36,7 +36,10 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 12: Go/Rust/PHP/Ruby/C#/Kotlin precision/recall from the 0llino sast-benchmark and vulnerable-app corpora (request
 //     wrappers and Android sources, constant folding, literal-key maps, substring/alphabet/prefix/host/HMAC guards,
 //     proven-constant vetoes, argument injection that respects validation, new sinks, PHP/Ruby weak-crypto rules).
-export const SCAN_CACHE_VERSION = 12;
+// 13: NodeGoat / DVC / DVPWA / Juliet: JS log injection, constant-regex ReDoS, HTTP client packages and require()
+//     bindings, block comments and HTML samples skipped by the line rules, C# conventional actions, Sinatra route
+//     bodies, aiohttp sources, literal DB credentials, Java methods called from another file not seeded as entries.
+export const SCAN_CACHE_VERSION = 13;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

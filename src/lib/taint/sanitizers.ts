@@ -14,7 +14,7 @@
  */
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
-import { charClassClears, delimitedPatternBody } from "./charClass";
+import { charClassClears, delimitedPatternBody, removesLineBreaks } from "./charClass";
 
 export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs";
 
@@ -35,6 +35,8 @@ const TABLES: Record<SanitizerLang, Table> = {
       "DOMPurify.sanitize": XSS, "sanitizeHtml": XSS, "he.encode": XSS, "he.escape": XSS,
       "escapeHtml": XSS, "xss": XSS, "validator.escape": XSS, "_.escape": XSS, "lodash.escape": XSS,
       "encodeURIComponent": URL_SAFE, "encodeURI": C.REDIRECT | C.HEADER,
+      // a JSON string escapes CR/LF (\r \n): one header line, one log entry
+      "JSON.stringify": C.HEADER,
       "path.basename": C.PATH,
       "parseInt": NUMERIC, "parseFloat": NUMERIC, "Number": NUMERIC, "Boolean": NUMERIC, "BigInt": NUMERIC,
       // String(x) keeps every string-injection class but defeats operator-object (NoSQL) injection
@@ -121,9 +123,7 @@ const TABLES: Record<SanitizerLang, Table> = {
         const negated = body ? /^\[\^((?:\\.|[^\]\\])+)\][+*]?$/.exec(body) : null;
         if (negated) return charClassClears(negated[1]) ?? 0;
         // a class or alternation of nothing but \r / \n / \0 escapes, removing both CR and LF
-        const crlf = body?.replace(/[+*]$/, "") ?? "";
-        const onlyLineBreaks = /^\[(?:\\[rn0])+\]$/.test(crlf) || /^\(?\\r\|\\n\)?$/.test(crlf) || /^\(?\\n\|\\r\)?$/.test(crlf);
-        return onlyLineBreaks && /\\r/.test(crlf) && /\\n/.test(crlf) ? C.HEADER : 0;
+        return removesLineBreaks(body ?? "") ? C.HEADER : 0;
       },
       str_replace: (_callee, args) => (/\\r/.test(args[0] ?? "") && /\\n/.test(args[0] ?? "") && /^(['"])\1$/.test((args[1] ?? "").trim()) ? C.HEADER : 0),
       urlencode: URL_SAFE, rawurlencode: URL_SAFE,
