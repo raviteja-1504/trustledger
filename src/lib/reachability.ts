@@ -190,6 +190,16 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0, cwe:"CWE-943",
   },
+  // Browsable folder: confidentiality of whatever sits in it.
+  "directory-listing": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0, A:0, cwe:"CWE-548",
+  },
+  // Needs content loaded into the WebView first; then local files / other origins are readable.
+  "webview-insecure-settings": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"REQUIRED", S:"CHANGED",
+    C:0.56, I:0.22, A:0, cwe:"CWE-749",
+  },
   // C/C++ memory corruption: write primitives that commonly end in code execution.
   "format-string": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",

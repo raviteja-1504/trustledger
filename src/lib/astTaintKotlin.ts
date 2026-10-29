@@ -223,7 +223,9 @@ function argsOfList(va: SyntaxNode | null): Arg[] {
   const out: Arg[] = [];
   for (const a of childrenOfType(va, "value_argument")) {
     const kids = named(a);
-    if (kids.length === 0) continue;
+    // `null` is an unnamed token: keep its slot (the argument node itself, which carries nothing) so later
+    // positions don't shift -- query(db, cols, sel, args, null, null, sortOrder)
+    if (kids.length === 0) { if (a.childCount > 0) out.push({ name: null, expr: a, spread: false }); continue; }
     if (kids.length >= 2 && kids[0].type === "simple_identifier" && operatorOf(a) === "=") {
       out.push({ name: kids[0].text, expr: kids[kids.length - 1], spread: false });
     } else if (kids[kids.length - 1].type === "spread_expression") {
@@ -1437,6 +1439,21 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
       fireOn(ctx, "sql-injection", node, arg0, mask(arg0, env), ct);
     }
   }
+  // Android SQLite by argument position: the WHERE / GROUP BY / HAVING / ORDER BY text (never selectionArgs, which
+  // are bound) -- SQLiteQueryBuilder.query(db, cols, selection, args, groupBy, having, sortOrder[, limit]),
+  // SQLiteDatabase.query(table, cols, selection, args, groupBy, having, orderBy[, limit]), delete(table, where, args),
+  // update(table, values, where, args), queryBuilder.appendWhere(text)
+  const isBuilder = recvType === "SQLiteQueryBuilder" || /queryBuilder|qb\b|builder/i.test(recvText);
+  const isSqliteDb = recvType === "SQLiteDatabase" || /(?:readable|writable)Database$|^(?:db|sqlDB|sqliteDb|database)$/i.test(recvText);
+  const androidSqlIdx = recv && name === "query" && isBuilder && pos.length >= 7 ? [2, 4, 5, 6, 7]
+    : recv && name === "query" && isSqliteDb && pos.length >= 7 ? [0, 2, 4, 5, 6, 7]
+    : recv && name === "delete" && isSqliteDb && pos.length >= 2 ? [0, 1]
+    : recv && name === "update" && isSqliteDb && pos.length >= 3 ? [0, 2]
+    // appendWhereEscapeString escapes its argument: not a sink
+    : recv && name === "appendWhere" && isBuilder ? [0] : null;
+  if (androidSqlIdx) {
+    for (const i of androidSqlIdx) if (pos[i] && fireOn(ctx, "sql-injection", node, pos[i], mask(pos[i], env), `${recvText}.${name}`)) break;
+  }
 
   // ── WebView ──
   if (recv && (recvType === "WebView" || /^(?:web[vV]iew|wv|mWebView|binding\.web[vV]iew)$/.test(recvText))) {
@@ -1537,7 +1554,9 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── Log injection: log.warn("login failed for $user") -- a CR/LF in it forges a separate entry ──
-  if (recv && KT_LOG_TAILS.has(name) && KT_LOGGER_RE.test(recvText.split(".").pop() ?? "")) {
+  // (Android's android.util.Log uses one-letter methods: Log.i / d / w / e / v / wtf)
+  if (recv && (KT_LOG_TAILS.has(name) && KT_LOGGER_RE.test(recvText.split(".").pop() ?? "")
+      || /^(?:i|d|w|e|v|wtf|println)$/.test(name) && /^(?:android\.util\.)?Log$/.test(recvText))) {
     for (const a of pos) if (fireOn(ctx, "log-injection", node, a, mask(a, env), `${recvText}.${name}`)) break;
   }
 
@@ -2061,11 +2080,25 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
 const walkMain = (node: SyntaxNode, env: Env, ctx: EngineCtx) => createWalker(ctx, { descendLambdas: true }).walk(node, env);
 
 /** Parameter masks at a function's entry: request-bound parameters are sources. */
+/**
+ * A ContentProvider's query / update / delete / insert / call: any app may call an exported provider, so the URI it
+ * names and the selection / sort order it passes are input (selectionArgs are bound, and stay clean).
+ */
+const PROVIDER_ENTRY_RE = /^(?:query|update|delete|insert|call|openFile|openAssetFile|getType)$/;
+function isContentProviderEntry(fn: LocalFn): boolean {
+  if (!PROVIDER_ENTRY_RE.test(fn.name) || !fn.classDecl) return false;
+  const brace = fn.classDecl.text.indexOf("{");
+  const header = brace >= 0 ? fn.classDecl.text.slice(0, brace) : fn.classDecl.text;
+  return /:\s*(?:[\w.]+\.)?(?:ContentProvider|DocumentsProvider|FileProvider)\s*\(/.test(header);
+}
+
 function entryEnv(fn: LocalFn, seedEntryPoints: boolean): Env {
   const env: Env = new Map();
+  const provider = isContentProviderEntry(fn);
   for (const p of fn.params) {
     let m = 0;
     if (p.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) m = SAFE_SCALAR_TYPE_RE.test(bareType(p.type)) ? applyClears(ALL, NUMERIC_CLEARS) : ALL;
+    else if (provider && /^(?:Uri|String|ContentValues|Bundle)\??$/.test(bareType(p.type))) m = ALL;
     else if (seedEntryPoints && p.annotations.length === 0 && STRINGY_TYPE_RE.test(p.type.replace(/\s+/g, " "))) m = ALL;
     env.set(p.name, m);
   }

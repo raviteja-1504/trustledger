@@ -808,7 +808,9 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx, rootIsCall
     // proof pass: a name that is no local of this method is a field (or inherited state) another method could have
     // filled with input; a class name / package prefix is not data, except System.in; `doSomething(x)`'s name is a call
     if (ctx.proof && rootVar !== null && !ctx.localNames?.has(rootVar) && !(rootIsCallee && parts.length === 1)
-      && ((!/^[A-Z]/.test(rootVar) && !(parts.length >= 2 && JAVA_PACKAGE_ROOT_RE.test(rootVar))) || (rootVar === "System" && parts[1] === "in"))) {
+      && ((!/^[A-Z]/.test(rootVar) && !(parts.length >= 2 && JAVA_PACKAGE_ROOT_RE.test(rootVar))) || (rootVar === "System" && parts[1] === "in")
+        // `OtherClass.data`: a static field another method could have filled (`OtherClass.run()` is a call, not a read)
+        || (/^[A-Z]/.test(rootVar) && parts.length >= 2 && !rootIsCallee))) {
       taint |= ALL;
     }
     return { parts, taint, rootVar, isNewExprOf: null };
@@ -1069,6 +1071,8 @@ function walkPrimaryChain(
           // return outside input; an instance call on a local (`map.get(k)`, `s.getBytes()`) returns its receiver's
           const isStatic = (calls === 0 && !recv) || (!!rootVar && /^[A-Z]/.test(rootVar) && !ctx.localNames?.has(rootVar) && calls === 0);
           if ((args.length === 0 || isStatic) && PROOF_INPUT_TAIL_RE.test(tail)) chainTaint |= ALL;
+          // `buf.write(tainted)`: what a local object is given, it may hand back later
+          if (anyArgMask && rootVar && calls === 0 && ctx.localNames?.has(rootVar)) env.set(rootVar, (env.get(rootVar) ?? 0) | anyArgMask);
         }
       }
 

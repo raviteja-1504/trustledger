@@ -83,7 +83,7 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
-  KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
+  KIND_POSITION_SENSITIVE, combineUrlFacets, urlPrefixFacets, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { anchoredPatternClears, delimitedPatternBody } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
@@ -1355,13 +1355,17 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
       const l = cond.childForFieldName("left");
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
-      if (op === "&&" || op === "and") return [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "true");
+      if (op === "&&" || op === "and") {
+        const gs = [...guardsOfConditionPHP(l, root), ...guardsOfConditionPHP(r, root)].filter(g => g.holds === "true");
+        return [...gs, ...combineUrlFacets(gs, "true")];
+      }
       if (op === "||" || op === "or") {
         const lg = guardsOfConditionPHP(l, root), rg = guardsOfConditionPHP(r, root);
         // `$x == 'jpg' || $x == 'png'`: when it holds, $x is one of the literals
         const only = (gs: Guard[]) => (gs.length === 1 && gs[0].holds === "true" && gs[0].clears === undefined ? gs[0].name : null);
         if (only(lg) !== null && only(lg) === only(rg)) return [{ name: only(lg)!, holds: "true" }];
-        return [...lg, ...rg].filter(g => g.holds === "false");
+        const gs = [...lg, ...rg].filter(g => g.holds === "false");
+        return [...gs, ...combineUrlFacets(gs, "false")];
       }
       const strict = op === "===" || op === "!==";
       const loose = op === "==" || op === "!=";
@@ -1374,9 +1378,23 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
         const whenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
         if (hayName && other.text === "0" && isRealpathResultPHP(hayName, cond)) return [{ name: hayName, holds: whenEqual, clears: SinkClass.PATH | SinkClass.INCLUDE }];
         const sub = needle ? phpStringValue(needle) : null;
+        // strpos($u, '/') === 0 is "starts with /"; strpos($u, '://') !== false is "contains ://" -- URL facets
+        if (hayName && sub !== null && other.text === "0" && (sub === "/" || sub === "//")) {
+          return urlPrefixFacets(hayName, sub, "starts").map(g => (whenEqual === "true" ? g : invertPHP(g)));
+        }
+        if (hayName && sub === "://" && other.text.toLowerCase() === "false") {
+          // `!== false` holds when it is there (whenEqual "false" for !==)
+          return urlPrefixFacets(hayName, sub, "contains").map(g => (whenEqual === "false" ? g : invertPHP(g)));
+        }
         const clears = sub !== null ? substringGuardClearsPHP(sub) : null;
         // `!== false` holds when the sequence is there: safe on the other side
         if (hayName && clears && other.text.toLowerCase() === "false") return [{ name: hayName, holds: whenEqual, clears }];
+      }
+      // filter_var(...) === false / preg_match(...) !== false: the call's own guards, on the side it succeeded
+      if ((strict || loose) && call && call.childForFieldName("function")?.text !== "strpos" && other.text.toLowerCase() === "false") {
+        const succeededWhen: "true" | "false" = op === "!==" || op === "!=" ? "true" : "false";
+        const gs = guardsOfConditionPHP(call, root);
+        return succeededWhen === "true" ? gs : gs.map(invertPHP);
       }
       if (strict || loose) {
         const holdsWhenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
@@ -1404,6 +1422,14 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
         const nm = variableBareName(args[1]);
         if (nm && clears) return [{ name: nm, holds: "true", clears }];
       }
+      // filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) after
+      // $ip = gethostbyname(parse_url($url, PHP_URL_HOST)): $url names a public address (SSRF guard)
+      if (fnName === "filter_var" && a0 && /FILTER_FLAG_NO_PRIV_RANGE/.test(args[2]?.text ?? "") && /FILTER_FLAG_NO_RES_RANGE/.test(args[2]?.text ?? "")) {
+        const resolved = lastAssignmentPHP(a0, cond);
+        const hostArg = resolved?.type === "function_call_expression" && resolved.childForFieldName("function")?.text === "gethostbyname" ? argListOfPHP(resolved)[0] : null;
+        const src = hostArg ? parsedUrlSourcePHP(hostArg, cond) : null;
+        if (src) return [{ name: a0, holds: "true" }, { name: src, holds: "true", clears: SinkClass.SSRF }];
+      }
       // filter_var($x, FILTER_VALIDATE_IP|INT|...): what the validated value can't carry
       if (fnName === "filter_var" && a0) {
         const clears = sanitizerClears("php", "filter_var", args.map(a => a.text));
@@ -1411,6 +1437,9 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
       }
       // str_starts_with($real, $base) after realpath(); str_contains($x, '..')
       if (fnName === "str_starts_with" && a0 && isRealpathResultPHP(a0, cond)) return [{ name: a0, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
+      // str_starts_with($u, '/') / ('//') / ('https://example.com/'), str_contains($u, '://'): URL facets
+      if (fnName === "str_starts_with" && a0 && args[1] && phpStringValue(args[1]) !== null) return urlPrefixFacets(a0, phpStringValue(args[1])!, "starts");
+      if (fnName === "str_contains" && a0 && args[1] && phpStringValue(args[1]) === "://") return urlPrefixFacets(a0, "://", "contains");
       if (fnName === "str_contains" && a0 && args[1]) {
         const sub = phpStringValue(args[1]);
         const clears = sub !== null ? substringGuardClearsPHP(sub) : null;

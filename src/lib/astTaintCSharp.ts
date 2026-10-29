@@ -627,7 +627,28 @@ interface EngineCtx {
   responseNames?: Set<string>;
   /** method start offset -> its single-assignment constant locals (see constValueCS) */
   constLocals?: Map<number, Map<string, ConstVal>>;
+  /** Proof pass only (see proveSinksSafeCS): parameters, fields and unmodelled input assumed tainted, unmodelled
+   * calls carrying their arguments -- an injection sink whose argument is STILL clean is proven safe. */
+  proof?: { proven: SuppressedSink[] };
 }
+
+/** Calls that return what a network peer sent, on a socket / TCP client / web client. */
+const CS_NETWORK_READS = new Set(["GetStream", "Receive", "ReceiveAsync", "ReceiveFrom", "OpenRead", "OpenReadAsync", "OpenReadTaskAsync",
+  "DownloadString", "DownloadStringAsync", "DownloadStringTaskAsync", "DownloadData", "DownloadDataAsync", "DownloadDataTaskAsync"]);
+const CS_NETWORK_TYPE_RE = /^(?:System\.Net(?:\.Sockets)?\.)?(?:TcpClient|Socket|NetworkStream|UdpClient|WebClient|SslStream)$/;
+/** `tcpConn` declared as a TcpClient / Socket / WebClient (or `listener.AcceptTcpClient()`, `new TcpClient(...)`). */
+function isNetworkValueCS(n: SyntaxNode, ctx: EngineCtx): boolean {
+  if (n.type === "object_creation_expression") return CS_NETWORK_TYPE_RE.test(stripGenerics(n.childForFieldName("type")?.text ?? ""));
+  if (n.type === "invocation_expression") return /\.(?:AcceptTcpClient|AcceptSocket|Accept|AcceptTcpClientAsync|AcceptSocketAsync|EndAccept)$/.test(n.childForFieldName("function")?.text ?? "");
+  if (n.type !== "identifier") return false;
+  const esc = n.text.replace(/[$]/g, "\\$&");
+  return new RegExp(`\\b(?:System\\.Net(?:\\.Sockets)?\\.)?(?:TcpClient|Socket|NetworkStream|UdpClient|WebClient|SslStream)\\s+${esc}\\b|\\bvar\\s+${esc}\\s*=\\s*(?:new\\s+(?:TcpClient|Socket|WebClient|UdpClient)\\b|\\w+\\.Accept(?:TcpClient|Socket)\\b)`).test(ctx.content);
+}
+
+/** Proof pass: an unmodelled call with one of these names may return outside input (`sr.ReadLine()`). */
+const CS_PROOF_INPUT_RE = /^(?:Get|Read|Fetch|Load|Receive|Recv|Input|Next|Poll|Take|Lookup|Find|Query|Download)/;
+/** Sinks the proof pass can clear: a value proven independent of every input can't inject into them. */
+const CS_PROOF_IDS: ReadonlySet<string> = new Set(["sql-injection", "command-injection", "ldap-injection", "xpath-injection", "path-traversal", "open-redirect", "ssrf"]);
 
 function emit(
   ctx: EngineCtx, id: AstTaintCSharpId, node: SyntaxNode, sourceExpr: string, sinkExpr: string,
@@ -667,6 +688,9 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
     if (node.type === "identifier") {
       const m = env.get(node.text);
       if (m !== undefined) return m;
+      // proof pass: a field, or any lower-case name that is no local (inherited state), may hold input; a PascalCase
+      // non-local is a type / static class name
+      if (ctx.proof && !isLocalNameCS(node) && (ctx.classFieldNames.has(node.text) || /^[a-z_]/.test(node.text))) return ALL;
       // Not a local: class fields / static containers carry taint written by OTHER methods.
       if (!ctx.classFieldNames.has(node.text) || isLocalNameCS(node)) return 0;
       return ctx.sticky.get(node.text) ?? 0;
@@ -721,6 +745,10 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       // pure recall gain, never removes a class the fallback alone finds.
       const path = calleeTextCSharp(node);
       const expr = node.childForFieldName("expression");
+      // proof pass: `this.x` / `base.x` -- and `OtherClass.field`, a static another method could have filled -- is
+      // state that may hold input (a method call's callee is not read here: invocation_expression handles calls)
+      if (ctx.proof && expr && (/^(?:this|base)$/.test(expr.text)
+          || (expr.type === "identifier" && /^[A-Z]/.test(expr.text) && !isLocalNameCS(expr) && node.parent?.type !== "invocation_expression"))) return ALL;
       return (path ? (env.get(path) ?? 0) : 0) | (expr ? taintMask(expr, env) : 0);
     }
     if (node.type === "element_access_expression") {
@@ -750,6 +778,13 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
         const clears = sanitizerClears("cs", calleeName, args.map(a => a.text));
         if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
       }
+      // Network input: tcpConn.GetStream() / socket.Receive(buf) / webClient.OpenRead(url) / DownloadString(url) --
+      // what the peer sends (Juliet's Connect_tcp / Listen_tcp / NetClient sources)
+      if (fn?.type === "member_access_expression") {
+        const nm = stripGenerics(fn.childForFieldName("name")?.text ?? "");
+        const recvNode = fn.childForFieldName("expression");
+        if (CS_NETWORK_READS.has(nm) && recvNode && isNetworkValueCS(recvNode, ctx)) return ALL;
+      }
       // Same-file interprocedural, bounded (see buildPropagatingMapCSharp).
       const localName = resolveLocalCalleeCS(fn, ctx);
       if (localName) {
@@ -761,8 +796,12 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
           for (const [i, surviving] of propIdx) {
             if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
           }
-          if (m) return m;
+          // proof pass: also what the method returns with no tainted argument (index -1: a field, an input)
+          if (ctx.proof) m |= propIdx.get(-1) ?? 0;
+          if (m || ctx.proof) return m;
         }
+        // proof pass: a local method with no summary entry returns nothing the caller gave it
+        if (ctx.proof) return 0;
       }
       // Curated string/path/URL/JSON plumbing: the result carries its arguments' taint. Decoders
       // re-taint what a sanitizer cleared (encode-then-decode).
@@ -777,15 +816,25 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       if (fn?.type === "identifier" && !ctx.localMethods.has(fn.text) && isLocalNameCS(fn)) {
         return args.reduce((acc, a) => acc | taintMask(a, env), env.get(fn.text) ?? 0);
       }
+      const argsAll = () => args.reduce((acc, a) => acc | taintMask(a, env), 0);
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. dirty.Trim(), dirty.ToLower()); replacement / joined text also carries its arguments.
       if (fn?.type === "member_access_expression") {
         const expr = fn.childForFieldName("expression");
         const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
         let m = expr ? taintMask(expr, env) : 0;
-        if (CS_ARG_CARRYING_METHODS.has(name) || CS_REFLECTION_LOOKUPS.has(name)) m |= args.reduce((acc, a) => acc | taintMask(a, env), 0);
+        if (CS_ARG_CARRYING_METHODS.has(name) || CS_REFLECTION_LOOKUPS.has(name)) m |= argsAll();
+        // proof pass: an unmodelled call may return what it is given; a reader / getter with no arguments, or a
+        // static one (`Console.ReadLine()`, `Util.GetInput(k)`), may return outside input
+        if (ctx.proof) {
+          m |= argsAll();
+          const isStatic = !!expr && /^[A-Z]/.test(expr.text) && !(expr.type === "identifier" && isLocalNameCS(expr));
+          if ((args.length === 0 || isStatic) && CS_PROOF_INPUT_RE.test(name)) m |= ALL;
+        }
         return m;
       }
+      // proof pass: an unmodelled bare call (`GetInput()` inherited from a base class)
+      if (ctx.proof && fn?.type === "identifier") return argsAll() | (CS_PROOF_INPUT_RE.test(fn.text) ? ALL : 0);
       return 0;
     }
     // Generic fallback -- recurse into every named child and OR-combine.
@@ -812,15 +861,20 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  for (const shape of method.paramShapes) {
+  // proof pass: also what the method returns with NO tainted parameter (a field, an unmodelled input), as index -1
+  const seeds: Array<{ name: string | null; index: number }> = method.paramShapes.map(s => ({ name: s.name, index: s.index }));
+  if (ctx.proof) seeds.push({ name: null, index: -1 });
+  for (const shape of seeds) {
     let surviving = 0;
     // Path-sensitive: the mask is taken at EACH return with the env on that
     // path; a return inside a lambda / local function is not this method's.
-    // Sink checks would run against a throwaway ctx, so use a sink-free copy.
-    const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false },
+    // Sink checks would run against a throwaway ctx, so use a sink-free copy (and a summary walk's hypothetical
+    // seeds prove nothing).
+    const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
+      proof: ctx.proof && { proven: [] } },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
-    env.set(shape.name, ALL);
+    if (shape.name !== null) env.set(shape.name, ALL);
     walker.walk(method.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
     surviving &= ALL;
@@ -1152,6 +1206,7 @@ function checkCallSink(
     const cls = classOf(id);
     if (mask & cls) emit(ctx, id, node, source, text);
     else if (wasCleared(mask, cls)) ctx.suppressed?.push({ id, line: lineOf(node) });
+    if (ctx.proof && !(mask & ALL)) recordProofCS(ctx, id, node, args);
   };
   // Only the argument(s) that can be exploited: the SQL text (not the parameters array), the URL of a
   // request (not its content), the path(s) of a file operation (not the contents or content type).
@@ -1295,6 +1350,7 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   const argMasks = args.map(a => taintMask(a, env));
   // command text built only from constants: the regex layer's "input near a query" heuristic is wrong here
   if (CS_SQL_COMMAND_TYPES.has(className) && args[0] && provenConstantCS(args[0], node)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
+  if (ctx.proof && CS_SQL_COMMAND_TYPES.has(className) && args[0] && !(argMasks[0] & ALL)) recordProofCS(ctx, "sql-injection", node, [args[0]]);
   // Any bit (taint OR shadow) counts so a tainted-then-sanitized value
   // still reaches the suppression record below.
   const firstIdx = argMasks.findIndex(m => m !== 0);
@@ -1536,6 +1592,16 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       if (op === "||") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "false");
       if (op === "==" || op === "!=") {
         const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
+        // `parsed != null` after `parsed = int.Parse(data)` (in a try whose catch leaves it null): data is a number
+        const nullSide = r.type === "null_literal" ? l : l.type === "null_literal" ? r : null;
+        if (nullSide?.type === "identifier") {
+          const def = lastAssignmentCS(nullSide.text, cond);
+          const f = def?.type === "invocation_expression" ? def.childForFieldName("function") : null;
+          const parsed = f?.type === "member_access_expression" && f.childForFieldName("name")?.text === "Parse"
+            && STRICT_PARSE_TYPES_CS.has(f.childForFieldName("expression")?.text ?? "") ? argListOfCSharp(def!)[0] : undefined;
+          const src = parsed ? guardedIdentifierCS(parsed) : null;
+          if (src) return [{ name: src, holds: holdsWhenEqual === "true" ? "false" : "true" }];
+        }
         const ln = guardedIdentifierCS(l), rn = guardedIdentifierCS(r);
         if (ln && isLiteralCS(r)) return [{ name: ln, holds: holdsWhenEqual }];
         if (rn && isLiteralCS(l)) return [{ name: rn, holds: holdsWhenEqual }];
@@ -1989,6 +2055,7 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
             else if (wasCleared(mask, cls) || (setterSink === "sql-injection" && provenConstantCS(right, node))) {
               ctx.suppressed?.push({ id: setterSink, line: lineOf(node) });
             }
+            if (ctx.proof && !(mask & ALL) && right) recordProofCS(ctx, setterSink, node, [right]);
           }
           // Structural sink: `xxx.Filter = tainted` (System.DirectoryServices
           // DirectorySearcher.Filter) -- an assignment-target-IS-the-sink
@@ -2010,6 +2077,12 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         checkCallSink(fn, args, node, env, ctx, taintMask);
         const localName = resolveLocalCalleeCS(fn, ctx);
         if (localName) seedLocalMethodParams(localName, args, env, ctx);
+        // proof pass: `memStream.Write(tainted, ...)` -- what a local object is given, it may hand back later
+        if (ctx.proof && !localName && fn.type === "member_access_expression") {
+          const recvId = fn.childForFieldName("expression");
+          const am = args.reduce((acc, a) => acc | taintMask(a, env), 0);
+          if (am && recvId?.type === "identifier" && isLocalNameCS(recvId)) env.set(recvId.text, (env.get(recvId.text) ?? 0) | am);
+        }
         // sb.Append(x) / list.Add(x) / Comments.Add(c): the container now holds x
         if (fn.type === "member_access_expression" && !localName) {
           const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
@@ -2383,6 +2456,87 @@ function collectMemberTypesCS(root: SyntaxNode): Map<string, string> {
 }
 
 /** The per-file engine context both the main scan and the cross-file summary pass walk with. */
+/**
+ * A sink proven safe in the proof pass: its own line, and the line that builds each local feeding it (assigned
+ * exactly once in its method, so the vetoed line holds the very value proven clean); up to three hops.
+ */
+function recordProofCS(ctx: EngineCtx, id: string, node: SyntaxNode, exprs: SyntaxNode[]): void {
+  if (!ctx.proof || !CS_PROOF_IDS.has(id)) return;
+  const proven = ctx.proof.proven;
+  proven.push({ id, line: lineOf(node) });
+  const method = enclosingMethodCS(node);
+  if (!method) return;
+  const assigns = assignmentsInCS(method);
+  const seen = new Set<string>();
+  let frontier = [...new Set(exprs.flatMap(e => findAllNodes(e, "identifier").map(i => i.text)))];
+  for (let hop = 0; hop < 3 && frontier.length; hop++) {
+    const next: string[] = [];
+    for (const name of frontier) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const defs = assigns.filter(a => a.name === name);
+      if (defs.length !== 1) continue;
+      proven.push({ id, line: defs[0].line });
+      next.push(...(defs[0].rhsText.match(/[A-Za-z_]\w*/g) ?? []));
+    }
+    frontier = next;
+  }
+}
+/**
+ * The proof pass (see astTaintJava.ts's twin): every method walked once with ALL its parameters tainted, fields and
+ * unmodelled input tainted, unmodelled calls carrying their arguments and summaries recomputed the same way. An
+ * injection sink whose argument is still clean cannot depend on any input, so the regex layer's line match there is
+ * vetoed. Nothing found here is reported.
+ */
+function proveSinksSafeCS(ctx: EngineCtx, localMethods: Map<string, LocalMethod>, root: SyntaxNode, suppressedOut: SuppressedSink[]): void {
+  const proof = { proven: [] as SuppressedSink[] };
+  const pctx: EngineCtx = {
+    ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false, sticky: new Map(),
+    stickyDirty: false, propagatingParams: new Map(), proof,
+  };
+  for (const [name, idx] of buildPropagatingMapCSharp(localMethods, pctx)) pctx.propagatingParams.set(name, idx);
+
+  // A private method that is only ever CALLED (never passed as a delegate, no overload) has no caller outside this
+  // file: its parameters hold what the calls here pass (Juliet's GoodG2BSink(data) called with "foo"). Every other
+  // method may be called from anywhere, so all its parameters are input.
+  const declsByName = new Map<string, SyntaxNode[]>();
+  for (const d of findAllNodes(root, "method_declaration")) {
+    const n = d.childForFieldName("name")?.text;
+    if (n) declsByName.set(n, [...(declsByName.get(n) ?? []), d]);
+  }
+  const contextual = new Set<string>();
+  for (const [name, method] of localMethods) {
+    const decls = declsByName.get(name) ?? [];
+    if (!method.body || decls.length !== 1 || modifiersOf(decls[0]).some(m => /^(?:public|internal|protected)$/.test(m))) continue;
+    const esc = name.replace(/[$]/g, "\\$&");
+    const all = ctx.content.match(new RegExp(`\\b${esc}\\b`, "g"))?.length ?? 0;
+    const called = ctx.content.match(new RegExp(`\\b${esc}\\s*\\(`, "g"))?.length ?? 0;
+    // ...and called at least once here (the declaration is one match): a private method nothing here calls may still
+    // be wired by reflection or a framework (WebForms `OnClick="Handler"`), so its parameters stay input
+    if (all === called && called >= 2) contextual.add(name);
+  }
+
+  // Fixed point over the call-site seeds; only the final (stable) round's proofs count.
+  let seeds = new Map<string, Map<number, number>>();
+  for (let round = 0; round < FIXED_POINT_CAP; round++) {
+    proof.proven = [];
+    pctx.seededParams = new Map();
+    for (const [name, method] of localMethods) {
+      if (!method.body) continue;
+      const env: Env = new Map();
+      const seeded = seeds.get(name);
+      for (const p of method.paramShapes) env.set(p.name, contextual.has(name) ? (seeded?.get(p.index) ?? 0) : ALL);
+      walkForDeclarationsAndSinks(method.body, env, pctx);
+    }
+    for (const st of root.namedChildren) if (st?.type === "global_statement") walkForDeclarationsAndSinks(st, new Map(), pctx);
+    const sig = (m: Map<string, Map<number, number>>) => JSON.stringify([...m].map(([k, v]) => [k, [...v].sort()]).sort());
+    const next = pctx.seededParams;
+    if (sig(next) === sig(seeds)) break;
+    seeds = next;
+  }
+  suppressedOut.push(...proof.proven);
+}
+
 function makeCSharpCtx(
   content: string, filePath: string, root: SyntaxNode, suppressedOut: SuppressedSink[] | undefined,
   crossFileFacts: ReadonlyMap<string, readonly ParamSinkFact[]> | undefined,
@@ -2562,6 +2716,9 @@ export function scanAstTaintCSharp(
       }
       if (!changed) break;
     }
+
+    // Sinks proven independent of every input veto the regex layer's duplicates.
+    if (suppressedOut) proveSinksSafeCS(ctx, localMethods, root, suppressedOut);
 
     void filePath;
     return ctx.findings;

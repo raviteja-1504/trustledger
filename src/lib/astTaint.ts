@@ -135,11 +135,40 @@ export function findEnclosingFunctionName(node: ts.Node): string {
 const SOURCE_ROOTS = new Set(["req", "request"]);
 const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies"]);
 
+// Browser input: the page URL (anyone can craft a link), the referrer, window.name (set by the opener)
+const DOM_URL_PROPS = new Set(["hash", "search", "href", "pathname"]);
+const DOM_DOCUMENT_PROPS = new Set(["URL", "documentURI", "baseURI", "referrer"]);
+
+/** `e.data` where `e` is the event parameter of a "message" listener: what another window posted. */
+function isMessageEventData(node: ts.PropertyAccessExpression): boolean {
+  if (node.name.text !== "data" || !ts.isIdentifier(node.expression)) return false;
+  const evName = node.expression.text;
+  for (let cur: ts.Node | undefined = node.parent; cur; cur = cur.parent) {
+    if (!(ts.isArrowFunction(cur) || ts.isFunctionExpression(cur) || ts.isFunctionDeclaration(cur))) continue;
+    const p0 = cur.parameters[0];
+    if (!p0 || !ts.isIdentifier(p0.name) || p0.name.text !== evName) continue;
+    const parent = cur.parent;
+    // addEventListener("message", (e) => ...) / window.onmessage = (e) => ...
+    if (parent && ts.isCallExpression(parent) && /(?:^|\.)addEventListener$/.test(parent.expression.getText())) {
+      const a0 = parent.arguments[0];
+      return !!a0 && ts.isStringLiteralLike(a0) && a0.text === "message";
+    }
+    return !!parent && ts.isBinaryExpression(parent) && /(?:^|\.)onmessage$/.test(parent.left.getText());
+  }
+  return false;
+}
+
 function isTaintSourceExpr(node: ts.Expression): boolean {
   if (ts.isPropertyAccessExpression(node)) {
     if (ts.isIdentifier(node.expression) && SOURCE_ROOTS.has(node.expression.text) && SOURCE_PROPS.has(node.name.text)) {
       return true;
     }
+    // location.hash / window.location.search / document.location.href, document.URL / referrer, window.name
+    const owner = node.expression.getText();
+    if (DOM_URL_PROPS.has(node.name.text) && /^(?:(?:window|document|self|top)\.)?location$/.test(owner)) return true;
+    if (DOM_DOCUMENT_PROPS.has(node.name.text) && owner === "document") return true;
+    if (node.name.text === "name" && owner === "window") return true;
+    if (isMessageEventData(node)) return true;
     return isTaintSourceExpr(node.expression);
   }
   if (ts.isElementAccessExpression(node)) return isTaintSourceExpr(node.expression);
@@ -518,6 +547,15 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     const recvText = (callee as ts.PropertyAccessExpression).expression.getText().replace(/\s+/g, "");
     return { id: "nosql-injection", sinkExpr: `${recvText}.${mongoVerb}`, args: [call.arguments[0]] };
   }
+  // el.insertAdjacentHTML(position, html) -- on any receiver, including a chained `document.querySelector(s)`
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === "insertAdjacentHTML" && call.arguments[1]) {
+    return { id: "xss", sinkExpr: "insertAdjacentHTML", args: [call.arguments[1]] };
+  }
+  const domText = calleeText(callee);
+  // DOM-based redirect, ahead of the name-based rules below (`window.open` is no file open)
+  if (domText && (/^(?:(?:window|document|self|top)\.)?location\.(?:assign|replace)$/.test(domText) || domText === "window.open")) {
+    return call.arguments[0] ? { id: "open-redirect", sinkExpr: domText, args: [call.arguments[0]] } : null;
+  }
   const inlineModule = inlineRequireModule(callee);
   const text = calleeText(callee) ?? fluentResponseText(callee) ??
     (inlineModule && ts.isPropertyAccessExpression(callee) ? `${inlineModule}.${callee.name.text}` : null);
@@ -541,7 +579,7 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (text === "res.send" || text === "res.write" || text === "res.end") {
     return call.arguments[0] ? { id: "xss", sinkExpr: text, args: [call.arguments[0]] } : null;
   }
-  if (text === "document.write") {
+  if (text === "document.write" || text === "document.writeln") {
     return { id: "xss", sinkExpr: text, args: call.arguments };
   }
   if (
@@ -3321,9 +3359,18 @@ export function scanAstTaint(
 
     const checkAssignmentForXSS = (node: ts.BinaryExpression, env: Env) => {
       if (node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
+      // DOM-based redirect: `location = x` / `window.location = x` / `location.href = x`
+      const target = node.left.getText();
+      if (/^(?:(?:window|document|self|top)\.)?location(?:\.href)?$/.test(target)) {
+        const m = taintMask(node.right, env);
+        if (m & classOf("open-redirect")) emit("open-redirect", node, sourceLabel(node.right), target, node.right);
+        else if (wasCleared(m, classOf("open-redirect"))) suppressedOut?.push({ id: "open-redirect", line: lineOf(node) });
+        return;
+      }
       if (!ts.isPropertyAccessExpression(node.left)) return;
       const prop = node.left.name.text;
-      if (prop === "innerHTML" || prop === "outerHTML") {
+      // iframe.srcdoc is a whole HTML document
+      if (prop === "innerHTML" || prop === "outerHTML" || prop === "srcdoc") {
         const m = taintMask(node.right, env);
         if (m & classOf("xss")) emit("xss", node, sourceLabel(node.right), `.${prop}`, node.right);
         else if (wasCleared(m, classOf("xss"))) suppressedOut?.push({ id: "xss", line: lineOf(node) });

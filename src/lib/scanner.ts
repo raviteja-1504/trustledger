@@ -1337,8 +1337,12 @@ const XXE_RE = [
   /\b(?:noent|dtdload|resolveExternalEntities|loadExternalEntities)\s*:\s*true\b/i,
   // PHP — DOMDocument::loadXML($xml, LIBXML_NOENT | LIBXML_DTDLOAD). PHP's
   // own libxml constant spelling, distinct from the generic XML_PARSE_*
-  // names above.
-  /LIBXML_NOENT|LIBXML_DTDLOAD/,
+  // names above. libxml >= 2.9 loads no external entity unless asked:
+  // LIBXML_NOENT substitutes them (file:// reads work even with LIBXML_NONET);
+  // LIBXML_DTDLOAD fetches an external DTD, which LIBXML_NONET confines to no network.
+  /LIBXML_NOENT/,
+  /^(?!.*LIBXML_NONET).*LIBXML_DTDLOAD/,
+  /->(?:substituteEntities|resolveExternals)\s*=\s*true\b|libxml_disable_entity_loader\s*\(\s*false\s*\)/,
 ];
 
 // LDAP injection (filter construction with user input)
@@ -2070,6 +2074,66 @@ function findTlsVerificationDisabled(lines: string[]): ScanIndicator[] {
     if (!TLS_VERIFY_OFF_RE.some(re => re.test(line))) continue;
     found.push({ id: "tls-verification-disabled", label: "TLS Verification Disabled", severity: "high", line: i + 1,
       detail: "TLS certificate verification is turned off, so anyone on the network path can impersonate the server -- keep verification on and trust the needed CA instead" });
+  }
+  return found;
+}
+
+// Directory listing switched on: Express serve-index, ASP.NET Core's directory browser, Django / Flask-AutoIndex.
+// (Go's http.FileServer also lists directories, but it is the everyday static-file server: too noisy to flag alone.)
+const DIRECTORY_LISTING_RE = /\bserveIndex\s*\(|\bexpress\.directory\s*\(|\b(?:Use|Add)DirectoryBrowser\s*\(|['"]?show_indexes['"]?\s*[:=]\s*True\b|\bAutoIndex\s*\(\s*app\b/;
+function findDirectoryListing(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !DIRECTORY_LISTING_RE.test(lines[i])) continue;
+    found.push({ id: "directory-listing", label: "Directory Listing Enabled", severity: "medium", line: i + 1,
+      detail: "A directory index is served: anyone can browse the folder's files (backups, logs, keys) -- serve named files only" });
+  }
+  return found;
+}
+
+// `url.includes(allowedUrl)`: an allowlist matched by substring -- https://evil.example/?https://allowed.example passes
+const SUBSTRING_URL_ALLOWLIST_RE = /\b(\w*(?:url|uri|redirect|target|next|return_?to|dest\w*|location|link)\w*)\s*\.\s*(?:includes|indexOf|contains|Contains|IndexOf)\s*\(\s*(\w*(?:allow|white|trusted|safe|permit)\w*)\s*\)/i;
+function findSubstringUrlAllowlist(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = SUBSTRING_URL_ALLOWLIST_RE.exec(lines[i]);
+    if (!m) continue;
+    found.push({ id: "open-redirect", label: "Open Redirect", severity: "medium", line: i + 1,
+      detail: `URL allowlist checked by substring ('${m[1]}' contains '${m[2]}'): a URL that merely mentions an allowed one -- https://evil.example/?${m[2]} -- passes; compare the parsed origin exactly` });
+  }
+  return found;
+}
+
+// Android WebView reading other files / origins from a file:// page
+const WEBVIEW_FILE_ACCESS_RE = /\b(?:set)?[Aa]llow(?:Universal|File)AccessFromFileURLs\s*(?:\(\s*true\s*\)|=\s*true\b)/;
+function findWebViewInsecureSettings(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !WEBVIEW_FILE_ACCESS_RE.test(lines[i])) continue;
+    found.push({ id: "webview-insecure-settings", label: "Insecure WebView Settings", severity: "high", line: i + 1,
+      detail: "The WebView lets a file:// page read other local files or any origin -- one injected page can read app data; keep these off" });
+  }
+  return found;
+}
+
+// `password == "Sup3rSecret!"`: a credential compiled into the code as a comparison (a backdoor login)
+const HARDCODED_CREDENTIAL_COMPARE_RE = /\b\w*(?:password|passwd|pwd|passphrase|secret|api_?key|token)\w*\s*(?:===?|!==?)\s*["']([^"'\s]{6,})["']|\b\w*(?:password|passwd|secret|token)\w*\s*\.\s*equals\s*\(\s*"([^"\s]{6,})"\s*\)/i;
+function findHardcodedCredentialCompare(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = HARDCODED_CREDENTIAL_COMPARE_RE.exec(lines[i]);
+    const value = m?.[1] ?? m?.[2];
+    // placeholders and type / state words are no credential; a credential has a digit or symbol, or is long
+    if (!value || /^(?:password|changeme|undefined|string|number|object|bearer|basic|null|none|true|false)$/i.test(value)) continue;
+    if (!/[\d\W_]/.test(value) && value.length < 12) continue;
+    // `process.env.CRON_SECRET === "dev-cron-secret"`: configuration checked against a known default, to warn --
+    // the opposite of a backdoor; so is any placeholder-looking literal
+    if (/\b(?:process\.env|os\.environ|getenv|ENV\[|System\.getenv|Environment\.GetEnvironmentVariable|config\.)/.test(lines[i])) continue;
+    if (/^(?:dev|test|default|example|sample|demo|local)[-_]|change-?me|placeholder|dummy|example|your[-_]/i.test(value)) continue;
+    found.push({ id: "hardcoded-secret", label: "Hardcoded Secret", severity: "high", line: i + 1,
+      detail: "A credential is compared against a literal in code -- anyone with the binary or the repo can log in with it; check against a stored hash instead" });
   }
   return found;
 }
@@ -6113,6 +6177,20 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  'console.log("login failed for", userName.replace(/[\\r\\n]/g, "_"))',
     cwe: "CWE-117", effort: "low",
   },
+  "directory-listing": {
+    title: "Serve named files, not a browsable index",
+    description: "Remove the directory-index middleware (serve-index, UseDirectoryBrowser, show_indexes) and serve only the files that are meant to be public.",
+    code_before: "app.use('/ftp', serveIndex('ftp'))",
+    code_after:  "app.use('/ftp/:file', serveAllowedFile)",
+    cwe: "CWE-548", effort: "low",
+  },
+  "webview-insecure-settings": {
+    title: "Keep WebView file access off",
+    description: "Leave allowFileAccessFromFileURLs and allowUniversalAccessFromFileURLs false (the default since API 16) and load local content through WebViewAssetLoader.",
+    code_before: "settings.allowUniversalAccessFromFileURLs = true",
+    code_after:  "settings.allowUniversalAccessFromFileURLs = false",
+    cwe: "CWE-749", effort: "low",
+  },
   "format-string": {
     title: "Pass untrusted text as an argument, never as the format",
     description: "Use a constant format string and pass the value through %s, so %n / %x in the input are printed, not interpreted.",
@@ -7133,6 +7211,10 @@ export function analyzeFile(
     ...findEvalExec(codeLines),
     ...findJwtBypass(codeLines),
     ...findTlsVerificationDisabled(codeLines),
+    ...findDirectoryListing(codeLines),
+    ...findSubstringUrlAllowlist(codeLines),
+    ...findWebViewInsecureSettings(codeLines),
+    ...findHardcodedCredentialCompare(codeLines),
     ...findWeakSigningSecret(codeLines),
     ...findWeakSigningSecretPHPHmac(codeLines),
     ...findWeakSigningSecretSplitLine(codeLines),

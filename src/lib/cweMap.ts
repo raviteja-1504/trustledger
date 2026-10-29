@@ -69,6 +69,8 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "header-injection":            { id: "CWE-113",  title: "CRLF Injection in HTTP Headers" },
   "log-injection":               { id: "CWE-117",  title: "Improper Output Neutralization for Logs" },
   "format-string":               { id: "CWE-134",  title: "Use of Externally-Controlled Format String" },
+  "directory-listing":           { id: "CWE-548",  title: "Exposure of Information Through Directory Listing" },
+  "webview-insecure-settings":   { id: "CWE-749",  title: "Exposed Dangerous Method or Function" },
   "buffer-overflow":             { id: "CWE-120",  title: "Buffer Copy without Checking Size of Input" },
   "integer-overflow":            { id: "CWE-789",  title: "Memory Allocation with Excessive Size Value" },
   "use-after-free":              { id: "CWE-416",  title: "Use After Free" },
