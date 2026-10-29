@@ -76,7 +76,7 @@ export type AstTaintPyId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal" | "open-redirect" | "ssti"
   | "xss" | "header-injection" | "nosql-injection" | "ldap-injection" | "xpath-injection" | "redos" | "eval-exec"
   | "insecure-deserialization" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "bola-missing-ownership-check"
-  | "argument-injection" | "xxe" | "trust-boundary";
+  | "argument-injection" | "xxe" | "trust-boundary" | "log-injection";
 
 export interface AstTaintPyFinding {
   id:         AstTaintPyId;
@@ -645,6 +645,8 @@ const DESERIALIZERS_PY = new Set([
   "pickle.loads", "pickle.load", "cPickle.loads", "cPickle.load", "dill.loads", "dill.load", "marshal.loads", "marshal.load",
   "jsonpickle.decode", "shelve.open", "yaml.unsafe_load", "yaml.full_load", "yaml.load_all",
 ]);
+const PY_LOG_METHODS = new Set(["debug", "info", "warning", "warn", "error", "critical", "exception", "fatal", "log"]);
+const PY_LOGGER_RECEIVER_RE = /^(?:logging|(?:self\.|app\.|current_app\.)?_?(?:\w*_)?(?:logger|log|LOGGER|LOG))$/;
 const XSS_RESPONSES_PY = new Set(["Response", "flask.Response", "make_response", "flask.make_response", "HttpResponse", "HTMLResponse", "Markup", "markupsafe.Markup", "mark_safe"]);
 const PATH_FUNCS_PY = new Set([
   "send_file", "os.remove", "os.unlink", "os.rename", "os.listdir", "os.rmdir", "os.makedirs", "os.mkdir", "os.chmod",
@@ -842,6 +844,12 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     // make_response((body, headers)) / make_response((body, status, headers)): only the body is HTML
     const body = first?.type === "tuple" ? first.namedChildren[0] ?? null : first;
     return body ? { id: "xss", sinkExpr: text, args: [body] } : null;
+  }
+  // logging.info / logger.warning / app.logger.error: a CR/LF in a logged string forges a separate log entry
+  // (a dict argument is structured context, rendered with its strings quoted)
+  if (parts.length >= 2 && PY_LOG_METHODS.has(tail) && PY_LOGGER_RECEIVER_RE.test(parts.slice(0, -1).join("."))) {
+    const msgs = positional.filter(a => a.type !== "dictionary");
+    return msgs.length ? { id: "log-injection", sinkExpr: text, args: msgs } : null;
   }
   // response.headers.add/set(name, value)
   if (/\.headers\.(?:add|set|extend|update|setdefault)$/.test(text)) {
@@ -3162,7 +3170,7 @@ const SEVERITY: Record<AstTaintPyId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "timing-attack": "medium", "jwt-none-alg": "critical",
   // Fallback only -- collectBolaFindingsPy always passes a severityOverride (medium for a read-shaped
   // function name, high otherwise), same convention as every other engine's BOLA detector.
-  "bola-missing-ownership-check": "high", "argument-injection": "high", "xxe": "high", "trust-boundary": "medium",
+  "bola-missing-ownership-check": "high", "argument-injection": "high", "xxe": "high", "trust-boundary": "medium", "log-injection": "medium",
 };
 const LABEL: Record<AstTaintPyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -3173,7 +3181,7 @@ const LABEL: Record<AstTaintPyId, string> = {
   "eval-exec": "Arbitrary Code Execution", "insecure-deserialization": "Insecure Deserialization",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)", "argument-injection": "Argument Injection",
-  "xxe": "XML External Entity (XXE)", "trust-boundary": "Trust Boundary Violation",
+  "xxe": "XML External Entity (XXE)", "trust-boundary": "Trust Boundary Violation", "log-injection": "Log Injection",
 };
 
 function isFastApiHandler(fn: SyntaxNode): boolean {

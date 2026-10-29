@@ -86,6 +86,7 @@ import {
   KIND_POSITION_SENSITIVE, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { anchoredPatternClears, delimitedPatternBody } from "./taint/charClass";
+import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { assessSqlInjection, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -101,7 +102,7 @@ export type AstTaintPHPId =
   | "open-redirect" | "insecure-deserialization" | "file-inclusion"
   | "bola-missing-ownership-check" | "header-injection" | "ldap-injection"
   | "nosql-injection" | "xpath-injection"
-  | "eval-exec" | "ssti" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg";
+  | "eval-exec" | "ssti" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg" | "log-injection";
 
 export interface AstTaintPHPFinding {
   id:         AstTaintPHPId;
@@ -355,7 +356,7 @@ const SEVERITY: Record<AstTaintPHPId, "critical" | "high" | "medium"> = {
   "ssrf": "critical", "path-traversal": "critical", "insecure-deserialization": "critical",
   "file-inclusion": "critical", "open-redirect": "medium",
   "bola-missing-ownership-check": "high",
-  "header-injection": "critical", "ldap-injection": "critical",
+  "header-injection": "critical", "ldap-injection": "critical", "log-injection": "medium",
   "nosql-injection": "critical", "xpath-injection": "critical",
   "eval-exec": "critical", "ssti": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical",
@@ -366,7 +367,7 @@ const LABEL: Record<AstTaintPHPId, string> = {
   "insecure-deserialization": "Insecure Deserialization", "file-inclusion": "PHP File Inclusion",
   "open-redirect": "Open Redirect",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
-  "header-injection": "HTTP Header Injection", "ldap-injection": "LDAP Injection",
+  "header-injection": "HTTP Header Injection", "ldap-injection": "LDAP Injection", "log-injection": "Log Injection",
   "nosql-injection": "NoSQL Injection", "xpath-injection": "XPath Injection",
   "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
   "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
@@ -391,6 +392,8 @@ interface EngineCtx {
   filePath: string;
   content: string;
   lines: string[];
+  /** function start offset -> its single-assignment constant locals (see constValuePHP) */
+  constLocals?: Map<number, Map<string, ConstVal>>;
   localFunctions: Map<string, LocalFunction>;
   propagatingParams: PropagatingPHP;
   // function name -> (tainted param index -> classes tainted at the call site)
@@ -481,6 +484,13 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       const cond = node.childForFieldName("condition");
       const cons = node.childForFieldName("body");
       const alt = node.childForFieldName("alternative");
+      // a constant condition: only the arm that runs, the other's taint recorded as cleared
+      const c = cons && alt ? constValuePHP(cond, ctx) : undefined;
+      if (typeof c === "boolean") {
+        const taken = taintMask(c ? cons! : alt!, env);
+        const dead = taintMask(c ? alt! : cons!, env) & ALL & ~taken;
+        return taken | (dead << SHADOW);
+      }
       return (cons ? taintMask(cons, env) : cond ? taintMask(cond, env) : 0) | (alt ? taintMask(alt, env) : 0);
     }
     if (node.type === "match_expression") {
@@ -979,6 +989,9 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // call, discriminated purely by the literal string prefix of the header
     // line (args[0]; $replace and $response_code choose nothing).
     fireArg(/^["']?\s*Location\s*:/i.test(args[0]?.text ?? "") ? "open-redirect" : "header-injection", 0);
+  } else if (fnName === "error_log" || fnName === "syslog") {
+    // error_log($msg) / syslog($priority, $msg): a CR/LF in the message forges a separate log entry
+    fireArg("log-injection", fnName === "syslog" ? 1 : 0);
   } else if (fnName === "ldap_search") {
     // ldap_search($link, $base_dn, $filter) -- confirmed 3-arg positional
     // signature; the filter is args[2], not just "any tainted arg" (the
@@ -1075,6 +1088,9 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
       if (culprit) emit(ctx, "sql-injection", node, culprit.text, methodName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
       else fireArg("sql-injection", 0);
     }
+  } else if (PHP_LOG_METHODS.has(methodName) && /^\$?(?:this->)?_?(?:\w*logger|log)$/i.test(node.namedChildren[0]?.text ?? "")) {
+    // $logger->warning("login failed for " . $user) (PSR-3 / Monolog): the message; a context array is structured
+    fireArg("log-injection", 0);
   } else if (NOSQL_CALL_TAILS.has(methodName)) {
     // ->find($filter[, $options]): the filter document only -- options (projection, sort, limit) query nothing.
     fireArg("nosql-injection", 0);
@@ -1160,6 +1176,29 @@ function checkDynamicCallSink(node: SyntaxNode, fnNode: SyntaxNode, ctx: EngineC
 
 const NUMERIC_CHECK_FUNCTIONS_PHP = new Set(["is_numeric", "ctype_digit", "is_int", "is_integer", "is_long", "is_float", "is_double", "is_bool"]);
 const TERMINATING_CALLS_PHP = new Set(["die", "exit", "abort", "wp_die"]);
+
+// PSR-3 / Monolog logger methods
+const PHP_LOG_METHODS = new Set(["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug", "log", "addInfo", "addWarning", "addError"]);
+
+// ── Constant folding: a condition / switch subject that is a constant of its function ──
+const PHP_SCOPE_RE = /^(?:function_definition|method_declaration|anonymous_function|arrow_function|program)$/;
+/** `$num` -> `num`, 'abc' -> "abc": the shared C-family evaluator's syntax (env keys are bare names too). */
+const phpConstText = (s: string) => s.replace(/'((?:[^'\\]|\\.)*)'/g, (_m, b: string) => `"${b.replace(/"/g, '\\"')}"`).replace(/\$([A-Za-z_]\w*)/g, "$1");
+const PHP_CONST_DECL_RE = /(?<=^|[;{}(])\s*([A-Za-z_]\w*)\s*=(?![=>])\s*([^;]+);/g;
+const phpWriteRe = (name: string) => new RegExp(`(?<![\\w.>$])${name}\\s*(?:[-+*/%.]?=(?![=>])|\\+\\+|--)|(?:\\+\\+|--)\\s*${name}\\b`, "g");
+const PHP_IDENT_RE = /\$[A-Za-z_]\w*/g;
+const PHP_ASSIGN_RE = /\$([A-Za-z_]\w*)\s*=(?![=>])/g;
+
+function constValuePHP(node: SyntaxNode | null | undefined, ctx: EngineCtx): ConstVal | undefined {
+  if (!node) return undefined;
+  let scope: SyntaxNode | null = node.parent;
+  while (scope && !PHP_SCOPE_RE.test(scope.type)) scope = scope.parent;
+  const key = scope ? scope.startIndex : -1;
+  ctx.constLocals ??= new Map();
+  let locals = ctx.constLocals.get(key);
+  if (!locals) ctx.constLocals.set(key, locals = scope ? constLocalsFromText(phpConstText(scope.text), PHP_CONST_DECL_RE, phpWriteRe) : new Map());
+  return evalConstExpr(phpConstText(node.text), n => locals!.get(n));
+}
 
 function isStringLiteralPHP(n: SyntaxNode): boolean {
   if (n.type === "string") return true;
@@ -1557,6 +1596,18 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const branches: Branch[] = [];
         const cond = node.childForFieldName("condition");
         const body = node.childForFieldName("body");
+        // a constant condition (no elseif to weigh): only the arm that runs
+        const alts = node.childrenForFieldName("alternative").filter((a): a is SyntaxNode => !!a);
+        const c0 = alts.every(a => a.type === "else_clause") ? constValuePHP(cond, ctx) : undefined;
+        if (typeof c0 === "boolean") {
+          if (cond) walk(cond, env);
+          const elseBody = alts[0]?.childForFieldName("body") ?? null;
+          const taken = c0 ? body : elseBody;
+          const dead = c0 ? elseBody : body;
+          const term = taken ? walk(taken, env) : false;
+          if (dead) recordPrunedArm(env, dead.text, PHP_IDENT_RE, PHP_ASSIGN_RE);
+          return term;
+        }
         branches.push({
           visitCond: (e) => { if (cond) { walk(cond, e); seedElementKeysPHP(cond, e, taintMask); } },
           guards: () => (cond ? guardsOfConditionPHP(cond, root) : []),
@@ -1678,6 +1729,26 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const subject = inner?.type === "variable_name" ? variableBareName(inner) : null;
         const clauses = (node.childForFieldName("body") ?? node).namedChildren
           .filter(c => c?.type === "case_statement" || c?.type === "default_statement");
+        // switch on a constant: from the matching case through to the next break, when every case value is constant
+        const sv = constValuePHP(inner, ctx);
+        if (sv !== undefined) {
+          const vals = clauses.map(cl => cl!.type === "default_statement" ? "default" : constValuePHP(cl!.childForFieldName("value"), ctx));
+          if (vals.every(v => v !== undefined)) {
+            let idx = vals.findIndex(v => v === sv);
+            if (idx < 0) idx = vals.indexOf("default");
+            const ran = new Set<number>();
+            let term = false;
+            for (let k = idx; k >= 0 && k < clauses.length; k++) {
+              ran.add(k);
+              const value = clauses[k]!.childForFieldName("value");
+              const stmts = clauses[k]!.namedChildren.filter(c => !!c && c.id !== value?.id) as SyntaxNode[];
+              if (walkStmts(stmts, env)) { term = true; break; }
+              if (stmts.some(s => s.type === "break_statement")) break;
+            }
+            clauses.forEach((cl, k) => { if (!ran.has(k)) recordPrunedArm(env, cl!.text, PHP_IDENT_RE, PHP_ASSIGN_RE); });
+            return term;
+          }
+        }
         return walkSwitch(env, clauses.map(cl => {
           const value = cl!.childForFieldName("value");
           const stmts = cl!.namedChildren.filter(c => !!c && c.id !== value?.id);

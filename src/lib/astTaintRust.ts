@@ -276,6 +276,19 @@ const REQUEST_INPUT_METHODS = new Set([
   // lambda_http's RequestExt
   "payload", "query_string_parameters", "path_parameters", "query_string_parameters_ref", "path_parameters_ref", "raw_http_path",
 ]);
+const REQUEST_INPUT_HELPER_RE = /^(?:query|header|param|form|cookie|path_param)_(?:get|value|param|str|string|opt)$/;
+
+/** The argument is (or is bound to) SQL text: `&query` where `let query = format!("SELECT ... {}", x)`. */
+function sqlTextNearby(arg: SyntaxNode, at: SyntaxNode): boolean {
+  const base = arg.type === "reference_expression" ? named(arg)[0] : arg;
+  if (!base) return false;
+  if (/\b(?:SELECT|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b/i.test(base.text)) return true;
+  if (base.type !== "identifier") return false;
+  let fn: SyntaxNode | null = at.parent;
+  while (fn && fn.type !== "function_item" && fn.type !== "closure_expression") fn = fn.parent;
+  return !!fn && new RegExp(`let\\s+(?:mut\\s+)?${base.text}\\b[^;]*?\\b(?:SELECT|INSERT\\s+INTO|UPDATE\\s+\\w+\\s+SET|DELETE\\s+FROM)\\b`, "is").test(fn.text);
+}
+
 /** warp filters whose output is what the client sent; a handler fed by them (`.and_then(handler)`) gets it as params. */
 const WARP_INPUT_RE = /warp::(?:path::param|path::tail|path::full|query|body::json|body::form|body::bytes|body::stream|header|cookie|filters::query|multipart::form|ws)\b|warp::path!/;
 /** Fields that let a client grant themselves something when a request body is saved as-is. */
@@ -644,7 +657,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     const fullPath = path ? resolvePath(path, ctx) : null;
 
     // request accessors: req.headers() / req.match_info() / request.uri()
-    if (recv && REQUEST_INPUT_METHODS.has(name) && isRequestValue(recv, env, ctx)) return ALL;
+    // an app's own request type read through `query_get` / `header_value` / `form_param`-style helpers too
+    if (recv && (REQUEST_INPUT_METHODS.has(name) || REQUEST_INPUT_HELPER_RE.test(name)) && isRequestValue(recv, env, ctx)) return ALL;
     // m.get("k") on a map written under literal keys: what was stored under "k" (plus the map itself), not its other keys
     if (recv && /^(?:get|get_mut|remove)$/.test(name)) {
       const kc = literalKeyCall(node);
@@ -1542,6 +1556,10 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (full && DIESEL_SQL_FNS.test(full) && /diesel/.test(full + ctx.content.slice(0, 4000)) && args[0]) checkSql(ctx, node, args[0], env, mask, two || full);
   if (full && /(?:^|::)Statement::from_string$/.test(full) && args[1]) checkSql(ctx, node, args[1], env, mask, "Statement::from_string");
   if (recv && DB_METHODS.has(name) && args[0] && isDbReceiver(recv, ctx)) checkSql(ctx, node, args[0], env, mask, `${recvText.split(".").pop()}.${name}`);
+  // a store's own query helper (`db.query_users(&sql)`): SQL when the argument is SQL text built in this function
+  else if (recv && /^(?:query|execute|exec|run)_\w+$/.test(name) && args[0] && isDbReceiver(recv, ctx) && sqlTextNearby(args[0], node)) {
+    checkSql(ctx, node, args[0], env, mask, `${recvText.split(".").pop()}.${name}`);
+  }
   if (recv && name === "push" && args[0] && /QueryBuilder/.test(ctx.varTypes.get(unwrapExpr(recv).text) ?? chainText(recv))) checkSql(ctx, node, args[0], env, mask, "QueryBuilder.push");
 
   // ── Command ──

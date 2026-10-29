@@ -118,3 +118,41 @@ describe("C# log injection", () => {
     expect(log(`_logger.LogWarning("Failed: " + int.Parse(data));`)).toBe(false);
   });
 });
+
+describe("C# System.Web response sinks, code generation and reflection", () => {
+  const cs = (body: string) => `using System.Web;\nclass C : AbstractTestCaseWeb\n{\n    public override void Bad(HttpRequest req, HttpResponse resp)\n    {\n        string data = req.Params.Get("name");\n${body}\n    }\n}\n`;
+  const ids = (body: string) => scan([["C.cs", cs(body)]]).files[0].indicators.filter(i => !!i.sourceExpr).map(i => i.id);
+  it("resp.Write / StatusDescription (XSS), AddHeader / new HttpCookie (header splitting)", () => {
+    expect(ids(`        resp.Write("<br>data = " + data);`)).toContain("xss");
+    expect(ids(`        resp.StatusDescription = "<br>value " + data;`)).toContain("xss");
+    expect(ids(`        resp.AddHeader("Location", "/author.jsp?lang=" + data);`)).toContain("header-injection");
+    expect(ids(`        HttpCookie c = new HttpCookie("lang", data);\n        resp.AppendCookie(c);`)).toContain("header-injection");
+    expect(ids(`        resp.Write("<br>constant");`)).not.toContain("xss");
+    expect(ids(`        other.Write(data);`)).not.toContain("xss");
+  });
+  it("CompileAssemblyFromSource and Activator.CreateInstance(assembly, typeName)", () => {
+    expect(ids(`        var provider = CodeDomProvider.CreateProvider("CSharp");\n        var cr = provider.CompileAssemblyFromSource(new CompilerParameters(), "class X { int Y = " + data + "; }");`)).toContain("eval-exec");
+    expect(ids(`        var container = Activator.CreateInstance(null, data);`)).toContain("eval-exec");
+    expect(ids(`        var container = Activator.CreateInstance(null, "Testing.test");`)).not.toContain("eval-exec");
+  });
+});
+
+describe("Java network input", () => {
+  const java = (decl: string, read: string) => `import java.io.*;\nimport java.net.*;\npublic class N {\n    public void bad() throws Exception {\n        ${decl}\n        BufferedReader r = new BufferedReader(new InputStreamReader(${read}.getInputStream(), "UTF-8"));\n        String data = r.readLine();\n        Runtime.getRuntime().exec("ls " + data);\n    }\n}\n`;
+  const cmd = (code: string) => scan([["N.java", code]]).files[0].indicators.some(i => i.id === "command-injection" && !!i.sourceExpr);
+  it("Socket / URLConnection input streams are request-like input", () => {
+    expect(cmd(java(`Socket socket = new Socket("host.example.org", 39544);`, "socket"))).toBe(true);
+    expect(cmd(java(`URLConnection urlConnection = (new URL("http://www.example.org/")).openConnection();`, "urlConnection"))).toBe(true);
+    expect(cmd(java(`Process proc = Runtime.getRuntime().exec("id");`, "proc"))).toBe(false);
+  });
+});
+
+describe("cross-file facts of several kinds at one call", () => {
+  it("a callee that both logs and renders its parameter reports both at the caller", () => {
+    const svc = `import javax.servlet.http.*;\npublic class Svc {\n    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(Svc.class);\n    public void greet(String name, HttpServletResponse response) throws Exception {\n        log.info("greeting " + name);\n        response.getWriter().println("<p>" + name + "</p>");\n    }\n}\n`;
+    const ctl = `import javax.servlet.http.*;\npublic class Ctl extends HttpServlet {\n    private Svc svc = new Svc();\n    public void doGet(HttpServletRequest request, HttpServletResponse response) throws Exception {\n        String n = request.getParameter("n");\n        svc.greet(n, response);\n    }\n}\n`;
+    const r = scan([["Svc.java", svc], ["Ctl.java", ctl]]);
+    const at = r.files.find(f => f.file_path === "Ctl.java")!.indicators.filter(i => i.line === 6 && !!i.sourceExpr).map(i => i.id).sort();
+    expect(at).toEqual(["log-injection", "xss"]);
+  });
+});

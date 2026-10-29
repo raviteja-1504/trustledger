@@ -87,7 +87,8 @@ export function removesLineBreaks(body: string): boolean {
   if (grp) b = grp[1];
   const singles = new Set<string>();
   for (const alt of b.split("|")) {
-    if (/^\[(?:\\[rn0])+\]$/.test(alt)) for (const m of alt.matchAll(/\\([rn0])/g)) singles.add(m[1]);
+    // a class may also take the other control whitespace (`[\r\n\t]`)
+    if (/^\[(?:\\[rn0tfv])+\]$/.test(alt)) for (const m of alt.matchAll(/\\([rn0])/g)) singles.add(m[1]);
     else if (!/^(?:\\[rn0])+$/.test(alt)) return false;
     else if (alt.length === 2) singles.add(alt[1]);
   }

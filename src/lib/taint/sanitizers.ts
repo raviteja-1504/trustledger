@@ -77,6 +77,11 @@ const TABLES: Record<SanitizerLang, Table> = {
       "strconv.ParseFloat": NUMERIC, "strconv.ParseBool": NUMERIC,
       // a parsed IP is digits, dots and colons: no injection syntax -- but still a network destination
       "net.ParseIP": NUMERIC & ~C.SSRF,
+      // strconv.Quote escapes CR/LF; replacing "\n" (or "\r") with text free of line breaks -- CodeQL's Go
+      // log-injection sanitizer: the two are usually chained, each step accepted on its own
+      "strconv.Quote": C.HEADER, "strconv.QuoteToASCII": C.HEADER,
+      "strings.ReplaceAll": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
+      "strings.Replace": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
     },
     tail: {},
   },
@@ -157,11 +162,22 @@ const TABLES: Record<SanitizerLang, Table> = {
       "Rack::Utils.escape": URL_SAFE, "Rack::Utils.escape_path": URL_SAFE,
       "Integer": NUMERIC, "Float": NUMERIC, "Rational": NUMERIC, "Complex": NUMERIC, "BigDecimal": NUMERIC,
       // These return a complete, safely quoted SQL fragment (a literal, not an escaped substring).
+      "JSON.generate": C.HEADER, "JSON.dump": C.HEADER,
       "ActiveRecord::Base.sanitize_sql": C.SQL, "ActiveRecord::Base.sanitize_sql_array": C.SQL,
       "sanitize_sql": C.SQL, "sanitize_sql_array": C.SQL, "sanitize_sql_for_conditions": C.SQL,
     },
     // connection.quote / ActiveRecord::Base.connection.quote / conn.quote_string
-    tail: { quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL },
+    tail: {
+      quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL,
+      // s.gsub(/[\r\n]/, "_") / s.delete("\r\n"): no line break left -- one header line, one log entry
+      gsub: (_callee, args) => {
+        const body = /^\/(.*)\/[a-z]*$/s.exec((args[0] ?? "").trim())?.[1];
+        return body !== undefined && removesLineBreaks(body) && !/\\[rn]/.test(args[1] ?? "") ? C.HEADER : 0;
+      },
+      delete: (_callee, args) => (/\\r/.test(args[0] ?? "") && /\\n/.test(args[0] ?? "") ? C.HEADER : 0),
+      // a quoted / JSON rendering escapes CR and LF
+      inspect: C.HEADER, to_json: C.HEADER,
+    },
   },
   // Kotlin runs on the JVM and calls the same libraries: Java's tail table, plus JVM/Kotlin calls whose tail alone
   // is too generic to trust (`encode`, `fromString`, `getName`, `clean`). Receiver conversions (x.toInt()) are

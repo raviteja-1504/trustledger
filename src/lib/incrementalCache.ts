@@ -39,7 +39,10 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 13: NodeGoat / DVC / DVPWA / Juliet: JS log injection, constant-regex ReDoS, HTTP client packages and require()
 //     bindings, block comments and HTML samples skipped by the line rules, C# conventional actions, Sinatra route
 //     bodies, aiohttp sources, literal DB credentials, Java methods called from another file not seeded as entries.
-export const SCAN_CACHE_VERSION = 13;
+// 14: constant folding in C#/PHP/Ruby/Kotlin, log injection in every engine (with CR/LF sanitizers), C# System.Web
+//     response / cookie / CodeDom / reflection sinks, Java socket and URLConnection input, Rust request helpers and
+//     store query helpers, secrets formatted into multi-line log calls.
+export const SCAN_CACHE_VERSION = 14;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

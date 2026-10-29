@@ -66,6 +66,7 @@ import {
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { anchoredPatternClears } from "./taint/charClass";
+import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
@@ -517,6 +518,7 @@ const CSHARP_SIMPLE_TYPE_RE = /^(?:string|int|long|short|byte|bool|double|float|
 const RAW_SOURCE_MEMBER_TAILS = new Set(["Query", "Form", "Headers", "Cookies", "QueryString", "Params", "ServerVariables"]);
 // `HttpRequest req` / `HttpRequestBase request` (System.Web, MVC 5) / `HttpRequest request` (ASP.NET Core)
 const REQUEST_DECL_RE = /\b(?:HttpRequest|HttpRequestBase|HttpRequestWrapper)\s+([A-Za-z_]\w*)\s*[,)=;]/g;
+const RESPONSE_DECL_RE = /\b(?:HttpResponse|HttpResponseBase|HttpResponseWrapper)\s+([A-Za-z_]\w*)\s*[,)=;]/g;
 
 function isTaintSourceExprCSharp(node: SyntaxNode, requestNames?: ReadonlySet<string>): boolean {
   // The receiver: the Web Forms / controller `Request` property, or a name declared as a request
@@ -621,6 +623,10 @@ interface EngineCtx {
   classFieldNames: Set<string>;
   /** Names declared with a request type (`HttpRequest req`): their QueryString / Form / Params / Cookies are input. */
   requestNames?: Set<string>;
+  /** Names declared with a response type (`HttpResponse resp`): Write / AddHeader / StatusDescription are sinks. */
+  responseNames?: Set<string>;
+  /** method start offset -> its single-assignment constant locals (see constValueCS) */
+  constLocals?: Map<number, Map<string, ConstVal>>;
 }
 
 function emit(
@@ -690,6 +696,13 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       // the condition steers control, it does not flow into the value
       const cons = node.childForFieldName("consequence");
       const alt = node.childForFieldName("alternative");
+      // a constant condition: only the arm that runs, the other's taint recorded as cleared
+      const c = constValueCS(node.childForFieldName("condition"), ctx);
+      if (typeof c === "boolean") {
+        const taken = (c ? cons : alt) ? taintMask((c ? cons : alt)!, env) : 0;
+        const dead = ((c ? alt : cons) ? taintMask((c ? alt : cons)!, env) : 0) & ALL & ~taken;
+        return taken | (dead << SHADOW);
+      }
       return (cons ? taintMask(cons, env) : 0) | (alt ? taintMask(alt, env) : 0);
     }
     if (node.type === "switch_expression") {
@@ -1173,8 +1186,14 @@ function checkCallSink(
     checkProcessArgsCS(args, argMasks, (id, idx) => fireArgs(id, [idx]));
   } else if (tail === "Raw" && owner === "Html") {
     fire("xss");
-  } else if ((tail === "Write" || tail === "WriteAsync") && (owner === "Response" || owner === "Body")) {
+  } else if ((tail === "Write" || tail === "WriteAsync") && (owner === "Response" || owner === "Body" || !!ctx.responseNames?.has(owner))) {
     fire("xss");
+  } else if ((tail === "AddHeader" || tail === "AppendHeader") && (owner === "Response" || !!ctx.responseNames?.has(owner))) {
+    // System.Web HttpResponse.AddHeader(name, value): a CR/LF in either splits the response
+    fireArgs("header-injection", [0, 1]);
+  } else if (tail === "CompileAssemblyFromSource" || tail === "CompileAssemblyFromDom") {
+    // CodeDomProvider.CompileAssemblyFromSource(parameters, source...): the source is compiled and run
+    fireArgs("eval-exec", args.map((_, i) => i).slice(1));
   } else if (tail === "Content" || (owner === "Results" && tail === "Text")) {
     // ControllerBase.Content(html, contentType) -- ASP.NET Core's
     // return-raw-HTML helper. Bare call (no rootVar prefix beyond
@@ -1225,7 +1244,9 @@ function checkCallSink(
     // An anonymous object (`new { user }`) is structured context, serialized with its strings quoted.
     fireArgs("log-injection", args.map((_, i) => i).filter(i => args[i].type !== "anonymous_object_creation_expression"));
   } else if (CS_EVAL_OWNERS.has(owner) && CS_EVAL_TAILS.has(tail) && args[0]) {
-    fire("eval-exec", argMasks[0] ?? 0, args[0].text);
+    // Activator.CreateInstance(assemblyName, typeName): either names what gets instantiated
+    if (tail === "CreateInstance" || tail === "CreateInstanceFrom") fireArgs("eval-exec", args.map((_, i) => i).slice(0, 2));
+    else fire("eval-exec", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Invoke" && reflective) {
     fire("eval-exec", taintMask(receiver!, env), receiver!.text);
   } else if (tail === "SetValue" && reflective) {
@@ -1292,6 +1313,8 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   else if (className === "HtmlString") fire("xss", 0);
   else if (className === "Regex") fire("redos", 0);
   else if (className === "DirectorySearcher" || className === "SearchRequest") fire("ldap-injection", 0);
+  // new HttpCookie(name, value): both go into a Set-Cookie header -- a CR/LF splits the response
+  else if (className === "HttpCookie") { if (argMasks[0] & classOf("header-injection")) fire("header-injection", 0); else if (args[1]) fire("header-injection", 1); }
   else if ((className === "FileStream" || className === "StreamReader" || className === "StreamWriter" || className === "FileInfo" || className === "DirectoryInfo")
            && args[0] && !/(?:^|\.)Request\.Body$|Stream\b/.test(args[0].text)) fire("path-traversal", 0);
 }
@@ -1429,6 +1452,24 @@ function lastAssignmentCS(name: string, at: SyntaxNode): SyntaxNode | null {
 }
 
 /** A value built only from constants: literals, `const` locals, `+` of those, locals bound only to those. */
+// ── Constant folding: a condition / switch subject that is a compile-time constant of its method ──
+const CS_SCOPE_RE = /^(?:method_declaration|constructor_declaration|local_function_statement|lambda_expression|accessor_declaration)$/;
+const CS_CONST_DECL_RE = /(?<=^|[;{}(])\s*(?:const\s+)?(?:int|long|short|byte|char|string|String|bool|double|float|decimal|var)\s+([A-Za-z_]\w*)\s*=\s*([^;]+);/g;
+const csWriteRe = (name: string) => new RegExp(`(?<![\\w.])${name}\\s*(?:[-+*/%]?=(?!=)|\\+\\+|--)|(?:\\+\\+|--)\\s*${name}\\b`, "g");
+const CS_IDENT_RE = /[A-Za-z_]\w*/g;
+const CS_ASSIGN_RE = /(?<![\w.])([A-Za-z_]\w*)\s*=(?!=)/g;
+
+function constValueCS(node: SyntaxNode | null | undefined, ctx: EngineCtx): ConstVal | undefined {
+  if (!node) return undefined;
+  let scope: SyntaxNode | null = node.parent;
+  while (scope && !CS_SCOPE_RE.test(scope.type)) scope = scope.parent;
+  const key = scope ? scope.startIndex : -1;
+  ctx.constLocals ??= new Map();
+  let locals = ctx.constLocals.get(key);
+  if (!locals) ctx.constLocals.set(key, locals = scope ? constLocalsFromText(scope.text, CS_CONST_DECL_RE, csWriteRe) : new Map());
+  return evalConstExpr(node.text, n => locals!.get(n));
+}
+
 const CS_CONSTANT_PRESERVING_METHODS = new Set(["Split", "Trim", "TrimStart", "TrimEnd", "ToLower", "ToUpper", "ToLowerInvariant", "ToUpperInvariant", "Substring", "Replace", "ToString"]);
 
 function provenConstantCS(n: SyntaxNode | null, at: SyntaxNode, depth = 0): boolean {
@@ -1687,6 +1728,17 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         return walkStmts(node.namedChildren, env);
 
       case "if_statement": {
+        // `if ((7 * 42) - num > 200)` with `int num = 86`: only the arm that runs
+        const c0 = constValueCS(node.childForFieldName("condition"), ctx);
+        if (typeof c0 === "boolean") {
+          const cond0 = node.childForFieldName("condition");
+          if (cond0) walk(cond0, env);
+          const taken = node.childForFieldName(c0 ? "consequence" : "alternative");
+          const dead = node.childForFieldName(c0 ? "alternative" : "consequence");
+          const term = taken ? walk(taken, env) : false;
+          if (dead) recordPrunedArm(env, dead.text, CS_IDENT_RE, CS_ASSIGN_RE);
+          return term;
+        }
         const branches: Branch[] = [];
         let cur: SyntaxNode | null = node;
         while (cur && cur.type === "if_statement") {
@@ -1713,6 +1765,13 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         const cond = node.childForFieldName("condition");
         const cons = node.childForFieldName("consequence");
         const alt = node.childForFieldName("alternative");
+        const c = constValueCS(cond, ctx);
+        if (typeof c === "boolean") {
+          if (cond) walk(cond, env);
+          const taken = c ? cons : alt;
+          if (taken) walk(taken, env);
+          return false;
+        }
         walkIfChain(env, [
           {
             visitCond: (e) => { if (cond) walk(cond, e); },
@@ -1800,6 +1859,21 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         if (value) walk(value, env);
         const subject = value?.type === "identifier" ? value.text : null;
         const sections = (node.childForFieldName("body") ?? node).namedChildren.filter(c => c?.type === "switch_section");
+        // switch on a constant: only the matching section (C# sections don't fall through), when every label is a constant
+        const sv = constValueCS(value, ctx);
+        if (sv !== undefined) {
+          const labelsOf = (sec: SyntaxNode) => sec.namedChildren.filter((c): c is SyntaxNode => !!c && SWITCH_LABELS_CS.has(c.type));
+          const vals = sections.map(sec => labelsOf(sec!).map(l => l.type === "default_switch_label" ? "default" : constValueCS(l.namedChildren[0], ctx)));
+          if (vals.every(vs => vs.every(v => v !== undefined))) {
+            let idx = vals.findIndex(vs => vs.includes(sv));
+            if (idx < 0) idx = vals.findIndex(vs => vs.includes("default"));
+            const stmtsOf = (sec: SyntaxNode) => sec.namedChildren.filter(c => !!c && !SWITCH_LABELS_CS.has(c.type)) as SyntaxNode[];
+            const term = idx >= 0 ? walkStmts(stmtsOf(sections[idx]!), env) : false;
+            // after the taken section, so its own assignments can't overwrite what the dead ones prove
+            sections.forEach((sec, k) => { if (k !== idx) recordPrunedArm(env, stmtsOf(sec!).map(s => s.text).join("\n"), CS_IDENT_RE, CS_ASSIGN_RE); });
+            return term;
+          }
+        }
         return walkSwitch(env, sections.map(sec => {
           const labels = sec!.namedChildren.filter((c): c is SyntaxNode => !!c && SWITCH_LABELS_CS.has(c.type));
           const stmts = sec!.namedChildren.filter(c => !!c && !SWITCH_LABELS_CS.has(c.type));
@@ -1901,7 +1975,10 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
           const rootId = rootIdentCS(left);
           if (rootId) recordFieldStickyCS(rootId.text, mask, ctx, rootId);
           // cmd.CommandText = tainted, psi.FileName / psi.Arguments = tainted: property-setter sinks
+          const setterRoot = rootId?.text ?? "";
           const setterSink = key.endsWith(".CommandText") ? "sql-injection" as const
+            // resp.StatusDescription = "..." + input: rendered on the error page as HTML
+            : key.endsWith(".StatusDescription") && (setterRoot === "Response" || !!ctx.responseNames?.has(setterRoot)) ? "xss" as const
             : ((key.endsWith(".FileName") || key.endsWith(".Arguments")) && rootId &&
                 (ctx.varTypes.get(rootId.text) === "ProcessStartInfo" ||
                  (ctx.varTypes.get(rootId.text) === "Process" && /\.StartInfo\.(?:FileName|Arguments)$/.test(key)))) ? "command-injection" as const
@@ -2318,6 +2395,7 @@ function makeCSharpCtx(
     sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     crossFileFacts,
     requestNames: new Set([...content.matchAll(REQUEST_DECL_RE)].map(m => m[1])),
+    responseNames: new Set([...content.matchAll(RESPONSE_DECL_RE)].map(m => m[1])),
   };
   return { ctx, localMethods };
 }

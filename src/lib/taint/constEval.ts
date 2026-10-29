@@ -6,7 +6,43 @@
  * Returns undefined for anything it can't prove; a caller then keeps both arms, exactly as before.
  */
 
+import { ALL, SHADOW } from "./taintCore";
+
 export type ConstVal = number | string | boolean;
+
+/**
+ * Locals of one function assigned exactly once, from a constant expression. `declRe` matches a declaration or
+ * assignment with groups (1) the name and (2) the initializer text; a name written anywhere else
+ * (`writeRe(name)` counts every write, the declaration included) is not a constant. Shared by the tree-sitter
+ * engines (C#, PHP, Ruby, Kotlin), which hand in their function's source text.
+ */
+export function constLocalsFromText(text: string, declRe: RegExp, writeRe: (name: string) => RegExp): Map<string, ConstVal> {
+  const out = new Map<string, ConstVal>();
+  for (const m of text.matchAll(declRe)) {
+    const name = m[1];
+    if (out.has(name) || (text.match(writeRe(name))?.length ?? 0) !== 1) continue;
+    const v = evalConstExpr(m[2], n => out.get(n));
+    if (v !== undefined) out.set(name, v);
+  }
+  return out;
+}
+
+/**
+ * A never-run arm (constant condition) that would have assigned tainted data: each variable it assigns
+ * (`assignRe` group 1) is positively proven not to hold that data here, so those classes are recorded as cleared
+ * -- the sink then vetoes the regex layer's duplicate exactly as for a sanitizer. `idRe` finds the arm's
+ * variable references (whose taint it would have copied).
+ */
+export function recordPrunedArm(env: Map<string, number>, armText: string, idRe: RegExp, assignRe: RegExp): void {
+  let m = 0;
+  for (const id of armText.match(idRe) ?? []) m |= env.get(id.replace(/^\$/, "")) ?? env.get(id) ?? 0;
+  m &= ALL;
+  if (!m) return;
+  for (const a of armText.matchAll(assignRe)) {
+    const cur = env.get(a[1]) ?? 0;
+    env.set(a[1], cur | ((m & ~cur & ALL) << SHADOW));
+  }
+}
 
 const TOKEN_RE = /\s+|(\d+(?:\.\d+)?)[LlFfDd]?|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.))'|([A-Za-z_]\w*)|(&&|\|\||[<>=!]=|[-+*/%()<>!.,])/y;
 

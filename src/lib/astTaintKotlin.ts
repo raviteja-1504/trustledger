@@ -51,6 +51,7 @@ import {
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 import { astTaintJavaLabel, astTaintJavaSeverity, type AstTaintJavaId } from "./astTaintJava";
@@ -455,11 +456,40 @@ interface LocalFn {
 }
 type TaintMaskFn = (node: SyntaxNode, env: Env) => number;
 
+// SLF4J / Log4j / kotlin-logging / java.util.logging write methods, on a receiver named like a logger
+const KT_LOG_TAILS = new Set(["trace", "debug", "info", "warn", "error", "fatal", "severe", "warning", "log"]);
+const KT_LOGGER_RE = /^_?(?:\w*[Ll]ogger|[Ll]og|LOG|LOGGER)$/;
+
+// ── Constant folding: a condition / when subject that is a constant of its function ──
+const KT_SCOPE_RE = /^(?:function_declaration|secondary_constructor|anonymous_function|lambda_literal|getter|setter|source_file)$/;
+/** `guess[1]` -> `guess.charAt(1)`: the shared evaluator's syntax; a "${...}" template is never a constant. */
+function ktConstText(source: string): string {
+  const noTemplates = source.replace(/\$\{/g, "\u0001").replace(/\$([A-Za-z_])/g, "\u0001$1");
+  return noTemplates.replace(/\b([A-Za-z_]\w*)\[(\d+)\]/g, "$1.charAt($2)");
+}
+const KT_CONST_DECL_RE = /(?<=^|\n|;|\{)\s*(?:val|var)\s+([A-Za-z_]\w*)\s*(?::\s*[\w?]+)?\s*=\s*([^\n;]+)/g;
+const ktWriteRe = (name: string) => new RegExp(`(?<![\\w.])${name}\\s*(?::\\s*[\\w?]+\\s*)?(?:[-+*/%]?=(?!=)|\\+\\+|--)|(?:\\+\\+|--)\\s*${name}\\b`, "g");
+const KT_IDENT_RE = /[A-Za-z_]\w*/g;
+const KT_ASSIGN_RE = /(?<![\w.])([A-Za-z_]\w*)\s*=(?!=)/g;
+
+function constValueKt(node: SyntaxNode | null | undefined, ctx: EngineCtx): ConstVal | undefined {
+  if (!node) return undefined;
+  let scope: SyntaxNode | null = node.parent;
+  while (scope && !KT_SCOPE_RE.test(scope.type)) scope = scope.parent;
+  const key = scope ? scope.startIndex : -1;
+  ctx.constLocals ??= new Map();
+  let locals = ctx.constLocals.get(key);
+  if (!locals) ctx.constLocals.set(key, locals = scope ? constLocalsFromText(ktConstText(scope.text), KT_CONST_DECL_RE, ktWriteRe) : new Map());
+  return evalConstExpr(ktConstText(node.text), n => locals!.get(n));
+}
+
 interface EngineCtx {
   filePath: string;
   content: string;
   lines: string[];
   root: SyntaxNode;
+  /** function start offset -> its single-assignment constant locals (see constValueKt) */
+  constLocals?: Map<number, Map<string, ConstVal>>;
   fns: Map<string, LocalFn>;
   propagating: Map<string, Map<number, number>>;
   intrinsic: Map<string, number>;
@@ -587,11 +617,31 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         const cond = named(node).find(k => k.type !== "control_structure_body");
         const guards = cond ? guardsOf(cond, ctx.root) : [];
         const bodies = childrenOfType(node, "control_structure_body");
+        // a constant condition: only the arm that runs, the other's taint recorded as cleared
+        const k0 = bodies.length === 2 ? constValueKt(cond, ctx) : undefined;
+        if (typeof k0 === "boolean") {
+          const taken = valueMask(bodies[k0 ? 0 : 1], env);
+          return taken | ((valueMask(bodies[k0 ? 1 : 0], env) & ALL & ~taken) << SHADOW);
+        }
         return bodies.reduce((m, b, i) => m | valueMask(b, guarded(env, guards.filter(g => g.holds === (i === 0 ? "true" : "false")))), 0);
       }
       case "when_expression": {
         const subject = childOfType(node, "when_subject");
         const subjectName = guardName(named(subject).find(k => k.type !== "variable_declaration"));
+        // when on a constant: the matching entry's value, the others' taint recorded as cleared
+        const subjExpr = named(subject).find(k => k.type !== "variable_declaration");
+        const sv = subjExpr && !childOfType(subject, "variable_declaration") ? constValueKt(subjExpr, ctx) : undefined;
+        if (sv !== undefined) {
+          const entries = childrenOfType(node, "when_entry");
+          const vals = entries.map(e => childrenOfType(e, "when_condition").map(c => constValueKt(c, ctx)));
+          if (vals.every(vs => vs.every(v => v !== undefined))) {
+            let idx = vals.findIndex(vs => vs.includes(sv));
+            if (idx < 0) idx = vals.findIndex(vs => vs.length === 0);
+            const taken = idx >= 0 ? valueMask(childOfType(entries[idx], "control_structure_body"), env) : 0;
+            const dead = entries.reduce((m, e, i) => (i === idx ? m : m | valueMask(childOfType(e, "control_structure_body"), env)), 0);
+            return taken | ((dead & ALL & ~taken) << SHADOW);
+          }
+        }
         return childrenOfType(node, "when_entry").reduce((m, e) => {
           const conds = childrenOfType(e, "when_condition");
           const literalArm = !!subjectName && conds.length > 0 && conds.every(c => whenConditionIsLiteral(c, ctx.root));
@@ -974,6 +1024,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     const kids = named(node);
     const cond = kids.find(k => k.type !== "control_structure_body") ?? null;
     const bodies = childrenOfType(node, "control_structure_body");
+    // a constant condition: only the arm that runs
+    const k0 = constValueKt(cond, ctx);
+    if (typeof k0 === "boolean") {
+      if (cond) walk(cond, env);
+      const taken = k0 ? bodies[0] : bodies[1];
+      const dead = k0 ? bodies[1] : bodies[0];
+      const term = taken ? walk(taken, env) : false;
+      if (dead) recordPrunedArm(env, dead.text, KT_IDENT_RE, KT_ASSIGN_RE);
+      return term;
+    }
     const branches: Branch[] = [branch(cond, bodies[0] ?? null)];
     if (bodies[1]) branches.push({ body: (e) => walk(bodies[1], e) });
     return walkIfChain(env, branches);
@@ -1087,6 +1147,20 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
             const cond = conds.length === 1 ? named(conds[0])[0] ?? null : null;
             return branch(cond, body);
           }));
+        }
+        // when on a constant: only the matching entry (no fall-through), when every condition is a constant
+        const sv = subjectDecl ? undefined : constValueKt(subjectExpr, ctx);
+        if (sv !== undefined) {
+          const vals = entries.map(e => childrenOfType(e, "when_condition").map(c => constValueKt(c, ctx)));
+          if (vals.every(vs => vs.every(v => v !== undefined))) {
+            let idx = vals.findIndex(vs => vs.includes(sv));
+            if (idx < 0) idx = vals.findIndex(vs => vs.length === 0);
+            const takenBody = idx >= 0 ? childOfType(entries[idx], "control_structure_body") : null;
+            const term = takenBody ? walk(takenBody, env) : false;
+            // after the taken entry, so its own assignments can't overwrite what the dead ones prove
+            entries.forEach((e, i) => { const b = childOfType(e, "control_structure_body"); if (i !== idx && b) recordPrunedArm(env, b.text, KT_IDENT_RE, KT_ASSIGN_RE); });
+            return term;
+          }
         }
         return walkSwitch(env, entries.map(e => {
           const conds = childrenOfType(e, "when_condition");
@@ -1460,6 +1534,11 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const key = stringValue(pos[0]);
     if (key && /^location$/i.test(key)) checkRedirectTarget(ctx, node, pos[1], env, mask, `${name}("Location")`);
     else if (key && HTTP_HEADER_NAME_RE.test(key)) fireOn(ctx, "header-injection", node, pos[1], mask(pos[1], env), `${name}("${key}")`);
+  }
+
+  // ── Log injection: log.warn("login failed for $user") -- a CR/LF in it forges a separate entry ──
+  if (recv && KT_LOG_TAILS.has(name) && KT_LOGGER_RE.test(recvText.split(".").pop() ?? "")) {
+    for (const a of pos) if (fireOn(ctx, "log-injection", node, a, mask(a, env), `${recvText}.${name}`)) break;
   }
 
   // ── Deserialization ──

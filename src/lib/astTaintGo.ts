@@ -74,7 +74,10 @@ export type AstTaintGoId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "idor"
   | "xss" | "header-injection" | "redos" | "ssti" | "eval-exec" | "mass-assignment" | "nosql-injection"
-  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto" | "argument-injection";
+  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto" | "argument-injection" | "log-injection";
+
+const GO_LOG_TAILS_RE = /^(?:Print|Printf|Println|Fatal|Fatalf|Fatalln|Panic|Panicf|Panicln|Info|Infof|Infow|Warn|Warnf|Warnw|Warning|Warningf|Error|Errorf|Errorw|Debug|Debugf|Debugw|Trace|Tracef)$/;
+const GO_LOGGER_RE = /^(?:log|logger|\w*[Ll]ogger|sugar|logrus|klog|glog)$/;
 
 export interface AstTaintGoFinding {
   id:         AstTaintGoId;
@@ -603,6 +606,14 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     return { id: "xss", sinkExpr: text, args: args.slice(-1) };
   }
   if (/^template\.(?:HTML|JS|JSStr|URL|CSS|HTMLAttr)$/.test(text) && args[0]) return { id: "xss", sinkExpr: text, args: [args[0]] };
+  // log.Printf("login failed for %s", user): a CR/LF in it forges a separate entry (zap/slog/zerolog fields are structured)
+  if (GO_LOG_TAILS_RE.test(tail) && GO_LOGGER_RE.test(receiverText)) {
+    // log.Printf("user=%q", u): %q quotes (escapes CR/LF); only %s / %v verbs print a value raw
+    const verbs = args[0]?.type === "interpreted_string_literal" ? args[0].text.match(/%[-+# 0-9.*]*[a-zA-Z]/g) ?? [] : null;
+    const quotedOnly = verbs !== null && verbs.length > 0 && verbs.every(v => !/[sv]$/.test(v));
+    const msgs = quotedOnly ? [] : args.filter(a => !/^(?:zap|slog|zerolog)\.\w+\(/.test(a.text));
+    if (msgs.length) return { id: "log-injection", sinkExpr: text, args: msgs };
+  }
   // HTTP header injection
   if (/^(?:[\w.]+)\.Header\(\)\.(?:Set|Add)$/.test(rawText) || /^(?:c|ctx)\.(?:Header|SetHeader|Set)$/.test(text)) {
     if (args.length >= 2) return { id: "header-injection", sinkExpr: text, args };
@@ -1105,8 +1116,9 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       // classes it neutralizes. Checked BEFORE the format-call passthrough
       // and every other taint-increasing branch below, so a sanitized value
       // can't be re-tainted by one of them in this same call.
-      const clears = sanitizerClears("go", text);
-      if (clears !== null) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
+      const clears = sanitizerClears("go", text, args.map(a => a.text));
+      // (an argument-dependent entry that clears nothing here -- a ReplaceAll of "<" -- stays an ordinary passthrough)
+      if (clears !== null && clears !== 0) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
       // a local function that replaces "<" with an HTML entity is structurally an escaper
       if (goCtx.htmlEscapers.has(text)) return args[0] ? applyClears(taintMask(args[0], env), classOf("xss")) : 0;
       if (isFormatCall(text)) return args.reduce((m, a) => m | taintMask(a, env), 0);
@@ -1354,6 +1366,7 @@ const SEVERITY: Record<AstTaintGoId, "critical" | "high" | "medium"> = {
   "xss": "critical", "header-injection": "high", "redos": "high", "ssti": "critical", "eval-exec": "critical",
   "mass-assignment": "high", "nosql-injection": "critical", "ldap-injection": "critical", "xpath-injection": "critical",
   "timing-attack": "medium", "jwt-none-alg": "critical", "weak-crypto": "high", "argument-injection": "high",
+  "log-injection": "medium",
 };
 const LABEL: Record<AstTaintGoId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -1364,7 +1377,7 @@ const LABEL: Record<AstTaintGoId, string> = {
   "ssti": "Server-Side Template Injection", "eval-exec": "Arbitrary Code Execution", "mass-assignment": "Mass Assignment",
   "nosql-injection": "NoSQL Injection", "ldap-injection": "LDAP Injection", "xpath-injection": "XPath Injection",
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "weak-crypto": "Weak Cryptography",
-  "argument-injection": "Argument Injection",
+  "argument-injection": "Argument Injection", "log-injection": "Log Injection",
 };
 
 /** Unwraps short_var_declaration/assignment_statement's left/right fields,

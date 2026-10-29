@@ -1822,8 +1822,27 @@ function findWeakCrypto(lines: string[]): ScanIndicator[] {
 }
 
 function findPIIInLogs(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, PII_LOG_RE, "pii-in-logs", "PII in Logs", "high",
-    "Sensitive user data (email/password/SSN/card) passed to logger — strip before logging");
+  return [
+    ...runDetector(lines, PII_LOG_RE, "pii-in-logs", "PII in Logs", "high",
+      "Sensitive user data (email/password/SSN/card) passed to logger — strip before logging"),
+    ...findSecretInLogFormat(lines),
+  ];
+}
+
+// A format string that labels a secret field (`token={}`, `password=%s`, `secret: {x}`) inside a log call -- the call
+// may open on this line or up to two lines above (`audit_log(&format!(\n "login token={} ...", t))`).
+const SECRET_FORMAT_FIELD_RE = /"[^"\n]*\b(?:password|passwd|token|secret|api_?key|ssn)\s*[=:]\s*(?:\{[\w:?]*\}|%[sdv])/i;
+const LOG_CALL_OPEN_RE = /\b(?:info|warn|error|debug|trace|e?println|e?print)!\s*\(|\b\w*log\w*\s*\(|\b(?:logger|log|console)\.\w+\s*\(/i;
+function findSecretInLogFormat(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !SECRET_FORMAT_FIELD_RE.test(lines[i])) continue;
+    if (PII_LOG_RE.some(r => r.test(lines[i]))) continue;   // the single-line rules already report it
+    if (!lines.slice(Math.max(0, i - 2), i + 1).some(l => LOG_CALL_OPEN_RE.test(l))) continue;
+    found.push({ id: "pii-in-logs", label: "Secret in Logs", severity: "high", line: i + 1,
+      detail: "A secret-named field (token / password / key) is formatted into a log message — log a redacted or hashed form instead" });
+  }
+  return found;
 }
 
 function findMassAssignment(lines: string[]): ScanIndicator[] {

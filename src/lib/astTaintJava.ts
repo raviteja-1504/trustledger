@@ -57,7 +57,7 @@ export type AstTaintJavaId =
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "bola-missing-ownership-check"
   | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "argument-injection"
-  | "weak-crypto" | "eval-exec" | "nosql-injection" | "trust-boundary";
+  | "weak-crypto" | "eval-exec" | "nosql-injection" | "trust-boundary" | "log-injection";
 
 export interface AstTaintJavaFinding {
   id:         AstTaintJavaId;
@@ -487,7 +487,7 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "header-injection": "high", "redos": "high", "ssti": "critical", "mass-assignment": "high", "timing-attack": "medium",
   "jwt-none-alg": "critical", "weak-crypto": "high", "eval-exec": "critical", "nosql-injection": "critical",
-  "argument-injection": "high", "trust-boundary": "medium",
+  "argument-injection": "high", "trust-boundary": "medium", "log-injection": "medium",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -498,7 +498,7 @@ const LABEL: Record<AstTaintJavaId, string> = {
   "header-injection": "HTTP Header Injection", "redos": "ReDoS — Regex DoS", "ssti": "Server-Side Template Injection",
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "weak-crypto": "Weak Cryptography", "eval-exec": "Arbitrary Code Execution", "nosql-injection": "NoSQL Injection",
-  "argument-injection": "Argument Injection", "trust-boundary": "Trust Boundary Violation",
+  "argument-injection": "Argument Injection", "trust-boundary": "Trust Boundary Violation", "log-injection": "Log Injection",
 };
 
 // lowercase tag names only, and not glued to an identifier: `Map<String, Object>` is a generic, not markup
@@ -967,6 +967,10 @@ function walkPrimaryChain(
       if (isRequestVar(rootVar, ctx) && SERVLET_SOURCE_CALLS.has(tail)) {
         chainTaint = ALL;
       }
+      // Network input: socket.getInputStream() / urlConnection.getInputStream() -- what the peer sends
+      if (tail === "getInputStream" && rootVar && isNetworkStreamVar(rootVar, ctx)) {
+        chainTaint = ALL;
+      }
       // Static/utility carriers (Path.of, String.join, URLDecoder.decode, Base64...decode, URI.create, ...)
       if (ARG_CARRYING_TAILS.has(tail) || ((tail === "get") && (rootVar === "Paths" || rootVar === "Path"))) {
         // map.getOrDefault(key, fallback): the result is an entry of the map or the fallback -- never the key
@@ -1172,7 +1176,8 @@ function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
       }
       const line = lineOf(info.node);
       const dedupKey = `${fact.id}:${line}`;
-      if (ctx.seen.has(dedupKey)) return;
+      // one finding per fact id at this call -- the callee's other facts (an XSS beside a log write) still report
+      if (ctx.seen.has(dedupKey)) break;
       ctx.seen.add(dedupKey);
       const source = culpritText(a, env, ctx);
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
@@ -1189,7 +1194,7 @@ function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
         trace,
         calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
       });
-      return;
+      break;
     }
   }
 }
@@ -1258,6 +1263,14 @@ function provenConstantJava(node: CstNode, ctx: EngineCtx): boolean {
     if (t.tokenType.name !== "Identifier" || !constantLocal(t.image, 0)) return false;
   }
   return true;
+}
+
+/** A local / field / parameter declared as a socket or URL connection (`Socket socket`, `URLConnection c`). */
+const NETWORK_STREAM_TYPE_RE = /^(?:java\.net\.)?(?:Socket|SSLSocket|URLConnection|HttpURLConnection|HttpsURLConnection|JarURLConnection)$/;
+function isNetworkStreamVar(name: string, ctx: EngineCtx): boolean {
+  if (NETWORK_STREAM_TYPE_RE.test(ctx.varTypes.get(name) ?? "")) return true;
+  const body = ctx.currentBody ? tokensText(ctx.currentBody) : "";
+  return new RegExp(`\\b(?:java\\.net\\.)?(?:Socket|SSLSocket|URLConnection|HttpURLConnection|HttpsURLConnection)\\s+${name}\\b`).test(body);
 }
 
 // ── Constant folding and literal-slot collections (the method being walked) ──
@@ -1376,6 +1389,10 @@ function collectionOpJava(rootVar: string, tail: string, args: CstNode[], argMas
   return map.has(read.key!) ? map.get(read.key!) : undefined;
 }
 
+// SLF4J / Log4j / commons-logging / java.util.logging write methods, on a receiver named like a logger
+const JAVA_LOG_TAILS = new Set(["trace", "debug", "info", "warn", "error", "fatal", "severe", "warning", "fine", "finer", "finest", "config", "log"]);
+const JAVA_LOGGER_RE = /^_?(?:\w*[Ll]ogger|[Ll]og|LOG|LOGGER)$/;
+
 /** `request.getSession().setAttribute(...)`, or a receiver held as an HttpSession / named `session`. */
 function isSessionReceiver(info: CallInfo, ctx: EngineCtx): boolean {
   const recv = info.rootVar ?? "";
@@ -1453,6 +1470,9 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fireArgs("xpath-injection", [0]);
   } else if (tail === "body" && hasHtmlTagNearby(ctx.lines, lineOf(node))) {
     fire("xss");
+  } else if (JAVA_LOG_TAILS.has(tail) && JAVA_LOGGER_RE.test(info.receiverName ?? rootVar ?? "")) {
+    // log.warn("login failed for " + user) / IO.logger.log(Level.WARNING, msg): a CR/LF in it forges a separate entry
+    fireArgs("log-injection", args.map((_, i) => i));
   } else if ((tail === "setAttribute" || tail === "putValue") && args.length >= 2 && isSessionReceiver(info, ctx)) {
     // session.setAttribute(name, value): request data stored as server-side state that later code trusts
     fireArgs("trust-boundary", [0, 1]);

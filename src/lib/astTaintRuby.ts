@@ -57,6 +57,7 @@ import {
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
 import { anchoredPatternClears } from "./taint/charClass";
+import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
 
@@ -69,7 +70,7 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintRubyId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect"
   | "insecure-deserialization" | "eval-exec" | "ssti" | "mass-assignment" | "header-injection" | "redos"
-  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg" | "ldap-injection";
+  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg" | "ldap-injection" | "log-injection";
 
 export interface AstTaintRubyFinding {
   id:         AstTaintRubyId;
@@ -282,6 +283,27 @@ const PASSTHROUGH_CALLS = new Set([
 const DECODER_CALLS = new Set(["Base64.decode64", "Base64.strict_decode64", "Base64.urlsafe_decode64", "CGI.unescape", "URI.decode_www_form_component", "Rack::Utils.unescape"]);
 /** Block-taking iterators whose block parameters are the receiver's elements. */
 const SINATRA_ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete"]);
+const RB_LOG_METHODS = new Set(["debug", "info", "warn", "error", "fatal", "unknown", "add", "log"]);
+
+// ── Constant folding: a condition / case subject that is a constant of its method ──
+const RB_SCOPE_RE = /^(?:method|singleton_method|block|do_block|lambda|program)$/;
+/** 'abc' -> "abc"; an interpolating "#{...}" string is never a constant. */
+const rbConstText = (s: string) => s.replace(/#\{/g, "\u0001").replace(/'((?:[^'\\]|\\.)*)'/g, (_m, b: string) => `"${b.replace(/"/g, '\\"')}"`);
+const RB_CONST_DECL_RE = /(?<=^|\n|;)[ \t]*([a-z_]\w*)[ \t]*=(?![=~>])[ \t]*([^\n;]+)/g;
+const rbWriteRe = (name: string) => new RegExp(`(?<![\\w.@:$])${name}[ \\t]*(?:[-+*/%|&]?=(?![=~>])|\\|\\|=)`, "g");
+const RB_IDENT_RE = /[a-z_]\w*/g;
+const RB_ASSIGN_RE = /(?<![\w.@:$])([a-z_]\w*)[ \t]*=(?![=~>])/g;
+
+function constValueRb(node: SyntaxNode | null | undefined, ctx: EngineCtx): ConstVal | undefined {
+  if (!node) return undefined;
+  let scope: SyntaxNode | null = node.parent;
+  while (scope && !RB_SCOPE_RE.test(scope.type)) scope = scope.parent;
+  const key = scope ? scope.startIndex : -1;
+  ctx.constLocals ??= new Map();
+  let locals = ctx.constLocals.get(key);
+  if (!locals) ctx.constLocals.set(key, locals = scope ? constLocalsFromText(rbConstText(scope.text), RB_CONST_DECL_RE, rbWriteRe) : new Map());
+  return evalConstExpr(rbConstText(node.text), n => locals!.get(n));
+}
 const ITERATOR_METHODS = new Set([
   "each", "each_with_index", "each_with_object", "map", "flat_map", "collect", "select", "filter", "reject", "find", "detect",
   "each_pair", "each_key", "each_value", "map!", "select!", "reject!", "filter_map", "group_by", "partition", "sort_by",
@@ -330,7 +352,7 @@ const SEVERITY: Record<AstTaintRubyId, "critical" | "high" | "medium"> = {
   "sql-injection": "critical", "command-injection": "critical", "xss": "high", "ssrf": "critical", "path-traversal": "critical",
   "open-redirect": "medium", "insecure-deserialization": "critical", "eval-exec": "critical", "ssti": "critical",
   "mass-assignment": "high", "header-injection": "high", "redos": "high", "bola-missing-ownership-check": "high",
-  "timing-attack": "medium", "jwt-none-alg": "critical", "ldap-injection": "critical",
+  "timing-attack": "medium", "jwt-none-alg": "critical", "ldap-injection": "critical", "log-injection": "medium",
 };
 const LABEL: Record<AstTaintRubyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Cross-Site Scripting (XSS)",
@@ -338,7 +360,7 @@ const LABEL: Record<AstTaintRubyId, string> = {
   "insecure-deserialization": "Insecure Deserialization", "eval-exec": "Code Execution / Unsafe Reflection",
   "ssti": "Server-Side Template Injection", "mass-assignment": "Mass Assignment", "header-injection": "HTTP Header Injection",
   "redos": "ReDoS — Regex DoS", "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
-  "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "ldap-injection": "LDAP Injection",
+  "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "ldap-injection": "LDAP Injection", "log-injection": "Log Injection",
 };
 
 export function astTaintRubySeverity(id: AstTaintRubyId): "critical" | "high" | "medium" { return SEVERITY[id]; }
@@ -387,6 +409,8 @@ interface EngineCtx {
   localKeys: Set<string>;
   /** A Sinatra app: a route block's value is the (text/html) response body. */
   sinatra?: boolean;
+  /** method start offset -> its single-assignment constant locals (see constValueRb) */
+  constLocals?: Map<number, Map<string, ConstVal>>;
   /** Variables holding an unrestricted params hash (permit! / to_unsafe_h / privileged permit). */
   unsafeParamVars: Set<string>;
   /** Set by the walker at each sink check (it holds the env): narrows a reported source to its tainted operand. */
@@ -470,6 +494,12 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       }
       case "conditional": {
         const c = node.childForFieldName("consequence"), a = node.childForFieldName("alternative");
+        // a constant condition: only the arm that runs, the other's taint recorded as cleared
+        const k = c && a ? constValueRb(node.childForFieldName("condition"), ctx) : undefined;
+        if (typeof k === "boolean") {
+          const taken = mask(k ? c! : a!, env);
+          return taken | ((mask(k ? a! : c!, env) & ALL & ~taken) << SHADOW);
+        }
         return (c ? mask(c, env) : 0) | (a ? mask(a, env) : 0);
       }
       case "if": case "unless": case "case": case "begin": case "then": case "else": case "elsif": case "when":
@@ -542,7 +572,9 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     if (sc !== null) {
       // connection.quote returns a complete quoted literal: safe in any position, unlike an escaper.
       const complete = /\.quote$|sanitize_sql/.test(callee);
-      const data = recv && /\.quote(?:_string)?$/.test(callee) ? args[0] : (args[0] ?? recv);
+      // s.gsub(/[\r\n]/, "") / s.inspect / h.to_json: the receiver is what gets cleaned
+      const data = recv && /(?:^|\.)(?:gsub|delete|inspect|to_json|dump)$/.test(callee) ? recv
+        : recv && /\.quote(?:_string)?$/.test(callee) ? args[0] : (args[0] ?? recv);
       return data ? (complete ? applyClears : applySanitizer)(mask(data, env), sc) : 0;
     }
 
@@ -856,6 +888,19 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
   /** if / unless / elsif chain. */
   const ifChain = (node: SyntaxNode, env: Env): boolean => {
+    // a constant condition (no elsif to weigh): only the arm that runs
+    const alt0 = node.childForFieldName("alternative");
+    const k0 = alt0?.type === "elsif" ? undefined : constValueRb(node.childForFieldName("condition"), ctx);
+    if (typeof k0 === "boolean") {
+      const runs = node.type === "unless" ? !k0 : k0;
+      const cond = node.childForFieldName("condition");
+      if (cond) walk(cond, env);
+      const taken = runs ? node.childForFieldName("consequence") : alt0;
+      const dead = runs ? alt0 : node.childForFieldName("consequence");
+      const term = taken ? walk(taken, env) : false;
+      if (dead) recordPrunedArm(env, dead.text, RB_IDENT_RE, RB_ASSIGN_RE);
+      return term;
+    }
     const branches: Branch[] = [];
     let cur: SyntaxNode | null = node;
     let negated = node.type === "unless";
@@ -995,6 +1040,22 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         if (subject) walk(subject, env);
         const subjectName = subject ? guardName(subject) : null;
         const clauses = named(node).filter(c => c.type === "when" || c.type === "else");
+        // case on a constant: only the matching when (Ruby doesn't fall through), when every pattern is constant
+        const sv = constValueRb(subject, ctx);
+        if (sv !== undefined) {
+          const pats = clauses.map(cl => cl.type === "else" ? ["else" as ConstVal]
+            : cl.childrenForFieldName("pattern").filter((p): p is SyntaxNode => !!p).map(p => constValueRb(named(p)[0] ?? p, ctx)));
+          if (pats.every(ps => ps.every(v => v !== undefined))) {
+            let idx = pats.findIndex(ps => ps.includes(sv));
+            if (idx < 0) idx = clauses.findIndex(cl => cl.type === "else");
+            const bodyOf = (cl: SyntaxNode) => (cl.type === "when" ? cl.childForFieldName("body") : cl);
+            const takenBody = idx >= 0 ? bodyOf(clauses[idx]) : null;
+            const term = takenBody ? walk(takenBody, env) : false;
+            // after the taken arm, so its own assignments can't overwrite what the dead arms prove
+            clauses.forEach((cl, i) => { const b = bodyOf(cl); if (i !== idx && b) recordPrunedArm(env, b.text, RB_IDENT_RE, RB_ASSIGN_RE); });
+            return term;
+          }
+        }
         return walkSwitch(env, clauses.map(cl => ({
           isDefault: cl.type === "else",
           pre: (e: Env) => {
@@ -1200,6 +1261,11 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   const callee = calleeTextRuby(node) ?? name;
   const pos = positionalArgs(node);
   const sinkName = callee.replace(/^::/, "");
+
+  // ── Log injection: logger.warn("login failed for #{user}") / Rails.logger.info -- a CR/LF forges an entry ──
+  if (recv && RB_LOG_METHODS.has(name) && /(?:^|\.|::)(?:@?_?\w*logger|log)$/i.test(recv.text)) {
+    for (const a of pos) if (a.type !== "hash" && fireOn(ctx, "log-injection", node, a, mask(a, env), sinkName)) break;
+  }
 
   // ── SQL ──
   // Unambiguous relation methods count on any receiver; names Enumerable also has (count, sum, select, find_by...)
