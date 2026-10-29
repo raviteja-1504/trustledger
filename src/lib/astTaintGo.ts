@@ -53,6 +53,7 @@ import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } fro
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, INJECTION, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, guardedNames, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, wasCleared,
+  combineUrlFacets, urlPartFacet, urlPrefixFacets,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
@@ -1173,6 +1174,8 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       const operand = fn.childForFieldName("operand");
       const field = fn.childForFieldName("field")?.text ?? "";
       const recv = operand ? taintMask(operand, env) : 0;
+      // u.EscapedPath() / u.RequestURI() on a parsed URL: path (and query) only
+      if ((field === "EscapedPath" || field === "RequestURI") && operand?.type === "identifier" && urlParseNamesGo(operand).length > 1) return applyClears(recv, SinkClass.REDIRECT | SinkClass.SSRF);
       return recv | (GO_ARG_CARRYING_METHODS.has(field) ? orArgs(args, env) : 0);
     }
     return 0;
@@ -1218,7 +1221,11 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       const opMask = operand?.type === "identifier"
         ? (env.get(operand.text) ?? 0) | (sticky && !isLocalNameGo(operand) ? (sticky.get(operand.text) ?? 0) : 0)
         : operand ? taintMask(operand, env) : 0;
-      return (path ? (env.get(path) ?? 0) : 0) | opMask;
+      const m = (path ? (env.get(path) ?? 0) : 0) | opMask;
+      // u.Path / u.RawPath after u, _ := url.Parse(x): the path only -- no scheme or host to send anyone elsewhere
+      const fld = node.childForFieldName("field")?.text;
+      if ((fld === "Path" || fld === "RawPath") && operand?.type === "identifier" && urlParseNamesGo(operand).length > 1) return applyClears(m, SinkClass.REDIRECT | SinkClass.SSRF);
+      return m;
     }
     if (node.type === "unary_expression" || node.type === "variadic_argument") {
       const operand = node.namedChildren[0];
@@ -1573,6 +1580,34 @@ function unwrapByteConversionGo(a: SyntaxNode | undefined): SyntaxNode | null {
   return a;
 }
 
+/**
+ * `if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { return }` after `ip := net.ParseIP(u.Hostname())`
+ * (u from url.Parse(x)): where the condition is false, x names a public address -- not loopback, private or the
+ * link-local cloud metadata range. All three checks are required.
+ */
+function publicIpGuardGo(cond: SyntaxNode): Guard[] {
+  const checks = new Map<string, Set<string>>();
+  for (const c of findAllNodesGo(cond, "call_expression")) {
+    const f = c.childForFieldName("function");
+    const recv = f?.type === "selector_expression" ? f.childForFieldName("operand") : null;
+    const m = f?.type === "selector_expression" ? f.childForFieldName("field")?.text : null;
+    if (recv?.type === "identifier" && m) (checks.get(recv.text) ?? checks.set(recv.text, new Set()).get(recv.text)!).add(m);
+  }
+  const out: Guard[] = [];
+  for (const [ip, ms] of checks) {
+    if (!["IsLoopback", "IsPrivate", "IsLinkLocalUnicast"].every(m => ms.has(m))) continue;
+    const def = lastAssignmentGo(ip, cond);
+    if (def?.type !== "call_expression" || calleeTextGo(def.childForFieldName("function") ?? def) !== "net.ParseIP") continue;
+    const arg = argListOfGo(def)[0];
+    // ParseIP(host) / ParseIP(u.Hostname()) / ParseIP(u.Host)
+    const hostSel = arg?.type === "call_expression" ? arg.childForFieldName("function") : arg;
+    const owner = hostSel?.type === "selector_expression" && /^(?:Hostname|Host)$/.test(hostSel.childForFieldName("field")?.text ?? "") ? hostSel.childForFieldName("operand") : null;
+    const names = owner?.type === "identifier" ? urlParseNamesGo(owner) : arg?.type === "identifier" ? [arg.text] : [];
+    for (const name of names) out.push({ name, holds: "false", clears: SinkClass.SSRF });
+  }
+  return out;
+}
+
 function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: ReadonlyMap<string, ValidationAliasGo>): Guard[] {
   switch (cond.type) {
     case "parenthesized_expression": {
@@ -1594,10 +1629,20 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       const l = cond.childForFieldName("left");
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
-      if (op === "&&") return [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "true");
-      if (op === "||") return [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "false");
+      if (op === "&&") { const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "true"); return [...gs, ...combineUrlFacets(gs, "true")]; }
+      if (op === "||") {
+        const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "false");
+        return [...gs, ...combineUrlFacets(gs, "false"), ...publicIpGuardGo(cond)];
+      }
       if (op === "==" || op === "!=") {
         const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
+        // u.Host == "" / u.Scheme == "" after u, _ := url.Parse(x): URL facets on x
+        const sel = l.type === "selector_expression" && r.type === "interpreted_string_literal" && goStringLiteralValue(r) === "" ? l : null;
+        const part = sel?.childForFieldName("field")?.text;
+        const owner = sel?.childForFieldName("operand");
+        if (owner?.type === "identifier" && (part === "Host" || part === "Scheme")) {
+          return urlParseNamesGo(owner).flatMap(n => urlPartFacet(n, part === "Host" ? "host" : "scheme", holdsWhenEqual));
+        }
         if (l.type === "identifier" && isLiteralGo(r)) return [{ name: l.text, holds: holdsWhenEqual }];
         if (r.type === "identifier" && isLiteralGo(l)) return [{ name: r.text, holds: holdsWhenEqual }];
         // `err == nil` / `err != nil` after `_, err := strconv.Atoi(x)`
@@ -1629,6 +1674,14 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       const args = argListOfGo(cond);
       if (text === "slices.Contains" && args.length === 2 && args[1].type === "identifier" && isLiteralCollectionGo(args[0], root)) {
         return [{ name: args[1].text, holds: "true" }];
+      }
+      // strings.Contains(x, "://"): a URL facet (see combineUrlFacets)
+      if (text === "strings.Contains" && args.length === 2 && args[0].type === "identifier" && goStringLiteralValue(args[1]) === "://") {
+        return urlPrefixFacets(args[0].text, "://", "contains");
+      }
+      // strings.HasPrefix(x, "/") / (x, "//") / (x, "https://example.com/"): URL facets
+      if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier" && /^(?:\/\/?|https?:\/\/.*)$/.test(goStringLiteralValue(args[1]) ?? "")) {
+        return urlPrefixFacets(args[0].text, goStringLiteralValue(args[1])!, "starts");
       }
       // strings.Contains(x, "..") -- when false, x lacks that sequence
       if (text === "strings.Contains" && args.length === 2 && args[0].type === "identifier") {

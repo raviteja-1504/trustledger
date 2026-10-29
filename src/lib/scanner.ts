@@ -856,6 +856,23 @@ const TLS_VERIFY_OFF_RE = [
   /\brejectUnauthorized\s*:\s*false\b/,
   /NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["']?0["']?/,
   /\bverify_mode\s*=\s*ssl\.CERT_NONE\b|ssl\._create_unverified_context\s*\(/,
+  // Rust: reqwest / native-tls builders, a struct literal carrying the same switch, rustls' custom verifier
+  /\bdanger_accept_invalid_(?:certs|hostnames)\s*(?:\(\s*true\s*\)|:\s*true\b)/,
+  // any language's config struct / builder: a verify-named switch set false, an accept-invalid-named one set true
+  /\b(?:verify|validate|check)_?(?:tls|ssl|certs?|certificates?|hostnames?|peer)\s*(?:[:=]|\()\s*false\b/i,
+  /\b(?:ssl|tls|cert|peer)_?verif(?:y|ication)\s*(?:[:=]|\()\s*false\b/i,
+  /\b(?:accept|allow|trust)_?(?:invalid|any|all|self_?signed)_?(?:certs?|certificates?|hostnames?)\s*(?:[:=]|\()\s*true\b/i,
+  /\b(?:insecure_skip_verify|skip_(?:tls|ssl|cert)_?verif\w*)\s*(?:[:=]|\()\s*true\b/i,
+  // OpenSSL bindings: verification mode NONE
+  /\bSslVerifyMode::NONE\b|\bSSL_VERIFY_NONE\b/,
+  /\.dangerous\(\)\s*\.\s*set_certificate_verifier\s*\(/,
+  // PHP curl, Ruby Net::HTTP / OpenSSL
+  /\bCURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:false|0)\b/,
+  /\bverify_mode\s*=\s*OpenSSL::SSL::VERIFY_NONE\b|\bverify_ssl\s*:\s*(?:false|OpenSSL::SSL::VERIFY_NONE)\b/,
+  // C#: a certificate callback that accepts everything
+  /ServerCertificate(?:Custom)?ValidationCallback\s*\+?=\s*(?:\([^)]*\)|\w+)\s*=>\s*true\b|DangerousAcceptAnyServerCertificateValidator\b/,
+  // Java / Kotlin: a hostname verifier that accepts everything
+  /\bALLOW_ALL_HOSTNAME_VERIFIER\b|NoopHostnameVerifier\.INSTANCE|HostnameVerifier\s*\{\s*_\s*,\s*_\s*->\s*true\s*\}/,
 ];
 
 // A hardcoded JWT/session signing secret -- unlike the SECRET_PATTERNS

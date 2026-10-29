@@ -126,3 +126,62 @@ describe("Java line rules and the session sink", () => {
     expect(tb(s(`request.setAttribute("userid", param);`))).toBe(false);
   });
 });
+
+describe("SQL proven independent of every input vetoes the line rule (BenchmarkJava sqli false positives)", () => {
+  const sqlServlet = (pre: string, bar: string, extra = "") => `import javax.servlet.http.*;
+public class T extends HttpServlet {
+    public void doPost(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        String param = request.getParameter("p");
+${pre}
+        String bar = ${bar};
+        String sql = "SELECT * from USERS where USERNAME='foo' and PASSWORD='" + bar + "'";
+        java.sql.Statement statement = org.owasp.benchmark.helpers.DatabaseHelper.getSqlStatement();
+        statement.execute(sql);
+    }
+${extra}
+}
+`;
+  const sqli = (code: string) => found(code).filter(i => i.id === "sql-injection").length;
+  const helper = (ret: string) => `    private class Test {
+        public String doSomething(HttpServletRequest request, String param) throws Exception {
+            String bar;
+            String guess = "ABC";
+            char switchTarget = guess.charAt(1);
+            switch (switchTarget) {
+                case 'A': bar = param; break;
+                case 'B': bar = ${ret}; break;
+                default: bar = "bob's your uncle"; break;
+            }
+            return bar;
+        }
+    }`;
+  it("a local helper whose result can't depend on its arguments; the same helper returning them still reports", () => {
+    expect(sqli(sqlServlet("", "new Test().doSomething(request, param)", helper(`"bob"`)))).toBe(0);
+    expect(sqli(sqlServlet("", "new Test().doSomething(request, param)", helper("param")))).toBeGreaterThan(0);
+  });
+  it("a static helper called by bare name, folding a constant ternary; the inverted ternary still reports", () => {
+    const stat = (cond: string) => `    private static String doSomething(HttpServletRequest request, String param) {
+        int num = 106;
+        String bar = ${cond} ? "This_should_always_happen" : param;
+        return bar;
+    }`;
+    expect(sqli(sqlServlet("", "doSomething(request, param)", stat("(7 * 18) + num > 200")))).toBe(0);
+    expect(sqli(sqlServlet("", "doSomething(request, param)", stat("(500 / 42) + num > 200")))).toBeGreaterThan(0);
+  });
+  it("an unmodelled call carries its arguments: constant in, constant out; input in, still reported", () => {
+    const thing = `        org.owasp.benchmark.helpers.ThingInterface thing = org.owasp.benchmark.helpers.ThingFactory.createThing();`;
+    expect(sqli(sqlServlet(thing, `thing.doSomething("barbarians_at_the_gate")`))).toBe(0);
+    expect(sqli(sqlServlet(thing, "thing.doSomething(param)"))).toBeGreaterThan(0);
+  });
+  it("fields, static readers and no-argument readers are never proven", () => {
+    expect(sqli(sqlServlet("", "this.saved", "    private String saved;"))).toBeGreaterThan(0);
+    // a helper of this class that returns a field with no argument at all: what it returns is not proven
+    expect(sqli(sqlServlet("", "load()", "    private String saved;\n    private String load() { return saved; }"))).toBeGreaterThan(0);
+    expect(sqli(sqlServlet("", `System.getenv("X")`))).toBeGreaterThan(0);
+    expect(sqli(sqlServlet(`        java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));`, "reader.readLine()"))).toBeGreaterThan(0);
+  });
+  it("only a local assigned once has its building line vetoed", () => {
+    const twice = sqlServlet("", `"x"`).replace(`        statement.execute(sql);`, `        String q = "SELECT * from USERS where NAME='" + param + "'";\n        q = "SELECT 1";\n        statement.execute(q);`);
+    expect(sqli(twice)).toBeGreaterThan(0);
+  });
+});

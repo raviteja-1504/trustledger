@@ -562,6 +562,9 @@ interface EngineCtx {
   // Parameter -> sink facts for methods of OTHER classes in the batch, keyed `Type.method` (see
   // computeJavaMethodSinkFacts) -- a call through an injected/typed receiver is checked against these.
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>;
+  // Proof pass only (see proveSinksSafeJava): every parameter, field and unmodelled input is assumed tainted and an
+  // unmodelled call carries its arguments, so an injection sink whose argument is STILL clean is proven safe.
+  proof?: { localClasses: Set<string>; proven: SuppressedSink[] };
 }
 
 function emit(
@@ -776,7 +779,7 @@ function extractInstantiatedClassName(uc: CstNode): string | null {
   return ids[ids.length - 1]?.image ?? null;
 }
 
-function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
+function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx, rootIsCallee = false):
   { parts: string[]; taint: number; rootVar: string | null; isNewExprOf: string | null } {
   const fqn = firstNode(prefix, "fqnOrRefType");
   if (fqn) {
@@ -802,6 +805,12 @@ function primaryPrefixInfo(prefix: CstNode, env: Env, ctx: EngineCtx):
     let taint = rootVar !== null ? (env.get(rootVar) ?? 0) : 0;
     if (rootVar !== null && ctx.sticky.size > 0 && !ctx.localNames?.has(rootVar)) taint |= ctx.sticky.get(rootVar) ?? 0;
     if (parts.length >= 2) taint |= env.get(`${parts[0]}.${parts[1]}`) ?? 0;
+    // proof pass: a name that is no local of this method is a field (or inherited state) another method could have
+    // filled with input; a class name / package prefix is not data, except System.in; `doSomething(x)`'s name is a call
+    if (ctx.proof && rootVar !== null && !ctx.localNames?.has(rootVar) && !(rootIsCallee && parts.length === 1)
+      && ((!/^[A-Z]/.test(rootVar) && !(parts.length >= 2 && JAVA_PACKAGE_ROOT_RE.test(rootVar))) || (rootVar === "System" && parts[1] === "in"))) {
+      taint |= ALL;
+    }
     return { parts, taint, rootVar, isNewExprOf: null };
   }
   const newExpr = firstNode(prefix, "newExpression");
@@ -912,13 +921,22 @@ function assignmentsInJava(scope: CstNode): Array<{ name: string; position: numb
  * SAME fold serves both the pure `isTainted()` predicate and the separate
  * sink-emitting tree walk, without maintaining two parallel implementations.
  */
+/** `java.net.URLDecoder.decode(...)` / `org.apache...Base64`: a package prefix, not a variable. */
+const JAVA_PACKAGE_ROOT_RE = /^(?:java|javax|jakarta|org|com|net|io|android|sun|kotlin)$/;
+/** Proof pass: an unmodelled no-argument call with one of these names may return outside input. */
+const PROOF_INPUT_TAIL_RE = /^(?:get|read|fetch|load|recv|receive|input|next|poll|take|lookup|find|query)/;
+/** Sinks the proof pass can clear: a value proven independent of every input can't inject into them. */
+const PROOF_IDS: ReadonlySet<string> = new Set(["sql-injection", "command-injection", "ldap-injection", "xpath-injection", "path-traversal", "open-redirect", "ssrf"]);
+
 function walkPrimaryChain(
   primary: CstNode, env: Env, ctx: EngineCtx,
   onCall?: (info: CallInfo) => void,
 ): number {
   const prefix = firstNode(primary, "primaryPrefix");
   if (!prefix) return 0;
-  const { parts, taint: prefixTaint, rootVar, isNewExprOf } = primaryPrefixInfo(prefix, env, ctx);
+  const firstSuffix = allNodes(primary, "primarySuffix")[0];
+  const rootIsCallee = !!firstSuffix && !!firstNode(firstSuffix, "methodInvocationSuffix");
+  const { parts, taint: prefixTaint, rootVar, isNewExprOf } = primaryPrefixInfo(prefix, env, ctx, rootIsCallee);
   let chainTaint = prefixTaint;
   let nameParts = [...parts];
   let receiverSoFar: string | undefined;
@@ -933,6 +951,8 @@ function walkPrimaryChain(
     const invocation = firstNode(suffix, "methodInvocationSuffix");
 
     if (hasDot && dotId && !invocation) {
+      // proof pass: `this.field` is state another method could have filled with input
+      if (ctx.proof && prefixIsThis && calls === 0) chainTaint |= ALL;
       // A `.identifier` link with no immediate call -- extends the name for the NEXT call.
       receiverSoFar = nameParts[nameParts.length - 1];
       nameParts = [dotId.image];
@@ -1034,6 +1054,23 @@ function walkPrimaryChain(
         ? collectionOpJava(rootVar, tail, args, argMasks, startOf(suffix), ctx) : undefined;
       // the rest of the collection's taint is proven not to be this slot: recorded as cleared
       if (slotRead !== undefined) chainTaint = slotRead | (((env.get(rootVar!) ?? 0) & ALL & ~slotRead) << SHADOW);
+
+      // proof pass: a method of this file (no receiver, `this.`, or an instance of a class declared here) is judged by
+      // its pessimistic summary, including what it returns with no tainted argument (index -1: a field, an input);
+      // any other call may return what it is given, and a no-argument getter/reader may return input.
+      if (ctx.proof && slotRead === undefined) {
+        const recv = receiverOf();
+        const localTarget = ctx.localMethods.has(tail) && ((calls === 0 && nameParts.length === 1 && !recv) || prefixIsThis
+          || (!!isNewExprOf && ctx.proof.localClasses.has(isNewExprOf)) || (!!recv && ctx.proof.localClasses.has(recv)));
+        if (localTarget) chainTaint |= propIdx?.get(-1) ?? 0;
+        else {
+          chainTaint |= anyArgMask;
+          // a reader/getter with no arguments, or a static one (`System.getenv("X")`, `Util.readInput(k)`) may
+          // return outside input; an instance call on a local (`map.get(k)`, `s.getBytes()`) returns its receiver's
+          const isStatic = (calls === 0 && !recv) || (!!rootVar && /^[A-Z]/.test(rootVar) && !ctx.localNames?.has(rootVar) && calls === 0);
+          if ((args.length === 0 || isStatic) && PROOF_INPUT_TAIL_RE.test(tail)) chainTaint |= ALL;
+        }
+      }
 
       // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
       const selfCall = calls === 0 && nameParts.length === 1 && !receiverOf() && (parts.length === 1 || prefixIsThis);
@@ -1434,6 +1471,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     } else if (!(mask & ALL) && present.every(i => provenConstantJava(args[i], ctx))) {
       ctx.suppressed?.push({ id, line: lineOf(node) });
     }
+    if (ctx.proof && !(mask & ALL)) recordProofJava(id, present.map(i => args[i]), node, ctx);
   };
 
   if ((tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") && receiverMayBe(info, ctx, SQL_RECEIVER_TYPE_RE)) {
@@ -1484,6 +1522,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   if (["prepareStatement", "prepareCall", "createQuery", "createNativeQuery", "queryForObject", "queryForList", "queryForMap", "batchUpdate", "addBatch"].includes(tail) && arg0) {
     fire("sql-injection", argMasks[0], nodeText(arg0));
     if (!(argMasks[0] & ALL) && provenConstantJava(arg0, ctx)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
+    if (ctx.proof && !(argMasks[0] & ALL)) recordProofJava("sql-injection", [arg0], node, ctx);
   }
   if (tail === "format" && rootVar === "String" && args.length >= 2 && SQL_START_RE.test(literalStringOf(arg0) ?? "")) {
     fire("sql-injection", argMasks.slice(1).reduce((m, x) => m | x, 0), culpritText(args[1], env, ctx), "String.format");
@@ -1660,19 +1699,24 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  for (const shape of method.paramShapes) {
+  // proof pass: also what the method returns with NO tainted parameter (a field, an unmodelled input), as index -1
+  const seeds: Array<{ name: string | null; index: number }> = method.paramShapes.map(s => ({ name: s.name, index: s.index }));
+  if (ctx.proof) seeds.push({ name: null, index: -1 });
+  for (const shape of seeds) {
     let surviving = 0;
     // Path-sensitive: the mask is taken at EACH return with the env on that
     // path; a return inside a lambda is not this method's. Sink checks run
     // against a throwaway ctx copy.
     const walker = createWalkerJava({
+      // a summary walk seeds parameters hypothetically: what it would "prove" at a sink is not a proof
       ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
+      proof: ctx.proof && { ...ctx.proof, proven: [] },
       localNames: localNamesOfMethod(method), currentParams: new Set(method.paramShapes.map(p => p.name)),
       currentBody: method.body ?? undefined, entryLoopVars: [],
     },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
-    env.set(shape.name, ALL);
+    if (shape.name !== null) env.set(shape.name, ALL);
     walker.walk(method.body, env);
     // Low bits only: the shadow half is per-scan bookkeeping, not a summary.
     surviving &= ALL;
@@ -2909,6 +2953,59 @@ export function scanAstTaintJava(
 }
 
 /** The per-file engine context both the main scan and the cross-file summary pass walk with. */
+/**
+ * A sink proven safe in the proof pass: its own line, and the line that builds each local feeding it -- the regex
+ * layer reports `String sql = "... '" + bar + "'";`, not the execute() call below it. Only a local assigned exactly
+ * once (its declaration) is followed, so the line vetoed holds the very value proven clean; up to three hops.
+ */
+function recordProofJava(id: string, args: CstNode[], node: CstNode, ctx: EngineCtx): void {
+  if (!ctx.proof || !PROOF_IDS.has(id)) return;
+  ctx.proof.proven.push({ id, line: lineOf(node) });
+  if (!ctx.currentBody) return;
+  const assigns = assignmentsInJava(ctx.currentBody);
+  const seen = new Set<string>();
+  let frontier = [...new Set(args.flatMap(a => [...collectIdentifiers(a)]))];
+  for (let hop = 0; hop < 3 && frontier.length; hop++) {
+    const next: string[] = [];
+    for (const name of frontier) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const defs = assigns.filter(a => a.name === name);
+      if (defs.length !== 1) continue;
+      ctx.proof.proven.push({ id, line: defs[0].line });
+      next.push(...(defs[0].rhsText.match(/[A-Za-z_$][\w$]*/g) ?? []));
+    }
+    frontier = next;
+  }
+}
+
+/**
+ * The proof pass: every method walked once with ALL its parameters tainted, every field tainted, unmodelled calls
+ * carrying their arguments and summaries recomputed under the same assumptions. An injection sink whose argument
+ * is still clean cannot depend on any input -- `bar = new Test().doSomething(request, param)` whose body switches on
+ * a constant, `thing.doSomething("constant")` -- so the regex layer's line match is a false positive and is vetoed.
+ * Nothing found here is reported; it only adds proofs.
+ */
+function proveSinksSafeJava(ctx: EngineCtx, localMethods: Map<string, LocalMethod>, suppressedOut: SuppressedSink[]): void {
+  const proof = { localClasses: new Set([...ctx.content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1])), proven: [] as SuppressedSink[] };
+  const pctx: EngineCtx = {
+    ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false, sticky: new Map(),
+    stickyDirty: false, lambdas: new Map(), entryLoopVars: [], proof,
+  };
+  pctx.propagatingParams = buildPropagatingMapJava(localMethods, pctx);
+  for (const [, method] of localMethods) {
+    if (!method.body) continue;
+    pctx.localNames = localNamesOfMethod(method);
+    pctx.currentParams = new Set(method.paramShapes.map(p => p.name));
+    pctx.currentBody = method.body;
+    pctx.entryLoopVars.length = 0;
+    const env: Env = new Map();
+    for (const p of method.paramShapes) env.set(p.name, ALL);
+    walkForDeclarationsAndSinks(method.body, env, pctx);
+  }
+  suppressedOut.push(...proof.proven);
+}
+
 function makeJavaCtx(
   content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined,
   crossFileFacts: ReadonlyMap<string, readonly ParamSinkFact[]> | undefined,
@@ -3035,6 +3132,9 @@ function runJavaScan(
         }
       }
     }
+
+    // Once per file (the strict scan): sinks proven independent of every input veto the regex duplicates.
+    if (!withEntryPoints && suppressedOut) proveSinksSafeJava(ctx, localMethods, suppressedOut);
 
     void filePath;
     return ctx.findings;

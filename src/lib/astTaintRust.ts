@@ -54,7 +54,8 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintRustId =
   | "sql-injection" | "command-injection" | "argument-injection" | "path-traversal" | "ssrf" | "open-redirect" | "xss"
   | "ssti" | "eval-exec" | "redos" | "nosql-injection" | "ldap-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto"
-  | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection";
+  | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection"
+  | "log-injection";
 
 export interface AstTaintRustFinding {
   id:         AstTaintRustId;
@@ -66,6 +67,8 @@ export interface AstTaintRustFinding {
   severityOverride?: "critical" | "high" | "medium";
   trace?: TraceStep[];
   calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
+  /** reported from the string's shape (a format! that builds SQL / a filter / a header), not at an API call */
+  shape?: boolean;
 }
 
 const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
@@ -75,6 +78,7 @@ const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
   "weak-crypto": "high", "bola-missing-ownership-check": "high",
   // No gadget-chain RCE in Rust's serde: attacker-sized allocations / panics (DoS), so high rather than critical.
   "mass-assignment": "high", "insecure-deserialization": "high", "xpath-injection": "critical", "header-injection": "high",
+  "log-injection": "medium",
 };
 const LABEL: Record<AstTaintRustId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "argument-injection": "Argument Injection",
@@ -84,7 +88,7 @@ const LABEL: Record<AstTaintRustId, string> = {
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "weak-crypto": "Weak Cryptography",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "mass-assignment": "Mass Assignment", "insecure-deserialization": "Insecure Deserialization",
-  "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection",
+  "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection", "log-injection": "Log Injection",
 };
 export function astTaintRustSeverity(id: AstTaintRustId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]; }
@@ -674,6 +678,17 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         return !target || /^(?:i\d+|u\d+|isize|usize|f\d+|bool|char|Uuid|IpAddr|Ipv4Addr|Ipv6Addr|SocketAddr|NaiveDate|NaiveDateTime|DateTime.*)$/.test(target) ? applyClears(rm, NUMERIC_CLEARS) : rm;
       }
       if (NAME_ONLY_METHODS.has(name)) return applyClears(mask(recv, env), SinkClass.PATH);
+      // s.replace('\n', "") / s.replace("\r\n", " "): line breaks removed -- a log or header line can't be split
+      // (the CR and LF replacements are usually chained; each is accepted on its own, as in the Go engine)
+      if ((name === "replace" || name === "replacen") && args[0] && args[1]) {
+        // the literal's raw text (charOrStringValue unescapes '\n' to "n")
+        const raw = (n: SyntaxNode) => (n.type === "char_literal" ? n.text.slice(1, -1) : stringValue(n));
+        const from = raw(args[0]), to = raw(args[1]);
+        // a real \n / \r escape is an odd run of backslashes before it ("\\n" writes a backslash and an n)
+        if (from !== null && /^(?:\\r)?\\n$|^\\r$/.test(from) && to !== null && !/(?:^|[^\\])(?:\\\\)*\\[rn]/.test(to)) return applyClears(mask(recv, env), SinkClass.HEADER);
+        // s.replace('<', "&lt;"): no tag can open (the usual escaper chains this with & > " ')
+        if (from === "<" && to !== null && /^&(?:lt|#0*60|#x0*3c);$/i.test(to)) return applyClears(mask(recv, env), SinkClass.XSS);
+      }
       if (RECEIVER_CLEARS[name] !== undefined) return applyClears(mask(recv, env), RECEIVER_CLEARS[name]);
       if (OPAQUE_RESULT_METHODS.has(name) || /^is_/.test(name)) return 0;
     }
@@ -1045,7 +1060,13 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
     const l = field(c, "left"), r = field(c, "right");
     if (!l || !r) return [];
     if (op === "&&") return [...guardsOf(l, ctx, depth + 1), ...guardsOf(r, ctx, depth + 1)].filter(g => g.holds === "true");
-    if (op === "||") return [...guardsOf(l, ctx, depth + 1), ...guardsOf(r, ctx, depth + 1)].filter(g => g.holds === "false");
+    if (op === "||") {
+      const lg = guardsOf(l, ctx, depth + 1), rg = guardsOf(r, ctx, depth + 1);
+      // `a.starts_with(X) || a.starts_with(Y)`: true means one of them held -- what BOTH clear is cleared
+      const both = lg.filter(g => g.holds === "true").flatMap(g => rg.filter(h => h.holds === "true" && h.name === g.name)
+        .map(h => ({ name: g.name, holds: "true" as const, clears: (g.clears ?? ALL) & (h.clears ?? ALL) })));
+      return [...both, ...[...lg, ...rg].filter(g => g.holds === "false")];
+    }
     if (op === "==" || op === "!=") {
       const holds = op === "==" ? "true" : "false";
       const ln = guardName(l), rn = guardName(r);
@@ -1117,12 +1138,20 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
       const clears = pattern ? anchoredPatternClears(pattern) : null;
       return n && clears ? [{ name: n, holds: "true", clears }] : [];
     }
-    // p.starts_with(&base) after p = base.join(x).canonicalize()?
+    // p.starts_with(&base) after p = base.join(x).canonicalize()? -- checked first: a resolved path's prefix is the
+    // path-traversal proof even when the base is written as "/data"
     if (name === "starts_with" && recv) {
       const n = guardName(recv);
       const def = n ? lastAssignment(n, c) : null;
-      if (n && !def && ctx.fns.get(findEnclosingFunctionNameRust(c))?.params.some(p => p.name === n)) return [{ name: CANON_PARAM(n), holds: "true" }];
-      return n && def && /canonicalize|normalize|clean/.test(def.text) ? [{ name: n, holds: "true" }] : [];
+      const canonical = !!def && /canonicalize|normalize|clean/.test(def.text);
+      // url.starts_with("https://example.com/") / url.starts_with("/app/"): the destination's host is fixed
+      const prefix = args[0] ? stringValue(unwrapExpr(args[0])) : null;
+      const urlGuard: Guard[] = !canonical && n && prefix !== null && (/^https?:\/\/[^/?#\\@]+\//i.test(prefix) || /^\/[^/\\]/.test(prefix))
+        ? [{ name: n, holds: "true", clears: SinkClass.REDIRECT | SinkClass.SSRF }] : [];
+      // a helper's parameter: the call site decides whether it was canonicalized (CANON_PARAM), so both readings stay
+      if (n && !def && ctx.fns.get(findEnclosingFunctionNameRust(c))?.params.some(p => p.name === n)) return [...urlGuard, { name: CANON_PARAM(n), holds: "true" }];
+      if (urlGuard.length) return urlGuard;
+      return n && canonical ? [{ name: n, holds: "true" }] : [];
     }
   }
   return [];
@@ -1615,6 +1644,10 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (recv && name === "body" && args[0] && (HTML_CHAIN_RE.test(recv.text) || htmlLiteralWithTaint(args[0], env, mask))) {
     fireOn(ctx, "xss", node, args[0], mask(args[0], env), "response.body (HTML)");
   }
+  // an application's own response type built from HTML around request data: `AppResponse::ok(&html)`
+  if (!recv && path && /Response::(?:ok|new|html|from|with_body|success)$/.test(path) && args[0] && htmlLiteralWithTaint(args[0], env, mask)) {
+    fireOn(ctx, "xss", node, args[0], mask(args[0], env), `${path.split("::").slice(-2).join("::")} (HTML)`);
+  }
 
   if (!recv && path && /(?:^|::)PreEscaped$/.test(path) && args[0]) fireOn(ctx, "xss", node, args[0], mask(args[0], env), "maud::PreEscaped");
 
@@ -1753,8 +1786,48 @@ function checkMassAssignment(node: SyntaxNode, name: string, recv: SyntaxNode | 
 }
 
 /** Macro-level sinks: doc! with $where, sqlx raw macros are safe (checked at compile time). */
+/** Log macros (log / tracing crates, eprintln! to the service's stderr log): a CR/LF in a value forges an entry. */
+const LOG_MACROS = new Set(["error", "warn", "info", "debug", "trace", "log", "event", "eprintln", "eprint"]);
+/** Text that IS a query / filter / header no matter where it is sent (see checkFormatShape). */
+const SQL_SHAPE_RE = /^\s*(?:SELECT\b[\s\S]*\bFROM\b|INSERT\s+INTO\b|UPDATE\s+[\w."`\[\]]+\s+SET\b|DELETE\s+FROM\b|REPLACE\s+INTO\b|MERGE\s+INTO\b)/i;
+const LDAP_FILTER_SHAPE_RE = /^\s*\(\s*[&|!]?\s*\(?\s*[\w-]+\s*[~<>]?=/;
+const LOCATION_HEADER_RE = /^\s*Location\s*:\s*$/i;
+
+/**
+ * `format!` building a SQL statement, an LDAP filter or a `Location:` header around request data: the string is the
+ * injection whether it is executed here, returned, or handed to another module (the same sinks-by-shape the Java
+ * engine applies to `+` chains). A flow that also reaches a modelled sink below is reported there once -- see
+ * dropShapeDuplicates.
+ */
+function checkFormatShape(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
+  const parts = formatParts(node);
+  if (!parts) return;
+  const firstValue = parts.findIndex(p => p.kind === "opaque");
+  if (firstValue < 0) return;
+  const literal = parts.filter(p => p.kind === "literal").map(p => (p as { text: string }).text).join("");
+  const before = parts.slice(0, firstValue).map(p => (p as { text: string }).text).join("");
+  const at = ctx.findings.length;
+  if (SQL_SHAPE_RE.test(literal)) checkSql(ctx, node, node, env, mask, "SQL text built with format!");
+  else if (LDAP_FILTER_SHAPE_RE.test(literal)) fireOn(ctx, "ldap-injection", node, node, mask(node, env), "LDAP filter built with format!");
+  else if (LOCATION_HEADER_RE.test(before)) {
+    const v = (parts[firstValue] as { node: SyntaxNode }).node;
+    fireOn(ctx, "open-redirect", node, v, mask(v, env), "Location header built with format!");
+  }
+  for (let i = at; i < ctx.findings.length; i++) ctx.findings[i].shape = true;
+}
+
+/** A shape finding whose string also reaches a modelled sink (sqlx::query(&sql) ...) is that sink's finding. */
+function dropShapeDuplicates(findings: AstTaintRustFinding[]): AstTaintRustFinding[] {
+  return findings.filter(f => !f.shape || !findings.some(g => g !== f && !g.shape && g.id === f.id && g.trace?.some(s => s.line === f.line)));
+}
+
 function checkMacroSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   const name = macroName(node);
+  if (name === "format") checkFormatShape(node, env, ctx, mask);
+  if (LOG_MACROS.has(name)) {
+    const { args, captures } = macroArgs(node);
+    for (const a of [...args, ...captures.values()]) if (fireOn(ctx, "log-injection", node, a, mask(a, env), `${name}!`)) break;
+  }
   if (name === "doc" && /"\$where"/.test(node.text)) {
     const m = findAllNodes(node, "identifier").reduce((acc, i) => acc | mask(i, env), 0);
     if (m & ALL) emit(ctx, "nosql-injection", node, node.text.slice(0, 60), "doc! { \"$where\": ... }", "Request input is placed in a MongoDB $where clause — it runs as JavaScript on the server; use query operators instead");
@@ -2163,10 +2236,10 @@ export function scanAstTaintRust(
 ): AstTaintRustFinding[] {
   try {
     const strict = runScan(makeCtx(content, filePath, root, suppressedOut, opts?.crossFileFacts), false);
-    if (!opts?.entryPoints) return strict;
+    if (!opts?.entryPoints) return dropShapeDuplicates(strict);
     const relaxed = runScan(makeCtx(content, filePath, root, suppressedOut, opts.crossFileFacts), true);
     const have = new Set(strict.map(f => `${f.id}:${f.line}`));
-    return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
+    return dropShapeDuplicates([...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))]);
   } catch (err) {
     console.error(`[astTaintRust] threw scanning ${filePath}:`, err);
     return [];

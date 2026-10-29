@@ -43,7 +43,9 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     response / cookie / CodeDom / reflection sinks, Java socket and URLConnection input, Rust request helpers and
 //     store query helpers, secrets formatted into multi-line log calls.
 // 15: C/C++ data-flow and memory-safety engine (astTaintCpp.ts); .cc/.cxx/.hpp/.hh/.h are C/C++ sources.
-export const SCAN_CACHE_VERSION = 15;
+// 16: Java proof pass (sinks proven independent of every input veto the regex duplicate), Rust log injection and
+//     SQL / LDAP / Location built with format!, relative-URL guards (Go / Ruby / Rust), TLS-off switches by name.
+export const SCAN_CACHE_VERSION = 16;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

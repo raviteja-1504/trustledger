@@ -53,6 +53,7 @@ import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
   ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry,
+  combineUrlFacets, urlPartFacet, urlPrefixFacets, applyGuardSet,
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -500,7 +501,11 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
           const taken = mask(k ? c! : a!, env);
           return taken | ((mask(k ? a! : c!, env) & ALL & ~taken) << SHADOW);
         }
-        return (c ? mask(c, env) : 0) | (a ? mask(a, env) : 0);
+        // `ok?(x) ? x : "/"`: each arm sees the guards its side of the condition proves
+        const cond = node.childForFieldName("condition");
+        const gs = cond ? guardsOf(cond, ctx.root) : [];
+        const sideEnv = (side: "true" | "false") => { if (!gs.some(g => g.holds === side)) return env; const e = cloneEnv(env); applyGuardSet(e, gs, side); return e; };
+        return (c ? mask(c, sideEnv("true")) : 0) | (a ? mask(a, sideEnv("false")) : 0);
       }
       case "if": case "unless": case "case": case "begin": case "then": case "else": case "elsif": case "when":
       case "body_statement": case "do": case "ensure": case "rescue": case "block_body":
@@ -564,6 +569,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       const clears = RECEIVER_CLEARS[name];
       // to_sym / numeric conversions change what the value IS (safe in any position); shellescape is an escaper.
       if (clears !== undefined) return (name === "shellescape" ? applySanitizer : applyClears)(mask(recv, env), clears);
+      // URI.parse(url).path / parsed&.path: the path component only -- no scheme or host to send anyone elsewhere
+      if ((name === "path" || name === "request_uri") && isParsedUriRb(recv, node)) return applyClears(mask(recv, env), SinkClass.REDIRECT | SinkClass.SSRF);
       if (OPAQUE_RESULT_METHODS.has(name) || (name.endsWith("?") && !ARG_FLOW_METHODS.has(name))) return 0;
     }
 
@@ -735,6 +742,24 @@ function isResolvedPathRb(name: string, at: SyntaxNode): boolean {
 
 /** `expr rescue nil` -> expr. */
 const unwrapRescueRb = (n: SyntaxNode | null): SyntaxNode | null => (n?.type === "rescue_modifier" ? named(n)[0] ?? null : n);
+const stringValueRb = (n: SyntaxNode): string | null => (n.type === "simple_symbol" ? null : stringValue(n));
+/** `URI.parse(x)` itself, or a local bound to it (whatever x is). */
+function isParsedUriRb(n: SyntaxNode | null, at: SyntaxNode, depth = 0): boolean {
+  if (!n || depth > 3) return false;
+  if (n.type === "call" && /^(?:URI\.parse|URI)$/.test(calleeTextRuby(n) ?? "")) return true;
+  const name = guardName(n);
+  const def = name ? unwrapRescueRb(lastAssignment(name, at)) : null;
+  return !!def && def !== n && isParsedUriRb(def, at, depth + 1);
+}
+/** `URI.parse(url)` (or a local bound to it, `parsed = URI.parse(url) rescue nil`, `parsed&.`) -> "url". */
+function parsedUriSourceRb(n: SyntaxNode | null, at: SyntaxNode, depth = 0): string | null {
+  if (!n || depth > 3) return null;
+  if (n.type === "call" && /^(?:URI\.parse|URI)$/.test(calleeTextRuby(n) ?? "")) { const src = positionalArgs(n)[0]; return src ? guardName(src) : null; }
+  const name = guardName(n);
+  if (!name) return null;
+  const def = unwrapRescueRb(lastAssignment(name, at));
+  return def && def !== n ? parsedUriSourceRb(def, at, depth + 1) : null;
+}
 
 /** `uri.host` of `uri = URI.parse(src)` -> [uri, src] (or just [uri]); null when the argument isn't a parsed host. */
 function parsedHostNamesRb(arg: SyntaxNode): string[] | null {
@@ -785,8 +810,9 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
     const op = operatorOf(c);
     const l = c.childForFieldName("left"), r = c.childForFieldName("right");
     if (!l || !r) return [];
-    if (op === "&&" || op === "and") return [...guardsOf(l, root), ...guardsOf(r, root)].filter(g => g.holds === "true");
-    if (op === "||" || op === "or") return [...guardsOf(l, root), ...guardsOf(r, root)].filter(g => g.holds === "false");
+    // facets (partial URL facts) on the side both operands share are combined into a relative-URL proof
+    if (op === "&&" || op === "and") { const gs = [...guardsOf(l, root), ...guardsOf(r, root)].filter(g => g.holds === "true"); return [...gs, ...combineUrlFacets(gs, "true")]; }
+    if (op === "||" || op === "or") { const gs = [...guardsOf(l, root), ...guardsOf(r, root)].filter(g => g.holds === "false"); return [...gs, ...combineUrlFacets(gs, "false")]; }
     if (op === "==" || op === "!=") {
       const holds = op === "==" ? "true" : "false";
       const ln = guardName(l), rn = guardName(r);
@@ -822,6 +848,18 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
     if (name === "start_with?" && recv && args[0]) {
       const n = guardName(recv);
       if (n && isResolvedPathRb(n, c)) return [{ name: n, holds: "true", clears: SinkClass.PATH }];
+      // url.start_with?('/') / ('//') / ('https://example.com/'): URL facets (see combineUrlFacets)
+      const lit = stringValueRb(args[0]);
+      if (n && lit !== null) return urlPrefixFacets(n, lit, "starts");
+    }
+    if (name === "include?" && recv && args[0] && !isLiteralCollection(recv, root)) {
+      const n = guardName(recv), lit = stringValueRb(args[0]);
+      if (n && lit !== null) return urlPrefixFacets(n, lit, "contains");
+    }
+    // parsed.host.nil? / parsed.scheme.nil? after parsed = URI.parse(url): facets on url
+    if (name === "nil?" && recv?.type === "call" && /^(?:host|scheme)$/.test(methodNameOf(recv))) {
+      const src = parsedUriSourceRb(receiverOf(recv), c);
+      if (src) return urlPartFacet(src, methodNameOf(recv) as "host" | "scheme", "true");
     }
     // x.match?(/\A[a-z0-9]+\z/)
     if (name === "match?" && recv && args[0]?.type === "regex") {

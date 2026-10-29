@@ -637,6 +637,54 @@ export interface Guard {
   /** The classes the guard proves safe; every injection class unless narrower (`typeof x === "string"` rules out
    *  an operator object -- NoSQL -- but a string still carries a SQL quote or a script tag). */
   clears?: number;
+  /** A partial fact that clears nothing alone (`starts with "/"`, `has no "://"`) -- see combineUrlFacets. */
+  facet?: UrlFacet;
+}
+
+// ── Relative-URL proofs built from partial checks ────────────────────────────
+// `url.start_with?("/")` alone proves nothing ("//evil.com" passes) and neither does `!url.start_with?("//")`
+// ("https://evil.com" passes); together they prove a same-site path. Each engine turns its own checks into facets
+// (urlPrefixFacets) and combines the ones true on the same side of an `&&` / `||` (combineUrlFacets).
+// Known limit, accepted deliberately: "/\evil.com" passes the "/"-but-not-"//" check and some browsers read "/\" as
+// "//" (CodeQL's go/bad-redirect-check asks for the backslash check too); the common idiom is treated as a guard.
+
+export type UrlFacet = "slash" | "no-slash" | "dslash" | "no-dslash" | "scheme" | "no-scheme" | "host" | "no-host";
+const URL_DEST = SinkClass.REDIRECT | SinkClass.SSRF;
+
+/**
+ * Guards for `name.startsWith(lit)` / `name.includes(lit)`: facets for "/", "//" and "://", and a full guard when the
+ * prefix alone fixes the destination (`https://example.com/...`, `/app/...`).
+ */
+export function urlPrefixFacets(name: string, lit: string, kind: "starts" | "contains"): Guard[] {
+  const pair = (yes: UrlFacet, no: UrlFacet): Guard[] => [
+    { name, holds: "true", clears: 0, facet: yes }, { name, holds: "false", clears: 0, facet: no },
+  ];
+  if (kind === "contains") return lit === "://" ? pair("scheme", "no-scheme") : [];
+  if (lit === "//") return pair("dslash", "no-dslash");
+  if (lit === "/") return pair("slash", "no-slash");
+  if (/^https?:\/\/[^/?#\\@]+\//i.test(lit) || /^\/[^/\\]/.test(lit)) return [{ name, holds: "true", clears: URL_DEST }];
+  return [];
+}
+
+/** A parsed URL's host / scheme compared with nothing (`u.host.nil?`, `u.Host == ""`): facets on the source value. */
+export function urlPartFacet(name: string, part: "host" | "scheme", emptyOnSide: "true" | "false"): Guard[] {
+  const other = emptyOnSide === "true" ? "false" : "true";
+  return part === "host"
+    ? [{ name, holds: emptyOnSide, clears: 0, facet: "no-host" }, { name, holds: other, clears: 0, facet: "host" }]
+    : [{ name, holds: emptyOnSide, clears: 0, facet: "no-scheme" }, { name, holds: other, clears: 0, facet: "scheme" }];
+}
+
+/** The facets that hold on `side` for one name, combined: a relative path is no open redirect / SSRF target. */
+export function combineUrlFacets(guards: readonly Guard[], side: "true" | "false"): Guard[] {
+  const by = new Map<string, Set<UrlFacet>>();
+  for (const g of guards) if (g.facet && g.holds === side) (by.get(g.name) ?? by.set(g.name, new Set()).get(g.name)!).add(g.facet);
+  const out: Guard[] = [];
+  for (const [name, f] of by) {
+    if ((f.has("slash") && f.has("no-dslash")) || (f.has("no-host") && f.has("no-scheme"))) out.push({ name, holds: side, clears: URL_DEST });
+    // no "://" and no leading "//": no other site -- but `file:/etc/passwd` still reads a file, so redirects only
+    else if (f.has("no-scheme") && f.has("no-dslash")) out.push({ name, holds: side, clears: SinkClass.REDIRECT });
+  }
+  return out;
 }
 
 /** Mark `names` as validated in `env`: clears injection classes, remembers it in the shadow bits (regex-veto data). */
@@ -654,7 +702,7 @@ export function applyGuardSet(env: TaintEnv, guards: readonly Guard[], side: "tr
 
 /** Names guarded in the arm where the condition evaluates to `side`. */
 export function guardedNames(guards: readonly Guard[], side: "true" | "false"): string[] {
-  return guards.filter(g => g.holds === side).map(g => g.name);
+  return guards.filter(g => g.holds === side && !g.facet).map(g => g.name);
 }
 
 // ── Shared control-flow combinators ─────────────────────────────────────────
