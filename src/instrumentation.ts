@@ -57,6 +57,10 @@ export async function register() {
     const { warmRustTaintEngine } = await import("./lib/astTaintRust");
     warmRustTaintEngine().catch(() => { /* already logged inside astTaintRust.ts */ });
 
+    // 3h. Same warm-up for the C/C++ AST taint engine -- see astTaintCpp.ts.
+    const { warmCppTaintEngine } = await import("./lib/astTaintCpp");
+    warmCppTaintEngine().catch(() => { /* already logged inside astTaintCpp.ts */ });
+
     // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
     const org    = process.env.NEXT_PUBLIC_ORG ?? "unknown";

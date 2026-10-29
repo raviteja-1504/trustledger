@@ -42,7 +42,8 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 14: constant folding in C#/PHP/Ruby/Kotlin, log injection in every engine (with CR/LF sanitizers), C# System.Web
 //     response / cookie / CodeDom / reflection sinks, Java socket and URLConnection input, Rust request helpers and
 //     store query helpers, secrets formatted into multi-line log calls.
-export const SCAN_CACHE_VERSION = 14;
+// 15: C/C++ data-flow and memory-safety engine (astTaintCpp.ts); .cc/.cxx/.hpp/.hh/.h are C/C++ sources.
+export const SCAN_CACHE_VERSION = 15;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

@@ -10,6 +10,8 @@
 export const SCANNABLE_EXTS = new Set([
   "py", "ts", "tsx", "js", "jsx", "rb", "go", "rs",
   "java", "kt", "kts", "cs", "php", "cpp", "c", "swift",
+  // the other C/C++ source and header extensions (astTaintCpp.ts parses all of them)
+  "cc", "cxx", "hpp", "hh", "h",
   // .csproj -- C#'s dependency manifest (PackageReference elements, parsed by
   // depAnalysis.ts's parseCsproj). Project-specific filenames (MyApp.csproj), unlike
   // package.json/go.mod's fixed basenames, so this needs the extension allowlist rather than

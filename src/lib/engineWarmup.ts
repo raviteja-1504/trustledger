@@ -14,13 +14,14 @@ import { warmPhpTaintEngine } from "./astTaintPHP";
 import { warmRubyTaintEngine } from "./astTaintRuby";
 import { warmKotlinTaintEngine } from "./astTaintKotlin";
 import { warmRustTaintEngine } from "./astTaintRust";
+import { warmCppTaintEngine } from "./astTaintCpp";
 
 export const ENGINE_WARMUP_TIMEOUT_MS = 20000;
 
 export async function ensureTaintEngines(timeoutMs = ENGINE_WARMUP_TIMEOUT_MS): Promise<{ ready: boolean; ms: number }> {
   const t0 = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const all = Promise.allSettled([warmPythonTaintEngine(), warmGoTaintEngine(), warmCSharpTaintEngine(), warmPhpTaintEngine(), warmRubyTaintEngine(), warmKotlinTaintEngine(), warmRustTaintEngine()])
+  const all = Promise.allSettled([warmPythonTaintEngine(), warmGoTaintEngine(), warmCSharpTaintEngine(), warmPhpTaintEngine(), warmRubyTaintEngine(), warmKotlinTaintEngine(), warmRustTaintEngine(), warmCppTaintEngine()])
     .then(results => results.every(r => r.status === "fulfilled"));
   const timeout = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
   try {

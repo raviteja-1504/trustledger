@@ -190,6 +190,40 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0, cwe:"CWE-943",
   },
+  // C/C++ memory corruption: write primitives that commonly end in code execution.
+  "format-string": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0.56, cwe:"CWE-134",
+  },
+  "buffer-overflow": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0.56, cwe:"CWE-120",
+  },
+  "use-after-free": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0.56, cwe:"CWE-416",
+  },
+  "double-free": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.56, A:0.56, cwe:"CWE-415",
+  },
+  // Availability first: a huge size exhausts memory; a wrapped one under-allocates.
+  "integer-overflow": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0.22, A:0.56, cwe:"CWE-789",
+  },
+  "null-dereference": {
+    AV:"LOCAL", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0, A:0.56, cwe:"CWE-690",
+  },
+  "mismatched-deallocation": {
+    AV:"LOCAL", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0.56, cwe:"CWE-762",
+  },
+  "insecure-temp-file": {
+    AV:"LOCAL", AC:"HIGH", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.56, A:0, cwe:"CWE-377",
+  },
   "ldap-injection": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.22, A:0, cwe:"CWE-90",

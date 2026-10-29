@@ -147,10 +147,10 @@ const PILLARS: Pillar[] = [
   },
   {
     id: "code-risk", icon: CodeRiskIcon, color: ROSE, name: "Code Risk", tagline: "What's actually in the code — vulnerabilities, secrets, dependencies",
-    desc: "Nine real AST-based taint engines trace SQL injection, XSS, SSRF, and seventeen other vulnerability classes from source to sink — across files, services and includes, not just within one file. The same scan flags hardcoded secrets the moment they land, and ranks every vulnerable dependency by whether your code actually reaches it.",
+    desc: "Ten real AST-based taint engines trace SQL injection, XSS, SSRF, buffer overflows and twenty-four other vulnerability classes from source to sink — across files, services and includes, not just within one file. The same scan flags hardcoded secrets the moment they land, and ranks every vulnerable dependency by whether your code actually reaches it.",
     bullets: [
-      "Real data-flow taint engines: JS/TS, Python, Java, Kotlin, Go, C#, PHP, Ruby, Rust — across files in all nine",
-      "20 vulnerability classes, each with a source-to-sink trace and the exact sink argument",
+      "Real data-flow taint engines: JS/TS, Python, Java, Kotlin, Go, C#, PHP, Ruby, Rust, C/C++ — across files in all ten",
+      "28 vulnerability classes, each with a source-to-sink trace and the exact sink argument",
       "Secrets detection — API keys, tokens, credentials — before they reach history",
       "Live CVEs across 8 ecosystems, ranked by reachability: is the vulnerable function called?",
     ],
@@ -224,8 +224,16 @@ const VULN_CLASSES: VulnClass[] = [
   { name: "Timing Attack", cwe: "CWE-208", group: "Authorization" },
   { name: "ReDoS", cwe: "CWE-1333", group: "Availability" },
   { name: "Arbitrary Code Execution", cwe: "CWE-95", group: "Availability" },
+  { name: "Buffer Overflow", cwe: "CWE-120", group: "Memory safety" },
+  { name: "Format String", cwe: "CWE-134", group: "Memory safety" },
+  { name: "Use After Free", cwe: "CWE-416", group: "Memory safety" },
+  { name: "Double Free", cwe: "CWE-415", group: "Memory safety" },
+  { name: "NULL Dereference", cwe: "CWE-690", group: "Memory safety" },
+  { name: "Mismatched Deallocation", cwe: "CWE-762", group: "Memory safety" },
+  { name: "Uncontrolled Allocation Size", cwe: "CWE-789", group: "Memory safety" },
+  { name: "Insecure Temporary File", cwe: "CWE-377", group: "Filesystem" },
 ];
-const GROUP_COLORS: Record<string, string> = { "Injection": CYAN, "Request forgery": ORANGE, "Filesystem": AMBER, "Data handling": VIOLET, "Authorization": ROSE, "Availability": EMERALD };
+const GROUP_COLORS: Record<string, string> = { "Injection": CYAN, "Request forgery": ORANGE, "Filesystem": AMBER, "Data handling": VIOLET, "Authorization": ROSE, "Availability": EMERALD, "Memory safety": SKY };
 
 /** `mono` / `color`: the monogram badge each language gets on the page (its community color, not a logo). */
 interface LangEngine { lang: string; short: string; mono: string; color: string; ext: string; note: string; extra: string }
@@ -239,6 +247,7 @@ const LANGUAGES: LangEngine[] = [
   { lang: "PHP", short: "PHP", mono: "PHP", color: "#818cf8", ext: ".php", note: "Functions & classes across includes, path-sensitive", extra: "__DIR__, relative & transitive includes; static calls" },
   { lang: "Ruby", short: "Ruby", mono: "Rb", color: "#f43f5e", ext: ".rb", note: "Rails & Sinatra controllers to services and models", extra: "Strong params, before_action state, service objects, scopes" },
   { lang: "Rust", short: "Rust", mono: "Rs", color: "#fb923c", ext: ".rs", note: "Axum, Actix & Rocket handlers, format! traced per argument", extra: "State<Arc<T>> services, trait objects, module functions via use" },
+  { lang: "C / C++", short: "C/C++", mono: "C++", color: "#60a5fa", ext: ".c .cpp .cc .h .hpp", note: "argv, stdin, sockets & getenv into exec, printf formats, SQL and files", extra: "Use-after-free, double free, unchecked malloc, constant-size overflows" },
 ];
 /** Frameworks the engines model by name (sources, sinks, injection) -- each one appears in an engine. */
 const FRAMEWORKS = ["Express", "NestJS", "Next.js", "Flask", "FastAPI", "Spring", "JAX-RS", "Ktor", "ASP.NET", "Laravel", "Rails", "Sinatra", "Axum", "Actix", "Rocket"];
@@ -253,7 +262,7 @@ const MOCK_FINDINGS = [
 
 const FAQS = [
   { q: "Do I need to change my CI pipeline?", a: "No. TrustLedger installs as a GitHub App — GitLab and Bitbucket are supported too — and scans every pull request automatically, with no config files and no CI changes. If you'd rather drive it yourself, scans can also be submitted through the REST API." },
-  { q: "Which languages and frameworks are covered?", a: "Nine languages have their own AST parser and taint engine: TypeScript/JavaScript, Python, Java, Kotlin, Go, C#, PHP, Ruby and Rust, tuned to frameworks such as Express, NestJS, Flask, FastAPI, Spring, Ktor, ASP.NET, Laravel, Rails, Axum, Actix and Rocket. Infrastructure checks cover Terraform, CloudFormation, ARM, Bicep, Serverless, Kubernetes, Helm, Docker and OpenAPI." },
+  { q: "Which languages and frameworks are covered?", a: "Ten languages have their own AST parser and taint engine: TypeScript/JavaScript, Python, Java, Kotlin, Go, C#, PHP, Ruby, Rust and C/C++ (which also checks memory safety: use-after-free, double free, unchecked allocations, buffer overflows), tuned to frameworks such as Express, NestJS, Flask, FastAPI, Spring, Ktor, ASP.NET, Laravel, Rails, Axum, Actix and Rocket. Infrastructure checks cover Terraform, CloudFormation, ARM, Bicep, Serverless, Kubernetes, Helm, Docker and OpenAPI." },
   { q: "How is this different from a regex-based scanner?", a: "A vulnerability is reported only when an attacker-controlled value is traced to a real sink — through assignments, branches, helper functions and other files — and a sanitizer clears only the vulnerability classes it actually neutralizes. Every finding ships with its source-to-sink trace, so reviewers can check it in seconds." },
   { q: "What does AI provenance measure?", a: "47 signals across code structure, git history and behavior estimate how much of each file is AI-generated and attribute it to the tool that wrote it — Copilot, Cursor, Claude, Windsurf and more — and flag tools that aren't on your approved list." },
   { q: "Can it block a merge?", a: "Yes. Policy gates hold a pull request until the required fixes or a named reviewer's attestation are recorded, and the result is posted back to the PR as a check run." },
@@ -292,7 +301,7 @@ const ENGINE_FACTS = [
   { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal, a fully anchored digits-only or character-class pattern. A loose regex match is deliberately NOT trusted." },
   { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
   { label: "Fixed-point call resolution", desc: "Call summaries iterate until nothing changes — same-file and across files — so an eight-deep helper chain or a five-file flow converges, with a safety cap instead of an arbitrary round limit." },
-  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all nine languages, including Rails autoloading, Kotlin↔Java calls and Rust modules. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
+  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all ten languages, including Rails autoloading, Kotlin↔Java calls, Rust modules and C/C++ functions across translation units. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
 ];
 
 const STEPS = [
@@ -522,7 +531,7 @@ function HeroSection() {
             One risk score.
           </h1>
           <p className="text-lg sm:text-xl text-white/65 max-w-xl mx-auto lg:mx-0 leading-relaxed">
-            Every pull request scored for AI-generated code, real vulnerabilities traced across files in nine languages, leaked secrets, reachable vulnerable dependencies and cloud misconfigurations — and held until a named reviewer signs off.
+            Every pull request scored for AI-generated code, real vulnerabilities traced across files in ten languages, leaked secrets, reachable vulnerable dependencies and cloud misconfigurations — and held until a named reviewer signs off.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-3 pt-1">
             <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
@@ -552,7 +561,7 @@ function HeroSection() {
       </div>
 
       <Reveal delay={320} className="relative mt-20 w-full max-w-5xl mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 pt-10 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
-        {[{ to: 9, label: "language engines" }, { to: 20, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
+        {[{ to: LANGUAGES.length, label: "language engines" }, { to: VULN_CLASSES.length, label: "vulnerability classes" }, { to: 47, label: "AI-detection signals" }, { to: 8, label: "SCA ecosystems" }, { to: IAC_FORMATS.length, label: "IaC & cloud formats" }, { to: 6, label: "API languages inventoried" }].map(s => (
           <div key={s.label} className="text-center">
             <p className="text-3xl font-black font-mono" style={{ color: "#67e8f9", textShadow: `0 0 24px ${CYAN}88` }}><CountUp to={s.to} /></p>
             <p className="text-[11px] text-white/50 font-medium mt-1">{s.label}</p>
@@ -752,8 +761,8 @@ function VulnCoverageSection() {
       <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Twenty vulnerability classes, real data-flow evidence</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — not a keyword or a line pattern.</p>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">{VULN_CLASSES.length} vulnerability classes, real data-flow evidence</h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — or, for C/C++ memory safety, a pointer's real allocation state along the path — not a keyword or a line pattern.</p>
         </Reveal>
         <div className="space-y-8">
           {groups.map((g, gi) => (
@@ -792,10 +801,10 @@ function LanguageEngineSection() {
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl sm:text-5xl font-black text-white mt-4 tracking-tight">Nine languages. <span style={{ color: "#67e8f9" }}>Nine real parsers.</span></h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across nine syntaxes.</p>
+          <h2 className="text-4xl sm:text-5xl font-black text-white mt-4 tracking-tight">Ten languages. <span style={{ color: "#67e8f9" }}>Ten real engines.</span></h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across ten syntaxes.</p>
         </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {LANGUAGES.map((l, i) => (
             <Reveal key={l.lang} delay={i * 70}>
               <div className="group relative h-full p-5 rounded-2xl border transition-all overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
@@ -917,7 +926,7 @@ function PipelineSection() {
 
 const FEATURES = [
   { icon: RouteIcon, title: "Source → Sink Traces", desc: "Every finding ships with the actual data-flow path, hop by hop, with real file and line numbers — including across a file boundary.", accent: CYAN },
-  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all nine languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS, Axum state), Go packages, PHP includes, Rails autoloading, Rust modules — measured by a 72-case cross-file benchmark on every change.", accent: CYAN },
+  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all ten languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS, Axum state), Go packages, PHP includes, Rails autoloading, Rust modules — measured by a 72-case cross-file benchmark on every change.", accent: CYAN },
   { icon: MergeIcon, title: "One Issue, One Finding", desc: "When the pattern layer, the taint engine and cross-file analysis see the same bug, it becomes one finding listing every location and every detector that agreed.", accent: CYAN },
   { icon: LockIcon, title: "Broken Object-Level Authorization", desc: "Structural ownership-dominance analysis: a resource lookup only clears when a real comparison against the principal dominates every path to the sink.", accent: ROSE },
   { icon: PackageIcon, title: "Reachable Dependencies", desc: "Live CVEs across 8 ecosystems, ranked by whether the vulnerable function is called, the package is reachable from an entry point, used only in tests, or never imported.", accent: AMBER },

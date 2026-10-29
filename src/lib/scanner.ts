@@ -92,6 +92,10 @@ import {
   findEnclosingFunctionNameRust, findNodeAtRowRust, astTaintRustSeverity, astTaintRustLabel,
 } from "./astTaintRust";
 import type { Node as RustSyntaxNode } from "web-tree-sitter";
+import {
+  parseCppSourceSync, isCppParserReady, scanAstTaintCpp, computeCppFnSinkFacts,
+  findEnclosingFunctionNameCpp, findNodeAtRowCpp, astTaintCppSeverity, astTaintCppLabel,
+} from "./astTaintCpp";
 import { parseAst }              from "./ast";
 import type { AstMetrics, AstRisk } from "./ast";
 import { buildSSA, extractFunctionBody } from "./ssa";
@@ -302,6 +306,7 @@ const LANG_MAP: Record<string, string> = {
   rb: "ruby",     go: "golang",     rs: "rust",
   java: "java",   kt: "kotlin",     kts: "kotlin",  cs: "csharp",   cshtml: "csharp",
   php: "php",     cpp: "cpp",       c:   "c",
+  cc: "cpp",      cxx: "cpp",       hpp: "cpp",     hh: "cpp",      h: "c",
   swift: "swift", yaml: "yaml",     yml: "yaml",
   json: "json",   sh: "shell",      sql: "sql",
   md: "markdown", tf: "terraform",  ex: "elixir",
@@ -6091,6 +6096,62 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  'console.log("login failed for", userName.replace(/[\\r\\n]/g, "_"))',
     cwe: "CWE-117", effort: "low",
   },
+  "format-string": {
+    title: "Pass untrusted text as an argument, never as the format",
+    description: "Use a constant format string and pass the value through %s, so %n / %x in the input are printed, not interpreted.",
+    code_before: "printf(data);",
+    code_after:  'printf("%s", data);',
+    cwe: "CWE-134", effort: "low",
+  },
+  "buffer-overflow": {
+    title: "Bound every copy by the destination's size",
+    description: "Replace gets/strcpy/strcat/sprintf and unbounded %s with fgets, snprintf or strlcpy, and check any length against sizeof(destination) before memcpy.",
+    code_before: "strcpy(dest, input);",
+    code_after:  'snprintf(dest, sizeof(dest), "%s", input);',
+    cwe: "CWE-120", effort: "low",
+  },
+  "integer-overflow": {
+    title: "Check sizes against an upper bound before allocating",
+    description: "Reject sizes above a sane limit (and multiplications that would wrap) before passing them to malloc, new[] or memcpy.",
+    code_before: "char *p = malloc(n);",
+    code_after:  "if (n == 0 || n > MAX_LEN) return -1;\nchar *p = malloc(n);",
+    cwe: "CWE-789", effort: "low",
+  },
+  "use-after-free": {
+    title: "Don't touch memory after freeing it",
+    description: "Set the pointer to NULL right after free and restructure so no path reads it afterwards; in C++ prefer std::unique_ptr.",
+    code_before: "free(p);\nuse(p);",
+    code_after:  "use(p);\nfree(p);\np = NULL;",
+    cwe: "CWE-416", effort: "medium",
+  },
+  "double-free": {
+    title: "Free each allocation exactly once",
+    description: "Null the pointer after free (free(NULL) is a no-op) or give the allocation a single owner.",
+    code_before: "free(p);\n...\nfree(p);",
+    code_after:  "free(p);\np = NULL;",
+    cwe: "CWE-415", effort: "low",
+  },
+  "null-dereference": {
+    title: "Check allocator results for NULL",
+    description: "malloc/calloc/realloc return NULL on failure; test the result before using it.",
+    code_before: "int *p = malloc(sizeof *p);\n*p = 5;",
+    code_after:  "int *p = malloc(sizeof *p);\nif (p == NULL) return -1;\n*p = 5;",
+    cwe: "CWE-690", effort: "low",
+  },
+  "mismatched-deallocation": {
+    title: "Release memory with the matching routine",
+    description: "malloc pairs with free, new with delete, new[] with delete[]; in C++ prefer std::vector / smart pointers.",
+    code_before: "int *a = new int[10];\ndelete a;",
+    code_after:  "int *a = new int[10];\ndelete[] a;",
+    cwe: "CWE-762", effort: "low",
+  },
+  "insecure-temp-file": {
+    title: "Create temporary files atomically",
+    description: "Use mkstemp (or tmpfile) which creates and opens the file in one step, instead of generating a name with tmpnam/mktemp.",
+    code_before: "char *name = tmpnam(NULL);\nFILE *f = fopen(name, \"w\");",
+    code_after:  "char name[] = \"/tmp/appXXXXXX\";\nint fd = mkstemp(name);",
+    cwe: "CWE-377", effort: "low",
+  },
   "ldap-injection": {
     title: "Escape LDAP special characters or use parameterised filters",
     description: "Never concatenate user input into an LDAP filter string — escape special characters (*, (, ), \\, NUL) first.",
@@ -6794,6 +6855,25 @@ function findAstTaintRustFindings(
   }));
 }
 
+// C/C++: same contract; flow findings from an exported function's parameters are lower confidence, and the
+// intraprocedural memory-safety checks (no source involved) sit between the two.
+const CPP_MEMORY_IDS = new Set(["use-after-free", "double-free", "null-dereference", "mismatched-deallocation", "insecure-temp-file"]);
+function findAstTaintCppFindings(
+  content: string, filePath: string, root: RustSyntaxNode, suppressed?: SuppressedSink[],
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+): ScanIndicator[] {
+  return scanAstTaintCpp(content, filePath, root, suppressed, { entryPoints: true, crossFileFacts }).map(f => ({
+    id: f.id, label: astTaintCppLabel(f.id), severity: astTaintCppSeverity(f.id),
+    line: f.line,
+    detail: f.entryPointSeeded
+      ? `${f.detail} [input assumed untrusted: string parameter of an exported function with no in-file caller]`
+      : f.detail,
+    confidence: f.entryPointSeeded ? 70 : CPP_MEMORY_IDS.has(f.id) ? 85 : 95,
+    sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+    sourceAssumed: f.entryPointSeeded || undefined,
+  }));
+}
+
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
 export function analyzeFile(
@@ -6854,6 +6934,8 @@ export function analyzeFile(
   crossFileRust?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Python helpers anywhere in the batch that return request data (module.func / module.Class.method).
   crossFilePySources?: ReadonlyMap<string, number>,
+  // Same as crossFileRust, for C/C++ (callers -> functions defined in other translation units).
+  crossFileCpp?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -6967,6 +7049,11 @@ export function analyzeFile(
     lang === "rust" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRustParserReady()
       ? (crossFileRust?.tree ?? parseRustSourceSync(content, file_path))
       : null;
+  // C and C++ share tree-sitter-cpp (astTaintCpp.ts).
+  const cppTree: RustSyntaxNode | null =
+    (lang === "c" || lang === "cpp") && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCppParserReady()
+      ? (crossFileCpp?.tree ?? parseCppSourceSync(content, file_path))
+      : null;
 
   const secretIndicators: ScanIndicator[] = [
     ...findSecrets(lines, file_path),
@@ -6997,6 +7084,7 @@ export function analyzeFile(
     ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
     ...(kotlinTree ? findAstTaintKotlinFindings(content, file_path, kotlinTree, suppressedSinks, crossFileKotlin?.facts) : []),
     ...(rustTree ? findAstTaintRustFindings(content, file_path, rustTree, suppressedSinks, crossFileRust?.facts) : []),
+    ...(cppTree ? findAstTaintCppFindings(content, file_path, cppTree, suppressedSinks, crossFileCpp?.facts) : []),
   ];
   // Comment and displayed-only text blanked: see codeOnlyLines.
   const codeLines = codeOnlyLines(content, lines, file_path, tsSourceFile);
@@ -7290,6 +7378,9 @@ export function analyzeFile(
     if (rustTree) {
       return findEnclosingFunctionNameRust(findNodeAtRowRust(rustTree, Math.max(0, line - 1)));
     }
+    if (cppTree) {
+      return findEnclosingFunctionNameCpp(findNodeAtRowCpp(cppTree, Math.max(0, line - 1)));
+    }
     return "unknown";
   };
   // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
@@ -7453,7 +7544,7 @@ export interface ScanInput {
  * incrementalCache.ts / moduleSummaryCache.ts). A stored scan with an older value can be rescanned. */
 export const CURRENT_ENGINE_VERSION = `${SCAN_CACHE_VERSION}.${MODULE_CACHE_VERSION}`;
 
-const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby", "kotlin", "rust"]);
+const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", "golang", "csharp", "php", "ruby", "kotlin", "rust", "c", "cpp"]);
 
 /** Why `path` will NOT get data-flow analysis in this process, or null when it will (or its language has
  * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
@@ -7467,7 +7558,7 @@ function coverageGapFor(path: string, content: string): CoverageGap | null {
   const ready = language === "python" ? isPythonParserReady() : language === "golang" ? isGoParserReady()
     : language === "csharp" ? isCSharpParserReady() : language === "php" ? isPhpParserReady()
     : language === "ruby" ? isRubyParserReady() : language === "kotlin" ? isKotlinParserReady()
-    : language === "rust" ? isRustParserReady() : true;
+    : language === "rust" ? isRustParserReady() : language === "c" || language === "cpp" ? isCppParserReady() : true;
   return ready ? null : { file: path, language, reason: "engine-unavailable" };
 }
 
@@ -8277,6 +8368,20 @@ export function runScan(input: ScanInput): ScanOutput {
   const rustFactsDigest = rustFacts.size > 0 ? factsDigest(rustFacts) : "";
   const rubyFactsDigest = rubyFacts.size > 0 ? factsDigest(rubyFacts) : "";
 
+  // C/C++: one global namespace of external functions across the batch's translation units.
+  const cppTrees = new Map<string, RustSyntaxNode>();
+  if (isCppParserReady()) {
+    for (const f of allFiles) {
+      const l = detectLanguage(f.path);
+      if ((l !== "c" && l !== "cpp") || getFileTypeMeta(f.path).isGenerated || /(?:^|\/)(?:third_party|vendor|external|build)\//.test(f.path)) continue;
+      if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
+      const tree = parseCppSourceSync(f.content, f.path);
+      if (tree) cppTrees.set(f.path, tree);
+    }
+  }
+  const cppFacts = convergeServiceFacts(cppTrees, allFiles, computeCppFnSinkFacts);
+  const cppFactsDigest = cppFacts.size > 0 ? factsDigest(cppFacts) : "";
+
   // Per file: reuse the cached analysis when EVERYTHING analyzeFile() would read is unchanged (see
   // incrementalCache.ts), else analyze for real. The key is computed here, after the cross-file bridges,
   // precisely because it must cover the incoming cross-file summaries those bridges produce -- that is
@@ -8297,7 +8402,7 @@ export function runScan(input: ScanInput): ScanOutput {
       storedProvenanceIncoming: modelReceiversByFile.get(f.path) &&
         [...new Set(modelReceiversByFile.get(f.path)!.values())].map(key => [key, modelWritesAggregate.get(key) ?? 0] as [string, number]),
       serviceFactsDigest: javaCsts.has(f.path) ? javaFactsDigest : csTrees.has(f.path) ? csFactsDigest : goTrees.has(f.path) ? goFactsDigest
-        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : rustTrees.has(f.path) ? rustFactsDigest
+        : phpIncoming.has(f.path) ? factsDigest(phpIncoming.get(f.path)!) : rubyTrees.has(f.path) ? rubyFactsDigest : kotlinTrees.has(f.path) ? javaFactsDigest : rustTrees.has(f.path) ? rustFactsDigest : cppTrees.has(f.path) ? cppFactsDigest
         // a Python file's result also depends on which helpers elsewhere return request data
         : pySourceFiles.has(f.path) ? `pysrc:${crypto.createHash("sha256").update(pySourceFnsDigest).digest("hex")}` : undefined,
     });
@@ -8316,6 +8421,7 @@ export function runScan(input: ScanInput): ScanOutput {
           kotlinTrees.has(f.path) ? { tree: kotlinTrees.get(f.path), facts: javaFacts } : undefined,
           rustTrees.has(f.path) ? { tree: rustTrees.get(f.path), facts: rustFacts } : undefined,
           pySourceFiles.has(f.path) ? pySourceFns : undefined,
+          cppTrees.has(f.path) ? { tree: cppTrees.get(f.path), facts: cppFacts } : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
