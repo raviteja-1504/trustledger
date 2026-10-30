@@ -49,6 +49,7 @@ function isPublic(pathname: string): boolean {
   if (pathname.startsWith("/docs/"))           return true;
   if (pathname.startsWith("/blog/"))           return true;
   if (pathname.startsWith("/videos/"))         return true;
+  if (pathname.startsWith("/screens/"))        return true;
   if (pathname.startsWith("/_next/"))          return true;
   if (pathname.startsWith("/static/"))         return true;
   if (pathname === "/favicon.ico")             return true;
