@@ -1,0 +1,29 @@
+WEBVTT
+
+1
+00:00:00.172 --> 00:00:07.642
+How the engine finds a real vulnerability across files.
+
+2
+00:00:07.642 --> 00:00:14.646
+Scan: the value is tracked from its source, through a function call, to the database call it reaches.
+
+3
+00:00:14.646 --> 00:00:21.653
+Each step of the trace names its kind, file and line: source, cross-file parameter, sink.
+
+4
+00:00:21.653 --> 00:00:28.670
+Side by side: the concatenated query, and the parameterised one.
+
+5
+00:00:28.670 --> 00:00:35.674
+Rescanning the fixed code: the SQL text no longer carries request data, so there is nothing to report.
+
+6
+00:00:35.674 --> 00:00:42.676
+A sanitizer clears only what it neutralises. Python sample: request data echoed into HTML.
+
+7
+00:00:42.676 --> 00:00:49.682
+Escaping the value for HTML clears the XSS finding.

@@ -75,6 +75,37 @@ const CHANGELOG = [
   },
 ];
 
+/** Detection-engine releases, by the commit that shipped them; measured effect on /benchmarks#history. */
+const ENGINE_RELEASES = [
+  {
+    commit: "e2f90ea",
+    date:   "2026-10-30",
+    changes: [
+      { kind:"added",   text:"C#: proofs seeded from the batch's own call sites — helpers other files only ever call with constants are proven safe (Juliet C# SQL false positives 48.6% → 27.3%, detection unchanged at 100%)" },
+      { kind:"fixed",   text:"C#: named arguments (`Find(conn: x, data: y)`) were evaluated by name instead of value, and cross-file facts matched them by position" },
+      { kind:"added",   text:"Java: request wrappers in other files are sources (BenchmarkJava 68.9 → 77.2 with helper classes scanned); DES/3DES/RC4 key generators" },
+      { kind:"added",   text:"Rust: integer overflow and truncation, unsafe raw memory access, allocation sizes. C/C++: new T[n] sized by input, constant-bound loops past a buffer" },
+      { kind:"added",   text:"Go: math/rand token flows; PHP: template-engine render, session-authenticated CSRF; Ruby: reflection and file inclusion with allow-list guards; Kotlin: coroutine values and WebView bridges" },
+      { kind:"added",   text:"Express: spoofable rate-limit keys, unauthenticated diagnostics routes, session fixation, shadowed role guards; JS recursive-merge prototype pollution; Android cleartext storage and clipboard" },
+      { kind:"fixed",   text:"Go: looking up a session by its cookie is no longer reported as IDOR" },
+    ],
+  },
+  {
+    commit: "bbe15dd",
+    date:   "2026-10-29",
+    changes: [
+      { kind:"added",   text:"C# proof pass and network sources; PHP guards and XXE following libxml's defaults; Kotlin/Android content providers; browser DOM sources and sinks" },
+    ],
+  },
+  {
+    commit: "a21ecb3",
+    date:   "2026-10-29",
+    changes: [
+      { kind:"added",   text:"C/C++ data-flow and memory-safety engine: command, format-string, SQL and path sinks; use-after-free, double free, unchecked allocation, buffer bounds" },
+    ],
+  },
+];
+
 const KIND_STYLE: Record<string, { bg: string; text: string; label: string }> = {
   added:      { bg:"#f0fdf4", text:"#15803d", label:"Added"      },
   changed:    { bg:"#eff6ff", text:"#1d4ed8", label:"Changed"     },
@@ -117,6 +148,35 @@ export default function ChangelogPage() {
           </p>
         </div>
 
+        {/* Engine releases */}
+        <div className="mb-14">
+          <h2 className="text-lg font-black text-gray-900 mb-1">Detection engine releases</h2>
+          <p className="text-sm text-gray-500 mb-6">By commit. The measured effect of each release is on the <a href="/benchmarks#history" className="text-indigo-600 hover:underline">benchmark report</a>.</p>
+          <div className="space-y-8">
+            {ENGINE_RELEASES.map(r => (
+              <div key={r.commit} id={`engine-${r.commit}`}>
+                <div className="flex items-center gap-3 mb-3">
+                  <span className="text-sm font-mono font-black px-3 py-1 rounded-xl" style={{ background:"#050810", color:"#67e8f9" }}>{r.commit}</span>
+                  <span className="text-sm text-gray-400">{formatDateOnly(new Date(r.date), getSavedTimezone())}</span>
+                  <div className="flex-1 h-px bg-gray-200" />
+                </div>
+                <div className="space-y-1.5">
+                  {r.changes.map((c, i) => {
+                    const style = KIND_STYLE[c.kind] ?? KIND_STYLE.added;
+                    return (
+                      <div key={i} className="flex items-start gap-3 py-1">
+                        <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded shrink-0 mt-0.5" style={{ background: style.bg, color: style.text }}>{style.label}</span>
+                        <p className="text-sm text-gray-700 leading-relaxed">{c.text}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <h2 className="text-lg font-black text-gray-900 mb-6">API and platform releases</h2>
         {/* Entries */}
         <div className="space-y-10">
           {CHANGELOG.map(entry => {

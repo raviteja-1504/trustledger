@@ -1,0 +1,91 @@
+{
+  "falsePositives": [
+    {
+      "corpus": "OWASP Benchmark (Java)",
+      "caseId": "BenchmarkTest00925",
+      "rule": "sql-injection",
+      "title": "A constant that passes through two helpers in other files",
+      "explanation": "The value comes from a helper method that returns a constant, then passes through an interface method created by a factory in another file before it is concatenated into SQL. The proof pass cannot see through the factory, so the line-level concatenation match is kept. Engine gap; most of the remaining BenchmarkJava SQL false positives have this shape."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00158",
+      "rule": "log-injection",
+      "title": "A sanitizer written as a character filter",
+      "explanation": "The username is cleaned with chars().filter(|c| !c.is_ascii_control()), which removes CR and LF, but the engine does not recognise a closure-based filter as a log sanitizer, so the log line is still reported. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest01167",
+      "rule": "idor",
+      "title": "Ownership proven by an HMAC-signed token",
+      "explanation": "The handler verifies an HMAC-signed resource token that binds the caller to the resource id before the lookup. The engine recognises comparisons with the authenticated principal but not a signature check, so it reports the lookup. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Ruby",
+      "caseId": "BenchmarkTest00997",
+      "rule": "ssrf",
+      "title": "An https-only check is labelled safe",
+      "explanation": "The corpus treats a request URL as safe once its scheme is https. Restricting the scheme does not stop a request to an internal host (https://169.254.169.254/, an internal service), so we keep reporting it. A deliberate disagreement with the label."
+    }
+  ],
+  "falseNegatives": [
+    {
+      "corpus": "OWASP Benchmark (Java)",
+      "caseId": "BenchmarkTest00003",
+      "rule": "weak-crypto",
+      "title": "A hash algorithm chosen in a properties file",
+      "explanation": "The algorithm name is read with getProperty(\"hashAlg1\", ...) from benchmark.properties, where it is set to a weak hash. The engine does not resolve values from .properties files, so every hash case configured this way is missed. Engine gap; on the roadmap."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00125",
+      "rule": "ssrf",
+      "title": "A stub HTTP client",
+      "explanation": "The request URL reaches simulated_reqwest_get(), a function the corpus defines to stand in for an HTTP client and which only formats a string. We report calls to real HTTP libraries, not functions that merely have a client-like name, so these cases count as misses. A deliberate choice."
+    },
+    {
+      "corpus": "SAST Benchmark — Ruby",
+      "caseId": "BenchmarkTest01120",
+      "rule": "xxe",
+      "title": "Nokogiri's default parse is labelled vulnerable",
+      "explanation": "Nokogiri::XML(input) does not substitute external entities by default; the corpus labels it vulnerable and labels the noent option — which turns substitution on — as safe. We follow the library's real behaviour, so Ruby XXE scores 0 on this corpus. A deliberate disagreement with the label."
+    },
+    {
+      "corpus": "SAST Benchmark — PHP",
+      "caseId": "BenchmarkTest00053",
+      "rule": "csrf",
+      "title": "CSRF without a session or cookie",
+      "explanation": "The corpus labels a state-changing handler with no CSRF token as vulnerable even when it reads no session or cookie. Cross-site request forgery needs a credential the browser attaches by itself, so we report CSRF only for session- or cookie-authenticated handlers. A deliberate choice."
+    },
+    {
+      "corpus": "OWASP Juice Shop",
+      "caseId": "weakPasswordChallenge",
+      "rule": "weak-crypto",
+      "title": "A weak password hash behind a helper in another file",
+      "explanation": "models/user.ts stores security.hash(password), and the weak MD5 hash lives in lib/insecurity.ts. The weak hash itself is reported there, but not the use of it for passwords in the model. Engine gap."
+    }
+  ],
+  "limitations": [
+    "Benchmarks are small, synthetic programs. They measure whether known patterns are recognised, not how the engines behave on your codebase, and scores on different corpora are not comparable with each other.",
+    "Trace accuracy is not measured: no public corpus labels the expected source-to-sink path.",
+    "Kotlin has no public labelled corpus and is not in this report; it is covered by unit tests and checked against the AndroGoat and Goatlin apps by hand.",
+    "Juliet cases are scored by region (a finding in the bad or good function); Juice Shop challenges count as detected when a finding lands within two lines of a marked line.",
+    "The internal cross-file suite was written by us. It is included because no public corpus targets cross-file flows, but it is less independent than the public corpora.",
+    "The AI-attribution check uses 10 labelled TypeScript/JavaScript files: a regression check, not a statistically strong evaluation.",
+    "Throughput is measured in batch on a developer workstation, on the corpora scanned in a single pass. It is not end-to-end pull-request latency.",
+    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label."
+  ],
+  "comparison": {
+    "status": "not-run",
+    "note": "We have not yet run CodeQL or Semgrep on these corpora under identical conditions, so we publish no comparison numbers. We will add one when we have run both tools on the same corpus versions, with their default security rules, scored by the same scripts."
+  },
+  "history": [
+    { "commit": "b73e12f", "date": "2026-10-24", "corpus": "OWASP Benchmark (Python)", "score": 95, "note": "From 12 before this commit (recorded in the commit message)" },
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "OWASP Benchmark (Java)", "score": 65.4, "note": "Test cases only; helper classes not scanned" },
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Go", "score": 35, "note": "Category average" },
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — PHP", "score": 42, "note": "Category average" },
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Ruby", "score": 36, "note": "Category average" },
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Rust", "score": 25, "note": "Category average" }
+  ]
+}

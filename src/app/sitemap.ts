@@ -1,4 +1,6 @@
 import { MetadataRoute } from "next";
+import { DOCS_PAGES } from "./docs/docsNav";
+import { POSTS } from "./blog/posts";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";
 
@@ -45,5 +47,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
   ];
 
-  return publicPages;
+  // The public site: demo, evidence, trust, roadmap, every docs page and article
+  const site: MetadataRoute.Sitemap = [
+    ...["/demo", "/benchmarks", "/trust", "/roadmap", "/blog", "/security", "/privacy"].map(p => ({ url: `${APP_URL}${p}`, lastModified: now, changeFrequency: "weekly" as const, priority: 0.8 })),
+    ...DOCS_PAGES.map(p => ({ url: `${APP_URL}/docs/${p.slug}`, lastModified: now, changeFrequency: "monthly" as const, priority: 0.7 })),
+    ...POSTS.map(p => ({ url: `${APP_URL}/blog/${p.slug}`, lastModified: p.date, changeFrequency: "yearly" as const, priority: 0.6 })),
+  ];
+
+  return [...publicPages, ...site];
 }

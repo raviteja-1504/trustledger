@@ -1,0 +1,25 @@
+WEBVTT
+
+1
+00:00:00.117 --> 00:00:08.268
+AI provenance and reviewer sign-off, on the same scan.
+
+2
+00:00:08.268 --> 00:00:15.271
+Each file gets an AI-generated estimate — a probability from code signals, not proof of authorship — and a content hash.
+
+3
+00:00:15.271 --> 00:00:22.278
+A reviewer signs off (simulated here). The sign-off is bound to this exact content hash.
+
+4
+00:00:22.278 --> 00:00:29.286
+Now the code changes…
+
+5
+00:00:29.286 --> 00:00:36.306
+…and is scanned again.
+
+6
+00:00:36.306 --> 00:00:43.309
+The content hash changed, so the old sign-off no longer covers the file: a reviewer must attest again.

@@ -17,6 +17,7 @@ const EXCEPTIONS: Record<string, string> = {
   "POST auth/2fa":              "The caller's own 2FA enrolment.",
   "POST auth/bootstrap":        "The caller's own first sign-in; never joins an org (invites need a confirmed email).",
   "POST claim-admin":           "Only succeeds when the org has no admin at all (recovery path).",
+  "POST demo/scan":             "The public live demo: scans only a built-in sample's own files (or an edit of them), stores nothing, rate-limited per IP.",
   "POST orgs/create":           "Runs before the caller has an org; creates their own.",
   "PATCH preferences":          "The caller's own notification preferences (identity is forced from the session).",
   "POST scan-worker":           "Queue callback, verified by QStash signature; no user.",

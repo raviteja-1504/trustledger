@@ -1,0 +1,1659 @@
+{
+  "generatedAt": "2026-10-30T10:50:17.106Z",
+  "engineCommit": "e2f90ea",
+  "environment": "Measured in batch on a Windows developer workstation (single Node.js process, Jest harness) — a throughput figure, not end-to-end pull-request latency.",
+  "corpora": [
+    {
+      "id": "sast-benchmark-go",
+      "name": "SAST Benchmark — Go",
+      "url": "https://github.com/0llino/sast-benchmark",
+      "version": "0.5.1",
+      "languages": [
+        "Go"
+      ],
+      "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
+      "runAt": "2026-10-30T08:41:05.471Z",
+      "files": 1353,
+      "wallMs": 59148,
+      "categories": [
+        {
+          "name": "authnfailure",
+          "tp": 3,
+          "fn": 22,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "authzfailure",
+          "tp": 5,
+          "fn": 20,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "cmdi",
+          "tp": 21,
+          "fn": 9,
+          "fp": 10,
+          "tn": 20
+        },
+        {
+          "name": "codeinj",
+          "tp": 3,
+          "fn": 22,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "csrf",
+          "tp": 10,
+          "fn": 15,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "deserial",
+          "tp": 8,
+          "fn": 17,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "fileupload",
+          "tp": 15,
+          "fn": 10,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "hardcodedcreds",
+          "tp": 12,
+          "fn": 13,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "infodisclosure",
+          "tp": 12,
+          "fn": 13,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "inputval",
+          "tp": 8,
+          "fn": 17,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "ldapi",
+          "tp": 17,
+          "fn": 8,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "loginjection",
+          "tp": 13,
+          "fn": 12,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "nosql",
+          "tp": 16,
+          "fn": 9,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "pathtraver",
+          "tp": 27,
+          "fn": 3,
+          "fp": 1,
+          "tn": 29
+        },
+        {
+          "name": "race_condition",
+          "tp": 7,
+          "fn": 18,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "redirect",
+          "tp": 17,
+          "fn": 8,
+          "fp": 7,
+          "tn": 18
+        },
+        {
+          "name": "securecookie",
+          "tp": 21,
+          "fn": 4,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "sqli",
+          "tp": 53,
+          "fn": 12,
+          "fp": 3,
+          "tn": 62
+        },
+        {
+          "name": "ssrf",
+          "tp": 18,
+          "fn": 7,
+          "fp": 6,
+          "tn": 19
+        },
+        {
+          "name": "tlsverify",
+          "tp": 16,
+          "fn": 9,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "trustbound",
+          "tp": 20,
+          "fn": 5,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "weakcipher",
+          "tp": 9,
+          "fn": 16,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakhash",
+          "tp": 22,
+          "fn": 3,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "weakrand",
+          "tp": 15,
+          "fn": 10,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "xss",
+          "tp": 18,
+          "fn": 7,
+          "fp": 4,
+          "tn": 21
+        }
+      ]
+    },
+    {
+      "id": "sast-benchmark-php",
+      "name": "SAST Benchmark — PHP",
+      "url": "https://github.com/0llino/sast-benchmark",
+      "version": "0.3.2",
+      "languages": [
+        "PHP"
+      ],
+      "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
+      "runAt": "2026-10-30T08:41:05.471Z",
+      "files": 1251,
+      "wallMs": 14500,
+      "categories": [
+        {
+          "name": "cmdi",
+          "tp": 17,
+          "fn": 8,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "codeinj",
+          "tp": 21,
+          "fn": 4,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "csrf",
+          "tp": 1,
+          "fn": 24,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "deserial",
+          "tp": 16,
+          "fn": 9,
+          "fp": 6,
+          "tn": 19
+        },
+        {
+          "name": "extract",
+          "tp": 7,
+          "fn": 18,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "fileinclusion",
+          "tp": 20,
+          "fn": 5,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "fileupload",
+          "tp": 22,
+          "fn": 3,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "hardcodedcreds",
+          "tp": 13,
+          "fn": 12,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "headerinj",
+          "tp": 17,
+          "fn": 8,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "ldapi",
+          "tp": 14,
+          "fn": 11,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "massassign",
+          "tp": 14,
+          "fn": 11,
+          "fp": 4,
+          "tn": 21
+        },
+        {
+          "name": "pathtraver",
+          "tp": 22,
+          "fn": 3,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "redirect",
+          "tp": 18,
+          "fn": 7,
+          "fp": 4,
+          "tn": 21
+        },
+        {
+          "name": "securecookie",
+          "tp": 8,
+          "fn": 17,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "sqli",
+          "tp": 23,
+          "fn": 2,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "ssrf",
+          "tp": 15,
+          "fn": 10,
+          "fp": 7,
+          "tn": 18
+        },
+        {
+          "name": "ssti",
+          "tp": 13,
+          "fn": 12,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "typejuggling",
+          "tp": 4,
+          "fn": 21,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "unsafereflect",
+          "tp": 18,
+          "fn": 7,
+          "fp": 4,
+          "tn": 21
+        },
+        {
+          "name": "variablevars",
+          "tp": 17,
+          "fn": 8,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakcipher",
+          "tp": 7,
+          "fn": 18,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakhash",
+          "tp": 17,
+          "fn": 8,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakrand",
+          "tp": 11,
+          "fn": 14,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "xss",
+          "tp": 23,
+          "fn": 2,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "xxe",
+          "tp": 5,
+          "fn": 20,
+          "fp": 3,
+          "tn": 22
+        }
+      ]
+    },
+    {
+      "id": "sast-benchmark-ruby",
+      "name": "SAST Benchmark — Ruby",
+      "url": "https://github.com/0llino/sast-benchmark",
+      "version": "0.3.2",
+      "languages": [
+        "Ruby"
+      ],
+      "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
+      "runAt": "2026-10-30T08:41:05.471Z",
+      "files": 1351,
+      "wallMs": 19994,
+      "categories": [
+        {
+          "name": "authnfailure",
+          "tp": 4,
+          "fn": 21,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "authzfailure",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "cmdi",
+          "tp": 17,
+          "fn": 8,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "codeinj",
+          "tp": 15,
+          "fn": 10,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "csrf",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "deserial",
+          "tp": 17,
+          "fn": 8,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "dynmethod",
+          "tp": 18,
+          "fn": 7,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "fileinclusion",
+          "tp": 14,
+          "fn": 11,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "fileupload",
+          "tp": 14,
+          "fn": 11,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "hardcodedcreds",
+          "tp": 9,
+          "fn": 16,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "headerinj",
+          "tp": 17,
+          "fn": 8,
+          "fp": 4,
+          "tn": 21
+        },
+        {
+          "name": "ldapi",
+          "tp": 12,
+          "fn": 13,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "loginjection",
+          "tp": 9,
+          "fn": 16,
+          "fp": 6,
+          "tn": 19
+        },
+        {
+          "name": "massassign",
+          "tp": 5,
+          "fn": 20,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "pathtraver",
+          "tp": 22,
+          "fn": 3,
+          "fp": 4,
+          "tn": 21
+        },
+        {
+          "name": "redirect",
+          "tp": 22,
+          "fn": 3,
+          "fp": 8,
+          "tn": 17
+        },
+        {
+          "name": "regex",
+          "tp": 13,
+          "fn": 12,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "securecookie",
+          "tp": 9,
+          "fn": 16,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "sqli",
+          "tp": 25,
+          "fn": 0,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "ssrf",
+          "tp": 12,
+          "fn": 13,
+          "fp": 9,
+          "tn": 16
+        },
+        {
+          "name": "ssti",
+          "tp": 13,
+          "fn": 12,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "unsafereflect",
+          "tp": 22,
+          "fn": 3,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "weakcipher",
+          "tp": 13,
+          "fn": 12,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakhash",
+          "tp": 18,
+          "fn": 7,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakrand",
+          "tp": 12,
+          "fn": 13,
+          "fp": 3,
+          "tn": 22
+        },
+        {
+          "name": "xss",
+          "tp": 14,
+          "fn": 11,
+          "fp": 5,
+          "tn": 20
+        },
+        {
+          "name": "xxe",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        }
+      ]
+    },
+    {
+      "id": "sast-benchmark-rust",
+      "name": "SAST Benchmark — Rust",
+      "url": "https://github.com/0llino/sast-benchmark",
+      "version": "0.5.2",
+      "languages": [
+        "Rust"
+      ],
+      "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
+      "runAt": "2026-10-30T08:41:05.471Z",
+      "files": 1251,
+      "wallMs": 27795,
+      "categories": [
+        {
+          "name": "authnfailure",
+          "tp": 3,
+          "fn": 22,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "authzfailure",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "cmdi",
+          "tp": 23,
+          "fn": 2,
+          "fp": 6,
+          "tn": 19
+        },
+        {
+          "name": "crypto",
+          "tp": 4,
+          "fn": 21,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "csrf",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "deserial",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "fileupload",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "hardcodedcreds",
+          "tp": 5,
+          "fn": 20,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "infodisclosure",
+          "tp": 1,
+          "fn": 24,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "inputval",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "intoverflow",
+          "tp": 21,
+          "fn": 4,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "ldapi",
+          "tp": 19,
+          "fn": 6,
+          "fp": 11,
+          "tn": 14
+        },
+        {
+          "name": "loginjection",
+          "tp": 21,
+          "fn": 4,
+          "fp": 5,
+          "tn": 20
+        },
+        {
+          "name": "memsafety",
+          "tp": 17,
+          "fn": 8,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "nosql",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "pathtraver",
+          "tp": 24,
+          "fn": 1,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "race_condition",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "redirect",
+          "tp": 23,
+          "fn": 2,
+          "fp": 9,
+          "tn": 16
+        },
+        {
+          "name": "redos",
+          "tp": 17,
+          "fn": 8,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "securecookie",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "sqli",
+          "tp": 22,
+          "fn": 3,
+          "fp": 1,
+          "tn": 24
+        },
+        {
+          "name": "ssrf",
+          "tp": 2,
+          "fn": 23,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "tlsverify",
+          "tp": 6,
+          "fn": 19,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "weakrand",
+          "tp": 0,
+          "fn": 25,
+          "fp": 0,
+          "tn": 25
+        },
+        {
+          "name": "xss",
+          "tp": 24,
+          "fn": 1,
+          "fp": 5,
+          "tn": 20
+        }
+      ]
+    },
+    {
+      "id": "owasp-benchmark-java",
+      "name": "OWASP Benchmark (Java)",
+      "url": "https://github.com/OWASP-Benchmark/BenchmarkJava",
+      "version": "1.2",
+      "languages": [
+        "Java"
+      ],
+      "scoring": "Each test case is one servlet labelled vulnerable or safe for a category; helper classes are scanned alongside, as in a whole-repository scan.",
+      "runAt": "2026-10-30T08:44:14.177Z",
+      "files": null,
+      "wallMs": null,
+      "categories": [
+        {
+          "name": "cmdi",
+          "tp": 62,
+          "fn": 64,
+          "fp": 0,
+          "tn": 125
+        },
+        {
+          "name": "crypto",
+          "tp": 130,
+          "fn": 0,
+          "fp": 0,
+          "tn": 116
+        },
+        {
+          "name": "hash",
+          "tp": 89,
+          "fn": 40,
+          "fp": 0,
+          "tn": 107
+        },
+        {
+          "name": "ldapi",
+          "tp": 18,
+          "fn": 9,
+          "fp": 0,
+          "tn": 32
+        },
+        {
+          "name": "pathtraver",
+          "tp": 79,
+          "fn": 54,
+          "fp": 0,
+          "tn": 135
+        },
+        {
+          "name": "securecookie",
+          "tp": 36,
+          "fn": 0,
+          "fp": 0,
+          "tn": 31
+        },
+        {
+          "name": "sqli",
+          "tp": 267,
+          "fn": 5,
+          "fp": 39,
+          "tn": 193
+        },
+        {
+          "name": "trustbound",
+          "tp": 54,
+          "fn": 29,
+          "fp": 0,
+          "tn": 43
+        },
+        {
+          "name": "weakrand",
+          "tp": 200,
+          "fn": 18,
+          "fp": 0,
+          "tn": 275
+        },
+        {
+          "name": "xpathi",
+          "tp": 13,
+          "fn": 2,
+          "fp": 0,
+          "tn": 20
+        },
+        {
+          "name": "xss",
+          "tp": 197,
+          "fn": 49,
+          "fp": 0,
+          "tn": 209
+        }
+      ]
+    },
+    {
+      "id": "owasp-benchmark-python",
+      "name": "OWASP Benchmark (Python)",
+      "url": "https://github.com/OWASP-Benchmark/BenchmarkPython",
+      "version": "0.1",
+      "languages": [
+        "Python"
+      ],
+      "scoring": "Each test case is one Flask view labelled vulnerable or safe for a category; helper modules are scanned alongside.",
+      "runAt": "2026-10-30T08:59:33.939Z",
+      "files": null,
+      "wallMs": null,
+      "categories": [
+        {
+          "name": "cmdi",
+          "tp": 13,
+          "fn": 0,
+          "fp": 0,
+          "tn": 7
+        },
+        {
+          "name": "codeinj",
+          "tp": 20,
+          "fn": 0,
+          "fp": 4,
+          "tn": 29
+        },
+        {
+          "name": "deserialization",
+          "tp": 17,
+          "fn": 1,
+          "fp": 3,
+          "tn": 33
+        },
+        {
+          "name": "hash",
+          "tp": 71,
+          "fn": 0,
+          "fp": 0,
+          "tn": 80
+        },
+        {
+          "name": "ldapi",
+          "tp": 15,
+          "fn": 1,
+          "fp": 0,
+          "tn": 13
+        },
+        {
+          "name": "pathtraver",
+          "tp": 59,
+          "fn": 6,
+          "fp": 0,
+          "tn": 103
+        },
+        {
+          "name": "redirect",
+          "tp": 13,
+          "fn": 0,
+          "fp": 0,
+          "tn": 21
+        },
+        {
+          "name": "securecookie",
+          "tp": 24,
+          "fn": 0,
+          "fp": 0,
+          "tn": 15
+        },
+        {
+          "name": "sqli",
+          "tp": 5,
+          "fn": 0,
+          "fp": 0,
+          "tn": 11
+        },
+        {
+          "name": "trustbound",
+          "tp": 18,
+          "fn": 0,
+          "fp": 0,
+          "tn": 19
+        },
+        {
+          "name": "weakrand",
+          "tp": 99,
+          "fn": 0,
+          "fp": 0,
+          "tn": 227
+        },
+        {
+          "name": "xpathi",
+          "tp": 45,
+          "fn": 6,
+          "fp": 0,
+          "tn": 135
+        },
+        {
+          "name": "xss",
+          "tp": 30,
+          "fn": 1,
+          "fp": 1,
+          "tn": 57
+        },
+        {
+          "name": "xxe",
+          "tp": 6,
+          "fn": 2,
+          "fp": 0,
+          "tn": 20
+        }
+      ]
+    },
+    {
+      "id": "juliet-cs",
+      "name": "NIST Juliet (C#)",
+      "url": "https://samate.nist.gov/SARD/test-suites",
+      "version": "SARD",
+      "languages": [
+        "C#"
+      ],
+      "scoring": "Every case has a vulnerable (bad) and a safe (good) region; a case counts as detected when a finding of its CWE's rules lands in the bad region, and as a false positive when one lands in a good region. Cases with a web or network source.",
+      "runAt": "2026-10-30T09:00:44.446Z",
+      "files": null,
+      "wallMs": null,
+      "categories": [
+        {
+          "name": "CWE89_SQL_Injection/s01",
+          "tp": 370,
+          "fn": 0,
+          "fp": 101,
+          "tn": 269
+        },
+        {
+          "name": "CWE89_SQL_Injection/s02",
+          "tp": 296,
+          "fn": 0,
+          "fp": 81,
+          "tn": 215
+        },
+        {
+          "name": "CWE78_OS_Command_Injection",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE80_XSS",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE81_XSS_Error_Message",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE83_XSS_Attribute",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE23_Relative_Path_Traversal",
+          "tp": 187,
+          "fn": 35,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE36_Absolute_Path_Traversal",
+          "tp": 187,
+          "fn": 35,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE601_Open_Redirect",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE113_HTTP_Response_Splitting/s01",
+          "tp": 318,
+          "fn": 52,
+          "fp": 10,
+          "tn": 360
+        },
+        {
+          "name": "CWE113_HTTP_Response_Splitting/s02",
+          "tp": 255,
+          "fn": 41,
+          "fp": 8,
+          "tn": 288
+        },
+        {
+          "name": "CWE90_LDAP_Injection",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE643_Xpath_Injection",
+          "tp": 192,
+          "fn": 30,
+          "fp": 6,
+          "tn": 216
+        },
+        {
+          "name": "CWE94_Improper_Control_of_Generation_of_Code",
+          "tp": 192,
+          "fn": 30,
+          "fp": 6,
+          "tn": 216
+        },
+        {
+          "name": "CWE470_Unsafe_Reflection",
+          "tp": 180,
+          "fn": 42,
+          "fp": 0,
+          "tn": 222
+        },
+        {
+          "name": "CWE117_Improper_Output_Neutralization_for_Logs",
+          "tp": 192,
+          "fn": 30,
+          "fp": 6,
+          "tn": 216
+        }
+      ]
+    },
+    {
+      "id": "juliet-c",
+      "name": "NIST Juliet (C/C++)",
+      "url": "https://samate.nist.gov/SARD/test-suites",
+      "version": "1.3",
+      "languages": [
+        "C",
+        "C++"
+      ],
+      "scoring": "Every case has a vulnerable (bad) and a safe (good) function; a case counts as detected when a finding of its CWE's rules lands in a bad function, and as a false positive when one lands in a good function.",
+      "runAt": "2026-10-30T10:14:16.823Z",
+      "files": null,
+      "wallMs": null,
+      "categories": [
+        {
+          "name": "CWE78_OS_Command_Injection",
+          "tp": 3600,
+          "fn": 1200,
+          "fp": 0,
+          "tn": 4800
+        },
+        {
+          "name": "CWE134_Uncontrolled_Format_String",
+          "tp": 2220,
+          "fn": 660,
+          "fp": 0,
+          "tn": 2880
+        },
+        {
+          "name": "CWE23_Relative_Path_Traversal",
+          "tp": 1575,
+          "fn": 825,
+          "fp": 0,
+          "tn": 2400
+        },
+        {
+          "name": "CWE36_Absolute_Path_Traversal",
+          "tp": 1575,
+          "fn": 825,
+          "fp": 0,
+          "tn": 2400
+        },
+        {
+          "name": "CWE90_LDAP_Injection",
+          "tp": 360,
+          "fn": 120,
+          "fp": 0,
+          "tn": 480
+        },
+        {
+          "name": "CWE114_Process_Control",
+          "tp": 360,
+          "fn": 216,
+          "fp": 0,
+          "tn": 576
+        },
+        {
+          "name": "CWE242_Use_of_Inherently_Dangerous_Function",
+          "tp": 18,
+          "fn": 0,
+          "fp": 0,
+          "tn": 18
+        },
+        {
+          "name": "CWE377_Insecure_Temporary_File",
+          "tp": 144,
+          "fn": 0,
+          "fp": 0,
+          "tn": 144
+        },
+        {
+          "name": "CWE415_Double_Free",
+          "tp": 460,
+          "fn": 502,
+          "fp": 0,
+          "tn": 962
+        },
+        {
+          "name": "CWE416_Use_After_Free",
+          "tp": 380,
+          "fn": 79,
+          "fp": 0,
+          "tn": 459
+        },
+        {
+          "name": "CWE690_NULL_Deref_From_Return",
+          "tp": 386,
+          "fn": 574,
+          "fp": 0,
+          "tn": 960
+        },
+        {
+          "name": "CWE762_Mismatched_Memory_Management_Routines",
+          "tp": 1554,
+          "fn": 2010,
+          "fp": 0,
+          "tn": 3564
+        },
+        {
+          "name": "CWE789_Uncontrolled_Mem_Alloc",
+          "tp": 576,
+          "fn": 384,
+          "fp": 0,
+          "tn": 960
+        },
+        {
+          "name": "CWE680_Integer_Overflow_to_Buffer_Overflow",
+          "tp": 280,
+          "fn": 296,
+          "fp": 0,
+          "tn": 576
+        },
+        {
+          "name": "CWE121_Stack_Based_Buffer_Overflow",
+          "tp": 1216,
+          "fn": 3728,
+          "fp": 12,
+          "tn": 4932
+        },
+        {
+          "name": "CWE122_Heap_Based_Buffer_Overflow",
+          "tp": 1927,
+          "fn": 3995,
+          "fp": 16,
+          "tn": 5906
+        }
+      ]
+    },
+    {
+      "id": "trustledger-cross-file",
+      "name": "TrustLedger cross-file suite (internal)",
+      "url": "src/__tests__/benchmarks/crossFile in the TrustLedger repository",
+      "version": "e2f90ea",
+      "languages": [
+        "TypeScript",
+        "Python",
+        "Java",
+        "C#",
+        "Go",
+        "PHP"
+      ],
+      "scoring": "Our own suite: 72 small multi-file programs, each with a flow that crosses files (vulnerable) or a safe twin. Less independent than the public corpora, since we wrote it; included because no public corpus targets cross-file flows.",
+      "runAt": "2026-10-30T09:12:10.071Z",
+      "files": null,
+      "wallMs": null,
+      "categories": [
+        {
+          "name": "csharp",
+          "tp": 5,
+          "fn": 0,
+          "fp": 0,
+          "tn": 4
+        },
+        {
+          "name": "go",
+          "tp": 7,
+          "fn": 0,
+          "fp": 0,
+          "tn": 4
+        },
+        {
+          "name": "java",
+          "tp": 7,
+          "fn": 0,
+          "fp": 0,
+          "tn": 4
+        },
+        {
+          "name": "php",
+          "tp": 8,
+          "fn": 0,
+          "fp": 0,
+          "tn": 5
+        },
+        {
+          "name": "python",
+          "tp": 8,
+          "fn": 0,
+          "fp": 0,
+          "tn": 5
+        },
+        {
+          "name": "typescript",
+          "tp": 10,
+          "fn": 0,
+          "fp": 0,
+          "tn": 5
+        }
+      ]
+    }
+  ],
+  "juice": {
+    "name": "OWASP Juice Shop",
+    "url": "https://github.com/juice-shop/juice-shop",
+    "version": "20.3.0",
+    "runAt": "2026-10-30T10:48:12.369Z",
+    "files": 966,
+    "wallMs": 92533,
+    "challenges": [
+      {
+        "id": "accessLogDisclosureChallenge",
+        "detected": true,
+        "via": "directory-listing",
+        "location": "server.ts:302"
+      },
+      {
+        "id": "adminSectionChallenge",
+        "detected": false,
+        "via": null,
+        "location": "frontend/src/app/app.routing.ts:79"
+      },
+      {
+        "id": "changeProductChallenge",
+        "detected": false,
+        "via": null,
+        "location": "server.ts:398"
+      },
+      {
+        "id": "chatbotGreedyInjectionChallenge",
+        "detected": false,
+        "via": null,
+        "location": "routes/chat.ts:179"
+      },
+      {
+        "id": "chatbotPromptInjectionChallenge",
+        "detected": false,
+        "via": null,
+        "location": "routes/chat.ts:179"
+      },
+      {
+        "id": "dbSchemaChallenge",
+        "detected": true,
+        "via": "sql-injection",
+        "location": "routes/search.ts:23"
+      },
+      {
+        "id": "directoryListingChallenge",
+        "detected": true,
+        "via": "directory-listing",
+        "location": "server.ts:290"
+      },
+      {
+        "id": "exposedMetricsChallenge",
+        "detected": true,
+        "via": "unauthenticated-diagnostics",
+        "location": "server.ts:759"
+      },
+      {
+        "id": "forgedReviewChallenge",
+        "detected": true,
+        "via": "nosql-injection",
+        "location": "routes/updateProductReviews.ts:16"
+      },
+      {
+        "id": "iacLeakedKeyChallenge",
+        "detected": true,
+        "via": "hardcoded-secret",
+        "location": "infrastructure/terraform/networking.tf:171"
+      },
+      {
+        "id": "localXssChallenge",
+        "detected": true,
+        "via": "xss",
+        "location": "frontend/src/app/search-result/search-result.component.ts:146"
+      },
+      {
+        "id": "loginAdminChallenge",
+        "detected": true,
+        "via": "sql-injection",
+        "location": "routes/login.ts:34"
+      },
+      {
+        "id": "loginBenderChallenge",
+        "detected": true,
+        "via": "sql-injection",
+        "location": "routes/login.ts:34"
+      },
+      {
+        "id": "loginJimChallenge",
+        "detected": true,
+        "via": "sql-injection",
+        "location": "routes/login.ts:34"
+      },
+      {
+        "id": "nftMintChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/web3-snippets/HoneyPotNFT.sol:26"
+      },
+      {
+        "id": "nftUnlockChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/web3-snippets/JuiceShopSBT.sol:18"
+      },
+      {
+        "id": "noSqlReviewsChallenge",
+        "detected": true,
+        "via": "nosql-injection",
+        "location": "routes/updateProductReviews.ts:18"
+      },
+      {
+        "id": "redirectChallenge",
+        "detected": true,
+        "via": "open-redirect",
+        "location": "lib/insecurity.ts:136"
+      },
+      {
+        "id": "redirectCryptoCurrencyChallenge",
+        "detected": false,
+        "via": null,
+        "location": "lib/insecurity.ts:124"
+      },
+      {
+        "id": "registerAdminChallenge",
+        "detected": false,
+        "via": null,
+        "location": "server.ts:539"
+      },
+      {
+        "id": "resetPasswordBenderChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/securityQuestions.yml:21"
+      },
+      {
+        "id": "resetPasswordBjoernChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/securityQuestions.yml:19"
+      },
+      {
+        "id": "resetPasswordBjoernOwaspChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/securityQuestions.yml:15"
+      },
+      {
+        "id": "resetPasswordJimChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/securityQuestions.yml:3"
+      },
+      {
+        "id": "resetPasswordMortyChallenge",
+        "detected": true,
+        "via": "rate-limit-bypass",
+        "location": "server.ts:374"
+      },
+      {
+        "id": "resetPasswordUvoginChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/securityQuestions.yml:25"
+      },
+      {
+        "id": "restfulXssChallenge",
+        "detected": true,
+        "via": "xss",
+        "location": "frontend/src/app/search-result/search-result.component.ts:113"
+      },
+      {
+        "id": "scoreBoardChallenge",
+        "detected": false,
+        "via": null,
+        "location": "frontend/src/app/app.routing.ts:186"
+      },
+      {
+        "id": "tokenSaleChallenge",
+        "detected": false,
+        "via": null,
+        "location": "frontend/src/app/app.routing.ts:261"
+      },
+      {
+        "id": "unionSqlInjectionChallenge",
+        "detected": true,
+        "via": "sql-injection",
+        "location": "routes/search.ts:23"
+      },
+      {
+        "id": "vulnerableDockerImageChallenge",
+        "detected": false,
+        "via": null,
+        "location": "infrastructure/docker-compose.yml:59"
+      },
+      {
+        "id": "weakPasswordChallenge",
+        "detected": false,
+        "via": null,
+        "location": "models/user.ts:73"
+      },
+      {
+        "id": "web3SandboxChallenge",
+        "detected": false,
+        "via": null,
+        "location": "frontend/src/app/app.routing.ts:239"
+      },
+      {
+        "id": "web3WalletChallenge",
+        "detected": false,
+        "via": null,
+        "location": "data/static/web3-snippets/ETHWalletBank.sol:34"
+      },
+      {
+        "id": "xssBonusChallenge",
+        "detected": true,
+        "via": "xss",
+        "location": "frontend/src/app/search-result/search-result.component.ts:146"
+      }
+    ]
+  },
+  "aiAttribution": {
+    "samples": 10,
+    "threshold": 0.5,
+    "precision": 1,
+    "recall": 0.6,
+    "f1": 0.7499999999999999,
+    "accuracy": 0.8,
+    "rocAuc": 1,
+    "toolSamples": 10,
+    "toolAccuracy": 1
+  },
+  "falsePositives": [
+    {
+      "corpus": "OWASP Benchmark (Java)",
+      "caseId": "BenchmarkTest00925",
+      "rule": "sql-injection",
+      "title": "A constant that passes through two helpers in other files",
+      "explanation": "The value comes from a helper method that returns a constant, then passes through an interface method created by a factory in another file before it is concatenated into SQL. The proof pass cannot see through the factory, so the line-level concatenation match is kept. Engine gap; most of the remaining BenchmarkJava SQL false positives have this shape."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00158",
+      "rule": "log-injection",
+      "title": "A sanitizer written as a character filter",
+      "explanation": "The username is cleaned with chars().filter(|c| !c.is_ascii_control()), which removes CR and LF, but the engine does not recognise a closure-based filter as a log sanitizer, so the log line is still reported. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest01167",
+      "rule": "idor",
+      "title": "Ownership proven by an HMAC-signed token",
+      "explanation": "The handler verifies an HMAC-signed resource token that binds the caller to the resource id before the lookup. The engine recognises comparisons with the authenticated principal but not a signature check, so it reports the lookup. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Ruby",
+      "caseId": "BenchmarkTest00997",
+      "rule": "ssrf",
+      "title": "An https-only check is labelled safe",
+      "explanation": "The corpus treats a request URL as safe once its scheme is https. Restricting the scheme does not stop a request to an internal host (https://169.254.169.254/, an internal service), so we keep reporting it. A deliberate disagreement with the label."
+    }
+  ],
+  "falseNegatives": [
+    {
+      "corpus": "OWASP Benchmark (Java)",
+      "caseId": "BenchmarkTest00003",
+      "rule": "weak-crypto",
+      "title": "A hash algorithm chosen in a properties file",
+      "explanation": "The algorithm name is read with getProperty(\"hashAlg1\", ...) from benchmark.properties, where it is set to a weak hash. The engine does not resolve values from .properties files, so every hash case configured this way is missed. Engine gap; on the roadmap."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00125",
+      "rule": "ssrf",
+      "title": "A stub HTTP client",
+      "explanation": "The request URL reaches simulated_reqwest_get(), a function the corpus defines to stand in for an HTTP client and which only formats a string. We report calls to real HTTP libraries, not functions that merely have a client-like name, so these cases count as misses. A deliberate choice."
+    },
+    {
+      "corpus": "SAST Benchmark — Ruby",
+      "caseId": "BenchmarkTest01120",
+      "rule": "xxe",
+      "title": "Nokogiri's default parse is labelled vulnerable",
+      "explanation": "Nokogiri::XML(input) does not substitute external entities by default; the corpus labels it vulnerable and labels the noent option — which turns substitution on — as safe. We follow the library's real behaviour, so Ruby XXE scores 0 on this corpus. A deliberate disagreement with the label."
+    },
+    {
+      "corpus": "SAST Benchmark — PHP",
+      "caseId": "BenchmarkTest00053",
+      "rule": "csrf",
+      "title": "CSRF without a session or cookie",
+      "explanation": "The corpus labels a state-changing handler with no CSRF token as vulnerable even when it reads no session or cookie. Cross-site request forgery needs a credential the browser attaches by itself, so we report CSRF only for session- or cookie-authenticated handlers. A deliberate choice."
+    },
+    {
+      "corpus": "OWASP Juice Shop",
+      "caseId": "weakPasswordChallenge",
+      "rule": "weak-crypto",
+      "title": "A weak password hash behind a helper in another file",
+      "explanation": "models/user.ts stores security.hash(password), and the weak MD5 hash lives in lib/insecurity.ts. The weak hash itself is reported there, but not the use of it for passwords in the model. Engine gap."
+    }
+  ],
+  "limitations": [
+    "Benchmarks are small, synthetic programs. They measure whether known patterns are recognised, not how the engines behave on your codebase, and scores on different corpora are not comparable with each other.",
+    "Trace accuracy is not measured: no public corpus labels the expected source-to-sink path.",
+    "Kotlin has no public labelled corpus and is not in this report; it is covered by unit tests and checked against the AndroGoat and Goatlin apps by hand.",
+    "Juliet cases are scored by region (a finding in the bad or good function); Juice Shop challenges count as detected when a finding lands within two lines of a marked line.",
+    "The internal cross-file suite was written by us. It is included because no public corpus targets cross-file flows, but it is less independent than the public corpora.",
+    "The AI-attribution check uses 10 labelled TypeScript/JavaScript files: a regression check, not a statistically strong evaluation.",
+    "Throughput is measured in batch on a developer workstation, on the corpora scanned in a single pass. It is not end-to-end pull-request latency.",
+    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label."
+  ],
+  "comparison": {
+    "status": "not-run",
+    "note": "We have not yet run CodeQL or Semgrep on these corpora under identical conditions, so we publish no comparison numbers. We will add one when we have run both tools on the same corpus versions, with their default security rules, scored by the same scripts."
+  },
+  "history": [
+    {
+      "commit": "b73e12f",
+      "date": "2026-10-24",
+      "corpus": "OWASP Benchmark (Python)",
+      "score": 95,
+      "note": "From 12 before this commit (recorded in the commit message)"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 65.4,
+      "note": "Test cases only; helper classes not scanned"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Go",
+      "score": 35,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 42,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 36,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 25,
+      "note": "Category average"
+    }
+  ]
+}

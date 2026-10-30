@@ -1,0 +1,25 @@
+WEBVTT
+
+1
+00:00:00.820 --> 00:00:08.966
+The TrustLedger live demo runs the real scanner on a sample app. Here: an Express route and a repository in another file.
+
+2
+00:00:08.966 --> 00:00:15.973
+Scanning the vulnerable version — the same engine that checks pull requests.
+
+3
+00:00:15.973 --> 00:00:22.981
+The check blocks the merge: a SQL injection, reported at the call in the route that hands the email to the repository.
+
+4
+00:00:22.981 --> 00:00:29.993
+The trace follows the email from req.query in routes/users.ts into db/users.ts, where it is concatenated into SQL.
+
+5
+00:00:29.993 --> 00:00:36.999
+The fix uses a parameterised query. Rescanning…
+
+6
+00:00:36.999 --> 00:00:44.017
+No finding: the check passes and the merge is unblocked.

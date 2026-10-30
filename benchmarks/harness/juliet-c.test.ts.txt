@@ -1,0 +1,43 @@
+// TEMPORARY Juliet C/C++ probe (engine only). Not committed. Env: JROOT, CWES (comma list of dirs), OUT (tsv).
+import fs from "fs";
+import path from "path";
+import { warmCppTaintEngine, parseCppSourceSync, scanAstTaintCpp, computeCppFnSinkFacts } from "@/lib/astTaintCpp";
+import type { ParamSinkFact } from "@/lib/taint/taintCore";
+
+beforeAll(async () => { await warmCppTaintEngine(); }, 120000);
+
+const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap(e =>
+  e.isDirectory() ? walk(path.join(d, e.name)) : /\.(?:c|cpp)$/.test(e.name) && !/^main/.test(e.name) ? [path.join(d, e.name)] : []);
+const caseOf = (f: string) => path.basename(f).replace(/\.(?:c|cpp)$/, "").replace(/(_\d\d)[a-e]$/, "$1").replace(/_(?:bad|good\w*)$/, "");
+
+it("juliet c", () => {
+  const root = process.env.JROOT!;
+  const out: string[] = [];
+  for (const cwe of process.env.CWES!.split(",")) {
+    const t0 = Date.now();
+    const groups = new Map<string, string[]>();
+    for (const f of walk(path.join(root, cwe))) { const c = caseOf(f); groups.set(c, [...(groups.get(c) ?? []), f]); }
+    let n = 0;
+    for (const files of groups.values()) {
+      const parsed = files.map(f => { const content = fs.readFileSync(f, "utf8"); return { f, content, tree: parseCppSourceSync(content, f) }; });
+      let facts = new Map<string, ParamSinkFact[]>();
+      if (files.length > 1) {
+        for (let round = 0; round < 4; round++) {
+          const next = new Map<string, ParamSinkFact[]>();
+          for (const p of parsed) if (p.tree) for (const [k, v] of computeCppFnSinkFacts(p.content, p.f, p.tree, facts)) next.set(k, [...(next.get(k) ?? []), ...v]);
+          const same = JSON.stringify([...next]) === JSON.stringify([...facts]);
+          facts = next;
+          if (same) break;
+        }
+      }
+      for (const p of parsed) {
+        if (!p.tree) continue;
+        n++;
+        const rel = path.relative(root, p.f).split(path.sep).join("/");
+        for (const x of scanAstTaintCpp(p.content, p.f, p.tree, undefined, { crossFileFacts: facts })) out.push(`${rel}\t${x.line}\t${x.id}`);
+      }
+    }
+    console.log(`J ${cwe} files=${n} ${Date.now() - t0}ms`);
+  }
+  fs.writeFileSync(process.env.OUT!, out.join("\n") + "\n");
+}, 3600000);

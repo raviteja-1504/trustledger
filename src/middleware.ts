@@ -12,7 +12,9 @@ import { checkRateLimit } from "@/lib/rateLimit";
 const SKIP_AUTH  = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 const IS_PROD    = process.env.NODE_ENV === "production";
 
-const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz", "/privacy", "/terms", "/security", "/.well-known/security.txt", "/.well-known/trustledger-export-signing-key"]);
+const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz", "/privacy", "/terms", "/security", "/.well-known/security.txt", "/.well-known/trustledger-export-signing-key",
+  // the public site: live demo, benchmark report, Trust Center, roadmap, blog
+  "/demo", "/benchmarks", "/benchmarks/report.json", "/trust", "/roadmap", "/blog"]);
 
 // Routes blocked in production (dev/seed tools)
 const DEV_ONLY_PATHS = new Set(["/seed", "/dev-seed"]);
@@ -44,6 +46,9 @@ function isPublic(pathname: string): boolean {
   if (pathname.startsWith("/api/webhook/"))    return true;
   if (pathname.startsWith("/api/docs"))        return true;
   if (pathname.startsWith("/api/health"))      return true;
+  if (pathname.startsWith("/docs/"))           return true;
+  if (pathname.startsWith("/blog/"))           return true;
+  if (pathname.startsWith("/videos/"))         return true;
   if (pathname.startsWith("/_next/"))          return true;
   if (pathname.startsWith("/static/"))         return true;
   if (pathname === "/favicon.ico")             return true;
@@ -178,8 +183,8 @@ function addSecurityHeaders(res: NextResponse, pathname: string): void {
   }
 
   // Content Security Policy (production only)
-  // /docs page loads Swagger UI from unpkg — needs unsafe-eval for its bundle
-  const isDocsPage = pathname === "/docs" || pathname.startsWith("/api/docs");
+  // /docs/api loads Swagger UI from unpkg — needs unsafe-eval for its bundle
+  const isDocsPage = pathname === "/docs/api" || pathname.startsWith("/api/docs");
   const scriptSrc  = isDocsPage
     ? "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://unpkg.com"
     : "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net";

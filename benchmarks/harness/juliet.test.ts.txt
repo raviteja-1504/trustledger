@@ -1,0 +1,37 @@
+﻿// TEMPORARY Juliet / BenchmarkJava probe (full scanner). Not committed.
+// Env: JROOT (root), CWES (comma list of dirs under it), SRC (basename regex), EXT (extension regex), OUT (tsv).
+import fs from "fs";
+import path from "path";
+import { runScan } from "@/lib/scanner";
+import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
+import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+
+jest.setTimeout(3600000);
+beforeAll(async () => { await warmCSharpTaintEngine(); await warmPythonTaintEngine(); }, 120000);
+
+const walk = (d: string, ext: RegExp): string[] => fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap(e =>
+  e.isDirectory() ? (e.name === "antbuild" ? [] : walk(path.join(d, e.name), ext)) : ext.test(e.name) ? [path.join(d, e.name)] : []) : [];
+
+it("juliet", () => {
+  const root = process.env.JROOT!;
+  const src = new RegExp(process.env.SRC || ".");
+  const ext = new RegExp(process.env.EXT || "\\.java$");
+  const out: string[] = [];
+  for (const cwe of process.env.CWES!.split(",")) {
+    const t0 = Date.now();
+    const files = walk(path.join(root, cwe), ext).filter(p => src.test(path.basename(p)))
+      .map(p => ({ path: path.relative(root, p).split(path.sep).join("/"), content: fs.readFileSync(p, "utf8") }));
+    // scan in batches so a test case's helper files share a batch (they sit next to each other alphabetically)
+    // EXTRA: support files (a benchmark's helpers/) scanned with every batch, as a whole-repo scan would see them
+    const extra = (process.env.EXTRA ?? "").split(",").filter(Boolean).flatMap(d => walk(path.join(root, d), ext))
+      .map(p => ({ path: path.relative(root, p).split(path.sep).join("/"), content: fs.readFileSync(p, "utf8") }));
+    for (let i = 0; i < files.length; i += 200) {
+      const r = runScan({ repo: "t", pr_number: 1, commit_sha: "a", branch: "main", files: [...files.slice(i, i + 200), ...extra] });
+      for (const f of r.files) for (const ind of f.indicators) if (ind.line != null) out.push(`${f.file_path}\t${ind.line}\t${ind.id}\t${ind.sourceExpr ? "ast" : "rx"}`);
+    }
+    console.log(`J ${cwe} files=${files.length} ${Date.now() - t0}ms`);
+  }
+  fs.writeFileSync(process.env.OUT!, out.join("\n") + "\n");
+});
+
+

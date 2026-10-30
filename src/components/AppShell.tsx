@@ -13,9 +13,14 @@ import { useAuth } from "@/lib/auth";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
+/** Pages that render without the app chrome (sidebar, top bar, status bar): the public site and sign-in flow. */
+const PUBLIC_PAGES = new Set(["/", "/login", "/onboarding", "/status", "/auth/callback", "/privacy", "/terms", "/changelog", "/security",
+  "/demo", "/benchmarks", "/trust", "/roadmap", "/blog", "/docs"]);
+const PUBLIC_PREFIXES = ["/docs/", "/blog/"];
+
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname   = usePathname() ?? "/";
-  const isPublic   = pathname === "/" || pathname === "/login" || pathname === "/onboarding" || pathname === "/status" || pathname === "/docs" || pathname === "/auth/callback" || pathname === "/privacy" || pathname === "/terms" || pathname === "/changelog";
+  const isPublic   = PUBLIC_PAGES.has(pathname) || PUBLIC_PREFIXES.some(p => pathname.startsWith(p));
   const [mobileNav, setMobileNav] = useState(false);
   const { user, loading } = useAuth();
 

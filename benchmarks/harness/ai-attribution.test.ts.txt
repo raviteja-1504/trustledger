@@ -1,0 +1,15 @@
+// Benchmark probe (copy to src/__tests__/zzAiAttribution.test.ts to run): the AI-attribution validation numbers for
+// the published report. OUT=<file> receives { samples, threshold, precision, recall, f1, accuracy, rocAuc,
+// toolSamples, toolAccuracy } from the labelled corpus in src/lib/aiAttributionBenchmark.fixtures*.ts.
+import fs from "fs";
+import { runAIAttributionBenchmark, runToolAttributionBenchmark } from "@/lib/aiAttributionBenchmark";
+
+it("ai attribution report", () => {
+  const r = runAIAttributionBenchmark();
+  const t = runToolAttributionBenchmark();
+  const out = {
+    samples: r.results.length, threshold: r.threshold, precision: r.precision, recall: r.recall, f1: r.f1,
+    accuracy: r.accuracy, rocAuc: r.rocAuc, toolSamples: t.results.length, toolAccuracy: t.accuracy,
+  };
+  fs.writeFileSync(process.env.OUT!, JSON.stringify(out, null, 2));
+});

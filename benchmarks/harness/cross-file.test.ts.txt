@@ -1,0 +1,18 @@
+// Benchmark probe (copy to src/__tests__/zzCrossFile.test.ts to run): runs the internal 72-case cross-file suite
+// (src/__tests__/benchmarks/crossFile) through the production pipeline and writes { byLanguage } to OUT for the
+// published report. The tree-sitter engines are warmed first, as production does at start-up.
+import fs from "fs";
+import { runCrossFileBenchmark } from "./benchmarks/crossFile/runCrossFileBenchmark";
+import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+import { warmGoTaintEngine } from "@/lib/astTaintGo";
+import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
+import { warmPhpTaintEngine } from "@/lib/astTaintPHP";
+
+beforeAll(async () => {
+  await Promise.all([warmPythonTaintEngine(), warmGoTaintEngine(), warmCSharpTaintEngine(), warmPhpTaintEngine()]);
+}, 120000);
+
+it("cross-file report", () => {
+  const r = runCrossFileBenchmark();
+  fs.writeFileSync(process.env.OUT!, JSON.stringify({ cases: r.cases.length, byLanguage: r.byLanguage }, null, 2));
+});

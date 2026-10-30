@@ -1,0 +1,34 @@
+﻿// TEMPORARY sast-benchmark / DVRA probe (full scanner). Not committed.
+// Env: ROOT (dir), EXT (extension regex), OUT (tsv: severity \t rule \t path:line \t detail).
+import fs from "fs";
+import path from "path";
+import { runScan } from "@/lib/scanner";
+import { warmGoTaintEngine } from "@/lib/astTaintGo";
+import { warmPhpTaintEngine } from "@/lib/astTaintPHP";
+import { warmRubyTaintEngine } from "@/lib/astTaintRuby";
+import { warmRustTaintEngine } from "@/lib/astTaintRust";
+import { warmKotlinTaintEngine } from "@/lib/astTaintKotlin";
+import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+import { warmCSharpTaintEngine } from "@/lib/astTaintCSharp";
+import { warmCppTaintEngine } from "@/lib/astTaintCpp";
+
+jest.setTimeout(3600000);
+beforeAll(async () => { await warmGoTaintEngine(); await warmPhpTaintEngine(); await warmRubyTaintEngine(); await warmRustTaintEngine(); await warmKotlinTaintEngine(); await warmPythonTaintEngine(); await warmCSharpTaintEngine(); await warmCppTaintEngine(); }, 120000);
+
+const walk = (d: string, ext: RegExp): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap(e =>
+  e.isDirectory() ? (/^(?:node_modules|vendor|target|\.git)$/.test(e.name) ? [] : walk(path.join(d, e.name), ext)) : ext.test(e.name) ? [path.join(d, e.name)] : []);
+
+it("probe", () => {
+  const root = process.env.ROOT!;
+  const ext = new RegExp(process.env.EXT!);
+  const t0 = Date.now();
+  const files = walk(root, ext).map(p => ({ path: path.relative(root, p).split(path.sep).join("/"), content: fs.readFileSync(p, "utf8") }));
+  const out: string[] = [];
+  for (let i = 0; i < files.length; i += 300) {
+    const r = runScan({ repo: "t", pr_number: 1, commit_sha: "a", branch: "main", files: files.slice(i, i + 300) });
+    for (const f of r.files) for (const ind of f.indicators) if (ind.line != null) out.push(`${ind.severity}\t${ind.id}\t${f.file_path}:${ind.line}\t${(ind.detail ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  fs.writeFileSync(process.env.OUT!, out.join("\n") + "\n");
+  console.log(`files=${files.length} findings=${out.length} ms=${Date.now() - t0}`);
+});
+
