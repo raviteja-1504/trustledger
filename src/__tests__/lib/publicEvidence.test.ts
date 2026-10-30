@@ -3,6 +3,8 @@
  * engines: every count a whole number, every Juliet category balanced, every cited example pointing at a corpus in
  * the report, and the coverage matrix exactly the engine registry.
  */
+import fs from "fs";
+import path from "path";
 import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput } from "@/lib/benchmarkReport";
 import { dataFlowRules, rulesByLanguage, COVERAGE_LANGUAGES, LANGUAGE_ENGINES, dataFlowCwes } from "@/lib/publicCoverage";
 import { DATA_FLOW_LANGUAGES } from "@/lib/ruleLanguages";
@@ -61,6 +63,22 @@ describe("benchmark report", () => {
     const a = R.aiAttribution;
     for (const x of [a.precision, a.recall, a.accuracy, a.rocAuc, a.toolAccuracy]) expect(x >= 0 && x <= 1).toBe(true);
     expect(a.samples).toBeGreaterThan(0);
+  });
+});
+
+describe("public site text", () => {
+  // UTF-8 read back as Windows-1252 and saved again: "·" becomes "Â·", "—" becomes "â€”"
+  const MOJIBAKE = /Â[\u0080-¿]|â€|Ã[\u0080-¿]/;
+  const SITE_SOURCES = ["src/app/page.tsx", "src/app/LandingClient.tsx", "src/app/trust", "src/app/docs", "src/app/blog", "src/app/benchmarks",
+    "src/app/roadmap", "src/app/demo", "src/app/changelog", "src/components/marketing", "src/lib/demoSamples.ts", "src/lib/publicCoverage.ts"];
+  const files = (p: string): string[] => {
+    const abs = path.join(process.cwd(), p);
+    return fs.statSync(abs).isDirectory() ? fs.readdirSync(abs).flatMap(n => files(path.join(p, n))) : /\.tsx?$/.test(p) ? [p] : [];
+  };
+
+  it("has no mis-encoded characters in any public page's source", () => {
+    const bad = SITE_SOURCES.flatMap(files).filter(f => MOJIBAKE.test(fs.readFileSync(path.join(process.cwd(), f), "utf8")));
+    expect(bad).toEqual([]);
   });
 });
 

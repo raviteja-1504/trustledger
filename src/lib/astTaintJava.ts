@@ -553,6 +553,8 @@ interface EngineCtx {
   currentBody?: CstNode;
   // lambda variable name -> its lambda (so `f.apply(x)` resolves to the lambda's body)
   lambdas: Map<string, CstNode>;
+  // local String[] arrays whose tainted elements only fill in the value of a harmless "NAME=" entry
+  envValueOnly?: Set<string>;
   // iteration variables of enclosing `for (var e : tainted.entrySet())` loops
   entryLoopVars: string[];
   // local methods that are structurally HTML escapers (their body replaces "<" with an entity)
@@ -568,7 +570,12 @@ interface EngineCtx {
   /** `Class.method` of other files in the batch whose return value is request input whatever it is passed
    * (`SeparateClassRequest.getTheParameter` returning `request.getParameter(p)`) -- see computeJavaSourceMethods. */
   sourceMethods?: ReadonlyMap<string, number>;
+  /** `Class.method` / `Interface.method` of the batch -> [argument index, classes surviving to the return] -- see
+   * computeJavaPassThroughMethods. An interface's entry is the union over its implementations: any of them may run. */
+  passMethods?: PassThroughMethods;
 }
+
+export type PassThroughMethods = ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>;
 
 function emit(
   ctx: EngineCtx, id: AstTaintJavaId, node: CstNode, sourceExpr: string, sinkExpr: string,
@@ -627,6 +634,8 @@ const NON_ENTRY_METHOD_RE = /^(?:main|equals|hashCode|toString|compareTo|run|cal
 const ARG_CARRYING_TAILS = new Set([
   "replace", "replaceAll", "replaceFirst", "concat", "join", "valueOf", "copyValueOf", "of", "ofNullable", "asList",
   "resolve", "resolveSibling", "decode", "encode", "encodeToString", "decodeToString", "requireNonNull",
+  // Commons Codec's Base64: the encoded form keeps "/" (not path-safe), and decoding gives the input back
+  "encodeBase64", "encodeBase64String", "encodeBase64URLSafe", "encodeBase64URLSafeString", "decodeBase64",
   "requireNonNullElse", "copyOf", "singletonList", "unmodifiableList", "unmodifiableSet", "unmodifiableMap",
   "orElse", "getOrDefault", "create", "toURI", "normalize", "strip", "trim",
 ]);
@@ -1002,7 +1011,7 @@ function walkPrimaryChain(
         // (a request-chosen id looked up in a fixed table of destinations returns one of those destinations).
         chainTaint |= tail === "getOrDefault" && args.length === 2 ? argMasks[1] : anyArgMask;
         // a decoder RESTORES what an earlier encoder/sanitizer cleared
-        if (tail === "decode" && /URLDecoder|Base64|Decoder/.test(calleeName || (rootVar ?? ""))) {
+        if ((tail === "decode" && /URLDecoder|Base64|Decoder/.test(calleeName || (rootVar ?? ""))) || tail === "decodeBase64") {
           chainTaint |= (anyArgMask >>> SHADOW) & ALL;
         }
       }
@@ -1060,6 +1069,14 @@ function walkPrimaryChain(
         const owner = (calls === 0 ? isNewExprOf : undefined) ?? (recv ? ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined) : undefined);
         const fromSource = owner ? ctx.sourceMethods.get(`${owner.replace(/<.*$/, "").split(".").pop()}.${tail}`) : undefined;
         if (fromSource) chainTaint |= fromSource;
+      }
+      // Cross-file pass-through: `thing.doSomething(param)` on a receiver typed as a class or interface of the batch
+      // whose method (every implementation of it, for an interface) returns what it is given.
+      if (ctx.passMethods?.size) {
+        const recv = receiverOf();
+        const owner = (calls === 0 ? isNewExprOf : undefined) ?? (recv ? ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined) : undefined);
+        const pass = owner ? ctx.passMethods.get(`${owner.replace(/<.*$/, "").split(".").pop()}.${tail}`) : undefined;
+        if (pass) for (const [i, surviving] of pass) chainTaint |= (argMasks[i] ?? 0) & surviving;
       }
 
       // list.get(1) / map.get("keyA") on a collection whose literal slots are known: that slot's value, not the whole receiver
@@ -1497,8 +1514,14 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     // pb.command(argList) / pb.command("sh", "-c", x): the same rules as new ProcessBuilder(...)
     checkProcessBuilderArgs(args, argMasks, (id, _sink, idxs) => fireArgs(id, idxs ?? [0]));
   } else if (tail === "exec" && rootVar !== null) {
-    // exec(command[, envp[, dir]]): the environment and working directory choose nothing that runs.
-    fireArgs("command-injection", [0]);
+    // exec(command[, envp[, dir]]): the command, and the environment when the request controls a whole
+    // entry (LD_PRELOAD=..., PATH=..., BASH_ENV=...) or a loader variable's value -- either chooses what
+    // runs. A request value filling in a harmless "NAME=" entry, or the working directory, chooses nothing.
+    if (!(argMasks[0] & ALL) && args.length >= 2 && (argMasks[1] & classOf("command-injection")) && !envArgValueOnly(args[1], env, ctx)) {
+      fire("command-injection", argMasks[1], culpritText(args[1], env, ctx), `${calleeName} (environment)`);
+    } else {
+      fireArgs("command-injection", [0]);
+    }
   } else if (tail === "sendRedirect") {
     fireArgs("open-redirect", [0]);
   } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "")) {
@@ -1628,7 +1651,28 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   }
 }
 
-const SHELL_PROGRAMS_JAVA = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
+// Environment variables whose value alone picks code to load or run (a library, a search path, a startup file).
+const LOADER_ENV_VARS = /^(?:PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|PS4|IFS|PROMPT_COMMAND|PYTHON\w*|PERL5\w*|PERLLIB|RUBY\w*|NODE_OPTIONS|NODE_PATH|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|CLASSPATH|GIT_\w+|PAGER|EDITOR|VISUAL)$/;
+
+/** Every tainted element of this array initializer is `"NAME=" + ...` with a literal, non-loader NAME. */
+function envEntriesValueOnly(arrayInit: CstNode, env: Env, ctx: EngineCtx): boolean {
+  return findAllNodes(arrayInit, "expression").every(e => {
+    if (!(taintMask(e, env, ctx) & ALL)) return true;
+    const first = collectAllTokens(e)[0];
+    const m = first && (first as IToken).tokenType?.name === "StringLiteral" ? /^"([A-Za-z_]\w*)=/.exec(first.image) : null;
+    return !!m && !LOADER_ENV_VARS.test(m[1]);
+  });
+}
+
+/** The envp argument of exec(): a local array known to be value-only, or an inline `new String[]{...}` that is. */
+function envArgValueOnly(arg: CstNode, env: Env, ctx: EngineCtx): boolean {
+  const name = bareIdentifierOf(arg);
+  if (name !== null) return ctx.envValueOnly?.has(name) ?? false;
+  const init = findAllNodes(arg, "arrayInitializer")[0];
+  return init ? envEntriesValueOnly(init, env, ctx) : false;
+}
+
+const SHELL_PROGRAMS_JAVA =/^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd|cmd\.exe|powershell|powershell\.exe|pwsh)$/i;
 const SHELL_COMMAND_FLAGS_JAVA = /^(?:-c|\/c|\/k|-command|-encodedcommand)$/i;
 
 /**
@@ -2363,6 +2407,9 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
         const arrayInit = init && !initExpr ? firstNode(init, "arrayInitializer") : undefined;
         env.set(nameTok.image, initExpr ? taintMask(initExpr, env, ctx)
           : arrayInit ? findAllNodes(arrayInit, "expression").reduce((m, e) => m | taintMask(e, env, ctx), 0) : 0);
+        ctx.envValueOnly ??= new Set();
+        if (arrayInit && envEntriesValueOnly(arrayInit, env, ctx)) ctx.envValueOnly.add(nameTok.image);
+        else ctx.envValueOnly.delete(nameTok.image);
         if (declaredTypeSimpleName) ctx.varTypes.set(nameTok.image, declaredTypeSimpleName);
         // FunctionLike f = x -> ...;  remember the lambda so f.apply(v) resolves to its body
         const lam = soleLambda(init) ?? soleLambda(initExpr);
@@ -2963,6 +3010,8 @@ export interface JavaScanOptions {
   calledElsewhere?: ReadonlySet<string>;
   /** `Class.method` -> classes of request input it returns (see computeJavaSourceMethods). */
   sourceMethods?: ReadonlyMap<string, number>;
+  /** `Class.method` / `Interface.method` -> arguments its return value carries (see computeJavaPassThroughMethods). */
+  passMethods?: PassThroughMethods;
 }
 
 /**
@@ -2997,6 +3046,36 @@ export function computeJavaSourceMethods(
   return out;
 }
 
+/**
+ * Cross-file PASS-THROUGHS (Java): methods of this file's classes whose return value carries a parameter's taint
+ * (`return i;`, `return new StringBuilder(i).toString();`), keyed `Class.method` for each class declared here AND
+ * `Interface.method` / `Superclass.method` for the types they implement or extend -- so a call through the
+ * interface (`ThingInterface thing = ThingFactory.createThing(); thing.doSomething(param)`) carries the argument.
+ * Several files implementing one interface merge by union (see scanner.ts): whichever implementation runs.
+ */
+export function computeJavaPassThroughMethods(content: string, filePath: string, cst: CstNode): Map<string, Array<[number, number]>> {
+  const out = new Map<string, Array<[number, number]>>();
+  try {
+    const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, undefined, undefined);
+    const propagating = buildPropagatingMapJava(localMethods, ctx);
+    const owners = new Set<string>();
+    for (const m of content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)(?:\s*<[^>{]*>)?((?:\s+(?:extends|implements)\s+[\w.<>,\s]+?)*)\s*\{/g)) {
+      owners.add(m[1]);
+      for (const t of (m[2] ?? "").replace(/<[^>]*>/g, "").split(/\bextends\b|\bimplements\b|,/)) {
+        const simple = t.trim().split(".").pop();
+        if (simple && /^[A-Z]\w*$/.test(simple)) owners.add(simple);
+      }
+    }
+    for (const [name, idx] of propagating) {
+      const entries = [...idx].filter(([i, surviving]) => i >= 0 && (surviving & ALL)) as Array<[number, number]>;
+      if (entries.length) for (const o of owners) out.set(`${o}.${name}`, entries);
+    }
+  } catch (err) {
+    console.error(`[astTaintJava] threw computing pass-through methods for ${filePath}:`, err);
+  }
+  return out;
+}
+
 export function scanAstTaintJava(
   content: string, filePath: string, cst: CstNode,
   // Sinks whose argument was tainted for the sink's class but positively
@@ -3004,9 +3083,9 @@ export function scanAstTaintJava(
   suppressedOut?: SuppressedSink[],
   opts?: JavaScanOptions,
 ): AstTaintJavaFinding[] {
-  const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts, undefined, opts?.sourceMethods);
+  const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts, undefined, opts?.sourceMethods, opts?.passMethods);
   if (!opts?.entryPoints) return strict;
-  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts, opts?.calledElsewhere, opts?.sourceMethods);
+  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts, opts?.calledElsewhere, opts?.sourceMethods, opts?.passMethods);
   const have = new Set(strict.map(f => `${f.id}:${f.line}`));
   return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
 }
@@ -3096,10 +3175,12 @@ function runJavaScan(
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
   calledElsewhere?: ReadonlySet<string>,
   sourceMethods?: ReadonlyMap<string, number>,
+  passMethods?: PassThroughMethods,
 ): AstTaintJavaFinding[] {
   try {
     const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, suppressedOut, crossFileFacts);
     ctx.sourceMethods = sourceMethods;
+    ctx.passMethods = passMethods;
     const declaredClasses = calledElsewhere?.size ? [...content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]) : [];
     const calledFromAnotherFile = (name: string) => declaredClasses.some(c => calledElsewhere!.has(`${c}.${name}`));
 

@@ -18,6 +18,77 @@ function scan(code: string, file = "src/main.c", opts?: Parameters<typeof scanAs
 }
 const ids = (code: string, file?: string) => scan(code, file).map(f => f.id).sort();
 
+describe("C++ references and out-parameters of local functions", () => {
+  it("a reference stays bound to its variable after that variable is re-pointed (Juliet _33)", () => {
+    const bad = `
+void bad() {
+  char * data;
+  char * &dataRef = data;
+  char buf[100] = "ls ";
+  data = buf;
+  strncat(data, getenv("X"), 50);
+  {
+    char * data = dataRef;
+    system(data);
+  }
+}`;
+    expect(ids(bad, "src/main.cpp")).toEqual(["command-injection"]);
+    expect(ids(bad.replace(`strncat(data, getenv("X"), 50);`, `strncat(data, "-l", 50);`), "src/main.cpp")).toEqual([]);
+  });
+
+  it("assigning the variable is seen through its reference, and assigning the reference through the variable", () => {
+    const viaVar = `void bad() {\n  char * data = (char *)"ls";\n  char * &r = data;\n  data = getenv("X");\n  system(r);\n}`;
+    expect(ids(viaVar, "src/main.cpp")).toEqual(["command-injection"]);
+    expect(ids(viaVar.replace(`data = getenv("X");`, `data = (char *)"pwd";`), "src/main.cpp")).toEqual([]);
+    const viaRef = `void bad() {\n  char * data = (char *)"ls";\n  char * &r = data;\n  r = getenv("X");\n  system(data);\n}`;
+    expect(ids(viaRef, "src/main.cpp")).toEqual(["command-injection"]);
+  });
+
+  it("writing through a reference reaches the variable it names", () => {
+    const bad = `void bad() {\n  char buf[100] = "ls ";\n  char * data = buf;\n  char * &r = data;\n  strncat(r, getenv("X"), 50);\n  system(data);\n}`;
+    expect(ids(bad, "src/main.cpp")).toEqual(["command-injection"]);
+    expect(ids(bad.replace(`getenv("X")`, `"-l"`), "src/main.cpp")).toEqual([]);
+  });
+
+  it("a local function that fills a reference parameter taints the caller's variable (Juliet _43)", () => {
+    const bad = `
+static void badSource(char * &data) {
+  strncat(data, getenv("X"), 50);
+}
+void bad() {
+  char * data;
+  char buf[100] = "ls ";
+  data = buf;
+  badSource(data);
+  system(data);
+}`;
+    expect(ids(bad, "src/main.cpp")).toEqual(["command-injection"]);
+    expect(ids(bad.replace(`strncat(data, getenv("X"), 50);`, `strncat(data, "-l", 50);`), "src/main.cpp")).toEqual([]);
+    // assigning the reference itself is the caller's variable too
+    expect(ids(bad.replace(`strncat(data, getenv("X"), 50);`, `data = getenv("X");`), "src/main.cpp")).toEqual(["command-injection"]);
+  });
+
+  it("a local function that writes input through a pointer parameter fills the caller's buffer", () => {
+    const bad = `static void fill(char * buf) {\n  strncat(buf, getenv("X"), 50);\n}\nvoid f(void) {\n  char cmd[100] = "ls ";\n  fill(cmd);\n  system(cmd);\n}`;
+    expect(ids(bad)).toEqual(["command-injection"]);
+    expect(ids(bad.replace(`getenv("X")`, `"-l"`))).toEqual([]);
+    // re-pointing a plain pointer parameter changes only the callee's copy, never the caller's buffer
+    expect(ids(bad.replace(`strncat(buf, getenv("X"), 50);`, `buf = getenv("X");`))).toEqual([]);
+  });
+
+  it("a local copy wrapper carries its source argument into its destination argument", () => {
+    const code = (src: string) => `static void copyTo(char * dst, const char * src) {\n  strcpy(dst, src);\n}\nvoid f(void) {\n  char cmd[100];\n  copyTo(cmd, ${src});\n  system(cmd);\n}`;
+    expect(ids(code(`getenv("X")`))).toContain("command-injection");
+    expect(ids(code(`"ls -l"`))).not.toContain("command-injection");
+  });
+
+  it("an out-parameter through a pointer to a pointer: *p = input", () => {
+    const bad = `static void src(char ** p) {\n  *p = getenv("X");\n}\nvoid f(void) {\n  char * data = "ls";\n  src(&data);\n  system(data);\n}`;
+    expect(ids(bad)).toEqual(["command-injection"]);
+    expect(ids(bad.replace(`*p = getenv("X");`, `*p = "pwd";`))).toEqual([]);
+  });
+});
+
 describe("sources and command / format sinks", () => {
   it("argv into system is command injection; a literal is not", () => {
     expect(ids(`int main(int argc, char *argv[]) { system(argv[1]); return 0; }`)).toEqual(["command-injection"]);

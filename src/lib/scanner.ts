@@ -60,7 +60,7 @@ import {
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import type { SuppressedSink } from "./taint/taintCore";
-import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods } from "./astTaintJava";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods, computeJavaPassThroughMethods, type PassThroughMethods } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
   parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts,
@@ -7177,8 +7177,9 @@ function findAstTaintJavaFindings(
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
   calledElsewhere?: ReadonlySet<string>,
   sourceMethods?: ReadonlyMap<string, number>,
+  passMethods?: PassThroughMethods,
 ): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere, sourceMethods }).map(f => ({
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere, sourceMethods, passMethods }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -7346,7 +7347,7 @@ export function analyzeFile(
   storedProvenance?: StoredProvenanceIO,
   // Cross-file service-layer facts for Java (see astTaintJava.ts computeJavaMethodSinkFacts), computed by
   // runScan() over the whole batch, plus the CST it already parsed for this file.
-  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number> },
+  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number>; passMethods?: PassThroughMethods },
   // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
   crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; callerArgs?: ReadonlyMap<string, ReadonlyMap<number, number>> },
   // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
@@ -7504,7 +7505,7 @@ export function analyzeFile(
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods, crossFileJava?.passMethods) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts, crossFileCSharp?.callerArgs) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
@@ -8308,6 +8309,36 @@ function convergeJavaSourceMethods(
   return found;
 }
 
+/**
+ * Java: `Type.method` keys whose return value carries an argument (see computeJavaPassThroughMethods), merged over the
+ * batch -- several implementations of one interface method union their arguments and surviving classes, since any of
+ * them may be the one that runs. Only types declared in exactly one file of the batch are kept: a class that implements
+ * a library interface (`Function`, `Comparator`) does not change what every call through that interface returns, and
+ * a name many files declare for themselves (a private inner `Test` in each) cannot be told apart by its simple name.
+ */
+function collectJavaPassThroughMethods(
+  csts: ReadonlyMap<string, JavaCstNode>, files: readonly { path: string; content: string }[],
+): Map<string, Array<[number, number]>> {
+  const out = new Map<string, Array<[number, number]>>();
+  if (csts.size < 2) return out;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  const declaringFiles = new Map<string, number>();
+  for (const path of csts.keys()) {
+    for (const name of new Set([...contentOf.get(path)!.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]))) {
+      declaringFiles.set(name, (declaringFiles.get(name) ?? 0) + 1);
+    }
+  }
+  for (const [path, cst] of csts) {
+    for (const [key, entries] of computeJavaPassThroughMethods(contentOf.get(path)!, path, cst)) {
+      if (declaringFiles.get(key.slice(0, key.indexOf("."))) !== 1) continue;
+      const merged = new Map(out.get(key) ?? []);
+      for (const [i, surviving] of entries) merged.set(i, (merged.get(i) ?? 0) | surviving);
+      out.set(key, [...merged].sort((a, b) => a[0] - b[0]));
+    }
+  }
+  return out;
+}
+
 const callerArgsDigest =(m: ReadonlyMap<string, ReadonlyMap<number, number>>): string =>
   JSON.stringify([...m].map(([k, v]) => [k, [...v].sort((a, b) => a[0] - b[0])] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 
@@ -8788,9 +8819,11 @@ export function runScan(input: ScanInput): ScanOutput {
     t.kind === "java" ? computeJavaMethodSinkFacts(content, path, t.cst, incoming) : computeKotlinMethodSinkFacts(content, path, t.tree, incoming));
   const javaCalledElsewhere = javaMethodsCalledFromOtherFiles(allFiles.filter(f => javaCsts.has(f.path)));
   const javaSourceMethods = convergeJavaSourceMethods(javaCsts, allFiles);
-  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0 || javaSourceMethods.size > 0
+  const javaPassMethods = collectJavaPassThroughMethods(javaCsts, allFiles);
+  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0 || javaSourceMethods.size > 0 || javaPassMethods.size > 0
     ? factsDigest(javaFacts) + ":" + crypto.createHash("sha256").update([...javaCalledElsewhere].sort().join(",")).digest("hex")
       + ":src:" + sha256Hex(JSON.stringify([...javaSourceMethods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))))
+      + ":pass:" + sha256Hex(JSON.stringify([...javaPassMethods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))))
     : "";
 
   // Same for C# (ASP.NET controllers -> injected services -> repositories).
@@ -8905,7 +8938,7 @@ export function runScan(input: ScanInput): ScanOutput {
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
-          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods } : undefined,
+          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods, passMethods: javaPassMethods } : undefined,
           csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts, callerArgs: csCallerArgs } : undefined,
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,

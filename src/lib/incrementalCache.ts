@@ -56,7 +56,9 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     loops; Go math/rand token flows and session-cookie lookups; PHP template-engine render; Java DES key generators;
 //     Java request wrappers in other files as sources; Android cleartext storage / clipboard; JS recursive merges;
 //     PHP session-authenticated CSRF; Kotlin argument + trailing-lambda calls and coroutine values; WebView bridges.
-export const SCAN_CACHE_VERSION = 18;
+// 19: Java Runtime.exec environment entries that choose what runs; Commons Codec Base64 carries taint; calls through
+//     a batch class or interface whose implementations return their argument carry it (cross-file pass-throughs).
+export const SCAN_CACHE_VERSION = 19;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

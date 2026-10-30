@@ -4,7 +4,7 @@ import { SitePage, Section, Card, Pill, TableWrap, BORDER, CYAN, EMERALD, AMBER,
 import { securityContact, SECURITY_ACK_BUSINESS_DAYS } from "@/lib/contacts";
 
 export const metadata: Metadata = {
-  title: "Trust Center â€” TrustLedger",
+  title: "Trust Center — TrustLedger",
   description: "How TrustLedger handles your source code: architecture, repository permissions, what is stored and for how long, encryption, tenant isolation, attestation integrity, subprocessors and current compliance status.",
 };
 
@@ -44,15 +44,15 @@ function Diagram() {
         <rect x="16" y="16" width="250" height="438" rx="16" fill="none" stroke={AMBER} strokeDasharray="6 6" strokeOpacity="0.6" />
         <text x="30" y="40" fill={AMBER} fontSize="11" fontWeight="700">YOUR GIT PROVIDER</text>
         <rect x="300" y="16" width="664" height="438" rx="16" fill="none" stroke={CYAN} strokeDasharray="6 6" strokeOpacity="0.6" />
-        <text x="314" y="40" fill={CYAN} fontSize="11" fontWeight="700">TRUSTLEDGER (VERCEL Â· SUPABASE Â· UPSTASH)</text>
+        <text x="314" y="40" fill={CYAN} fontSize="11" fontWeight="700">TRUSTLEDGER (VERCEL · SUPABASE · UPSTASH)</text>
 
         {box(40, 70, 200, 76, "Pull request", "opened or updated|on GitHub / GitLab / Bitbucket", AMBER)}
         {box(40, 300, 200, 92, "Check run / status", "pass, or merge blocked|until a reviewer attests", AMBER)}
         {box(330, 70, 220, 76, "Webhook endpoint", "HMAC-SHA256 signature|verified before anything runs", CYAN)}
         {box(610, 70, 330, 76, "Job queue (QStash)", "the scan is queued, not run|inside the webhook request", VIOLET)}
-        {box(610, 190, 330, 104, "Scan worker", "fetches changed files (GitHub: short-lived|installation token) Â· parses them as text,|never executes them Â· size and depth limits", ROSE)}
+        {box(610, 190, 330, 104, "Scan worker", "fetches changed files (GitHub: short-lived|installation token) · parses them as text,|never executes them · size and depth limits", ROSE)}
         {box(330, 330, 250, 100, "Postgres (Supabase)", "row-level security per organisation|findings, risk, file content for review|hash-chained audit log", EMERALD)}
-        {box(640, 340, 300, 90, "Dashboard & API", "Supabase Auth Â· SSO Â· 2FA Â· SCIM|role checked on every write|Ed25519-signed exports", SKY)}
+        {box(640, 340, 300, 90, "Dashboard & API", "Supabase Auth · SSO · 2FA · SCIM|role checked on every write|Ed25519-signed exports", SKY)}
 
         {arrow(240, 108, 330, 108, "signed webhook")}
         {arrow(550, 108, 610, 108, "enqueue")}
@@ -70,11 +70,11 @@ export default function TrustPage() {
   const contact = securityContact();
   return (
     <SitePage active="/trust" eyebrow="Trust Center" eyebrowColor={EMERALD} title="What happens to your code when you connect it"
-      lede={<>A code-security product should be judged by its own security posture. This page describes what TrustLedger accesses, what it stores, how long it keeps it and how it is protected â€” and, just as plainly, what we have <em>not</em> done yet.</>}>
+      lede={<>A code-security product should be judged by its own security posture. This page describes what TrustLedger accesses, what it stores, how long it keeps it and how it is protected — and, just as plainly, what we have <em>not</em> done yet.</>}>
       <Section>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card accent={CYAN}><p className="font-bold text-white mb-1.5">What we access</p><p className="text-sm text-white/65">The metadata of pull requests in repositories you connect, and the contents of the files each pull request changes. Read-only: the app cannot push, merge or change settings.</p></Card>
-          <Card accent={AMBER}><p className="font-bold text-white mb-1.5">What we store</p><p className="text-sm text-white/65">Scan results (findings, traces, risk scores, AI estimates), the content of scanned files â€” so reviewers can see the flagged lines â€” attestations and an audit log. Scoped to your organisation.</p></Card>
+          <Card accent={AMBER}><p className="font-bold text-white mb-1.5">What we store</p><p className="text-sm text-white/65">Scan results (findings, traces, risk scores, AI estimates), the content of scanned files — so reviewers can see the flagged lines — attestations and an audit log. Scoped to your organisation.</p></Card>
           <Card accent={EMERALD}><p className="font-bold text-white mb-1.5">What we never do</p><p className="text-sm text-white/65">Execute your code, use it to train AI models, share it with other customers, or ask for write access to your repositories&apos; contents.</p></Card>
         </div>
       </Section>
@@ -105,7 +105,7 @@ export default function TrustPage() {
           <Card><p className="font-bold text-white mb-1.5">How code is processed</p><p>Changed files are fetched when a pull request is opened or updated and analysed by the scanner as text. It never runs, builds or installs your code, and it has hard limits on file size and parse depth so a hostile file cannot exhaust it. Processing happens in TrustLedger&apos;s hosted infrastructure; we do not currently offer an on-premises scanner.</p></Card>
           <Card><p className="font-bold text-white mb-1.5">What is retained</p><p>Scan results and the content of each scanned file are stored so reviewers can see the flagged lines when they attest. By default nothing is deleted automatically: an organisation chooses a retention window between 30 days and 7 years in Settings. Automatic enforcement never deletes attested scans (they are the audit evidence), open items, or the audit log.</p></Card>
           <Card><p className="font-bold text-white mb-1.5">Deletion</p><p>Administrators can delete historical, unattested scans older than seven days, export the organisation&apos;s data, or delete the organisation&apos;s account and data from Settings. Attestations are immutable by database rule. Some records may be kept where the law requires it.</p></Card>
-          <Card><p className="font-bold text-white mb-1.5">AI and model training</p><p>Your source code is used only to provide the service to your organisation. It is not used to train our models or third-party models, and it is not sent to external AI services for analysis â€” the engines run inside TrustLedger.</p></Card>
+          <Card><p className="font-bold text-white mb-1.5">AI and model training</p><p>Your source code is used only to provide the service to your organisation. It is not used to train our models or third-party models, and it is not sent to external AI services for analysis — the engines run inside TrustLedger.</p></Card>
         </div>
       </Section>
 
@@ -166,7 +166,7 @@ export default function TrustPage() {
 
       <Section id="disclosure" title="Vulnerability disclosure and incident response" tone="surface">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-white/70 leading-relaxed">
-          <Card accent={ROSE}><p className="font-bold text-white mb-1.5">Report a vulnerability</p><p>Email <a href={`mailto:${contact}`} className="underline underline-offset-2 text-white/85">{contact}</a>. We acknowledge within {SECURITY_ACK_BUSINESS_DAYS} business days and give an initial assessment within 10. Good-faith research within our guidelines is covered by safe harbour. Full policy: <Link href="/security" className="underline underline-offset-2 text-white/85">/security</Link> Â· machine-readable: <a href="/.well-known/security.txt" className="underline underline-offset-2 text-white/85">security.txt</a>.</p></Card>
+          <Card accent={ROSE}><p className="font-bold text-white mb-1.5">Report a vulnerability</p><p>Email <a href={`mailto:${contact}`} className="underline underline-offset-2 text-white/85">{contact}</a>. We acknowledge within {SECURITY_ACK_BUSINESS_DAYS} business days and give an initial assessment within 10. Good-faith research within our guidelines is covered by safe harbour. Full policy: <Link href="/security" className="underline underline-offset-2 text-white/85">/security</Link> · machine-readable: <a href="/.well-known/security.txt" className="underline underline-offset-2 text-white/85">security.txt</a>.</p></Card>
           <Card accent={VIOLET}><p className="font-bold text-white mb-1.5">If something goes wrong</p><p>Incidents are triaged by severity with a written runbook. If we confirm an incident affecting a customer&apos;s data we notify that customer&apos;s administrators without undue delay and within 72 hours of confirming it, with what happened, what data was involved and what to do.</p></Card>
         </div>
       </Section>

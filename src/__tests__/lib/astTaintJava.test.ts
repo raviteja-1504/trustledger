@@ -133,6 +133,53 @@ public class A {
     expect(findings.some(f => f.id === "command-injection")).toBe(true);
   });
 
+  it("keeps taint through a Commons Codec Base64 round trip into a file path, and through an encoded value", () => {
+    const pathHits = (expr: string) => scan(`
+public class A {
+  public void run(@RequestParam String param) throws Exception {
+    String bar = ${expr};
+    java.io.FileInputStream fis = new java.io.FileInputStream(new java.io.File("/srv/files/" + bar));
+  }
+}`).filter(f => f.id === "path-traversal");
+    expect(pathHits(`new String(org.apache.commons.codec.binary.Base64.decodeBase64(org.apache.commons.codec.binary.Base64.encodeBase64(param.getBytes())))`)).toHaveLength(1);
+    // Base64's alphabet includes "/", so the encoded form still walks directories
+    expect(pathHits(`org.apache.commons.codec.binary.Base64.encodeBase64String(param.getBytes())`)).toHaveLength(1);
+    expect(pathHits(`"report.txt"`)).toHaveLength(0);
+  });
+
+  describe("Runtime.exec's environment argument", () => {
+  const run = (body: string) => scan(`
+public class A {
+  public void run(@RequestParam String p, @RequestParam String dir) throws Exception {
+    Runtime r = Runtime.getRuntime();
+${body}
+  }
+}`).filter(f => f.id === "command-injection");
+
+  it("flags a request value that is a whole environment entry (it can be LD_PRELOAD=..., PATH=...)", () => {
+    const hits = run(`    String[] args = {"/usr/bin/report"};\n    String[] argsEnv = {p};\n    r.exec(args, argsEnv);`);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail ?? JSON.stringify(hits[0])).toMatch(/environment/);
+  });
+
+  it("flags a request value for a variable that picks code to load, inline or in a local array", () => {
+    expect(run(`    r.exec("/usr/bin/report", new String[]{"PATH=" + p});`)).toHaveLength(1);
+    expect(run(`    String[] e = {"LANG=C", "LD_LIBRARY_PATH=" + p};\n    r.exec("/usr/bin/report", e);`)).toHaveLength(1);
+  });
+
+  it("does not flag a request value that only fills in a harmless entry, or the working directory", () => {
+    expect(run(`    r.exec("/usr/bin/report", new String[]{"REPORT_TITLE=" + p});`)).toHaveLength(0);
+    expect(run(`    String[] e = {"LANG=C", "REPORT_TITLE=" + p};\n    r.exec("/usr/bin/report", e);`)).toHaveLength(0);
+    expect(run(`    r.exec("/usr/bin/report", null, new java.io.File(dir));`)).toHaveLength(0);
+  });
+
+  it("still reports a tainted command once, not again for the environment", () => {
+    const hits = run(`    r.exec("ping " + p, new String[]{p});`);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].detail ?? JSON.stringify(hits[0])).not.toMatch(/environment/);
+  });
+  });
+
   it("catches SQL injection through plain + concatenation split across lines", () => {
     const content = `
 public class A {

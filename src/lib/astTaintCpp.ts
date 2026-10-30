@@ -244,7 +244,9 @@ function stringValue(n: SyntaxNode | null | undefined): string | null {
 
 type Env = TaintEnv;
 
-interface LocalFn { name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number }>; isStatic: boolean }
+/** `out`: a parameter the caller's object is reached through -- a C++ reference (`char *&data`), or a pointer the
+ * function never re-points (`char *buf`, `char **p`) so its writes land in the caller's buffer. */
+interface LocalFn { name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number; out?: "ref" | "ptr" }>; isStatic: boolean }
 
 interface EngineCtx {
   filePath: string;
@@ -279,6 +281,21 @@ interface EngineCtx {
   /** a walk with parameters seeded hypothetically (summaries, facts): its writes to globals are not real */
   speculative: boolean;
   current: LocalFn | null;
+  /** per walk: C++ reference -> the variable it is bound to (`char *&dataRef = data;`), for good. Every write to
+   * one of them is made to all (setVar / taintBuffer), so a read of either sees the object's value. */
+  refs: Map<string, string>;
+  /** fn -> (out-parameter index -> (source -> classes it stores there)); source -1 is input the fn reads itself,
+   * j >= 0 is its parameter j (`copy(dst, src)` wrapping strcpy) */
+  fills: Map<string, Map<number, Map<number, number>>>;
+}
+
+/** The other names a C++ reference binds to `name`: `r` and `x` after `T &r = x;` always name one object. */
+function refPeers(name: string, ctx: EngineCtx): string[] {
+  if (!ctx.refs.size) return [];
+  const root = ctx.refs.get(name) ?? name;
+  const out = root !== name ? [root] : [];
+  for (const [r, t] of ctx.refs) if (t === root && r !== name) out.push(r);
+  return out;
 }
 
 const KIND_KEY = (kind: string, name: string) => `!${kind}:${name}`;
@@ -488,15 +505,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   const m = (e: SyntaxNode | null, env: Env) => mask(e, env, ctx);
 
   const setVar = (name: string, value: number, env: Env, orInto: boolean) => {
-    env.set(name, orInto ? (env.get(name) ?? 0) | value : value);
+    for (const n of [name, ...refPeers(name, ctx)]) env.set(n, orInto ? (env.get(n) ?? 0) | value : value);
   };
-  /** Taint a buffer through an out-parameter: every name in its alias group. */
+  /** Taint a buffer through an out-parameter: every name in its alias group, and the references bound to it. */
   const taintBuffer = (name: string, value: number, env: Env) => {
     const base = name.split(".")[0];
     const g = ctx.aliases.get(base);
     env.set(name, (env.get(name) ?? 0) | value);
     if (name !== base) env.set(base, (env.get(base) ?? 0) | value);
     if (g) for (const [n, gid] of ctx.aliases) if (gid === g) env.set(n, (env.get(n) ?? 0) | value);
+    for (const p of refPeers(base, ctx)) env.set(p, (env.get(p) ?? 0) | value);
   };
   const alias = (a: string, b: string) => {
     const gid = ctx.aliases.get(b) ?? ctx.aliases.get(a) ?? b;
@@ -898,6 +916,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         }
         if (recv?.type === "identifier") touchVar(recv.text, recv, env, fnNode?.text.includes("->") ?? false);
         checkCall(e, env);
+        // a local function that fills an out-parameter (`badSource(data)` with `char *&data`, `fill(buf)`): the
+        // caller's argument now holds what the function stored there
+        const fill = !recv ? ctx.fills.get(ctx.fnAlias.get(name) ?? name) : undefined;
+        if (fill) for (const [i, sources] of fill) {
+          const nm = rootName(args[i] ?? null);
+          if (!nm) continue;
+          let v = 0;
+          for (const [j, cls] of sources) v |= j < 0 ? cls : m(args[j] ?? null, env) & cls;
+          if (v) taintBuffer(nm, v, env);
+        }
         // what the call leaves in its destination buffer (after checkCall, which sizes the copy by the old length)
         const dst = args[0]?.type === "identifier" ? args[0].text : null;
         if (dst) {
@@ -977,6 +1005,10 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (arr && v) setLen(nm, strLenOfName(v));
       walkExpr(v, env);
       env.set(nm, m(v, env));
+      // `char *&dataRef = data;`: a reference names that variable from now on, whatever it is later assigned
+      if (v?.type === "identifier" && target && (target.type === "reference_declarator" || findAllNodes(target, "reference_declarator").length)) {
+        ctx.refs.set(nm, ctx.refs.get(v.text) ?? v.text);
+      }
       recordAlloc(nm, v, env);
       copyMemory(nm, v, env);
       const vn = v?.type === "identifier" ? v.text : null;
@@ -1075,13 +1107,27 @@ function collectFns(root: SyntaxNode): LocalFn[] {
   return findAllNodes(root, "function_definition").map(f => {
     let d = field(f, "declarator");
     while (d && d.type !== "function_declarator") d = field(d, "declarator");
+    const body = field(f, "body");
     const params = named(field(d, "parameters")).filter(p => /parameter_declaration/.test(p.type))
-      .map((p, index) => ({ name: declaredName(field(p, "declarator")) ?? "", index }));
+      .map((p, index) => {
+        const name = declaredName(field(p, "declarator")) ?? "";
+        return { name, index, out: name ? outKind(field(p, "declarator"), name, body) : undefined };
+      });
     return {
       name: functionName(f) ?? "", decl: f, body: field(f, "body"), params,
       isStatic: named(f).some(c => c.type === "storage_class_specifier" && c.text === "static"),
     };
   }).filter(f => !!f.name);
+}
+
+/** A reference parameter, or a pointer one the body never re-points (`p = ...` would leave the caller's buffer). */
+function outKind(declarator: SyntaxNode | null, name: string, body: SyntaxNode | null): "ref" | "ptr" | undefined {
+  if (!declarator) return undefined;
+  const has = (t: string) => declarator.type === t || findAllNodes(declarator, t).length > 0;
+  if (has("reference_declarator")) return "ref";
+  if (!has("pointer_declarator") && !has("array_declarator")) return undefined;
+  const repointed = body ? findAllNodes(body, "assignment_expression").some(a => field(a, "left")?.type === "identifier" && field(a, "left")!.text === name) : false;
+  return repointed ? undefined : "ptr";
 }
 
 type Release = "free" | "delete" | "delete[]";
@@ -1134,20 +1180,47 @@ function collectGlobals(root: SyntaxNode): Set<string> {
   return out;
 }
 
-function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); }
+function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); ctx.refs = new Map(); }
 
-function returnMask(fn: LocalFn, ctx: EngineCtx, seedIndex: number | null): number {
+/** What `fn` returns with parameter `seedIndex` tainted (null: none); `outs` collects what it leaves in each
+ * out-parameter other than the seeded one, at every return and at the end of the body. */
+function returnMask(fn: LocalFn, ctx: EngineCtx, seedIndex: number | null, outs?: Map<number, number>): number {
   if (!fn.body) return 0;
   let surviving = 0;
-  const saved = { findings: ctx.findings, seen: ctx.seen, suppressed: ctx.suppressed, seeded: ctx.seeded, aliases: ctx.aliases, capacity: ctx.capacity, strLen: ctx.strLen, fnAlias: ctx.fnAlias, current: ctx.current, speculative: ctx.speculative };
+  const saved = { findings: ctx.findings, seen: ctx.seen, suppressed: ctx.suppressed, seeded: ctx.seeded, aliases: ctx.aliases, capacity: ctx.capacity, strLen: ctx.strLen, fnAlias: ctx.fnAlias, refs: ctx.refs, current: ctx.current, speculative: ctx.speculative };
   ctx.findings = []; ctx.seen = new Set(); ctx.suppressed = undefined; ctx.seeded = new Map(); ctx.current = fn;
   ctx.speculative = saved.speculative || seedIndex !== null;
   freshWalkState(ctx);
   const env: Env = new Map();
   for (const p of fn.params) env.set(p.name, seedIndex === p.index ? ALL : 0);
-  createWalker(ctx, { quiet: true, onReturn: (e, en) => { surviving |= mask(e, en, ctx); } }).walk(fn.body, env);
+  const collectOuts = (en: Env) => {
+    if (!outs) return;
+    for (const p of fn.params) {
+      if (!p.out || p.index === seedIndex) continue;
+      const v = groupMask(p.name, en, ctx) & ALL;
+      if (v) outs.set(p.index, (outs.get(p.index) ?? 0) | v);
+    }
+  };
+  createWalker(ctx, { quiet: true, onReturn: (e, en) => { surviving |= mask(e, en, ctx); collectOuts(en); } }).walk(fn.body, env);
+  collectOuts(env);
   Object.assign(ctx, saved);
   return surviving & ALL;
+}
+
+/** Merge one walk's out-parameter masks into `fills` under `source`; true when anything grew. */
+function mergeFills(ctx: EngineCtx, fn: string, source: number, outs: ReadonlyMap<number, number>, exclude = 0): boolean {
+  let grew = false;
+  for (const [i, raw] of outs) {
+    const v = raw & ~exclude;
+    if (!v) continue;
+    const byOut = ctx.fills.get(fn) ?? new Map<number, Map<number, number>>();
+    const bySource = byOut.get(i) ?? new Map<number, number>();
+    const next = (bySource.get(source) ?? 0) | v;
+    if (next === (bySource.get(source) ?? 0)) continue;
+    bySource.set(source, next); byOut.set(i, bySource); ctx.fills.set(fn, byOut);
+    grew = true;
+  }
+  return grew;
 }
 
 function buildSummaries(ctx: EngineCtx) {
@@ -1156,14 +1229,19 @@ function buildSummaries(ctx: EngineCtx) {
     const before = globalsSig();
     let changed = false;
     for (const [name, f] of ctx.fns) {
-      const intrinsic = returnMask(f, ctx, null);
+      const ownOuts = new Map<number, number>();
+      const intrinsic = returnMask(f, ctx, null, ownOuts);
       if ((intrinsic | (ctx.intrinsic.get(name) ?? 0)) !== (ctx.intrinsic.get(name) ?? 0)) { ctx.intrinsic.set(name, (ctx.intrinsic.get(name) ?? 0) | intrinsic); changed = true; }
+      if (mergeFills(ctx, name, -1, ownOuts)) changed = true;
       const prop = new Map(ctx.propagating.get(name) ?? []);
       let grew = false;
       for (const p of f.params) {
-        const r = returnMask(f, ctx, p.index) & ~intrinsic;
+        const outs = new Map<number, number>();
+        const r = returnMask(f, ctx, p.index, outs) & ~intrinsic;
         const next = (prop.get(p.index) ?? 0) | r;
         if (r && next !== (prop.get(p.index) ?? 0)) { prop.set(p.index, next); grew = true; }
+        // parameter p reaches another out-parameter: beyond what that one gets from the function itself
+        for (const [i, v] of outs) if (mergeFills(ctx, name, p.index, new Map([[i, v & ~(ownOuts.get(i) ?? 0)]]))) changed = true;
       }
       if (grew) { ctx.propagating.set(name, prop); changed = true; }
     }
@@ -1180,6 +1258,7 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
     filePath, content, lines: content.split("\n"), root, fns, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
     suppressed, findings: [], seen: new Set(), crossFileFacts, aliases: new Map(), capacity: new Map(), strLen: new Map(), fnAlias: new Map(), freesParam: collectFreesParam(fns), seededMem: new Map(),
     globalNames: collectGlobals(root), globalTaint: new Map(), speculative: false, current: null,
+    refs: new Map(), fills: new Map(),
   };
   buildSummaries(ctx);
   return ctx;
