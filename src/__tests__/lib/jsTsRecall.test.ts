@@ -246,4 +246,20 @@ describe("mass assignment, timing, JWT, prototype pollution", () => {
     const guarded = bad.replace("const parts", `if (p.includes("__proto__") || p.includes("constructor")) return; const parts`);
     expect(has(guarded, "prototype-pollution")).toBe(false);
   });
+  it("recursive deep merge without a prototype guard (for-in, Object.keys loop or forEach)", () => {
+    const forIn = `function merge(dst: any, src: any) { for (const k in src) { if (typeof src[k] === "object" && src[k]) { if (!dst[k]) dst[k] = {}; merge(dst[k], src[k]); } else { dst[k] = src[k]; } } return dst; }`;
+    expect(has(forIn, "prototype-pollution")).toBe(true);
+    expect(has(forIn.replace("for (const k in src) {", `for (const k in src) { if (k === "__proto__" || k === "constructor") continue;`), "prototype-pollution")).toBe(false);
+    const keys = `const deepMerge = (a: any, b: any) => { Object.keys(b).forEach((key) => { if (b[key] && typeof b[key] === "object") { a[key] = a[key] || {}; deepMerge(a[key], b[key]); } else a[key] = b[key]; }); return a; };`;
+    expect(has(keys, "prototype-pollution")).toBe(true);
+    // a non-recursive copy of own keys is a shallow assign, not a walk into nested objects
+    expect(has(`function copy(dst: any, src: any) { for (const k in src) { dst[k] = src[k]; } return dst; }`, "prototype-pollution")).toBe(false);
+    // recursion that writes at a counter, not at the walked key
+    expect(has(`function flatten(dst: any[], src: any, i = 0) { for (const k in src) { if (typeof src[k] === "object") flatten(dst, src[k], i + 1); } dst[i] = src; }`, "prototype-pollution")).toBe(false);
+    // keys from a fixed array, not from the source object
+    expect(has(`function tree(dst: any, src: any) { for (const idx of ["left", "right"]) { dst[idx] = {}; tree(dst[idx], src[idx]); } }`, "prototype-pollution")).toBe(false);
+    expect(has(`function tree(dst: any, src: any) { for (const idx of Object.keys(src)) { dst[idx] = {}; tree(dst[idx], src[idx]); } }`, "prototype-pollution")).toBe(true);
+    // recursion over array indices, not object keys
+    expect(has(`function sum(xs: number[][], i: number): number { const out: number[] = []; for (let j = 0; j < xs.length; j++) { out[j] = xs[j][i]; } return i ? sum(xs, i - 1) + out.length : out[i]; }`, "prototype-pollution")).toBe(false);
+  });
 });

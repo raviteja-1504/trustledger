@@ -217,10 +217,11 @@ function argListOfCSharp(call: SyntaxNode): SyntaxNode[] {
   // `argument` nodes wrap the real expression (confirmed: `argument ->
   // identifier`/`string_literal`/etc as a single named child, no field
   // name) -- unwrap one level so callers see the real expression directly,
-  // matching every other engine's argListOf* convention.
+  // matching every other engine's argListOf* convention. A named argument (`conn: x`) holds its name first and its
+  // value last, so the value is the LAST named child.
   return args.namedChildren
     .filter((n): n is SyntaxNode => !!n && n.type === "argument")
-    .map(a => a.namedChildren[0])
+    .map(a => a.namedChildren[a.namedChildren.length - 1])
     .filter((n): n is SyntaxNode => !!n);
 }
 
@@ -630,6 +631,11 @@ interface EngineCtx {
   /** Proof pass only (see proveSinksSafeCS): parameters, fields and unmodelled input assumed tainted, unmodelled
    * calls carrying their arguments -- an injection sink whose argument is STILL clean is proven safe. */
   proof?: { proven: SuppressedSink[] };
+  /** Proof pass: `Type.Method` -> param index -> what this file's call sites pass (index -1: unknown, i.e. ALL). */
+  callArgsOut?: Map<string, Map<number, number>>;
+  /** Proof pass: the batch's converged call-site masks (see computeCSharpCallSiteArgs) -- a non-entry public method
+   * other files call receives what they pass rather than anything at all. */
+  callerArgMasks?: ReadonlyMap<string, ReadonlyMap<number, number>>;
 }
 
 /** Calls that return what a network peer sent, on a socket / TCP client / web client. */
@@ -1121,8 +1127,10 @@ function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNo
   const key = `${stripGenerics(type).split(".").pop()}.${method}`;
   const list = facts.get(key);
   if (!list) return;
+  // named arguments (`Find(id: x, name: y)`) bind by name, not position: any of them may be the fact's parameter
+  const named = args.some(isNamedArgCS);
   for (const fact of list) {
-    const bound = fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
+    const bound = named ? args : fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
     for (const a of bound) {
       const m = taintMask(a, env);
       if (!(m & fact.sinkClass)) {
@@ -1181,9 +1189,50 @@ function boundPathReachesFsSinkCS(name: string, after: SyntaxNode): boolean {
   });
 }
 
+/** An argument written `name: value` (argListOfCSharp hands back the value; its parent holds the name). */
+const isNamedArgCS = (a: SyntaxNode): boolean => a.parent?.type === "argument" && /^\s*@?[A-Za-z_]\w*\s*:(?!:)/.test(a.parent.text);
+
+/** `Base b = new Concrete()` in the call's own method: the class a virtual call on `b` dispatches to, if only one. */
+function concreteTypeOfCS(recv: string, at: SyntaxNode): string | undefined {
+  let m: SyntaxNode | null = at.parent;
+  while (m && !/^(?:method_declaration|constructor_declaration|local_function_statement)$/.test(m.type)) m = m.parent;
+  if (!m || !/^[A-Za-z_]\w*$/.test(recv)) return undefined;
+  const types = new Set([...m.text.matchAll(new RegExp(`\\b${recv}\\s*=\\s*new\\s+([A-Za-z_][\\w.]*)\\s*[(<{]`, "g"))].map(x => x[1]));
+  return types.size === 1 ? [...types][0] : undefined;
+}
+
+/** Proof pass: what this call passes to another class's method (`Svc.Run(q)`, `_repo.Find(id)`), by parameter. */
+function recordCallArgsCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
+  const out = ctx.callArgsOut;
+  if (!out || fn.type !== "member_access_expression") return;
+  const parts = (calleeTextCSharp(fn) ?? "").split(".");
+  if (parts.length < 2) return;
+  const method = parts[parts.length - 1], recv = parts[parts.length - 2];
+  if (recv === "this" || recv === "base") return;
+  const type = concreteTypeOfCS(recv, node) ?? ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined);
+  if (!type) return;
+  const key = `${stripGenerics(type).split(".").pop()}.${method}`;
+  const slot = out.get(key) ?? new Map<number, number>();
+  // a named argument (`Run(query: q)`) may bind any parameter
+  if (args.some(isNamedArgCS)) slot.set(-1, ALL);
+  args.forEach((a, i) => slot.set(i, (slot.get(i) ?? 0) | (filledObjectCS(a, node) ? ALL : taintMask(a, env))));
+  out.set(key, slot);
+}
+
+/** An object variable its method fills in (`box.Field = x`, `list[i] = x`, `list.Add(x)`): the engine does not
+ * follow that into the object's own mask, so what it carries to a callee is unknown. */
+function filledObjectCS(arg: SyntaxNode, at: SyntaxNode): boolean {
+  if (arg.type !== "identifier") return false;
+  let m: SyntaxNode | null = at.parent;
+  while (m && !/^(?:method_declaration|constructor_declaration|local_function_statement|lambda_expression)$/.test(m.type)) m = m.parent;
+  const v = arg.text;
+  return !!m && new RegExp(`\\b${v}\\s*(?:\\.\\s*\\w+|\\[[^\\]]*\\])\\s*(?:[+]?=(?!=))|\\b${v}\\s*\\.\\s*(?:Add\\w*|Insert\\w*|Push|Enqueue|Append\\w*|Set\\w*|Put)\\s*\\(`).test(m.text);
+}
+
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
+  recordCallArgsCS(fn, args, node, env, ctx, taintMask);
   checkCrossFileCallCS(fn, args, node, env, ctx, taintMask);
   // A call chained off another call (`t.GetMethod(m).Invoke(...)`, `new HttpClient().GetStringAsync(u)`) has no
   // dotted root; it still has a method name to match.
@@ -2482,19 +2531,46 @@ function recordProofCS(ctx: EngineCtx, id: string, node: SyntaxNode, exprs: Synt
     frontier = next;
   }
 }
+/** The class declaring `decl`, and the types in its base list (calls through an interface / base class name those). */
+function ownerTypesCS(decl: SyntaxNode): string[] {
+  let cls: SyntaxNode | null = decl.parent;
+  while (cls && !/^(?:class_declaration|struct_declaration|record_declaration)$/.test(cls.type)) cls = cls.parent;
+  const name = cls?.childForFieldName("name")?.text;
+  if (!cls || !name) return [];
+  const bases = cls.namedChildren.find(c => c?.type === "base_list");
+  return [name, ...(bases?.namedChildren ?? []).map(b => simpleTypeNameCS(b)).filter((n): n is string => !!n)];
+}
+
+const CS_ENTRY_CLASS_RE = /(?:Controller|Hub|PageModel|Page|Function|Functions|Endpoint|Endpoints|Handler|Middleware)$/;
+const CS_ENTRY_BASE_RE = /^(?:Controller|ControllerBase|ApiController|Hub|PageModel|Page|ComponentBase|BackgroundService|IHostedService|IMiddleware|IHttpHandler|IRequestHandler)$/;
+/** A method something outside the batch can call with anything: attributed (routes, triggers, tests), on a
+ * controller / hub / page / function / handler class, an event handler, or Main. */
+function isEntryPointCS(decl: SyntaxNode): boolean {
+  if (decl.namedChildren.some(c => c?.type === "attribute_list")) return true;
+  const name = decl.childForFieldName("name")?.text ?? "";
+  if (name === "Main" || /\bEventArgs\b/.test(decl.childForFieldName("parameters")?.text ?? "")) return true;
+  const [cls, ...bases] = ownerTypesCS(decl);
+  return !cls || CS_ENTRY_CLASS_RE.test(cls) || bases.some(b => CS_ENTRY_BASE_RE.test(b));
+}
+
 /**
  * The proof pass (see astTaintJava.ts's twin): every method walked once with ALL its parameters tainted, fields and
  * unmodelled input tainted, unmodelled calls carrying their arguments and summaries recomputed the same way. An
  * injection sink whose argument is still clean cannot depend on any input, so the regex layer's line match there is
  * vetoed. Nothing found here is reported.
  */
-function proveSinksSafeCS(ctx: EngineCtx, localMethods: Map<string, LocalMethod>, root: SyntaxNode, suppressedOut: SuppressedSink[]): void {
+function proveSinksSafeCS(
+  ctx: EngineCtx, localMethods: Map<string, LocalMethod>, root: SyntaxNode, suppressedOut: SuppressedSink[],
+  callArgsOut?: Map<string, Map<number, number>>,
+): void {
   const proof = { proven: [] as SuppressedSink[] };
   const pctx: EngineCtx = {
     ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false, sticky: new Map(),
     stickyDirty: false, propagatingParams: new Map(), proof,
   };
   for (const [name, idx] of buildPropagatingMapCSharp(localMethods, pctx)) pctx.propagatingParams.set(name, idx);
+  // only the proof walks below record call sites (the propagation pre-pass seeds every parameter on purpose)
+  pctx.callArgsOut = callArgsOut;
 
   // A private method that is only ever CALLED (never passed as a delegate, no overload) has no caller outside this
   // file: its parameters hold what the calls here pass (Juliet's GoodG2BSink(data) called with "foo"). Every other
@@ -2515,6 +2591,23 @@ function proveSinksSafeCS(ctx: EngineCtx, localMethods: Map<string, LocalMethod>
     // be wired by reflection or a framework (WebForms `OnClick="Handler"`), so its parameters stay input
     if (all === called && called >= 2) contextual.add(name);
   }
+  // A public method other files of the batch call (Juliet's `Helper_51b.GoodG2BSink(data)`, a repository a service
+  // calls) receives what those calls pass -- unless it is an entry point a framework or outside caller can reach.
+  const fromCallers = new Map<string, ReadonlyMap<number, number>>();
+  for (const [name] of localMethods) {
+    const decls = declsByName.get(name) ?? [];
+    if (!ctx.callerArgMasks?.size || contextual.has(name) || decls.length !== 1 || isEntryPointCS(decls[0])) continue;
+    const owners = ownerTypesCS(decls[0]);
+    const merged = new Map<number, number>();
+    let found = false;
+    for (const o of owners) {
+      const s = ctx.callerArgMasks.get(`${o}.${name}`);
+      if (!s) continue;
+      found = true;
+      for (const [i, m] of s) merged.set(i, (merged.get(i) ?? 0) | m);
+    }
+    if (found) fromCallers.set(name, merged);
+  }
 
   // Fixed point over the call-site seeds; only the final (stable) round's proofs count.
   let seeds = new Map<string, Map<number, number>>();
@@ -2525,7 +2618,12 @@ function proveSinksSafeCS(ctx: EngineCtx, localMethods: Map<string, LocalMethod>
       if (!method.body) continue;
       const env: Env = new Map();
       const seeded = seeds.get(name);
-      for (const p of method.paramShapes) env.set(p.name, contextual.has(name) ? (seeded?.get(p.index) ?? 0) : ALL);
+      const callers = fromCallers.get(name);
+      for (const p of method.paramShapes) {
+        // an argument some call site leaves out (a defaulted parameter) or binds by name: assume anything
+        const fromBatch = callers && (callers.has(-1) || !callers.has(p.index) ? ALL : callers.get(p.index)!);
+        env.set(p.name, contextual.has(name) ? (seeded?.get(p.index) ?? 0) : callers ? fromBatch! | (seeded?.get(p.index) ?? 0) : ALL);
+      }
       walkForDeclarationsAndSinks(method.body, env, pctx);
     }
     for (const st of root.namedChildren) if (st?.type === "global_statement") walkForDeclarationsAndSinks(st, new Map(), pctx);
@@ -2574,6 +2672,25 @@ function drainSeededParamsCS(ctx: EngineCtx, localMethods: Map<string, LocalMeth
     }
     if (!changed) break;
   }
+}
+
+/**
+ * Cross-file CALLERS (C#): what this file's call sites pass to other classes' methods, keyed `Type.Method` -> param
+ * index -> mask, computed in the proof pass's terms (parameters of entry points tainted). `incoming` is the batch's
+ * previous round, so a helper that only ever receives constants passes constants on to its own callees.
+ */
+export function computeCSharpCallSiteArgs(
+  content: string, filePath: string, root: SyntaxNode, incoming: ReadonlyMap<string, ReadonlyMap<number, number>>,
+): Map<string, Map<number, number>> {
+  const out = new Map<string, Map<number, number>>();
+  try {
+    const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, undefined, undefined);
+    ctx.callerArgMasks = incoming;
+    proveSinksSafeCS(ctx, localMethods, root, [], out);
+  } catch (err) {
+    console.error(`[astTaintCSharp] threw computing call-site arguments for ${filePath}:`, err);
+  }
+  return out;
 }
 
 const CS_CALLABLE_MODIFIERS = new Set(["public", "internal", "protected"]);
@@ -2650,9 +2767,12 @@ export function scanAstTaintCSharp(
   suppressedOut?: SuppressedSink[],
   // Parameter -> sink facts for other classes' methods in the batch (see computeCSharpMethodSinkFacts).
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+  // What the batch's own call sites pass to this file's public methods (see computeCSharpCallSiteArgs); proof pass only.
+  callerArgMasks?: ReadonlyMap<string, ReadonlyMap<number, number>>,
 ): AstTaintCSharpFinding[] {
   try {
     const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, suppressedOut, crossFileFacts);
+    ctx.callerArgMasks = callerArgMasks;
     const sensitiveTypes = collectSensitiveTypesCS(root);
     const methodDecls = new Map<string, SyntaxNode>();
     for (const decl of findAllNodes(root, "method_declaration")) {

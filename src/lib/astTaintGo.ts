@@ -75,7 +75,8 @@ export type AstTaintGoId =
   | "sql-injection" | "command-injection" | "ssrf" | "path-traversal"
   | "open-redirect" | "insecure-deserialization" | "idor"
   | "xss" | "header-injection" | "redos" | "ssti" | "eval-exec" | "mass-assignment" | "nosql-injection"
-  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto" | "argument-injection" | "log-injection";
+  | "ldap-injection" | "xpath-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto" | "argument-injection" | "log-injection"
+  | "trust-boundary" | "insecure-file-upload" | "input-validation" | "race-condition" | "csrf" | "integer-overflow";
 
 const GO_LOG_TAILS_RE = /^(?:Print|Printf|Println|Fatal|Fatalf|Fatalln|Panic|Panicf|Panicln|Info|Infof|Infow|Warn|Warnf|Warnw|Warning|Warningf|Error|Errorf|Errorw|Debug|Debugf|Debugw|Trace|Tracef)$/;
 const GO_LOGGER_RE = /^(?:log|logger|\w*[Ll]ogger|sugar|logrus|klog|glog)$/;
@@ -232,7 +233,7 @@ function argListOfGo(call: SyntaxNode): SyntaxNode[] {
 // directly instead. The request variable is any parameter typed *http.Request
 // (collected per scan into goSourceCallRe), not only one literally named `r`.
 const GIN_ECHO_FIBER_SOURCE_METHODS = new Set([
-  "Param", "Params", "Query", "QueryParam", "QueryParams", "PostForm", "PostFormArray", "DefaultQuery", "DefaultPostForm",
+  "Param", "Params", "Query", "QueryParam", "QueryParams", "PostForm", "PostFormArray", "DefaultQuery", "DefaultPostForm", "FormFile",
   "GetHeader", "Cookie", "FormValue", "FormParams", "GetRawData", "Body",
 ]);
 
@@ -295,12 +296,12 @@ const emptyGoCtx = (): GoScanCtx => ({
 });
 // Per-scan facts. Scans are synchronous, so a module-level slot set at scan start is safe.
 let goCtx: GoScanCtx = emptyGoCtx();
-let goSourceCallRe = /^(?:r|req|request|c\.Request)\.(?:URL\.Query\(\)|(?:Header\.(?:Get|Values)|FormValue|PostFormValue|Cookie|Referer|UserAgent|BasicAuth|PathValue)\s*\()/;
+let goSourceCallRe = /^(?:r|req|request|c\.Request)\.(?:URL\.Query\(\)|(?:Header\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\s*\()/;
 let goSourceSelectorRe = /^(?:r|req|request|c\.Request)\.(?:URL\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$/;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function setGoRequestVars(names: Iterable<string>): void {
   const alt = ["r", "req", "request", ...names].map(escapeRe).join("|");
-  goSourceCallRe = new RegExp(`^(?:${alt}|c\\.Request)\\.(?:URL\\.Query\\(\\)|(?:Header\\.(?:Get|Values)|FormValue|PostFormValue|Cookie|Referer|UserAgent|BasicAuth|PathValue)\\s*\\()`);
+  goSourceCallRe = new RegExp(`^(?:${alt}|c\\.Request)\\.(?:URL\\.Query\\(\\)|(?:Header\\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\\s*\\()`);
   goSourceSelectorRe = new RegExp(`^(?:${alt}|c\\.Request)\\.(?:URL\\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$`);
 }
 
@@ -582,6 +583,8 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   // Web-framework helpers on the handler's context (gin, echo, fiber): serve a file from a path, or redirect.
   if (FRAMEWORK_CTX_RE.test(receiverText)) {
     if (FRAMEWORK_FILE_TAILS.has(tail) && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
+    // gin c.SaveUploadedFile(file, dst) / fiber c.SaveFile(file, dst): writes to dst
+    if ((tail === "SaveUploadedFile" || tail === "SaveFile") && args[1]) return { id: "path-traversal", sinkExpr: text, args: [args[1]] };
     // gin/echo Redirect(code, location); fiber Redirect(location[, code])
     if (tail === "Redirect") {
       const target = args.length >= 2 && /^\d+$|StatusFound|StatusMovedPermanently|StatusSeeOther|StatusTemporaryRedirect|StatusPermanentRedirect/.test(args[0].text) ? args[1] : args[0];
@@ -864,7 +867,18 @@ function matchIdorGo(call: SyntaxNode): SinkMatch | null {
   if (tail !== "QueryRow" && tail !== "First" && tail !== "Where") return null;
   const args = argListOfGo(call);
   const last = args[args.length - 1];
-  return last ? { id: "idor", sinkExpr: text, args: [last] } : null;
+  if (!last || isCredentialLookupGo(args[0], last)) return null;
+  return { id: "idor", sinkExpr: text, args: [last] };
+}
+
+/** `SELECT user_id FROM sessions WHERE token = ?` with `cookie.Value`: resolving the caller's own credential (the
+ * session cookie, a bearer / API token) is authentication, not access to an object the client picked. */
+function isCredentialLookupGo(query: SyntaxNode | undefined, bound: SyntaxNode): boolean {
+  // `c.Value` where `c, err := r.Cookie("sid")`
+  const cookieVar = /^(\w+)\.Value$/.exec(bound.text)?.[1];
+  if (cookieVar && new RegExp(`\\b${cookieVar}\\s*(?:,\\s*\\w+\\s*)?:?=\\s*[\\w.]+\\.Cookie\\s*\\(`).test(enclosingFnGo(bound)?.text ?? "")) return true;
+  if (bound.type === "identifier" && /^(?:\w*(?:token|session|sess|sid|cookie|api_?key|apikey|bearer|jwt)\w*)$/i.test(bound.text)) return true;
+  return !!query && /\bWHERE\s+[\w.]*(?:token|session_id|sid|api_?key|apikey|secret)\w*\s*=\s*[?$@:]/i.test(query.text);
 }
 
 // ── Authorization analysis (Decision 4) ─────────────────────────────────
@@ -1374,6 +1388,7 @@ const SEVERITY: Record<AstTaintGoId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "nosql-injection": "critical", "ldap-injection": "critical", "xpath-injection": "critical",
   "timing-attack": "medium", "jwt-none-alg": "critical", "weak-crypto": "high", "argument-injection": "high",
   "log-injection": "medium",
+  "trust-boundary": "medium", "insecure-file-upload": "high", "input-validation": "medium", "race-condition": "medium", "csrf": "medium", "integer-overflow": "high",
 };
 const LABEL: Record<AstTaintGoId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection",
@@ -1385,6 +1400,8 @@ const LABEL: Record<AstTaintGoId, string> = {
   "nosql-injection": "NoSQL Injection", "ldap-injection": "LDAP Injection", "xpath-injection": "XPath Injection",
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "weak-crypto": "Weak Cryptography",
   "argument-injection": "Argument Injection", "log-injection": "Log Injection",
+  "trust-boundary": "Trust Boundary Violation", "insecure-file-upload": "Unrestricted File Upload",
+  "input-validation": "Unchecked Array Index", "race-condition": "Data Race", "csrf": "Cross-Site Request Forgery", "integer-overflow": "Uncontrolled Size",
 };
 
 /** Unwraps short_var_declaration/assignment_statement's left/right fields,
@@ -1501,6 +1518,27 @@ function regexpPatternOfGo(re: SyntaxNode): string | null {
   const t = calleeTextGo(def.childForFieldName("function") ?? def);
   const a = argListOfGo(def)[0];
   return t && /^regexp\.(?:MustCompile|Compile)$/.test(t) && a ? goStringLiteralValue(a) : null;
+}
+
+/** A slice / array value (indexing it out of range panics), not a map: its declaration or last assignment says so. */
+function isSliceValueGo(id: SyntaxNode): boolean {
+  const def = lastAssignmentGo(id.text, id);
+  if (def) return /^(?:\[\d*\]|make\(\s*\[\])/.test(def.text.trim()) || def.type === "composite_literal" && /^\[/.test(def.text);
+  // a package-level `var name = []T{...}` / `var name [N]T`
+  let root: SyntaxNode = id;
+  while (root.parent) root = root.parent;
+  const re = new RegExp(`\\bvar\\s+${escapeRe(id.text)}\\s*(?:=\\s*)?\\[\\d*\\]`);
+  return re.test(root.text);
+}
+
+/** Does `arg` (or the local it names, one or two hops back) use an uploaded file's client-chosen name? */
+function mentionsUploadFilenameGo(arg: SyntaxNode, at: SyntaxNode, depth = 0): boolean {
+  if (/\.Filename\b/.test(arg.text)) return true;
+  if (depth >= 2) return false;
+  return findAllNodesGo(arg, "identifier").some(i => {
+    const def = lastAssignmentGo(i.text, at);
+    return !!def && def !== arg && mentionsUploadFilenameGo(def, at, depth + 1);
+  });
 }
 
 /** `p` and the value it was parsed from, for `p, err := url.Parse(src)` (else just `p`). */
@@ -1633,6 +1671,12 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       if (op === "||") {
         const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "false");
         return [...gs, ...combineUrlFacets(gs, "false"), ...publicIpGuardGo(cond)];
+      }
+      // i < len(xs) / i >= len(xs) / i <= 9: an upper bound -- the index can no longer run past the slice
+      if (op === "<" || op === "<=" || op === ">" || op === ">=") {
+        const isBound = (b: SyntaxNode) => /^len\(/.test(b.text) || /^\d+$/.test(b.text) || /^cap\(/.test(b.text);
+        if (l.type === "identifier" && isBound(r)) return [{ name: l.text, holds: op === "<" || op === "<=" ? "true" : "false", clears: SinkClass.CONTROL }];
+        if (r.type === "identifier" && isBound(l)) return [{ name: r.text, holds: op === ">" || op === ">=" ? "true" : "false", clears: SinkClass.CONTROL }];
       }
       if (op === "==" || op === "!=") {
         const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
@@ -1831,6 +1875,8 @@ function createWalkerGo(h: WalkHooksGo) {
       // convention those are `err`/`ok`, not real data).
       put(targets[0], taintMask(rightVals[0], env), rightVals[0]);
       targets.slice(1).forEach(k => { if (k) markAssignedGo(env, k, false); });
+      // r.FormFile returns (file, header, err): the header -- its Filename, Header -- is the client's too
+      if (targets[1] && /\.FormFile\s*\(/.test(rightVals[0].text) && !/^c\./.test(rightVals[0].text)) put(targets[1], taintMask(rightVals[0], env), rightVals[0]);
     } else {
       // Positional 1:1 multi-assignment (`a, b = x, y`) -- assign independently.
       targets.forEach((key, i) => { if (rightVals[i]) put(key, taintMask(rightVals[i], env), rightVals[i]); });
@@ -2331,7 +2377,25 @@ export function scanAstTaintGo(
       const args = argListOfGo(node);
       if (crossFileFacts && crossFileFacts.size > 0 && fn?.type === "selector_expression") checkCrossPackageCall(node, fn, args, env, taintMask);
 
+      // session.Set("role", role) / sessionManager.Put(ctx, "role", role): request data stored as trusted state
+      if (fn?.type === "selector_expression" && /^(?:Set|Put)$/.test(fn.childForFieldName("field")?.text ?? "")
+          && /^(?:sess|session|s?ession\w*|sessionManager|sm|store)$/i.test(fn.childForFieldName("operand")?.text ?? "") && args.length >= 2) {
+        const v = args[args.length - 1];
+        if (taintMask(v, env) & ALL) emit("trust-boundary", node, sourceLabelGo(v), fn.text,
+          `Request data '${sourceLabelGo(v)}' is stored in the session — code that reads it back trusts it as server-set state; validate it (or derive it server-side) first`);
+      }
+      // make([]byte, n) / make([]T, 0, n) with an attacker-chosen n and no upper bound: one request allocates gigabytes
+      if (fn?.type === "identifier" && fn.text === "make" && args.length >= 2) {
+        const size = args.slice(1).find(a => taintMask(a, env) & SinkClass.CONTROL);
+        if (size) emit("integer-overflow", node, sourceLabelGo(size), "make",
+          `Attacker-controlled size '${sourceLabelGo(size)}' allocates memory with no upper bound checked first — one request can exhaust the process; cap it (if n > max { ... })`);
+      }
       const match = matchSinkGo(node);
+      // the upload's own client-chosen name used as the destination path (os.Create(filepath.Join(dir, header.Filename)))
+      if (match?.id === "path-traversal" && match.args.some(a => (taintMask(a, env) & ALL) && mentionsUploadFilenameGo(a, node))) {
+        emit("insecure-file-upload", node, "header.Filename", match.sinkExpr,
+          `The uploaded file is saved under the name the client sent — any extension (a .php / .html served back) and, unless cleaned, any directory; generate the name server-side and check the type`);
+      }
       // `p := filepath.Join(base, name)`: building a path reads nothing -- p is judged where it is used
       if (match?.sinkExpr === "filepath.Join" && joinResultIsBoundGo(node)) {
         // no finding here; the file call that uses the bound path carries it -- and when that call is one this engine
@@ -2607,6 +2671,25 @@ export function scanAstTaintGo(
           }
         }
       }
+      if (n.type === "assignment_statement") {
+        // session.Values["role"] = role (gorilla/sessions): request data stored as server-side state later code trusts
+        const target = n.childForFieldName("left")?.namedChildren[0];
+        const value = n.childForFieldName("right")?.namedChildren[0];
+        const operand = target?.type === "index_expression" ? target.childForFieldName("operand") : null;
+        if (operand?.type === "selector_expression" && operand.childForFieldName("field")?.text === "Values" && value && (mask(value, env) & ALL)) {
+          emit("trust-boundary", n, sourceLabelGo(value), `${operand.text}[...]`,
+            `Request data '${sourceLabelGo(value)}' is stored in the session as '${target!.text}' — code that reads it back trusts it as server-set state; validate it (or derive it server-side) first`);
+        }
+      }
+      // items[i] (read or write) with an attacker-chosen i and no bounds check: an index out of range panics the handler
+      if (n.type === "index_expression") {
+        const operand = n.childForFieldName("operand");
+        const index = n.childForFieldName("index");
+        if (operand?.type === "identifier" && index && isSliceValueGo(operand) && (mask(index, env) & SinkClass.CONTROL)) {
+          emit("input-validation", n, sourceLabelGo(index), `${operand.text}[...]`,
+            `Attacker-controlled index '${sourceLabelGo(index)}' selects an element of '${operand.text}' with no bounds check — an out-of-range value panics the request (and a negative one always does); check 0 <= i < len(${operand.text})`);
+        }
+      }
       if (n.type === "assignment_statement" || n.type === "send_statement" || n.type === "call_expression") recordSticky(n, env, mask);
     };
 
@@ -2690,6 +2773,39 @@ export function scanAstTaintGo(
             "JWT payload is base64-decoded and JSON-parsed by hand and the file never verifies a signature — claims (role, sub, ...) are attacker-controlled; verify with a JWT library");
         }
       }
+    }
+
+    // Data race: a package-level variable written from a goroutine with no lock / atomic / channel in sight -- two
+    // requests (or the two goroutines) write it at once; a concurrent map write crashes the process.
+    for (const gs of findAllNodesGo(root, "go_statement")) {
+      const lit = findAllNodesGo(gs, "func_literal")[0];
+      const body = lit?.childForFieldName("body");
+      const fnBody = enclosingFnGo(gs)?.text ?? "";
+      if (!body || /\.(?:R?Lock|Unlock)\(\)|\batomic\.|<-|sync\.Map\b|\.Do\(/.test(body.text) || /\.R?Lock\(\)[\s\S]*\bgo\s+func/.test(fnBody)) continue;
+      for (const st of [...findAllNodesGo(body, "assignment_statement"), ...findAllNodesGo(body, "inc_statement"), ...findAllNodesGo(body, "dec_statement")]) {
+        const target = st.type === "assignment_statement" ? st.childForFieldName("left")?.namedChildren[0] : st.namedChildren[0];
+        const root2 = target ? rootIdentGo(target) : null;
+        if (!root2 || !modulePkgNames.has(root2.text) || isLocalNameGo(root2)) continue;
+        emit("race-condition", st, root2.text, "goroutine write",
+          `Package-level '${root2.text}' is written from a goroutine with no mutex, atomic or channel — concurrent writes race (a concurrent map write aborts the process); guard it with a sync.Mutex or use sync.Map / atomic`);
+        break;
+      }
+    }
+
+    // CSRF: a handler that authenticates by a session cookie and changes state, with no CSRF token, Origin /
+    // Referer check or SameSite cookie anywhere in sight. (A token in an Authorization header is no CSRF risk, and a
+    // handler with no cookie / session use is left alone: its auth may sit in middleware this file doesn't show.)
+    const usesSessionLib = /gorilla\/sessions|alexedwards\/scs|gin-contrib\/sessions|sessions\.NewCookieStore/.test(content);
+    const csrfDefended = /csrf|xsrf|nosurf|SameSite|"Origin"|Referer\(\)|"Referer"/i;
+    for (const fnDecl of [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]) {
+      const t = fnDecl.text;
+      const params = fnDecl.childForFieldName("parameters")?.text ?? "";
+      if (!/http\.ResponseWriter|\*gin\.Context|echo\.Context|\*fiber\.Ctx/.test(params)) continue;
+      if (!/\.Cookie\(|session/i.test(t) && !usesSessionLib) continue;
+      if (!/\b(?:Exec|ExecContext)\(|\b(?:UPDATE|INSERT|DELETE)\b|\.(?:Save|Create|Delete|Updates?)\(/.test(t)) continue;
+      if (csrfDefended.test(t) || csrfDefended.test(content.slice(0, 3000))) continue;
+      emit("csrf", fnDecl.childForFieldName("name") ?? fnDecl, "session cookie", "state-changing handler",
+        "This handler changes state on the strength of a session cookie alone — another site can make the browser send it (CSRF); require a CSRF token (gorilla/csrf, nosurf), check Origin, or set the cookie SameSite=Strict");
     }
 
     return findings;

@@ -136,6 +136,30 @@ describe("buffer and size checks", () => {
     expect(ids(bad.replace("char *p = (char *)malloc(n);", "char *p = n < 1024 ? (char *)malloc(16) : 0;"))).toEqual([]);
   });
 
+  it("a constant-bound loop writing past a smaller buffer, through an alias too", () => {
+    const loop = (cap: string, bound: string, decl = "char") =>
+      `void f(void) { ${decl} *data; ${decl} small[${cap}]; data = small; size_t i; ${decl} src[100]; for (i = 0; i < ${bound}; i++) { data[i] = src[i]; } }`;
+    expect(ids(loop("50", "100"))).toEqual(["buffer-overflow"]);
+    expect(ids(loop("100", "100"))).toEqual([]);
+    expect(ids(loop("50", "100", "int"))).toEqual(["buffer-overflow"]);
+    expect(ids(loop("100", "100", "int"))).toEqual([]);
+    // alloca'd capacity in bytes vs wchar_t elements
+    expect(ids(`void f(void) { wchar_t *d = (wchar_t *)alloca(50*sizeof(wchar_t)); size_t i; for (i = 0; i < 100; i++) d[i] = L'A'; }`)).toEqual(["buffer-overflow"]);
+    expect(ids(`void f(void) { wchar_t *d = (wchar_t *)alloca(100*sizeof(wchar_t)); size_t i; for (i = 0; i < 100; i++) d[i] = L'A'; }`)).toEqual([]);
+    // <= reaches the bound itself; a variable bound or start says nothing
+    expect(ids(`void f(void) { char b[100]; int i; for (i = 0; i <= 100; i++) b[i] = 0; }`)).toEqual(["buffer-overflow"]);
+    expect(ids(`void f(int n) { char b[100]; int i; for (i = 0; i < n; i++) b[i] = 0; }`)).toEqual([]);
+    expect(ids(`void f(int n) { char b[50]; int i; for (i = n; i < 100; i++) b[i - n] = 0; }`)).toEqual([]);
+    expect(ids(`void f(int n) { char b[50]; int i; for (i = n; i < 100; i++) b[i] = 0; }`)).toEqual([]);
+  });
+
+  it("so does an attacker-sized new T[n]", () => {
+    const bad = `void f() { char in[16]; fgets(in, 16, stdin); size_t n = strtoul(in, 0, 10); char *p = new char[n]; delete [] p; }`;
+    expect(ids(bad, "src/a.cpp")).toEqual(["integer-overflow"]);
+    expect(ids(bad.replace("char *p = new char[n];", "if (n > 1024) return; char *p = new char[n];"), "src/a.cpp")).toEqual([]);
+    expect(ids(bad.replace("new char[n]", "new char[64]"), "src/a.cpp")).toEqual([]);
+  });
+
   it("an attacker-chosen memcpy length is an overflow unless bounded", () => {
     const bad = `void f(int s, char *dst) { int n; recv(s, (char *)&n, sizeof(n), 0); memcpy(dst, "abc", n); }`;
     expect(ids(bad)).toEqual(["buffer-overflow"]);

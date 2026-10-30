@@ -190,6 +190,41 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0, cwe:"CWE-943",
   },
+  // Choosing which method / class runs: often a step from code execution.
+  "unsafe-reflection": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0.22, cwe:"CWE-470",
+  },
+  // Loading a request-chosen source file runs it.
+  "file-inclusion": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
+    C:0.56, I:0.56, A:0.56, cwe:"CWE-98",
+  },
+  // Whatever the overwritten variable controls (often an authorisation flag).
+  "variable-overwrite": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.56, A:0, cwe:"CWE-621",
+  },
+  // A comparison that accepts the wrong value: usually an authentication / token check bypass.
+  "type-juggling": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0, cwe:"CWE-1024",
+  },
+  // Corrupted shared state / a crashed process under concurrent requests.
+  "race-condition": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0.22, A:0.56, cwe:"CWE-362",
+  },
+  // A panic per request (net/http recovers it; other servers may not).
+  "input-validation": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0, A:0.22, cwe:"CWE-129",
+  },
+  // The victim's browser performs the state change for the attacker.
+  "csrf": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"REQUIRED", S:"UNCHANGED",
+    C:0, I:0.56, A:0, cwe:"CWE-352",
+  },
   // Browsable folder: confidentiality of whatever sits in it.
   "directory-listing": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
@@ -221,6 +256,40 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
   "integer-overflow": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0, I:0.22, A:0.56, cwe:"CWE-789",
+  },
+  // A panic per request in debug builds; a wrapped value (wrong size / price / index) in release.
+  "arithmetic-overflow": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0.22, A:0.22, cwe:"CWE-190",
+  },
+  // Local: another app (external storage), a backup or a rooted device reads the file.
+  "cleartext-sensitive-storage": {
+    AV:"LOCAL", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0, A:0, cwe:"CWE-312",
+  },
+  "sensitive-clipboard": {
+    AV:"LOCAL", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0, A:0, cwe:"CWE-200",
+  },
+  // The attacker needs the victim to log in on a session id the attacker set.
+  "session-fixation": {
+    AV:"NETWORK", AC:"HIGH", PR:"NONE", UI:"REQUIRED", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-384",
+  },
+  // Any logged-in user runs an admin function.
+  "missing-function-level-authz": {
+    AV:"NETWORK", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0, cwe:"CWE-285",
+  },
+  // Unlimited guesses against whatever the limiter protects (login, reset, OTP).
+  "rate-limit-bypass": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0, cwe:"CWE-348",
+  },
+  // Read-only internals: routes, versions, load, sometimes configuration.
+  "unauthenticated-diagnostics": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0, A:0, cwe:"CWE-497",
   },
   "null-dereference": {
     AV:"LOCAL", AC:"HIGH", PR:"NONE", UI:"NONE", S:"UNCHANGED",

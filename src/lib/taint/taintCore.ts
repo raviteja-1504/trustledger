@@ -57,6 +57,7 @@ const ID_TO_CLASS: Record<string, number> = {
   // CR/LF in a log line forges an entry: the same line-break class a response header needs
   "log-injection": SinkClass.HEADER,
   "eval-exec": SinkClass.EVAL,
+  "unsafe-reflection": SinkClass.EVAL,
   "ssti": SinkClass.SSTI,
   "idor": SinkClass.CONTROL,
   "bola-missing-ownership-check": SinkClass.CONTROL,

@@ -573,19 +573,20 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     const kind = allocKindOf(value);
     if (!kind) return;
     env.set(KIND_KEY("alloc", name), kind);
-    // malloc/calloc/realloc report failure as NULL (new throws instead)
-    if (kind === ALLOC_MALLOC) env.set(KIND_KEY("unchecked", name), 1);
+    // malloc/calloc/realloc report failure as NULL (new throws instead; alloca never returns NULL)
+    if (kind === ALLOC_MALLOC && !(g?.type === "call_expression" && /^_?alloca$/.test(baseApi(callInfo(g).name)))) env.set(KIND_KEY("unchecked", name), 1);
     // `new char[n]` / `malloc(n)` with an attacker-chosen n and no bound check
     let e = value;
     while (e && (e.type === "cast_expression" || e.type === "parenthesized_expression")) e = e.type === "cast_expression" ? field(e, "value") : named(e)[0] ?? null;
     const sizeArg = e?.type === "call_expression" ? callInfo(e).args[baseApi(callInfo(e).name) === "realloc" ? 1 : 0] ?? null
-      : e?.type === "new_expression" ? findAllNodes(e, "new_declarator")[0] ?? null : null;
+      // `new char[n]`: the expression inside the brackets
+      : e?.type === "new_expression" ? (() => { const d = findAllNodes(e, "new_declarator")[0]; return d ? field(d, "length") ?? named(d)[0] ?? null : null; })() : null;
     // a constant size is the buffer's capacity: malloc(50*sizeof(char)), calloc(50, 1), new wchar_t[50]
     if (sizeArg && e) {
       const ci = e.type === "call_expression" ? callInfo(e) : null;
       const bytes = ci && baseApi(ci.name) === "calloc" && ci.args[1] ? constBytes(`(${ci.args[0]?.text})*(${ci.args[1].text})`)
         : ci ? constBytes(sizeArg.text)
-        : (() => { const n = constBytes(named(sizeArg)[0]?.text ?? ""); const el = SIZEOF[field(e, "type")?.text ?? ""]; return n !== undefined && el ? n * el : undefined; })();
+        : (() => { const n = constBytes(sizeArg.text); const el = SIZEOF[field(e, "type")?.text ?? ""]; return n !== undefined && el ? n * el : undefined; })();
       if (bytes !== undefined) ctx.capacity.set(name, bytes);
     }
     if (sizeArg && !opts.quiet) fireOn(ctx, "integer-overflow", e!, sizeArg, m(sizeArg, env), "allocation size", SinkClass.CONTROL,
@@ -801,6 +802,43 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     }
   };
 
+  /** Bytes per element of `name`'s declared (pointer / array) type in the enclosing function or file, if basic. */
+  const elemSizeOf = (name: string, at: SyntaxNode): number | undefined => {
+    let fn: SyntaxNode | null = at;
+    while (fn && fn.type !== "function_definition") fn = fn.parent;
+    const re = new RegExp(`\\b((?:unsigned\\s+|signed\\s+)?[A-Za-z_]\\w*)\\s*\\*?\\s*\\b${name}\\b\\s*(?:\\[|=|;|,)`);
+    const hit = re.exec(fn?.text ?? "") ?? re.exec(ctx.root?.text ?? "");
+    return hit ? SIZEOF[hit[1].replace(/\s+/g, " ")] : undefined;
+  };
+  /** `for (i = 0; i < 100; i++) data[i] = ...;` into a buffer of 50 elements: the last iterations write past it. */
+  const checkConstantLoopOverflow = (loop: SyntaxNode) => {
+    const cond = field(loop, "condition");
+    if (cond?.type !== "binary_expression" || !/^<=?$/.test(operatorOf(cond))) return;
+    const iv = field(cond, "left");
+    const bound = constBytes(field(cond, "right")?.text ?? "");
+    if (iv?.type !== "identifier" || bound === undefined) return;
+    // the counter starts at a constant (0 in practice); a variable start says nothing about the range
+    const init = field(loop, "initializer");
+    const startText = init?.type === "assignment_expression" ? field(init, "right")?.text
+      : init?.type === "declaration" ? field(findAllNodes(init, "init_declarator")[0] ?? init, "value")?.text : undefined;
+    if (startText === undefined || constBytes(startText) === undefined) return;
+    const lastIndex = operatorOf(cond) === "<" ? bound - 1 : bound;
+    const body = field(loop, "body");
+    for (const a of body ? findAllNodes(body, "assignment_expression") : []) {
+      const l = field(a, "left");
+      if (l?.type !== "subscript_expression") continue;
+      const idx = named(field(l, "indices"))[0] ?? field(l, "index");
+      const buf = field(l, "argument");
+      if (idx?.text !== iv.text || buf?.type !== "identifier") continue;
+      const cap = ctx.capacity.get(buf.text);
+      const elem = elemSizeOf(buf.text, loop);
+      if (cap === undefined || !elem || (lastIndex + 1) * elem <= cap) continue;
+      emit(ctx, "buffer-overflow", a, iv.text, `${buf.text}[${iv.text}]`,
+        `The loop writes '${buf.text}[${iv.text}]' up to index ${lastIndex}, but '${buf.text}' holds ${Math.floor(cap / elem)} elements — the last iterations write past its end`);
+      return;
+    }
+  };
+
   const walkExpr = (e: SyntaxNode | null, env: Env): void => {
     if (!e) return;
     switch (e.type) {
@@ -990,6 +1028,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       }
       case "for_statement": case "for_range_loop": {
         for (const k of ["initializer", "condition", "right"]) { const c = field(node, k); if (c) { if (c.type === "declaration") declare(c, env); else walkExpr(c, env); } }
+        if (node.type === "for_statement" && !opts.quiet) checkConstantLoopOverflow(node);
         const body = field(node, "body");
         const update = field(node, "update");
         // `for (T *x : items)`: x is a fresh element each iteration (a `delete x` in two such loops is two objects)

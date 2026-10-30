@@ -60,7 +60,7 @@ import {
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import type { SuppressedSink } from "./taint/taintCore";
-import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts } from "./astTaintJava";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
   parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts,
@@ -69,7 +69,7 @@ import {
 import type { Node as GoSyntaxNode } from "web-tree-sitter";
 import {
   parseCSharpSourceSync, isCSharpParserReady, scanAstTaintCSharp,
-  findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel, computeCSharpMethodSinkFacts,
+  findEnclosingFunctionNameCSharp, findNodeAtRowCSharp, astTaintCSharpSeverity, astTaintCSharpLabel, computeCSharpMethodSinkFacts, computeCSharpCallSiteArgs,
 } from "./astTaintCSharp";
 import type { Node as CSharpSyntaxNode } from "web-tree-sitter";
 import {
@@ -1266,6 +1266,14 @@ const NOSQL_INJECT_RE = [
 //   - error.message in res.send(): used in error middleware to pass clean messages
 //   - JSON.stringify(error): common in server-side logging, not a client disclosure
 const VERBOSE_ERROR_RE = [
+  // Go -- a stack trace, or an error formatted with internal context, written to the response; the profiling /
+  // metrics handlers that net/http/pprof and expvar register on the default mux. (The bare idiom
+  // http.Error(w, err.Error(), code) is left alone.)
+  /\b(?:w|rw|resp|writer)\.Write\(\s*(?:debug\.Stack\(\)|stack\b|buf\[:n\])/,
+  /\bfmt\.Fprint(?:f|ln)?\(\s*(?:w|rw|resp|writer)\s*,[^\n]*(?:%\+?v[^\n]*\berr\b|\berr\.Error\(\))/,
+  /\bhttp\.Error\(\s*\w+\s*,\s*(?:"[^"]*"\s*\+\s*err\.Error\(\)|fmt\.Sprintf\([^\n]*%\+?v[^\n]*\b(?:err|wrapped)\b)/,
+  /^\s*_\s+"net\/http\/pprof"|\bexpvar\.Handler\(\)\.ServeHTTP\(/,
+  /\.Header\(\)\.Set\(\s*"(?:Server|X-Powered-By)"\s*,[^\n]*runtime\.Version\(\)/,
   /(?:res\.json|res\.send|res\.status\s*\(\s*\d+\s*\)\.json)\s*\([^)]*(?:error|err|e)\.stack\b/i,
   /(?:NextResponse|Response)\.json\s*\([^)]*(?:error|err|e)\.(?:stack|message)\b/i,
   /(?:message|detail|error|stack)\s*:\s*(?:error|err|e)\.stack\b/,
@@ -1447,6 +1455,8 @@ const WEAK_CRYPTO_RE = [
   /createCipheriv\s*\(\s*["'](?:des|rc4|rc2|bf|blowfish|idea)[-\w]*["']/i,
   /createCipheriv\s*\(\s*["']aes-\d+-ecb["']/i,
   /Cipher\.getInstance\s*\(\s*["'](?:DES|AES\/ECB|RC4|Blowfish)/i,
+  // Java: a key made for a broken cipher (the Cipher's own algorithm may come from configuration)
+  /\b(?:KeyGenerator|SecretKeyFactory)\.getInstance\s*\(\s*["'](?:DES|DESede|TripleDES|RC2|RC4|ARCFOUR|Blowfish)["']/i,
   /Digest\s*\(\s*["'](?:MD5|SHA-1|SHA1)["']/i,
   /bcrypt\.(?:hash|hashSync)\s*\([^,]+,\s*[1-9]\s*[,)]/,  // rounds < 10
   // Go — crypto/md5, crypto/sha1 (broken hashes); crypto/des, crypto/rc4
@@ -2078,6 +2088,24 @@ function findTlsVerificationDisabled(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// A Set-Cookie header written by hand (`headers['Set-Cookie'] = "session=..."`, `header("Set-Cookie: sid=...")`,
+// `w.Header().Set("Set-Cookie", ...)`) with no HttpOnly / Secure attribute in it
+const RAW_SET_COOKIE_RE = /['"]Set-Cookie['"]\s*(?:\]\s*=|,)|\bheader\s*\(\s*['"]Set-Cookie\s*:/i;
+function findRawSetCookieFlags(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || !RAW_SET_COOKIE_RE.test(line)) continue;
+    // a session / auth cookie only: a preference cookie (theme=dark) needs neither flag
+    if (!/(?:session|sess|sid|token|auth|login|remember|jwt)\w*\s*=/i.test(line)) continue;
+    if (!/HttpOnly/i.test(line)) found.push({ id: "cookie-no-httponly", label: "Cookie Without HttpOnly", severity: "medium", line: i + 1,
+      detail: "A session cookie is set by a hand-written Set-Cookie header with no HttpOnly attribute — any injected script can read it; add HttpOnly (and Secure, SameSite)" });
+    else if (!/;\s*Secure\b/i.test(line)) found.push({ id: "cookie-no-secure", label: "Cookie Without Secure", severity: "medium", line: i + 1,
+      detail: "A session cookie is set by a hand-written Set-Cookie header with no Secure attribute — it is also sent over plain HTTP; add Secure" });
+  }
+  return found;
+}
+
 // Directory listing switched on: Express serve-index, ASP.NET Core's directory browser, Django / Flask-AutoIndex.
 // (Go's http.FileServer also lists directories, but it is the everyday static-file server: too noisy to flag alone.)
 const DIRECTORY_LISTING_RE = /\bserveIndex\s*\(|\bexpress\.directory\s*\(|\b(?:Use|Add)DirectoryBrowser\s*\(|['"]?show_indexes['"]?\s*[:=]\s*True\b|\bAutoIndex\s*\(\s*app\b/;
@@ -2087,6 +2115,185 @@ function findDirectoryListing(lines: string[]): ScanIndicator[] {
     if (isNonExecutableLine(lines[i]) || !DIRECTORY_LISTING_RE.test(lines[i])) continue;
     found.push({ id: "directory-listing", label: "Directory Listing Enabled", severity: "medium", line: i + 1,
       detail: "A directory index is served: anyone can browse the folder's files (backups, logs, keys) -- serve named files only" });
+  }
+  return found;
+}
+
+// A rate limiter keyed on a client-supplied forwarding header (express-rate-limit's `keyGenerator` returning
+// `req.headers['x-forwarded-for']`): every request can name a fresh "client", so the limit never trips. `req.ip`
+// with `trust proxy` set is the proxy-aware value; the raw header is whatever the client sent.
+const SPOOFABLE_IP_HEADER_RE = /['"`]x-(?:forwarded-for|real-ip|client-ip)['"`]/i;
+function findSpoofableRateLimitKey(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    // the option itself (`keyGenerator: ...` / `keyGenerator (req) {`), not the word inside a string
+    if (isNonExecutableLine(lines[i]) || !/^\s*(?:async\s+)?keyGenerator\b\s*[:(]/.test(lines[i])) continue;
+    // the generator's own body: this line and the few after it, up to the next option
+    for (let j = i; j < Math.min(lines.length, i + 5); j++) {
+      if (j > i && /^\s*(?:\w+\s*:|}\s*\)|}\s*,)/.test(lines[j])) break;
+      if (isNonExecutableLine(lines[j]) || !SPOOFABLE_IP_HEADER_RE.test(lines[j])) continue;
+      found.push({ id: "rate-limit-bypass", label: "Rate Limit Keyed on a Spoofable Header", severity: "medium", line: j + 1,
+        detail: "The rate limiter counts requests per X-Forwarded-For value, which the client writes itself — a new value per request resets the limit (brute force, credential stuffing); key on req.ip with 'trust proxy' set to your real proxy hops" });
+      break;
+    }
+  }
+  return found;
+}
+
+// Express serving operational endpoints with nothing but the handler: Prometheus /metrics, Spring-style /actuator,
+// Go-style /debug/vars|pprof, heap dumps. They expose internals (routes, versions, memory, sometimes env / config).
+const DIAGNOSTICS_ROUTE_RE = /^\s*(?:app|router|server|api)\s*\.\s*(?:get|all|use)\s*\(\s*['"`](\/(?:metrics|prometheus|actuator(?:\/[\w/-]*)?|debug\/(?:vars|pprof)[\w/-]*|heapdump|threaddump|env))['"`]\s*,([^\n]*)$/;
+const ROUTE_GUARD_RE = /auth|authoriz|authenticat|protect|require|guard|passport|basic|admin|verify|jwt|token|session|allow|ipfilter|internal|restrict|denyAll|isLocal|localhost/i;
+function findUnauthenticatedDiagnosticsRoute(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const text = lines.join("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = DIAGNOSTICS_ROUTE_RE.exec(lines[i]);
+    if (!m) continue;
+    const path = m[1];
+    // a guard among the route's own middleware, or mounted on that path separately (`app.use('/metrics', auth)`)
+    const esc = path.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+    if (ROUTE_GUARD_RE.test(m[2]) || new RegExp(`\\.\\s*use\\s*\\(\\s*['"\`]${esc}['"\`]\\s*,[^\\n]*(?:${ROUTE_GUARD_RE.source})`, "i").test(text)) continue;
+    found.push({ id: "unauthenticated-diagnostics", label: "Unauthenticated Diagnostics Endpoint", severity: "medium", line: i + 1,
+      detail: `'${path}' is served to anyone with no authentication middleware — metrics / debug endpoints reveal routes, versions, load and internals; protect it or bind it to an internal port` });
+  }
+  return found;
+}
+
+// Session fixation (Express / Koa): the login handler marks the EXISTING session as authenticated
+// (`req.session.userId = user._id`) instead of doing it inside `req.session.regenerate(() => ...)`, so a session id
+// planted before login stays valid afterwards. Logout-style resets (`= null`) are not logins.
+const SESSION_LOGIN_RE = /^\s*(?:req|ctx|request)\.session\.(?:user(?:Id|_id|name|Name)?|uid|account(?:Id)?|authenticated|loggedIn|isAuthenticated)\s*=(?!=)(?!\s*(?:null|undefined|false)\b)/;
+function findSessionFixation(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const text = lines.join("\n");
+  if (/\bregenerateSession\b|session\.regenerate\s*=|\bsession-fixation\b/.test(text)) return found;
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !SESSION_LOGIN_RE.test(lines[i])) continue;
+    // inside a regenerate callback: the call opens a few lines above
+    const before = lines.slice(Math.max(0, i - 12), i).filter(l => !isNonExecutableLine(l)).join("\n");
+    if (/\.regenerate\s*\(/.test(before)) continue;
+    found.push({ id: "session-fixation", label: "Session Fixation", severity: "medium", line: i + 1,
+      detail: "The session is marked as logged in without regenerating its id — a session id an attacker planted before login becomes an authenticated one; set the user inside req.session.regenerate(() => { ... })" });
+  }
+  return found;
+}
+
+// Express runs the FIRST route that matches: `app.get('/benefits', isLoggedIn, h)` registered before
+// `app.get('/benefits', isLoggedIn, isAdmin, h)` serves every logged-in user, and the admin-guarded twin never runs.
+const ROUTE_DECL_RE = /^\s*(?:app|router)\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*(['"`])([^'"`]+)\2\s*,(.*)\)\s*;?\s*$/;
+const ROLE_GUARD_RE = /\b(?:is|require|ensure|check|has)_?(?:Admin|Role|Staff|Superuser|Owner|Manager|Permission)\w*|\badmin(?:Only|Required)\b|\bauthorize\s*\(/i;
+function findShadowedRouteGuard(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const first = new Map<string, { line: number; mw: string }>();
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = ROUTE_DECL_RE.exec(lines[i]);
+    if (!m) continue;
+    const key = `${m[1]} ${m[3]}`;
+    const prev = first.get(key);
+    if (!prev) { first.set(key, { line: i + 1, mw: m[4] }); continue; }
+    if (ROLE_GUARD_RE.test(m[4]) && !ROLE_GUARD_RE.test(prev.mw)) {
+      found.push({ id: "missing-function-level-authz", label: "Missing Function-Level Authorization", severity: "high", line: prev.line,
+        detail: `${m[1].toUpperCase()} ${m[3]} is registered here without the role check its later twin (line ${i + 1}) adds — Express serves the first match, so the guarded route never runs and any user reaches the handler` });
+    }
+  }
+  return found;
+}
+
+// Android (Kotlin / Java): a credential written in the clear -- a file (FileWriter / openFileOutput / writeText),
+// external storage, or plain SharedPreferences -- where another app (external storage), a backup or a rooted device
+// reads it. Followed one hop: `val data = "... ${password.text}"` then `fw.write(data)`. Encrypted stores
+// (EncryptedSharedPreferences / EncryptedFile / a Cipher stream) are not plaintext.
+const ANDROID_SECRET_RE = /\b\w*(?:password|passwd|pwd|passcode|pin\b|otp|cvv|card(?:Number|No)?|ssn|secret|token)\w*\b(?:\.text|\.getText\(\))?/i;
+const ANDROID_WRITE_RE = /\b(\w+)\s*\.\s*(?:write|append|println|print)\s*\(|\.(?:writeText|appendText)\s*\(|\bputString\s*\(|\bopenFileOutput\s*\(|\b(\w+)\s*\.\s*put\s*\(\s*"/;
+function findCleartextSensitiveStorage(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const text = lines.join("\n");
+  if (/\bEncrypted(?:SharedPreferences|File)\b|\bCipherOutputStream\b/.test(text)) return found;
+  // variables opened on a file: `val fw = FileWriter(f)`, `fos = openFileOutput(...)`, `new PrintWriter(new File(..))`
+  const fileWriters = new Set([...text.matchAll(/\b(\w+)\s*=\s*(?:new\s+)?(?:FileWriter|FileOutputStream|BufferedWriter|PrintWriter|OutputStreamWriter)\s*\(|\b(\w+)\s*=\s*\w*\.?openFileOutput\s*\(/g)].map(m => m[1] ?? m[2]));
+  // a SQLite row: `val record = ContentValues()` ... `record.put("password", password)`
+  const rows = new Set([...text.matchAll(/\b(\w+)\s*(?::\s*ContentValues)?\s*=\s*(?:new\s+)?ContentValues\s*\(/g)].map(m => m[1]));
+  // locals whose value is built from a secret (`val data = "... Password - ${password.text}"`)
+  const carriers = new Set<string>();
+  for (const l of lines) {
+    // `[^\n]` not `.`: `.` stops at the `\r` of a CRLF line, so `(.+)$` never matches one
+    const m = /^\s*(?:val|var|String|final\s+String)?\s*([A-Za-z_]\w*)\s*=(?!=)\s*([^\n]+)$/.exec(l);
+    if (m && !isNonExecutableLine(l) && ANDROID_SECRET_RE.test(m[2]) && /["'+$]/.test(m[2])) carriers.add(m[1]);
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const w = isNonExecutableLine(line) ? null : ANDROID_WRITE_RE.exec(line);
+    // a `.write(` / `.append(` counts only on a variable opened on a file (not a StringBuilder, a log, a response)
+    if (!w || (w[1] && !fileWriters.has(w[1])) || (w[2] && !rows.has(w[2]))) continue;
+    // the written value: the call's arguments (putString's key names the field too)
+    const args = line.slice(w.index);
+    const secret = ANDROID_SECRET_RE.exec(args)?.[0] ?? [...carriers].find(c => new RegExp(`\\b${c}\\b`).test(args));
+    // a hashed / encrypted value is not the secret in the clear (a weak hash is weak-crypto's finding)
+    if (!secret || /\b\w*(?:hash|encrypt|digest|cipher|bcrypt|argon|pbkdf|scrypt)\w*\s*\(/i.test(args)) continue;
+    found.push({ id: "cleartext-sensitive-storage", label: "Sensitive Data Stored in Cleartext", severity: "high", line: i + 1,
+      detail: `'${secret}' is written to storage in plain text (a file, external storage or SharedPreferences) — other apps, backups or a rooted device can read it; don't store it, or use EncryptedSharedPreferences / EncryptedFile` });
+  }
+  return found;
+}
+
+// Android: an OTP / card number / password placed on the system clipboard, which any app can read (and, before
+// Android 13, without the user seeing it).
+const SENSITIVE_CLIP_RE = /\bClipData\.new(?:PlainText|HtmlText)\s*\(([^\n]*)/;
+function findSensitiveClipboard(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    const m = SENSITIVE_CLIP_RE.exec(lines[i]);
+    if (!m || !/\b\w*(?:password|passwd|pwd|pin\b|otp|cvv|card|ssn|secret|token|cc\b)\w*/i.test(m[1])) continue;
+    found.push({ id: "sensitive-clipboard", label: "Sensitive Data on the Clipboard", severity: "medium", line: i + 1,
+      detail: "A secret (OTP / card number / password) is copied to the system clipboard, which every app can read — don't copy it, or mark the clip sensitive (ClipDescription.EXTRA_IS_SENSITIVE) and clear it soon" });
+  }
+  return found;
+}
+
+// PHP CSRF: a function that authenticates by the session / a cookie and changes state (an UPDATE / INSERT / DELETE,
+// a file write) with no CSRF token, nonce, Origin / Referer check or SameSite cookie anywhere in sight. A handler
+// with no session or cookie use is left alone -- a bearer-token API is not CSRF-able, and its auth may live in
+// middleware this file doesn't show (the Go engine's rule, same reasoning).
+const PHP_FN_START_RE = /^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*function\s+&?(\w+)\s*\(/;
+const PHP_SESSION_AUTH_RE = /\$_SESSION\b|\bsession_start\s*\(|\$_COOKIE\b|->cookie\s*\(|->session\s*\(|\bAuth::|\bauth\(\)|\b\w*(?:current_?user|logged_?in_?user|get_?user_?id|is_?logged_?in)\w*\s*\(/i;
+const PHP_STATE_CHANGE_RE = /\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM|REPLACE\s+INTO)\b|\b(?:file_put_contents|unlink|rename|move_uploaded_file|mail)\s*\(|->(?:save|delete|update|create|destroy)\s*\(/;
+const PHP_CSRF_DEFENCE_RE = /csrf|xsrf|_token\b|\bnonce\b|wp_verify_nonce|check_admin_referer|check_ajax_referer|hash_equals|HTTP_ORIGIN|HTTP_REFERER|samesite|VerifyCsrfToken|isTokenValid|SSL_CLIENT_VERIFY/i;
+function findCsrfPhp(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  const text = lines.join("\n");
+  // a framework-wide defence (Laravel / Symfony middleware, a global token check) covers every handler
+  if (PHP_CSRF_DEFENCE_RE.test(text.slice(0, 2000)) && /middleware|csrf_protection|VerifyCsrfToken/i.test(text)) return found;
+  // a schema / install routine (CREATE / DROP TABLE) is reached from a setup page that guards it, not a user action
+  const unsafe = (body: string) => PHP_SESSION_AUTH_RE.test(body) && PHP_STATE_CHANGE_RE.test(body) && !PHP_CSRF_DEFENCE_RE.test(body)
+    && !/\b(?:CREATE|DROP)\s+(?:TABLE|DATABASE)\b/i.test(body);
+  // the script's own top-level code (a classic `if (isset($_GET['Change'])) { ... UPDATE ... }` page) is a unit too
+  const topLevel: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const head = PHP_FN_START_RE.exec(lines[i]);
+    if (!head || isNonExecutableLine(lines[i])) { if (!isNonExecutableLine(lines[i])) topLevel.push(i); continue; }
+    // the function's body by brace depth
+    let depth = 0, opened = false, end = i;
+    for (let j = i; j < lines.length; j++) {
+      for (const ch of lines[j]) { if (ch === "{") { depth++; opened = true; } else if (ch === "}") depth--; }
+      if (opened && depth <= 0) { end = j; break; }
+      end = j;
+    }
+    const body = lines.slice(i, end + 1).filter(l => !isNonExecutableLine(l)).join("\n");
+    if (unsafe(body)) {
+      found.push({ id: "csrf", label: "Cross-Site Request Forgery", severity: "medium", line: i + 1,
+        detail: `${head[1]}() changes state on the strength of the session / a cookie alone — another site can make the browser send it; verify a CSRF token (hash_equals against the session's), or set the session cookie SameSite=Strict` });
+    }
+    i = end;
+  }
+  const script = topLevel.map(i => lines[i]).join("\n");
+  if (unsafe(script)) {
+    const at = topLevel.find(i => PHP_STATE_CHANGE_RE.test(lines[i])) ?? topLevel[0];
+    found.push({ id: "csrf", label: "Cross-Site Request Forgery", severity: "medium", line: at + 1,
+      detail: "This page changes state for the logged-in user on any request that reaches it — another site can make the browser send one; verify a CSRF token (hash_equals against the session's), or set the session cookie SameSite=Strict" });
   }
   return found;
 }
@@ -2596,6 +2803,14 @@ const GO_SECURITY_FUNC_NAME_RE = /token|secret|session|password|auth|csrf|nonce|
 
 function findInsecureRandomnessGoFunc(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
+  const text = lines.join("\n");
+  // the name math/rand is imported under (`"math/rand"` -> rand, `mrand "math/rand"` -> mrand)
+  const imp = /(?:^|\n)\s*(?:import\s+)?(?:(\w+)\s+)?"math\/rand(?:\/v2)?"/.exec(text);
+  const mathRand = imp ? imp[1] ?? "rand" : null;
+  const flowCall = mathRand ? new RegExp(`\\b${mathRand}\\.(?:Int\\b|Intn|Int31|Int63|Int31n|Int63n|Uint32|Uint64|Float32|Float64|Read|IntN|Int64|N)\\s*\\(`) : null;
+  // generators made from math/rand: `src := rand.New(rand.NewSource(...))` -> src.Int63()
+  const gens = mathRand ? [...text.matchAll(new RegExp(`\\b(\\w+)\\s*:?=\\s*${mathRand}\\.New\\s*\\(`, "g"))].map(m => m[1]) : [];
+  const genCall = gens.length ? new RegExp(`\\b(?:${gens.join("|")})\\.(?:Int\\b|Intn|Int31|Int63|Int31n|Int63n|Uint32|Uint64|Float32|Float64|Read)\\s*\\(`) : null;
   let inSecurityFunc = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -2604,13 +2819,30 @@ function findInsecureRandomnessGoFunc(lines: string[]): ScanIndicator[] {
       inSecurityFunc = GO_SECURITY_FUNC_NAME_RE.test(funcMatch[1]);
       continue;
     }
-    if (!inSecurityFunc) continue;
     if (isNonExecutableLine(line)) continue;
     if (INSECURE_RANDOM_RE.some(r => r.test(line))) continue; // already caught inline
-    if (GO_INSECURE_RANDOM_CALL_RE.test(line)) {
+    if (inSecurityFunc && GO_INSECURE_RANDOM_CALL_RE.test(line)) {
       found.push({ id:"insecure-randomness", label:"Insecure Randomness", severity:"high", line:i+1,
         detail:"math/rand used inside a security-sounding function — use crypto/rand for tokens, session ids, or anything security-sensitive" });
+      continue;
     }
+    // any function: a math/rand value that becomes a token / session / key (followed a few assignments on)
+    if (!(flowCall?.test(line) || genCall?.test(line))) continue;
+    const readInto = new RegExp(`\\.Read\\s*\\(\\s*(\\w+)`).exec(line)?.[1];
+    const lhs = /^\s*([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*(?::=|=|\+=)(?!=)/.exec(line)?.[1];
+    const tracked = new Set([lhs, readInto].filter((v): v is string => !!v && v !== "_" && v !== "err"));
+    let stored = [...tracked].some(v => GO_SECURITY_FUNC_NAME_RE.test(v)) || /\b(?:\w*(?:token|secret|session|password|csrf|nonce|key|otp|salt)\w*)\s*(?::=|=)/i.test(line);
+    for (let j = i + 1; j < Math.min(lines.length, i + 26) && !stored && tracked.size > 0; j++) {
+      const l = lines[j];
+      if (GO_FUNC_DECL_RE.test(l.trim())) break;
+      if (![...tracked].some(t => new RegExp(`\\b${t}\\b`).test(l))) continue;
+      if (/\bValue\s*:\s*\w+|http\.SetCookie|\.Set(?:Cookie)?\s*\(\s*"(?:\w*(?:token|session|csrf|auth)\w*)"/i.test(l)) stored = true;
+      const next = /^\s*([A-Za-z_]\w*)\s*(?::=|=)(?!=)/.exec(l)?.[1];
+      if (next) { tracked.add(next); if (GO_SECURITY_FUNC_NAME_RE.test(next)) stored = true; }
+    }
+    if (!stored) continue;
+    found.push({ id:"insecure-randomness", label:"Insecure Randomness", severity:"high", line:i+1,
+      detail:"A math/rand value (predictable, and seeded from the clock) becomes a token / session / key here — use crypto/rand (rand.Read, rand.Int) for anything security-sensitive" });
   }
   return found;
 }
@@ -6177,6 +6409,55 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  'console.log("login failed for", userName.replace(/[\\r\\n]/g, "_"))',
     cwe: "CWE-117", effort: "low",
   },
+  "unsafe-reflection": {
+    title: "Map input to an allow-list instead of calling it by name",
+    description: "Never pass request input to send / public_send / const_get / constantize / Class.forName; look the action up in a fixed hash of allowed names.",
+    code_before: "obj.send(params[:action])",
+    code_after:  "ACTIONS = { 'archive' => :archive }.freeze\nobj.public_send(ACTIONS.fetch(params[:action]))",
+    cwe: "CWE-470", effort: "low",
+  },
+  "file-inclusion": {
+    title: "Load code only from a fixed list",
+    description: "Don't build an include / require / load path from input; map the requested name to a known file.",
+    code_before: "load(\"plugins/#{params[:plugin]}.rb\")",
+    code_after:  "PLUGINS = { 'csv' => 'plugins/csv.rb' }.freeze\nload(PLUGINS.fetch(params[:plugin]))",
+    cwe: "CWE-98", effort: "low",
+  },
+  "variable-overwrite": {
+    title: "Read expected keys explicitly instead of extract() / $$",
+    description: "Don't turn request keys into variables; read each expected key ($in['lang'] ?? 'en'), or use EXTR_SKIP / an EXTR_PREFIX_* flag.",
+    code_before: "extract($_POST);",
+    code_after:  "$lang = $_POST['lang'] ?? 'en';",
+    cwe: "CWE-621", effort: "low",
+  },
+  "type-juggling": {
+    title: "Compare strictly",
+    description: "Use === / !== for input, hash_equals() for hashes and tokens, and validate numbers with filter_var(FILTER_VALIDATE_INT) first.",
+    code_before: "if ($token == $expected) { ... }",
+    code_after:  "if (hash_equals($expected, (string) $token)) { ... }",
+    cwe: "CWE-1024", effort: "low",
+  },
+  "race-condition": {
+    title: "Synchronise writes to shared state",
+    description: "Guard a variable shared between goroutines / threads with a mutex, or use sync.Map / atomic / a channel owned by one goroutine.",
+    code_before: "go func() { counts[key]++ }()",
+    code_after:  "go func() { mu.Lock(); counts[key]++; mu.Unlock() }()",
+    cwe: "CWE-362", effort: "low",
+  },
+  "input-validation": {
+    title: "Check an index against the bounds first",
+    description: "Reject an attacker-chosen index outside 0 <= i < len(items) before using it.",
+    code_before: "v := items[i]",
+    code_after:  "if i < 0 || i >= len(items) { return errBadIndex }\nv := items[i]",
+    cwe: "CWE-129", effort: "low",
+  },
+  "csrf": {
+    title: "Require a CSRF token on state-changing requests",
+    description: "Verify a per-session CSRF token (gorilla/csrf, nosurf, framework middleware), check the Origin header, or set the session cookie SameSite=Strict.",
+    code_before: "http.HandleFunc(\"/email\", updateEmail)",
+    code_after:  "http.Handle(\"/email\", csrf.Protect(key)(http.HandlerFunc(updateEmail)))",
+    cwe: "CWE-352", effort: "medium",
+  },
   "directory-listing": {
     title: "Serve named files, not a browsable index",
     description: "Remove the directory-index middleware (serve-index, UseDirectoryBrowser, show_indexes) and serve only the files that are meant to be public.",
@@ -6211,6 +6492,55 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_before: "char *p = malloc(n);",
     code_after:  "if (n == 0 || n > MAX_LEN) return -1;\nchar *p = malloc(n);",
     cwe: "CWE-789", effort: "low",
+  },
+  "cleartext-sensitive-storage": {
+    title: "Don't store secrets in plain files or preferences",
+    description: "Keep credentials out of storage entirely (use a token from the server), or use EncryptedSharedPreferences / EncryptedFile backed by the Android Keystore; never write them to external storage.",
+    code_before: "FileWriter(file).write(\"password is \" + password.text)",
+    code_after:  "EncryptedSharedPreferences.create(ctx, \"auth\", masterKey, AES256_SIV, AES256_GCM).edit().putString(\"token\", token).apply()",
+    cwe: "CWE-312", effort: "medium",
+  },
+  "sensitive-clipboard": {
+    title: "Keep secrets off the clipboard",
+    description: "Don't copy OTPs, card numbers or passwords; if you must, mark the clip sensitive (EXTRA_IS_SENSITIVE) and clear it after a short time.",
+    code_before: "clipboard.setPrimaryClip(ClipData.newPlainText(\"OTP\", otp))",
+    code_after:  "val clip = ClipData.newPlainText(\"OTP\", otp)\nclip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }",
+    cwe: "CWE-200", effort: "low",
+  },
+  "session-fixation": {
+    title: "Regenerate the session id at login",
+    description: "Mark the session as authenticated only inside req.session.regenerate(), so the pre-login id is discarded.",
+    code_before: "req.session.userId = user._id;",
+    code_after:  "req.session.regenerate(err => {\n  if (err) return next(err);\n  req.session.userId = user._id;\n});",
+    cwe: "CWE-384", effort: "low",
+  },
+  "missing-function-level-authz": {
+    title: "Register the guarded route only",
+    description: "Remove the unguarded registration (Express serves the first match) so the role check runs on every request.",
+    code_before: "app.get('/benefits', isLoggedIn, h);\napp.get('/benefits', isLoggedIn, isAdmin, h);",
+    code_after:  "app.get('/benefits', isLoggedIn, isAdmin, h);",
+    cwe: "CWE-285", effort: "low",
+  },
+  "rate-limit-bypass": {
+    title: "Key the rate limiter on the proxy-verified client address",
+    description: "Set Express's 'trust proxy' to the number of proxies in front of the app and let the limiter use req.ip; never read X-Forwarded-For yourself.",
+    code_before: "keyGenerator: (req) => req.headers['x-forwarded-for'] ?? req.ip",
+    code_after:  "app.set('trust proxy', 1)\n// default keyGenerator uses req.ip",
+    cwe: "CWE-348", effort: "low",
+  },
+  "unauthenticated-diagnostics": {
+    title: "Protect or move diagnostics endpoints",
+    description: "Put metrics / actuator / debug routes behind authentication, or serve them on an internal-only port the load balancer doesn't expose.",
+    code_before: "app.get('/metrics', serveMetrics())",
+    code_after:  "app.get('/metrics', requireMetricsToken, serveMetrics())",
+    cwe: "CWE-497", effort: "low",
+  },
+  "arithmetic-overflow": {
+    title: "Use checked arithmetic on request-chosen integers",
+    description: "Use checked_mul / checked_add / checked_shl / checked_pow and reject the None case, or bound the value first; convert between integer types with try_from instead of `as`.",
+    code_before: "let total = qty * price;",
+    code_after:  "let total = qty.checked_mul(price).ok_or(Error::Overflow)?;",
+    cwe: "CWE-190", effort: "low",
   },
   "use-after-free": {
     title: "Don't touch memory after freeing it",
@@ -6846,8 +7176,9 @@ function findAstTaintJavaFindings(
   content: string, filePath: string, cst: JavaCstNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
   calledElsewhere?: ReadonlySet<string>,
+  sourceMethods?: ReadonlyMap<string, number>,
 ): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere }).map(f => ({
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere, sourceMethods }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -6885,8 +7216,9 @@ function findAstTaintGoFindings(
 function findAstTaintCSharpFindings(
   content: string, filePath: string, root: CSharpSyntaxNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>,
+  callerArgMasks?: ReadonlyMap<string, ReadonlyMap<number, number>>,
 ): ScanIndicator[] {
-  return scanAstTaintCSharp(content, filePath, root, suppressed, crossFileFacts).map(f => ({
+  return scanAstTaintCSharp(content, filePath, root, suppressed, crossFileFacts, callerArgMasks).map(f => ({
     id: f.id, label: astTaintCSharpLabel(f.id), severity: f.severityOverride ?? astTaintCSharpSeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -7014,9 +7346,9 @@ export function analyzeFile(
   storedProvenance?: StoredProvenanceIO,
   // Cross-file service-layer facts for Java (see astTaintJava.ts computeJavaMethodSinkFacts), computed by
   // runScan() over the whole batch, plus the CST it already parsed for this file.
-  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string> },
+  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number> },
   // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
-  crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; callerArgs?: ReadonlyMap<string, ReadonlyMap<number, number>> },
   // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
   crossFileGo?: { tree?: GoSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Same, for PHP functions from files this one includes (see astTaintPHP.ts computePhpFunctionSinkFacts).
@@ -7172,9 +7504,9 @@ export function analyzeFile(
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
-    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts) : []),
+    ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts, crossFileCSharp?.callerArgs) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
     ...(rubyTree ? findAstTaintRubyFindings(content, file_path, rubyTree, suppressedSinks, crossFileRuby?.facts) : []),
     ...(kotlinTree ? findAstTaintKotlinFindings(content, file_path, kotlinTree, suppressedSinks, crossFileKotlin?.facts) : []),
@@ -7212,6 +7544,13 @@ export function analyzeFile(
     ...findJwtBypass(codeLines),
     ...findTlsVerificationDisabled(codeLines),
     ...findDirectoryListing(codeLines),
+    ...findRawSetCookieFlags(codeLines),
+    ...(lang === "typescript" || lang === "javascript" ? [
+      ...findSpoofableRateLimitKey(codeLines), ...findUnauthenticatedDiagnosticsRoute(codeLines), ...findSessionFixation(codeLines),
+      ...findShadowedRouteGuard(codeLines),
+    ] : []),
+    ...(lang === "kotlin" || lang === "java" ? [...findCleartextSensitiveStorage(codeLines), ...findSensitiveClipboard(codeLines)] : []),
+    ...(lang === "php" ? findCsrfPhp(codeLines) : []),
     ...findSubstringUrlAllowlist(codeLines),
     ...findWebViewInsecureSettings(codeLines),
     ...findHardcodedCredentialCompare(codeLines),
@@ -7949,6 +8288,56 @@ function convergeServiceFacts<T>(
   return facts;
 }
 
+/**
+ * Java: `Class.method` keys whose return value is request input (see computeJavaSourceMethods), grown round by round
+ * so a wrapper around a wrapper resolves. Grows monotonically from empty; stops when a round adds nothing.
+ */
+function convergeJavaSourceMethods(
+  csts: ReadonlyMap<string, JavaCstNode>, files: readonly { path: string; content: string }[],
+): Map<string, number> {
+  let found = new Map<string, number>();
+  if (csts.size < 2) return found;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  for (let round = 0; round < MAX_SERVICE_FACT_ROUNDS; round++) {
+    const next = new Map<string, number>();
+    for (const [path, cst] of csts) for (const [k, m] of computeJavaSourceMethods(contentOf.get(path)!, path, cst, found)) next.set(k, (next.get(k) ?? 0) | m);
+    const settled = next.size === found.size && [...next].every(([k, m]) => found.get(k) === m);
+    found = next;
+    if (settled) break;
+  }
+  return found;
+}
+
+const callerArgsDigest =(m: ReadonlyMap<string, ReadonlyMap<number, number>>): string =>
+  JSON.stringify([...m].map(([k, v]) => [k, [...v].sort((a, b) => a[0] - b[0])] as const).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
+/**
+ * C#: per `Type.Method`, what the batch's own call sites pass each parameter (see computeCSharpCallSiteArgs).
+ * Starts from "every public method is an entry point" and narrows each round, so every round -- converged or
+ * stopped at the cap -- still over-approximates what callers pass.
+ */
+function convergeCallerArgsCS(
+  trees: ReadonlyMap<string, CSharpSyntaxNode>, files: readonly { path: string; content: string }[],
+): Map<string, Map<number, number>> {
+  let masks = new Map<string, Map<number, number>>();
+  if (trees.size < 2) return masks;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  for (let round = 0; round < MAX_SERVICE_FACT_ROUNDS + 2; round++) {
+    const next = new Map<string, Map<number, number>>();
+    for (const [path, tree] of trees) {
+      for (const [key, slot] of computeCSharpCallSiteArgs(contentOf.get(path)!, path, tree, masks)) {
+        const merged = next.get(key) ?? new Map<number, number>();
+        for (const [i, m] of slot) merged.set(i, (merged.get(i) ?? 0) | m);
+        next.set(key, merged);
+      }
+    }
+    const settled = callerArgsDigest(next) === callerArgsDigest(masks);
+    masks = next;
+    if (settled) break;
+  }
+  return masks;
+}
+
 /** `dir` + a relative include literal, with `.`/`..` segments resolved (posix paths, batch-relative). */
 function joinRelPath(dir: string, rel: string): string {
   const out: string[] = dir ? dir.split("/") : [];
@@ -8398,8 +8787,10 @@ export function runScan(input: ScanInput): ScanOutput {
   const javaFacts = convergeServiceFacts(jvmTrees, allFiles, (content, path, t, incoming) =>
     t.kind === "java" ? computeJavaMethodSinkFacts(content, path, t.cst, incoming) : computeKotlinMethodSinkFacts(content, path, t.tree, incoming));
   const javaCalledElsewhere = javaMethodsCalledFromOtherFiles(allFiles.filter(f => javaCsts.has(f.path)));
-  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0
+  const javaSourceMethods = convergeJavaSourceMethods(javaCsts, allFiles);
+  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0 || javaSourceMethods.size > 0
     ? factsDigest(javaFacts) + ":" + crypto.createHash("sha256").update([...javaCalledElsewhere].sort().join(",")).digest("hex")
+      + ":src:" + sha256Hex(JSON.stringify([...javaSourceMethods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))))
     : "";
 
   // Same for C# (ASP.NET controllers -> injected services -> repositories).
@@ -8413,7 +8804,9 @@ export function runScan(input: ScanInput): ScanOutput {
     }
   }
   const csFacts = convergeServiceFacts(csTrees, allFiles, computeCSharpMethodSinkFacts);
-  const csFactsDigest = csFacts.size > 0 ? factsDigest(csFacts) : "";
+  const csCallerArgs = convergeCallerArgsCS(csTrees, allFiles);
+  const csFactsDigest = csFacts.size > 0 || csCallerArgs.size > 0
+    ? `${csFacts.size > 0 ? factsDigest(csFacts) : ""}:callers:${sha256Hex(callerArgsDigest(csCallerArgs))}` : "";
 
   // Same for Go (handler package -> models/store package), keyed `pkg.Func` / `pkg.Type.Method`.
   const goTrees = new Map<string, GoSyntaxNode>();
@@ -8512,8 +8905,8 @@ export function runScan(input: ScanInput): ScanOutput {
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
-          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere } : undefined,
-          csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts } : undefined,
+          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods } : undefined,
+          csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts, callerArgs: csCallerArgs } : undefined,
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,
           rubyTrees.has(f.path) ? { tree: rubyTrees.get(f.path), facts: rubyFacts } : undefined,

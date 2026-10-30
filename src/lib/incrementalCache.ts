@@ -48,7 +48,15 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 17: C# proof pass (incl. private helpers) and network sources, int.Parse as validation; PHP relative-URL / resolved
 //     IP guards and libxml-accurate XXE; Android content providers, SQLite by position, Log.*; JS DOM sources and
 //     sinks; directory listing, substring URL allowlists, WebView file access, credentials compared to literals.
-export const SCAN_CACHE_VERSION = 17;
+// 18: Go trust boundary / upload names / unchecked index / goroutine races / CSRF / make() sizes and verbose errors;
+//     PHP extract / $$ / loose comparisons / upload names; Ruby reflection and file inclusion with allow-list guards;
+//     Rust integer overflow, unsafe memory access and allocation sizes; Java ProcessBuilder.command and array inits;
+//     C# proof pass seeded from the batch's own call sites (and named arguments read by value); Express rate-limit
+//     keys / diagnostics routes / session fixation / shadowed role guards; C/C++ new T[n] sizes and constant-bound
+//     loops; Go math/rand token flows and session-cookie lookups; PHP template-engine render; Java DES key generators;
+//     Java request wrappers in other files as sources; Android cleartext storage / clipboard; JS recursive merges;
+//     PHP session-authenticated CSRF; Kotlin argument + trailing-lambda calls and coroutine values; WebView bridges.
+export const SCAN_CACHE_VERSION = 18;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

@@ -71,7 +71,8 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintRubyId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect"
   | "insecure-deserialization" | "eval-exec" | "ssti" | "mass-assignment" | "header-injection" | "redos"
-  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg" | "ldap-injection" | "log-injection";
+  | "bola-missing-ownership-check" | "timing-attack" | "jwt-none-alg" | "ldap-injection" | "log-injection"
+  | "unsafe-reflection" | "file-inclusion" | "insecure-file-upload";
 
 export interface AstTaintRubyFinding {
   id:         AstTaintRubyId;
@@ -354,6 +355,7 @@ const SEVERITY: Record<AstTaintRubyId, "critical" | "high" | "medium"> = {
   "open-redirect": "medium", "insecure-deserialization": "critical", "eval-exec": "critical", "ssti": "critical",
   "mass-assignment": "high", "header-injection": "high", "redos": "high", "bola-missing-ownership-check": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical", "ldap-injection": "critical", "log-injection": "medium",
+  "unsafe-reflection": "high", "file-inclusion": "critical", "insecure-file-upload": "high",
 };
 const LABEL: Record<AstTaintRubyId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Cross-Site Scripting (XSS)",
@@ -362,6 +364,7 @@ const LABEL: Record<AstTaintRubyId, string> = {
   "ssti": "Server-Side Template Injection", "mass-assignment": "Mass Assignment", "header-injection": "HTTP Header Injection",
   "redos": "ReDoS — Regex DoS", "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified", "ldap-injection": "LDAP Injection", "log-injection": "Log Injection",
+  "unsafe-reflection": "Unsafe Reflection", "file-inclusion": "File Inclusion", "insecure-file-upload": "Unrestricted File Upload",
 };
 
 export function astTaintRubySeverity(id: AstTaintRubyId): "critical" | "high" | "medium" { return SEVERITY[id]; }
@@ -742,6 +745,15 @@ function isResolvedPathRb(name: string, at: SyntaxNode): boolean {
 
 /** `expr rescue nil` -> expr. */
 const unwrapRescueRb = (n: SyntaxNode | null): SyntaxNode | null => (n?.type === "rescue_modifier" ? named(n)[0] ?? null : n);
+/** An uploaded file's client-chosen name: `upload[:filename]`, `file.original_filename`, or a local bound to one. */
+function mentionsUploadNameRb(n: SyntaxNode, depth = 0): boolean {
+  if (/\[\s*[:'"]filename['"]?\s*\]|\.original_filename\b/.test(n.text)) return true;
+  if (depth >= 2) return false;
+  return findAllNodes(n, "identifier").some(i => {
+    const def = lastAssignment(i.text, i);
+    return !!def && def !== n && mentionsUploadNameRb(def, depth + 1);
+  });
+}
 const stringValueRb = (n: SyntaxNode): string | null => (n.type === "simple_symbol" ? null : stringValue(n));
 /** `URI.parse(x)` itself, or a local bound to it (whatever x is). */
 function isParsedUriRb(n: SyntaxNode | null, at: SyntaxNode, depth = 0): boolean {
@@ -796,6 +808,8 @@ function isLiteralCollection(n: SyntaxNode, root: SyntaxNode): boolean {
     return !!v && isLiteralCollection(v, root);
   }
   if (n.type === "call" && methodNameOf(n) === "freeze") { const r = receiverOf(n); return !!r && isLiteralCollection(r, root); }
+  // allowed = %w[start stop]; ... allowed.include?(x)
+  if (n.type === "identifier") { const v = lastAssignment(n.text, n); return !!v && v.type !== "identifier" && isLiteralCollection(v, root); }
   return false;
 }
 
@@ -847,7 +861,7 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
     // resolved.start_with?(base) after resolved = File.expand_path(...) / realpath: confined to base
     if (name === "start_with?" && recv && args[0]) {
       const n = guardName(recv);
-      if (n && isResolvedPathRb(n, c)) return [{ name: n, holds: "true", clears: SinkClass.PATH }];
+      if (n && isResolvedPathRb(n, c)) return [{ name: n, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
       // url.start_with?('/') / ('//') / ('https://example.com/'): URL facets (see combineUrlFacets)
       const lit = stringValueRb(args[0]);
       if (n && lit !== null) return urlPrefixFacets(n, lit, "starts");
@@ -1350,6 +1364,11 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (FILE_CALL_RE.test(callee) && !FILE_SAFE_METHODS.has(name)) {
     const targets = /\.(?:rename|symlink|link|copy|cp|mv|copy_file|cp_r|ln_s)$/.test(callee) ? pos : pos.slice(0, 1);
     for (const a of targets) if (fireOn(ctx, "path-traversal", node, a, mask(a, env), sinkName)) break;
+    // File.write("/uploads/#{upload[:filename]}", ...) / FileUtils.mv(tmp, dir.join(file.original_filename)):
+    // the upload saved under the name (and extension) the client sent
+    const named = targets.find(a => (mask(a, env) & ALL) && mentionsUploadNameRb(a));
+    if (named) emit(ctx, "insecure-file-upload", node, named.text.slice(0, 60), sinkName,
+      "The upload is stored under the client's own file name — any extension (one the server later runs or serves as HTML) and, unless cleaned, any directory; generate the name server-side and allowlist the type");
   }
   if (!recv && (name === "send_file" || name === "send_data_file")) {
     const a = pos[0];
@@ -1407,14 +1426,17 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   // ── Code execution / reflection ──
   if ((!recv && EVAL_FUNCTIONS.has(name)) || EVAL_FUNCTIONS.has(sinkName)) {
     const a = pos[0];
-    if (a) fireOn(ctx, "eval-exec", node, a, mask(a, env), sinkName);
+    // load / require of a request-built path runs that file (file inclusion); eval runs the text itself
+    const loadsFile = /^(?:require|require_relative|load|autoload|Kernel\.load|Kernel\.require)$/.test(name) || /(?:^|\.)(?:require|load)$/.test(sinkName);
+    if (a) fireOn(ctx, loadsFile ? "file-inclusion" : "eval-exec", node, a, mask(a, env), sinkName,
+      loadsFile ? `Request input '${a.text.slice(0, 60)}' picks the Ruby file that ${name} runs — load from a fixed allow-list of names` : undefined);
   }
-  if (recv && REFLECTION_METHODS.has(name)) {
+  if (recv && (REFLECTION_METHODS.has(name) || name === "define_method")) {
     const a = pos[0];
-    if (a) fireOn(ctx, "eval-exec", node, a, mask(a, env), `.${name}`, `Request input '${a.text.slice(0, 60)}' picks which method/constant runs (.${name}) — map input to an explicit allow-list`);
+    if (a) fireOn(ctx, "unsafe-reflection", node, a, mask(a, env), `.${name}`, `Request input '${a.text.slice(0, 60)}' picks which method/constant runs (.${name}) — map input to an explicit allow-list`);
   }
   if (recv && (name === "constantize" || name === "safe_constantize")) {
-    fireOn(ctx, "eval-exec", node, recv, mask(recv, env), `.${name}`, `Request input '${recv.text.slice(0, 60)}' is turned into a class (.${name}) — map input to an explicit allow-list of classes`);
+    fireOn(ctx, "unsafe-reflection", node, recv, mask(recv, env), `.${name}`, `Request input '${recv.text.slice(0, 60)}' is turned into a class (.${name}) — map input to an explicit allow-list of classes`);
   }
 
   // ── LDAP ──

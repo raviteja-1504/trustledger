@@ -97,10 +97,14 @@ describe("path traversal / SSRF / redirect / deserialization / reflection / XSS 
     expect(has(ctl(`    JSON.parse(params[:j])`), "insecure-deserialization")).toBe(false);
   });
   it("reflection and eval", () => {
-    expect(has(ctl(`    params[:type].constantize.new`), "eval-exec")).toBe(true);
-    expect(has(ctl(`    @u.send(params[:method])`), "eval-exec")).toBe(true);
+    // choosing the method / class is unsafe reflection; running text is code execution
+    expect(has(ctl(`    params[:type].constantize.new`), "unsafe-reflection")).toBe(true);
+    expect(has(ctl(`    @u.send(params[:method])`), "unsafe-reflection")).toBe(true);
     expect(has(ctl(`    eval(params[:code])`), "eval-exec")).toBe(true);
-    expect(has(ctl(`    @u.send(:name)`), "eval-exec")).toBe(false);
+    expect(has(ctl(`    @u.send(:name)`), "unsafe-reflection")).toBe(false);
+    // loading a request-chosen file is file inclusion
+    expect(has(ctl(`    load("plugins/#{params[:plugin]}.rb")`), "file-inclusion")).toBe(true);
+    expect(has(ctl(`    load("plugins/csv.rb")`), "file-inclusion")).toBe(false);
   });
   it("XSS and template injection", () => {
     expect(has(ctl(`    @html = params[:bio].html_safe`), "xss")).toBe(true);

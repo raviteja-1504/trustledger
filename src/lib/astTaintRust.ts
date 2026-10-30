@@ -55,7 +55,7 @@ export type AstTaintRustId =
   | "sql-injection" | "command-injection" | "argument-injection" | "path-traversal" | "ssrf" | "open-redirect" | "xss"
   | "ssti" | "eval-exec" | "redos" | "nosql-injection" | "ldap-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto"
   | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection"
-  | "log-injection";
+  | "log-injection" | "arithmetic-overflow" | "buffer-overflow" | "integer-overflow";
 
 export interface AstTaintRustFinding {
   id:         AstTaintRustId;
@@ -79,6 +79,8 @@ const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
   // No gadget-chain RCE in Rust's serde: attacker-sized allocations / panics (DoS), so high rather than critical.
   "mass-assignment": "high", "insecure-deserialization": "high", "xpath-injection": "critical", "header-injection": "high",
   "log-injection": "medium",
+  // overflow panics in debug builds and silently wraps in release; out-of-bounds raw access in `unsafe` is UB
+  "arithmetic-overflow": "medium", "buffer-overflow": "critical", "integer-overflow": "high",
 };
 const LABEL: Record<AstTaintRustId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "argument-injection": "Argument Injection",
@@ -89,6 +91,7 @@ const LABEL: Record<AstTaintRustId, string> = {
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "mass-assignment": "Mass Assignment", "insecure-deserialization": "Insecure Deserialization",
   "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection", "log-injection": "Log Injection",
+  "arithmetic-overflow": "Integer Overflow / Truncation", "buffer-overflow": "Out-of-Bounds Memory Access", "integer-overflow": "Uncontrolled Size",
 };
 export function astTaintRustSeverity(id: AstTaintRustId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]; }
@@ -237,6 +240,11 @@ const LITERAL_TYPES = new Set([
   "line_comment", "block_comment", "string_content", "escape_sequence",
 ]);
 const isLiteral = (n: SyntaxNode): boolean => LITERAL_TYPES.has(n.type) || (n.type === "reference_expression" && !!named(n)[0] && isLiteral(named(n)[0]));
+/** A fixed upper bound: a literal, a CONST, or a buffer's `.len()`. */
+const isBoundExpr = (n: SyntaxNode): boolean => {
+  const u = unwrapExpr(n);
+  return isLiteral(u) || /^[A-Z][A-Z0-9_]*$/.test(u.text) || (u.type === "call_expression" && callParts(u).name === "len");
+};
 
 /** Peel `&T`, `&mut T`, `Option<T>`, `Arc<T>`, `Box<dyn T>`, `web::Data<T>`, `State<T>`, `impl T` -> T's last segment. */
 function coreType(t: SyntaxNode | null): string {
@@ -678,6 +686,10 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         return !target || /^(?:i\d+|u\d+|isize|usize|f\d+|bool|char|Uuid|IpAddr|Ipv4Addr|Ipv6Addr|SocketAddr|NaiveDate|NaiveDateTime|DateTime.*)$/.test(target) ? applyClears(rm, NUMERIC_CLEARS) : rm;
       }
       if (NAME_ONLY_METHODS.has(name)) return applyClears(mask(recv, env), SinkClass.PATH);
+      // n.min(31) / n.clamp(1, 100) / n.min(buf.len()): bounded, no longer an attacker-chosen magnitude
+      if ((name === "min" && args.length === 1 || name === "clamp" && args.length === 2) && args.every(isBoundExpr)) {
+        return applyClears(mask(recv, env), SinkClass.CONTROL);
+      }
       // s.replace('\n', "") / s.replace("\r\n", " "): line breaks removed -- a log or header line can't be split
       // (the CR and LF replacements are usually chained; each is accepted on its own, as in the Go engine)
       if ((name === "replace" || name === "replacen") && args[0] && args[1]) {
@@ -1073,6 +1085,16 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
       if (ln && isLiteral(unwrapExpr(r))) return [{ name: ln, holds }];
       if (rn && isLiteral(unwrapExpr(l))) return [{ name: rn, holds }];
     }
+    // n < 1000 / len > data.len() / a.abs() > 46340: a bounded magnitude (`capacity()` is not a bound on initialized
+    // elements). An index sink still checks the off-by-one itself (offByOneLenGuard).
+    if (/^(?:<|<=|>|>=)$/.test(op)) {
+      const subject = (n: SyntaxNode) => { const u = unwrapExpr(n); return u.type === "call_expression" && callParts(u).name === "abs" && callParts(u).recv ? callParts(u).recv! : u; };
+      const flip: Record<string, string> = { "<": ">", "<=": ">=", ">": "<", ">=": "<=" };
+      const [v, o] = guardName(subject(l)) && isBoundExpr(r) ? [subject(l), op] : guardName(subject(r)) && isBoundExpr(l) ? [subject(r), flip[op]] : [null, ""];
+      const n = v ? guardName(v) : null;
+      // v o bound: "true" proves v below the bound for < / <=, "false" proves it for > / >=
+      if (n) return [{ name: n, holds: o === "<" || o === "<=" ? "true" : "false", clears: SinkClass.CONTROL }];
+    }
     return [];
   }
   if (c.type === "macro_invocation" && macroName(c) === "matches") {
@@ -1298,6 +1320,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       case "assignment_expression": case "compound_assignment_expr": {
         const r = field(node, "right"), l = field(node, "left");
         if (r) walk(r, env);
+        if (node.type === "compound_assignment_expr") checkNumericSinks(node, env, ctx, mask);
         if (l && r) assignTo(l, mask(r, env), env, node.type === "compound_assignment_expr");
         return false;
       }
@@ -1373,6 +1396,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         else if (fnNode && fnNode.type !== "identifier" && fnNode.type !== "scoped_identifier") walk(fnNode, env);
         for (const a of argNodes(node)) if (a.type !== "closure_expression") walk(a, env);
         checkCallSink(node, env, ctx, mask);
+        checkNumericSinks(node, env, ctx, mask);
         seedLocalFn(node, env, ctx, mask);
         checkCrossFileCall(node, env, ctx, mask);
         const kc = recv && name === "insert" && argNodes(node).length === 2 ? literalKeyCall(node) : null;
@@ -1401,6 +1425,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       return false;
     }
     for (const c of named(node)) walk(c, env);
+    if (node.type === "binary_expression" || node.type === "type_cast_expression") checkNumericSinks(node, env, ctx, mask);
     return false;
   };
 
@@ -1485,6 +1510,89 @@ function fireOn(ctx: EngineCtx, id: AstTaintRustId, at: SyntaxNode, source: Synt
   }
   if (wasCleared(m, cls)) ctx.suppressed?.push({ id, line: lineOf(at) });
   return false;
+}
+
+const INT_BITS: Record<string, number> = { i8: 8, u8: 8, i16: 16, u16: 16, i32: 32, u32: 32, i64: 64, u64: 64, i128: 128, u128: 128, isize: 64, usize: 64 };
+/** A request-derived integer: an attacker-chosen magnitude (CONTROL) with every injection class already parsed away. */
+const numericTaint = (m: number) => (m & SinkClass.CONTROL) !== 0 && (m & INJECTION) === 0;
+function insideUnsafe(n: SyntaxNode): boolean {
+  for (let c = n.parent; c; c = c.parent) {
+    if (c.type === "unsafe_block") return true;
+    if (c.type === "function_item") return named(c).some(k => k.type === "function_modifiers" && /\bunsafe\b/.test(k.text));
+  }
+  return false;
+}
+const declaredInt = (n: SyntaxNode, ctx: EngineCtx): string | null => {
+  const u = unwrapExpr(n);
+  const t = u.type === "identifier" ? ctx.varTypes.get(u.text) : null;
+  return t && t in INT_BITS ? t : null;
+};
+/** `idx > data.len()` / `idx <= v.len()` before an index sink: idx == len still passes and reads one past the end. */
+function offByOneLenGuard(idx: SyntaxNode, at: SyntaxNode): boolean {
+  const n = unwrapExpr(idx);
+  const fn = enclosingScope(at);
+  if (n.type !== "identifier" || !fn) return false;
+  const v = n.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${v}\\s*(?:>|<=)\\s*[\\w.]+\\.len\\(\\)|[\\w.]+\\.len\\(\\)\\s*(?:<|>=)\\s*${v}\\b`).test(fn.text.slice(0, at.startIndex - fn.startIndex));
+}
+const isFloat = (n: SyntaxNode, ctx: EngineCtx) => { const u = unwrapExpr(n); return u.type === "float_literal" || (u.type === "identifier" && /^f(?:32|64)$/.test(ctx.varTypes.get(u.text) ?? "")); };
+
+/**
+ * Request-chosen integers reaching arithmetic that can overflow (`a * b`, `1 << n`, `a + b` with both chosen, `.pow(e)`,
+ * a narrowing / sign-changing `as` cast), raw memory access sized or offset by them (`get_unchecked`, `ptr.add`,
+ * `copy_nonoverlapping`, `from_raw_parts`, `set_len`, `ptr::write(addr as *mut _)`), and allocations they size.
+ * `checked_*` / `saturating_*` / `wrapping_*` are calls, not operators, so they never match; a bound check
+ * (`n > 1000 => return`, `idx < v.len()`) or `.min(N)` clears the magnitude first.
+ */
+function checkNumericSinks(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
+  const m = (n: SyntaxNode | null | undefined) => (n ? mask(n, env) : 0);
+  const fire = (id: AstTaintRustId, src: SyntaxNode, sink: string, detail: string) => emit(ctx, id, node, src.text, sink, detail);
+  if (node.type === "binary_expression" || node.type === "compound_assignment_expr") {
+    const l = field(node, "left"), r = field(node, "right");
+    if (!l || !r || isFloat(l, ctx) || isFloat(r, ctx)) return;
+    const op = (node.type === "binary_expression" ? operatorOf(node) : node.child(1)?.text ?? "").replace(/=$/, "");
+    const tl = numericTaint(m(l)), tr = numericTaint(m(r));
+    const hit = op === "*" ? (tl ? l : tr ? r : null) : op === "<<" ? (tr ? r : null) : (op === "+" || op === "-") && tl && tr ? r : null;
+    if (hit) fire("arithmetic-overflow", hit, `'${op}'`, `Request-chosen integer '${hit.text.slice(0, 60)}' in '${node.text.slice(0, 60)}' can overflow (a panic in debug builds, a silent wrap in release) — use checked_${op === "*" ? "mul" : op === "<<" ? "shl" : op === "+" ? "add" : "sub"} or bound it first`);
+    return;
+  }
+  if (node.type === "type_cast_expression") {
+    const v = field(node, "value"), t = field(node, "type")?.text ?? "";
+    const src = v ? declaredInt(v, ctx) : null;
+    if (!v || !src || !(t in INT_BITS) || !numericTaint(m(v))) return;
+    const sb = INT_BITS[src], db = INT_BITS[t], sSigned = src.startsWith("i"), dSigned = t.startsWith("i");
+    if (db < sb || (sSigned !== dSigned && db <= sb)) {
+      fire("arithmetic-overflow", v, `as ${t}`, `Request-chosen ${src} '${v.text.slice(0, 60)}' cast to ${t} is truncated or changes sign — use ${t}::try_from(..)`);
+    }
+    return;
+  }
+  if (node.type !== "call_expression") return;
+  const { name, recv, path } = callParts(node);
+  const args = argNodes(node);
+  const tail = (path ?? "").split("::").pop() ?? name;
+  if (name === "pow" && recv && (numericTaint(m(recv)) || numericTaint(m(args[0])))) {
+    const src = numericTaint(m(args[0])) ? args[0] : recv;
+    fire("arithmetic-overflow", src, ".pow", `Request-chosen integer '${src.text.slice(0, 60)}' in .pow(..) can overflow — use checked_pow`);
+    return;
+  }
+  const memArg: SyntaxNode | undefined =
+    recv && (name === "get_unchecked" || name === "get_unchecked_mut") ? args[0]
+    : recv && name === "set_len" ? args[0]
+    : recv && /^(?:add|offset|sub)$/.test(name) && insideUnsafe(node) && /\bas_(?:mut_)?ptr\(\)|\bptr\b|\*(?:const|mut)\b/.test(recv.text) ? args[0]
+    : !recv && /^(?:copy_nonoverlapping|copy|write_bytes)$/.test(tail) && /(?:^|::)ptr::|^(?:copy_nonoverlapping|write_bytes)$/.test(path ?? "") ? args[2]
+    : !recv && /^from_raw_parts(?:_mut)?$/.test(tail) ? args[1]
+    : !recv && /^(?:write|read|write_volatile|read_volatile|write_unaligned|read_unaligned)$/.test(tail) && /(?:^|::)ptr::/.test(path ?? "") && args[0]?.type === "type_cast_expression" ? args[0]
+    : undefined;
+  // an index / offset (not a length) needs a strict bound: `i > v.len()` lets i == len through
+  const isIndex = !!recv && /^(?:get_unchecked|get_unchecked_mut|add|offset)$/.test(name);
+  if (memArg && (numericTaint(m(memArg)) || (isIndex && wasCleared(m(memArg), SinkClass.CONTROL) && offByOneLenGuard(memArg, node)))) {
+    fire("buffer-overflow", memArg, `${recv ? "." : ""}${path ?? name}`, `Request-chosen integer '${memArg.text.slice(0, 60)}' sizes or offsets raw memory access (${path ?? name}) with no bounds check — undefined behaviour out of bounds; check it against the buffer's len() first`);
+    return;
+  }
+  const alloc = (path && /(?:^|::)(?:Vec|String|VecDeque|HashMap|BytesMut)::with_capacity$/.test(path)) || (recv && /^(?:reserve|reserve_exact)$/.test(name)) ? args[0] : undefined;
+  if (alloc && numericTaint(m(alloc))) {
+    fire("integer-overflow", alloc, path ?? `.${name}`, `Request-chosen size '${alloc.text.slice(0, 60)}' reserves memory (${path ?? name}) with no upper bound — cap it first`);
+  }
 }
 
 function lastAssignment(name: string, at: SyntaxNode): SyntaxNode | null {

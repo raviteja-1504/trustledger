@@ -2323,6 +2323,41 @@ function structuralChecks(
               "dotted-path assignment");
           }
         }
+        // recursive deep merge: `for (k in src)` / `Object.keys(src)` that recurses on `merge(dst[k], src[k])` and
+        // assigns `dst[k] = ...` -- a JSON body `{"__proto__": {"isAdmin": true}}` walks into Object.prototype
+        const selfName = (fn as ts.FunctionDeclaration).name?.text ?? (ts.isVariableDeclaration(fn.parent) && ts.isIdentifier(fn.parent.name) ? fn.parent.name.text : undefined);
+        if (selfName) {
+          const keyVars = new Set<string>();
+          let recursive = false;
+          let assign: ts.Node | null = null;
+          const scan = (m: ts.Node) => {
+            if (m !== fn.body && isFunctionLike(m) && !ts.isArrowFunction(m)) return;
+            if (ts.isForInStatement(m) || ts.isForOfStatement(m)) {
+              const d = m.initializer;
+              const name = ts.isVariableDeclarationList(d) && ts.isIdentifier(d.declarations[0]?.name) ? d.declarations[0].name.text : undefined;
+              if (name && (ts.isForInStatement(m) || /Object\.(?:keys|entries)\s*\(/.test(m.expression.getText(sf)))) keyVars.add(name);
+            }
+            // Object.keys(src).forEach((k) => ...)
+            if (ts.isCallExpression(m) && ts.isPropertyAccessExpression(m.expression) && m.expression.name.text === "forEach" &&
+                /Object\.keys\s*\(/.test(m.expression.expression.getText(sf))) {
+              const cb = m.arguments[0];
+              const p = cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) ? cb.parameters[0]?.name : undefined;
+              if (p && ts.isIdentifier(p)) keyVars.add(p.text);
+            }
+            if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === selfName &&
+                m.arguments.some(a => ts.isElementAccessExpression(a))) recursive = true;
+            if (!assign && ts.isBinaryExpression(m) && m.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(m.left) &&
+                ts.isIdentifier(m.left.argumentExpression)) assign = m;
+            ts.forEachChild(m, scan);
+          };
+          scan(fn.body!);
+          const a = assign as ts.BinaryExpression | null;
+          if (recursive && a && keyVars.has(((a.left as ts.ElementAccessExpression).argumentExpression as ts.Identifier).text)) {
+            report("prototype-pollution", a,
+              "Recursive merge copies every key of the source object, '__proto__' and 'constructor' included — merging a request body like {\"__proto__\": {\"isAdmin\": true}} pollutes Object.prototype; skip those keys or merge into Object.create(null)",
+              "recursive merge");
+          }
+        }
       }
     }
     ts.forEachChild(n, visit);

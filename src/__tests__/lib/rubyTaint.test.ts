@@ -69,8 +69,8 @@ describe("sinks", () => {
     expect(has(`redirect_to params[:next]`, "open-redirect")).toBe(true);
     expect(has(`redirect_to root_path`, "open-redirect")).toBe(false);
     expect(has(`Marshal.load(params[:blob])`, "insecure-deserialization")).toBe(true);
-    expect(has(`obj.send(params[:m])`, "eval-exec")).toBe(true);
-    expect(has(`params[:klass].constantize`, "eval-exec")).toBe(true);
+    expect(has(`obj.send(params[:m])`, "unsafe-reflection")).toBe(true);
+    expect(has(`params[:klass].constantize`, "unsafe-reflection")).toBe(true);
     expect(has(`params[:bio].html_safe`, "xss")).toBe(true);
     expect(has(`raw params[:bio]`, "xss")).toBe(true);
     expect(has(`render inline: params[:tpl]`, "ssti")).toBe(true);

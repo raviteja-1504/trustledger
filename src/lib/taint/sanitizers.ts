@@ -157,7 +157,7 @@ const TABLES: Record<SanitizerLang, Table> = {
       "h": XSS, "html_escape": XSS, "sanitize": XSS, "strip_tags": XSS, "escape_javascript": XSS, "j": XSS,
       "Loofah.fragment": XSS, "Rails::Html::FullSanitizer.new.sanitize": XSS,
       "Shellwords.escape": C.CMD, "Shellwords.shellescape": C.CMD, "Shellwords.join": C.CMD,
-      "File.basename": C.PATH,
+      "File.basename": C.PATH | C.INCLUDE,
       "CGI.escape": URL_SAFE, "ERB::Util.url_encode": URL_SAFE, "ERB::Util.u": URL_SAFE, "URI.encode_www_form_component": URL_SAFE,
       "Rack::Utils.escape": URL_SAFE, "Rack::Utils.escape_path": URL_SAFE,
       "Integer": NUMERIC, "Float": NUMERIC, "Rational": NUMERIC, "Complex": NUMERIC, "BigDecimal": NUMERIC,

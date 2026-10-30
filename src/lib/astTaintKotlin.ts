@@ -194,7 +194,22 @@ function calleeText(n: SyntaxNode | null): string | null {
 }
 
 interface CallParts { name: string; recv: SyntaxNode | null; callee: SyntaxNode | null; suffix: SyntaxNode | null }
+/**
+ * `withContext(IO) { ... }` / `list.fold(0) { ... }` parse as call(call(withContext, (IO)), { ... }): the lambda hangs
+ * off an outer call whose callee is the call with the arguments. Returns that inner call, so the pair reads as one
+ * call with both its arguments and its trailing lambda.
+ */
+function lambdaCallee(call: SyntaxNode): SyntaxNode | null {
+  const inner = named(call)[0];
+  const suffix = childOfType(call, "call_suffix");
+  return inner?.type === "call_expression" && childOfType(suffix, "annotated_lambda") && !childOfType(suffix, "value_arguments")
+    && childOfType(childOfType(inner, "call_suffix"), "value_arguments") && !childOfType(childOfType(inner, "call_suffix"), "annotated_lambda")
+    ? inner : null;
+}
+
 function callParts(call: SyntaxNode): CallParts {
+  const split = lambdaCallee(call);
+  if (split) return callParts(split);
   const kids = named(call);
   const callee = kids[0] ?? null;
   const suffix = kids.find(k => k.type === "call_suffix") ?? null;
@@ -216,7 +231,7 @@ function memberOf(nav: SyntaxNode): string {
 
 interface Arg { name: string | null; expr: SyntaxNode; spread: boolean }
 function argsOf(call: SyntaxNode): Arg[] {
-  const va = childOfType(childOfType(call, "call_suffix"), "value_arguments");
+  const va = childOfType(childOfType(lambdaCallee(call) ?? call, "call_suffix"), "value_arguments");
   return argsOfList(va);
 }
 function argsOfList(va: SyntaxNode | null): Arg[] {
@@ -388,7 +403,9 @@ const PASSTHROUGH_CALLS = new Set([
 const DECODER_RE = /(?:URLDecoder\.decode|getDecoder\.decode|getUrlDecoder\.decode|getMimeDecoder\.decode)$/;
 /** Lambda-taking calls: what the result is. */
 const RECEIVER_RESULT_LAMBDAS = new Set(["also", "apply", "takeIf", "takeUnless", "filter", "filterNot", "onEach", "sortedBy", "sortedByDescending", "distinctBy", "filterIndexed", "ifEmpty", "ifBlank"]);
-const LAMBDA_RESULT_LAMBDAS = new Set(["let", "run", "map", "mapNotNull", "flatMap", "mapIndexed", "use", "fold", "reduce", "associate", "associateWith", "associateBy", "firstOrNull", "lastOrNull", "find", "mapValues", "mapKeys", "getOrElse", "ifEmpty", "ifBlank", "takeIf"]);
+const LAMBDA_RESULT_LAMBDAS = new Set(["let", "run", "map", "mapNotNull", "flatMap", "mapIndexed", "use", "fold", "reduce", "associate", "associateWith", "associateBy", "firstOrNull", "lastOrNull", "find", "mapValues", "mapKeys", "getOrElse", "ifEmpty", "ifBlank", "takeIf",
+  // coroutine / deferred builders whose value is the block's last expression (`val q = withContext(IO) { ... }`)
+  "withContext", "async", "runBlocking", "coroutineScope", "supervisorScope", "withTimeout", "withTimeoutOrNull", "runCatching", "lazy"]);
 /** Lambda-taking calls whose lambda parameter is the receiver (or one of its elements). */
 const ELEMENT_LAMBDAS = new Set([
   "let", "also", "takeIf", "takeUnless", "forEach", "forEachIndexed", "map", "mapNotNull", "flatMap", "mapIndexed", "filter",
@@ -1461,7 +1478,15 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
       const a = pos[name === "loadDataWithBaseURL" ? 1 : 0];
       fireOn(ctx, "xss", node, a, mask(a, env), `WebView.${name}`, `Untrusted input '${a.text.slice(0, 60)}' is rendered as HTML/JS inside the app's WebView -- encode it, or load only trusted content`);
     } else if (name === "loadUrl" && pos[0]) {
-      fireOn(ctx, "open-redirect", node, pos[0], mask(pos[0], env), "WebView.loadUrl", `The app's WebView navigates to an attacker-chosen URL '${pos[0].text.slice(0, 60)}' (a javascript: URL runs in the WebView) -- allow only known hosts/schemes`);
+      // with a JavaScript bridge registered, the attacker's page also calls the app's own @JavascriptInterface methods
+      const bridge = /\baddJavascriptInterface\s*\(/.test(ctx.content);
+      const m = mask(pos[0], env);
+      if (bridge && (m & classOf("open-redirect"))) {
+        emit(ctx, "open-redirect", node, (ctx.refine ? ctx.refine(pos[0], classOf("open-redirect")) : pos[0]).text, "WebView.loadUrl",
+          `The app's WebView loads an attacker-chosen URL '${pos[0].text.slice(0, 60)}' and exposes a JavaScript bridge (addJavascriptInterface) -- that page can call the app's @JavascriptInterface methods; allow only known hosts`, "critical");
+      } else {
+        fireOn(ctx, "open-redirect", node, pos[0], m, "WebView.loadUrl", `The app's WebView navigates to an attacker-chosen URL '${pos[0].text.slice(0, 60)}' (a javascript: URL runs in the WebView) -- allow only known hosts/schemes`);
+      }
     }
   }
 

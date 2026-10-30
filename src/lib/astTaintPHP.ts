@@ -102,7 +102,8 @@ export type AstTaintPHPId =
   | "open-redirect" | "insecure-deserialization" | "file-inclusion"
   | "bola-missing-ownership-check" | "header-injection" | "ldap-injection"
   | "nosql-injection" | "xpath-injection"
-  | "eval-exec" | "ssti" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg" | "log-injection";
+  | "eval-exec" | "ssti" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg" | "log-injection"
+  | "variable-overwrite" | "type-juggling" | "insecure-file-upload";
 
 export interface AstTaintPHPFinding {
   id:         AstTaintPHPId;
@@ -360,6 +361,7 @@ const SEVERITY: Record<AstTaintPHPId, "critical" | "high" | "medium"> = {
   "nosql-injection": "critical", "xpath-injection": "critical",
   "eval-exec": "critical", "ssti": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical",
+  "variable-overwrite": "high", "type-juggling": "medium", "insecure-file-upload": "high",
 };
 const LABEL: Record<AstTaintPHPId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -372,6 +374,7 @@ const LABEL: Record<AstTaintPHPId, string> = {
   "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
   "mass-assignment": "Mass Assignment", "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack",
   "jwt-none-alg": "JWT Signature Not Verified",
+  "variable-overwrite": "Variable Overwrite", "type-juggling": "Type Juggling", "insecure-file-upload": "Unrestricted File Upload",
 };
 
 // ── Taint environment / propagation ─────────────────────────────────────
@@ -924,6 +927,17 @@ function escapedSqlInWrongPositionPHP(
 const ESCAPED_SQL_DETAIL_PHP = (culprit: string) =>
   `Escaped value '${culprit}' is placed outside a quoted string literal (an unquoted numeric position or an identifier) — string-escaping only neutralizes characters that break out of a quoted literal`;
 
+/** `$file['name']` / `$_FILES['f']['name']` (or a local built from it, one or two hops back): the client's file name. */
+function mentionsClientFilenamePHP(n: SyntaxNode, at: SyntaxNode, depth = 0): boolean {
+  if (/\[\s*['"]name['"]\s*\]/.test(n.text) && !/pathinfo\s*\(/.test(n.text)) return true;
+  if (depth >= 2) return false;
+  return findAllNodes(n, "variable_name").some(v => {
+    const nm = variableBareName(v);
+    const def = nm ? lastAssignmentPHP(nm, at) : null;
+    return !!def && def !== n && mentionsClientFilenamePHP(def, at, depth + 1);
+  });
+}
+
 function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const fnNode = node.childForFieldName("function");
   const fnName = fnNode?.type === "name" ? fnNode.text : null;
@@ -951,6 +965,23 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     fire(id, argMasks[idx], args[idx].text);
     if (!(argMasks[idx] & classOf(id)) && argMasks.some((m, i) => i !== idx && (m & ALL))) ctx.suppressed?.push({ id, line: lineOf(node) });
   };
+
+  // extract($input): every key becomes a local variable -- the request can overwrite $isAdmin, $sql, ...
+  // (EXTR_SKIP keeps existing variables; an EXTR_PREFIX_* flag puts the request's keys in their own namespace)
+  // (an array literal with fixed keys -- `['color' => $in]` -- can only set those keys)
+  const extractedLiteralKeys = (n: SyntaxNode | undefined): boolean => {
+    const def = n?.type === "variable_name" ? lastAssignmentPHP(variableBareName(n) ?? "", node) : n;
+    return def?.type === "array_creation_expression" && findAllNodes(def, "array_element_initializer").every(el => el.namedChildren.length === 2 && phpStringValue(el.namedChildren[0]!) !== null);
+  };
+  if (fnName === "extract" && args[0] && (argMasks[0] & ALL) && !/EXTR_SKIP|EXTR_PREFIX_/.test(args[1]?.text ?? "") && !extractedLiteralKeys(args[0])) {
+    emit(ctx, "variable-overwrite", node, args[0].text, "extract", undefined,
+      `extract(${args[0].text.slice(0, 40)}) turns attacker-chosen keys into local variables — any variable in scope ($isAdmin, $query, ...) can be overwritten; read the expected keys explicitly`);
+  }
+  // move_uploaded_file($tmp, $dir . $file['name']): saved under the name (and extension) the client sent
+  if (fnName === "move_uploaded_file" && args[1] && mentionsClientFilenamePHP(args[1], node)) {
+    emit(ctx, "insecure-file-upload", node, args[1].text, "move_uploaded_file", undefined,
+      "The upload is stored under the client's own file name — any extension (a .php the server then runs) and, unless cleaned, any directory; generate the name server-side and allowlist the type");
+  }
 
   if (SQL_FUNCTIONS.has(fnName)) {
     const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
@@ -1051,6 +1082,16 @@ function checkIncludeExpressionSink(node: SyntaxNode, ctx: EngineCtx, taintMask:
   else if (wasCleared(m, cls)) ctx.suppressed?.push({ id: "file-inclusion", line: lineOf(node) });
 }
 
+/** `$twig` / `$latte` / `$smarty`, or a variable assigned `new Twig\Environment(...)` / `new Latte\Engine` / `new Smarty`. */
+function isTemplateEnginePHP(receiver: SyntaxNode | null | undefined, ctx: EngineCtx): boolean {
+  if (receiver?.type !== "variable_name") return false;
+  const name = variableBareName(receiver);
+  if (!name) return false;
+  if (/^(?:twig|latte|smarty|mustache|plates|blade)$/i.test(name)) return true;
+  const cls = ctx.varTypes.get(name) ?? new RegExp(`\\$${name}\\s*=\\s*new\\s+\\\\?([\\w\\\\]+)`).exec(ctx.content)?.[1] ?? "";
+  return /(?:^|\\)(?:Twig\\Environment|Twig_Environment|Latte\\Engine|Smarty|Mustache_Engine|Mustache\\Engine|League\\Plates\\Engine)$/.test(cls);
+}
+
 function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const methodName = node.childForFieldName("name")?.text;
   if (!methodName) return;
@@ -1096,6 +1137,10 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     fireArg("nosql-injection", 0);
   } else if (methodName === "createTemplate" || methodName === "renderString" || methodName === "fetchFromString") {
     // the template SOURCE -- context variables passed alongside are rendered as data
+    fireArg("ssti", 0);
+  } else if (/^(?:render|renderToString|display|fetch|load|loadTemplate)$/.test(methodName) && isTemplateEnginePHP(node.namedChildren[0], ctx)) {
+    // $twig->render($name) / $latte->renderToString($tpl) / $smarty->display($tpl): the request picks the template
+    // itself (a string loader compiles it as source; a filesystem loader reads whatever path it names)
     fireArg("ssti", 0);
   } else if (methodName === "setopt") {
     // $curl->setopt(OPTION, $value): the same destination-only rule as curl_setopt($ch, OPTION, $value).
@@ -1836,10 +1881,43 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         break;
     }
 
+    // Type juggling: `$id + 0 == 1`, `$token == $hash`, `strcmp($pw, $expected) == 0` -- PHP's loose comparison of
+    // input with a number, a hash / token or strcmp's result ("0e1" == "0e2", strcmp(array, ...) is NULL == 0)
+    if (node.type === "binary_expression") {
+      const op = node.childForFieldName("operator")?.type;
+      const l = node.childForFieldName("left"), r = node.childForFieldName("right");
+      if ((op === "==" || op === "!=" || op === "<>") && l && r) {
+        for (const [input, other] of [[l, r], [r, l]] as const) {
+          // strcmp($input, ...) returns a number: the input is one of its arguments
+          const isStrcmp = input.type === "function_call_expression" && /^(?:strcmp|strcasecmp|strncmp)$/.test(input.childForFieldName("function")?.text ?? "");
+          const tainted = isStrcmp ? argListOfPHP(input).some(a => taintMask(a, env) & ALL) : (taintMask(input, env) & ALL) !== 0;
+          if (!tainted) continue;
+          const numeric = other.type === "integer" || other.type === "float" || /^-?\d+(?:\.\d+)?$/.test(other.text);
+          // `$storedHash`, `$expected_token`, `md5(...)` -- a hash / secret by name, camelCase included
+          const secretish = /(?:hash|token|secret|password|passwd|signature|hmac|digest|api_?key)/i.test(other.text) || /^(?:md5|sha1|crypt|hash)\s*\(/.test(other.text);
+          const strcmpLike = /^(?:strcmp|strcasecmp|strncmp)\s*\(/.test(input.text) && numeric;
+          if (numeric || secretish || strcmpLike) {
+            emit(ctx, "type-juggling", node, input.text, op, undefined,
+              `Loose comparison (${op}) of input '${input.text.slice(0, 40)}' with ${numeric ? "a number" : "a hash / secret"} — PHP coerces types first ("0e1" == "0e2", "1abc" == 1, strcmp(array, ...) == 0); use === / hash_equals`);
+            break;
+          }
+        }
+      }
+    }
+
     if (node.type === "assignment_expression") {
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
       const mask = right ? taintMask(right, env) : 0;
+      // $$name = $value with a request-chosen name: any variable in scope can be overwritten
+      if (left?.type === "dynamic_variable_name") {
+        const inner = left.namedChildren[0];
+        // an allowlisted / pattern-checked / numeric name keeps only the CONTROL bit: it can't name just any variable
+        if (inner && (taintMask(inner, env) & ALL & ~SinkClass.CONTROL)) {
+          emit(ctx, "variable-overwrite", node, inner.text, "$$", undefined,
+            `$$${inner.text.replace(/^\$/, "")} = ... with a request-chosen variable name — any variable in scope (or a global) can be overwritten; use an array keyed by an allowlist`);
+        }
+      }
       if (left?.type === "variable_name") {
         const varName = variableBareName(left);
         if (varName) {
