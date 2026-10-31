@@ -55,7 +55,7 @@ export type AstTaintRustId =
   | "sql-injection" | "command-injection" | "argument-injection" | "path-traversal" | "ssrf" | "open-redirect" | "xss"
   | "ssti" | "eval-exec" | "redos" | "nosql-injection" | "ldap-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto"
   | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection"
-  | "log-injection" | "arithmetic-overflow" | "buffer-overflow" | "integer-overflow";
+  | "log-injection" | "arithmetic-overflow" | "buffer-overflow" | "integer-overflow" | "insecure-file-upload";
 
 export interface AstTaintRustFinding {
   id:         AstTaintRustId;
@@ -80,7 +80,7 @@ const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
   "mass-assignment": "high", "insecure-deserialization": "high", "xpath-injection": "critical", "header-injection": "high",
   "log-injection": "medium",
   // overflow panics in debug builds and silently wraps in release; out-of-bounds raw access in `unsafe` is UB
-  "arithmetic-overflow": "medium", "buffer-overflow": "critical", "integer-overflow": "high",
+  "arithmetic-overflow": "medium", "buffer-overflow": "critical", "integer-overflow": "high", "insecure-file-upload": "high",
 };
 const LABEL: Record<AstTaintRustId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "argument-injection": "Argument Injection",
@@ -92,6 +92,7 @@ const LABEL: Record<AstTaintRustId, string> = {
   "mass-assignment": "Mass Assignment", "insecure-deserialization": "Insecure Deserialization",
   "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection", "log-injection": "Log Injection",
   "arithmetic-overflow": "Integer Overflow / Truncation", "buffer-overflow": "Out-of-Bounds Memory Access", "integer-overflow": "Uncontrolled Size",
+  "insecure-file-upload": "Unrestricted File Upload",
 };
 export function astTaintRustSeverity(id: AstTaintRustId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]; }
@@ -358,7 +359,15 @@ const SHELL_PROGRAMS = /^(?:(?:\/usr)?\/bin\/)?(?:sh|bash|zsh|dash|ksh)$|^(?:cmd
 const OPTION_SAFE_PROGRAMS = /^(?:(?:\/usr)?\/bin\/)?(?:echo|basename|dirname|true|false)$/;
 const SHELL_COMMAND_FLAGS = /^(?:-c|\/c|\/C|\/k|-command|-Command|-encodedcommand)$/;
 const FS_FIRST_ARG = /(?:^|::)(?:File::open|File::create|File::create_new|fs::read|fs::read_to_string|fs::write|fs::remove_file|fs::remove_dir|fs::remove_dir_all|fs::create_dir|fs::create_dir_all|fs::read_dir|fs::metadata|fs::symlink_metadata|fs::set_permissions|fs::read_link|NamedFile::open|NamedFile::open_async|ServeFile::new|ServeDir::new|NamedFile::new|File::options)$/;
-const FS_TWO_ARGS = /(?:^|::)fs::(?:copy|rename|hard_link|soft_link|symlink)$/;
+const UPLOAD_WRITE_FNS = /(?:^|::)(?:fs::write|File::create|File::create_new|tokio::fs::write)$/;
+/** The path names the client's own file name: a `filename` / `file_name` / `original_name` value, here or one `let` away. */
+const CLIENT_FILE_NAME_RE = /\b(?:file_?name|filename|original_?name|upload_?name|client_?name)\b|\.file_name\(\)/i;
+function namesClientFile(arg: SyntaxNode, at: SyntaxNode): boolean {
+  if (CLIENT_FILE_NAME_RE.test(arg.text)) return true;
+  const fnBody = (() => { let p: SyntaxNode | null = at; while (p && p.type !== "function_item") p = p.parent; return p?.text ?? ""; })();
+  return [...arg.text.matchAll(/\b([a-z_]\w*)\b/g)].some(m => new RegExp(`\\blet\\s+(?:mut\\s+)?${m[1]}\\s*(?::[^=]+)?=\\s*[^;]*${CLIENT_FILE_NAME_RE.source}`, "i").test(fnBody));
+}
+const FS_TWO_ARGS =/(?:^|::)fs::(?:copy|rename|hard_link|soft_link|symlink)$/;
 const HTTP_FREE_FNS = /^(?:reqwest::get|reqwest::blocking::get|ureq::get|ureq::post|ureq::put|ureq::delete|ureq::request|surf::get|surf::post|isahc::get|isahc::post|attohttpc::get|attohttpc::post|minreq::get|minreq::post|TcpStream::connect|UdpSocket::connect|tokio::net::TcpStream::connect)$/;
 const HTTP_CLIENT_METHODS = new Set(["get", "post", "put", "delete", "patch", "head", "request"]);
 const HTTP_CLIENT_TYPE_RE = /^(?:Client|ClientWithMiddleware|Agent|HttpClient)$/;
@@ -716,7 +725,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       let m = ctx.intrinsic.get(name) ?? 0;
       const prop = ctx.propagating.get(name);
       if (prop) for (const [i, surviving] of prop) { const a = args[i]; if (a) m |= mask(a, env) & surviving; }
-      return m;
+      // a hand-written RFC 4515 escaper: what it returns can't open or close a filter clause
+      return isLdapEscaperBody(local.body) ? applyClears(m, SinkClass.LDAP) : m;
     }
 
     if (recv) {
@@ -1058,7 +1068,27 @@ function vecElementAt(index: SyntaxNode): SyntaxNode | null | undefined {
   return k >= 0 && k < seq.length ? seq[k] : null;
 }
 
+/**
+ * A guard on a host taken out of a URL by a same-file helper (`let host = extract_host(&url); if is_allowed_host(&host)`)
+ * vets the URL's destination too: the redirect / request target is the URL the host came from.
+ */
 function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
+  const gs = guardsOfCondition(cond, ctx, depth);
+  if (depth > 0) return gs;
+  const extra: Guard[] = [];
+  for (const g of gs) {
+    const def = lastAssignment(g.name, cond);
+    const call = def ? unwrapExpr(def) : null;
+    if (call?.type !== "call_expression") continue;
+    const { name, recv } = callParts(call);
+    const src = argNodes(call)[0];
+    const srcName = src ? guardName(src) : null;
+    if (!recv && /host/i.test(name) && ctx.fns.has(name) && srcName) extra.push({ ...g, name: srcName, clears: (g.clears ?? ALL) & (SinkClass.REDIRECT | SinkClass.SSRF) });
+  }
+  return [...gs, ...extra];
+}
+
+function guardsOfCondition(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
   const c = unwrapExpr(cond);
   if (depth > 4) return [];
   if (c.type === "unary_expression" && operatorOf(c) === "!") { const v = named(c)[0]; return v ? guardsOf(v, ctx, depth + 1).map(invert) : []; }
@@ -1590,9 +1620,16 @@ function checkNumericSinks(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Tai
     return;
   }
   const alloc = (path && /(?:^|::)(?:Vec|String|VecDeque|HashMap|BytesMut)::with_capacity$/.test(path)) || (recv && /^(?:reserve|reserve_exact)$/.test(name)) ? args[0] : undefined;
-  if (alloc && numericTaint(m(alloc))) {
+  // sized by a value already in memory (`String::with_capacity(s.len())`): no amplification beyond what was received
+  if (alloc && numericTaint(m(alloc)) && !/^[\w.]+\.len\(\)$/.test(alloc.text)) {
     fire("integer-overflow", alloc, path ?? `.${name}`, `Request-chosen size '${alloc.text.slice(0, 60)}' reserves memory (${path ?? name}) with no upper bound — cap it first`);
   }
+}
+
+/** A function body that writes the RFC 4515 escape of every LDAP filter metacharacter: `*` `(` `)` `\` (\2a \28 \29 \5c). */
+function isLdapEscaperBody(body: SyntaxNode): boolean {
+  const t = body.text;
+  return ["2a", "28", "29", "5c"].every(h => new RegExp(`\\\\\\\\${h}`, "i").test(t));
 }
 
 function lastAssignment(name: string, at: SyntaxNode): SyntaxNode | null {
@@ -1725,7 +1762,12 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── Path ──
-  if (full && FS_FIRST_ARG.test(full) && args[0]) fireOn(ctx, "path-traversal", node, args[0], mask(args[0], env), two);
+  if (full && FS_FIRST_ARG.test(full) && args[0] && fireOn(ctx, "path-traversal", node, args[0], mask(args[0], env), two)
+    && UPLOAD_WRITE_FNS.test(full) && namesClientFile(args[0], node)) {
+    // request content saved under the name the client sent: any extension (a .html / .php served back), any place
+    emit(ctx, "insecure-file-upload", node, args[0].text, two,
+      `The upload is saved under the file name the client sent ('${args[0].text.slice(0, 60)}') — any extension and, unless cleaned, any directory; generate the name server-side and check the type`);
+  }
   if (full && FS_TWO_ARGS.test(full)) for (const a of args.slice(0, 2)) if (fireOn(ctx, "path-traversal", node, a, mask(a, env), two)) break;
   if (recv && name === "open" && args[0] && /OpenOptions/.test(recvText)) fireOn(ctx, "path-traversal", node, args[0], mask(args[0], env), "OpenOptions.open");
 

@@ -22,7 +22,8 @@ const RULES = {
   loginjection: ["log-injection"],
   nosql: ["nosql-injection"],
   csrf: ["csrf-protection-disabled", "csrf"],
-  codeinj: ["eval-exec", "code-injection"],
+  // template injection is code injection (CWE-1336 is a child of CWE-94); the Go corpus files it under codeinj
+  codeinj: ["eval-exec", "code-injection", "ssti"],
   ldapi: ["ldap-injection"],
   trustbound: ["trust-boundary"],
   deserial: ["insecure-deserialization"],

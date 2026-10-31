@@ -58,7 +58,11 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     PHP session-authenticated CSRF; Kotlin argument + trailing-lambda calls and coroutine values; WebView bridges.
 // 19: Java Runtime.exec environment entries that choose what runs; Commons Codec Base64 carries taint; calls through
 //     a batch class or interface whose implementations return their argument carry it (cross-file pass-throughs).
-export const SCAN_CACHE_VERSION = 19;
+// 20: Ruby whole-hash mass assignment, host-connection SSRF sinks, resolved-address guards, log streams and files; Go
+//     cipher use (64-bit ciphers, ECB, fixed IVs, unauthenticated modes, XOR), host-gate / suffix / resolved-address
+//     guards, numeric argv proofs; Rust uploads, LDAP escapers, extracted-host guards; PHP cipher use and
+//     unserialize allowed_classes / HMAC; raw Set-Cookie built on an earlier line; alphabets no longer clear EVAL.
+export const SCAN_CACHE_VERSION = 20;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

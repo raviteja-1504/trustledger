@@ -2090,15 +2090,28 @@ function findTlsVerificationDisabled(lines: string[]): ScanIndicator[] {
 
 // A Set-Cookie header written by hand (`headers['Set-Cookie'] = "session=..."`, `header("Set-Cookie: sid=...")`,
 // `w.Header().Set("Set-Cookie", ...)`) with no HttpOnly / Secure attribute in it
-const RAW_SET_COOKIE_RE = /['"]Set-Cookie['"]\s*(?:\]\s*=|,)|\bheader\s*\(\s*['"]Set-Cookie\s*:/i;
+const RAW_SET_COOKIE_RE = /['"]Set-Cookie['"]\s*(?:\]\s*=|,)|\bheader\s*\(\s*['"]Set-Cookie\s*:|['"]Set-Cookie:\s*\{\}|\bSET_COOKIE\b/i;
+const SESSION_COOKIE_RE = /(?:session|sess|sid|token|auth|login|remember|jwt)\w*\s*=/i;
 function findRawSetCookieFlags(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
     if (isNonExecutableLine(line) || !RAW_SET_COOKIE_RE.test(line)) continue;
+    // the cookie string built on an earlier line and sent by name: `let cookie = format!("session={}", t);` ... then
+    // `format!("Set-Cookie: {}", cookie)` / `headers.insert(SET_COOKIE, cookie.parse()?)`. A cookie that went through
+    // a helper (`let c = with_flags(&raw)`) shows no cookie text there, and is left alone.
+    if (!SESSION_COOKIE_RE.test(line)) {
+      const names = new Set([...line.matchAll(/\b([a-z_]\w*)\b/g)].map(m => m[1]));
+      for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
+        const def = /^\s*(?:let\s+(?:mut\s+)?|var\s+|\$)?(\w+)\s*:?=\s*(.*)$/.exec(lines[j]);
+        if (def && names.has(def[1])) { line = def[2]; break; }
+      }
+    }
     // a session / auth cookie only: a preference cookie (theme=dark) needs neither flag
-    if (!/(?:session|sess|sid|token|auth|login|remember|jwt)\w*\s*=/i.test(line)) continue;
-    if (!/HttpOnly/i.test(line)) found.push({ id: "cookie-no-httponly", label: "Cookie Without HttpOnly", severity: "medium", line: i + 1,
+    if (!SESSION_COOKIE_RE.test(line)) continue;
+    // a double-submit CSRF cookie is MEANT to be read by the page's script: it needs Secure, not HttpOnly
+    const csrfCookie = /\b(?:csrf|xsrf)\w*\s*=/i.test(line);
+    if (!csrfCookie && !/HttpOnly/i.test(line)) found.push({ id: "cookie-no-httponly", label: "Cookie Without HttpOnly", severity: "medium", line: i + 1,
       detail: "A session cookie is set by a hand-written Set-Cookie header with no HttpOnly attribute — any injected script can read it; add HttpOnly (and Secure, SameSite)" });
     else if (!/;\s*Secure\b/i.test(line)) found.push({ id: "cookie-no-secure", label: "Cookie Without Secure", severity: "medium", line: i + 1,
       detail: "A session cookie is set by a hand-written Set-Cookie header with no Secure attribute — it is also sent over plain HTTP; add Secure" });
@@ -2982,10 +2995,13 @@ function findWeakHashPython(lines: string[]): ScanIndicator[] {
 // cipher (DES, RC2, RC4, Blowfish). The password-context md5($password) case is already WEAK_CRYPTO_RE's.
 const PHP_WEAK_HASH_RE = /(?<![\w$>:])(?:md5|sha1|md5_file|sha1_file)\s*\(|\bhash(?:_file|_init)?\s*\(\s*["'](?:md2|md4|md5|sha1)["']|\bhash_hmac\s*\(\s*["'](?:md2|md4|md5)["']/i;
 const PHP_FAST_PASSWORD_HASH_RE = /\bhash\s*\(\s*["'](?:sha\d+(?:\/\d+)?|sha3-\d+|ripemd\d+|whirlpool|tiger\w*|crc32\w*|adler32|fnv\w*|xxh\w*|murmur\w*)["']\s*,[^)]*\$\w*(?:pass(?:word|wd)?|pwd)\w*/i;
-const PHP_WEAK_CIPHER_RE = /\bopenssl_(?:encrypt|decrypt)\s*\([^)]*["'](?:[\w-]*-ecb|des(?:-[\w-]+)?|des-ede3?(?:-[\w-]+)?|rc2(?:-[\w-]+)?|rc4(?:-[\w-]+)?|bf(?:-[\w-]+)?|blowfish)["']|\bmcrypt_(?:encrypt|decrypt|module_open)\s*\(|\bMCRYPT_(?:DES|3DES|RC2|BLOWFISH|MODE_ECB)\b/i;
+// (the arguments before the method may hold one level of parentheses: `openssl_encrypt($req->param('d'), 'DES-CBC', ...)`)
+const PHP_WEAK_CIPHER_RE = /\bopenssl_(?:encrypt|decrypt)\s*\((?:[^()]|\([^()]*\))*?["'](?:[\w-]*-ecb|des(?:-[\w-]+)?|des-ede3?(?:-[\w-]+)?|rc2(?:-[\w-]+)?|rc4(?:-[\w-]+)?|bf(?:-[\w-]+)?|blowfish)["']|\bmcrypt_(?:encrypt|decrypt|module_open)\s*\(|\bMCRYPT_(?:DES|3DES|RC2|BLOWFISH|MODE_ECB)\b/i;
 
 function findWeakCryptoPHP(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
+  // encrypt-then-MAC (or libsodium's authenticated boxes) somewhere in the file
+  const authenticated = lines.some(l => /\bhash_hmac\s*\(|\bsodium_crypto_(?:secretbox|aead)/.test(l));
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (isNonExecutableLine(line)) continue;
@@ -2999,9 +3015,37 @@ function findWeakCryptoPHP(lines: string[]): ScanIndicator[] {
     } else if (PHP_FAST_PASSWORD_HASH_RE.test(line)) {
       found.push({ id: "weak-crypto", label: "Fast Hash for a Password", severity: "high", line: i + 1,
         detail: "A fast general-purpose hash over a password (even salted) can be brute-forced at billions of guesses per second -- use password_hash() / password_verify()" });
+    } else if (PHP_UNAUTHENTICATED_MODE_RE.test(line) && !authenticated) {
+      found.push({ id: "weak-crypto", label: "Unauthenticated Encryption", severity: "medium", line: i + 1,
+        detail: "CBC/CTR/CFB/OFB encryption with no MAC anywhere in this file -- the ciphertext can be altered undetected (CBC padding errors become a decryption oracle); use AES-256-GCM, or encrypt-then-hash_hmac" });
+    } else if (fixedIvPHP(line, lines, i)) {
+      found.push({ id: "weak-crypto", label: "Fixed IV", severity: "high", line: i + 1,
+        detail: "openssl_encrypt is given a fixed or empty IV -- every message is encrypted the same way; use random_bytes(openssl_cipher_iv_length($method))" });
+    } else if (PHP_XOR_KEY_RE.test(line)) {
+      found.push({ id: "weak-crypto", label: "XOR Cipher", severity: "high", line: i + 1,
+        detail: "Data is \"encrypted\" by XOR with a repeating key -- trivially reversible from a little known plaintext; use sodium_crypto_secretbox or AES-256-GCM" });
     }
   }
   return found;
+}
+
+const PHP_UNAUTHENTICATED_MODE_RE = /\bopenssl_encrypt\s*\((?:[^()]|\([^()]*\))*?["'][\w-]*-(?:cbc|ctr|cfb\d*|ofb)["']/i;
+// $data[$i] ^ $key[$i % strlen($key)] / $data ^ str_repeat($key, ...)
+const PHP_XOR_KEY_RE = /\^\s*\$\w*(?:key|secret|pass)\w*\s*\[\s*\$\w+\s*%\s*(?:strlen|mb_strlen)\s*\(|\^\s*str_repeat\s*\(\s*\$\w*(?:key|secret|pass)/i;
+/** openssl_encrypt(..., $iv) with $iv '' / a literal / str_repeat("\0", n), inline or assigned in the lines before. */
+function fixedIvPHP(line: string, lines: readonly string[], i: number): boolean {
+  const m = /\bopenssl_encrypt\s*\((?:[^()]|\([^()]*\))*,\s*(?:0|OPENSSL_RAW_DATA|OPENSSL_ZERO_PADDING)\s*,\s*([^,)]+)\s*[,)]/i.exec(line);
+  if (!m) return false;
+  const FIXED = /^\s*(?:''|""|'[^']*'|"[^"$]*"|str_repeat\s*\(\s*["']\\0["'])/;
+  const iv = m[1].trim();
+  if (FIXED.test(iv)) return true;
+  const v = /^\$(\w+)$/.exec(iv)?.[1];
+  if (!v) return false;
+  for (let j = i - 1; j >= Math.max(0, i - 20); j--) {
+    const a = new RegExp(`\\$${v}\\s*=\\s*(.*);`).exec(lines[j]);
+    if (a) return FIXED.test(a[1]);
+  }
+  return false;
 }
 
 // Ruby: MD5 / MD4 / SHA-1 (Digest::MD5, OpenSSL::Digest.new('MD5'), OpenSSL::Digest::SHA1), any fast general-purpose

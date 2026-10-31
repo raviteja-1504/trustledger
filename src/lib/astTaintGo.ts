@@ -1667,7 +1667,12 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       const l = cond.childForFieldName("left");
       const r = cond.childForFieldName("right");
       if (!l || !r) return [];
-      if (op === "&&") { const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "true"); return [...gs, ...combineUrlFacets(gs, "true")]; }
+      if (op === "&&") {
+        const gate = hostGateGuardGo(l, r, root);
+        if (gate) return gate;
+        const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "true");
+        return [...gs, ...combineUrlFacets(gs, "true")];
+      }
       if (op === "||") {
         const gs = [...guardsOfConditionGo(l, root, aliases), ...guardsOfConditionGo(r, root, aliases)].filter(g => g.holds === "false");
         return [...gs, ...combineUrlFacets(gs, "false"), ...publicIpGuardGo(cond)];
@@ -1722,6 +1727,13 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       // strings.Contains(x, "://"): a URL facet (see combineUrlFacets)
       if (text === "strings.Contains" && args.length === 2 && args[0].type === "identifier" && goStringLiteralValue(args[1]) === "://") {
         return urlPrefixFacets(args[0].text, "://", "contains");
+      }
+      // strings.HasSuffix(u.Hostname(), ".example.com") after u, _ := url.Parse(x): a subdomain of a fixed domain (the
+      // leading dot matters -- "example.com" alone also matches "evilexample.com")
+      if (text === "strings.HasSuffix" && args.length === 2 && /^\.[\w.-]+\.[a-z]{2,}$/i.test(goStringLiteralValue(args[1]) ?? "")) {
+        const s = args[0].type === "call_expression" ? args[0].childForFieldName("function") : args[0];
+        const owner = s?.type === "selector_expression" && /^(?:Hostname|Host)$/.test(s.childForFieldName("field")?.text ?? "") ? s.childForFieldName("operand") : null;
+        if (owner?.type === "identifier") return urlParseNamesGo(owner).map(name => ({ name, holds: "true" as const, clears: SinkClass.SSRF | SinkClass.REDIRECT }));
       }
       // strings.HasPrefix(x, "/") / (x, "//") / (x, "https://example.com/"): URL facets
       if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier" && /^(?:\/\/?|https?:\/\/.*)$/.test(goStringLiteralValue(args[1]) ?? "")) {
@@ -2153,6 +2165,147 @@ function createWalkerGo(h: WalkHooksGo) {
  * Phase 1/2/3), and matches sink call expressions against a tainted
  * argument (or, for insecure-deserialization, a tainted receiver).
  */
+/**
+ * Cipher USE that is weak whatever the key (not taint-based), per function:
+ *  - a 64-bit-block or broken cipher (Blowfish, CAST5, TEA, XTEA; DES/RC4 are the call-site rule's);
+ *  - ECB: a cipher.Block's Encrypt/Decrypt called block by block in a loop, with no mode (GCM, CBC, CTR, ...) in sight;
+ *  - a fixed IV / nonce: `make([]byte, n)` or a literal handed to a mode or to gcm.Seal, never filled from crypto/rand;
+ *  - repeating-key XOR "encryption": `data[i] ^= key[i%len(key)]`.
+ */
+/**
+ * Before this request, in the same function: `ips, _ := net.LookupIP(u.Hostname())` and a loop over the ips that refuses
+ * a private one -- `if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { return }`, or a local helper named
+ * for it (`if isPrivate(ip) { return }`). Then the URL the request uses (`u`, its source, `u.String()`) names a public
+ * address. The loop must come first and must leave the handler (return / http.Error + return) on a private address.
+ */
+function resolvedAddressesVettedGo(sink: SyntaxNode, urlArg: SyntaxNode): boolean {
+  const fn = findEnclosingFunctionNodeGo(sink);
+  if (!fn) return false;
+  for (const loop of findAllNodesGo(fn, "for_statement")) {
+    if (loop.startIndex > sink.startIndex) continue;
+    const range = findAllNodesGo(loop, "range_clause")[0];
+    const ipsName = range?.childForFieldName("right")?.text;
+    const ipName = range?.childForFieldName("left")?.namedChildren.at(-1)?.text;
+    if (!ipsName || !ipName) continue;
+    // ips := net.LookupIP(u.Hostname()) / net.LookupHost(u.Hostname()) / resolver.LookupIPAddr(ctx, host)
+    const def = lastAssignmentGo(ipsName, loop);
+    if (def?.type !== "call_expression" || !/^net\.Lookup(?:IP|Host|IPAddr)$|\.LookupIPAddr$|\.LookupNetIP$/.test(calleeTextGo(def.childForFieldName("function") ?? def) ?? "")) continue;
+    const hostArg = argListOfGo(def).at(-1);
+    const sel = hostArg?.type === "call_expression" ? hostArg.childForFieldName("function") : hostArg;
+    const owner = sel?.type === "selector_expression" ? sel.childForFieldName("operand") : null;
+    if (owner?.type !== "identifier") continue;
+    // the loop body refuses a private address and leaves
+    const body = loop.childForFieldName("body")?.text ?? "";
+    const allThree = ["IsLoopback", "IsPrivate", "IsLinkLocalUnicast"].every(m => new RegExp(`\\b${ipName}\\.${m}\\(`).test(body));
+    const helper = new RegExp(`\\b\\w*(?:[Pp]rivate|[Ii]nternal|[Bb]locked|[Rr]eserved)\\w*\\(\\s*${ipName}\\s*\\)`).test(body);
+    if (!(allThree || helper) || !/\breturn\b/.test(body)) continue;
+    const names = new Set([owner.text, ...urlParseNamesGo(owner)]);
+    if (findAllNodesGo(urlArg, "identifier").some(i => names.has(i.text)) || names.has(urlArg.text)) return true;
+  }
+  return false;
+}
+
+/**
+ * `u.Host != "" && u.Host != X` / `u.Host != "" && !allowed[u.Host]` after `u, _ := url.Parse(src)` -- the usual
+ * reject-other-hosts gate. Its FALSE side (where code goes on after rejecting) proves the destination is relative or
+ * the vetted host: a literal or an allow-list vets it for redirects and requests alike; the request's own host (or
+ * any other expression) only for redirects.
+ */
+function hostGateGuardGo(l: SyntaxNode, r: SyntaxNode, root: SyntaxNode): Guard[] | null {
+  const hostOf = (n: SyntaxNode | null | undefined): SyntaxNode | null => {
+    const s = n?.type === "call_expression" ? n.childForFieldName("function") : n;
+    if (s?.type !== "selector_expression") return null;
+    const fld = s.childForFieldName("field")?.text;
+    const owner = s.childForFieldName("operand");
+    return owner?.type === "identifier" && (fld === "Host" || fld === "Hostname") ? owner : null;
+  };
+  const opOf = (b: SyntaxNode) => b.childForFieldName("operator")?.type;
+  if (l.type !== "binary_expression" || opOf(l) !== "!=") return null;
+  const owner = hostOf(l.childForFieldName("left"));
+  if (!owner || goStringLiteralValue(l.childForFieldName("right") ?? l) !== "") return null;
+  let clears = 0;
+  if (r.type === "binary_expression" && opOf(r) === "!=" && hostOf(r.childForFieldName("left"))?.text === owner.text) {
+    const other = r.childForFieldName("right");
+    clears = other?.type === "interpreted_string_literal" ? SinkClass.SSRF | SinkClass.REDIRECT : SinkClass.REDIRECT;
+  } else if (r.type === "unary_expression" && r.childForFieldName("operator")?.type === "!") {
+    const idx = r.childForFieldName("operand");
+    if (idx?.type === "index_expression" && hostOf(idx.childForFieldName("index"))?.text === owner.text) {
+      const coll = idx.childForFieldName("operand");
+      clears = coll && isLiteralCollectionGo(coll, root) ? SinkClass.SSRF | SinkClass.REDIRECT : SinkClass.REDIRECT;
+    }
+  }
+  return clears ? urlParseNamesGo(owner).map(name => ({ name, holds: "false" as const, clears })) : null;
+}
+
+/** `abs, _ := filepath.Abs(x)`, or a value the enclosing function requires to start with a literal "/..." prefix. */
+function isAbsolutePathGo(arg: SyntaxNode, at: SyntaxNode): boolean {
+  if (arg.type !== "identifier") return false;
+  const fn = findEnclosingFunctionNodeGo(at);
+  const text = fn?.text ?? "";
+  const name = arg.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${name}\\s*(?:,\\s*\\w+)?\\s*:?=\\s*filepath\\.Abs\\(`).test(text)
+    || new RegExp(`strings\\.HasPrefix\\(\\s*${name}\\s*,\\s*"/`).test(text);
+}
+
+function weakCipherUsesGo(root: SyntaxNode): Array<{ node: SyntaxNode; expr: string; detail: string }> {
+  const out: Array<{ node: SyntaxNode; expr: string; detail: string }> = [];
+  const fileText = root.text;
+  // encrypt-then-MAC or an AEAD anywhere in the file: the stream/CBC modes below are authenticated there
+  const authenticated = /\bhmac\.New\b|\bpoly1305\.|\bcipher\.NewGCM\w*\b|chacha20poly1305\./.test(fileText);
+  for (const fn of [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]) {
+    const body = fn.childForFieldName("body");
+    if (!body) continue;
+    const text = body.text;
+    const takesBlock = /\bcipher\.Block\b/.test(fn.childForFieldName("parameters")?.text ?? "");
+    const calls = findAllNodesGo(body, "call_expression");
+    const callee = (c: SyntaxNode) => c.childForFieldName("function")?.text ?? "";
+    const argsOf = (c: SyntaxNode) => (c.childForFieldName("arguments")?.namedChildren ?? []).filter((a): a is SyntaxNode => !!a);
+    for (const c of calls) {
+      if (/^(?:blowfish|cast5|tea|xtea)\.NewCipher$/.test(callee(c))) {
+        out.push({ node: c, expr: callee(c), detail: `${callee(c)} is a 64-bit-block / broken cipher — use AES-GCM or ChaCha20-Poly1305` });
+      }
+    }
+    // ECB: block.Encrypt(dst[i:...], src[i:...]) over the data in a loop, on a cipher.Block (a hand-rolled CTR encrypts a
+    // counter block, not slices of the plaintext)
+    for (const loop of findAllNodesGo(body, "for_statement")) {
+      const ecb = findAllNodesGo(loop, "call_expression").find(c => /\.(?:Encrypt|Decrypt)$/.test(callee(c)) && argsOf(c).length === 2 && argsOf(c).every(a => a.type === "slice_expression"));
+      if (ecb && (takesBlock || /\b(?:aes|des|blowfish|twofish)\.New(?:TripleDES)?Cipher\b/.test(text))) {
+        out.push({ node: ecb, expr: callee(ecb), detail: "The block cipher is applied block by block with no mode (ECB) — identical plaintext blocks give identical ciphertext; use AES-GCM" });
+        break;
+      }
+    }
+    // a fixed IV / nonce
+    for (const c of calls) {
+      const fnName = callee(c);
+      const ivArg = /^cipher\.(?:NewCBCEncrypter|NewCBCDecrypter|NewCTR|NewCFBEncrypter|NewCFBDecrypter|NewOFB)$/.test(fnName) ? argsOf(c)[1]
+        : /\.Seal$/.test(fnName) && argsOf(c).length === 4 ? argsOf(c)[1] : undefined;
+      // an unauthenticated mode: the ciphertext can be altered undetected (and CBC padding becomes an oracle)
+      if (!authenticated && /^cipher\.(?:NewCBCEncrypter|NewCBCDecrypter|NewCTR|NewCFBEncrypter|NewCFBDecrypter|NewOFB)$/.test(fnName)) {
+        out.push({ node: c, expr: fnName, detail: `${fnName} encrypts without authentication and nothing in this file adds a MAC — an attacker can modify the ciphertext undetected (CBC padding errors become a decryption oracle); use AES-GCM, or encrypt-then-HMAC` });
+      }
+      if (!ivArg || ivArg.type !== "identifier") continue;
+      const iv = ivArg.text;
+      // declared in the function or at package level (`var iv = []byte("staticivstaticiv")`)
+      const fixed = new RegExp(`\\b${iv}\\s*:?=\\s*(?:make\\(\\s*\\[\\]byte|\\[\\]byte\\s*\\(\\s*"|\\[\\]byte\\s*\\{)`);
+      const declared = fixed.test(text) || fixed.test(fileText);
+      const randomized = new RegExp(`\\b(?:rand\\.Read|io\\.ReadFull\\s*\\(\\s*rand\\.Reader\\s*,)\\s*\\(?\\s*${iv}\\b`).test(text);
+      if (declared && !randomized) {
+        out.push({ node: c, expr: fnName, detail: `'${iv}' is a fixed IV/nonce (never filled from crypto/rand) — every message is encrypted under the same IV; generate it with io.ReadFull(rand.Reader, ${iv})` });
+      }
+    }
+    // repeating-key XOR
+    // a repeating key (`key[i%len(key)]`) or a single key byte (`b ^ key`) XORed into data inside a loop
+    const KEYISH = /^\w*(?:key|secret|pass)\w*$/i;
+    const xorKey = (t: string) => /\[\s*\w+\s*%\s*len\(\s*\w*(?:key|secret|pass)\w*\s*\)\s*\]/i.test(t);
+    const inLoop = (n: SyntaxNode) => { for (let p = n.parent; p && p !== body; p = p.parent) if (p.type === "for_statement") return true; return false; };
+    const xor = findAllNodesGo(body, "assignment_statement").find(a => /\^=/.test(a.text) && (xorKey(a.text) || KEYISH.test(a.childForFieldName("right")?.text ?? "")) && inLoop(a))
+      ?? findAllNodesGo(body, "binary_expression").find(b => b.childForFieldName("operator")?.text === "^" && inLoop(b)
+        && (xorKey(b.text) || KEYISH.test(b.childForFieldName("left")?.text ?? "") || KEYISH.test(b.childForFieldName("right")?.text ?? "")));
+    if (xor) out.push({ node: xor, expr: "XOR with a repeating key", detail: "Data is \"encrypted\" by XOR with a repeating key — trivially reversible from a little known plaintext; use AES-GCM" });
+  }
+  return out;
+}
+
 export function scanAstTaintGo(
   content: string, filePath: string, presparsed?: SyntaxNode | null,
   idorAuthCheckNearby?: (line: number) => boolean,
@@ -2403,7 +2556,8 @@ export function scanAstTaintGo(
         if (boundPathReachesFsSinkGo(node)) suppressedOut?.push({ id: "path-traversal", line: lineOf(node) });
       } else if (match) {
         const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
-        if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
+        if (taintedArg && match.id === "ssrf" && resolvedAddressesVettedGo(node, taintedArg)) suppressedOut?.push({ id: "ssrf", line: lineOf(node) });
+        else if (taintedArg) emit(match.id, node, sourceLabelGo(taintedArg), match.sinkExpr);
         // Tainted data only in arguments that can't be exploited here (a request body, an argv element with
         // no shell): a positive proof for this sink, so the regex layer's line-level duplicate is dropped.
         else if (args.some(a => !match.args.some(m => m.startIndex === a.startIndex) && (taintMask(a, env) & ALL))) {
@@ -2411,12 +2565,25 @@ export function scanAstTaintGo(
         }
         // every argument a proven constant (`arg = "-la"` on the only path that runs)
         else if (args.length > 0 && args.every(a => provenLiteralGo(a, env))) suppressedOut?.push({ id: match.id, line: lineOf(node) });
+        // request data that reaches the sink only as a value stripped of this sink's class (strconv.Atoi -> Itoa):
+        // attacker-controlled, but proven unable to inject here
+        else if (args.some(a => { const m = taintMask(a, env); return (m & SinkClass.CONTROL) !== 0 || wasCleared(m, classOf(match.id)); })
+          && !args.some(a => taintMask(a, env) & classOf(match.id))) {
+          suppressedOut?.push({ id: match.id, line: lineOf(node) });
+        }
       }
       if (match?.id === "command-injection") {
         const argv = execCommandArgvGo(node)?.argv ?? [];
         const program = goStringLiteralValue(execCommandArgvGo(node)?.command[0] ?? node);
         const hit = program !== null && OPTION_SAFE_PROGRAMS_GO.test(program) ? undefined
-          : argv.find(a => { const m = taintMask(a, env); return (m & SinkClass.CONTROL) !== 0 && (m & SinkClass.CMD) !== 0; });
+          : argv.find((a, i) => {
+            const m = taintMask(a, env);
+            if ((m & SinkClass.CONTROL) === 0 || (m & SinkClass.CMD) === 0) return false;
+            // the value of a long option (`"--format", format`): consumed as that option's argument, whatever it starts with
+            if (i > 0 && /^--[A-Za-z][\w-]*$/.test(goStringLiteralValue(argv[i - 1]) ?? "")) return false;
+            // an absolute path (filepath.Abs, or checked to start with "/..."): it can't start with "-"
+            return !isAbsolutePathGo(a, node);
+          });
         if (hit) {
           emit("argument-injection", node, sourceLabelGo(hit), match.sinkExpr,
             `Tainted expression '${sourceLabelGo(hit)}' is passed to ${match.sinkExpr}(...) as an argv element with no preceding "--" — no shell runs, but a value starting with "-" is read as an option by the program`);
@@ -2807,6 +2974,8 @@ export function scanAstTaintGo(
       emit("csrf", fnDecl.childForFieldName("name") ?? fnDecl, "session cookie", "state-changing handler",
         "This handler changes state on the strength of a session cookie alone — another site can make the browser send it (CSRF); require a CSRF token (gorilla/csrf, nosurf), check Origin, or set the cookie SameSite=Strict");
     }
+
+    for (const w of weakCipherUsesGo(root)) emit("weak-crypto", w.node, w.expr, w.expr, w.detail);
 
     return findings;
   } catch (err) {

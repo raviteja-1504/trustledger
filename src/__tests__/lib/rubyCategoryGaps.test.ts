@@ -53,3 +53,69 @@ describe("hand-written Set-Cookie", () => {
     expect(ids(set("theme=dark"))).not.toContain("cookie-no-httponly");
   });
 });
+
+describe("mass assignment from the whole submitted hash", () => {
+  it("the request's full hash into a model write, directly, through a local, wrapped or nested", () => {
+    expect(ids(handler(`  user = User.create(req.post_data)`))).toContain("mass-assignment");
+    expect(ids(handler(`  attrs = req.post_data.merge('admin' => true)\n  User.create(attrs)`))).toContain("mass-assignment");
+    expect(ids(handler(`  form = OpenStruct.new(req.post_data)\n  User.create(form.to_h)`))).toContain("mass-assignment");
+    expect(ids(handler(`  User.new(profile_attributes: req.post_data)`))).toContain("mass-assignment");
+    expect(ids(handler(`  User.update_all(req.post_data)`))).toContain("mass-assignment");
+  });
+  it("picked keys, explicit attributes, or wrapping the hash to permit it are not", () => {
+    expect(ids(handler(`  User.create(req.post_data.slice('name', 'email'))`))).not.toContain("mass-assignment");
+    expect(ids(handler(`  attrs = req.post_data.select { |k, _| ALLOWED.include?(k) }\n  User.create(attrs)`))).not.toContain("mass-assignment");
+    expect(ids(handler(`  User.create(req.post_data.except('role', 'admin'))`))).not.toContain("mass-assignment");
+    expect(ids(handler(`  User.create(name: req.post('name'), email: req.post('email'))`))).not.toContain("mass-assignment");
+    expect(ids(handler(`  params = ActionController::Parameters.new(req.post_data)\n  User.create(params.permit(:name).to_h)`))).not.toContain("mass-assignment");
+  });
+});
+
+describe("SSRF", () => {
+  it("connections to a request-chosen host and HTTP client instances", () => {
+    expect(ids(handler(`  Socket.tcp(req.param('host'), 80) { |s| s.read(10) }`))).toContain("ssrf");
+    expect(ids(handler(`  Net::SMTP.start(req.param('smtp_host'), 25) { |s| s.finish }`))).toContain("ssrf");
+    expect(ids(handler(`  Net::LDAP.new(host: req.param('ldap_host')).bind`))).toContain("ssrf");
+    expect(ids(handler(`  sess = Patron::Session.new\n  sess.get(req.param('url'))`))).toContain("ssrf");
+    expect(ids(handler(`  Async::HTTP::Internet.new.get(req.param('url'))`))).toContain("ssrf");
+    expect(ids(handler(`  MiniMagick::Image.open(req.param('url'))`))).toContain("ssrf");
+  });
+  it("a fixed host, or a local path under a fixed directory, is not", () => {
+    expect(ids(handler(`  Socket.tcp('db.internal', 5432) { |s| s.read(10) }`))).not.toContain("ssrf");
+    expect(ids(handler(`  path = UPLOAD_DIR + '/' + File.basename(req.param('filename'))\n  MiniMagick::Image.open(path)`))).not.toContain("ssrf");
+  });
+  it("a request refused when its resolved address is private is cleared; one allowed only when internal is not", () => {
+    const fetch = (guard: string) => handler(`  uri = URI.parse(req.param('url'))\n  ip = Resolv.getaddress(uri.host)\n${guard}\n  Net::HTTP.get(uri)`);
+    expect(ids(fetch(`  raise 'blocked' if PRIVATE_RANGES.any? { |r| r.include?(IPAddr.new(ip)) }`))).not.toContain("ssrf");
+    expect(ids(fetch(`  addr = IPAddr.new(ip)\n  return BenchmarkResponse.bad_request('no') if addr.private? || addr.loopback?`))).not.toContain("ssrf");
+    expect(ids(fetch(`  parts = ip.split('.').map(&:to_i)\n  private = parts[0] == 10 || (parts[0] == 192 && parts[1] == 168)\n  return BenchmarkResponse.bad_request('no') if private`))).not.toContain("ssrf");
+    expect(ids(fetch(`  return BenchmarkResponse.bad_request('no') unless INTERNAL_RANGES.any? { |r| ip.match?(r) }`))).toContain("ssrf");
+    expect(ids(fetch(``))).toContain("ssrf");
+  });
+});
+
+describe("log injection into the process's streams and log files", () => {
+  it("$stderr / STDOUT writes, bare puts, appending to a .log file, Syslog", () => {
+    expect(ids(handler(`  $stderr.write("Error: #{req.param('m')}\\n")`))).toContain("log-injection");
+    expect(ids(handler(`  puts "DEBUG: #{req.body_str}"`))).toContain("log-injection");
+    expect(ids(handler(`  File.open('application.log', 'a') { |f| f.puts(req.param('m')) }`))).toContain("log-injection");
+    expect(ids(handler(`  log_file = '/tmp/app.log'\n  File.open(log_file, 'a') { |f| f.puts("A: #{req.param('m')}") }`))).toContain("log-injection");
+    expect(ids(handler(`  Syslog.open('app') { |s| s.log(Syslog::LOG_INFO, req.param('u')) }`))).toContain("log-injection");
+  });
+  it("a data file, a constant, or a value with its line breaks removed is not", () => {
+    expect(ids(handler(`  File.open('export.csv', 'a') { |f| f.puts(req.param('m')) }`))).not.toContain("log-injection");
+    expect(ids(handler(`  $stderr.write("Error: fixed\\n")`))).not.toContain("log-injection");
+    expect(ids(handler(`  puts req.param('m').gsub(/[\\r\\n\\x00]/, ' ')`))).not.toContain("log-injection");
+    expect(ids(handler(`  puts req.param('m').gsub(/[[:cntrl:]]/, '?')`))).not.toContain("log-injection");
+    expect(ids(handler(`  puts req.param('m').gsub(/[^a-zA-Z0-9_]/, '')`))).not.toContain("log-injection");
+    // \\s keeps newlines, and a replacement can put them back: still reported
+    expect(ids(handler(`  puts req.param('m').gsub(/[^\\w\\s@.]/, '')`))).toContain("log-injection");
+    expect(ids(handler(`  puts req.param('m').gsub(/[^a-zA-Z0-9_]/, "\\n")`))).toContain("log-injection");
+  });
+});
+
+describe("an alphabet does not make reflection safe", () => {
+  it("Object.const_get on an identifier-only value is still unsafe reflection", () => {
+    expect(ids(handler(`  safe = req.param('klass').gsub(/[^A-Za-z0-9:]/, '')\n  klass = Object.const_get(safe)`))).toContain("unsafe-reflection");
+  });
+});

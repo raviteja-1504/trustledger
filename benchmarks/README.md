@@ -50,7 +50,11 @@ node benchmarks/scorers/score_juliet.js /path/to/juliet-cs/src/testcases juliet_
 ```
 
 The score is TPR − FPR in percentage points (the OWASP Benchmark convention). The mapping from TrustLedger rule
-ids to each corpus's categories is the `RULES` table at the top of each scorer.
+ids to each corpus's categories is the `RULES` table at the top of each scorer. Mapping changes are listed here
+because they move scores without any engine change:
+
+- 2026-10-31: `codeinj` also counts `ssti`. Template injection is code injection (CWE-1336 is a child of CWE-94),
+  and the sast-benchmark Go suite files its template-injection cases under `codeinj` (Go: +1 point).
 
 ## Building the report
 

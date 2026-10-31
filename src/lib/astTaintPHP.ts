@@ -992,7 +992,13 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // exec($cmd, &$output, &$code) / popen($cmd, $mode) / proc_open($cmd, $spec, &$pipes): the command only.
     fireArg("command-injection", 0);
   } else if (fnName === "unserialize") {
-    fireArg("insecure-deserialization", 0);
+    // ['allowed_classes' => false] / [...a list]: no object of an arbitrary class can be built -- no gadget chain. A
+    // payload whose HMAC was checked with hash_equals() first came from this server.
+    if (/['"]allowed_classes['"]\s*=>\s*(?:false|\[|array\s*\()/i.test(args[1]?.text ?? "") || hmacVerifiedBeforePHP(node, args[0])) {
+      ctx.suppressed?.push({ id: "insecure-deserialization", line: lineOf(node) });
+    } else {
+      fireArg("insecure-deserialization", 0);
+    }
   } else if (fnName === "include" || fnName === "require" || fnName === "include_once" || fnName === "require_once") {
     // Dead in practice -- confirmed directly that plain `include $x;` is a
     // distinct language-construct node (include_expression), never a
@@ -1167,6 +1173,30 @@ function checkResponseFactorySinkPHP(node: SyntaxNode, ctx: EngineCtx, taintMask
 }
 
 /** The body of the function/method lexically enclosing \`node\`, or null (top-level code). */
+/** Before `at`, in its function: `$mac = hash_hmac(..., $payload, ...)` and a `hash_equals(...)` that leaves on mismatch. */
+function hmacVerifiedBeforePHP(at: SyntaxNode, payload: SyntaxNode | undefined): boolean {
+  const v = payload?.type === "variable_name" ? payload.text : null;
+  const body = enclosingFunctionBodyPHP(at);
+  if (!v || !body) return false;
+  const before = body.text.slice(0, at.startIndex - body.startIndex);
+  const esc = v.replace(/\$/g, "\\$");
+  const mac = new RegExp(`\\bhash_hmac\\s*\\(([^;]*${esc}\\b[^;]*)\\)\\s*;`).exec(before);
+  if (!mac || !/if\s*\(\s*!\s*hash_equals\s*\([^;{]*\)\s*\)\s*\{?\s*(?:return|throw|exit|die)\b/.test(before)) return false;
+  // the key must be a secret: not a literal, nor built only from literals in this function (`md5('changeme')`)
+  const key = mac[1].split(",").pop()!.trim();
+  const fromLiterals = (expr: string, depth: number): boolean => {
+    if (/getenv|\$_ENV|\$_SERVER|\benv\s*\(|config\s*\(|constant\s*\(|file_get_contents|random_bytes/i.test(expr)) return false;
+    const vars = [...expr.matchAll(/\$\w+/g)].map(m => m[0]);
+    if (vars.length === 0) return true;
+    if (depth >= 2) return false;
+    return vars.every(name => {
+      const def = new RegExp(`${name.replace(/\$/g, "\\$")}\\s*=\\s*([^;]*);`).exec(before);
+      return !!def && fromLiterals(def[1], depth + 1);
+    });
+  };
+  return !fromLiterals(key, 0);
+}
+
 function enclosingFunctionBodyPHP(node: SyntaxNode): SyntaxNode | null {
   for (let cur: SyntaxNode | null = node.parent; cur; cur = cur.parent) {
     if (cur.type === "function_definition" || cur.type === "method_declaration") return cur.childForFieldName("body") ?? null;

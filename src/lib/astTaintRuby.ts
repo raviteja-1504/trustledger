@@ -245,7 +245,7 @@ const REQUEST_INPUT_MEMBERS = new Set([
 ]);
 /** Rack-style request objects a handler is handed (`def call(req)`, `req = Rack::Request.new(env)`): the members above
  * plus the common accessor names of request wrappers. */
-const RACK_REQUEST_MEMBERS = new Set([...REQUEST_INPUT_MEMBERS, "param", "post", "cookie", "header", "get_header", "body_str", "file", "files", "[]"]);
+const RACK_REQUEST_MEMBERS = new Set([...REQUEST_INPUT_MEMBERS, "param", "post", "post_data", "cookie", "header", "get_header", "body_str", "file", "files", "[]"]);
 const RACK_REQUEST_NAME_RE = /^(?:req|request|rack_request)$/;
 const RACK_REQUEST_CTOR_RE = /^(?:::)?(?:Rack::Request|ActionDispatch::Request|Sinatra::Request|Rack::Request::Helpers)\.new$/;
 const PARAMS_SOURCE = "params";
@@ -335,7 +335,11 @@ const SHELL_CALLS = new Set([
 const FILE_CALL_RE = /^(?:::)?(?:File|IO|Dir|FileUtils)\.\w+[?!]?$/;
 const FILE_SAFE_METHODS = new Set(["basename", "extname", "dirname", "join", "expand_path", "absolute_path", "split", "fnmatch", "fnmatch?", "path", "pwd", "home", "tmpdir"]);
 const PATH_RECEIVER_SINKS = new Set(["read", "binread", "readlines", "write", "binwrite", "open", "each_line", "delete", "unlink", "rmtree", "children", "entries", "opendir"]);
-const SSRF_CALL_RE = /^(?:::)?(?:Net::HTTP\.(?:get|get_response|get_print|post|post_form|start|new)|URI\.open|(?:HTTParty|Faraday|RestClient|Excon|HTTP|Typhoeus|HTTPX|Curl)\.(?:get|post|put|patch|delete|head|options|request|new|follow|via|stream_get)|RestClient::Request\.(?:execute|new)|Typhoeus::Request\.new|Faraday::Connection\.new|OpenURI\.open_uri)$/;
+const HOST_CONNECT_RE = /^(?:::)?(?:Socket\.tcp|TCPSocket\.(?:new|open)|Net::(?:SMTP|FTP|Telnet|POP3|IMAP)\.(?:start|new|open)|Net::LDAP\.new|Redis\.new|Elasticsearch::Client\.new)$/;
+/** Fetch a URL -- or read a local path, which a fixed leading directory keeps it (assessed like any request URL). */
+const URL_OR_PATH_FETCH_RE = /^(?:::)?(?:MiniMagick::Image\.open|WickedPdf\.new\.pdf_from_url)$/;
+const HTTP_CLIENT_CLASS_RE = /^(?:::)?(?:Patron::Session|Async::HTTP::Internet|HTTPClient|Net::HTTP|Faraday::Connection|HTTPX::Session)$/;
+const SSRF_CALL_RE =/^(?:::)?(?:Net::HTTP\.(?:get|get_response|get_print|post|post_form|start|new)|URI\.open|(?:HTTParty|Faraday|RestClient|Excon|HTTP|Typhoeus|HTTPX|Curl)\.(?:get|post|put|patch|delete|head|options|request|new|follow|via|stream_get)|RestClient::Request\.(?:execute|new)|Typhoeus::Request\.new|Faraday::Connection\.new|OpenURI\.open_uri)$/;
 const DESERIAL_CALL_RE = /^(?:::)?(?:Marshal\.(?:load|restore)|YAML\.(?:load|unsafe_load|load_file|unsafe_load_file|load_stream)|Psych\.(?:load|unsafe_load|load_stream)|Oj\.(?:load|object_load)|JSON\.load|Ox\.load)$/;
 const SSTI_CALL_RE = /^(?:::)?(?:ERB\.new|Erubi::Engine\.new|Erubis::Eruby\.new|Haml::Engine\.new|Haml::Template\.new|Slim::Template\.new|Tilt::\w+\.new|Mustache\.render)$/;
 const REFLECTION_METHODS = new Set(["send", "public_send", "__send__", "try", "try!", "instance_variable_get", "instance_variable_set", "method", "public_method", "const_get", "class_variable_get", "class_variable_set"]);
@@ -344,8 +348,9 @@ const EVAL_FUNCTIONS = new Set(["eval", "instance_eval", "class_eval", "module_e
 const MASS_ASSIGN_METHODS = new Set([
   "new", "create", "create!", "build", "update", "update!", "assign_attributes", "attributes=", "update_attributes",
   "update_attributes!", "insert", "insert!", "upsert", "find_or_create_by", "find_or_create_by!", "first_or_create",
-  "first_or_create!", "find_or_initialize_by", "first_or_initialize", "update_columns",
+  "first_or_create!", "find_or_initialize_by", "first_or_initialize", "update_columns", "update_all",
 ]);
+const HASH_WRAPPER_RE = /(?:^|::)(?:\w*Params|\w*Parameters|OpenStruct|Hash|HashWithIndifferentAccess|Struct)$/;
 /** permit(...) keys that let a user change who they are or what they may do. */
 const PRIVILEGED_ATTR_RE = /^(?:admin|is_admin|role|roles|role_id|superuser|is_superuser|staff|permissions?|account_id|user_id|owner_id|organization_id|tenant_id|verified|approved|banned|confirmed_at|password_digest)$/;
 const SECRET_NAME_RE = /secret|token|password|passwd|api_?key|hmac|signature|digest/i;
@@ -417,6 +422,8 @@ interface EngineCtx {
   constLocals?: Map<number, Map<string, ConstVal>>;
   /** Variables holding an unrestricted params hash (permit! / to_unsafe_h / privileged permit). */
   unsafeParamVars: Set<string>;
+  /** variables holding a whole submitted hash (see isWholeRequestHash) */
+  wholeHashVars: Set<string>;
   /** Set by the walker at each sink check (it holds the env): narrows a reported source to its tainted operand. */
   refine?: (source: SyntaxNode, cls: number) => SyntaxNode;
 }
@@ -813,9 +820,45 @@ function isLiteralCollection(n: SyntaxNode, root: SyntaxNode): boolean {
   return false;
 }
 
+const PRIVATE_ADDRESS_EVIDENCE_RE = /private\?|loopback\?|link_local\?|\b10\b|192\.168|\b172\b|\b127\b|169\.254|PRIVATE|INTERNAL|RESERVED|BLOCKED/;
+const RESOLVES_ADDRESS_RE = /\bResolv\.getaddress\b|\bIPSocket\.getaddress\b|\bAddrinfo\.(?:getaddrinfo|ip|tcp)\b/;
+
+/** The host a resolved address came from: `ip = Resolv.getaddress(uri.host)` (also wrapped, `IPAddr.new(...)`, or one
+ * or two locals away, `parts = ip.split('.')`) -> the names the parsed host stands for ([uri, url]). */
+function resolvedHostNamesRb(test: SyntaxNode, depth = 0): string[] | null {
+  for (const id of findAllNodes(test, "identifier")) {
+    const def = unwrapRescueRb(lastAssignment(id.text, id));
+    if (!def || def === test) continue;
+    if (RESOLVES_ADDRESS_RE.test(def.text)) {
+      const hostCall = findAllNodes(def, "call").find(n => /^(?:host|hostname)$/.test(methodNameOf(n)));
+      const names = hostCall ? parsedHostNamesRb(hostCall) : null;
+      if (names?.length) return names;
+    } else if (depth < 2) {
+      const inner = resolvedHostNamesRb(def, depth + 1);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+
+/**
+ * `raise ... if PRIVATE_RANGES.any? { |r| r.include?(ip) }`, `return ... if ip.private? || ip.loopback?`, `return ... if
+ * private` (a flag computed from the address) after `ip = Resolv.getaddress(uri.host)`: the condition is true for an
+ * internal destination, so its FALSE side proves the URL names a public address. A check that allows only internal
+ * addresses leaves the true side, which proves nothing.
+ */
+function resolvedAddressGuardRb(c: SyntaxNode): Guard[] | null {
+  const test = c.type === "identifier" ? unwrapRescueRb(lastAssignment(c.text, c)) : c;
+  if (!test || !PRIVATE_ADDRESS_EVIDENCE_RE.test(test.text)) return null;
+  const names = resolvedHostNamesRb(test);
+  return names ? names.map(name => ({ name, holds: "false" as const, clears: SinkClass.SSRF })) : null;
+}
+
 /** Validation guards a condition proves (true side). Narrow on purpose: a wrong guard hides a real finding. */
 function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
   const c = unwrapParens(cond);
+  const resolved = resolvedAddressGuardRb(c);
+  if (resolved) return resolved;
   if (c.type === "unary" && (c.child(0)?.type === "!" || c.child(0)?.type === "not")) {
     const inner = named(c)[0];
     return inner ? guardsOf(inner, root).map(invert) : [];
@@ -1306,6 +1349,37 @@ function sqlTextArg(call: SyntaxNode): SyntaxNode | null {
   return first;
 }
 
+const STREAM_WRITE_METHODS = new Set(["write", "puts", "print", "printf", "<<", "syswrite"]);
+/** The call that yields block parameter `name` to the block around `at` (`File.open(p, 'a') { |f| ... }` -> File.open). */
+function blockOwnerOfParamRb(name: string, at: SyntaxNode): SyntaxNode | null {
+  for (let p: SyntaxNode | null = at.parent; p; p = p.parent) {
+    if (p.type !== "block" && p.type !== "do_block") continue;
+    const params = p.childForFieldName("parameters");
+    if (params && findAllNodes(params, "identifier").some(i => i.text === name)) return p.parent?.type === "call" ? p.parent : null;
+  }
+  return null;
+}
+function isLogStreamWriteRb(node: SyntaxNode, name: string, recv: SyntaxNode | null): boolean {
+  if (!recv) return /^(?:puts|print|warn)$/.test(name);
+  if (STREAM_WRITE_METHODS.has(name) && /^(?:\$stderr|\$stdout|STDERR|STDOUT)$/.test(recv.text)) return true;
+  if (name === "log" && /^(?:::)?Syslog$/.test(recv.text)) return true;
+  if (recv.type !== "identifier") return false;
+  const owner = blockOwnerOfParamRb(recv.text, node);
+  const ownerCallee = owner ? calleeTextRuby(owner) ?? "" : "";
+  if (name === "log" && /(?:^|::)Syslog\.open$/.test(ownerCallee)) return true;
+  if (!STREAM_WRITE_METHODS.has(name) || !/(?:^|::)File\.open$/.test(ownerCallee)) return false;
+  // File.open(path, 'a') on a path that names a log file (a literal, or a local/constant bound to one)
+  const [path, mode] = positionalArgs(owner!);
+  const pathText = path ? (path.type === "identifier" || path.type === "constant" ? lastAssignment(path.text, path)?.text ?? findConstantValueRb(path) : path.text) : "";
+  return /\blogs?\b|\.log\b/i.test(pathText ?? "") && /^['"]a\+?['"]$/.test(mode?.text ?? "");
+}
+function findConstantValueRb(n: SyntaxNode): string {
+  if (n.type !== "constant") return "";
+  let root: SyntaxNode = n;
+  while (root.parent) root = root.parent;
+  return findAllNodes(root, "assignment").find(a => a.childForFieldName("left")?.text === n.text)?.childForFieldName("right")?.text ?? "";
+}
+
 function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   ctx.refine = (src, cls) => culpritOf(src, cls, env, mask, ctx);
   const name = methodNameOf(node);
@@ -1317,6 +1391,12 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   // ── Log injection: logger.warn("login failed for #{user}") / Rails.logger.info -- a CR/LF forges an entry ──
   if (recv && RB_LOG_METHODS.has(name) && /(?:^|\.|::)(?:@?_?\w*logger|log)$/i.test(recv.text)) {
     for (const a of pos) if (a.type !== "hash" && fireOn(ctx, "log-injection", node, a, mask(a, env), sinkName)) break;
+  }
+  // the process's own log streams and log files: $stderr.write / STDOUT.puts / bare puts, print, warn; appending to a
+  // file whose path names a log (File.open('app.log', 'a') { |f| f.puts(x) }); Syslog.log / s.log in Syslog.open
+  if (isLogStreamWriteRb(node, name, recv)) {
+    const msgs = name === "log" ? pos.slice(1) : pos;
+    for (const a of msgs) if (a.type !== "hash" && fireOn(ctx, "log-injection", node, a, mask(a, env), sinkName)) break;
   }
 
   // ── SQL ──
@@ -1390,7 +1470,15 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── SSRF ──
-  if (SSRF_CALL_RE.test(callee)) {
+  // a connection to a request-chosen host: sockets, mail, FTP, LDAP, Redis, Elasticsearch, URL-fetching renderers
+  if (HOST_CONNECT_RE.test(callee)) {
+    const target = keywordArg(node, "host") ?? keywordArg(node, "url") ?? keywordArg(node, "hosts") ?? pos[0];
+    if (target) fireOn(ctx, "ssrf", node, target, mask(target, env), sinkName);
+  }
+  // `sess = Patron::Session.new; sess.get(url)` / `Async::HTTP::Internet.new.get(url)`: an HTTP client instance
+  const clientType = recv?.type === "identifier" ? ctx.varTypes.get(recv.text) : recv?.type === "call" ? constructedClass(recv) : undefined;
+  const instanceRequest = !!clientType && HTTP_CLIENT_CLASS_RE.test(clientType) && /^(?:get|post|put|patch|delete|head|request|get_content|post_content)$/.test(name);
+  if (SSRF_CALL_RE.test(callee) || instanceRequest || URL_OR_PATH_FETCH_RE.test(callee)) {
     const urlArg = keywordArg(node, "url") ?? pos[0];
     if (urlArg) {
       const parts = decomposeString(resolveUnguarded(urlArg, SinkClass.SSRF, env, mask), ctx);
@@ -1489,10 +1577,19 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── Mass assignment ──
-  if (recv && MASS_ASSIGN_METHODS.has(name)) {
+  // `ActionController::Parameters.new(h)` / `OpenStruct.new(h)` wrap a hash (to permit it, to read it), they write no model
+  if (recv && MASS_ASSIGN_METHODS.has(name) && !(name === "new" && HASH_WRAPPER_RE.test(recv.text))) {
     const a = pos[0];
+    // the attributes hash itself, or a nested-attributes value (`User.new(profile_attributes: req.post_data)`)
+    const args = node.childForFieldName("arguments");
+    const nested = (args ? findAllNodes(args, "pair") : []).map(p => p.childForFieldName("value")).find(v => v && isWholeRequestHash(v, ctx));
     if (a && isUnsafeParams(a, ctx)) emit(ctx, "mass-assignment", node, a.text, `${sinkName}`,
       `Unrestricted request parameters ('${a.text.slice(0, 60)}') are written to the model — permit only the attributes users may set (no permit!/to_unsafe_h, no role/admin/owner keys)`);
+    else if ((a && isWholeRequestHash(a, ctx)) || nested) {
+      const culprit = (a && isWholeRequestHash(a, ctx) ? a : nested)!;
+      emit(ctx, "mass-assignment", node, culprit.text, `${sinkName}`,
+        `The whole submitted hash ('${culprit.text.slice(0, 60)}') is written to the model — any attribute the client names (role, admin, owner) is set; slice or permit the attributes users may change`);
+    }
   }
 
   // ── JWT without verification ──
@@ -1562,6 +1659,23 @@ function permitsPrivileged(text: string): boolean {
 }
 function trackUnsafeParams(name: string, right: SyntaxNode, ctx: EngineCtx) {
   if (isUnsafeParams(right, ctx)) ctx.unsafeParamVars.add(name);
+  if (isWholeRequestHash(right, ctx)) ctx.wholeHashVars.add(name); else ctx.wholeHashVars.delete(name);
+}
+
+/**
+ * The whole hash a client submitted, not one value of it: a Rack/request object's full parameter hash
+ * (`request.POST`, `req.params`, `req.post_data`), a parsed JSON body, or a variable built from one -- kept through
+ * `merge`, `to_h`, `OpenStruct.new(...)` and sub-hash lookups (`data['attributes']`), lost through anything that
+ * picks the keys (`slice`, `select`, `permit`, `except`, ...). Bare Rails `params` is not one: Rails refuses it.
+ */
+const WHOLE_HASH_SOURCE_RE = /\b(?:req|request|rack_request)\.(?:params|POST|GET|parameters|request_parameters|query_parameters|post_data)\b|\bJSON\.parse\s*\(\s*(?:req|request)\.(?:body|raw_post|body_str)\b/;
+const KEY_PICKING_RE = /\.(?:slice|select|filter|filter_map|permit|except|reject|keep_if|delete_if|values_at|fetch_values|transform_values)\b|\.require\s*\(/;
+function isWholeRequestHash(n: SyntaxNode, ctx: EngineCtx): boolean {
+  const t = n.text;
+  if (KEY_PICKING_RE.test(t)) return false;
+  if (WHOLE_HASH_SOURCE_RE.test(t)) return true;
+  // a variable holding one, possibly wrapped or indexed: `form.to_h`, `data['attributes']`, `OpenStruct.new(h)`
+  return [...t.matchAll(/\b([a-z_]\w*)\b/g)].some(m => ctx.wholeHashVars.has(m[1]));
 }
 function isUnsafeParams(n: SyntaxNode, ctx: EngineCtx): boolean {
   const t = n.text;
@@ -1797,6 +1911,7 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
     suppressed, findings: [], seen: new Set(), sticky: new Map(), stickyDirty: false, varTypes: new Map(),
     heredocs: heredocBodies(root), crossFileFacts, localKeys: new Set(all.map(m => m.key).filter((k): k is string => !!k)),
     unsafeParamVars: new Set(),
+    wholeHashVars: new Set(),
     sinatra: /^\s*require\s+["']sinatra["']|<\s*Sinatra::(?:Base|Application)\b/m.test(content),
   };
   buildSummaries(ctx);

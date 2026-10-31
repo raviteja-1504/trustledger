@@ -14,7 +14,7 @@
  */
 
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
-import { charClassClears, delimitedPatternBody, removesLineBreaks } from "./charClass";
+import { anchoredPatternClears, charClassClears, delimitedPatternBody, removesLineBreaks } from "./charClass";
 
 export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs";
 
@@ -172,7 +172,11 @@ const TABLES: Record<SanitizerLang, Table> = {
       // s.gsub(/[\r\n]/, "_") / s.delete("\r\n"): no line break left -- one header line, one log entry
       gsub: (_callee, args) => {
         const body = /^\/(.*)\/[a-z]*$/s.exec((args[0] ?? "").trim())?.[1];
-        return body !== undefined && removesLineBreaks(body) && !/\\[rn]/.test(args[1] ?? "") ? C.HEADER : 0;
+        if (body === undefined) return 0;
+        if (removesLineBreaks(body) && !/\\[rn]/.test(args[1] ?? "")) return C.HEADER;
+        // s.gsub(/[^a-zA-Z0-9_]/, '') keeps only that class: what a value made of those characters alone proves
+        const kept = /^\[\^((?:[^\]\\]|\\.)+)\][+*]?$/.exec(body);
+        return kept && /^(['"])\1$/.test((args[1] ?? "").trim()) ? anchoredPatternClears(`^[${kept[1]}]*$`) ?? 0 : 0;
       },
       delete: (_callee, args) => (/\\r/.test(args[0] ?? "") && /\\n/.test(args[0] ?? "") ? C.HEADER : 0),
       // a quoted / JSON rendering escapes CR and LF
