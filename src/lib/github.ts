@@ -11,6 +11,7 @@ import type { CheckAnnotation } from "./checkAnnotations";
 import { findingMeta } from "./findingCatalog";
 import { DEFAULT_GATE, blockingRisks, blocksMerge, type GateSettings } from "./mergeGate";
 import { readTarGz } from "./tarArchive";
+import type { RawClassicProtection, RawProtection, RawRulesetRule } from "./branchProtection";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -511,6 +512,87 @@ export async function listOpenPullRequests(token: string, owner: string, repo: s
   });
   if (!res.ok) throw new Error(`GitHub GET pulls ${owner}/${repo} failed: ${res.status}`);
   return (await res.json() as GhPull[]).map(toSummary);
+}
+
+/**
+ * The raw protection of a repository's default branch (lib/branchProtection.ts normalises it): its rulesets, and
+ * classic branch protection when the App may read it (404 = none, 403 = not permitted). Never throws: a failure is
+ * returned as `error` so the snapshot says what couldn't be read.
+ */
+export async function readBranchProtection(token: string, owner: string, repo: string): Promise<RawProtection> {
+  const headers = { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  const full = `${owner}/${repo}`;
+  try {
+    const repoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers });
+    if (!repoRes.ok) return { repo: full, branch: null, protected: null, rules: null, classic: "unreadable", error: `repository ${repoRes.status}` };
+    const branch = (await repoRes.json() as { default_branch?: string }).default_branch ?? null;
+    if (!branch) return { repo: full, branch: null, protected: null, rules: null, classic: "unreadable", error: "no default branch" };
+    const b = encodeURIComponent(branch);
+    const [branchRes, rulesRes, classicRes] = await Promise.all([
+      fetch(`${GITHUB_API}/repos/${owner}/${repo}/branches/${b}`, { headers }),
+      fetch(`${GITHUB_API}/repos/${owner}/${repo}/rules/branches/${b}?per_page=100`, { headers }),
+      fetch(`${GITHUB_API}/repos/${owner}/${repo}/branches/${b}/protection`, { headers }),
+    ]);
+    const isProtected = branchRes.ok ? !!(await branchRes.json() as { protected?: boolean }).protected : null;
+    const rules = rulesRes.ok ? await rulesRes.json() as RawRulesetRule[] : null;
+    const classic: RawProtection["classic"] = classicRes.ok ? await classicRes.json() as RawClassicProtection
+      : classicRes.status === 404 ? "none" : "unreadable";
+    return { repo: full, branch, protected: isProtected, rules, classic };
+  } catch (err) {
+    return { repo: full, branch: null, protected: null, rules: null, classic: "unreadable", error: err instanceof Error ? err.message : "error" };
+  }
+}
+
+/** A pull request merged in a period: the change-management register's population (lib/changeRegister.ts). */
+export interface MergedPullRequest {
+  number: number; title: string; author: string | null; merged_at: string; merged_by: string | null; head_sha: string; url: string;
+}
+
+/**
+ * Pull requests merged between `since` and `until`, newest first. Closed pull requests are read most-recently-updated
+ * first and paging stops at the first page whose last item was updated before `since` (a merge updates the pull
+ * request, so nothing merged in the period comes later). `truncated` is set when `max` merged pull requests were
+ * collected before the pages ran out -- the population is then incomplete and the caller must say so.
+ */
+export async function listMergedPullRequests(
+  token: string, owner: string, repo: string, since: string, until: string, max = 1000,
+): Promise<{ pulls: MergedPullRequest[]; truncated: boolean }> {
+  type GhClosed = { number: number; title: string; user?: { login?: string } | null; merged_at: string | null; updated_at: string;
+    merged_by?: { login?: string } | null; head: { sha: string }; html_url: string };
+  const pulls: MergedPullRequest[] = [];
+  for (let page = 1; page <= 50; page++) {
+    const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`, {
+      headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!res.ok) throw new Error(`GitHub GET closed pulls ${owner}/${repo} failed: ${res.status}`);
+    const batch = await res.json() as GhClosed[];
+    for (const p of batch) {
+      if (!p.merged_at || p.merged_at < since || p.merged_at > until) continue;
+      pulls.push({ number: p.number, title: p.title, author: p.user?.login ?? null, merged_at: p.merged_at,
+        merged_by: p.merged_by?.login ?? null, head_sha: p.head.sha, url: p.html_url });
+      if (pulls.length >= max) return { pulls, truncated: true };
+    }
+    if (batch.length < 100 || batch[batch.length - 1].updated_at < since) break;
+  }
+  return { pulls, truncated: false };
+}
+
+/** A pull request's reviews (who approved, requested changes or commented; when; on which commit). */
+export async function listPullReviews(token: string, owner: string, repo: string, prNumber: number): Promise<Array<{
+  reviewer: string | null; state: string; submitted_at: string | null; commit_id: string | null;
+}>> {
+  type GhReview = { user?: { login?: string } | null; state: string; submitted_at?: string | null; commit_id?: string | null };
+  const out: Array<{ reviewer: string | null; state: string; submitted_at: string | null; commit_id: string | null }> = [];
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`, {
+      headers: { Authorization: `token ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (!res.ok) throw new Error(`GitHub GET reviews ${owner}/${repo}#${prNumber} failed: ${res.status}`);
+    const batch = await res.json() as GhReview[];
+    out.push(...batch.map(r => ({ reviewer: r.user?.login ?? null, state: r.state, submitted_at: r.submitted_at ?? null, commit_id: r.commit_id ?? null })));
+    if (batch.length < 100) break;
+  }
+  return out;
 }
 
 let appInfoCache: { slug: string; html_url: string } | null = null;

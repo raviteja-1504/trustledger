@@ -49,7 +49,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
 
   // The public site: demo, evidence, trust, roadmap, every docs page and article
   const site: MetadataRoute.Sitemap = [
-    ...["/demo", "/benchmarks", "/trust", "/roadmap", "/blog", "/security", "/privacy"].map(p => ({ url: `${APP_URL}${p}`, lastModified: now, changeFrequency: "weekly" as const, priority: 0.8 })),
+    ...["/demo", "/benchmarks", "/trust", "/verify", "/roadmap", "/blog", "/security", "/privacy"].map(p => ({ url: `${APP_URL}${p}`, lastModified: now, changeFrequency: "weekly" as const, priority: 0.8 })),
     ...DOCS_PAGES.map(p => ({ url: `${APP_URL}/docs/${p.slug}`, lastModified: now, changeFrequency: "monthly" as const, priority: 0.7 })),
     ...POSTS.map(p => ({ url: `${APP_URL}/blog/${p.slug}`, lastModified: p.date, changeFrequency: "yearly" as const, priority: 0.6 })),
   ];

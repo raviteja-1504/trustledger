@@ -126,6 +126,23 @@ function run() {
     expect(findings(content)).toHaveLength(0);
   });
 
+  it("Object.assign returns its target: a plain object only when the target is an object literal", () => {
+    const element = `
+function save(href) {
+  const a = Object.assign(document.createElement("a"), { href, download: "x.csv" });
+  a.click();
+}
+`;
+    expect(findings(element)).toHaveLength(0);
+    const literal = `
+function run(extra) {
+  const opts = Object.assign({}, extra);
+  return opts.flatten();
+}
+`;
+    expect(findings(literal)).toHaveLength(1);
+  });
+
   it("does not flag real String/JSON/Math static and instance methods", () => {
     const content = `
 function run(x) {

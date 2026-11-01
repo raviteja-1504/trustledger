@@ -39,14 +39,14 @@ const reportData = {
   gaps: [{ repo: "acme/api", pr_number: 7, file_path: "src/pay.ts", risk_score: "CRITICAL", ai_percentage: 0.8 }],
   compliance: [
     { control_id: "CC8.1", control_name: "Change management", status: "pass", score: 100, checks: [{ label: "Reviewed", status: "pass", summary: "All reviewed", gaps: [] }] },
-    { control_id: "CC7.1", control_name: "Monitoring", status: "fail", score: 20, checks: [{ label: "Secrets", status: "fail", summary: "1 open", gaps: ["src/pay.ts"] }] },
+    { control_id: "CC7.1", control_name: "Monitoring", status: "fail", score: 20, checks: [{ label: "Secrets", basis: "current", status: "fail", summary: "1 open", gaps: ["src/pay.ts"] }] },
   ],
   scans: [], attestations: [], secrets: [],
 };
 
 describe("PDF elements", () => {
   it("the whole SOC 2 report, handed over React 19-style, comes out as renderer-React host elements only", () => {
-    const tree = asReact19(React.createElement(buildReportDocument, { data: reportData as never, signature: "f".repeat(64) }));
+    const tree = asReact19(React.createElement(buildReportDocument, { data: reportData as never, signature: { algorithm: "HMAC-SHA256", value: "f".repeat(64), record_sha256: "e".repeat(64) } }));
     const out = toRendererElements(tree, loadRendererReact());
     const types = new Set<unknown>();
     let text = "";
@@ -65,6 +65,77 @@ describe("PDF elements", () => {
     expect(types).toEqual(expect.objectContaining(new Set(["DOCUMENT", "PAGE", "VIEW", "TEXT"])));
     expect(text).toContain("ABC-123");
     expect(text).toContain("CC7.1");
+    // a state read at generation time is marked as such, period evidence isn't
+    expect(text).toMatch(/Secrets\s+\(as of 1 Oct 2026, not across the period\)/);
+    expect(text).not.toMatch(/Reviewed\s+\(as of/);
+  });
+
+  describe("change-management register page", () => {
+    const { buildRegister, registerForReport } = jest.requireActual("@/lib/changeRegister");
+    const pull = (number: number) => ({ repo: "acme/api", number, title: `PR ${number}`, author: "alice",
+      merged_at: `2026-09-1${number}T12:00:00Z`, merged_by: "carol", head_sha: `sha${number}`, url: `u${number}` });
+    const register = registerForReport(buildRegister({
+      period_start: "2026-09-01T00:00:00Z", period_end: "2026-10-01T00:00:00Z", pulls: [pull(1), pull(2)],
+      reviews: new Map([["acme/api#1", [{ reviewer: "bob", state: "APPROVED", submitted_at: "2026-09-11T10:00:00Z", commit_id: "sha1" }]]]),
+      scans: [{ scan_id: "s1", repo: "acme/api", pr_number: 1, commit_sha: "sha1", created_at: "2026-09-11T09:00:00Z", overall_risk: "LOW" }],
+      riskyFiles: [], signoffs: [],
+      coverage: [{ repo: "acme/api", read: true, pulls: 2 }, { repo: "acme/web", read: false, pulls: 0, reason: "GitHub App has no access" }],
+    }), "ABC-123", 25);
+    const textOf = (data: object) => {
+      const out = toRendererElements(asReact19(React.createElement(buildReportDocument, { data: { ...reportData, framework_id: "soc2", ...data } as never,
+        signature: { algorithm: "HMAC-SHA256", value: "f".repeat(64), record_sha256: "e".repeat(64) } })), loadRendererReact());
+      let text = "";
+      const walk = (n: unknown): void => {
+        if (Array.isArray(n)) return n.forEach(walk);
+        if (typeof n === "string" || typeof n === "number") { text += `${n}`; return; }
+        if (n && typeof n === "object") walk((n as { props: { children?: unknown } }).props.children);
+      };
+      walk(out);
+      return text;
+    };
+
+    it("shows the summary, the incomplete population, the exceptions and the seeded sample, and renumbers what follows", () => {
+      const text = textOf({ change_register: register });
+      expect(text).toContain("5. Change-Management Register (CC8.1)");
+      expect(text).toContain("POPULATION INCOMPLETE");
+      expect(text).toContain("acme/web: GitHub App has no access");
+      expect(text).toContain("Exceptions (1)");
+      expect(text).toContain("acme/api#2");
+      expect(text).toContain("Merged without an approval from someone other than the author");
+      expect(text).toContain("Auditor sample (2 of 2)");
+      expect(text).toContain("seed ABC-123");
+      expect(text).toContain("acme/api#1");   // no exceptions: listed only in the sample
+      expect(text).toContain("6. Attestation Evidence");
+    });
+
+    it("prints the branch-protection snapshot with what couldn't be read", () => {
+      const { normalizeProtection } = jest.requireActual("@/lib/branchProtection");
+      const text = textOf({ change_register: { ...register, branch_protection: [
+        normalizeProtection({ repo: "acme/api", branch: "main", protected: true, rules: [], classic: "unreadable" }),
+      ] } });
+      expect(text).toContain("How merging is protected (default branch, as of report generation)");
+      expect(text).toContain("acme/api (main)");
+      expect(text).toContain("Unknown");
+      expect(text).toMatch(/acme\/api: Classic branch protection is on, but the TrustLedger GitHub App can't read its settings/);
+    });
+
+    it("the framework view prints under Control Evidence", () => {
+      const { frameworkView } = jest.requireActual("@/lib/frameworkViews");
+      const { FRAMEWORKS } = jest.requireActual("@/lib/controlEvidence");
+      const iso = FRAMEWORKS.find((f: { id: string }) => f.id === "iso27001");
+      const text = textOf({ framework_id: "iso27001", framework_view: frameworkView(iso, []) });
+      expect(text).toContain("4b. Statement of Applicability input (Annex A 8, development)");
+      expect(text).toContain("Access to source code");
+      const pci = FRAMEWORKS.find((f: { id: string }) => f.id === "pcidss");
+      expect(textOf({ framework_id: "pcidss", framework_view: frameworkView(pci, []) })).toContain("Attacks on cryptography usage");
+    });
+
+    it("a register that couldn't be built is stated; without one the sections keep their numbers", () => {
+      expect(textOf({ change_register: { error: "GitHub could not be read" } })).toContain("GitHub could not be read");
+      const without = textOf({});
+      expect(without).not.toContain("Change-Management Register");
+      expect(without).toContain("5. Attestation Evidence");
+    });
   });
 
   it("keeps keys, props, fragments and primitives; calls function components", () => {

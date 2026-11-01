@@ -16,6 +16,7 @@ import { isActive, type TriageDecision } from "./findingLifecycle";
 import { confidenceLevel } from "./confidence";
 import { findingMeta } from "./findingCatalog";
 import { EXPORT_SIG_ALGO, signEd25519, verifyEd25519, keyIdMatches, type Ed25519Signature } from "./exportSigning";
+import { canonicalJson } from "./canonicalJson";
 
 /** What the signed bytes are, named inside every signature so a verifier reconstructs them exactly. */
 const SIGNED_CONTENT_NOTE = "canonical JSON of `record`: object keys sorted, no whitespace";
@@ -102,12 +103,7 @@ export function buildTrustRecord(input: TrustRecordInput) {
 export type TrustRecord = ReturnType<typeof buildTrustRecord>;
 
 /** JSON with object keys sorted at every level and no whitespace -- the exact bytes that are signed. */
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj).filter(k => obj[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
-}
+export { canonicalJson };
 
 export function signTrustRecord(record: TrustRecord, key: string): string {
   return crypto.createHmac("sha256", key).update(canonicalJson(record)).digest("hex");

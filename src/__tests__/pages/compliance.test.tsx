@@ -65,6 +65,41 @@ describe("Compliance evidence page", () => {
     expect(screen.getByText(/A SOC 2 report can only be issued by a licensed CPA firm/)).toBeInTheDocument();
   });
 
+  it("each control carries its write-up; partial coverage and what the evidence doesn't cover are stated", async () => {
+    const { FRAMEWORKS } = jest.requireActual("@/lib/controlEvidence");
+    const soc2 = FRAMEWORKS.find((f: { id: string }) => f.id === "soc2");
+    render(<CompliancePage />);
+    await screen.findByText("Changes are authorised, tested and approved");
+    const cc81 = soc2.controls.find((c: { id: string }) => c.id === "CC8.1");
+    expect(screen.getByText(cc81.statement)).toBeInTheDocument();
+    expect(screen.getAllByText("Owner").length).toBe(soc2.controls.length);
+    const cc61 = soc2.controls.find((c: { id: string }) => c.id === "CC6.1");
+    expect(screen.getByText(cc61.partial)).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Not covered by this evidence" })).getAllByRole("listitem")).toHaveLength(soc2.not_covered.length);
+    // CC8.1's checks are period evidence; CC7.1's fix deadlines and secrets are read as they stand now
+    expect(screen.getAllByText("Over the period").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("At collection time").length).toBeGreaterThan(0);
+    // only the change-control card points to the register
+    const link = screen.getByRole("link", { name: /in the change register/ });
+    expect(link).toHaveAttribute("href", "/reports?fw=SOC2");
+    expect(screen.getAllByRole("link", { name: /in the change register/ })).toHaveLength(1);
+  });
+
+  it("the evidence download carries the write-ups and what isn't covered", async () => {
+    const blobs: Blob[] = [];
+    URL.createObjectURL = jest.fn((b: Blob) => { blobs.push(b); return "blob:x"; });
+    URL.revokeObjectURL = jest.fn();
+    const click = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<CompliancePage />);
+    await screen.findByText("Changes are authorised, tested and approved");
+    fireEvent.click(screen.getByRole("button", { name: "Download evidence (JSON)" }));
+    const pkg = JSON.parse(await new Promise<string>(res => { const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsText(blobs[0]); }));
+    expect(pkg.not_covered.length).toBeGreaterThan(2);
+    expect(pkg.controls.find((c: { id: string }) => c.id === "CC8.1")).toMatchObject({ statement: expect.any(String), owner: expect.any(String), test: expect.any(String) });
+    expect(pkg.controls.find((c: { id: string }) => c.id === "CC6.1").partial_coverage).toEqual(expect.any(String));
+    click.mockRestore();
+  });
+
   it("shows PCI DSS when the org has a cardholder data environment", async () => {
     pci = true;
     render(<CompliancePage />);

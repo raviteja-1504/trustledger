@@ -143,7 +143,7 @@ export const api = {
 
   // Resolves with the response whatever its status (rejects only on a network failure): the caller reads the
   // status and error code to say what went wrong (signing not configured, rate limited, no permission...).
-  generateReport: (body: { org: string; period_start: string; period_end: string; framework: string }): Promise<Response> =>
+  generateReport: (body: { org: string; period_start: string; period_end: string; framework: string; format?: "pdf" | "bundle" }): Promise<Response> =>
     getToken().then(token =>
       fetch("/api/report", {
         method: "POST",

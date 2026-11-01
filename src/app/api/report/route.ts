@@ -14,6 +14,13 @@ import { collectEvidence } from "@/lib/evidenceEngine";
 import crypto from "crypto";
 import { logger } from "@/lib/logger";
 import { reportServerError } from "@/lib/serverErrors";
+import { signEd25519 } from "@/lib/exportSigning";
+import { canonicalJson } from "@/lib/trustRecord";
+import type { ReportSignature } from "@/lib/reportPDF";
+import { loadChangeRegister } from "@/lib/changeRegisterLoader";
+import { REGISTER_CONTROL, registerForReport, type ReportChangeRegister } from "@/lib/changeRegister";
+import { frameworkById } from "@/lib/controlEvidence";
+import { frameworkView } from "@/lib/frameworkViews";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -31,6 +38,8 @@ export async function POST(req: NextRequest) {
     framework:    string;   // SOC2 | ISO27001 | PCIDSS | AIGOV (EUAI accepted → AIGOV)
     period_start: string;
     period_end:   string;
+    /** "pdf" (default): the PDF itself; "bundle": JSON with the PDF (base64) and its signed evidence record. */
+    format?:      "pdf" | "bundle";
   };
 
   const db = createServiceClient();
@@ -115,6 +124,22 @@ export async function POST(req: NextRequest) {
   // below, so "the report an auditor was handed" is traceable to one record.
   const reportId = crypto.randomUUID().toUpperCase();
 
+  // The change-management register for the frameworks with a change-control criterion: every pull request merged in
+  // the period, and the auditor sample drawn with this report's id as its seed (anyone with the record re-draws it).
+  // A register that can't be built is stated in the report, not left out silently.
+  let changeRegister: ReportChangeRegister | undefined;
+  if (REGISTER_CONTROL[evidence.framework.toLowerCase()]) {
+    try {
+      changeRegister = registerForReport(await loadChangeRegister(db, org_id, body.period_start, body.period_end), reportId);
+    } catch (err) {
+      logger.error("Report change register failed", { org_id, detail: err instanceof Error ? err.message : String(err) });
+      changeRegister = { error: "The change register could not be built when this report was generated (GitHub or TrustLedger's records could not be read)." };
+    }
+  }
+
+  const frameworkDef = frameworkById(evidence.framework.toLowerCase());
+  const fwView = frameworkDef ? frameworkView(frameworkDef, evidence.controls) : null;
+
   // Build report payload
   const reportData = {
     report_id:     reportId,
@@ -144,24 +169,35 @@ export async function POST(req: NextRequest) {
     gaps:           gapFiles,
     compliance:     evidence.controls.map(c => ({
       control_id: c.control_id, control_name: c.control_name, status: c.status, score: c.score,
-      checks: c.checks.map(k => ({ label: k.label, status: k.status, summary: k.summary, gaps: k.gaps })),
+      statement: c.statement, owner: c.owner, frequency: c.frequency, test: c.test, ...(c.partial ? { partial: c.partial } : {}),
+      checks: c.checks.map(k => ({ label: k.label, basis: k.basis, status: k.status, summary: k.summary, gaps: k.gaps })),
     })),
-    scans:        scans ?? [],
+    not_covered:    evidence.not_covered,
+    // the framework's own working form: ISO SoA input, PCI 6.2.4 attack classes, AI governance mappings
+    ...(fwView ? { framework_view: fwView } : {}),
+    ...(changeRegister ? { change_register: changeRegister } : {}),
+    scans:       scans ?? [],
     attestations: attestations ?? [],
     secrets:      secrets ?? [],
   };
 
-  // Real signature over the exact report content -- same pattern as
-  // /api/export/signed: HMAC-SHA256, same already-configured signing key,
-  // honestly labeled. This is what replaced the Reports page's fabricated
-  // "SHA-256 with RSA-4096" / fake PGP block in the on-screen preview --
-  // this is the genuine artifact those claims should have described.
-  const signingKey = process.env.EXPORT_SIGNING_KEY ?? process.env.CRON_SECRET;
-  if (!signingKey) {
-    return NextResponse.json({ error: "report_signing_not_configured", detail: "Set EXPORT_SIGNING_KEY or CRON_SECRET" }, { status: 503 });
+  // The signature covers the report's evidence record -- the exact data the PDF is rendered from -- as canonical JSON
+  // (keys sorted, no whitespace), the same format as a Trust Record. The record goes to the requester with the PDF,
+  // so an auditor can verify it independently: with the Ed25519 public key published at
+  // /.well-known/trustledger-export-signing-key (scripts/verify-trust-record.mjs), and match it to the PDF through
+  // the record's SHA-256 printed there. HMAC (a shared secret, checkable only by us) is the fallback when no Ed25519
+  // key is configured; a cron secret is never used as a signing key.
+  const canonical = canonicalJson(reportData);
+  const recordSha256 = crypto.createHash("sha256").update(canonical).digest("hex");
+  const ed = signEd25519(canonical, "canonical JSON of `record` (the report's evidence): object keys sorted at every level, no whitespace");
+  const hmacKey = process.env.EXPORT_SIGNING_KEY;
+  if (!ed && !hmacKey) {
+    return NextResponse.json({ error: "report_signing_not_configured", detail: "Set EXPORT_SIGNING_PRIVATE_KEY (Ed25519) or EXPORT_SIGNING_KEY" }, { status: 503 });
   }
-  const contentToSign = JSON.stringify(reportData);
-  const signature = crypto.createHmac("sha256", signingKey).update(contentToSign).digest("hex");
+  const sig: ReportSignature = ed
+    ? { ...ed, record_sha256: recordSha256 }
+    : { algorithm: "HMAC-SHA256", value: crypto.createHmac("sha256", hmacKey!).update(canonical).digest("hex"), record_sha256: recordSha256 };
+  const signature = sig.value;
 
   // Generate PDF using @react-pdf/renderer
   try {
@@ -171,7 +207,7 @@ export async function POST(req: NextRequest) {
     const { toRendererElements, loadRendererReact } = await import("@/lib/pdfElements");
 
     // Rebuilt with the renderer's own React: the bundled one's elements are rejected by it (see lib/pdfElements.ts).
-    const doc    = toRendererElements(createElement(buildReportDocument, { data: reportData, signature }), loadRendererReact());
+    const doc    = toRendererElements(createElement(buildReportDocument, { data: reportData, signature: sig }), loadRendererReact());
     const buffer = await renderToBuffer(doc as Parameters<typeof renderToBuffer>[0]);
 
     await writeAuditLog(db, {
@@ -180,7 +216,10 @@ export async function POST(req: NextRequest) {
       actor_id:      user_id ?? null,
       actor_email:   actor_email ?? null,
       resource_type: "report",
-      payload: { framework: body.framework, period_start: body.period_start, period_end: body.period_end, signature },
+      payload: {
+        framework: body.framework, period_start: body.period_start, period_end: body.period_end, signature,
+        signature_algorithm: sig.algorithm, record_sha256: recordSha256, ...("key_id" in sig ? { key_id: sig.key_id } : {}),
+      },
     });
 
     // Structured, queryable record (Reports page's "Recent Reports" list)
@@ -197,12 +236,23 @@ export async function POST(req: NextRequest) {
     const filename = `trustledger-${body.framework.toLowerCase()}-${body.period_start.slice(0,7)}.pdf`;
     const uint8    = new Uint8Array(buffer);
 
+    // format "bundle": the PDF and its signed evidence record in one response (the Reports page saves both). The
+    // record is { record, signature }, verifiable offline with scripts/verify-trust-record.mjs.
+    if (body.format === "bundle") {
+      return NextResponse.json({
+        report_id: reportId, filename,
+        pdf_base64: Buffer.from(uint8).toString("base64"),
+        evidence: { record: reportData, signature: sig },
+      }, { headers: { "Cache-Control": "private, no-store" } });
+    }
     return new NextResponse(uint8, {
       headers: {
         "Content-Type":            "application/pdf",
         "Content-Disposition":     `attachment; filename="${filename}"`,
         "Content-Length":          String(uint8.length),
         "X-TrustLedger-Signature": signature,
+        "X-TrustLedger-Signature-Algorithm": sig.algorithm,
+        "X-TrustLedger-Record-SHA256": recordSha256,
       },
     });
 

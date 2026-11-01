@@ -16,9 +16,12 @@ import { useRole } from "@/lib/roles";
 import { fileReviewHref } from "@/lib/reviewLinks";
 import { BrandWordmark } from "@/components/BrandLogo";
 import PeriodAttestations from "@/components/reports/PeriodAttestations";
+import ChangeRegister from "@/components/reports/ChangeRegister";
+import FrameworkView from "@/components/reports/FrameworkView";
+import { REGISTER_CONTROL } from "@/lib/changeRegisterShared";
 import {
-  STATUS_LABEL, frameworkById, normalizeFrameworkId,
-  type CheckResult, type ComplianceFacts, type EvidenceStatus, type FrameworkDef as EvidenceFramework,
+  BASIS_LABEL, STATUS_LABEL, frameworkById, normalizeFrameworkId,
+  type CheckResult, type ComplianceFacts, type ControlWriteUp, type EvidenceStatus, type FrameworkDef as EvidenceFramework,
 } from "@/lib/controlEvidence";
 
 type EvidenceFrameworkId = EvidenceFramework["id"];
@@ -53,6 +56,7 @@ interface FwDef {
   standard:    string;
   tagline:     string;
   scopeNote:   string;          // explicit "what this does / doesn't cover" disclaimer
+  notCovered:  readonly string[]; // the framework's areas this evidence doesn't reach
   color:       string;          // primary hex
   colorDark:   string;
   gradientCss: string;
@@ -61,7 +65,7 @@ interface FwDef {
   icon:        ReactNode;
 }
 
-const FW_STYLE: Record<Framework, Omit<FwDef, "shortName" | "fullName" | "standard" | "scopeNote">> = {
+const FW_STYLE: Record<Framework, Omit<FwDef, "shortName" | "fullName" | "standard" | "scopeNote" | "notCovered">> = {
   "SOC 2": {
     tagline:     "Change management & vulnerability management evidence",
     color:       "#6366f1",
@@ -122,7 +126,7 @@ const FW_STYLE: Record<Framework, Omit<FwDef, "shortName" | "fullName" | "standa
 
 const FW: Record<Framework, FwDef> = Object.fromEntries(FRAMEWORKS.map(k => {
   const def = frameworkById(EVIDENCE_ID[k])!;
-  return [k, { ...FW_STYLE[k], shortName: k, fullName: def.name, standard: def.standard, scopeNote: def.scope }];
+  return [k, { ...FW_STYLE[k], shortName: k, fullName: def.name, standard: def.standard, scopeNote: def.scope, notCovered: def.not_covered }];
 })) as Record<Framework, FwDef>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -233,7 +237,7 @@ function AIPctBar({ raw }: { raw: number }) {
 interface EvidencePackageView {
   framework: string;
   status_counts: Record<EvidenceStatus, number>;
-  controls: Array<{ control_id: string; control_name: string; status: EvidenceStatus; checks: CheckResult[] }>;
+  controls: Array<{ control_id: string; control_name: string; status: EvidenceStatus; checks: CheckResult[] } & Partial<ControlWriteUp>>;
   facts: ComplianceFacts;
 }
 
@@ -703,12 +707,27 @@ function ControlEvidenceSection({ evidence, failed, color, accentBg }: {
             </div>
             <div className="px-4 py-3.5 space-y-2.5 bg-white">
               <p className="text-xs font-bold text-gray-800 leading-snug">{c.control_name}</p>
+              {/* the control as an auditor writes it up: statement, owner, frequency, the test the evidence supports */}
+              {c.statement && (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[10px] leading-relaxed">
+                  <dt className="font-semibold text-gray-500">Control</dt><dd className="text-gray-700">{c.statement}</dd>
+                  <dt className="font-semibold text-gray-500">Owner</dt><dd className="text-gray-700">{c.owner}</dd>
+                  <dt className="font-semibold text-gray-500">Frequency</dt><dd className="text-gray-700">{c.frequency}</dd>
+                  <dt className="font-semibold text-gray-500">Test</dt><dd className="text-gray-700">{c.test}</dd>
+                </dl>
+              )}
+              {c.partial && (
+                <p className="text-[10px] rounded-lg px-3 py-2 border border-amber-200 bg-amber-50 text-amber-900">
+                  <span className="font-bold">Partial coverage:</span> {c.partial}
+                </p>
+              )}
               {c.checks.map(k => (
                 <div key={k.key} className="rounded-lg px-3 py-2" style={{ background:accentBg }}>
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] font-bold text-gray-700">{k.label}</p>
                     <span className="text-[9px] font-bold" style={{ color: STATUS_STYLE[k.status].textColor }}>{STATUS_LABEL[k.status]}</span>
                   </div>
+                  <p className={`text-[9px] font-semibold ${k.basis === "current" ? "text-sky-700" : "text-gray-400"}`}>{BASIS_LABEL[k.basis]}</p>
                   <p className="text-[10px] text-gray-600 leading-relaxed mt-0.5">{k.summary}</p>
                   {k.gaps.map(g => (
                     <p key={g} className="text-[10px] font-semibold text-amber-800 mt-1">Gap: {g}</p>
@@ -782,8 +801,10 @@ function ReportReferenceBlock({ id, fw, start, end, org, generatedBy }: {
             <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
           </svg>
           <p className="text-[10px] text-slate-400 leading-relaxed">
-            This on-screen preview is not signed. Use <span className="text-indigo-400 font-semibold">Generate Report</span> to
-            download a PDF with a real HMAC-SHA256 signature over its exact contents.
+            This on-screen preview is not signed. <span className="text-indigo-400 font-semibold">Generate Report</span> downloads
+            the PDF and its evidence record (JSON). The record is signed with TrustLedger&apos;s Ed25519 key, whose public half
+            is published at /.well-known/trustledger-export-signing-key, so anyone can verify it on the{" "}
+            <Link href="/verify" className="text-indigo-400 underline">Verify page</Link>; the PDF prints the record&apos;s SHA-256.
           </p>
         </div>
       </div>
@@ -808,6 +829,9 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
   // letterhead, the Report Reference section, and the footer, unlike the
   // two independently-generated fake ids this replaced.
   const reportId = useMemo(() => crypto.randomUUID().toUpperCase(), []);
+  const registerControl = REGISTER_CONTROL[EVIDENCE_ID[fw]];
+  // the register is section 5 when the framework has one; the sections after it move down one
+  const n = registerControl ? 1 : 0;
 
   return (
     <div id="report-print-area" className="rounded-2xl overflow-hidden border border-gray-200 min-w-[660px]"
@@ -881,6 +905,14 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
             Scope &amp; Limitations
           </p>
           <p className="text-xs text-gray-700 leading-relaxed">{def.scopeNote}</p>
+          {def.notCovered.length > 0 && (
+            <>
+              <p className="text-[10px] font-black uppercase tracking-widest mt-3 mb-1" style={{ color: def.colorDark }}>Not covered by this evidence</p>
+              <ul className="list-disc pl-4 space-y-0.5">
+                {def.notCovered.map(n => <li key={n} className="text-[11px] text-gray-600 leading-relaxed">{n}</li>)}
+              </ul>
+            </>
+          )}
         </div>
 
         {/* 1. Executive Summary */}
@@ -915,38 +947,52 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
         <section>
           <SectionHead num={4} title="Control Evidence" color={def.color} />
           <ControlEvidenceSection evidence={evidence} failed={evidenceFailed} color={def.color} accentBg={def.accentBg} />
+          {evidence && (
+            <div className="mt-6">
+              <FrameworkView fw={frameworkById(EVIDENCE_ID[fw])!} controls={evidence.controls} />
+            </div>
+          )}
         </section>
 
-        {/* 5. Report Reference */}
+        {/* 5. Change-Management Register (frameworks with a change-control criterion) */}
+        {registerControl && (
+          <section>
+            <SectionHead num={5} title={`Change-Management Register (${registerControl})`} color={def.color} />
+            <ChangeRegister start={start} end={end} control={registerControl} color={def.color} />
+          </section>
+        )}
+
+        {/* Report Reference */}
         <section>
-          <SectionHead num={5} title="Report Reference" color={def.color} />
+          <SectionHead num={5 + n} title="Report Reference" color={def.color} />
           <ReportReferenceBlock id={reportId} fw={fw} start={start} end={end} org={org} generatedBy={generatedBy} />
         </section>
 
-        {/* 6. Management Assertion */}
+        {/* Management Assertion */}
         <section>
-          <SectionHead num={6} title="Management Assertion" color={def.color} />
+          <SectionHead num={6 + n} title="Evidence Summary for Management" color={def.color} />
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-100" style={{ background:`${def.accentBg}` }}>
-              <p className="text-xs font-bold text-gray-800">Management Representation Letter</p>
+              <p className="text-xs font-bold text-gray-800">Management review of this evidence</p>
               <p className="text-[10px] text-gray-500 mt-0.5">
                 For the period {start} to {end} · {def.standard}
               </p>
             </div>
             <div className="px-6 py-5 space-y-4 bg-white">
+              {/* Not a SOC 2 / ISO management assertion: that covers the whole system and is the organisation's own
+                  statement to its auditor. This records that management reviewed the evidence for the controls in scope. */}
               <p className="text-xs text-gray-700 leading-relaxed">
-                Management of <strong>{org}</strong> asserts that, to the best of its knowledge and belief,
-                the controls described in this report were suitably designed and operating effectively throughout
-                the period <strong>{start}</strong> to <strong>{end}</strong> with respect to the specific
-                {" "}{def.shortName} controls listed in Control Evidence above, except for the gaps recorded there.
-                This assertion does not extend to any {def.shortName} requirement outside that scope — see
-                Scope &amp; Limitations at the top of this report.
+                Management of <strong>{org}</strong> has reviewed the evidence in this report for the {def.shortName}
+                {" "}controls listed under Control Evidence, for the period <strong>{start}</strong> to <strong>{end}</strong>,
+                including the gaps and exceptions recorded there. This is a review of evidence for those controls only;
+                it is not a management assertion over the whole {def.shortName} scope and does not replace the
+                independent audit or certification described under Scope &amp; Limitations.
               </p>
               <p className="text-xs text-gray-700 leading-relaxed">
                 Pull requests in connected repositories were scanned automatically, and reviewer sign-offs on
                 high-risk files were recorded with the reviewer&apos;s identity. The scan, sign-off and audit-log
-                records summarised in this report are the evidence base for this assertion; the downloaded PDF
-                additionally carries a cryptographic signature over its exact contents.
+                records summarised in this report are the evidence base for this review; the downloaded report comes
+                with its evidence record, signed so it can be checked independently.
               </p>
               <div className="grid grid-cols-2 gap-6 pt-4 border-t border-gray-100">
                 <div>
@@ -966,9 +1012,9 @@ function ReportDocument({ data, fw, start, end, violationStatuses, org, generate
           </div>
         </section>
 
-        {/* 7. Gap Analysis & Remediation Status */}
+        {/* Gap Analysis & Remediation Status */}
         <section>
-          <SectionHead num={7} title="Gap Analysis &amp; Remediation" color={def.color} />
+          <SectionHead num={7 + n} title="Gap Analysis &amp; Remediation" color={def.color} />
           <div className="space-y-3">
             {evidenceGaps.length > 0 && (
               <div className="rounded-xl border border-amber-200 overflow-hidden">
@@ -1247,29 +1293,30 @@ function ReportsContent() {
     setGenerating(true); setError(null); setSuccess(false);
 
     try {
+      // The PDF and the signed evidence record it was rendered from, in one response: both are saved, since the
+      // record is what an auditor verifies (and the PDF carries its SHA-256).
       const res = await api.generateReport({
         org: orgName, framework: API_FRAMEWORK_ID[fw],
         period_start: new Date(start).toISOString(),
         period_end:   new Date(`${end}T23:59:59.999Z`).toISOString(),
+        format: "bundle",
       });
-      // The API can return 200 with a JSON body (not a PDF) if server-side
-      // PDF rendering failed -- previously this got force-downloaded as
-      // "*.pdf" anyway, producing a file that looked generated but wouldn't
-      // open. Only ever download bytes the server actually labelled as a PDF.
-      const contentType = res.headers.get("content-type") ?? "";
-      if (!res.ok || !contentType.includes("application/pdf")) {
-        const body = await res.json().catch(() => null) as { error?: string } | null;
+      const body = await res.json().catch(() => null) as { error?: string; pdf_base64?: string; evidence?: unknown } | null;
+      // Only save what the server actually produced: an error body never becomes a "*.pdf" that won't open.
+      if (!res.ok || !body?.pdf_base64 || !body.evidence) {
         setError(reportErrorMessage(res.status, body?.error));
         setGenerating(false);
         return;
       }
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement("a");
-      a.href = url;
-      a.download = `trustledger-${API_FRAMEWORK_ID[fw].toLowerCase()}-${start}.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const base = `trustledger-${API_FRAMEWORK_ID[fw].toLowerCase()}-${start}`;
+      const save = (blob: Blob, name: string) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = name; a.click();
+        URL.revokeObjectURL(url);
+      };
+      save(new Blob([Uint8Array.from(atob(body.pdf_base64), c => c.charCodeAt(0))], { type: "application/pdf" }), `${base}.pdf`);
+      save(new Blob([JSON.stringify(body.evidence, null, 2)], { type: "application/json" }), `${base}-evidence.json`);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 4000);
       fetchHistory();

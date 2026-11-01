@@ -181,9 +181,10 @@ function receiverLooksLikeMock(lines: string[], lineIdx: number, name: string): 
 // small backward window (same line + up to 3 non-blank lines above) --
 // string/regex based, not real scope analysis, deliberately conservative.
 // Object.keys/values/entries return ARRAYS (so .find/.map/.filter on them are real); Object.assign returns
-// its target object.
+// its target, which is a plain object only when that target is an object literal --
+// `Object.assign(document.createElement("a"), {...})` is an element, with .click().
 const ARRAY_CTOR_RE = /=\s*(?:\[\s*\]|\[[^\]]{0,300}\]|Array\.from\(|Array\(|new\s+Array\(|Object\.(?:keys|values|entries)\()/;
-const OBJECT_CTOR_RE = /=\s*(?:\{\s*\}|Object\.assign\()/;
+const OBJECT_CTOR_RE = /=\s*(?:\{\s*\}|Object\.assign\(\s*\{)/;
 
 type ReceiverKind = "array" | "object" | null;
 

@@ -15,7 +15,7 @@ const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
 /** Pages that render without the app chrome (sidebar, top bar, status bar): the public site and sign-in flow. */
 const PUBLIC_PAGES = new Set(["/", "/login", "/onboarding", "/status", "/auth/callback", "/privacy", "/terms", "/changelog", "/security",
-  "/demo", "/benchmarks", "/trust", "/roadmap", "/blog", "/docs"]);
+  "/demo", "/benchmarks", "/trust", "/roadmap", "/blog", "/docs", "/verify"]);
 const PUBLIC_PREFIXES = ["/docs/", "/blog/"];
 
 export default function AppShell({ children }: { children: React.ReactNode }) {

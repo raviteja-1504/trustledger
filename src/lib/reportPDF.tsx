@@ -12,6 +12,9 @@ import {
 } from "@react-pdf/renderer";
 import { WORDMARK_PNG_DATA_URI, WORDMARK_ASPECT } from "./brandAssets";
 import { FRAMEWORKS, normalizeFrameworkId } from "./controlEvidence";
+import { EXCEPTION_INFO, REGISTER_CONTROL, pullKey, type RegisterRow, type ReportChangeRegister } from "./changeRegister";
+import { FRAMEWORK_VIEW_TITLE, type FrameworkView } from "./frameworkViews";
+import { protectionValue } from "./branchProtection";
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 
@@ -171,8 +174,24 @@ interface ComplianceControl {
   control_name: string;
   status:       string;
   score:        number;
-  checks:       Array<{ label: string; status: string; summary: string; gaps: string[] }>;
+  /** The control as an auditor writes it up (lib/controlEvidence.ts ControlWriteUp); absent on older payloads. */
+  statement?:   string;
+  owner?:       string;
+  frequency?:   string;
+  test?:        string;
+  partial?:     string;
+  /** basis "current": a state when the report was generated, not evidence across the period. */
+  checks:       Array<{ label: string; basis?: string; status: string; summary: string; gaps: string[] }>;
 }
+
+/**
+ * How a report is signed: Ed25519 over the canonical JSON of its evidence record (verifiable by anyone with the
+ * published public key), or HMAC-SHA256 when no Ed25519 key is configured (checkable only by the issuing server).
+ * `record_sha256` ties the PDF to the evidence record handed out with it.
+ */
+export type ReportSignature =
+  | { algorithm: "Ed25519"; value: string; key_id: string; public_key_pem: string; signed_content: string; record_sha256: string }
+  | { algorithm: "HMAC-SHA256"; value: string; record_sha256: string };
 
 interface GapFile {
   repo:          string;
@@ -208,7 +227,12 @@ interface ReportData {
   risk_breakdown: { critical: number; high: number; medium: number; low: number };
   gaps:           GapFile[];
   compliance:     ComplianceControl[];
-  scans:        Array<{ repo_full_name: string; overall_risk: string; total_ai_percentage: number; created_at: string }>;
+  not_covered?:   readonly string[];
+  /** SOC 2 / ISO 27001 / PCI DSS: every pull request merged in the period and the auditor sample (lib/changeRegister.ts). */
+  change_register?: ReportChangeRegister;
+  /** ISO SoA input / PCI 6.2.4 attack classes / AI governance mappings (lib/frameworkViews.ts). */
+  framework_view?: FrameworkView;
+  scans:       Array<{ repo_full_name: string; overall_risk: string; total_ai_percentage: number; created_at: string }>;
   attestations: Array<{ file_path: string; risk_score: string; reviewer_email: string; created_at: string }>;
   secrets:      Array<{ file_path: string; severity: string; label: string; status: string; created_at: string }>;
 }
@@ -223,9 +247,205 @@ const ASSESSOR: Record<string, string> = {
   aigov: "Internal review: not a regulatory framework",
 };
 
+// ── Framework view (under Control Evidence) ───────────────────────────────────
+
+function FrameworkViewPdf({ view }: { view: FrameworkView }) {
+  const row = (i: number) => [S.tableRow, i % 2 ? S.tableRowAlt : {}];
+  return (
+    <View style={S.section}>
+      <Text style={S.sectionTitle}>4b. {FRAMEWORK_VIEW_TITLE[view.kind]}</Text>
+      {view.kind === "iso_soa" && (
+        <>
+          <Text style={[S.ctrlEvidenceRow, { marginBottom:6 }]}>
+            For your Statement of Applicability. Applicability is your decision; TrustLedger supplies the implementation
+            and evidence reference where it holds evidence, and says where it holds none.
+          </Text>
+          <View style={S.table}>
+            <View style={S.tableHead}>
+              <Text style={[S.th, { flex:0.7 }]}>Control</Text><Text style={[S.th, { flex:1.5 }]}>Title</Text>
+              <Text style={[S.th, { flex:3 }]}>Implementation</Text><Text style={[S.th, { flex:1.4 }]}>Evidence reference</Text><Text style={[S.th, { flex:0.9 }]}>Evidence</Text>
+            </View>
+            {view.rows.map((r, i) => (
+              <View key={r.control} style={row(i)} wrap={false}>
+                <Text style={[S.td, { flex:0.7 }]}>{r.control}</Text>
+                <Text style={[S.td, { flex:1.5 }]}>{r.title}</Text>
+                <Text style={[S.td, { flex:3 }]}>{r.implementation}{r.gaps.length ? `\nGaps: ${r.gaps.join("; ")}` : ""}</Text>
+                <Text style={[S.td, { flex:1.4 }]}>{r.evidence_reference}</Text>
+                <Text style={[S.td, { flex:0.9 }, r.status ? statusStyle(r.status) : S.statusNotTested]}>{r.status ? statusLabel(r.status) : "None"}</Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+      {view.kind === "pci_624" && (
+        <View style={S.table}>
+          <View style={S.tableHead}>
+            <Text style={[S.th, { flex:2 }]}>Attack class (6.2.4)</Text><Text style={[S.th, { flex:2.4 }]}>TrustLedger rules</Text><Text style={[S.th, { flex:2.2 }]}>Where scanning stops</Text>
+          </View>
+          {view.classes.map((c, i) => (
+            <View key={c.key} style={row(i)} wrap={false}>
+              <Text style={[S.td, { flex:2 }]}>{c.title}</Text>
+              <Text style={[S.td, { flex:2.4 }]}>{c.rules.length ? `${c.rules.length} rules: ${c.rules.join(", ")}` : "Tracked under 6.3.1"}</Text>
+              <Text style={[S.td, { flex:2.2 }]}>{c.limits}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+      {view.kind === "ai_mapping" && (
+        <>
+          <Text style={[S.ctrlEvidenceRow, { marginBottom:6 }]}>{view.caveat}</Text>
+          <View style={S.table}>
+            <View style={S.tableHead}>
+              <Text style={[S.th, { flex:1.3 }]}>Control</Text><Text style={[S.th, { flex:1.6 }]}>ISO/IEC 42001 Annex A</Text>
+              <Text style={[S.th, { flex:1.8 }]}>NIST AI RMF 1.0</Text><Text style={[S.th, { flex:2 }]}>Note</Text>
+            </View>
+            {view.rows.map((r, i) => (
+              <View key={r.control} style={row(i)} wrap={false}>
+                <Text style={[S.td, { flex:1.3 }]}>{r.control} {r.name}</Text>
+                <Text style={[S.td, { flex:1.6 }]}>{r.iso42001.map(x => `${x.id} ${x.title}`).join("\n") || "—"}</Text>
+                <Text style={[S.td, { flex:1.8 }]}>{r.nist_ai_rmf.map(x => `${x.id}: ${x.summary}`).join("\n") || "—"}</Text>
+                <Text style={[S.td, { flex:2 }]}>{r.note}</Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+// ── Change-management register page ───────────────────────────────────────────
+
+const MAX_EXCEPTION_ROWS = 40;
+
+function RegisterTable({ rows }: { rows: RegisterRow[] }) {
+  return (
+    <View style={S.table}>
+      <View style={S.tableHead}>
+        <Text style={[S.th, { flex:1.6 }]}>Pull request</Text>
+        <Text style={S.th}>Merged</Text>
+        <Text style={[S.th, { flex:1.2 }]}>Approved by</Text>
+        <Text style={S.th}>Scan</Text>
+        <Text style={[S.th, { flex:2 }]}>Exceptions</Text>
+      </View>
+      {rows.map((r, i) => (
+        <View key={pullKey(r.repo, r.number)} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
+          <Text style={[S.td, { flex:1.6 }]}>{r.repo}#{r.number}</Text>
+          <Text style={S.td}>{fmtDate(r.merged_at)}</Text>
+          <Text style={[S.td, { flex:1.2 }]}>{r.approvals.map(a => a.reviewer).join(", ") || "—"}</Text>
+          <Text style={[S.td, r.scan ? riskStyle(r.scan.overall_risk) : {}]}>{r.scan?.overall_risk ?? "none"}</Text>
+          <Text style={[S.td, { flex:2 }, r.exceptions.length ? S.statusPartial : S.statusPass]}>
+            {r.exceptions.length ? r.exceptions.map(e => EXCEPTION_INFO[e].label).join("; ") : "None"}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function ChangeRegisterPage({ register, control, reportId }: { register: ReportChangeRegister; control: string; reportId: string }) {
+  const footer = <PageFooter label={reportId.slice(0, 8)} />;
+  if ("error" in register) {
+    return (
+      <Page size="A4" style={S.page}>
+        <Text style={S.pageHeading}>5. Change-Management Register ({control})</Text>
+        <View style={S.scopeBox}><Text style={S.scopeText}>{register.error}</Text></View>
+        {footer}
+      </Page>
+    );
+  }
+  const s = register.summary;
+  const withExceptions = register.rows.filter(r => r.exceptions.length > 0);
+  const byKey = new Map(register.rows.map(r => [pullKey(r.repo, r.number), r]));
+  const sampled = register.sample.picked.map(p => byKey.get(pullKey(p.repo, p.number))).filter((r): r is RegisterRow => !!r);
+  const notRead = register.coverage.filter(c => !c.read || c.truncated);
+  return (
+    <Page size="A4" style={S.page} wrap>
+      <Text style={S.pageHeading}>5. Change-Management Register ({control})</Text>
+      <Text style={S.pageSubheading}>
+        Every pull request merged in the period: who approved it before the merge, whether TrustLedger scanned it, and
+        whether its HIGH/CRITICAL files were signed off before it merged. The full register, one row per pull request
+        with its SHA-256, is in the signed evidence record supplied with this report.
+      </Text>
+
+      <View style={S.metricsRow}>
+        <View style={S.metricCard}><Text style={S.metricValue}>{s.merged}</Text><Text style={S.metricLabel}>Pull requests merged</Text></View>
+        <View style={S.metricCard}><Text style={S.metricValue}>{s.approved_before_merge}</Text><Text style={S.metricLabel}>Approved before merge</Text></View>
+        <View style={S.metricCard}><Text style={S.metricValue}>{s.scanned}</Text><Text style={S.metricLabel}>Scanned before merge</Text></View>
+        <View style={S.metricCard}><Text style={[S.metricValue, s.with_exceptions ? S.high : {}]}>{s.with_exceptions}</Text><Text style={S.metricLabel}>With exceptions</Text></View>
+      </View>
+
+      {register.complete ? (
+        <View style={S.infoBox}>
+          <Text style={S.infoText}>Population complete: all {register.coverage.length} connected repositories were read from GitHub in full.</Text>
+        </View>
+      ) : (
+        <View style={S.scopeBox}>
+          <Text style={S.scopeLabel}>POPULATION INCOMPLETE</Text>
+          {notRead.map(c => <Text key={c.repo} style={S.scopeText}>• {c.repo}: {c.reason ?? "not read in full"}</Text>)}
+          <Text style={S.scopeText}>Changes in these repositories may be missing from the register and the sample.</Text>
+        </View>
+      )}
+
+      <View style={S.section}>
+        <Text style={S.sectionTitle}>Exceptions ({withExceptions.length})</Text>
+        {withExceptions.length === 0 ? (
+          <View style={S.gapOkBox}><Text style={S.gapOkText}>✓ Every merged pull request has the evidence above</Text></View>
+        ) : (
+          <>
+            <RegisterTable rows={withExceptions.slice(0, MAX_EXCEPTION_ROWS)} />
+            {withExceptions.length > MAX_EXCEPTION_ROWS && (
+              <Text style={S.ctrlEvidenceRow}>+ {withExceptions.length - MAX_EXCEPTION_ROWS} more in the evidence record.</Text>
+            )}
+            <Text style={S.ctrlEvidenceRow}>&quot;Approved on an earlier commit&quot; is an observation (later commits were not re-approved); the others are exceptions.</Text>
+          </>
+        )}
+      </View>
+
+      {(register.branch_protection ?? []).length > 0 && (
+        <View style={S.section}>
+          <Text style={S.sectionTitle}>How merging is protected (default branch, as of report generation)</Text>
+          <Text style={[S.ctrlEvidenceRow, { marginBottom:6 }]}>
+            The control&apos;s design, read from GitHub when this report was generated -- a snapshot, not a history of the settings.
+          </Text>
+          <View style={S.table}>
+            <View style={S.tableHead}>
+              <Text style={[S.th, { flex:1.8 }]}>Repository</Text><Text style={S.th}>PR required</Text><Text style={[S.th, { flex:0.8 }]}>Approvals</Text>
+              <Text style={S.th}>Stale approvals dismissed</Text><Text style={[S.th, { flex:1.4 }]}>Required checks</Text><Text style={S.th}>Force push blocked</Text>
+            </View>
+            {register.branch_protection!.map((p, i) => (
+              <View key={p.repo} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
+                <Text style={[S.td, { flex:1.8 }]}>{p.repo}{p.branch ? ` (${p.branch})` : ""}</Text>
+                <Text style={S.td}>{protectionValue(p.pull_request_required)}</Text>
+                <Text style={[S.td, { flex:0.8 }]}>{protectionValue(p.approvals_required)}</Text>
+                <Text style={S.td}>{protectionValue(p.dismiss_stale_approvals)}</Text>
+                <Text style={[S.td, { flex:1.4 }]}>{p.required_status_checks.join(", ") || "—"}</Text>
+                <Text style={S.td}>{protectionValue(p.force_push_blocked)}</Text>
+              </View>
+            ))}
+          </View>
+          {register.branch_protection!.flatMap(p => p.limits.map(l => (
+            <Text key={`${p.repo}${l}`} style={[S.ctrlEvidenceRow, S.statusPartial]}>{p.repo}: {l}</Text>
+          )))}
+        </View>
+      )}
+
+      <View style={S.section}>
+        <Text style={S.sectionTitle}>Auditor sample ({sampled.length} of {s.merged})</Text>
+        <Text style={[S.ctrlEvidenceRow, { marginBottom:6 }]}>
+          Drawn at random with seed {register.sample.seed} (this report&apos;s id). Anyone with the evidence record draws
+          the same {sampled.length} pull requests; the auditor may draw another sample with a seed of their own.
+        </Text>
+        {sampled.length > 0 ? <RegisterTable rows={sampled} /> : <Text style={S.ctrlEvidenceRow}>No pull requests were merged in the period.</Text>}
+      </View>
+      {footer}
+    </Page>
+  );
+}
+
 // ── Document component ─────────────────────────────────────────────────────────
 
-export function buildReportDocument({ data, signature }: { data: ReportData; signature: string }) {
+export function buildReportDocument({ data, signature }: { data: ReportData; signature: ReportSignature }) {
   const fw = FRAMEWORKS.find(f => f.id === (data.framework_id ?? normalizeFrameworkId(data.framework)));
   const meta = {
     full: data.evidence_scope?.name ?? fw?.name ?? data.framework,
@@ -245,6 +465,9 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
     { label:"MEDIUM",   count:rb.medium,   color:"#d97706" },
     { label:"LOW",      count:rb.low,      color:"#15803d" },
   ];
+  // the register page is section 5 when present; the sections after it move down one
+  const cr = data.change_register;
+  const n = cr ? 1 : 0;
 
   return (
     <Document>
@@ -271,6 +494,12 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         <View style={S.scopeBox}>
           <Text style={S.scopeLabel}>SCOPE &amp; LIMITATIONS</Text>
           <Text style={S.scopeText}>{meta.scopeNote}</Text>
+          {(data.not_covered ?? fw?.not_covered ?? []).length > 0 && (
+            <>
+              <Text style={[S.scopeLabel, { marginTop: 5 }]}>NOT COVERED BY THIS EVIDENCE</Text>
+              {(data.not_covered ?? fw?.not_covered ?? []).map((n, i) => <Text key={i} style={S.scopeText}>• {n}</Text>)}
+            </>
+          )}
         </View>
 
         {/* Report Reference */}
@@ -372,9 +601,17 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
               </View>
               <Text style={[S.ctrlEvidenceRow, statusStyle(c.status), { marginLeft:8, marginTop:0 }]}>{statusLabel(c.status)}</Text>
             </View>
+            {c.statement && (
+              <>
+                <Text style={S.ctrlEvidenceRow}>Control: {c.statement}</Text>
+                <Text style={S.ctrlEvidenceRow}>Owner: {c.owner}  ·  Frequency: {c.frequency}</Text>
+                <Text style={S.ctrlEvidenceRow}>Test: {c.test}</Text>
+              </>
+            )}
+            {c.partial && <Text style={[S.ctrlEvidenceRow, S.statusPartial]}>Partial coverage: {c.partial}</Text>}
             {c.checks.map((k, i) => (
               <View key={i}>
-                <Text style={S.ctrlEvidenceRow}>• {k.label}: {k.summary}</Text>
+                <Text style={S.ctrlEvidenceRow}>• {k.label}{k.basis === "current" ? ` (as of ${fmtDate(data.generated_at)}, not across the period)` : ""}: {k.summary}</Text>
                 {k.gaps.map((g, j) => (
                   <Text key={j} style={[S.ctrlEvidenceRow, S.statusPartial, { marginLeft:8 }]}>Gap: {g}</Text>
                 ))}
@@ -383,12 +620,16 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
           </View>
         ))}
 
+        {data.framework_view && <FrameworkViewPdf view={data.framework_view} />}
+
         <PageFooter label={data.report_id.slice(0, 8)} />
       </Page>
 
+      {cr &&<ChangeRegisterPage register={cr} control={REGISTER_CONTROL[fw?.id ?? ""] ?? "change control"} reportId={data.report_id} />}
+
       {/* ── Page 4: Attestation Records + Gap Analysis ──────────────────────── */}
       <Page size="A4" style={S.page}>
-        <Text style={S.sectionTitle}>5. Attestation Evidence ({recentAttests.length} records)</Text>
+        <Text style={S.sectionTitle}>{5 + n}. Attestation Evidence ({recentAttests.length} records)</Text>
         <View style={S.table}>
           <View style={S.tableHead}>
             <Text style={[S.th, { flex:2 }]}>File</Text>
@@ -407,7 +648,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         </View>
 
         <View style={S.section}>
-          <Text style={S.sectionTitle}>6. Gap Analysis &amp; Remediation</Text>
+          <Text style={S.sectionTitle}>{6 + n}. Gap Analysis &amp; Remediation</Text>
           {data.gaps.length === 0 ? (
             <View style={S.gapOkBox}>
               <Text style={S.gapOkText}>✓ No open gaps identified for this audit period</Text>
@@ -442,7 +683,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
       <Page size="A4" style={S.page}>
         {data.secrets.length > 0 && (
           <View style={{ marginBottom:8 }}>
-            <Text style={S.sectionTitle}>7. Secret Findings</Text>
+            <Text style={S.sectionTitle}>{7 + n}. Secret Findings</Text>
             <View style={S.table}>
               <View style={S.tableHead}>
                 <Text style={[S.th, { flex:2 }]}>File</Text>
@@ -463,28 +704,26 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         )}
 
         <View style={S.section}>
-          <Text style={S.sectionTitle}>{data.secrets.length > 0 ? "8." : "7."} Management Assertion</Text>
+          <Text style={S.sectionTitle}>{(data.secrets.length > 0 ? 8 : 7) + n}. Evidence Summary for Management</Text>
           <View style={S.assertionBox}>
             <View style={S.assertionHead}>
-              <Text style={{ fontSize:8, fontFamily:"Helvetica-Bold", color:"#1e293b" }}>Management Representation Letter</Text>
+              <Text style={{ fontSize:8, fontFamily:"Helvetica-Bold", color:"#1e293b" }}>Management review of this evidence</Text>
               <Text style={{ fontSize:7.5, color:"#64748b", marginTop:2 }}>
                 For the period {fmtDate(data.period_start)} to {fmtDate(data.period_end)} · {meta.standard}
               </Text>
             </View>
             <View style={S.assertionBody}>
               <Text style={S.assertionP}>
-                Management of {data.org.name} asserts that, to the best of its knowledge and belief, the
-                controls described in this report were suitably designed and operating effectively throughout
-                the period {fmtDate(data.period_start)} to {fmtDate(data.period_end)} with respect to the specific
-                {" "}{meta.full} controls listed in Control Evidence above, except for the gaps recorded there.
-                This assertion does not extend to any {meta.full} requirement outside that scope — see
-                Scope &amp; Limitations on page 1.
+                Management of {data.org.name} has reviewed the evidence in this report for the {meta.full} controls
+                listed under Control Evidence, for the period {fmtDate(data.period_start)} to {fmtDate(data.period_end)},
+                including the gaps and exceptions recorded there. This is a review of evidence for those controls only;
+                it is not a management assertion over the whole {meta.full} scope and does not replace the independent
+                audit or certification described under Scope &amp; Limitations on page 1.
               </Text>
               <Text style={S.assertionP}>
                 Pull requests in connected repositories were scanned automatically, and reviewer sign-offs on
-                high-risk files were recorded with the reviewer&apos;s identity. The scan, sign-off and audit-log
-                records summarised in this report are the evidence base for this assertion; this document
-                additionally carries the cryptographic signature below over its exact contents.
+                high-risk files were recorded with the reviewer&apos;s identity. The evidence record this report is
+                rendered from is signed (see Document Signature below) and supplied with it.
               </Text>
               <View style={{ flexDirection:"row", gap:24, marginTop:4 }}>
                 <View style={{ flex:1 }}>
@@ -511,13 +750,23 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         </View>
 
         <View style={S.sigBox}>
-          <Text style={S.sigLabel}>DOCUMENT SIGNATURE — HMAC-SHA256</Text>
-          <Text style={S.sigValue}>{signature}</Text>
+          <Text style={S.sigLabel}>DOCUMENT SIGNATURE — {signature.algorithm}</Text>
+          <Text style={S.sigNote}>Evidence record SHA-256</Text>
+          <Text style={S.sigValue}>{signature.record_sha256}</Text>
+          {signature.algorithm === "Ed25519" && <Text style={S.sigNote}>Signing key id: {signature.key_id}</Text>}
+          <Text style={S.sigNote}>Signature</Text>
+          <Text style={S.sigValue}>{signature.value}</Text>
           <Text style={S.sigNote}>
-            Computed over this report&apos;s exact contents (org, framework, period, metrics, risk
-            breakdown, compliance mapping, scans, attestations, secrets) using TrustLedger&apos;s export
-            signing key. Recomputing this HMAC over an altered copy of this data will not match —
-            verify by requesting the same report regeneration from TrustLedger and comparing signatures.
+            {signature.algorithm === "Ed25519"
+              ? "This PDF is rendered from the evidence record supplied with it (trustledger-…-evidence.json). To verify, " +
+                "open /verify on the TrustLedger site and choose that file (it is checked in the browser, not uploaded); or " +
+                "(1) check that the SHA-256 of the record's canonical JSON matches the value above; (2) verify the signature " +
+                "with scripts/verify-trust-record.mjs and the public key published at " +
+                "/.well-known/trustledger-export-signing-key, whose key id must equal the one above. A changed record, or " +
+                "one signed with any other key, fails."
+              : "Signed with TrustLedger's shared HMAC key over the canonical JSON of the evidence record supplied with " +
+                "this PDF (its SHA-256 is above). An HMAC can only be checked by the issuing server; configure an Ed25519 " +
+                "signing key for reports anyone can verify."}
           </Text>
         </View>
 

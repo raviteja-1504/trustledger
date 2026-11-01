@@ -15,7 +15,7 @@ import { allRows } from "@/lib/allRows";
 import { builtinPermissions, canAttestAny, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 import {
   FRAMEWORKS, STATUS_LABEL, countStatuses, deriveFacts, evaluateChecks, evaluateFramework, normalizeFrameworkId,
-  type CheckResult, type ComplianceFacts, type EvidenceStatus, type FactRows,
+  type CheckResult, type ComplianceFacts, type ControlWriteUp, type EvidenceStatus, type FactRows,
 } from "@/lib/controlEvidence";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,7 +29,7 @@ export interface EvidenceItem {
   source:       string;
 }
 
-export interface ControlEvidence {
+export interface ControlEvidence extends ControlWriteUp {
   control_id:   string;
   control_name: string;
   status:       EvidenceStatus;
@@ -46,6 +46,8 @@ export interface EvidencePackage {
   standard:        string;
   /** What this evidence does and does not cover. Always shown next to the controls. */
   scope:           string;
+  /** The framework's main areas this evidence doesn't reach. */
+  not_covered:     readonly string[];
   period_start:    string;
   period_end:      string;
   generated_at:    string;
@@ -136,12 +138,13 @@ export function buildPackage(rawFramework: string, facts: ComplianceFacts, rows:
   const controls = evaluateFramework(fw, evaluateChecks(facts));
   const tested = controls.filter(c => c.status !== "not_tested");
   return {
-    framework: fw.id, framework_name: fw.name, standard: fw.standard, scope: fw.scope,
+    framework: fw.id, framework_name: fw.name, standard: fw.standard, scope: fw.scope, not_covered: fw.not_covered,
     period_start: facts.period_start, period_end: facts.period_end, generated_at: generatedAt,
     overall_score: tested.length ? Math.round(tested.reduce((a, c) => a + c.score, 0) / tested.length) : 0,
     status_counts: countStatuses(controls),
     controls: controls.map(c => ({
       control_id: c.control_id, control_name: c.control_name, status: c.status, status_label: STATUS_LABEL[c.status], score: c.score,
+      statement: c.statement, owner: c.owner, frequency: c.frequency, test: c.test, ...(c.partial ? { partial: c.partial } : {}),
       checks: c.checks,
       evidence: c.checks.map(k => ({ type: k.key, description: `${k.label}: ${k.summary}`, count: k.score, collected_at: generatedAt, source: "TrustLedger records" })),
     })),

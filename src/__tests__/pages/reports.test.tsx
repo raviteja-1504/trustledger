@@ -84,13 +84,16 @@ describe("an unattested file's button follows the viewer's role", () => {
 });
 
 describe("Reports page", () => {
-  it("a generated PDF is downloaded", async () => {
-    reportRes = () => fakeRes(200, "application/pdf", new Blob(["%PDF-1.4"]));
-    const click = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  it("a generated report saves the PDF and the signed evidence record it was rendered from", async () => {
+    reportRes = () => json(200, { report_id: "R1", pdf_base64: btoa("%PDF-1.4"), evidence: { record: { report_id: "R1" }, signature: { algorithm: "Ed25519" } } });
+    const names: string[] = [];
+    const click = jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { names.push(this.download); });
     render(<ReportsPage />);
     fireEvent.click(await generateButton());
-    await waitFor(() => expect(click).toHaveBeenCalled(), { timeout: 10_000 });
-    expect(api.generateReport).toHaveBeenCalledWith(expect.objectContaining({ framework: "SOC2" }));
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(2), { timeout: 10_000 });
+    expect(api.generateReport).toHaveBeenCalledWith(expect.objectContaining({ framework: "SOC2", format: "bundle" }));
+    expect(names.some(n => n.endsWith(".pdf"))).toBe(true);
+    expect(names.some(n => n.endsWith("-evidence.json"))).toBe(true);
     expect(screen.queryByText(/couldn't render/i)).not.toBeInTheDocument();
     click.mockRestore();
   });
@@ -107,6 +110,16 @@ describe("Reports page", () => {
     render(<ReportsPage />);
     fireEvent.click(await generateButton());
     expect(await screen.findByText(msg)).toBeInTheDocument();
+  });
+
+  it("SOC 2 / ISO / PCI carry the change register (built on request); AI governance doesn't", async () => {
+    render(<ReportsPage />);
+    expect(await screen.findByText("Change-Management Register (CC8.1)", {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Build change register" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "ISO 27001" }));
+    expect(screen.getByText("Change-Management Register (A.8.32)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "AI governance" }));
+    expect(screen.queryByText(/Change-Management Register/)).toBeNull();
   });
 
   it("a failed data load shows an error, not placeholder repositories", async () => {

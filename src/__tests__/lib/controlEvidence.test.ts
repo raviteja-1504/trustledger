@@ -104,6 +104,14 @@ describe("evaluateChecks", () => {
     for (const k of Object.values(c)) expect([k.key, k.status]).toEqual([k.key, "pass"]);
   });
 
+  it("each check says whether it is evidence over the period or a state at collection time", () => {
+    const c = evaluateChecks(facts());
+    const current = Object.values(c).filter(k => k.basis === "current").map(k => k.key).sort();
+    // open findings, open secrets, the audit chain, who holds sign-off rights and the AI policy are read as they stand now
+    expect(current).toEqual(["ai_policy", "approval_access", "audit_trail", "remediation", "secrets"]);
+    expect(Object.values(c).every(k => k.basis === CHECK_INFO[k.key].basis)).toBe(true);
+  });
+
   it("review coverage: ≥90% collected, ≥50% gaps, below that failing, none → no evidence yet", () => {
     const at = (reviewed: number) => evaluateChecks(facts({ risky: { total: 10, reviewed, ai_heavy_total: 0, ai_heavy_reviewed: 0 } })).review;
     expect(at(9).status).toBe("pass");
@@ -219,5 +227,31 @@ describe("evidence packages", () => {
     expect(o.frameworks.map(x => x.id)).toEqual(["soc2", "iso27001", "pcidss", "aigov"]);
     expect(o.gaps.map(g => g.key)).toEqual(["independent_review", "remediation", "review", "scanning"]);
     expect(new Set(o.gaps.map(g => g.key)).size).toBe(o.gaps.length);
+  });
+});
+
+describe("control write-ups (what an auditor puts in their working papers)", () => {
+  it("every control of every framework states the control, its owner, its frequency and the test the evidence supports", () => {
+    for (const fw of FRAMEWORKS) for (const c of fw.controls) {
+      expect({ fw: fw.id, id: c.id, ok: [c.statement, c.owner, c.frequency, c.test].every(v => typeof v === "string" && v.trim().length >= 5) })
+        .toEqual({ fw: fw.id, id: c.id, ok: true });
+    }
+  });
+
+  it("controls whose id names a broader criterion than code changes say so (partial coverage)", () => {
+    const partial = FRAMEWORKS.flatMap(fw => fw.controls.filter(c => c.partial).map(c => `${fw.id}:${c.id}`)).sort();
+    expect(partial).toEqual(["iso27001:A.8.15", "pcidss:10.3.2", "soc2:CC6.1", "soc2:CC7.2"]);
+  });
+
+  it("every framework lists the areas this evidence does not reach", () => {
+    for (const fw of FRAMEWORKS) expect(fw.not_covered.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("evaluated controls carry their write-up through to the report", () => {
+    const fw = frameworkById("soc2")!;
+    const [cc81, , cc61] = evaluateFramework(fw, evaluateChecks(deriveFacts(rows())));
+    expect(cc81.statement).toMatch(/approved by someone other than its author/);
+    expect(cc81.partial).toBeUndefined();
+    expect(cc61.partial).toMatch(/not logical access to your systems/);
   });
 });

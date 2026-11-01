@@ -22,7 +22,7 @@ it.each([
   "/favicon-16x16.png", "/favicon-32x32.png", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
   "/og-image.png", "/manifest.json",
   // the public site: its pages, the landing hero screenshot and the demo videos with their captions
-  "/demo", "/benchmarks", "/benchmarks/report.json", "/trust", "/roadmap", "/blog", "/blog/taint-is-not-a-boolean",
+  "/demo", "/benchmarks", "/benchmarks/report.json", "/trust", "/verify", "/roadmap", "/blog", "/blog/taint-is-not-a-boolean",
   "/docs", "/docs/coverage", "/screens/demo-scan.png", "/videos/tour.webm", "/videos/tour.vtt",
 ])("serves %s without a session", async path => {
   const res = await get(path);

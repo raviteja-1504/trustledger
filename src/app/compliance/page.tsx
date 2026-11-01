@@ -5,8 +5,9 @@
  * and the exception register for gaps you have formally accepted or are remediating.
  *
  * Everything shown is measured (lib/controlEvidence.ts via GET /api/evidence/collect). There are no compliance
- * percentages, invented audit dates, owners or "last tested" dates: a status describes the evidence, and only an
- * auditor can conclude a control is effective.
+ * percentages, invented audit dates, named owners or "last tested" dates: a status describes the evidence, and only
+ * an auditor can conclude a control is effective. Each control's write-up (statement, the owning role, frequency,
+ * test) and what the evidence does not cover come from lib/controlEvidence.ts.
  */
 
 import { useState, useMemo, useEffect, useCallback } from "react";
@@ -18,9 +19,10 @@ import { useAuth } from "@/lib/auth";
 import { useRole } from "@/lib/roles";
 import { useToastHelpers } from "@/lib/toast";
 import {
-  CHECK_INFO, FRAMEWORKS, STATUS_LABEL, countStatuses, evaluateChecks, evaluateFramework, normalizeFrameworkId,
+  BASIS_LABEL, CHECK_INFO, FRAMEWORKS, STATUS_LABEL, countStatuses, evaluateChecks, evaluateFramework, normalizeFrameworkId,
   type CheckKey, type ComplianceFacts, type EvidenceStatus, type FrameworkDef,
 } from "@/lib/controlEvidence";
+import { REGISTER_CONTROL } from "@/lib/changeRegisterShared";
 
 type FrameworkId = FrameworkDef["id"];
 type PageTab = "controls" | "map" | "exceptions";
@@ -186,11 +188,12 @@ export default function CompliancePage() {
       type: "TrustLedger control evidence",
       generated_at: new Date().toISOString(),
       organisation: orgName,
-      framework: fw.name, standard: fw.standard, scope: fw.scope,
+      framework: fw.name, standard: fw.standard, scope: fw.scope, not_covered: fw.not_covered,
       period: { start: facts.period_start, end: facts.period_end },
       controls: controls.map(c => ({
         id: c.control_id, name: c.control_name, status: STATUS_LABEL[c.status],
-        checks: c.checks.map(k => ({ check: k.label, status: STATUS_LABEL[k.status], measured: k.summary, gaps: k.gaps })),
+        statement: c.statement, owner: c.owner, frequency: c.frequency, test: c.test, ...(c.partial ? { partial_coverage: c.partial } : {}),
+        checks: c.checks.map(k => ({ check: k.label, basis: k.basis, status: STATUS_LABEL[k.status], measured: k.summary, gaps: k.gaps })),
         open_exceptions: openExceptions(fw.id, c.control_id).map(e => e.title),
       })),
       exceptions: fwExceptions,
@@ -296,6 +299,16 @@ export default function CompliancePage() {
         <div className="animate-fade-up rounded-xl border px-5 py-3.5" style={{ borderColor: `${color}40`, background: `${color}0d` }}>
           <p className="text-[10px] font-black uppercase tracking-widest mb-1" style={{ color }}>Scope of this evidence · {fw.name}</p>
           <p className="text-xs text-gray-700 leading-relaxed">{fw.scope}</p>
+          {fw.not_covered.length > 0 && (
+            <details className="mt-2 group">
+              <summary className="text-[11px] font-bold cursor-pointer select-none" style={{ color }}>
+                Not covered by this evidence ({fw.not_covered.length}) — your auditor tests these elsewhere
+              </summary>
+              <ul aria-label="Not covered by this evidence" className="list-disc pl-4 mt-1.5 space-y-0.5">
+                {fw.not_covered.map(n => <li key={n} className="text-[11px] text-gray-600 leading-relaxed">{n}</li>)}
+              </ul>
+            </details>
+          )}
         </div>
 
         {/* ── Tabs ── */}
@@ -336,12 +349,33 @@ export default function CompliancePage() {
                     <StatusBadge status={c.status} />
                   </div>
                   <div className="px-5 py-3.5 space-y-3">
+                    {/* the control as an auditor writes it up: what it is, who runs it, how often, how it is tested */}
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] leading-relaxed rounded-lg px-3 py-2.5 bg-gray-50">
+                      <dt className="font-semibold text-gray-500">Control</dt><dd className="text-gray-700">{c.statement}</dd>
+                      <dt className="font-semibold text-gray-500">Owner</dt><dd className="text-gray-700">{c.owner}</dd>
+                      <dt className="font-semibold text-gray-500">Frequency</dt><dd className="text-gray-700">{c.frequency}</dd>
+                      <dt className="font-semibold text-gray-500">Test</dt><dd className="text-gray-700">{c.test}</dd>
+                    </dl>
+                    {c.partial && (
+                      <p className="text-[11px] rounded-lg px-3 py-2 border border-amber-200 bg-amber-50 text-amber-900">
+                        <span className="font-bold">Partial coverage:</span> {c.partial}
+                      </p>
+                    )}
+                    {REGISTER_CONTROL[fw.id] === c.control_id && (
+                      <Link href={`/reports?fw=${REPORT_FW[fw.id]}`} className="block text-[11px] font-semibold text-indigo-600 hover:text-indigo-800">
+                        Test it the way an auditor does: every merged pull request and a random sample, in the change register →
+                      </Link>
+                    )}
                     {c.checks.map(k => (
                       <div key={k.key}>
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-bold text-gray-800">{k.label}</p>
                           <span className="text-[10px] font-semibold" style={{ color: STATUS_STYLE[k.status].text }}>{STATUS_LABEL[k.status]}</span>
                         </div>
+                        <p className={`text-[10px] font-semibold ${k.basis === "current" ? "text-sky-700" : "text-gray-400"}`}
+                          title={k.basis === "current" ? "The state right now, not evidence across the whole period" : "Measured across the selected period"}>
+                          {BASIS_LABEL[k.basis]}
+                        </p>
                         <p className="text-xs text-gray-600 leading-relaxed mt-0.5">{k.summary}</p>
                         {k.gaps.map(g => <p key={g} className="text-xs font-semibold text-amber-800 mt-1">Gap: {g}</p>)}
                       </div>
