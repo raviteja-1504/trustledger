@@ -439,7 +439,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr.slice(0, 80)}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, rubyTraceResolver),
+    trace: (rbTraceRoot = rootOfRb(node), buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, rubyTraceResolver)),
   });
 }
 
@@ -617,7 +617,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     // (field-insensitive, like `obj.attr = x`), so `profile.to_s` / `profile.bio` read them back
     if (recv && name === "new" && (recv.type === "constant" || recv.type === "scope_resolution")) {
       const cls = recv.text.replace(/^::/, "");
-      const init = [...ctx.methods.values()].find(m => m.name === "initialize" && m.className === cls && m.params.length > 0);
+      // `QueryParams.new` also names a class nested in the one this call is in (`UsersController::QueryParams`)
+      const init = [...ctx.methods.values()].find(m => m.name === "initialize" && (m.className === cls || !!m.className?.endsWith(`::${cls}`)) && m.params.length > 0);
       if (init) return argsMask();
     }
     if (recv) {
@@ -1772,6 +1773,7 @@ function checkCrossFileCall(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Ta
       ctx.seen.add(dedup);
       const display = displayFnName(shown);
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
+      rbTraceRoot = rootOfRb(node);
       const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, a.text, display, rubyTraceResolver);
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${display}(...)` };
       ctx.findings.push({
@@ -1804,10 +1806,41 @@ function assignmentsIn(scope: SyntaxNode): Array<{ name: string; position: numbe
   visit(scope);
   return out;
 }
+const rootOfRb = (n: SyntaxNode): SyntaxNode => { let c = n; while (c.parent) c = c.parent; return c; };
+const paramNamesRb = (m: SyntaxNode): string[] => paramShapesOf(m.childForFieldName("parameters")).filter(p => !p.keyword).map(p => p.name);
+/** The file the trace being built belongs to (set at each trace build: the resolver is shared across files). */
+let rbTraceRoot: SyntaxNode | null = null;
+/** Source -> sink trace resolver, with the interprocedural hooks: a parameter continues at a caller's argument, a call
+ * of a method of this file (with or without parentheses) continues at its return value -- an explicit `return`, or
+ * the method's last expression. */
 const rubyTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope, assignmentsIn,
-  fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
+  fileScope: rootOfRb,
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = scope.type === "method" ? scope.childForFieldName("name")?.text : undefined;
+    return name ? { name, params: paramNamesRb(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    const m = rbTraceRoot ? findAllNodes(rbTraceRoot, "method").find(d => d.childForFieldName("name")?.text === name) : undefined;
+    if (!m) return null;
+    const returns: Array<{ text: string; position: number; line: number }> = [];
+    const visit = (n: SyntaxNode) => {
+      if (n !== m && (n.type === "method" || n.type === "lambda" || n.type === "block" || n.type === "do_block")) return;
+      if (n.type === "return") { const e = n.namedChildren[0]?.type === "argument_list" ? n.namedChildren[0].namedChildren[0] : n.namedChildren[0]; if (e) returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(m);
+    // the implicit return: the body's last statement
+    const body = m.childForFieldName("body") ?? m;
+    const stmts = body.namedChildren.filter((c): c is SyntaxNode => !!c && c.type !== "comment" && c !== m.childForFieldName("name") && c !== m.childForFieldName("parameters"));
+    const last = stmts[stmts.length - 1];
+    if (last && last.type !== "return") returns.push({ text: last.text, position: last.startIndex, line: lineOf(last) });
+    return { scope: m, params: paramNamesRb(m), line: lineOf(m), returns };
+  },
+  callSitesOf: name => (rbTraceRoot ? findAllNodes(rbTraceRoot, "call") : [])
+    .filter(c => c.childForFieldName("method")?.text === name)
+    .map(c => ({ scope: enclosingScope(c), position: c.startIndex, line: lineOf(c), text: c.text })),
 };
 
 // ── Interprocedural summaries ─────────────────────────────────────────────────────────────────────────────

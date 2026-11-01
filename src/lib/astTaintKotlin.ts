@@ -175,6 +175,11 @@ function operatorOf(n: SyntaxNode): string {
   return "";
 }
 
+/** `java.io` / `java.net` / `kotlin.io`: a package path, written before a class to qualify it (`java.io.File(x)`). */
+const PACKAGE_PATH_RE = /^(?:java|javax|kotlin|kotlinx|android|androidx)(?:\.[a-z_]\w*)+$/;
+const isPackageQualified = (base: string | null, member: string | null | undefined): boolean =>
+  !!base && !!member && /^[A-Z]/.test(member) && PACKAGE_PATH_RE.test(base);
+
 /** `x` / `a.b.c` / `Runtime.getRuntime().exec` (calls flattened) -> dotted text, or null for anything else. */
 function calleeText(n: SyntaxNode | null): string | null {
   if (!n) return null;
@@ -185,6 +190,8 @@ function calleeText(n: SyntaxNode | null): string | null {
       const suffix = kids[kids.length - 1];
       const member = suffix?.type === "navigation_suffix" ? childOfType(suffix, "simple_identifier")?.text : null;
       const base = calleeText(kids[0] ?? null);
+      // `java.net.URL` reads as the class it names
+      if (isPackageQualified(base, member)) return member!;
       return base !== null && member ? `${base}.${member}` : null;
     }
     case "call_expression": return calleeText(named(n)[0] ?? null);
@@ -218,6 +225,8 @@ function callParts(call: SyntaxNode): CallParts {
     const nk = named(callee);
     const navSuffix = nk[nk.length - 1];
     const name = navSuffix?.type === "navigation_suffix" ? childOfType(navSuffix, "simple_identifier")?.text ?? "" : "";
+    // `java.io.File(x)` is the constructor `File(x)`, not a method of a receiver `java.io`
+    if (isPackageQualified(calleeText(nk[0] ?? null), name)) return { name, recv: null, callee, suffix };
     return { name, recv: nk[0] ?? null, callee, suffix };
   }
   return { name: "", recv: callee, callee, suffix };
@@ -541,7 +550,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr.slice(0, 80)}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, kotlinTraceResolver),
+    trace: (ktTraceRoot = ctx.root, buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, kotlinTraceResolver)),
   });
 }
 
@@ -752,8 +761,17 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       const m = argsMask();
       return DECODER_RE.test(ct) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
     }
+    // a method of a class of this file called on an object (`p.name()` on a `Params(request)`): its summary, plus the
+    // receiver's own taint below
+    const method = recv ? ctx.fns.get(name) : undefined;
+    let own = 0;
+    if (method?.body && method.className) {
+      own = ctx.intrinsic.get(name) ?? 0;
+      const prop = ctx.propagating.get(name);
+      if (prop) for (const [i, surviving] of prop) for (const a of bindArgument(method, node, i)) own |= mask(a, env) & surviving;
+    }
     if (recv) {
-      const rm = mask(recv, env);
+      const rm = mask(recv, env) | own;
       if (DECODER_RE.test(ct)) { const m = rm | argsMask(); return (m & ALL) | ((m >>> SHADOW) & ALL); }
       return ARG_FLOW_METHODS.has(name) ? rm | argsMask() : rm;
     }
@@ -1331,6 +1349,47 @@ function lastAssignment(name: string, at: SyntaxNode): SyntaxNode | null {
 }
 const resolveVar = (n: SyntaxNode): SyntaxNode => (n.type === "simple_identifier" ? lastAssignment(n.text, n) ?? n : n);
 
+/**
+ * Can `node` only ever be a value written in the source? Literals and templates / `+` of such; a local of the enclosing
+ * function EVERY assignment of which (anywhere in it, so a loop's later write counts too) is one; a call of a
+ * parameterless function of this file every return of which is one (`val v = getName()` with `fun getName() = "admin"`).
+ * A parameter, a field or any other call is not -- that is the regex layer's line-level SQL duplicate this proof drops.
+ */
+function provenConstantKt(node: SyntaxNode, ctx: EngineCtx, depth = 0): boolean {
+  if (depth > 6) return false;
+  const n = unwrapParens(node);
+  if (n.type === "string_literal") return named(n).every(c => c.type !== "interpolated_expression" || (!!named(c)[0] && provenConstantKt(named(c)[0], ctx, depth + 1)));
+  if (/^(?:integer|long|real|boolean|character)_literal$/.test(n.type)) return true;
+  if (n.type === "additive_expression") return named(n).every(s => provenConstantKt(s, ctx, depth + 1));
+  if (n.type === "simple_identifier") {
+    const scope = enclosingScope(n);
+    if (!scope) return false;
+    const writes: SyntaxNode[] = [];
+    let declared = false;
+    const visit = (c: SyntaxNode) => {
+      if (c !== scope && (c.type === "function_declaration" || c.type === "lambda_literal")) return;
+      if (c.type === "property_declaration" && childOfType(childOfType(c, "variable_declaration"), "simple_identifier")?.text === n.text) {
+        declared = true;
+        const v = propertyValue(c);
+        if (v) writes.push(v);
+      }
+      if (c.type === "assignment" && named(c)[0]?.text === n.text) writes.push(named(c)[named(c).length - 1]);
+      for (const k of named(c)) visit(k);
+    };
+    visit(scope);
+    return declared && writes.length > 0 && writes.every(w => !!w && provenConstantKt(w, ctx, depth + 1));
+  }
+  if (n.type === "call_expression") {
+    const { name, recv } = callParts(n);
+    const fn = !recv ? ctx.fns.get(name) : undefined;
+    if (!fn?.body || fn.params.length > 0 || positionalArgs(n).length > 0) return false;
+    const expr = expressionBody(fn);
+    const rets = expr ? [expr] : findAllNodes(fn.body, "jump_expression").filter(j => /^return\b/.test(j.text)).map(j => named(j)[0]);
+    return rets.length > 0 && rets.every(r => !!r && provenConstantKt(r, ctx, depth + 1));
+  }
+  return false;
+}
+
 /** A Kotlin string expression as literal text and opaque value parts (templates, `+`, URI(...) wrappers). */
 function decomposeString(node: SyntaxNode, depth = 0): UrlPart<SyntaxNode>[] {
   const n = unwrapParens(node);
@@ -1452,8 +1511,8 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const verdict = assessSqlInjection(decomposeString(arg0), n => mask(n, env));
     if (verdict.verdict === "vulnerable" && verdict.escaped) {
       emit(ctx, "sql-injection", node, verdict.culprit!.text, ct, `Escaped value '${verdict.culprit!.text}' is placed outside a quoted SQL string literal — string-escaping only protects a value inside quotes`);
-    } else {
-      fireOn(ctx, "sql-injection", node, arg0, mask(arg0, env), ct);
+    } else if (!fireOn(ctx, "sql-injection", node, arg0, mask(arg0, env), ct) && provenConstantKt(arg0, ctx)) {
+      ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
     }
   }
   // Android SQLite by argument position: the WHERE / GROUP BY / HAVING / ORDER BY text (never selectionArgs, which
@@ -1833,6 +1892,7 @@ function checkCrossFileCall(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Ta
       const display = displayFnName(key.replace(/^::/, ""));
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
       const source = culpritOf(a, fact.sinkClass, env, mask).text;
+      ktTraceRoot = ctx.root;
       const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, source, display, kotlinTraceResolver);
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${display}(...)` };
       ctx.findings.push({
@@ -1871,10 +1931,42 @@ function assignmentsIn(scope: SyntaxNode): Array<{ name: string; position: numbe
   visit(scope);
   return out;
 }
+// The file the trace being built is in (set by emit) -- functionInfo / callSitesOf are asked by name only.
+let ktTraceRoot: SyntaxNode | null = null;
+const fnNameKt = (decl: SyntaxNode): string | undefined => named(decl).find(k => k.type === "simple_identifier")?.text;
+const paramNamesKt = (decl: SyntaxNode): string[] => paramShapesOf(childOfType(decl, "function_value_parameters")).map(p => p.name);
+/** A function's returned expressions: its expression body, or each `return x` not inside a nested function / lambda. */
+function returnsOfKt(decl: SyntaxNode): SyntaxNode[] {
+  const body = childOfType(decl, "function_body");
+  if (!body) return [];
+  const kids = named(body);
+  if (kids.length === 1 && kids[0].type !== "statements" && body.text.trimStart().startsWith("=")) return [kids[0]];
+  const out: SyntaxNode[] = [];
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "function_declaration" || n.type === "lambda_literal" || n.type === "anonymous_function") return;
+    if (n.type === "jump_expression" && /^return\b/.test(n.text) && named(n)[0]) out.push(named(n)[0]);
+    for (const c of named(n)) visit(c);
+  };
+  for (const c of kids) visit(c);
+  return out;
+}
 const kotlinTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope, assignmentsIn,
   fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = scope.type === "function_declaration" ? fnNameKt(scope) : undefined;
+    return name ? { name, params: paramNamesKt(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    const decl = ktTraceRoot ? findAllNodes(ktTraceRoot, "function_declaration").find(d => fnNameKt(d) === name) : undefined;
+    if (!decl) return null;
+    const returns = returnsOfKt(decl).map(r => ({ text: r.text, position: r.startIndex, line: lineOf(r) }));
+    return { scope: decl, params: paramNamesKt(decl), line: lineOf(decl), returns };
+  },
+  callSitesOf: name => (ktTraceRoot ? findAllNodes(ktTraceRoot, "call_expression") : [])
+    .filter(c => { const p = callParts(c); return p.name === name && (!p.recv || p.recv.type === "this_expression"); })
+    .map(c => ({ scope: enclosingScope(c), position: c.startIndex, line: lineOf(c), text: c.text })),
 };
 
 // ── Interprocedural summaries ─────────────────────────────────────────────────────────────────────────────

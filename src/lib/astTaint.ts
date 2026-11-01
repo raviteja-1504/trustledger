@@ -130,6 +130,23 @@ export function findEnclosingFunctionName(node: ts.Node): string {
   return "unknown";
 }
 
+const ROUTE_METHODS = new Set(["get", "post", "put", "patch", "delete", "del", "all", "use", "head", "options"]);
+/** Is `node` inside a callback passed straight to a route registration (`app.get("/x", (req, res) => ...)`,
+ * `router.post("/y", auth, async function (req, res) { ... })`)? Such a callback has no name of its own, so
+ * findEnclosingFunctionName can't tell the call graph it is an entry point. */
+export function isInsideRouteCallback(node: ts.Node): boolean {
+  for (let cur: ts.Node | undefined = node; cur; cur = cur.parent) {
+    if (!(ts.isArrowFunction(cur) || ts.isFunctionExpression(cur) || ts.isFunctionDeclaration(cur) || ts.isMethodDeclaration(cur))) continue;
+    const call = cur.parent;
+    if (!call || !ts.isCallExpression(call) || !call.arguments.includes(cur as ts.Expression)) return false;
+    const callee = call.expression;
+    return ts.isPropertyAccessExpression(callee) && ROUTE_METHODS.has(callee.name.text) && ts.isIdentifier(callee.expression) &&
+      /^(?:app|server|api|router|\w+Router|routes?)$/.test(callee.expression.text) &&
+      call.arguments.length >= 2 && ts.isStringLiteralLike(call.arguments[0]);
+  }
+  return false;
+}
+
 // ── Taint sources ────────────────────────────────────────────────────────────
 
 const SOURCE_ROOTS = new Set(["req", "request"]);
@@ -161,6 +178,11 @@ function isMessageEventData(node: ts.PropertyAccessExpression): boolean {
 function isTaintSourceExpr(node: ts.Expression): boolean {
   if (ts.isPropertyAccessExpression(node)) {
     if (ts.isIdentifier(node.expression) && SOURCE_ROOTS.has(node.expression.text) && SOURCE_PROPS.has(node.name.text)) {
+      return true;
+    }
+    // the request kept on an object: `this.req.query` / `this.request.body` (a class built around the request)
+    if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        SOURCE_ROOTS.has(node.expression.name.text) && SOURCE_PROPS.has(node.name.text)) {
       return true;
     }
     // location.hash / window.location.search / document.location.href, document.URL / referrer, window.name
@@ -3017,27 +3039,94 @@ export function scanAstTaint(
     /** Which operand of a composite carries the taint: the one that reaches a request source, else the
      * only non-literal identifier (typically a tainted parameter); undefined when it can't be told apart. */
     const taintedOperand = (e: ts.Expression): ts.Expression | undefined => {
-      const ops = operandsOf(e).filter(o => !isLiteralExpr(unwrapExpr(o)));
+      // `"a" + v + "b"` nests one concatenation in another: judge the leaves
+      const flat = (x: ts.Expression): ts.Expression[] =>
+        ts.isBinaryExpression(x) && x.operatorToken.kind === ts.SyntaxKind.PlusToken ? [...flat(x.left), ...flat(x.right)] : [x];
+      const ops = (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken ? flat(e) : operandsOf(e)).filter(o => !isLiteralExpr(unwrapExpr(o)));
       const bySource = ops.find(o => reachesSource(o));
       if (bySource) return bySource;
       const ids = ops.filter(o => ts.isIdentifier(unwrapExpr(o)));
+      // a parameter of the enclosing function: the value came in from the caller (followed by buildTrace)
+      const param = ids.find(o => { const f = enclosingFn(o); return !!f && paramNamesOf(f).includes((unwrapExpr(o) as ts.Identifier).text); });
+      if (param) return param;
       return ids.length === 1 && ops.length === 1 ? ids[0] : undefined;
     };
+    // ── interprocedural trace support: the functions of this file by name, their call sites and their returns ──
+    type FnNode = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
+    const isFnNode = (n: ts.Node): n is FnNode => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n);
+    const fnNameOf = (f: FnNode): string | undefined => {
+      if ((ts.isFunctionDeclaration(f) || ts.isMethodDeclaration(f) || ts.isFunctionExpression(f)) && f.name && ts.isIdentifier(f.name)) return f.name.text;
+      const p = f.parent;
+      return p && ts.isVariableDeclaration(p) && ts.isIdentifier(p.name) ? p.name.text : undefined;
+    };
+    let fnsByName: Map<string, FnNode> | null = null;
+    const localFn = (name: string): FnNode | undefined => {
+      if (!fnsByName) {
+        fnsByName = new Map();
+        const visit = (n: ts.Node) => { if (isFnNode(n)) { const nm = fnNameOf(n); if (nm && !fnsByName!.has(nm)) fnsByName!.set(nm, n); } ts.forEachChild(n, visit); };
+        visit(sourceFile);
+      }
+      return fnsByName.get(name);
+    };
+    const enclosingFn = (n: ts.Node): FnNode | undefined => { for (let p = n.parent; p; p = p.parent) if (isFnNode(p)) return p; return undefined; };
+    const paramNamesOf = (f: FnNode) => f.parameters.map(p => (ts.isIdentifier(p.name) ? p.name.text : ""));
+    const calleeName = (c: ts.CallExpression): string | undefined =>
+      ts.isIdentifier(c.expression) ? c.expression.text : ts.isPropertyAccessExpression(c.expression) ? c.expression.name.text : undefined;
+    const returnsOf = (f: FnNode): ts.Expression[] => {
+      if (ts.isArrowFunction(f) && !ts.isBlock(f.body)) return [f.body];
+      const out: ts.Expression[] = [];
+      const visit = (n: ts.Node) => { if (n !== f && isFnNode(n)) return; if (ts.isReturnStatement(n) && n.expression) out.push(n.expression); ts.forEachChild(n, visit); };
+      if (f.body) visit(f.body);
+      return out;
+    };
+    const callSitesOf = (name: string): ts.CallExpression[] => {
+      const out: ts.CallExpression[] = [];
+      const visit = (n: ts.Node) => { if (ts.isCallExpression(n) && calleeName(n) === name) out.push(n); ts.forEachChild(n, visit); };
+      visit(sourceFile);
+      return out;
+    };
+
     const buildTrace = (sinkNode: ts.Node, taintedArgExpr: ts.Expression | undefined, sinkExpr: string): TraceStep[] => {
       const backward: TraceStep[] = [];
       const visitedIds = new Set<string>();
+      // the callees the walk went down into, innermost last: a parameter met inside one returns to THAT call's argument
+      const frames: Array<{ fn: string; params: string[]; args: readonly ts.Expression[]; line: number }> = [];
+      const entered = new Set<string>();
       let cur: ts.Expression | undefined = taintedArgExpr;
-      for (let hop = 0; cur && hop < MAX_TRACE_HOPS; hop++) {
+      for (let hop = 0; cur && hop < MAX_TRACE_HOPS * 4; hop++) {
         if (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
           cur = ts.isAsExpression(cur) ? cur.expression : (cur as ts.ParenthesizedExpression | ts.NonNullExpression).expression;
           continue;
         }
         const text = cur.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
         if (ts.isIdentifier(cur)) {
-          if (visitedIds.has(cur.text)) break; // a re-assignment cycle -- stop rather than loop
-          visitedIds.add(cur.text);
+          const fnHere = enclosingFn(cur);
+          const visitKey = `${fnHere?.pos ?? -1}:${cur.text}`;
+          if (visitedIds.has(visitKey)) break; // a re-assignment cycle -- stop rather than loop
+          visitedIds.add(visitKey);
           const init = initializerOf.get(cur.text);
-          if (!init) { backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text }); break; }
+          const paramIdx = fnHere ? paramNamesOf(fnHere).indexOf(cur.text) : -1;
+          if (!init || paramIdx >= 0) {
+            const fnName = fnHere ? fnNameOf(fnHere) : undefined;
+            // a parameter of the callee we came down into: back to the argument that call passed
+            const top = frames[frames.length - 1];
+            if (top && paramIdx >= 0 && top.fn === fnName && top.args[paramIdx]) {
+              backward.push({ file: filePath, line: lineOf(fnHere!), kind: "parameter", label: `${cur.text} — parameter of ${fnName}`, snippet: cur.text });
+              frames.pop();
+              cur = top.args[paramIdx];
+              continue;
+            }
+            // a parameter of the function the walk is in: up to a caller that passes something other than a literal
+            const site = paramIdx >= 0 && fnName && frames.length === 0
+              ? callSitesOf(fnName).find(c => c.arguments[paramIdx] && !isLiteralExpr(unwrapExpr(c.arguments[paramIdx]))) : undefined;
+            if (site) {
+              backward.push({ file: filePath, line: lineOf(fnHere!), kind: "parameter", label: `${cur.text} — parameter of ${fnName}`, snippet: cur.text });
+              backward.push({ file: filePath, line: lineOf(site), kind: "call", label: `passes it to ${fnName}(…)`, snippet: site.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+              cur = site.arguments[paramIdx];
+              continue;
+            }
+            if (!init) { backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text }); break; }
+          }
           const initText = init.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
           const crossHit = crossFileCallIn(init.getText(sourceFile));
           if (crossHit) {
@@ -3060,6 +3149,21 @@ export function scanAstTaint(
         if (isTaintSourceExpr(cur)) {
           backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text });
           break;
+        }
+        // a call of a function of this file: down into what it returns (once per function)
+        const called = ts.isCallExpression(cur) ? calleeName(cur) : undefined;
+        const callee = called && !entered.has(called) ? localFn(called) : undefined;
+        const rets = callee ? returnsOf(callee) : [];
+        if (ts.isCallExpression(cur) && callee && rets.length > 0) {
+          entered.add(called!);
+          const ret = rets.find(r => reachesSource(r)) ?? rets.find(r => !isLiteralExpr(unwrapExpr(r))) ?? rets[0];
+          const prev = backward[backward.length - 1];
+          if (!(prev && prev.line === lineOf(cur) && prev.kind === "assignment")) backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: text, snippet: text });
+          frames.push({ fn: called!, params: paramNamesOf(callee), args: cur.arguments, line: lineOf(cur) });
+          const retText = ret.getText(sourceFile).replace(/\s+/g, " ");
+          backward.push({ file: filePath, line: lineOf(ret), kind: "assignment", label: `${called} returns ${retText.slice(0, 70)}`, snippet: retText.slice(0, 100) });
+          cur = ret;
+          continue;
         }
         if (ts.isCallExpression(cur)) {
           const firstArg = cur.arguments[0];
@@ -3257,6 +3361,35 @@ export function scanAstTaint(
         emit("xss", call, sourceLabel(a), match.sinkExpr, a,
           `HTML-escaped value '${sourceLabel(a)}' is interpolated into an UNQUOTED HTML attribute — HTML escaping doesn't add the missing quotes, so a space still starts a new attribute (e.g. ' onmouseover=alert(1)')`);
       } else if (cleared) suppressedOut?.push({ id: match.id, line: lineOf(call) });
+      // SQL built only from proven constants (`"..." + getName()` with getName returning a literal): the line rule's
+      // concatenation match on this line is a duplicate this proves wrong
+      else if (match.id === "sql-injection" && match.args.length > 0 && match.args.every(a => provenConstantJs(a))) suppressedOut?.push({ id: match.id, line: lineOf(call) });
+    };
+
+    /** A literal, a concatenation / template of constants, a `const` local initialised to one (a `let` may be appended
+     * to later: `let body = ""; ... body += chunk`), or a call of a function of this file whose every return is one --
+     * bounded. */
+    const provenConstantJs = (e: ts.Expression, depth = 0): boolean => {
+      if (depth > 5) return false;
+      const u = unwrapExpr(e);
+      if (isLiteralExpr(u)) return true;
+      if (ts.isBinaryExpression(u) && u.operatorToken.kind === ts.SyntaxKind.PlusToken) return provenConstantJs(u.left, depth + 1) && provenConstantJs(u.right, depth + 1);
+      if (ts.isTemplateExpression(u)) return u.templateSpans.every(s => provenConstantJs(s.expression, depth + 1));
+      if (ts.isIdentifier(u)) {
+        const f = enclosingFn(u);
+        if (f && paramNamesOf(f).includes(u.text)) return false;
+        const init = initializerOf.get(u.text);
+        const decl = init?.parent;
+        const isConst = !!decl && ts.isVariableDeclaration(decl) && ts.isVariableDeclarationList(decl.parent) && (decl.parent.flags & ts.NodeFlags.Const) !== 0;
+        return !!init && init !== e && isConst && provenConstantJs(init, depth + 1);
+      }
+      if (ts.isCallExpression(u) && u.arguments.length === 0) {
+        const name = calleeName(u);
+        const f = name ? localFn(name) : undefined;
+        const rets = f ? returnsOf(f) : [];
+        return rets.length > 0 && rets.every(r => provenConstantJs(r, depth + 1));
+      }
+      return false;
     };
 
     const checkNewExprForSink = (node: ts.NewExpression, env: Env) => {

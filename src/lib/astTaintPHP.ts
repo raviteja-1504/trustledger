@@ -440,13 +440,26 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, phpTraceResolver),
+    trace: (phpTraceRoot = rootOfPHP(node), buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, phpTraceResolver)),
   });
 }
 
 type TaintMaskFnPHP = (node: SyntaxNode, env: Env) => number;
 
 function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
+  // What a call of a function / method of this file returns, from its summary: index -1 is what it returns whatever
+  // it is passed (it reads $_GET / the request itself), every other index an argument that survives to the return.
+  const localReturnMask = (name: string, args: SyntaxNode[], env: Env): number => {
+    const propIdx = ctx.propagatingParams.get(name);
+    if (!propIdx) return 0;
+    const shapes = ctx.localFunctions.get(name)?.paramShapes ?? [];
+    let m = 0;
+    for (const [i, surviving] of propIdx) {
+      if (i === -1) m |= surviving;
+      else if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+    }
+    return m;
+  };
   const taintMask = (node: SyntaxNode, env: Env): number => {
     if (isTaintSourceExprPHP(node)) return ALL;
     if (node.type === "variable_name") {
@@ -546,16 +559,8 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       // regardless of args being a literal string.
       if (fnName === "file_get_contents" && /php:\/\/input/i.test(args[0]?.text ?? "")) return ALL;
       if (fnName) {
-        const propIdx = ctx.propagatingParams.get(fnName);
-        if (propIdx) {
-          const callee = ctx.localFunctions.get(fnName);
-          const shapes = callee?.paramShapes ?? [];
-          let m = 0;
-          for (const [i, surviving] of propIdx) {
-            if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
-          }
-          if (m) return m;
-        }
+        const m = localReturnMask(fnName, args, env);
+        if (m) return m;
       }
       // Curated string/array/JSON plumbing: the result carries its arguments' taint.
       if (fnName && PHP_PASSTHROUGH.has(fnName)) {
@@ -586,11 +591,13 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         const type = name ? paramTypeOfPHP(name, node) : null;
         if (type && REQUEST_TYPE_RE_PHP.test(type)) return ALL;
       }
+      // a method of this file (`$p->name()`, `$this->build($x)`): what its summary says it returns
+      const own = methodName ? localReturnMask(methodName, argListOfPHP(node), env) : 0;
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. $dirty->trim()).
       const receiver = node.namedChildren[0];
-      if (receiver) return taintMask(receiver, env);
-      return 0;
+      if (receiver) return own | taintMask(receiver, env);
+      return own;
     }
     // Generic fallback -- recurse into every named child and OR-combine.
     // Confirmed directly (via probing "...{$id}..." encapsed_string
@@ -629,6 +636,11 @@ function computeReturnTaintPropagatingPHP(fn: LocalFunction, ctx: EngineCtx): Ma
     surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
+  // nothing seeded: a helper that reads the request itself (`function get_user_input() { return $_GET['u']; }`)
+  let intrinsic = 0;
+  createWalkerPHP({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map() },
+    { descendFunctions: false, onReturn: (expr, env, mask) => { intrinsic |= mask(expr, env); } }).walk(fn.body, new Map());
+  if (intrinsic & ALL) propagatingIdx.set(-1, intrinsic & ALL);
   return propagatingIdx;
 }
 
@@ -674,6 +686,7 @@ function checkCrossFileCallPHP(node: SyntaxNode, name: string, ctx: EngineCtx, t
       ctx.seen.add(dedupKey);
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
       // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      phpTraceRoot = rootOfPHP(node);
       const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, a.text, name, phpTraceResolver);
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${name}(...)` };
       const trace = crossFileTrace(callerTrace, name, fact);
@@ -1635,18 +1648,57 @@ function assignmentsInPHP(scope: SyntaxNode): Array<{ name: string; position: nu
     if (n.type === "assignment_expression") {
       const left = n.childForFieldName("left");
       const right = n.childForFieldName("right");
-      if (left?.type === "variable_name" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: lineOf(right) });
+      // a variable, or a property of one (`$f->name = ...`, recorded under its whole path for a trace through `$f->name`)
+      const named = left?.type === "variable_name" || (left?.type === "member_access_expression" && /^\$\w+(?:->\w+)+$/.test(left.text));
+      if (named && right) out.push({ name: left!.text, position: n.startIndex, rhsText: right.text, line: lineOf(right) });
     }
     for (const c of n.namedChildren) if (c) visit(c);
   };
   visit(scope);
   return out;
 }
+const rootOfPHP = (n: SyntaxNode): SyntaxNode => { let c = n; while (c.parent) c = c.parent; return c; };
+const PHP_FUNCTION_DECLS = new Set(["function_definition", "method_declaration"]);
+const paramNamesPHP = (fn: SyntaxNode): string[] =>
+  (fn.childForFieldName("parameters")?.namedChildren ?? []).filter((p): p is SyntaxNode => !!p && /parameter/.test(p.type))
+    .map(p => p.childForFieldName("name")?.text ?? "");
+/** Source -> sink trace resolver, with the interprocedural hooks: a parameter continues at a caller's argument (top-level
+ * script code included -- its scope is the file), a call of a function of this file continues at its `return`. */
 const phpTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope: enclosingScopePHP, assignmentsIn: assignmentsInPHP,
-  fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
+  fileScope: rootOfPHP,
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = PHP_FUNCTION_DECLS.has(scope.type) ? scope.childForFieldName("name")?.text : undefined;
+    return name ? { name, params: paramNamesPHP(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    // the walk only ever asks about a name it met in this file, so any node of the file finds the root -- the last
+    // sink node seen is stashed for that (see phpTraceRoot)
+    const root = phpTraceRoot;
+    if (!root) return null;
+    const fn = findAllNodes(root, "function_definition").concat(findAllNodes(root, "method_declaration")).find(d => d.childForFieldName("name")?.text === name);
+    const body = fn?.childForFieldName("body");
+    if (!fn || !body) return null;
+    const returns: Array<{ text: string; position: number; line: number }> = [];
+    const visit = (n: SyntaxNode) => {
+      if (n !== body && ANY_FUNCTION_NODES_PHP.has(n.type)) return;
+      if (n.type === "return_statement" && n.namedChildren[0]) { const e = n.namedChildren[0]; returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(body);
+    return { scope: fn, params: paramNamesPHP(fn), line: lineOf(fn), returns };
+  },
+  callSitesOf: name => {
+    const root = phpTraceRoot;
+    if (!root) return [];
+    return findAllNodes(root, "function_call_expression").concat(findAllNodes(root, "member_call_expression"))
+      .filter(c => (c.childForFieldName("function") ?? c.childForFieldName("name"))?.text === name)
+      .map(c => ({ scope: enclosingScopePHP(c) ?? root, position: c.startIndex, line: lineOf(c), text: c.text }));
+  },
 };
+/** The file the trace being built belongs to (set by each trace build: the resolver is shared across files). */
+let phpTraceRoot: SyntaxNode | null = null;
 
 function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
   const taintMask = makeTaintMaskPHP(ctx);

@@ -138,3 +138,33 @@ it("incident state reads past the 1000-row cap too: the real latest scan, and ev
   expect(new Set(s.top_risk_files.map(f => f.scan_id))).toEqual(new Set(["latest"]));
   expect(s.top_risk_files).toHaveLength(1500);
 });
+
+describe("the SLA page's list (sla_open_files) is the dashboard's own SLA set", () => {
+  it("every deadline of the breach set's files, so its overdue count IS the breach count", async () => {
+    seed({
+      scans: [scan("a1", "o/api", 20, 0.9, 2), { ...scan("a2", "o/api", 2, 0.8, 2), pr_number: 42 }, scan("w1", "o/web", 3, 0.1, 198)],
+      violations: [
+        { id: "v1", scan_id: "a2", file_path: "src/auth.ts", risk_score: "HIGH", status: "open", sla_deadline: daysAgo(1), assigned_email: "dev@x" },
+        { id: "v2", scan_id: "a2", file_path: "src/db.ts", risk_score: "HIGH", status: "in_review", sla_deadline: daysAgo(-2) },
+        { id: "v3", scan_id: "a2", file_path: "src/pay.ts", risk_score: "CRITICAL", status: "open", sla_deadline: daysAgo(3) },     // signed off: out
+        { id: "v4", scan_id: "a1", file_path: "src/auth.ts", risk_score: "HIGH", status: "open", sla_deadline: daysAgo(15) },     // older scan: out
+        { id: "v5", scan_id: "a2", file_path: "src/util.ts", risk_score: "HIGH", status: "resolved", sla_deadline: daysAgo(1) },  // resolved: out
+      ],
+    });
+    const d = await fetchDashboard(ORG, 90, null);
+    expect(d.sla_open_files!.map(f => f.id).sort()).toEqual(["v1", "v2"]);
+    const overdue = d.sla_open_files!.filter(f => Date.parse(f.sla_deadline) < Date.now());
+    expect(overdue.length).toBe(d.sla_breach_critical_count + d.sla_breach_high_count);
+    expect(d.sla_open_files!.find(f => f.id === "v1")).toMatchObject({ repo: "o/api", pr_number: 42, assigned_email: "dev@x", status: "open" });
+  });
+
+  it("reads past the 1000-row cap: 1500 overdue files are all listed and all counted", async () => {
+    const violations = Array.from({ length: 1500 }, (_, i) => ({
+      id: `v${String(i).padStart(4, "0")}`, scan_id: "a2", file_path: `src/f${i}.ts`, risk_score: "HIGH", status: "open", sla_deadline: daysAgo(1),
+    }));
+    seed({ attestations: [], violations }, { maxRows: 1000 });
+    const d = await fetchDashboard(ORG, 90, null);
+    expect(d.sla_open_files!.length).toBe(1500);
+    expect(d.sla_breach_high_count).toBe(1500);
+  });
+});

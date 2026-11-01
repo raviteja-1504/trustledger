@@ -83,10 +83,10 @@ export const REACH_LABEL: Record<Reachability, string> = {
 
 export const REACH_DESC: Record<Reachability, string> = {
   "entry-point":  "Directly reachable from an API route or handler with no other function call between it and this code — the highest-confidence attack surface.",
-  "tainted-path": "Reachable, and the call graph traced attacker-controlled data flowing along the path to this code.",
-  "reachable":    "Reachable from at least one entry point, but no tainted data path was confirmed to it.",
-  "unreachable":  "No path found from any entry point in this file's call graph — likely dead code, or the call graph couldn't trace it (e.g. dynamic dispatch, or a language without call-graph support).",
-  "unknown":      "This scan predates reachability analysis, or this finding wasn't a scored security indicator.",
+  "tainted-path": "Attacker-controlled input was traced to this code — by the finding's own data-flow trace, or along the call graph.",
+  "reachable":    "Reachable from at least one entry point, or its input was assumed rather than seen — no tainted data path was confirmed.",
+  "unreachable":  "This code is in a function no entry point in this file calls — likely dead code, or called in a way the call graph can't see (e.g. dynamic dispatch).",
+  "unknown":      "Reachability couldn't be determined: the call graph can't place this code and no data-flow trace decides it (or the scan predates reachability analysis).",
 };
 
 // ── Remediation urgency ─────────────────────────────────────────────────────

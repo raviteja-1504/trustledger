@@ -10,6 +10,7 @@ import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { DEMO_SAMPLES, DEMO_LIMITS, type DemoSample } from "@/lib/demoSamples";
 import type { DemoFinding, DemoScanResponse } from "@/lib/demoScan";
+import { diffLines, changedLineCount } from "@/lib/lineDiff";
 import { AMBER, BORDER, CYAN, EMERALD, ROSE, SKY, VIOLET } from "@/components/marketing/Site";
 
 type Variant = "vulnerable" | "fixed" | "custom";
@@ -37,6 +38,46 @@ function CodePanel({ content, highlight, editable, onChange, label }: { content:
         );
       })}
     </pre>
+  );
+}
+
+const DIFF_TINT = { removed: `${ROSE}24`, added: `${EMERALD}24`, changedLeft: `${ROSE}1a`, changedRight: `${EMERALD}1a` };
+
+/** The fix side by side: both versions aligned row by row, the lines it removed in rose and the ones it added in green. */
+function DiffView({ before, after }: { before: string; after: string }) {
+  const rows = useMemo(() => diffLines(before, after), [before, after]);
+  const changed = changedLineCount(rows);
+  const cell = (no: number | undefined, text: string | undefined, tint: string | undefined, mark: string, markColor: string) => (
+    <div className="flex min-w-0" style={tint ? { background: tint } : undefined}>
+      <span className="select-none w-9 shrink-0 pr-2 text-right text-white/25">{no ?? ""}</span>
+      <span className="select-none w-4 shrink-0 text-center font-bold" style={{ color: markColor }}>{mark}</span>
+      {/* wrapped: the changed line is usually the longest one (a query, a command) and must be readable in full */}
+      <code className="whitespace-pre-wrap break-all min-w-0 text-white/85 pr-3">{text === undefined ? "" : text || " "}</code>
+    </div>
+  );
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-[11px] font-mono border-b" style={{ borderColor: BORDER }}>
+        <span className="font-bold" style={{ color: ROSE }}>VULNERABLE</span>
+        <span className="text-white/30">→</span>
+        <span className="font-bold" style={{ color: EMERALD }}>FIXED</span>
+        <span className="ml-auto text-white/50">
+          {changed === 0 ? "the fix doesn't change this file" : `${changed} line${changed === 1 ? "" : "s"} changed`}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <div className="grid grid-cols-2 min-w-[44rem] py-3 font-mono text-[12.5px] leading-[1.6]" aria-label="Vulnerable and fixed versions, line by line">
+          {rows.map((r, i) => (
+            <div key={i} className="contents">
+              {r.kind === "same" && <>{cell(r.leftNo, r.left, undefined, "", "")}{cell(r.rightNo, r.right, undefined, "", "")}</>}
+              {r.kind === "changed" && <>{cell(r.leftNo, r.left, DIFF_TINT.changedLeft, "−", ROSE)}{cell(r.rightNo, r.right, DIFF_TINT.changedRight, "+", EMERALD)}</>}
+              {r.kind === "removed" && <>{cell(r.leftNo, r.left, DIFF_TINT.removed, "−", ROSE)}{cell(undefined, undefined, "rgba(255,255,255,0.02)", "", "")}</>}
+              {r.kind === "added" && <>{cell(undefined, undefined, "rgba(255,255,255,0.02)", "", "")}{cell(r.rightNo, r.right, DIFF_TINT.added, "+", EMERALD)}</>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -129,21 +170,23 @@ export default function DemoClient() {
         <p className="text-sm text-white/60 mt-3 max-w-3xl">{sample.summary}</p>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[1.15fr_1fr] gap-6 items-start">
+      {/* comparing with the fix: the code takes the full width so both versions are readable side by side */}
+      <div className={`grid grid-cols-1 gap-6 items-start ${showDiff ? "" : "xl:grid-cols-[1.15fr_1fr]"}`}>
         {/* code */}
         <div className="rounded-2xl border overflow-hidden" style={{ borderColor: BORDER, background: "rgba(255,255,255,0.025)" }}>
           <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b" style={{ borderColor: BORDER }}>
             {sample.files.map(f => (
-              <button key={f.path} onClick={() => setActiveFile(f.path)} className="text-[12px] font-mono px-2.5 py-1 rounded-md"
-                style={{ color: f.path === activeFile ? "#fff" : "rgba(255,255,255,0.55)", background: f.path === activeFile ? "rgba(255,255,255,0.08)" : "transparent" }}>{f.path}</button>
+              <button key={f.path} onClick={() => setActiveFile(f.path)} className="inline-flex items-center gap-1.5 text-[12px] font-mono px-2.5 py-1 rounded-md"
+                style={{ color: f.path === activeFile ? "#fff" : "rgba(255,255,255,0.55)", background: f.path === activeFile ? "rgba(255,255,255,0.08)" : "transparent" }}>
+                {f.path}
+                {/* the files the fix touches -- the one to open when a sample has several */}
+                {f.fixed !== f.vulnerable && <span className="w-1.5 h-1.5 rounded-full" style={{ background: EMERALD }} title="The fix changes this file" />}
+              </button>
             ))}
-            <span className="ml-auto text-[11px] font-mono text-white/40">{variant === "fixed" ? "fixed version" : variant === "custom" ? "your edit" : "vulnerable version"}</span>
+            <span className="ml-auto text-[11px] font-mono text-white/40">{showDiff ? "comparing with the fix" : variant === "fixed" ? "fixed version" : variant === "custom" ? "your edit" : "vulnerable version"}</span>
           </div>
           {showDiff ? (
-            <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x" style={{ borderColor: BORDER }}>
-              <div><p className="px-4 pt-3 text-[11px] font-bold font-mono" style={{ color: ROSE }}>VULNERABLE</p><CodePanel label={`${activeFile} (vulnerable)`} content={contentOf(activeFile, "vulnerable")} highlight={new Set()} editable={false} /></div>
-              <div><p className="px-4 pt-3 text-[11px] font-bold font-mono" style={{ color: EMERALD }}>FIXED</p><CodePanel label={`${activeFile} (fixed)`} content={contentOf(activeFile, "fixed")} highlight={new Set()} editable={false} /></div>
-            </div>
+            <DiffView before={contentOf(activeFile, "vulnerable")} after={contentOf(activeFile, "fixed")} />
           ) : (
             <CodePanel label={activeFile} content={editing ? (edits[activeFile] ?? contentOf(activeFile)) : contentOf(activeFile)} highlight={highlight} editable={editing}
               onChange={v => setEdits(e => ({ ...e, [activeFile]: v }))} />
@@ -153,7 +196,19 @@ export default function DemoClient() {
               {busy ? "Scanning…" : "Step 2 · Scan the vulnerable code"}
             </button>
             <button disabled={busy} onClick={() => scan("fixed")} className="text-sm font-semibold px-4 py-2 rounded-lg border text-white/85 disabled:opacity-50" style={{ borderColor: `${EMERALD}66`, background: `${EMERALD}14` }}>Step 3 · Apply the fix and rescan</button>
-            <button onClick={() => setShowDiff(d => !d)} className="text-sm font-semibold px-3 py-2 rounded-lg border text-white/70" style={{ borderColor: BORDER }}>{showDiff ? "Hide" : "Show"} side-by-side fix</button>
+            <button aria-pressed={showDiff} onClick={() => {
+              setEditing(false);
+              if (!showDiff) {
+                // open a file the fix actually changes (a multi-file sample's fix is often in the second one)
+                const here = sample.files.find(f => f.path === activeFile);
+                if (here && here.fixed === here.vulnerable) setActiveFile((sample.files.find(f => f.fixed !== f.vulnerable) ?? here).path);
+              }
+              setShowDiff(d => !d);
+            }}
+              className="text-sm font-semibold px-3 py-2 rounded-lg border"
+              style={showDiff ? { borderColor: `${EMERALD}80`, background: `${EMERALD}1a`, color: "#fff" } : { borderColor: BORDER, color: "rgba(255,255,255,0.7)" }}>
+              {showDiff ? "Back to the code" : "Compare with the fix"}
+            </button>
             {!editing
               ? <button onClick={() => { setEditing(true); setShowDiff(false); setEdits(e => Object.fromEntries(sample.files.map(f => [f.path, e[f.path] ?? contentOf(f.path)]))); }} className="text-sm font-semibold px-3 py-2 rounded-lg border text-white/70" style={{ borderColor: BORDER }}>Edit the code</button>
               : <button disabled={busy} onClick={() => scan("custom")} className="text-sm font-bold px-3 py-2 rounded-lg border text-white disabled:opacity-50" style={{ borderColor: `${VIOLET}80`, background: `${VIOLET}1f` }}>Scan my edit</button>}

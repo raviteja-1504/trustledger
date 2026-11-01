@@ -308,7 +308,7 @@ function emit(ctx: EngineCtx, id: AstTaintCppId, node: SyntaxNode, sourceExpr: s
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr,
     detail: detail ?? `Tainted expression '${sourceExpr.slice(0, 80)}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, cppTraceResolver),
+    trace: (cppTraceRoot = ctx.root, buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, cppTraceResolver)),
   });
 }
 /** Report when `m` carries the sink's class, or record a positive proof (cleared) so the regex duplicate is vetoed. */
@@ -344,10 +344,40 @@ function assignmentsIn(scope: SyntaxNode): Array<{ name: string; position: numbe
   visit(scope);
   return out;
 }
+// The file the trace being built is in (set by emit) -- functionInfo / callSitesOf are asked by name only.
+let cppTraceRoot: SyntaxNode | null = null;
+function paramNamesCpp(fn: SyntaxNode): string[] {
+  let d = field(fn, "declarator");
+  while (d && d.type !== "function_declarator") d = field(d, "declarator");
+  return named(field(d, "parameters")).filter(p => /parameter_declaration/.test(p.type)).map(p => declaredName(field(p, "declarator")) ?? "");
+}
+function returnsOfCpp(fn: SyntaxNode): SyntaxNode[] {
+  const out: SyntaxNode[] = [];
+  const visit = (n: SyntaxNode) => {
+    if (n !== fn && (n.type === "function_definition" || n.type === "lambda_expression")) return;
+    if (n.type === "return_statement" && named(n)[0]) out.push(named(n)[0]);
+    for (const c of named(n)) visit(c);
+  };
+  visit(fn);
+  return out;
+}
 const cppTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope, assignmentsIn,
   fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = scope.type === "function_definition" ? functionName(scope) : null;
+    return name ? { name, params: paramNamesCpp(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    const fn = cppTraceRoot ? findAllNodes(cppTraceRoot, "function_definition").find(f => functionName(f) === name) : undefined;
+    if (!fn) return null;
+    const returns = returnsOfCpp(fn).map(r => ({ text: r.text, position: r.startIndex, line: lineOf(r) }));
+    return { scope: fn, params: paramNamesCpp(fn), line: lineOf(fn), returns };
+  },
+  callSitesOf: name => (cppTraceRoot ? findAllNodes(cppTraceRoot, "call_expression") : [])
+    .filter(c => { const f = field(c, "function"); return f?.type === "identifier" && f.text === name; })
+    .map(c => ({ scope: enclosingScope(c), position: c.startIndex, line: lineOf(c), text: c.text })),
 };
 
 // ── Vocabulary ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -447,6 +477,27 @@ function groupMask(name: string, env: Env, ctx: EngineCtx): number {
   return m | (env.get(name) ?? 0);
 }
 
+/** The function of this file a call runs: a free call, or `p.name()` / `p->name()` on a member function defined here
+ * (in a class body, or out of line as `T::name`). */
+function localCallee(target: string, recv: SyntaxNode | null, ctx: EngineCtx): LocalFn | undefined {
+  const local = ctx.fns.get(target);
+  if (!local || !recv) return local;
+  const member = local.decl.parent?.type === "field_declaration_list" || /::/.test(field(local.decl, "declarator")?.text ?? "");
+  // only a name defined once in the file: `base->action(data)` with a bad and several good `action` overrides could
+  // run any of them, and ctx.fns holds just one
+  return member && definitionCount(ctx.root, target) === 1 ? local : undefined;
+}
+const definitionCounts = new WeakMap<SyntaxNode, Map<string, number>>();
+function definitionCount(root: SyntaxNode, name: string): number {
+  let counts = definitionCounts.get(root);
+  if (!counts) {
+    counts = new Map();
+    for (const f of findAllNodes(root, "function_definition")) { const n = functionName(f); if (n) counts.set(n, (counts.get(n) ?? 0) + 1); }
+    definitionCounts.set(root, counts);
+  }
+  return counts.get(name) ?? 0;
+}
+
 function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
   const { name, recv, args } = callInfo(call);
   const api = baseApi(name);
@@ -456,7 +507,7 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
   if (recv && /^(?:append|insert|replace|assign|operator\+=)$/.test(api)) return mask(recv, env, ctx) | args.reduce((m, a) => m | mask(a, env, ctx), 0);
   // a local function: what its return carries from these arguments, plus what it reads itself
   const target = ctx.fnAlias.get(name) ?? name;
-  const fn = !recv ? ctx.fns.get(target) : undefined;
+  const fn = localCallee(target, recv, ctx);
   if (fn) {
     let m = ctx.intrinsic.get(target) ?? 0;
     const prop = ctx.propagating.get(target);
@@ -732,7 +783,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     // a local function called with tainted arguments: walk it with those (same file); a call through a local
     // function pointer goes to the function it was initialised with
     const target = ctx.fnAlias.get(name) ?? name;
-    const fn = !recv ? ctx.fns.get(target) : undefined;
+    const fn = localCallee(target, recv, ctx);
     if (fn) {
       let seeded = ctx.seeded.get(target);
       for (const [i, am] of argM.entries()) {
@@ -774,7 +825,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         ctx.findings.push({
           id: fact.id as AstTaintCppId, line, sourceExpr: a.text, sinkExpr: `${name}() -> ${fact.sinkExpr}`,
           detail: `Tainted expression '${a.text.slice(0, 60)}' is passed to ${name}(...), which reaches ${fact.sinkExpr}(...) at ${fact.file}:${fact.line} [crosses file boundary${via}] — real data-flow match across files, not a line-pattern guess`,
-          trace: crossFileTrace(buildBackwardTraceGeneric(ctx.filePath, call, a.text, name, cppTraceResolver), name, fact),
+          trace: crossFileTrace((cppTraceRoot = ctx.root, buildBackwardTraceGeneric(ctx.filePath, call, a.text, name, cppTraceResolver)), name, fact),
           calleeSink: { file: fact.file, line: fact.line, sinkExpr: fact.sinkExpr, via: fact.via },
         });
       }

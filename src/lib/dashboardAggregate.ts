@@ -33,11 +33,11 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   const until = period ? new Date(`${period.end}T23:59:59.999Z`).toISOString() : new Date().toISOString();
 
   // Per-repo stats from the period's scans. When prAuthorFilter is set (developer role), only that author's PRs.
-  type ScanRow = { id: string; repo_full_name: string; overall_risk: string; total_ai_percentage: number; file_count: number; created_at: string };
+  type ScanRow = { id: string; repo_full_name: string; overall_risk: string; total_ai_percentage: number; file_count: number; created_at: string; pr_number?: number | null };
   const scansRaw = await fetchAllRows<ScanRow>((from, to) => {
     let q = db
       .from("scans")
-      .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
+      .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at, pr_number")
       .eq("org_id", org_id)
       .gte("created_at", since)
       .lte("created_at", until)
@@ -102,11 +102,16 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // halves the row count (MEDIUM files make up ~half of violations), giving 2x
   // more headroom before hitting the server-side max_rows limit as more repos
   // are connected.
-  const { data: violations } = latestScanIdPerRepo.length === 0 ? { data: [] } : await db
+  // Paged: an org with more than 1000 CRITICAL/HIGH violations across its latest scans would otherwise get an
+  // arbitrary 1000 back, silently dropping SLA items.
+  type ViolationRow = { id: string; scan_id: string; file_path: string; risk_score: string; status: string; sla_deadline: string | null; assigned_email: string | null };
+  const violations: ViolationRow[] = latestScanIdPerRepo.length === 0 ? [] : await fetchAllRows<ViolationRow>((from, to) => db
     .from("violations")
-    .select("id, scan_id, file_path, risk_score, status, sla_deadline")
+    .select("id, scan_id, file_path, risk_score, status, sla_deadline, assigned_email")
     .in("scan_id", latestScanIdPerRepo)
-    .in("risk_score", ["CRITICAL", "HIGH"]);
+    .in("risk_score", ["CRITICAL", "HIGH"])
+    .order("id", { ascending: true })
+    .range(from, to) as unknown as PromiseLike<{ data: ViolationRow[] | null }>);
 
   type RiskFileRow = { scan_id: string; file_path: string; ai_percentage: number; risk_score: string; risk_indicators: string[]; created_at: string; scans: { repo_full_name: string; pr_number: number } | null };
   const riskFiles: RiskFileRow[] = latestScanIdPerRepo.length === 0 ? [] : await fetchAllRows<RiskFileRow>((from, to) => db
@@ -325,7 +330,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
   // period's scans are the complete lookup (a separate unpaged "all scans" query could drop rows past 1000).
   const scanCreatedAtAll = new Map(scans.map(s => [s.id, s.created_at]));
   const scanToRepoAll    = scanToRepo;
-  const latestViolationByFile = new Map<string, NonNullable<typeof violations>[number]>();
+  const latestViolationByFile = new Map<string, ViolationRow>();
   (violations ?? []).forEach(v => {
     const repo = scanToRepoAll.get(v.scan_id);
     if (!repo) return;
@@ -373,6 +378,23 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
       scan_id:    v.scan_id,
       sla_deadline: v.sla_deadline as string,
     }));
+  // Every file the SLA applies to -- overdue, due today or on track -- from the SAME set as the breach counts above
+  // (latest scan per repo, CRITICAL/HIGH, still open or in review, not signed off), so the SLA page's overdue count
+  // is exactly the dashboard's breach count for the same period.
+  const prByScan = new Map(scans.map(s => [s.id, s.pr_number ?? null]));
+  const sla_open_files = currentViolations
+    .filter(v => !!v.sla_deadline)
+    .map(v => ({
+      id:             v.id,
+      file_path:      v.file_path,
+      risk_score:     v.risk_score,
+      status:         v.status,
+      repo:           scanToRepoAll.get(v.scan_id) ?? "",
+      scan_id:        v.scan_id,
+      pr_number:      prByScan.get(v.scan_id) ?? null,
+      assigned_email: v.assigned_email ?? null,
+      sla_deadline:   v.sla_deadline as string,
+    }));
 
   return {
     repos,
@@ -393,6 +415,7 @@ export async function fetchDashboard(org_id: string, days: number, prAuthorFilte
     sla_breach_critical_count,
     sla_breach_high_count,
     sla_breach_files,
+    sla_open_files,
   };
 }
 

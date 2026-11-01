@@ -397,9 +397,38 @@ function assignmentsInCS(scope: SyntaxNode): Array<{ name: string; position: num
   visit(scope);
   return out;
 }
+const rootOfCS = (n: SyntaxNode): SyntaxNode => { let c = n; while (c.parent) c = c.parent; return c; };
+const findAllCS = (root: SyntaxNode, type: string): SyntaxNode[] => { const out: SyntaxNode[] = []; const v = (n: SyntaxNode) => { if (n.type === type) out.push(n); for (const c of n.namedChildren) if (c) v(c); }; v(root); return out; };
+const paramNamesCS = (m: SyntaxNode): string[] =>
+  (m.childForFieldName("parameters")?.namedChildren ?? []).filter((p): p is SyntaxNode => p?.type === "parameter")
+    .map(p => p.childForFieldName("name")?.text ?? p.namedChildren.filter(c => c?.type === "identifier").pop()?.text ?? "");
+/** The file the trace being built belongs to (set at each trace build: the resolver is shared across files). */
+let csTraceRoot: SyntaxNode | null = null;
+/** Source -> sink trace resolver, with the interprocedural hooks: a parameter continues at a caller's argument, a call
+ * of a method of this file continues at its `return`. */
 const csTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope: enclosingScopeCS, assignmentsIn: assignmentsInCS,
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = scope.type === "method_declaration" ? scope.childForFieldName("name")?.text : undefined;
+    return name ? { name, params: paramNamesCS(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    const m = csTraceRoot ? findAllCS(csTraceRoot, "method_declaration").find(d => d.childForFieldName("name")?.text === name) : undefined;
+    const body = m?.childForFieldName("body");
+    if (!m || !body) return null;
+    const returns: Array<{ text: string; position: number; line: number }> = [];
+    const visit = (n: SyntaxNode) => {
+      if (n !== body && (FUNCTION_NODES_CS.has(n.type) || n.type === "method_declaration")) return;
+      if (n.type === "return_statement" && n.namedChildren[0]) { const e = n.namedChildren[0]; returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(body);
+    return { scope: m, params: paramNamesCS(m), line: lineOf(m), returns };
+  },
+  callSitesOf: name => (csTraceRoot ? findAllCS(csTraceRoot, "invocation_expression") : [])
+    .filter(c => { const f = c.childForFieldName("function"); return (f?.type === "identifier" ? f.text : f?.childForFieldName("name")?.text) === name; })
+    .map(c => ({ scope: enclosingScopeCS(c), position: c.startIndex, line: lineOf(c), text: c.text })),
 };
 function isParamOfEnclosingCS(id: SyntaxNode): boolean {
   for (let cur: SyntaxNode | null = id.parent; cur; cur = cur.parent) {
@@ -667,7 +696,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, csTraceResolver),
+    trace: (csTraceRoot = rootOfCS(node), buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, csTraceResolver)),
   });
 }
 
@@ -802,8 +831,9 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
           for (const [i, surviving] of propIdx) {
             if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
           }
-          // proof pass: also what the method returns with no tainted argument (index -1: a field, an input)
-          if (ctx.proof) m |= propIdx.get(-1) ?? 0;
+          // index -1, what it returns with no tainted argument: request input it reads itself (and, in the proof pass,
+          // a field or an unmodelled input)
+          m |= propIdx.get(-1) ?? 0;
           if (m || ctx.proof) return m;
         }
         // proof pass: a local method with no summary entry returns nothing the caller gave it
@@ -867,9 +897,10 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
   if (!method.body) return propagatingIdx;
-  // proof pass: also what the method returns with NO tainted parameter (a field, an unmodelled input), as index -1
+  // index -1, nothing seeded: what the method returns whatever it is passed -- a helper that reads the request itself
+  // (`return Request.Query["u"];`); in the proof pass also a field or an unmodelled input
   const seeds: Array<{ name: string | null; index: number }> = method.paramShapes.map(s => ({ name: s.name, index: s.index }));
-  if (ctx.proof) seeds.push({ name: null, index: -1 });
+  seeds.push({ name: null, index: -1 });
   for (const shape of seeds) {
     let surviving = 0;
     // Path-sensitive: the mask is taken at EACH return with the env on that
@@ -1144,6 +1175,7 @@ function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNo
       const source = a.text.replace(/\s+/g, " ");
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
       // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
+      csTraceRoot = rootOfCS(node);
       const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, source, key, csTraceResolver);
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${recv}.${method}(...)` };
       const trace = crossFileTrace(callerTrace, key, fact);

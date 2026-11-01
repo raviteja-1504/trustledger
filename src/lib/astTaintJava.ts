@@ -585,10 +585,7 @@ function emit(
   const key = `${id}:${line}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
-  const traceResolver: TraceResolver<CstNode> = {
-    enclosingScope: () => ctx.currentBody ?? null, assignmentsIn: assignmentsInJava,
-    position: startOf, line: lineOf, text: tokensText,
-  };
+  const traceResolver = javaTraceResolver(ctx);
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? (id === "bola-missing-ownership-check"
@@ -608,6 +605,37 @@ function isRequestVar(v: string | null, ctx: { varTypes: Map<string, string> }):
 }
 
 /** Source-order text of every token under `node`, joined with no separators (`Map<String,String>`). */
+/** The trace resolver over this file's methods: the current method body as the scope, plus the interprocedural
+ * hooks (a parameter continues at a caller's argument; a call of a local method continues at its `return`). */
+function javaTraceResolver(ctx: EngineCtx): TraceResolver<CstNode> {
+  const methods = [...ctx.localMethods.values()].filter(m => m.body);
+  const params = (m: LocalMethod) => { const out: string[] = []; for (const s of m.paramShapes) out[s.index] = s.name; return Array.from(out, n => n ?? ""); };
+  const methodOfBody = (scope: CstNode) => methods.find(m => m.body === scope) ?? null;
+  const enclosingBody = (n: CstNode): CstNode | null => {
+    const at = startOf(n);
+    const m = methods.find(x => startOf(x.body!) <= at && at <= endOf(x.body!));
+    return m?.body ?? null;
+  };
+  return {
+    enclosingScope: () => ctx.currentBody ?? null, assignmentsIn: assignmentsInJava,
+    position: startOf, line: lineOf, text: tokensText,
+    scopeInfo: scope => { const m = methodOfBody(scope); return m ? { name: m.name, params: params(m), line: lineOf(m.body!) } : null; },
+    functionInfo: name => {
+      const m = ctx.localMethods.get(name);
+      if (!m?.body) return null;
+      const returns = findAllNodes(m.body, "returnStatement")
+        .filter(r => !findAllNodes(m.body!, "lambdaExpression").some(l => startOf(l) <= startOf(r) && startOf(r) <= endOf(l)))
+        .map(r => firstNode(r, "expression")).filter((e): e is CstNode => !!e)
+        .map(e => ({ text: tokensText(e), position: startOf(e), line: lineOf(e) }));
+      return { scope: m.body, params: params(m), line: lineOf(m.body), returns };
+    },
+    callSitesOf: name => (ctx.root ? findAllNodes(ctx.root, "primary") : [])
+      .map(p => ({ p, text: tokensText(p) }))
+      .filter(({ text }) => new RegExp(`^(?:this\\.)?${name}\\s*\\(`).test(text))
+      .map(({ p, text }) => ({ scope: enclosingBody(p), position: startOf(p), line: lineOf(p), text })),
+  };
+}
+
 function tokensText(node: CstNode): string {
   const toks: IToken[] = [];
   const visit = (n: CstNode) => {
@@ -916,7 +944,9 @@ function assignmentsInJava(scope: CstNode): Array<{ name: string; position: numb
       if (assignTok?.image === "=") {
         const lhsUnary = firstNode(n, "unaryExpression");
         const rhsExpr = firstNode(n, "expression");
-        const name = lhsUnary ? bareLocalNameJava(lhsUnary) : null;
+        // a local, or a field of one (`f.name = ...`, recorded under its whole path for a trace through `f.name`)
+        const lhsText = lhsUnary ? tokensText(lhsUnary) : "";
+        const name = lhsUnary ? bareLocalNameJava(lhsUnary) ?? (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(lhsText) ? lhsText : null) : null;
         if (name && rhsExpr) out.push({ name, position: startOf(n), rhsText: tokensText(rhsExpr), line: lineOf(rhsExpr) });
       }
     }
@@ -991,7 +1021,7 @@ function walkPrimaryChain(
       const clears = sanitizerClears("java", calleeName || tail) ?? (ctx.htmlEscapers.has(tail) ? classOf("xss") : null);
       if (clears !== null) {
         chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
-        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf() });
+        onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), prefix });
         calls++;
         nameParts = [];
         continue;
@@ -1056,6 +1086,9 @@ function walkPrimaryChain(
         const shapes = callee?.paramShapes ?? [];
         let m = 0;
         for (const [i, surviving] of propIdx) {
+          // index -1: what it returns whatever it is passed (outside the proof pass: request input it reads itself;
+          // the proof pass resolves -1 below, only for calls it can tie to this file)
+          if (i === -1) { if (!ctx.proof) m |= surviving; continue; }
           const shape = shapes[i];
           if (!shape) continue;
           for (const a of argsForShape(args, shape)) m |= taintMask(a, env, ctx) & surviving;
@@ -1106,7 +1139,7 @@ function walkPrimaryChain(
 
       // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
       const selfCall = calls === 0 && nameParts.length === 1 && !receiverOf() && (parts.length === 1 || prefixIsThis);
-      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall });
+      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall, prefix });
       calls++;
 
       // Generic passthrough: any other call keeps existing chain taint sticky
@@ -1126,6 +1159,8 @@ interface CallInfo {
   receiverName?: string;
   /** A call to the class's own method: `execute(x)`, `super.execute(x)`, `this.execute(x)`. */
   selfCall?: boolean;
+  /** The chain's first element (`new URL(x)` in `new URL(x).openStream()`). */
+  prefix?: CstNode;
 }
 
 function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
@@ -1534,7 +1569,8 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   } else if (tail === "openConnection" || tail === "openStream") {
     // Chained on `new URL(x)`, or on a URL held in a variable (`URL u = new URL(x); u.openConnection()`)
     // whose taint arrives as the receiver's.
-    if (info.isNewURL) fire("ssrf");
+    // the source is the `new URL(x)` the call is chained on (the trace follows x), not the method name
+    if (info.isNewURL) fire("ssrf", combined, info.prefix ? tokensText(info.prefix) : sourceExpr);
     else if (rootVar && (chainTaintBefore & classOf("ssrf"))) fire("ssrf", chainTaintBefore, rootVar);
   } else if (tail === "get" && rootVar === "Paths") {
     fire("path-traversal");
@@ -1635,7 +1671,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     const all = tail === "printf" || tail === "format";
     const mask = all ? argMasks.reduce((m, x) => m | x, 0) : argMasks[0];
     const culprit = all ? args[argMasks.findIndex(x => x & ALL)] ?? arg0 : arg0;
-    fire("xss", mask, nodeText(culprit));
+    fire("xss", mask, culpritText(culprit, env, ctx));
   }
   // for (var e : tainted.entrySet()) t.put(e.getKey(), e.getValue()): the request decides which keys are set
   if (tail === "put" && args.length === 2 && ctx.entryLoopVars.some(v => tokensText(arg0) === `${v}.getKey()` && tokensText(args[1]) === `${v}.getValue()`)) {
@@ -1767,7 +1803,9 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
   if (!method.body) return propagatingIdx;
   // proof pass: also what the method returns with NO tainted parameter (a field, an unmodelled input), as index -1
   const seeds: Array<{ name: string | null; index: number }> = method.paramShapes.map(s => ({ name: s.name, index: s.index }));
-  if (ctx.proof) seeds.push({ name: null, index: -1 });
+  // index -1, nothing seeded: what the method returns whatever it is passed -- a helper that reads the request itself
+  // (`return request.getParameter("u")`); in the proof pass, also a field or an unmodelled input
+  seeds.push({ name: null, index: -1 });
   for (const shape of seeds) {
     let surviving = 0;
     // Path-sensitive: the mask is taken at EACH return with the env on that

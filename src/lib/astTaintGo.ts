@@ -301,10 +301,13 @@ let goCtx: GoScanCtx = emptyGoCtx();
 let goSourceCallRe = /^(?:r|req|request|c\.Request)\.(?:URL\.Query\(\)|(?:Header\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\s*\()/;
 let goSourceSelectorRe = /^(?:r|req|request|c\.Request)\.(?:URL\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$/;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function setGoRequestVars(names: Iterable<string>): void {
+function setGoRequestVars(names: Iterable<string>, fields: Iterable<string> = []): void {
   const alt = ["r", "req", "request", ...names].map(escapeRe).join("|");
-  goSourceCallRe = new RegExp(`^(?:${alt}|c\\.Request)\\.(?:URL\\.Query\\(\\)|(?:Header\\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\\s*\\()`);
-  goSourceSelectorRe = new RegExp(`^(?:${alt}|c\\.Request)\\.(?:URL\\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$`);
+  // a struct field holding the request (`type Req struct { r *http.Request }`), read through any receiver: `q.r.URL...`
+  const fieldList = [...fields].map(escapeRe);
+  const root = fieldList.length ? `(?:${alt}|c\\.Request|(?:[A-Za-z_]\\w*\\.)+(?:${fieldList.join("|")}))` : `(?:${alt}|c\\.Request)`;
+  goSourceCallRe = new RegExp(`^${root}\\.(?:URL\\.Query\\(\\)|(?:Header\\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\\s*\\()`);
+  goSourceSelectorRe = new RegExp(`^${root}\\.(?:URL\\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$`);
 }
 
 // Stdlib/utility calls whose RESULT carries the taint of their arguments (string, path, URL, JSON and
@@ -1407,6 +1410,13 @@ function sourceLabelGo(node: SyntaxNode): string {
   return node.text.replace(/\s+/g, " ").slice(0, 60);
 }
 
+/** Parameter names by call position (an unnamed parameter still takes its slot, as ""). */
+function positionalParamsGo(fn: SyntaxNode): string[] {
+  const out: string[] = [];
+  for (const s of paramShapesOfGo(fn)) out[s.index] = s.name;
+  return Array.from(out, n => n ?? "");
+}
+
 function collectLocalFunctionsGo(root: SyntaxNode): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: SyntaxNode) => {
@@ -2381,6 +2391,7 @@ export function scanAstTaintGo(
     // Per-scan facts: request/writer variables, escapers, plugin/gob variables, structs with role-like fields.
     goCtx = emptyGoCtx();
     const requestVars: string[] = [];
+    const requestFields: string[] = [];
     const findDecls = (n: SyntaxNode) => {
       if (n.type === "parameter_declaration") {
         const type = n.childForFieldName("type")?.text ?? "";
@@ -2411,6 +2422,9 @@ export function scanAstTaintGo(
             if (q && importedPkgs.has(q[1])) {
               for (const f of fd.childrenForFieldName("name")) if (f) qualifiedFieldTypes.set(f.text, `${importedPkgs.get(q[1])}.${q[2]}`);
             }
+            if (/^\*?http\.Request$/.test(fd.childForFieldName("type")?.text ?? "")) {
+              for (const f of fd.childrenForFieldName("name")) if (f) requestFields.push(f.text);
+            }
             const tag = fd.childForFieldName("tag")?.text ?? "";
             if (/json:"-"/.test(tag)) continue;
             for (const f of fd.childrenForFieldName("name")) if (f && SENSITIVE_FIELD_RE_GO.test(f.text)) goCtx.sensitiveStructs.add(nm);
@@ -2427,7 +2441,7 @@ export function scanAstTaintGo(
       for (const c of n.namedChildren) if (c) findDecls(c);
     };
     findDecls(root);
-    setGoRequestVars(requestVars);
+    setGoRequestVars(requestVars, requestFields);
 
     const localFns = collectLocalFunctionsGo(root);
     const propagating = buildPropagatingMapGo(localFns, root);
@@ -2474,6 +2488,33 @@ export function scanAstTaintGo(
         visit(scope);
         return out;
       },
+      // interprocedural trace hooks (see buildBackwardTraceGeneric)
+      scopeInfo: (scope) => {
+        if (scope.type !== "function_declaration" && scope.type !== "method_declaration") return null;
+        const name = scope.childForFieldName("name")?.text;
+        return name ? { name, params: positionalParamsGo(scope), line: lineOf(scope) } : null;
+      },
+      functionInfo: (name) => {
+        const decl = [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]
+          .find(d => d.childForFieldName("name")?.text === name);
+        const body = decl?.childForFieldName("body");
+        if (!decl || !body) return null;
+        const returns: Array<{ text: string; position: number; line: number }> = [];
+        const visit = (n: SyntaxNode) => {
+          if (n.type === "func_literal") return; // a closure's returns are its own
+          if (n.type === "return_statement") {
+            const list = n.namedChildren.find(c => c?.type === "expression_list") ?? n.namedChildren[0];
+            const first = list?.type === "expression_list" ? list.namedChildren[0] : list;
+            if (first) returns.push({ text: first.text, position: first.startIndex, line: lineOf(first) });
+          }
+          for (const c of n.namedChildren) if (c) visit(c);
+        };
+        visit(body);
+        return { scope: decl, params: positionalParamsGo(decl), line: lineOf(decl), returns };
+      },
+      callSitesOf: (name) => findAllNodesGo(root, "call_expression")
+        .filter(c => { const f = c.childForFieldName("function"); return (f?.type === "identifier" && f.text === name) || (f?.type === "selector_expression" && f.childForFieldName("field")?.text === name); })
+        .map(c => ({ scope: findEnclosingFunctionNodeGo(c), position: c.startIndex, line: lineOf(c), text: c.text })),
     };
 
     const emit = (id: AstTaintGoId, node: SyntaxNode, sourceExpr: string, sinkExpr: string, detailOverride?: string) => {

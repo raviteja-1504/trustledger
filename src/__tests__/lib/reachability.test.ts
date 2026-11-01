@@ -65,13 +65,15 @@ describe("scoreExploitability -- per-indicator reachability resolution", () => {
     expect(sqlScore.exploitability_score).not.toBe(xssScore.exploitability_score);
   });
 
-  it("falls back to the old 'unreachable for everything' behavior only when no resolver is supplied at all", () => {
+  // With no resolver every line resolves to "unknown" -- a function the call graph can't place is unknown, not proven
+  // dead (it used to read "unreachable" for everything, scoring every finding 0.30x).
+  it("with no resolver supplied, findings are 'unknown' rather than 'unreachable'", () => {
     const graph = buildCallGraph(FIXTURE);
     const indicators: ScanIndicator[] = [
       { id: "sql-injection", label: "SQL Injection", severity: "critical", line: 3 },
     ];
     const report = scoreExploitability(indicators, FIXTURE, graph); // no 4th arg
-    expect(report.scores[0].reachability).toBe("unreachable");
+    expect(report.scores[0].reachability).toBe("unknown");
   });
 
   it("findEnclosingFunctionName's naming convention matches callGraph.ts's own function-name extraction", () => {

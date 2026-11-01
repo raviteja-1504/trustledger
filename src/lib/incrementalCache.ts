@@ -66,7 +66,14 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     helper that reads the request), slog / log-file / stderr log sinks, %q and escaped-newline proofs; Ruby and PHP
 //     weak randomness and Ruby cipher use, constructor taint, javascript_tag; Rust key-XOR / RC4 ciphers; secrets in
 //     typed constants, `:=` / struct fields, URL userinfo, SMTP / JWT literals and hex keys.
-export const SCAN_CACHE_VERSION = 21;
+// 22: interprocedural taint and traces: helpers that read the request are sources in every engine (Python, Java, PHP,
+//     C#, Go), Go request fields in structs; traces cross function boundaries (callers' arguments, callees' returns)
+//     in Go / Python / Java / PHP / C# / Ruby / Kotlin / Rust / C/C++; a builder in another function is no longer merged
+//     into a shared sink; method calls on objects use the method's summary (JS `this.req`, PHP, Kotlin, C++ members, Ruby
+//     nested classes); Kotlin package-qualified constructors and constant-helper SQL proof; field writes in traces;
+//     exploitability from each finding's own trace (reachability "unknown", local attack vector, auth from code as
+//     Privileges Required, a reason per score) and entry points for HandleFunc / Kotlin / Rust / Rails / C main.
+export const SCAN_CACHE_VERSION = 22;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

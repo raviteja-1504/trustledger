@@ -8,6 +8,10 @@ import InfoTooltip from "@/components/InfoTooltip";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import SLATrendChart, { type SLATrendPoint } from "@/components/SLATrendChart";
+import type { DashboardData } from "@/types";
+
+// The dashboard's default period: the SLA set is each repo's latest scan in it, as the dashboard's breach count is.
+const SLA_PERIOD_DAYS = 90;
 
 interface SLAViolation {
   id:           string;
@@ -16,7 +20,7 @@ interface SLAViolation {
   status:       string;
   scan_id:      string;
   sla_deadline: string;
-  created_at:   string;
+  created_at?:  string;
   repo?:        string;
   pr_number?:   number;
   assigned_email?: string;
@@ -77,29 +81,24 @@ export default function SLAPage() {
     }
     if (!profile?.org_id) { setLoading(false); setRefreshing(false); return; }
     try {
-      // "unresolved" = open + in_review — matches the dashboard's SLA breach
-      // count, which includes in_review violations whose deadline has passed.
-      const res = await authedFetch<{ violations: Array<Record<string, unknown>> }>("/api/violations?status=unresolved&limit=500");
+      // The dashboard's own SLA set (each repo's latest scan, CRITICAL/HIGH, open or in review, not signed off) for
+      // its default 90-day period -- so "Overdue" here is the dashboard's SLA breach count. (This used to read the 500
+      // newest violation rows of every scan and risk level, which both capped the list and counted different files.)
+      const res = await authedFetch<DashboardData>(`/api/dashboard?days=${SLA_PERIOD_DAYS}`);
       const now = Date.now();
-      const mapped = (res.violations ?? [])
-        .filter(v => v.sla_deadline)
-        .map(v => {
-          const scans = v.scans as { repo_full_name?: string; pr_number?: number } | { repo_full_name?: string; pr_number?: number }[] | null;
-          const scan  = Array.isArray(scans) ? scans[0] : scans;
-          return {
-            id:           v.id as string,
-            file_path:    v.file_path as string,
-            risk_score:   v.risk_score as string,
-            status:       v.status as string,
-            scan_id:      v.scan_id as string,
-            sla_deadline: v.sla_deadline as string,
-            created_at:   v.created_at as string,
-            repo:         scan?.repo_full_name,
-            pr_number:    scan?.pr_number,
-            assigned_email: v.assigned_email as string | undefined,
-            hours_overdue: (now - new Date(v.sla_deadline as string).getTime()) / 3600_000,
-          };
-        })
+      const mapped = (res.sla_open_files ?? [])
+        .map(v => ({
+          id:             v.id,
+          file_path:      v.file_path,
+          risk_score:     v.risk_score,
+          status:         v.status,
+          scan_id:        v.scan_id,
+          sla_deadline:   v.sla_deadline,
+          repo:           v.repo || undefined,
+          pr_number:      v.pr_number ?? undefined,
+          assigned_email: v.assigned_email ?? undefined,
+          hours_overdue:  (now - new Date(v.sla_deadline).getTime()) / 3600_000,
+        }))
         .sort((a, b) => b.hours_overdue - a.hours_overdue);
       setItems(mapped);
       setLastRefreshed(new Date());

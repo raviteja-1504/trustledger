@@ -1064,11 +1064,55 @@ function assignmentsInPy(scope: SyntaxNode): Array<{ name: string; position: num
   visit(scope);
   return out;
 }
-const pyTraceResolver: TraceResolver<SyntaxNode> = {
-  enclosingScope: enclosingFunctionPy, assignmentsIn: assignmentsInPy,
-  fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
-  position: n => n.startIndex, line: n => n.startPosition.row + 1, text: n => n.text,
-};
+const pyTraceResolverCache = new WeakMap<SyntaxNode, TraceResolver<SyntaxNode>>();
+/** The trace resolver for one file, with the interprocedural hooks (callers, callees' returns) over its functions. */
+function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
+  const cached = pyTraceResolverCache.get(root);
+  if (cached) return cached;
+  const lineOf = (n: SyntaxNode) => n.startPosition.row + 1;
+  const defs = (): SyntaxNode[] => { const out: SyntaxNode[] = []; const v = (n: SyntaxNode) => { if (n.type === "function_definition") out.push(n); for (const c of n.namedChildren) if (c) v(c); }; v(root); return out; };
+  // positional parameters a call binds: `self` / `cls` of a method is the receiver, not an argument
+  const params = (fn: SyntaxNode) => { const ps = paramNamesOf(fn); return ps[0] === "self" || ps[0] === "cls" ? ps.slice(1) : ps; };
+  const resolver: TraceResolver<SyntaxNode> = {
+    enclosingScope: enclosingFunctionPy, assignmentsIn: assignmentsInPy,
+    fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
+    position: n => n.startIndex, line: lineOf, text: n => n.text,
+    scopeInfo: scope => {
+      const name = scope.type === "function_definition" ? scope.childForFieldName("name")?.text : undefined;
+      return name ? { name, params: params(scope), line: lineOf(scope) } : null;
+    },
+    functionInfo: name => {
+      const fn = defs().find(d => d.childForFieldName("name")?.text === name);
+      const body = fn?.childForFieldName("body");
+      if (!fn || !body) return null;
+      const returns: Array<{ text: string; position: number; line: number }> = [];
+      const v = (n: SyntaxNode) => {
+        if (n.type === "function_definition" || n.type === "lambda") return; // a nested function's returns are its own
+        if (n.type === "return_statement" && n.namedChildren[0]) { const e = n.namedChildren[0]; returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
+        for (const c of n.namedChildren) if (c) v(c);
+      };
+      v(body);
+      return { scope: fn, params: params(fn), line: lineOf(fn), returns };
+    },
+    callSitesOf: name => {
+      const out: Array<{ scope: SyntaxNode | null; position: number; line: number; text: string }> = [];
+      const v = (n: SyntaxNode) => {
+        if (n.type === "call") {
+          const f = n.childForFieldName("function");
+          const called = f?.type === "identifier" ? f.text : f?.type === "attribute" ? f.childForFieldName("attribute")?.text : null;
+          // a module-level call's scope is the module
+          if (called === name) out.push({ scope: enclosingFunctionPy(n) ?? root, position: n.startIndex, line: lineOf(n), text: n.text });
+        }
+        for (const c of n.namedChildren) if (c) v(c);
+      };
+      v(root);
+      return out;
+    },
+  };
+  pyTraceResolverCache.set(root, resolver);
+  return resolver;
+}
+const pyRootOf = (n: SyntaxNode): SyntaxNode => { let c = n; while (c.parent) c = c.parent; return c; };
 
 // See astTaint.ts's identical JS/TS check's own docblock for the full reasoning: HTML-escaping
 // doesn't add the quotes an unquoted attribute value needs.
@@ -1602,6 +1646,8 @@ function makeTaintMaskPy(
         const shift = selfShift(callee, fn?.type === "attribute");
         let m = 0;
         for (const [i, surviving] of propIdx) {
+          // index -1: what the helper returns whatever it is passed (it reads the request itself)
+          if (i === -1) { m |= surviving; continue; }
           const shape = shapes[i];
           if (!shape || shape.index < shift) continue;
           for (const a of argsForShape(args, { ...shape, index: shape.index - shift })) m |= taintMask(a, env) & surviving;
@@ -2167,6 +2213,12 @@ function computeReturnTaintPropagatingPy(
     surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
+  // nothing seeded: a helper that reads the request itself (`def get_username(): return request.args.get("u")`)
+  // returns input whatever it is passed -- recorded under index -1
+  let intrinsic = 0;
+  createWalkerPy({ localFns, propagating, root, descendFunctions: false, crossFileShapes, onReturn: (expr, env, mask) => { intrinsic |= mask(expr, env); } })
+    .walk(fn.body, new Map(), false);
+  if (intrinsic & ALL) propagatingIdx.set(-1, intrinsic & ALL);
   return propagatingIdx;
 }
 
@@ -2393,7 +2445,7 @@ function computeFnSinkFactsPy(
     };
     // The path inside this function from the parameter to `node` (the sink, or a call forwarding it on).
     const pathTo = (node: SyntaxNode, arg: SyntaxNode | undefined, label: string) =>
-      buildBackwardTraceGeneric(filePath, node, arg ? arg.text : shape.name, label, pyTraceResolver);
+      buildBackwardTraceGeneric(filePath, node, arg ? arg.text : shape.name, label, pyTraceResolverFor(pyRootOf(node)));
     const onCall = (node: SyntaxNode, env: Env, mask: TaintMaskFnPy) => {
       const direct = directSinkHitPy(node, env, mask, importMap);
       if (direct) {
@@ -3341,7 +3393,7 @@ export function scanAstTaintPython(
       findings.push({
         id, line, sinkExpr, sourceExpr,
         detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-        trace: buildBackwardTraceGeneric(filePath, node, sourceExpr, sinkExpr, pyTraceResolver),
+        trace: buildBackwardTraceGeneric(filePath, node, sourceExpr, sinkExpr, pyTraceResolverFor(pyRootOf(node))),
       });
     };
 
@@ -3359,7 +3411,7 @@ export function scanAstTaintPython(
         else if (c.type === "interpolation") {
           const e = c.childForFieldName("expression");
           if (e && wasCleared(mask(e, env), classOf("xss")) && UNQUOTED_ATTR_CONTEXT_RE_PY.test(text)) return true;
-          text += " ";
+          text += "\\u0000";
         }
       }
       return false;
@@ -3382,7 +3434,7 @@ export function scanAstTaintPython(
       const sinkLabel = `${name}() -> ${fact.sinkExpr}`;
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
       // The caller's path to this call (the generic builder closes on the call itself), then the callee's own.
-      const callerTrace = buildBackwardTraceGeneric(filePath, node, sourceLabelPy(arg), sinkLabel, pyTraceResolver);
+      const callerTrace = buildBackwardTraceGeneric(filePath, node, sourceLabelPy(arg), sinkLabel, pyTraceResolverFor(pyRootOf(node)));
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: node.text.replace(/\s+/g, " ").slice(0, 100) };
       const trace = crossFileTrace(callerTrace, name, fact);
       findings.push({

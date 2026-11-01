@@ -139,6 +139,23 @@ function tryMatchFunc(line: string): FuncMatch | null {
     const isExported = !/\b(?:private|protected)\b/.test(modifiers);
     return { isExported, isAsync: false, name: m[2], params: m[3] };
   }
+  // fun name(a: String): String {  (Kotlin). An expression body on one line (`fun f() = x`) has no braces to close
+  // it, so it is left out rather than swallowing the lines after it.
+  m = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|internal|override|open|suspend|inline|operator)\s+)*fun\s+(?:<[^>]+>\s*)?(?:[\w.]+\.)?(\w+)\s*\(([^)]*)\)?/);
+  if (m) {
+    if (!line.includes("{") && /\)\s*(?::\s*[\w<>?,.\s]+)?=/.test(line)) return null;
+    return { isExported: !/\b(?:private|protected|internal)\b/.test(line), isAsync: /\bsuspend\b/.test(line), name: m[1], params: m[2] ?? "" };
+  }
+  // pub async fn name(q: Query<T>) -> String {  (Rust)
+  m = line.match(/^\s*(pub(?:\([\w:]+\))?\s+)?(?:const\s+)?(async\s+)?(?:unsafe\s+)?(?:extern\s+"\w+"\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)?/);
+  if (m) return { isExported: !!m[1], isAsync: !!m[2], name: m[3], params: m[4] ?? "" };
+  // def show / def self.find  (Ruby, no parentheses -- with them, the Python `def` pattern above already matches)
+  // (not "exported": a Ruby method is an entry point only as a controller action -- see detectEntryPoints)
+  m = line.match(/^\s*def\s+(?:self\.)?(\w+[?!]?)\s*$/);
+  if (m) return { isExported: false, isAsync: false, name: m[1], params: "" };
+  // int main(int argc, char **argv) {  (C/C++: only main -- any other C signature is too close to a call to tell apart)
+  m = line.match(/^\s*(?:int|void)\s+main\s*\(([^)]*)\)/);
+  if (m) return { isExported: true, isAsync: false, name: "main", params: m[1] };
   return null;
 }
 
@@ -150,7 +167,8 @@ function parseParams(raw: string): string[] {
   return raw.split(",").map(p => p.trim().split(/[\s:=]/)[0].replace(/^\.\.\./, "").replace(/^\$/, "")).filter(Boolean);
 }
 
-const PY_DEF_RE = /^\s*(?:async\s+)?def\s+\w+\s*\(/;
+// A `def` (Python, or Ruby -- whose `end` sits at the def's own indentation, so the same dedent rule closes it).
+const PY_DEF_RE = /^\s*(?:async\s+)?def\s+(?:self\.)?\w+[?!]?\s*(?:\(|$)/;
 
 function indentOf(line: string): number {
   return line.length - line.trimStart().length;
@@ -356,6 +374,8 @@ const PY_ENTRY_DECORATOR_RE = /^\s*@(?:\w+\.)?(?:app|router)\.(?:route|get|post|
 // placement (confirmed directly via tree-sitter probing), matching
 // astTaintCSharp.ts's own HTTP_VERB_ATTRIBUTES/isEndpoint vocabulary.
 const CSHARP_ENTRY_ANNOTATION_RE = /^\s*\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\b/;
+// Rust: actix-web / rocket route attributes (`#[get("/u")]`), the same line-above placement.
+const RUST_ENTRY_ATTRIBUTE_RE = /^\s*#\[(?:get|post|put|delete|patch|head|route)\s*\(/;
 
 /** Checks the few raw source lines immediately above a matched function's
  * start_line for a Java annotation, Python decorator, or C# attribute
@@ -364,7 +384,7 @@ function hasEntryMarkerAbove(content: string, startLine: number): boolean {
   const lines = content.split("\n");
   const windowStart = Math.max(0, startLine - 1 - 5);
   for (let i = windowStart; i < startLine - 1; i++) {
-    if (JAVA_ENTRY_ANNOTATION_RE.test(lines[i]) || PY_ENTRY_DECORATOR_RE.test(lines[i]) || CSHARP_ENTRY_ANNOTATION_RE.test(lines[i])) return true;
+    if (JAVA_ENTRY_ANNOTATION_RE.test(lines[i]) || PY_ENTRY_DECORATOR_RE.test(lines[i]) || CSHARP_ENTRY_ANNOTATION_RE.test(lines[i]) || RUST_ENTRY_ATTRIBUTE_RE.test(lines[i])) return true;
   }
   return false;
 }
@@ -400,7 +420,8 @@ export function detectEntryPoints(funcs: FunctionNode[], content: string): strin
   // and not at module scope: a global-flagged regex carries lastIndex
   // state across .exec() calls, which would go stale across repeated
   // detectEntryPoints() calls on different files if shared.
-  const goRouteRe = /\b(?:router|r|e|app|mux)\.(?:GET|POST|PUT|DELETE|PATCH|Handle(?:Func)?)\s*\(\s*(?:"[^"]*"|`[^`]*`)\s*,\s*(\w+)/g;
+  // `http.HandleFunc("/u", user)` (the standard library's default mux) as well as a router / mux / gin engine
+  const goRouteRe = /\b(?:router|r|e|g|app|api|mux|http|\w+Router|\w+Mux)\.(?:GET|POST|PUT|DELETE|PATCH|Handle(?:Func)?|HandlerFunc)\s*\(\s*(?:"[^"]*"|`[^`]*`)\s*,\s*(\w+)/g;
   let rm: RegExpExecArray | null;
   while ((rm = goRouteRe.exec(content)) !== null) {
     if (funcNames.has(rm[1])) entries.add(rm[1]);
@@ -418,6 +439,24 @@ export function detectEntryPoints(funcs: FunctionNode[], content: string): strin
   while ((pm = phpRouteRe.exec(content)) !== null) {
     const name = pm[1] ?? pm[2];
     if (name && funcNames.has(name)) entries.add(name);
+  }
+  // Rust: axum `.route("/u", get(user).post(create))` and actix `web::get().to(user)` register handlers by name
+  const rustRouteRe = /\.route\(\s*"[^"]*"\s*,\s*((?:[^()]|\([^()]*\))*)\)/g;
+  let rr: RegExpExecArray | null;
+  while ((rr = rustRouteRe.exec(content)) !== null) {
+    for (const h of rr[1].matchAll(/\b(?:get|post|put|delete|patch|head|options|any)\s*\(\s*(\w+)\s*\)/g)) if (funcNames.has(h[1])) entries.add(h[1]);
+  }
+  for (const h of content.matchAll(/\bweb::(?:get|post|put|delete|patch|head|resource\([^)]*\)\.route)\(\)\s*\.to\(\s*(\w+)\s*\)/g)) {
+    if (funcNames.has(h[1])) entries.add(h[1]);
+  }
+  // Ruby on Rails: a controller's public methods (those above `private` / `protected`) are its actions
+  const lines = content.split("\n");
+  const controllerAt = lines.findIndex(l => /^\s*class\s+\w+\s*<\s*(?:ApplicationController|ActionController::(?:Base|API))\b/.test(l));
+  if (controllerAt >= 0) {
+    const hiddenAt = lines.findIndex((l, i) => i > controllerAt && /^\s*(?:private|protected)\s*$/.test(l));
+    for (const fn of funcs) {
+      if (fn.start_line - 1 > controllerAt && (hiddenAt < 0 || fn.start_line - 1 < hiddenAt) && /^\s*def\s+\w/.test(fn.body)) entries.add(fn.name);
+    }
   }
   return Array.from(entries);
 }

@@ -33,6 +33,7 @@ const REACH_STYLE: Record<string, string> = {
   "tainted-path": "bg-orange-500/10 text-orange-200 ring-orange-500/30",
   "reachable":    "bg-amber-400/10 text-amber-100 ring-amber-400/30",
   "unreachable":  "bg-slate-500/15 text-slate-400 ring-slate-500/30",
+  "unknown":      "bg-slate-500/10 text-slate-400 ring-slate-500/20",
 };
 const URGENCY_STYLE: Record<string, string> = {
   immediate: "bg-rose-500/10 text-rose-200 ring-rose-500/30",
@@ -453,6 +454,12 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
                         </span>
                         {ind.exploitability_score.toFixed(1)} / 10
                       </dd>
+                      {ind.reachability_reason && (
+                        <>
+                          <dt className="text-slate-500">Why</dt>
+                          <dd className="text-slate-400">{ind.reachability_reason}</dd>
+                        </>
+                      )}
                     </>
                   )}
                   {cweTitle && cweTitle.toLowerCase() !== title.toLowerCase() && (

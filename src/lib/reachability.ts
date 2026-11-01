@@ -18,13 +18,20 @@
  * Reachability amplifier:
  *   - Unreachable from entry points → score × 0.30
  *   - Reachable but not from tainted path → score × 0.65
+ *   - Unknown (the call graph can't place the code) → score × 0.65
  *   - Reachable and on tainted data path → score × 1.0
  *   - Directly at entry point → score × 1.15 (capped at 1.0)
  *
- * Context modifiers:
- *   - Auth-protected endpoint → × 0.70
- *   - Rate-limited endpoint   → × 0.85
- *   - Sandboxed environment   → × 0.40
+ * Evidence first: a finding whose own data-flow trace starts at outside input is on a tainted path whatever the
+ * call graph says -- the trace IS the proof the input reaches the sink. A parameter the engine only assumed
+ * untrusted is "reachable" (unconfirmed). Input read from the environment / command line / stdin makes the attack
+ * local (AV:L), not network. The call graph only decides for findings with no trace, and "unreachable" is kept for
+ * code it can place in a function nothing calls; code it can't place at all is "unknown".
+ *
+ * Context:
+ *   - Auth-protected endpoint (route middleware, an authorisation annotation / attribute / filter, an auth call in
+ *     the code -- never a comment) → Privileges Required: Low (any logged-in user can still exploit it)
+ *   - Rate-limited endpoint → × 0.85, only for findings that need many requests (timing, guessing, enumeration)
  */
 
 import type { CallGraphResult } from "./callGraph";
@@ -61,7 +68,9 @@ export interface ExploitabilityScore {
   line?:                number;
   base_score:           number;  // 0–10 CVSS-equivalent
   exploitability_score: number;  // 0–10 after reachability
-  reachability:         "unreachable" | "reachable" | "tainted-path" | "entry-point";
+  reachability:         "unreachable" | "reachable" | "tainted-path" | "entry-point" | "unknown";
+  /** Why: the evidence the reachability came from, and what changed the score (shown on the finding). */
+  reachability_reason:  string;
   cvss_vector:          CVSSVector;
   is_critical_path:     boolean;
   auth_protected:       boolean;
@@ -397,6 +406,21 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.22, A:0, cwe:"CWE-643",
   },
+  // Any registered user makes themselves an administrator.
+  "privilege-escalation": {
+    AV:"NETWORK", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.56, I:0.56, A:0.22, cwe:"CWE-269",
+  },
+  // Availability only: one request sized to exhaust memory or CPU.
+  "resource-exhaustion": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0, I:0, A:0.56, cwe:"CWE-770",
+  },
+  // A local user / process replaces or tampers with the file.
+  "insecure-permissions": {
+    AV:"LOCAL", AC:"LOW", PR:"LOW", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.56, A:0.22, cwe:"CWE-732",
+  },
 };
 
 const DEFAULT_PROFILE: CVSSVector = {
@@ -406,28 +430,117 @@ const DEFAULT_PROFILE: CVSSVector = {
 
 // ── Context detection (auth, rate-limit) ──────────────────────────────────────
 
-function detectContext(content: string, line: number): { auth: boolean; rateLimited: boolean } {
-  const window = content.split("\n").slice(Math.max(0, line - 20), line + 5).join("\n");
-  const auth = /\b(?:authenticate|authorize|verifyToken|checkAuth|requireAuth|isAuthenticated|passport\.authenticate|jwt\.verify|session\.user)\b/.test(window);
-  const rl   = /\b(?:rateLimit|throttle|rateLimiter|rate_limit|checkRateLimit)\b/.test(window);
-  return { auth, rateLimited: rl };
+/** The code of a line with its comment removed (`// TODO: authenticate` must not count as authentication). */
+function codeOnly(line: string): string {
+  if (/^\s*(?:\/\/|#(?!\[)|\*|\/\*|--)/.test(line)) return "";
+  return line.replace(/\s\/\/.*$/, "").replace(/\/\*.*?\*\//g, "").replace(/\s#\s.*$/, "");
 }
 
+// Authorisation the handler runs before the code: route middleware, an annotation / attribute / decorator / filter,
+// or an auth call in the code itself.
+const AUTH_RE = new RegExp([
+  String.raw`\b(?:requireAuth|requireLogin|ensureAuthenticated|ensureLoggedIn|isAuthenticated|isLoggedIn|authenticate|authorize|verifyToken|checkAuth|authMiddleware|passport\.authenticate|jwt\.verify|session\.user)\b`,
+  String.raw`@(?:PreAuthorize|PostAuthorize|Secured|RolesAllowed|login_required|jwt_required|permission_required|UseGuards|Authenticated)\b`,
+  String.raw`\[Authorize\b`,
+  String.raw`\bbefore_action\s+:(?:authenticate\w*|require_\w*login\w*|require_user|authorize\w*)`,
+  String.raw`->middleware\(\s*\[?\s*['"]auth`,
+  String.raw`\bDepends\(\s*(?:get_current_user|get_current_active_user|current_user)\b`,
+].join("|"));
+const RATE_LIMIT_RE = /\b(?:rateLimit|throttle|rateLimiter|rate_limit|checkRateLimit|RateLimiter|Throttle)\b/;
+
+function detectContext(content: string, line: number): { auth: boolean; rateLimited: boolean } {
+  const window = content.split("\n").slice(Math.max(0, line - 20), line + 5).map(codeOnly).join("\n");
+  return { auth: AUTH_RE.test(window), rateLimited: RATE_LIMIT_RE.test(window) };
+}
+
+/** Findings whose attack needs many requests -- the only ones a rate limit slows down. */
+const RATE_SENSITIVE = new Set([
+  "timing-attack", "redos", "insecure-randomness", "rate-limit-bypass", "idor", "bola-identity-mismatch",
+  "bola-missing-ownership-check", "weak-crypto", "type-juggling", "jwt-bypass",
+]);
+
 // ── Reachability lookup ───────────────────────────────────────────────────────
+
+type Reach = ExploitabilityScore["reachability"];
 
 function classifyReachability(
   vulnFn:   string,
   graph:    CallGraphResult | null,
-): ExploitabilityScore["reachability"] {
+): Reach {
   if (!graph) return "reachable";  // no graph = assume worst case
+  if (vulnFn === ROUTE_HANDLER)                   return "entry-point";
   if (graph.entry_points.includes(vulnFn))       return "entry-point";
+  // code the graph can't place in a function it models (module level, an anonymous callback, a language it doesn't
+  // parse): it can't tell either way
+  if (!graph.functions.some(f => f.name === vulnFn)) return "unknown";
   if (!graph.reachable.has(vulnFn))               return "unreachable";
   if (graph.taint_paths.some(p => p.path.includes(vulnFn))) return "tainted-path";
   return "reachable";
 }
 
-const REACH_MULTIPLIERS: Record<ExploitabilityScore["reachability"], number> = {
+/**
+ * A function nothing outside this file can call: a `private` method (Java / C# / PHP / Kotlin), a Rust `fn` without
+ * `pub`, a Python `_name`, or a JS function that isn't exported from a file that exports. When such a function has
+ * no caller in the file it is dead code, whatever its own trace says the input would do if it ran. Anything else
+ * (a Django view, a Go handler registered in routes.go) may be called from another file, so its trace decides.
+ */
+function provablyPrivate(fnName: string, graph: CallGraphResult, content: string): boolean {
+  const fn = graph.functions.find(f => f.name === fnName);
+  if (!fn) return false;
+  const sig = fn.body.split("\n")[0] ?? "";
+  if (/\bprivate\b/.test(sig)) return true;
+  if (/^\s*(?:async\s+)?def\s+_\w/.test(sig)) return true;
+  if (/^\s*(?:async\s+)?(?:unsafe\s+)?fn\s/.test(sig)) return true;   // a `pub fn` doesn't start with `fn`
+  return /^\s*(?:async\s+)?function\b/.test(sig) && !fn.is_exported && /^\s*export\s|\bmodule\.exports\b|^\s*exports\.\w+/m.test(content);
+}
+
+/** The name a caller's resolver gives a callback passed straight to a route registration (`app.get("/x", (req, res) => ...)`). */
+export const ROUTE_HANDLER = "<route-handler>";
+
+// Input read from the process itself -- the environment, the command line, the terminal: whoever can set those
+// already runs code on the machine, so the attack is local.
+const LOCAL_SOURCE_RE = /\b(?:getenv|secure_getenv|_wgetenv|GetEnvironmentVariable|argv|ARGV|GetCommandLine\w*|std::env::(?:var|args)|env::(?:var|args)|os\.Getenv|os\.Args|os\.environ|sys\.argv|System\.getenv|process\.env|process\.argv|ENV\[|stdin|STDIN|fgets|gets|scanf|readline|getchar|cin)\b/;
+
+/** Findings that are outside input reaching a sink: their trace starts at that input. (Other findings may carry a
+ * trace too -- how a temp file's name was built, where a weak key came from -- which proves nothing about input.) */
+const INPUT_DRIVEN = new Set([
+  "sql-injection", "nosql-injection", "command-injection", "argument-injection", "xss", "path-traversal", "eval-exec",
+  "ssrf", "open-redirect", "header-injection", "log-injection", "ldap-injection", "xpath-injection", "graphql-injection",
+  "ssti", "xxe", "unsafe-reflection", "file-inclusion", "insecure-deserialization", "prototype-pollution", "redos",
+  "mass-assignment", "variable-overwrite", "trust-boundary", "format-string", "buffer-overflow", "integer-overflow",
+  "arithmetic-overflow", "input-validation", "insecure-file-upload", "resource-exhaustion",
+]);
+
+/** What the finding's own data-flow trace proves about how input reaches it. */
+function evidenceOf(ind: ScanIndicator): { reach: Reach; local: boolean; reason: string } | null {
+  const first = ind.trace?.[0];
+  if (!first || first.kind !== "source" || !INPUT_DRIVEN.has(ind.id)) return null;
+  const local = LOCAL_SOURCE_RE.test(first.label);
+  const from = first.label.length > 60 ? `${first.label.slice(0, 57)}...` : first.label;
+  if (ind.sourceAssumed) {
+    return { reach: "reachable", local, reason: `The data-flow trace starts at '${from}', a parameter assumed to carry outside input (no request read was seen)` };
+  }
+  return {
+    reach: "tainted-path", local,
+    reason: local
+      ? `The data-flow trace shows '${from}' (input from the environment, command line or terminal) reaching this sink`
+      : `The data-flow trace shows outside input '${from}' reaching this sink`,
+  };
+}
+
+const REACH_RANK: Record<Reach, number> = { "unknown": 0, "unreachable": 1, "reachable": 2, "tainted-path": 3, "entry-point": 4 };
+
+const GRAPH_REASON: Record<Reach, string> = {
+  "entry-point":  "Runs inside an entry point — a request handler, route, controller action or main (call graph)",
+  "tainted-path": "The call graph traces outside input along the calls to this code",
+  "reachable":    "Reachable from an entry point (call graph); no input was traced to it",
+  "unreachable":  "No caller from any entry point was found in this file (call graph) — possibly dead code",
+  "unknown":      "The call graph can't place this code in a function it models, so reachability is unknown",
+};
+
+const REACH_MULTIPLIERS: Record<Reach, number> = {
   "unreachable":  0.30,
+  "unknown":      0.65,
   "reachable":    0.65,
   "tainted-path": 1.00,
   "entry-point":  1.15,
@@ -461,13 +574,29 @@ export function scoreExploitability(
   );
 
   const scores: ExploitabilityScore[] = securityIndicators.map(ind => {
-    const profile  = VULN_PROFILES[ind.id] ?? DEFAULT_PROFILE;
-    const base     = cvssBase(profile);
-    const reach    = classifyReachability(resolveContainingFunction(ind.line ?? 1), graph);
     const ctx      = detectContext(content, ind.line ?? 1);
+    const fnName = resolveContainingFunction(ind.line ?? 1);
+    const graphReach = classifyReachability(fnName, graph);
+    const evidence = evidenceOf(ind);
+    // dead code stays dead: a private function nothing in the file calls never runs, whatever its trace shows
+    const dead = graphReach === "unreachable" && !!graph && provablyPrivate(fnName, graph, content);
+    // otherwise the stronger of the two: the trace proves input reaches the sink; the call graph may see an entry point
+    const reach: Reach = !dead && evidence && REACH_RANK[evidence.reach] > REACH_RANK[graphReach] ? evidence.reach : graphReach;
+    const reasons = [evidence && reach === evidence.reach ? evidence.reason
+      : dead && evidence ? `Outside input would reach this sink, but '${fnName}' is private and nothing in the file calls it — dead code` : GRAPH_REASON[reach]];
+    const own      = VULN_PROFILES[ind.id] ?? DEFAULT_PROFILE;
+    // input from the environment / command line: a local attack; behind authentication: any logged-in user
+    const profile: CVSSVector & { cwe?: string } = {
+      ...own,
+      ...(evidence?.local && own.AV === "NETWORK" ? { AV: "LOCAL" as const } : {}),
+      ...(ctx.auth && own.PR === "NONE" ? { PR: "LOW" as const } : {}),
+    };
+    if (evidence?.local && own.AV === "NETWORK") reasons.push("local attack vector");
+    if (ctx.auth) reasons.push("behind authentication: any logged-in user can exploit it");
+    const base     = cvssBase(profile);
     let   adjScore = base * REACH_MULTIPLIERS[reach];
-    if (ctx.auth)        adjScore *= 0.70;
-    if (ctx.rateLimited) adjScore *= 0.85;
+    const rateLimited = ctx.rateLimited && RATE_SENSITIVE.has(ind.id);
+    if (rateLimited) { adjScore *= 0.85; reasons.push("rate-limited"); }
 
     const urgency: ExploitabilityScore["remediation_urgency"] =
       adjScore >= 8.0 ? "immediate" :
@@ -481,11 +610,12 @@ export function scoreExploitability(
       base_score:           base,
       exploitability_score: Math.min(10, Math.round(adjScore * 10) / 10),
       reachability:         reach,
+      reachability_reason:  reasons.join("; "),
       cvss_vector:          profile,
       is_critical_path:     reach === "entry-point" || reach === "tainted-path",
       auth_protected:       ctx.auth,
-      rate_limited:         ctx.rateLimited,
-      cwe:                  "cwe" in profile ? (profile as CVSSVector & { cwe?: string }).cwe : undefined,
+      rate_limited:         rateLimited,
+      cwe:                  profile.cwe,
       remediation_urgency:  urgency,
     };
   });

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { warmCppTaintEngine, parseCppSourceSync, scanAstTaintCpp, computeCppFnSinkFacts } from "@/lib/astTaintCpp";
 import type { ParamSinkFact } from "@/lib/taint/taintCore";
+import { freeSyntaxTree } from "@/lib/treeSitterRuntime";
 
 beforeAll(async () => { await warmCppTaintEngine(); }, 120000);
 
@@ -36,6 +37,9 @@ it("juliet c", () => {
         const rel = path.relative(root, p.f).split(path.sep).join("/");
         for (const x of scanAstTaintCpp(p.content, p.f, p.tree, undefined, { crossFileFacts: facts })) out.push(`${rel}\t${x.line}\t${x.id}`);
       }
+      // free the group's trees: unfreed, ~50k parses exhaust tree-sitter's WebAssembly memory and the last category
+      // (CWE122) silently loses thousands of files
+      for (const p of parsed) freeSyntaxTree(p.tree);
     }
     console.log(`J ${cwe} files=${n} ${Date.now() - t0}ms`);
   }

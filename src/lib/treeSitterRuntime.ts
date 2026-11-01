@@ -65,9 +65,24 @@ export function rootIfShallowEnough<N extends import("web-tree-sitter").Node>(ro
   if (!root) return null;
   if (treeTooDeep(root)) {
     console.warn(`[${engine}] ${filePath}: syntax tree nests deeper than ${MAX_AST_DEPTH} levels -- AST analysis skipped (regex rules still run)`);
+    freeSyntaxTree(root);
     return null;
   }
   return root;
+}
+
+/**
+ * Free a parsed tree's WebAssembly memory (given its root). Garbage collection never reclaims it, so a long-lived
+ * process that keeps parsing eventually aborts inside tree-sitter and every later parse fails. Nothing may touch the
+ * tree's nodes afterwards. Calling it again for the same tree does nothing (a second delete() would free the same
+ * WebAssembly memory twice).
+ */
+const freedTrees = new WeakSet<object>();
+export function freeSyntaxTree(root: { tree?: { delete(): void } } | null | undefined): void {
+  const tree = root?.tree;
+  if (!tree || freedTrees.has(tree)) return;
+  freedTrees.add(tree);
+  tree.delete();
 }
 
 export function ensureTreeSitterInit(): Promise<void> {

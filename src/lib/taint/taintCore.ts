@@ -310,8 +310,24 @@ export function forwardedFactSteps(ownTrace: readonly TraceStep[], calleeName: s
  */
 export function dropOnPathDuplicates<T extends { id: string; line: number; trace?: readonly TraceStep[] }>(findings: readonly T[]): T[] {
   return findings.filter(f => !findings.some(g =>
-    g !== f && g.id === f.id && g.line !== f.line && !!g.trace && g.trace.slice(0, -1).some(s => s.line === f.line)));
+    g !== f && g.id === f.id && g.line !== f.line && !!g.trace && localPathSteps(g.trace).some(s => s.line === f.line)));
 }
+
+/**
+ * The steps of a trace inside the sink's own function, sink excluded: everything after its last function-boundary
+ * step (a parameter entered, a file crossed). Only these make another finding "the same issue": a builder in another
+ * function that a shared sink helper is reached from stays its own finding, one per caller, instead of every caller's
+ * flow collapsing into the helper's single sink line.
+ */
+export function localPathSteps(trace: readonly TraceStep[]): readonly TraceStep[] {
+  const body = trace.slice(0, -1);
+  let lastBoundary = -1;
+  // a callee's return value handed back ("map returns f.apply(v)") is a boundary too: the steps before it are inside the callee
+  body.forEach((s, i) => { if (s.kind === "parameter" || s.kind === "cross-file" || RETURN_STEP_RE.test(s.label)) lastBoundary = i; });
+  return body.slice(lastBoundary + 1);
+}
+/** The label buildBackwardTraceGeneric gives a step that leaves a callee through its return value. */
+const RETURN_STEP_RE = /^[\w$.]+ returns /;
 
 /**
  * The full trace of a finding reported at a call site because the callee sinks the argument: the caller's own
@@ -400,7 +416,7 @@ const BARE_IDENTIFIER_RE = /^\$?[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Where a request's own input is read, across the supported languages/frameworks. Presentational only:
 // it tells a trace it has reached the origin, and never influences taint itself.
-const REQUEST_INPUT_RE = /^(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|\$?(?:request|req)\s*(?:\.|->|\[)|r\s*\.\s*(?:URL|Form|PostForm|Header|Body|FormValue|PostFormValue|Cookie|MultipartForm)\b|c\s*\.\s*(?:Query|DefaultQuery|Param|PostForm|DefaultPostForm|GetHeader|FormValue|Cookie|QueryParam)\b|ctx\s*\.\s*(?:Query|Param|Request)\b|(?:HttpContext\s*\.\s*)?Request\s*\.\s*(?:Query|Form|Headers|Cookies|Body|RouteValues|QueryString)\b)/;
+const REQUEST_INPUT_RE = /^(?:params\s*(?:\[|\.(?:require|permit|fetch|dig)\b)|(?:[A-Za-z_]\w*\s*\.\s*)+(?:r|req|request)\s*\.\s*(?:URL|Form|PostForm|Header|Body|FormValue|PostFormValue|Cookie|args|form|values|json|params|query|body|headers|cookies|GET|POST)\b|\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)\b|\$?(?:request|req)\s*(?:\.|->|\[)|r\s*\.\s*(?:URL|Form|PostForm|Header|Body|FormValue|PostFormValue|Cookie|MultipartForm)\b|c\s*\.\s*(?:Query|DefaultQuery|Param|PostForm|DefaultPostForm|GetHeader|FormValue|Cookie|QueryParam)\b|ctx\s*\.\s*(?:Query|Param|Request)\b|(?:HttpContext\s*\.\s*)?Request\s*\.\s*(?:Query|Form|Headers|Cookies|Body|RouteValues|QueryString)\b)/;
 const TRACE_LITERAL_RE = /^(?:(["'`])[\s\S]*\1|[0-9][\w.]*|true|false|null|nil|None|True|False)$/;
 const NON_OPERAND_WORDS = new Set([
   "and", "or", "not", "in", "is", "if", "else", "new", "typeof", "await", "return", "lambda",
@@ -430,6 +446,8 @@ function operandCandidates(text: string, depth = 0): string[] {
       for (const m of inner.matchAll(/\$?\{([^{}]+)\}/g)) out.push(...operandCandidates(m[1], depth + 1));
     } else if (ch === '"') {
       for (const m of inner.matchAll(/\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*/g)) out.push(m[0]);
+      // Ruby's "...#{name}..." interpolation
+      for (const m of inner.matchAll(/#\{([^{}]+)\}/g)) out.push(...operandCandidates(m[1], depth + 1));
     }
     masked += " ".repeat(Math.min(j, text.length - 1) - i + 1);
     i = j;
@@ -455,7 +473,7 @@ function operandCandidates(text: string, depth = 0): string[] {
 function extractFirstCallArg(text: string): string | null {
   const open = text.indexOf("(");
   if (open < 0 || !text.trimEnd().endsWith(")")) return null;
-  if (!/^[\w$.]+$/.test(text.slice(0, open).trim())) return null;
+  if (!/^[\w$.]+(?:::[\w$.]+)*$/.test(text.slice(0, open).trim())) return null;
   let depth = 0;
   for (let i = open; i < text.length; i++) {
     if (text[i] === "(") depth++;
@@ -499,9 +517,59 @@ export interface TraceResolver<N> {
    * callee's own sub-slice is a documented one-hop boundary, matching astTaint.ts's identical
    * policy), same as returning null does for a name this resolver doesn't recognize as cross-file. */
   crossFileHop?(text: string): TraceStep[] | null;
+  /** Interprocedural (optional, all three together): the function a scope node is -- its name, parameter names and
+   * declaration line -- or null for a non-function scope. */
+  scopeInfo?(scope: N): { name: string; params: string[]; line: number } | null;
+  /** A function of this file by name: its body scope, parameters, declaration line and every `return` expression. */
+  functionInfo?(name: string): { scope: N; params: string[]; line: number; returns: Array<{ text: string; position: number; line: number }> } | null;
+  /** Every call of the named local function in this file: the scope it is in, where, and its source text. */
+  callSitesOf?(name: string): Array<{ scope: N | null; position: number; line: number; text: string }>;
 }
 
+/** `f.name` / `$f->name` / `a.b.c`: a field path a resolver may record a write to. */
+const FIELD_PATH_RE = /^\$?[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)+$/;
+
 const MAX_TRACE_HOPS = 6;
+const MAX_INTERPROCEDURAL_HOPS = 24;
+
+/** The top-level arguments of a call's text (`f(a, g(b, c), "x")` -> ["a", "g(b, c)", "\"x\""]), or null. */
+export function splitCallArgs(text: string): string[] | null {
+  const open = text.indexOf("(");
+  if (open < 0 || !text.trimEnd().endsWith(")")) return null;
+  const inner = text.slice(open + 1, text.trimEnd().length - 1);
+  const out: string[] = [];
+  let depth = 0, quote: string | null = null, start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) { out.push(inner.slice(start, i).trim()); start = i + 1; }
+  }
+  const last = inner.slice(start).trim();
+  if (last) out.push(last);
+  return out;
+}
+/** A call site's text cut at the parenthesis closing its first call: `f(g(x)).close()` -> `f(g(x))`. */
+function firstCallText(text: string): string {
+  let depth = 0, quote: string | null = null;
+  for (let i = text.indexOf("("); i >= 0 && i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return text.slice(0, i + 1);
+  }
+  return text;
+}
+/** `buildQuery(username)` / `self.build(x)` / `svc.Build(x)` -> "buildQuery" / "build" / "Build" (the called name). */
+function calleeNameOf(text: string): string | null {
+  const t = text.trim();
+  const m = /^\$?(?:[A-Za-z_]\w*\s*(?:\.|->|::)\s*)*([A-Za-z_]\w*)\s*\(/.exec(t);
+  // the call must be the whole text: `resolve(x).c_str()` is a call of c_str on resolve's result, not of resolve
+  return m && t.endsWith(")") && firstCallText(t) === t ? m[1] : null;
+}
 
 /**
  * Bounded backward slice from a sink's tainted argument (given only as TEXT -- every engine here
@@ -518,22 +586,70 @@ export function buildBackwardTraceGeneric<N>(
 ): TraceStep[] {
   const backward: TraceStep[] = [];
   const visited = new Set<string>();
-  const scope = resolver.enclosingScope(sinkNode) ?? resolver.fileScope?.(sinkNode) ?? null;
+  // Interprocedural mode (a resolver with the three function hooks): the walk may leave the sink's function --
+  // UP to a caller (a parameter continues as the argument its call site passed) and DOWN into a callee (a value
+  // returned by a local function continues at that function's `return`). `frames` remembers, for each callee
+  // entered, the call it was entered from, so a parameter met inside it returns to THAT call's argument.
+  const inter = !!(resolver.scopeInfo && resolver.functionInfo && resolver.callSitesOf);
+  let scope: N | null = resolver.enclosingScope(sinkNode) ?? resolver.fileScope?.(sinkNode) ?? null;
+  type Frame = { scope: N | null; position: number; line: number; args: string[]; params: string[]; fn: string; fnLine: number };
+  const frames: Frame[] = [];
+  const entered = new Set<string>();
   const assignedBefore = (name: string, pos: number) =>
     scope ? resolver.assignmentsIn(scope).filter(a => a.name === name && a.position < pos) : [];
+  const paramIndexInScope = (name: string): { info: { name: string; params: string[]; line: number }; index: number } | null => {
+    const info = inter && scope ? resolver.scopeInfo!(scope) : null;
+    const index = info ? info.params.indexOf(name) : -1;
+    return info && index >= 0 ? { info, index } : null;
+  };
   let curText = sourceText.trim();
+  // the variable whose assignment the walk just followed (its own name is no input of that assignment's call)
+  let assignedVar: string | null = null;
   let curPos = resolver.position(sinkNode);
   let curLine = resolver.line(sinkNode);
 
-  for (let hop = 0; hop < MAX_TRACE_HOPS; hop++) {
+  for (let hop = 0; hop < (inter ? MAX_INTERPROCEDURAL_HOPS : MAX_TRACE_HOPS); hop++) {
+    // a conversion of a call's result taking nothing but literals is that result (`resolve_file(x).c_str()`,
+    // `render(x).substring(0)`): continue into the call, whose function the walk can enter
+    if (inter) {
+      const conv = /^([\s\S]*\))\s*(?:\.|->)\s*[A-Za-z_]\w*\s*\(([^()]*)\)$/.exec(curText);
+      // a literal, or a local only ever assigned literals (`ext = ".txt"` in `resolve(x).concat(ext)`)
+      const constant = (a: string) => TRACE_LITERAL_RE.test(a) || (BARE_IDENTIFIER_RE.test(a) && !paramIndexInScope(a)
+        && assignedBefore(a, curPos).length > 0 && assignedBefore(a, curPos).every(w => TRACE_LITERAL_RE.test(w.rhsText.trim())));
+      const literalArgs = !!conv && (splitCallArgs(`(${conv[2]})`) ?? []).every(a => constant(a.trim()));
+      const head = conv && literalArgs ? calleeNameOf(conv[1]) : null;
+      if (head && !entered.has(head) && resolver.functionInfo!(head)) curText = conv![1];
+    }
     const crossSteps = resolver.crossFileHop?.(curText);
     if (crossSteps && crossSteps.length > 0) { backward.push(...crossSteps); break; }
 
     if (BARE_IDENTIFIER_RE.test(curText)) {
-      if (visited.has(curText)) break; // a re-assignment cycle -- stop rather than loop
-      visited.add(curText);
+      const visitKey = `${scope ? resolver.position(scope) : -1}:${curText}`;
+      if (visited.has(visitKey)) break; // a re-assignment cycle -- stop rather than loop
+      visited.add(visitKey);
       const candidates = assignedBefore(curText, curPos);
       if (candidates.length === 0) {
+        // a parameter of the callee we came down into: back up to the argument that call passed
+        const top = frames[frames.length - 1];
+        if (top && top.params.includes(curText) && top.args[top.params.indexOf(curText)] !== undefined) {
+          backward.push({ file: filePath, line: top.fnLine, kind: "parameter", label: `${curText} — parameter of ${top.fn}`, snippet: curText });
+          frames.pop();
+          scope = top.scope; curPos = top.position; curLine = top.line; curText = top.args[top.params.indexOf(curText)].trim();
+          continue;
+        }
+        // a parameter of the function the walk is in: up to a caller that passes something other than a literal
+        const p = frames.length === 0 ? paramIndexInScope(curText) : null;
+        const site = p ? resolver.callSitesOf!(p.info.name)
+          .map(s => ({ ...s, arg: splitCallArgs(firstCallText(s.text))?.[p.index] }))
+          .find(s => s.arg !== undefined && !TRACE_LITERAL_RE.test(s.arg.trim())) : undefined;
+        if (p && site) {
+          backward.push({ file: filePath, line: p.info.line, kind: "parameter", label: `${curText} — parameter of ${p.info.name}`, snippet: curText });
+          backward.push({ file: filePath, line: site.line, kind: "call", label: `passes it to ${displayFnName(p.info.name)}(…)`, snippet: site.text.replace(/\s+/g, " ").slice(0, 100) });
+          scope = site.scope; curPos = site.position; curLine = site.line; curText = site.arg!.trim();
+          continue;
+        }
+        // a bare name that is a function of this file: a call written without parentheses (Ruby's `name = user_input`)
+        if (inter && !p && !entered.has(curText) && resolver.functionInfo!(curText)) { curText = `${curText}()`; visited.delete(visitKey); continue; }
         backward.push({ file: filePath, line: curLine, kind: "source", label: curText, snippet: curText });
         break;
       }
@@ -542,6 +658,7 @@ export function buildBackwardTraceGeneric<N>(
         file: filePath, line: best.line, kind: "assignment",
         label: `${curText} = ${best.rhsText.slice(0, 80)}`, snippet: best.rhsText.slice(0, 100),
       });
+      assignedVar = curText;
       curText = best.rhsText.trim();
       curPos = best.position;
       curLine = best.line;
@@ -553,12 +670,54 @@ export function buildBackwardTraceGeneric<N>(
       break;
     }
 
+    // a field of a local written earlier (`f.name = request.getParameter("v")`, `$f->name = $_GET['v']`): continue
+    // at that write, not at the object's own declaration
+    const fieldWrites = FIELD_PATH_RE.test(curText) ? assignedBefore(curText, curPos) : [];
+    if (fieldWrites.length > 0) {
+      const best = fieldWrites.reduce((a, b) => (b.position > a.position ? b : a));
+      backward.push({ file: filePath, line: best.line, kind: "assignment", label: `${curText} = ${best.rhsText.slice(0, 80)}`, snippet: best.rhsText.slice(0, 100) });
+      curText = best.rhsText.trim(); curPos = best.position; curLine = best.line;
+      continue;
+    }
+
+    // a call of a function of this file: down into what it returns (once per function -- recursion stops)
+    const callee = inter ? calleeNameOf(curText) : null;
+    const fn = callee && !entered.has(callee) ? resolver.functionInfo!(callee) : null;
+    if (fn && fn.returns.length > 0) {
+      entered.add(callee!);
+      const ret = fn.returns.find(r => REQUEST_INPUT_RE.test(r.text)) ?? fn.returns.find(r => !TRACE_LITERAL_RE.test(r.text.trim())) ?? fn.returns[0];
+      const prev = backward[backward.length - 1];
+      // `username := getUserInput(r)` already shows the call on its assignment step
+      if (!(prev && prev.line === curLine && prev.kind === "assignment")) {
+        backward.push({ file: filePath, line: curLine, kind: "call", label: curText.replace(/\s+/g, " ").slice(0, 80), snippet: curText.replace(/\s+/g, " ").slice(0, 100) });
+      }
+      frames.push({ scope, position: curPos, line: curLine, args: splitCallArgs(curText) ?? [], params: fn.params, fn: callee!, fnLine: fn.line });
+      backward.push({ file: filePath, line: ret.line, kind: "assignment", label: `${callee} returns ${ret.text.replace(/\s+/g, " ").slice(0, 70)}`, snippet: ret.text.replace(/\s+/g, " ").slice(0, 100) });
+      scope = fn.scope; curPos = ret.position; curLine = ret.line; curText = ret.text.trim();
+      continue;
+    }
+
     const firstArg = extractFirstCallArg(curText);
-    if (firstArg !== null && !TRACE_LITERAL_RE.test(firstArg)) {
+    if (firstArg !== null && !TRACE_LITERAL_RE.test(firstArg) && firstArg.replace(/^&\s*/, "") !== assignedVar) {
       backward.push({ file: filePath, line: curLine, kind: "call", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
       curText = firstArg;
       continue;
     }
+    // a call whose first argument is a literal (`fmt.Sprintf("... '%s'", username)`): the live argument carries it
+    const known = (a: string) => assignedBefore(a, curPos).length > 0 || !!paramIndexInScope(a) || !!frames[frames.length - 1]?.params.includes(a);
+    // (not the variable this call fills: `snprintf(sql, ..., getenv("V"))` is the assignment of `sql`, so its input is
+    // the other argument)
+    const liveArgs = inter && firstArg !== null ? (splitCallArgs(firstCallText(curText)) ?? [])
+      .filter(a => !TRACE_LITERAL_RE.test(a.trim()) && a.trim().replace(/^&\s*/, "") !== assignedVar) : [];
+    if (liveArgs.length > 0) {
+      const pick = liveArgs.find(a => REQUEST_INPUT_RE.test(a))
+        ?? liveArgs.find(a => BARE_IDENTIFIER_RE.test(a) && known(a))
+        ?? (liveArgs.length === 1 ? liveArgs[0] : undefined);
+      if (pick) { curText = pick.trim(); continue; }
+    }
+    // a method chain on a local or parameter whose arguments are all literals (`q.get("v").cloned()`): the receiver
+    const chainRoot = inter && firstArg !== null ? /^(\$?[A-Za-z_]\w*)\s*(?:\.|->)/.exec(curText)?.[1] : undefined;
+    if (chainRoot && liveArgs.length === 0 && known(chainRoot)) { curText = chainRoot; continue; }
 
     // A concatenation, f-string/template, ternary, `obj.field`...: the composite is already shown by the
     // step that led here (its assignment, or the sink), so continue into the operand carrying the taint --
@@ -568,8 +727,20 @@ export function buildBackwardTraceGeneric<N>(
       const ops = operandCandidates(curText).filter(o => !TRACE_LITERAL_RE.test(o));
       const rootOf = (o: string) => o.match(/^\$?[A-Za-z_]\w*/)![0];
       const roots = ops.map(rootOf);
+      // a call of a function of this file anywhere inside (`base().concat(getInput(r))`) that can return something other
+      // than a literal: down into it, rather than into its own arguments
+      const localCall = inter ? [...curText.matchAll(/(?<![\w$.])([A-Za-z_]\w*)\s*\(/g)]
+        .map(m => ({ name: m[1], text: firstCallText(curText.slice(m.index!)) }))
+        .find(c => c.text !== curText && !entered.has(c.name) && (resolver.functionInfo!(c.name)?.returns ?? []).some(r => !TRACE_LITERAL_RE.test(r.text.trim())))
+        : undefined;
       const next = ops.find(o => o !== curText && REQUEST_INPUT_RE.test(o))
+        ?? localCall?.text
+        ?? ops.find(o => o !== curText && FIELD_PATH_RE.test(o) && assignedBefore(o, curPos).length > 0)
+        // a call of a function of this file (`q.Name()`): its return value, rather than the receiver's assignment
+        ?? ops.find(o => o !== curText && inter && !!calleeNameOf(o) && !entered.has(calleeNameOf(o)!) && !!resolver.functionInfo!(calleeNameOf(o)!))
         ?? roots.find(r => assignedBefore(r, curPos).length > 0)
+        // a parameter (interprocedural mode): the value came in from the caller
+        ?? roots.find(r => !!paramIndexInScope(r) || !!frames[frames.length - 1]?.params.includes(r))
         ?? (new Set(roots).size === 1 ? roots[0] : undefined);
       if (next && next !== curText) { curText = next; continue; }
     }
@@ -582,7 +753,11 @@ export function buildBackwardTraceGeneric<N>(
   // Adjacent steps that landed on the exact same line with the exact same text are redundant (a
   // source step immediately followed by an assignment step whose RHS IS that same source, e.g.
   // `const id = req.query.id;`) -- collapse rather than show the same snippet twice.
-  const deduped = backward.filter((s, i) => i === 0 || s.line !== backward[i - 1].line || s.snippet !== backward[i - 1].snippet);
+  // A call step beside an assignment of the very same call (`key := strings.TrimSpace(id)`) is the same hop: keep the
+  // assignment, which also names the variable.
+  const sameHop = (a: TraceStep | undefined, b: TraceStep) => !!a && a.line === b.line && a.snippet === b.snippet;
+  const noEchoedCalls = backward.filter((s, i) => !(s.kind === "call" && [backward[i - 1], backward[i + 1]].some(n => n?.kind === "assignment" && sameHop(n, s))));
+  const deduped = noEchoedCalls.filter((s, i) => i === 0 || !sameHop(noEchoedCalls[i - 1], s));
   deduped.push({ file: filePath, line: resolver.line(sinkNode), kind: "sink", label: sinkText, snippet: resolver.text(sinkNode).slice(0, 100) });
   return deduped;
 }

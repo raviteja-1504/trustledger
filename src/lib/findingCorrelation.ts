@@ -1,4 +1,5 @@
 import type { ScanIndicator } from "./scanner";
+import { localPathSteps } from "./taint/taintCore";
 
 /**
  * Finding correlation: one issue, one finding.
@@ -185,8 +186,10 @@ export function linkCrossFileFlows(files: ReadonlyArray<{ file_path: string; ind
           // Its own file's call graph can't see the caller, so it may have judged this line unreachable. The
           // proven flow says otherwise: it is as reachable, exploitable and urgent as the flow that reaches it.
           // Only corrects "unreachable"/unknown: a cross-file tier the call graph already gave it is left alone.
-          if (x.reachability && x.reachability !== "unreachable" && (!y.reachability || y.reachability === "unreachable")) {
+          const undecided = (r: typeof y.reachability) => !r || r === "unreachable" || r === "unknown";
+          if (!undecided(x.reachability) && undecided(y.reachability)) {
             y.reachability = "tainted-path";
+            y.reachability_reason = `Outside input reaches it through the data flow reported at ${f.file_path}:${x.line}`;
           }
           if ((x.exploitability_score ?? 0) > (y.exploitability_score ?? 0)) y.exploitability_score = x.exploitability_score;
           if (x.remediation_urgency && URGENCY_RANK[x.remediation_urgency] > URGENCY_RANK[y.remediation_urgency ?? "monitor"]) {
@@ -218,9 +221,11 @@ export function correlateFindings(indicators: ScanIndicator[], filePath: string)
   // 2. On another finding's data-flow path, same CWE. The kept finding is the downstream one (its trace
   //    contains the other's line); a finding on several paths joins the one with the longest trace. Two
   //    findings on each other's paths (a loop) are ambiguous and left alone.
+  //    Only the part of y's path inside y's own function counts (localPathSteps): a builder in another function a
+  //    shared sink helper is reached from stays its own finding, one per caller.
   const onPath = (x: ScanIndicator, y: ScanIndicator) =>
     x !== y && x.cwe === y.cwe && x.line !== y.line && !!y.trace &&
-    y.trace.slice(0, -1).some(s => s.line === x.line && sameFile(s.file, filePath));
+    localPathSteps(y.trace).some(s => s.line === x.line && sameFile(s.file, filePath));
   const live = candidates.filter(i => !merged.has(i));
   const target = new Map<ScanIndicator, ScanIndicator>();
   for (const x of live) {

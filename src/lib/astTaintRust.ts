@@ -470,7 +470,7 @@ function emit(
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr.slice(0, 80)}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
-    trace: buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, rustTraceResolver),
+    trace: (rsTraceRoot = ctx.root, buildBackwardTraceGeneric(ctx.filePath, node, sourceExpr, sinkExpr, rustTraceResolver)),
   });
 }
 
@@ -2089,6 +2089,7 @@ function checkCrossFileCall(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Ta
       const display = displayFnName(key);
       const via = fact.via.length > 1 ? ` (${fact.via.map(displayFnName).join(" -> ")})` : "";
       const source = culpritOf(a, fact.sinkClass, env, mask).text;
+      rsTraceRoot = ctx.root;
       const callerTrace = buildBackwardTraceGeneric(ctx.filePath, node, source, display, rustTraceResolver);
       callerTrace[callerTrace.length - 1] = { ...callerTrace[callerTrace.length - 1], snippet: `${display}(...)` };
       ctx.findings.push({
@@ -2125,10 +2126,42 @@ function assignmentsIn(scope: SyntaxNode): Array<{ name: string; position: numbe
   visit(scope);
   return out;
 }
+// The file the trace being built is in (set by emit) -- functionInfo / callSitesOf are asked by name only.
+let rsTraceRoot: SyntaxNode | null = null;
+const paramNamesRs = (decl: SyntaxNode): string[] => paramShapesOf(field(decl, "parameters")).shapes.map(s => s.name);
+/** A function's returned expressions: each `return x`, and the block's tail expression (`format!(..)` with no `;`). */
+function returnsOfRs(decl: SyntaxNode): SyntaxNode[] {
+  const body = field(decl, "body");
+  if (!body) return [];
+  const out: SyntaxNode[] = [];
+  const visit = (n: SyntaxNode) => {
+    if (n.type === "function_item" || n.type === "closure_expression") return;
+    if (n.type === "return_expression" && named(n)[0]) out.push(named(n)[0]);
+    for (const c of named(n)) visit(c);
+  };
+  visit(body);
+  const tail = named(body).filter(c => c.type !== "line_comment" && c.type !== "block_comment").slice(-1)[0];
+  if (tail && !/(?:_statement|_declaration|_item)$/.test(tail.type)) out.push(tail);
+  return out;
+}
 const rustTraceResolver: TraceResolver<SyntaxNode> = {
   enclosingScope, assignmentsIn,
   fileScope: n => { let c = n; while (c.parent) c = c.parent; return c; },
   position: n => n.startIndex, line: lineOf, text: n => n.text,
+  scopeInfo: scope => {
+    const name = scope.type === "function_item" ? field(scope, "name")?.text : undefined;
+    return name ? { name, params: paramNamesRs(scope), line: lineOf(scope) } : null;
+  },
+  functionInfo: name => {
+    const decl = rsTraceRoot ? findAllNodes(rsTraceRoot, "function_item").find(d => field(d, "name")?.text === name) : undefined;
+    if (!decl) return null;
+    const returns = returnsOfRs(decl).map(r => ({ text: r.text, position: r.startIndex, line: lineOf(r) }));
+    return { scope: decl, params: paramNamesRs(decl), line: lineOf(decl), returns };
+  },
+  // free-function calls only (`get_input(&q)`): a method call's receiver is its own argument the trace can't map
+  callSitesOf: name => (rsTraceRoot ? findAllNodes(rsTraceRoot, "call_expression") : [])
+    .filter(c => { const f = field(c, "function"); return f?.type === "identifier" && f.text === name; })
+    .map(c => ({ scope: enclosingScope(c), position: c.startIndex, line: lineOf(c), text: c.text })),
 };
 
 // ── Interprocedural summaries ─────────────────────────────────────────────────────────────────────────────

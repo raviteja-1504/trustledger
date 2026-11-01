@@ -34,7 +34,10 @@ export interface FileIndicator {
   // which is how the UI should always read this (never a static per-id
   // table, since the same rule id can be reachable at one line and dead code
   // at another within the same file).
-  reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point";
+  // "unknown" set by the scorer: the call graph couldn't place the code and no data-flow trace decides it.
+  reachability?: "unreachable" | "reachable" | "tainted-path" | "entry-point" | "unknown";
+  /** The evidence the reachability came from and what changed the score. */
+  reachability_reason?: string;
   exploitability_score?: number;
   remediation_urgency?: "immediate" | "sprint" | "backlog" | "monitor";
   // Stable cross-scan identity of this exact finding (see src/lib/findingIdentity.ts) -- what suppression /
@@ -227,6 +230,19 @@ export interface DashboardData {
     risk_score: RiskLevel;
     repo: string;
     scan_id: string;
+    sla_deadline: string;
+  }>;
+  // Every file under SLA (overdue, due today or on track) from the same set as the breach counts -- what the SLA page
+  // lists, so its overdue count matches the dashboard's. Optional for older cached/seed payloads.
+  sla_open_files?: Array<{
+    id: string;
+    file_path: string;
+    risk_score: RiskLevel;
+    status: string;
+    repo: string;
+    scan_id: string;
+    pr_number: number | null;
+    assigned_email: string | null;
     sla_deadline: string;
   }>;
   // Connected (switched-on) repositories, scanned in the period or not — the

@@ -23,10 +23,11 @@ import { attributeCode, type AttributionResult } from "./aiAttribution";
 import { buildCallGraph }        from "./callGraph";
 import { aggregateComplianceReports, evaluateCompliance } from "./compliance";
 import type { ComplianceReport }  from "./compliance";
-import { scoreExploitability }   from "./reachability";
+import { scoreExploitability, ROUTE_HANDLER } from "./reachability";
+import { freeSyntaxTree } from "./treeSitterRuntime";
 import type { ReachabilityReport } from "./reachability";
 import {
-  parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, astTaintSeverity, astTaintLabel,
+  parseSourceFile, scanAstTaint, findNodeAtPosition, findEnclosingFunctionName, isInsideRouteCallback, astTaintSeverity, astTaintLabel,
   computeExportTaintSummary, computeExportSinkSummary, buildImportBindings, collectReexports,
   isModelFile, modelLocalNamesInFile, blockCommentSpans,
 } from "./astTaint";
@@ -184,7 +185,9 @@ export interface ScanIndicator {
   // aggregate because the same rule id can be reachable at one line and dead
   // code at another within the same file -- see signalClassification.ts's
   // realReachability() for how the UI is meant to read this.
-  reachability?:         "unreachable" | "reachable" | "tainted-path" | "entry-point";
+  reachability?:         "unreachable" | "reachable" | "tainted-path" | "entry-point" | "unknown";
+  /** The evidence the reachability came from and what changed the score (reachability.ts). */
+  reachability_reason?:  string;
   exploitability_score?: number;
   remediation_urgency?:  "immediate" | "sprint" | "backlog" | "monitor";
   // The tainted expression and the sink call it flows into, verbatim from the AST engine that found
@@ -854,7 +857,7 @@ const EVAL_EXEC_RE = [
 // jjwt's parseClaimsJwt accepts UNSIGNED tokens; header.getJWKURL() fetches the verification key from a URL the
 // token itself names (jku injection) -- each lets a forged token through.
 const JWT_BYPASS_RE =
-  /(?:algorithms?\s*[:=]\s*\[.*["']none["']|jwt\.decode\s*\([^)]*verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False|JWTParser\.parse\s*\([^)]*\)\s*\.getJWTClaimsSet\s*\(|\.parseClaimsJwt\s*\(|\.getJWKURL\s*\(\s*\)|\bJwts\.parser(?:Builder)?\s*\(\s*\)[^;]*?\.parse\s*\()/i;
+  /(?:\bRequireSignedTokens\s*=\s*false\b|\bValidateIssuerSigningKey\s*=\s*false\b|\bSignatureValidator\s*=\s*\(|\bJWT\.decode\s*\([^,)]+,\s*nil\s*,\s*false\b|algorithms?\s*[:=]\s*\[.*["']none["']|jwt\.decode\s*\([^)]*verify\s*=\s*False|ignoreExpiration\s*[:=]\s*true|{"alg"\s*:\s*"none"}|["']?verify_signature["']?\s*:\s*False|JWTParser\.parse\s*\([^)]*\)\s*\.getJWTClaimsSet\s*\(|\.parseClaimsJwt\s*\(|\.getJWKURL\s*\(\s*\)|\bJwts\.parser(?:Builder)?\s*\(\s*\)[^;]*?\.parse\s*\()/i;
 // The last alternative: jjwt's generic parse() also accepts an UNSIGNED token (alg "none") even with a signing key
 // set -- WebGoat's JWT lessons; parseClaimsJws (signed only) is the safe call.
 
@@ -879,6 +882,9 @@ const TLS_VERIFY_OFF_RE = [
   /\.dangerous\(\)\s*\.\s*set_certificate_verifier\s*\(/,
   // PHP curl, Ruby Net::HTTP / OpenSSL
   /\bCURLOPT_SSL_VERIFY(?:PEER|HOST)\s*,\s*(?:false|0)\b/,
+  // Java: a hostname verifier that accepts every host, or Apache HttpClient's no-op / allow-all verifiers
+  /\bsetDefaultHostnameVerifier\s*\(\s*\(\s*\w+\s*,\s*\w+\s*\)\s*->\s*true\s*\)|\bsetHostnameVerifier\s*\(\s*\(\s*\w+\s*,\s*\w+\s*\)\s*->\s*true\s*\)/,
+  /\bNoopHostnameVerifier\b|\bALLOW_ALL_HOSTNAME_VERIFIER\b|\bTrustAllStrategy\b|\bnew\s+TrustSelfSignedStrategy\s*\(/,
   /\bverify_mode\s*=\s*OpenSSL::SSL::VERIFY_NONE\b|\bverify_ssl\s*:\s*(?:false|OpenSSL::SSL::VERIFY_NONE)\b/,
   // C#: a certificate callback that accepts everything
   /ServerCertificate(?:Custom)?ValidationCallback\s*\+?=\s*(?:\([^)]*\)|\w+)\s*=>\s*true\b|DangerousAcceptAnyServerCertificateValidator\b/,
@@ -909,6 +915,15 @@ const WEAK_SIGNING_SECRET_RE = [
   /^\s*(?:(?:const|let|var)\s+)?(?:SECRET_KEY|JWT_SECRET_KEY|JWT_SECRET)\s*=\s*["'][^"']+["']/,
   // Node/Express (jsonwebtoken): jwt.sign(payload, 'literal', ...) / jwt.verify(token, 'literal', ...)
   /jwt\.(?:sign|verify)\s*\(\s*[^,]+,\s*["'][^"']+["']/,
+  // Java: auth0 Algorithm.HMAC*("literal"), jjwt signWith(alg, "literal") / Keys.hmacShaKeyFor("literal".getBytes())
+  /\bAlgorithm\.HMAC(?:256|384|512)\s*\(\s*"[^"]+"/,
+  /\.signWith\s*\(\s*SignatureAlgorithm\.\w+\s*,\s*"[^"]+"|\bKeys\.hmacShaKeyFor\s*\(\s*"[^"]+"\s*\.getBytes/,
+  // PHP firebase/php-jwt: JWT::encode($payload, 'literal', ...) / JWT::decode($t, new Key('literal', ...))
+  /\bJWT::encode\s*\(\s*[^,]+,\s*["'][^"']+["']|\bnew\s+Key\s*\(\s*["'][^"']+["']/,
+  // Ruby jwt gem: JWT.encode(payload, "literal", ...)
+  /\bJWT\.encode\s*\(\s*[^,]+,\s*["'][^"']+["']/,
+  // Go: a JWT key declared as a []byte literal (`var jwtKey = []byte("...")`)
+  /\b(?:var\s+)?\w*(?:jwt|signing|secret|hmac)\w*(?:Key|Secret)\w*\s*:?=\s*\[\]byte\s*\(\s*"[^"]+"\s*\)/i,
   // C#: private const string JwtSecret = "literal" -- same "name+literal
   // is a finding either way" philosophy as the bare-constant pattern
   // above, just with C#'s modifier-chain prefix (public/private/internal/
@@ -1094,6 +1109,8 @@ const INSECURE_RANDOM_RE = [
 
 const REDOS_RE = [
   /new\s+RegExp\s*\(\s*(?:req\.|body\.|params\.|query\.)\w+/i,
+  // Java / Kotlin: a pattern compiled from the request
+  /\bPattern\.(?:compile|matches)\s*\(\s*request\.getParameter\s*\(|\.matches\s*\(\s*request\.getParameter\s*\(|\bRegex\s*\(\s*request\.getParameter\s*\(/,
   // Nested quantifiers — group containing +/* immediately re-quantified with
   // +/*, e.g. /(a+)+/ or /(\w+)*/ — the classic catastrophic-backtracking shape.
   // Requires the quantifier to follow the group's closing paren directly, so
@@ -1220,6 +1237,19 @@ const WEAK_CORS_RE = [
   // shape (a "]" then "=" follows the header name, not "," or ":").
   /Access-Control-Allow-Origin["']?\s*\]\s*=\s*["']?\*/,
   /cors\s*\(\s*\{\s*origin\s*:\s*["']\*["']/,
+  // Any origin reflected back with credentials: cors({ origin: true, credentials: true }), or the request's own
+  // Origin header echoed into Access-Control-Allow-Origin -- every site can make credentialed requests and read them
+  /cors\s*\(\s*\{(?=[^}]*\borigin\s*:\s*true\b)(?=[^}]*\bcredentials\s*:\s*true\b)/,
+  /Access-Control-Allow-Origin["']?\s*[,\]]\s*=?\s*(?:req|request)\.(?:headers?(?:\.origin|\[["']origin["']\])|get\s*\(\s*["']origin["']\s*\))/i,
+  // Flask-CORS: every origin (the default, or "*") with credentials allowed; Django's allow-all switches
+  /\bCORS\s*\((?![^)]*\borigins\s*=\s*\[?\s*["']https?:)[^)]*\bsupports_credentials\s*=\s*True/,
+  /\bCORS_(?:ALLOW_ALL_ORIGINS|ORIGIN_ALLOW_ALL)\s*=\s*True\b/,
+  // Go (gin-contrib/cors, rs/cors): every origin allowed
+  /\bAllowAllOrigins\s*:\s*true\b|\bAllowedOrigins\s*:\s*\[\]string\s*\{\s*"\*"/,
+  // ASP.NET Core: any origin, or every origin approved by a callback
+  /\.AllowAnyOrigin\s*\(\s*\)|\.SetIsOriginAllowed\s*\(\s*\w+\s*=>\s*true\s*\)/,
+  // Ruby rack-cors: origins '*'
+  /^\s*origins\s+['"]\*['"]/,
   /res\.(?:header|setHeader)\s*\(\s*["']Access-Control-Allow-Origin["'],\s*["']\*["']\)/,
   /app\.use\s*\(\s*cors\s*\(\s*\)\s*\)/,
   /allowedOrigins\s*=\s*\[\s*["']\*["']/,
@@ -1235,6 +1265,8 @@ const IDOR_RE = [
   /(?:db|conn|pool|client)\.(?:get|find|query)\s*\(\s*(?:req|request)\.(?:params|query)\b/i,
   /SELECT\s+\*\s+FROM\s+\w+\s+WHERE\s+(?:id|user_id|owner_id)\s*=\s*\$\{(?:req|request)\./i,
   /\bgetById\s*\(\s*(?:req|request)\.(?:params|query)\b/i,
+  // PHP: a record selected by the request's id with no session user in the same query
+  /\bSELECT\b(?![^;]*\$_SESSION)[^;]*\bWHERE\s+(?:\w+\.)?(?:id|\w+_id)\s*=\s*[^;]*\$_(?:GET|POST|REQUEST)\s*\[\s*['"]\w*id['"]\s*\]/i,
 ];
 
 // XPath injection — user input concatenated into an XPath expression
@@ -1286,6 +1318,16 @@ const VERBOSE_ERROR_RE = [
   /^\s*_\s+"net\/http\/pprof"|\bexpvar\.Handler\(\)\.ServeHTTP\(/,
   /\.Header\(\)\.Set\(\s*"(?:Server|X-Powered-By)"\s*,[^\n]*runtime\.Version\(\)/,
   /(?:res\.json|res\.send|res\.status\s*\(\s*\d+\s*\)\.json)\s*\([^)]*(?:error|err|e)\.stack\b/i,
+  /\bres\.status\s*\(\s*\d+\s*\)\s*\.(?:send|end|write)\s*\([^)]*\b(?:error|err|e|ex)\.stack\b/i,
+  // Python: the traceback (or the raw exception) returned as the response
+  /\b(?:return|jsonify\s*\(|make_response\s*\(|Response\s*\(|HttpResponse\s*\()[^\n]*\btraceback\.(?:format_exc|format_exception|format_tb)\s*\(/,
+  /^\s*return\s+(?:str|repr)\s*\(\s*(?:e|ex|exc|err|error)\s*\)\s*,\s*5\d\d\b/,
+  // PHP: the exception's trace / message echoed to the page
+  /\b(?:echo|print|die|exit)\b[^;]*\$\w+->(?:getTraceAsString|getTrace)\s*\(/i,
+  // C#: the exception's full text or stack trace returned from an action
+  /\breturn\s+(?:Content|Ok|BadRequest|Problem|StatusCode\s*\(\s*\d+\s*,)\s*\(?[^;]*\b(?:ex|e|exception|err)\.(?:ToString\s*\(\s*\)|StackTrace\b)/,
+  // Ruby: the backtrace rendered
+  /\brender\b[^\n]*\b(?:e|ex|exception|error)\.(?:backtrace|full_message)\b/,
   /(?:NextResponse|Response)\.json\s*\([^)]*(?:error|err|e)\.(?:stack|message)\b/i,
   /(?:message|detail|error|stack)\s*:\s*(?:error|err|e)\.stack\b/,
   // Sending the entire error object (not just message) in a response body
@@ -1334,6 +1376,8 @@ const GRAPHQL_INTROSPECTION_RE = [
 // XML External Entity injection
 const XXE_RE = [
   /new\s+DOMParser\s*\(\s*\)[\s\S]{0,100}\.parseFromString\s*\(\s*(?:req|request)\./i,
+  // Ruby Nokogiri: entity substitution / external DTD loading switched on (the default parse does neither)
+  /\bNokogiri::XML(?:::Document\.parse)?\s*\([^)]*\)\s*(?:\{|do)\s*\|\s*(\w+)\s*\|[^}\n]*\b\1\.(?:noent|dtdload)\b|\bNokogiri::XML::ParseOptions::(?:NOENT|DTDLOAD)\b/,
   /DocumentBuilderFactory\.newInstance\s*\(\s*\)(?![\s\S]{0,300}setFeature\s*\([^)]*FEATURE_SECURE_PROCESSING)/,
   /SAXParserFactory\.newInstance\s*\(\s*\)(?![\s\S]{0,300}setFeature)/,
   /XMLReaderFactory\.createXMLReader\s*\(\s*\)/,
@@ -1386,6 +1430,13 @@ const FILE_UPLOAD_RE = [
   /multer\s*\(\s*\{(?![^}]*fileFilter)[^}]*storage\s*:/,
   /upload\.single\s*\([^)]+\)(?![\s\S]{0,200}(?:mimetype|fileFilter|MIME_TYPES|allowedTypes))/,
   /req\.files?\.\w+\.mv\s*\(/i,
+  // The upload's own file name used as the stored name (no secure_filename / generated name): Python, PHP, Go,
+  // Java (Spring MultipartFile), Ruby
+  /^(?![^\n]*\bsecure_filename\s*\()[^\n]*\.save\s*\([^)\n]*\b\w+\.filename\b/,
+  /\bmove_uploaded_file\s*\([^;]*\$_FILES\s*\[[^\]]+\]\s*\[\s*['"]name['"]\s*\]/i,
+  /\bos\.(?:Create|OpenFile)\s*\([^)\n]*\.Filename\b/,
+  /\b(?:transferTo|copy)\s*\([^;]*getOriginalFilename\s*\(\s*\)|\b(?:new\s+File|Paths\.get|Path\.of)\s*\([^;]*getOriginalFilename\s*\(\s*\)/,
+  /\b(?:File\.(?:open|write|binwrite)|FileUtils\.(?:cp|mv)|\.join)\s*\([^)\n]*\.original_filename\b/,
   /busboy[\s\S]{0,100}on\s*\(\s*['"]file['"](?![\s\S]{0,500}(?:mimetype|content.?type|size))/i,
 ];
 
@@ -1434,6 +1485,9 @@ const INSECURE_DESERIAL_RE = [
   /Marshal\.load\s*\(\s*(?:params|request|body)/,
   /ObjectInputStream\s*\(\s*(?:request|socket)\.getInputStream/,
   /node-serialize\b.*\.unserialize/,
+  // node-serialize required on another line: `const serialize = require("node-serialize"); serialize.unserialize(x)`
+  /\b(?:serialize|nodeSerialize|serializer)\.unserialize\s*\(/,
+  /\bfuncster\.deepDeserialize\s*\(|\bcryo\.parse\s*\(/,
   /serialize-javascript.*eval\s*\(/i,
   // Go — encoding/gob decoding data sourced from an HTTP request body or a
   // raw network connection: gob can instantiate any type registered via
@@ -1463,6 +1517,9 @@ const WEAK_CRYPTO_RE = [
   // as the Python hashlib entry above (PHP variables carry a $ sigil).
   /\b(?:md5|sha1)\s*\(\s*\$(?:password|passwd|pwd)/i,
   /(?:MD5|SHA1|SHA128)\.new\s*\(/,
+  // Python PyCryptodome / PyCrypto: broken ciphers, and any cipher in ECB mode
+  /\b(?:DES|DES3|ARC2|ARC4|Blowfish|CAST)\.new\s*\(/,
+  /\.MODE_ECB\b/,
   /createCipheriv\s*\(\s*["'](?:des|rc4|rc2|bf|blowfish|idea)[-\w]*["']/i,
   /createCipheriv\s*\(\s*["']aes-\d+-ecb["']/i,
   /Cipher\.getInstance\s*\(\s*["'](?:DES|AES\/ECB|RC4|Blowfish)/i,
@@ -1515,6 +1572,8 @@ const PII_LOG_RE = [
   // access -- same precision bar as every entry above (must be
   // concatenated in, not merely present anywhere in the call).
   /\berror_log\s*\(\s*[^)]*\.\s*\$(?:password|passwd|pwd|token|secret|ssn|api[_]?key)\b/i,
+  // Ruby -- a secret interpolated into a logger line: logger.info("... #{params[:password]}")
+  /\b(?:Rails\.logger|logger|log)\.(?:info|debug|warn|error|fatal)\b[^\n]*#\{[^}]*\b(?:password|passwd|token|secret|ssn|credit_?card|cvv)\b/i,
 ];
 
 // Mass assignment
@@ -1534,6 +1593,14 @@ const MASS_ASSIGN_RE = [
   // are explicitly commented "VULNERABILITY: mass assignment" in-repo).
   /\.permit!\s*(?:\(\s*\))?/,
   /\.to_unsafe_h\b/,
+  // Python: the whole request body unpacked into a model / update (`User(**request.json)`, `.update(**request.form)`)
+  /\(\s*\*\*\s*(?:request\.(?:json|form|values|args|data|POST|GET)\b|request\.get_json\s*\(\s*\))/,
+  // JS: the whole body copied onto an object or spread into a write
+  /\bObject\.assign\s*\(\s*\w+(?:\.\w+)*\s*,\s*(?:req|request)\.body\s*\)/,
+  /\.(?:create|update|updateOne|insert|insertOne|save|findByIdAndUpdate|findOneAndUpdate)\s*\([^)]*\.\.\.\s*(?:req|request)\.body\b/,
+  // PHP / Laravel: the whole request into a model
+  /::(?:create|forceCreate|update|firstOrCreate|updateOrCreate)\s*\(\s*(?:\$_(?:POST|GET|REQUEST)\b|\$request->(?:all|input)\s*\(\s*\))/,
+  /->(?:fill|forceFill|update)\s*\(\s*(?:\$_(?:POST|GET|REQUEST)\b|\$request->(?:all|input)\s*\(\s*\))|\bnew\s+\w+\s*\(\s*\$request->all\s*\(\s*\)\s*\)/,
 ];
 
 // ── Detector helper: run patterns over lines, return deduped indicators ────────
@@ -1895,6 +1962,26 @@ function findSecretInLogFormat(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// Java / Kotlin Spring: the request body bound straight to a persisted entity and saved -- every column (role,
+// owner, balance) is the caller's to set. A DTO / request / form type is the allow-list, and is left alone.
+const SPRING_BODY_PARAM_RE = /@(?:[\w.]+\.)?RequestBody\s+(?:@\w+(?:\([^)]*\))?\s+)*(?:(\w+)\s+(\w+)\b|(\w+)\s*:\s*(\w+)\b)/;
+const DTO_TYPE_RE = /(?:Dto|DTO|Request|Req|Form|Command|Input|Payload|Params|Body|Update|Create|Patch)$/;
+function findMassAssignmentSpring(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = SPRING_BODY_PARAM_RE.exec(lines[i]);
+    if (!m || isNonExecutableLine(lines[i])) continue;
+    const [type, name] = m[1] ? [m[1], m[2]] : [m[4], m[3]];
+    if (DTO_TYPE_RE.test(type) || /^(?:String|Map|List|Object|JsonNode)$/.test(type)) continue;
+    const save = new RegExp(String.raw`\.(?:save|saveAndFlush|saveAll|persist|merge|insert)\s*\(\s*${name}\s*\)`);
+    const at = lines.slice(i, Math.min(lines.length, i + 15)).findIndex(l => save.test(l));
+    if (at < 0) continue;
+    found.push({ id: "mass-assignment", label: "Mass Assignment", severity: "high", line: i + 1 + at,
+      detail: `The request body is bound straight to the '${type}' entity and saved — the caller can set any of its fields (role, owner, balance); bind a DTO with only the editable fields` });
+  }
+  return found;
+}
+
 function findMassAssignment(lines: string[]): ScanIndicator[] {
   return runDetector(lines, MASS_ASSIGN_RE, "mass-assignment", "Mass Assignment", "high",
     "Raw request body passed to model constructor — allow-list fields explicitly");
@@ -2100,6 +2187,131 @@ function findTlsVerificationDisabled(lines: string[]): ScanIndicator[] {
       detail: "TLS certificate verification is turned off, so anyone on the network path can impersonate the server -- keep verification on and trust the needed CA instead" });
   }
   return found;
+}
+
+// A JWT read without its signature checked: jsonwebtoken's jwt.decode / auth0's JWT.decode / golang-jwt's
+// ParseUnverified return the claims of ANY token, forged or not. Only when the file never verifies one -- decode()
+// next to a verify() is the common "peek at the header, then verify" pattern. (Not Python: PyJWT's jwt.decode
+// verifies by default -- its blind form, verify_signature False, is JWT_BYPASS_RE's.)
+const JWT_DECODE_ONLY_RE = /\b(?:jwt|jsonwebtoken|JWT)\.decode\s*\(|\.ParseUnverified\s*\(/;
+const JWT_VERIFIES_RE = /\bjwt\.verify\s*\(|\bJWT\.require\s*\(|\.verify\s*\(\s*\w+\s*\)|\bjwt\.(?:Parse|ParseWithClaims)\s*\(|\bverify_signature["']?\s*:\s*True|\bjwt\.decode\s*\([^)]*\balgorithms\s*=/;
+function findJwtDecodeWithoutVerify(lines: string[]): ScanIndicator[] {
+  if (lines.some(l => JWT_VERIFIES_RE.test(l))) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !JWT_DECODE_ONLY_RE.test(lines[i]) || JWT_BYPASS_RE.test(lines[i])) continue;
+    found.push({ id: "jwt-none-alg", label: "JWT Signature Not Verified", severity: "critical", line: i + 1,
+      detail: "The token is decoded without checking its signature (and nothing in this file verifies one) -- a forged token's claims are trusted; use jwt.verify / JWT.require(alg).build().verify / jwt.Parse with the expected key" });
+  }
+  return found;
+}
+
+// Python IDOR: a Flask route's (or Django view's) id parameter used straight in a lookup, with nothing in the view
+// tying the record to the caller (current_user / g.user / request.user / an owner / user_id comparison).
+const PY_ROUTE_ID_RE = /@\w+\.(?:route|get|post|put|patch|delete)\s*\(\s*["'][^"']*<(?:\w+:)?(\w*(?:id|pk|Id))>/;
+const PY_OWNERSHIP_RE = /\bcurrent_user\b|\bg\.user\b|\brequest\.user\b|\bsession\s*\[|\bget_jwt_identity\s*\(|\bowner\w*\b|\buser_id\s*(?:==|=\s*(?:current|g\.|session|request\.user))|\bcheck_\w*(?:owner|permission|access)\w*\s*\(|\babort\s*\(\s*40[13]\b/;
+function findIDORPython(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = PY_ROUTE_ID_RE.exec(lines[i]);
+    if (!m || isNonExecutableLine(lines[i])) continue;
+    const id = m[1];
+    const defAt = lines.findIndex((l, j) => j > i && /^\s*(?:async\s+)?def\s+\w+\s*\(/.test(l));
+    if (defAt < 0 || defAt - i > 4) continue;
+    const indent = lines[defAt].length - lines[defAt].trimStart().length;
+    let end = defAt + 1;
+    while (end < lines.length && (lines[end].trim() === "" || lines[end].length - lines[end].trimStart().length > indent)) end++;
+    const body = lines.slice(defAt + 1, end);
+    if (body.some(l => PY_OWNERSHIP_RE.test(l)) || lines.slice(i, defAt).some(l => /owner|permission/i.test(l))) continue;
+    const lookup = new RegExp(String.raw`\.(?:get|get_or_404|first_or_404|filter_by|filter|get_object_or_404)\s*\([^)\n]*\b${id}\b|\bWHERE\b[^\n]*\b(?:id|pk)\s*=\s*(?:\?|%s|:\w+)[^\n]*\b${id}\b|\bobjects\.get\s*\([^)\n]*=\s*${id}\b|\bfind(?:_one)?\s*\([^)\n]*\b${id}\b`);
+    const at = body.findIndex(l => lookup.test(l));
+    if (at < 0) continue;
+    found.push({ id: "idor", label: "Insecure Direct Object Reference", severity: "high", line: defAt + 2 + at,
+      detail: `The record is looked up by the URL's '${id}' with no check that it belongs to the caller (current_user / owner) — any user can read another's by changing the id` });
+  }
+  return found;
+}
+
+// Privilege escalation (CWE-269): a role / admin flag / permission set taken from the request -- a user can make
+// themselves an administrator. A comparison (`if req.body.role === "admin"`) is not one; a write is.
+const PRIV_KEYS = String.raw`(?:role|roles|is_?admin|admin|is_?superuser|is_?staff|permissions?|privileges?|user_?type|account_?type|access_?level|groups?)`;
+const PRIV_FROM_REQUEST_RE = new RegExp([
+  String.raw`\b(?:req|request)\.(?:body|query|params)\.${PRIV_KEYS}\b`,
+  String.raw`\brequest\.(?:json|form|args|values|data|POST|GET)\s*(?:\[|\.get\s*\()\s*["']${PRIV_KEYS}["']`,
+  String.raw`\brequest\.get_json\s*\(\s*\)\s*(?:\[|\.get\s*\()\s*["']${PRIV_KEYS}["']`,
+  String.raw`\$_(?:POST|GET|REQUEST)\s*\[\s*["']${PRIV_KEYS}["']\s*\]`,
+  String.raw`\bparams\s*\[\s*:${PRIV_KEYS}\s*\]`,
+  String.raw`\b(?:request\.getParameter|r\.(?:FormValue|PostFormValue)|c\.(?:PostForm|Query|DefaultPostForm))\s*\(\s*"${PRIV_KEYS}"`,
+  String.raw`\bRequest\.(?:Form|Query)\s*\[\s*"${PRIV_KEYS}"\s*\]`,
+].join("|"), "i");
+// (a bound statement parameter -- AddWithValue / setString / bindValue -- writes it too)
+const PRIV_WRITE_CONTEXT_RE = /(?<![=!<>])=(?!=)|:\s*(?:req|request)\.|\b(?:update|create|save|insert|set\w*|add\w*|bind\w*|UPDATE\b[^\n]*\bSET)\b\s*\(?/i;
+const ADMIN_GUARD_RE = /\b(?:isAdmin|is_admin|requireAdmin|require_admin|admin_required|adminOnly|hasRole|has_role|hasAuthority|PreAuthorize|Secured|RolesAllowed|authorize|can\?|policy|is_superuser)\b|role\s*===?\s*["']admin/i;
+function findPrivilegeEscalation(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line) || !PRIV_FROM_REQUEST_RE.test(line)) continue;
+    // read for a decision (`if (req.body.role === "admin")`), not written anywhere
+    if (/^\s*(?:if|elif|else\s+if|unless|when|case|return)\b|===|!==|==|!=/.test(line) && !/\b(?:update|create|save|insert|SET)\b/i.test(line)) continue;
+    if (!PRIV_WRITE_CONTEXT_RE.test(line)) continue;
+    if (lines.slice(Math.max(0, i - 20), i).some(l => ADMIN_GUARD_RE.test(l))) continue;
+    found.push({ id: "privilege-escalation", label: "Privilege Escalation", severity: "high", line: i + 1,
+      detail: "A role / admin flag / permission is taken from the request and stored — a user can grant themselves higher privileges; set it server-side, and only behind an administrator check" });
+  }
+  return found;
+}
+
+// Resource exhaustion (CWE-400 / CWE-770): memory or work sized by the request -- an array / buffer / string /
+// loop as large as a number the caller sends -- or a request body limit so large it no longer protects anything.
+const REQ_NUMBER_RE = /\b(?:parseInt|parseFloat|Number)\s*\(\s*(?:req|request)\.(?:query|body|params)\b|\b(?:int|long|Int32|Int64)\.Parse\s*\(\s*Request\.(?:Query|Form)\b|\bConvert\.ToInt(?:32|64)\s*\(\s*Request\.(?:Query|Form)\b|\bint\s*\(\s*request\.(?:args|form|values|json|GET|POST)\b|\b(?:strconv\.Atoi|strconv\.ParseInt)\s*\(\s*(?:r\.(?:URL\.Query\(\)\.Get|FormValue)|c\.(?:Query|Param))\s*\(|\bInteger\.parseInt\s*\(\s*request\.getParameter\b|\bintval\s*\(\s*\$_(?:GET|POST|REQUEST)\b|\bparams\s*\[\s*:\w+\s*\]\.to_i\b/;
+const sizedBy = (v: string) => new RegExp(String.raw`\bnew\s+Array\s*\(\s*${v}\b|\bBuffer\.(?:alloc|allocUnsafe)\s*\(\s*${v}\b|\.repeat\s*\(\s*${v}\b|\bArray\.from\s*\(\s*\{\s*length\s*:\s*${v}\b|\]\s*\*\s*${v}\b|["']\s*\*\s*${v}\b|\b(?:bytearray|bytes)\s*\(\s*${v}\b|\bfor\s*\([^;]*;[^;]*<=?\s*${v}\b|\bfor\s+\w+\s+in\s+range\s*\(\s*${v}\b|\bmake\s*\(\s*\[\]\w+\s*,\s*${v}\b|\bnew\s+(?:byte|int|long|char)\s*\[\s*${v}\s*\]|\barray_fill\s*\(\s*0\s*,\s*\$?${v}\b|\bstr_repeat\s*\([^,]+,\s*\$?${v}\b|\bArray\.new\s*\(\s*${v}\b|\b${v}\.times\b`);
+const HUGE_BODY_LIMIT_RE = /\b(?:express|bodyParser)\.(?:json|urlencoded|raw|text)\s*\(\s*\{[^}]*\blimit\s*:\s*["']?(\d+)\s*(mb|gb)\b/i;
+function findResourceExhaustion(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isNonExecutableLine(line)) continue;
+    const limit = HUGE_BODY_LIMIT_RE.exec(line);
+    if (limit && (limit[2].toLowerCase() === "gb" || parseInt(limit[1]) >= 50)) {
+      found.push({ id: "resource-exhaustion", label: "Unbounded Resource Allocation", severity: "medium", line: i + 1,
+        detail: `The request body limit is ${limit[1]}${limit[2]} — a few concurrent requests exhaust the server's memory; keep the limit to what the endpoint needs` });
+      continue;
+    }
+    if (!REQ_NUMBER_RE.test(line)) continue;
+    const v = /^\s*(?:(?:const|let|var|final|int|long)\s+)?\$?(\w+)\s*(?::\s*\w+\s*)?:?=/.exec(line)?.[1];
+    // the size used inline (`new Array(parseInt(req.query.n))`), or through the variable it was read into
+    const inline = /\bnew\s+Array\s*\(\s*(?:parseInt|Number)|\bBuffer\.alloc\w*\s*\(\s*(?:parseInt|Number)|\.repeat\s*\(\s*(?:parseInt|Number)|\brange\s*\(\s*int\s*\(\s*request/.test(line);
+    if (!inline && !v) continue;
+    const window = lines.slice(i, Math.min(lines.length, i + 15));
+    // a bound on it first (`if n > 1000`, Math.min(n, MAX), min(n, LIMIT)) makes it a bounded size
+    if (v && window.some(l => new RegExp(String.raw`\b${v}\s*[<>]=?\s*\w|\b(?:Math\.)?min\s*\(\s*${v}\b|\bclamp\w*\s*\(\s*${v}\b`).test(l))) continue;
+    const at = inline ? 0 : window.findIndex((l, k) => k > 0 && sizedBy(v!).test(l));
+    if (at < 0) continue;
+    found.push({ id: "resource-exhaustion", label: "Unbounded Resource Allocation", severity: "medium", line: i + 1 + at,
+      detail: `Memory or work is sized by a number from the request${v ? ` ('${v}')` : ""} with no upper bound — one request can exhaust the server; clamp it to a maximum first` });
+  }
+  return found;
+}
+
+// Insecure permissions (CWE-732): a file or directory made writable by every user (chmod 0o777 / 0666, o+w), or the
+// process's umask cleared so everything it creates is. (A create mode alone -- open(path, 0o666) -- is narrowed by the
+// umask, so it isn't reported.)
+const WORLD_WRITABLE_MODE = String.raw`0o?[0-7]?[0-7][0-7][2367]\b`;
+const INSECURE_PERMISSIONS_RE = [
+  new RegExp(String.raw`\b(?:os\.(?:chmod|fchmod|lchmod)|fs\.(?:chmod|fchmod|lchmod)(?:Sync)?|fs\.promises\.chmod|(?:^|[^.\w])chmod|fchmod|File\.chmod|FileUtils\.chmod(?:_R)?|os\.Chmod|\.Chmod)\s*\([^)\n]*?,?\s*${WORLD_WRITABLE_MODE}`),
+  new RegExp(String.raw`\b(?:File\.chmod|FileUtils\.chmod(?:_R)?)\s*\(\s*${WORLD_WRITABLE_MODE}`),
+  /\b(?:os\.)?umask\s*\(\s*0o?0*\s*\)/,
+  /\bstat\.S_IWOTH\b|\bstat\.S_IRWXO\b/,
+  /\bPosixFilePermissions\.fromString\s*\(\s*"[r-][w-][x-][r-][w-][x-][r-]w[x-]"\s*\)/,
+  /\.set(?:Writable|Executable)\s*\(\s*true\s*,\s*false\s*\)/,
+  /\bUnixFileMode\.OtherWrite\b/,
+  // the chmod command run from code (a Dockerfile's RUN chmod is the container rules'; prose mentioning it is nothing)
+  /\b(?:system|exec\w*|popen|spawn\w*|run|shell_exec|passthru|Command)\s*\([^)\n]*\bchmod\s+(?:-R\s+)?(?:777|666|o\+w|a\+w)\b/,
+];
+function findInsecurePermissions(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, INSECURE_PERMISSIONS_RE, "insecure-permissions", "Insecure File Permissions", "medium",
+    "A file or directory is made writable by every user on the system (or the umask is cleared) — any local process can replace or tamper with it; use 0o600 / 0o640 / 0o750");
 }
 
 // A Set-Cookie header written by hand (`headers['Set-Cookie'] = "session=..."`, `header("Set-Cookie: sid=...")`,
@@ -3753,11 +3965,33 @@ const DEBUG_MODE_RE = [
   // on too (never absence-of-a-safe-value, which single-line regex can't
   // see).
   /ini_set\s*\(\s*["']display_errors["']\s*,\s*["']?1["']?\s*\)/i,
+  // Express: the development error handler (prints stack traces) installed unconditionally, or the environment
+  // forced to development
+  /^\s*app\.use\s*\(\s*(?:require\s*\(\s*["']errorhandler["']\s*\)|errorhandler)\s*\(\s*\)\s*\)/,
+  /\bapp\.set\s*\(\s*["']env["']\s*,\s*["']development["']\s*\)/,
+  // Go gin in debug mode
+  /\bgin\.SetMode\s*\(\s*gin\.DebugMode\s*\)/,
 ];
 
 function findDebugModeEnabled(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, DEBUG_MODE_RE, "debug-mode-enabled", "Debug Mode Enabled", "high",
-    "Framework debug mode is explicitly enabled — exposes stack traces, source code, and (Werkzeug) an interactive RCE console; disable in production");
+  return [
+    ...runDetector(lines, DEBUG_MODE_RE, "debug-mode-enabled", "Debug Mode Enabled", "high",
+      "Framework debug mode is explicitly enabled — exposes stack traces, source code, and (Werkzeug) an interactive RCE console; disable in production"),
+    ...findDeveloperExceptionPage(lines),
+  ];
+}
+
+// ASP.NET Core's developer exception page (full stack traces and source) installed without the usual
+// `if (env.IsDevelopment())` around it -- so it is on in production too.
+function findDeveloperExceptionPage(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !/\.UseDeveloperExceptionPage\s*\(\s*\)/.test(lines[i])) continue;
+    if (lines.slice(Math.max(0, i - 3), i + 1).some(l => /IsDevelopment\s*\(\s*\)|IsEnvironment\s*\(\s*"Development"/.test(l))) continue;
+    found.push({ id: "debug-mode-enabled", label: "Debug Mode Enabled", severity: "high", line: i + 1,
+      detail: "The developer exception page is installed with no IsDevelopment() check — every production error shows its stack trace and source; wrap it in if (env.IsDevelopment())" });
+  }
+  return found;
 }
 
 function findIDOR(lines: string[]): ScanIndicator[] {
@@ -3847,7 +4081,7 @@ const CSHARP_XML_DOC_CTOR_RE = /new\s+XmlDocument\s*\(\s*\)/;
 const CSHARP_XML_TEXT_READER_CTOR_RE = /new\s+XmlTextReader\s*\(/;
 const CSHARP_XML_RESOLVER_NULL_RE = /\.XmlResolver\s*=\s*null\b/;
 const CSHARP_XML_RESOLVER_UNSAFE_RE = /\.XmlResolver\s*=\s*new\s+XmlUrlResolver\s*\(/;
-const CSHARP_DTD_PARSE_RE = /DtdProcessing\s*=\s*DtdProcessing\.Parse\b/;
+const CSHARP_DTD_PARSE_RE = /DtdProcessing\s*=\s*(?:System\.Xml\.)?DtdProcessing\.Parse\b/;
 
 function findXXECSharp(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
@@ -7669,7 +7903,13 @@ export function analyzeFile(
     ...(lang === "ruby" ? findRubyTaintFindings(codeLines) : []),
     ...findEvalExec(codeLines),
     ...findJwtBypass(codeLines),
+    ...(lang === "typescript" || lang === "javascript" || lang === "java" || lang === "kotlin" || lang === "golang" ? findJwtDecodeWithoutVerify(codeLines) : []),
     ...findTlsVerificationDisabled(codeLines),
+    ...findPrivilegeEscalation(codeLines),
+    ...findResourceExhaustion(codeLines),
+    ...findInsecurePermissions(codeLines),
+    ...(lang === "python" ? findIDORPython(codeLines) : []),
+    ...(lang === "java" || lang === "kotlin" ? findMassAssignmentSpring(codeLines) : []),
     ...findDirectoryListing(codeLines),
     ...findRawSetCookieFlags(codeLines),
     ...(lang === "typescript" || lang === "javascript" ? [
@@ -7951,8 +8191,16 @@ export function analyzeFile(
   // Every indicator now exists (findings + AI signals + attribution/watermark/behavioral/supply-chain), and
   // enclosing-function resolution is available, so this is the one place identities are minted.
   assignFingerprints(indicators, { filePath: file_path, lines, enclosingFunction: resolveContainingFunction, fileLevelIds: FILE_LEVEL_INDICATOR_IDS });
+  // For reachability only (fingerprints keep resolveContainingFunction): an anonymous callback passed straight to a
+  // route registration is a request handler.
+  const resolveReachabilityFunction = (line: number): string => {
+    const name = resolveContainingFunction(line);
+    if (name !== "unknown" || !tsSourceFile) return name;
+    const pos = tsSourceFile.getPositionOfLineAndCharacter(Math.max(0, line - 1), 0);
+    return isInsideRouteCallback(findNodeAtPosition(tsSourceFile, pos)) ? ROUTE_HANDLER : name;
+  };
   const exploitability = indicators.filter(i => !AI_SIGNAL_IDS.has(i.id)).length > 0
-    ? scoreExploitability(indicators, content, callGraph, resolveContainingFunction)
+    ? scoreExploitability(indicators, content, callGraph, resolveReachabilityFunction)
     : null;
 
   // Merge per-instance reachability back onto `indicators` -- the same array
@@ -7971,6 +8219,7 @@ export function analyzeFile(
       const score = scoreByKey.get(`${ind.id}:${ind.line ?? ""}`);
       if (!score) continue; // AI-signal ids are never scored -- expected, leave untouched
       ind.reachability = score.reachability;
+      ind.reachability_reason = score.reachability_reason;
       ind.exploitability_score = score.exploitability_score;
       ind.remediation_urgency = score.remediation_urgency;
     }
@@ -8008,6 +8257,16 @@ export function analyzeFile(
   const ml_score = !fileMeta.skipAI
     ? classifyCode(content, ast_metrics, ai_percentage)
     : null;
+
+  // Free the syntax trees this call parsed itself. tree-sitter's trees live in WebAssembly memory that garbage
+  // collection never reclaims: one process that parses ~50k files aborts and every later parse fails (the Juliet C/C++
+  // run lost 3751 files that way). Trees handed in by runScan's cross-file pass are freed by runScan.
+  for (const [root, owned] of [
+    [pyTree, !presparsedPy], [goTree, !crossFileGo?.tree], [csTree, !crossFileCSharp?.tree], [phpTree, !crossFilePhp?.tree],
+    [rubyTree, !crossFileRuby?.tree], [kotlinTree, !crossFileKotlin?.tree], [rustTree, !crossFileRust?.tree], [cppTree, !crossFileCpp?.tree],
+  ] as const) {
+    if (root && owned) freeSyntaxTree(root);
+  }
 
   return {
     file_path, language: lang, ai_percentage, risk_score, risk_indicators, indicators,
@@ -9041,7 +9300,10 @@ export function runScan(input: ScanInput): ScanOutput {
   let skipped_unchanged = 0;
   const perFileStart = Date.now();
   const fileTimings = new Map<string, number>();
-  const files = allFiles.map(f => {
+  // (the cross-file pass's syntax trees are freed in the finally below, once every file has been analysed)
+  let files: FileAnalysis[];
+  try {
+  files = allFiles.map(f => {
     const t0 = Date.now();
     const cache_key = computeFileCacheKey({
       namespace, path: f.path, contentHash: contentHashByPath.get(f.path)!, prPriorBias,
@@ -9081,6 +9343,13 @@ export function runScan(input: ScanInput): ScanOutput {
     fileTimings.set(f.path, Date.now() - t0);
     return analysis;
   });
+  } finally {
+    // tree-sitter trees live in WebAssembly memory garbage collection never reclaims (see analyzeFile); nothing below
+    // reads them, and analyzeFile left these to us
+    for (const trees of [pySourceFiles, kotlinTrees, csTrees, goTrees, phpTrees, rubyTrees, rustTrees, cppTrees] as ReadonlyArray<Map<string, unknown>>) {
+      for (const root of trees.values()) freeSyntaxTree(root as Parameters<typeof freeSyntaxTree>[0]);
+    }
+  }
   const perFileEnd = Date.now();
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────

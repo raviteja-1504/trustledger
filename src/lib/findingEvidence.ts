@@ -245,13 +245,18 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
   if (onPathLines.length) {
     checks.push({ tone: "neutral", parts: [`Also reported at line${onPathLines.length === 1 ? "" : "s"} ${onPathLines.join(", ")}, on this same data-flow path — one issue, merged into this finding`] });
   }
+  // The scorer's own reason (reachability.ts) names the evidence: the data-flow trace, or the call graph.
+  const reason = ind.reachability_reason ? [ind.reachability_reason] : null;
   switch (ind.reachability) {
-    case "entry-point":  checks.push({ tone: "confirmed", parts: ["Runs directly inside a request handler / entry point"] }); break;
-    case "tainted-path": checks.push({ tone: "confirmed", parts: ["Call graph confirms tainted data reaches this code from an entry point"] }); break;
-    case "reachable":    checks.push({ tone: "confirmed", parts: ["Reachable from an entry point via the call graph"] }); break;
+    case "entry-point":  checks.push({ tone: "confirmed", parts: reason ?? ["Runs directly inside a request handler / entry point"] }); break;
+    case "tainted-path": checks.push({ tone: "confirmed", parts: reason ?? ["Call graph confirms tainted data reaches this code from an entry point"] }); break;
+    case "reachable":    checks.push({ tone: "confirmed", parts: reason ?? ["Reachable from an entry point via the call graph"] }); break;
     case "unreachable":
       // The call graph only sees this file; a flow proven from another file's request handler overrides it.
-      if (!ind.reachedFrom?.length) checks.push({ tone: "caution", parts: ["No call path from an entry point was found — possibly dead code"] });
+      if (!ind.reachedFrom?.length) checks.push({ tone: "caution", parts: reason ?? ["No call path from an entry point was found — possibly dead code"] });
+      break;
+    case "unknown":
+      if (!ind.reachedFrom?.length) checks.push({ tone: "neutral", parts: reason ?? ["Reachability could not be determined"] });
       break;
   }
 
