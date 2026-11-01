@@ -86,6 +86,11 @@
     { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Go", "score": 35, "note": "Category average" },
     { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — PHP", "score": 42, "note": "Category average" },
     { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Ruby", "score": 36, "note": "Category average" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Rust", "score": 25, "note": "Category average" }
+    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Rust", "score": 25, "note": "Category average" },
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "OWASP Benchmark (Java)", "score": 87.5, "note": "Category average; helper classes scanned alongside" },
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Go", "score": 55, "note": "Category average" },
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — PHP", "score": 56, "note": "Category average" },
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Ruby", "score": 52, "note": "Category average" },
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Rust", "score": 39, "note": "Category average" }
   ]
 }

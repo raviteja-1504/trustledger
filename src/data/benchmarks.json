@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-30T10:50:17.106Z",
-  "engineCommit": "e2f90ea",
+  "generatedAt": "2026-11-01T13:07:14.420Z",
+  "engineCommit": "756c80d",
   "environment": "Measured in batch on a Windows developer workstation (single Node.js process, Jest harness) — a throughput figure, not end-to-end pull-request latency.",
   "corpora": [
     {
@@ -12,14 +12,14 @@
         "Go"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-10-30T08:41:05.471Z",
+      "runAt": "2026-11-01T08:18:20.3834124Z",
       "files": 1353,
-      "wallMs": 59148,
+      "wallMs": 96294,
       "categories": [
         {
           "name": "authnfailure",
-          "tp": 3,
-          "fn": 22,
+          "tp": 5,
+          "fn": 20,
           "fp": 0,
           "tn": 25
         },
@@ -34,13 +34,13 @@
           "name": "cmdi",
           "tp": 21,
           "fn": 9,
-          "fp": 10,
-          "tn": 20
+          "fp": 7,
+          "tn": 23
         },
         {
           "name": "codeinj",
-          "tp": 3,
-          "fn": 22,
+          "tp": 8,
+          "fn": 17,
           "fp": 0,
           "tn": 25
         },
@@ -67,8 +67,8 @@
         },
         {
           "name": "hardcodedcreds",
-          "tp": 12,
-          "fn": 13,
+          "tp": 17,
+          "fn": 8,
           "fp": 0,
           "tn": 25
         },
@@ -95,10 +95,10 @@
         },
         {
           "name": "loginjection",
-          "tp": 13,
-          "fn": 12,
-          "fp": 3,
-          "tn": 22
+          "tp": 20,
+          "fn": 5,
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "nosql",
@@ -125,8 +125,8 @@
           "name": "redirect",
           "tp": 17,
           "fn": 8,
-          "fp": 7,
-          "tn": 18
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "securecookie",
@@ -146,8 +146,8 @@
           "name": "ssrf",
           "tp": 18,
           "fn": 7,
-          "fp": 6,
-          "tn": 19
+          "fp": 3,
+          "tn": 22
         },
         {
           "name": "tlsverify",
@@ -165,8 +165,8 @@
         },
         {
           "name": "weakcipher",
-          "tp": 9,
-          "fn": 16,
+          "tp": 22,
+          "fn": 3,
           "fp": 0,
           "tn": 25
         },
@@ -202,9 +202,9 @@
         "PHP"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-10-30T08:41:05.471Z",
+      "runAt": "2026-11-01T08:20:50.0791757Z",
       "files": 1251,
-      "wallMs": 14500,
+      "wallMs": 57932,
       "categories": [
         {
           "name": "cmdi",
@@ -231,8 +231,8 @@
           "name": "deserial",
           "tp": 16,
           "fn": 9,
-          "fp": 6,
-          "tn": 19
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "extract",
@@ -280,8 +280,8 @@
           "name": "massassign",
           "tp": 14,
           "fn": 11,
-          "fp": 4,
-          "tn": 21
+          "fp": 5,
+          "tn": 20
         },
         {
           "name": "pathtraver",
@@ -348,10 +348,10 @@
         },
         {
           "name": "weakcipher",
-          "tp": 7,
-          "fn": 18,
-          "fp": 0,
-          "tn": 25
+          "tp": 22,
+          "fn": 3,
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "weakhash",
@@ -362,8 +362,8 @@
         },
         {
           "name": "weakrand",
-          "tp": 11,
-          "fn": 14,
+          "tp": 21,
+          "fn": 4,
           "fp": 0,
           "tn": 25
         },
@@ -392,9 +392,9 @@
         "Ruby"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-10-30T08:41:05.471Z",
+      "runAt": "2026-11-01T08:22:00.5898269Z",
       "files": 1351,
-      "wallMs": 19994,
+      "wallMs": 44472,
       "categories": [
         {
           "name": "authnfailure",
@@ -419,8 +419,8 @@
         },
         {
           "name": "codeinj",
-          "tp": 15,
-          "fn": 10,
+          "tp": 16,
+          "fn": 9,
           "fp": 2,
           "tn": 23
         },
@@ -461,8 +461,8 @@
         },
         {
           "name": "hardcodedcreds",
-          "tp": 9,
-          "fn": 16,
+          "tp": 12,
+          "fn": 13,
           "fp": 0,
           "tn": 25
         },
@@ -470,8 +470,8 @@
           "name": "headerinj",
           "tp": 17,
           "fn": 8,
-          "fp": 4,
-          "tn": 21
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "ldapi",
@@ -482,15 +482,15 @@
         },
         {
           "name": "loginjection",
-          "tp": 9,
-          "fn": 16,
-          "fp": 6,
-          "tn": 19
+          "tp": 17,
+          "fn": 8,
+          "fp": 3,
+          "tn": 22
         },
         {
           "name": "massassign",
-          "tp": 5,
-          "fn": 20,
+          "tp": 18,
+          "fn": 7,
           "fp": 0,
           "tn": 25
         },
@@ -519,8 +519,8 @@
           "name": "securecookie",
           "tp": 9,
           "fn": 16,
-          "fp": 2,
-          "tn": 23
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "sqli",
@@ -531,10 +531,10 @@
         },
         {
           "name": "ssrf",
-          "tp": 12,
-          "fn": 13,
-          "fp": 9,
-          "tn": 16
+          "tp": 19,
+          "fn": 6,
+          "fp": 7,
+          "tn": 18
         },
         {
           "name": "ssti",
@@ -552,10 +552,10 @@
         },
         {
           "name": "weakcipher",
-          "tp": 13,
-          "fn": 12,
-          "fp": 0,
-          "tn": 25
+          "tp": 24,
+          "fn": 1,
+          "fp": 3,
+          "tn": 22
         },
         {
           "name": "weakhash",
@@ -566,17 +566,17 @@
         },
         {
           "name": "weakrand",
-          "tp": 12,
-          "fn": 13,
-          "fp": 3,
-          "tn": 22
+          "tp": 20,
+          "fn": 5,
+          "fp": 0,
+          "tn": 25
         },
         {
           "name": "xss",
-          "tp": 14,
-          "fn": 11,
-          "fp": 5,
-          "tn": 20
+          "tp": 16,
+          "fn": 9,
+          "fp": 3,
+          "tn": 22
         },
         {
           "name": "xxe",
@@ -596,9 +596,9 @@
         "Rust"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-10-30T08:41:05.471Z",
+      "runAt": "2026-11-01T08:22:56.3009482Z",
       "files": 1251,
-      "wallMs": 27795,
+      "wallMs": 48733,
       "categories": [
         {
           "name": "authnfailure",
@@ -623,10 +623,10 @@
         },
         {
           "name": "crypto",
-          "tp": 4,
-          "fn": 21,
-          "fp": 0,
-          "tn": 25
+          "tp": 12,
+          "fn": 13,
+          "fp": 5,
+          "tn": 20
         },
         {
           "name": "csrf",
@@ -644,15 +644,15 @@
         },
         {
           "name": "fileupload",
-          "tp": 0,
-          "fn": 25,
-          "fp": 0,
-          "tn": 25
+          "tp": 19,
+          "fn": 6,
+          "fp": 4,
+          "tn": 21
         },
         {
           "name": "hardcodedcreds",
-          "tp": 5,
-          "fn": 20,
+          "tp": 14,
+          "fn": 11,
           "fp": 0,
           "tn": 25
         },
@@ -681,8 +681,8 @@
           "name": "ldapi",
           "tp": 19,
           "fn": 6,
-          "fp": 11,
-          "tn": 14
+          "fp": 6,
+          "tn": 19
         },
         {
           "name": "loginjection",
@@ -723,8 +723,8 @@
           "name": "redirect",
           "tp": 23,
           "fn": 2,
-          "fp": 9,
-          "tn": 16
+          "fp": 8,
+          "tn": 17
         },
         {
           "name": "redos",
@@ -735,10 +735,10 @@
         },
         {
           "name": "securecookie",
-          "tp": 0,
-          "fn": 25,
-          "fp": 0,
-          "tn": 25
+          "tp": 18,
+          "fn": 7,
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "sqli",
@@ -786,14 +786,14 @@
         "Java"
       ],
       "scoring": "Each test case is one servlet labelled vulnerable or safe for a category; helper classes are scanned alongside, as in a whole-repository scan.",
-      "runAt": "2026-10-30T08:44:14.177Z",
+      "runAt": "2026-11-01T08:23:56.5637987Z",
       "files": null,
       "wallMs": null,
       "categories": [
         {
           "name": "cmdi",
-          "tp": 62,
-          "fn": 64,
+          "tp": 114,
+          "fn": 12,
           "fp": 0,
           "tn": 125
         },
@@ -813,15 +813,15 @@
         },
         {
           "name": "ldapi",
-          "tp": 18,
-          "fn": 9,
+          "tp": 24,
+          "fn": 3,
           "fp": 0,
           "tn": 32
         },
         {
           "name": "pathtraver",
-          "tp": 79,
-          "fn": 54,
+          "tp": 102,
+          "fn": 31,
           "fp": 0,
           "tn": 135
         },
@@ -834,15 +834,15 @@
         },
         {
           "name": "sqli",
-          "tp": 267,
-          "fn": 5,
+          "tp": 272,
+          "fn": 0,
           "fp": 39,
           "tn": 193
         },
         {
           "name": "trustbound",
-          "tp": 54,
-          "fn": 29,
+          "tp": 61,
+          "fn": 22,
           "fp": 0,
           "tn": 43
         },
@@ -855,15 +855,15 @@
         },
         {
           "name": "xpathi",
-          "tp": 13,
-          "fn": 2,
+          "tp": 15,
+          "fn": 0,
           "fp": 0,
           "tn": 20
         },
         {
           "name": "xss",
-          "tp": 197,
-          "fn": 49,
+          "tp": 219,
+          "fn": 27,
           "fp": 0,
           "tn": 209
         }
@@ -878,7 +878,7 @@
         "Python"
       ],
       "scoring": "Each test case is one Flask view labelled vulnerable or safe for a category; helper modules are scanned alongside.",
-      "runAt": "2026-10-30T08:59:33.939Z",
+      "runAt": "2026-11-01T08:44:50.0929874Z",
       "files": null,
       "wallMs": null,
       "categories": [
@@ -991,7 +991,7 @@
         "C#"
       ],
       "scoring": "Every case has a vulnerable (bad) and a safe (good) region; a case counts as detected when a finding of its CWE's rules lands in the bad region, and as a false positive when one lands in a good region. Cases with a web or network source.",
-      "runAt": "2026-10-30T09:00:44.446Z",
+      "runAt": "2026-11-01T08:47:45.0730520Z",
       "files": null,
       "wallMs": null,
       "categories": [
@@ -1011,99 +1011,99 @@
         },
         {
           "name": "CWE78_OS_Command_Injection",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE80_XSS",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE81_XSS_Error_Message",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE83_XSS_Attribute",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE23_Relative_Path_Traversal",
-          "tp": 187,
-          "fn": 35,
+          "tp": 197,
+          "fn": 25,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE36_Absolute_Path_Traversal",
-          "tp": 187,
-          "fn": 35,
+          "tp": 197,
+          "fn": 25,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE601_Open_Redirect",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE113_HTTP_Response_Splitting/s01",
-          "tp": 318,
-          "fn": 52,
+          "tp": 328,
+          "fn": 42,
           "fp": 10,
           "tn": 360
         },
         {
           "name": "CWE113_HTTP_Response_Splitting/s02",
-          "tp": 255,
-          "fn": 41,
+          "tp": 263,
+          "fn": 33,
           "fp": 8,
           "tn": 288
         },
         {
           "name": "CWE90_LDAP_Injection",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE643_Xpath_Injection",
-          "tp": 192,
-          "fn": 30,
+          "tp": 198,
+          "fn": 24,
           "fp": 6,
           "tn": 216
         },
         {
           "name": "CWE94_Improper_Control_of_Generation_of_Code",
-          "tp": 192,
-          "fn": 30,
+          "tp": 198,
+          "fn": 24,
           "fp": 6,
           "tn": 216
         },
         {
           "name": "CWE470_Unsafe_Reflection",
-          "tp": 180,
-          "fn": 42,
+          "tp": 192,
+          "fn": 30,
           "fp": 0,
           "tn": 222
         },
         {
           "name": "CWE117_Improper_Output_Neutralization_for_Logs",
-          "tp": 192,
-          "fn": 30,
+          "tp": 198,
+          "fn": 24,
           "fp": 6,
           "tn": 216
         }
@@ -1119,49 +1119,49 @@
         "C++"
       ],
       "scoring": "Every case has a vulnerable (bad) and a safe (good) function; a case counts as detected when a finding of its CWE's rules lands in a bad function, and as a false positive when one lands in a good function.",
-      "runAt": "2026-10-30T10:14:16.823Z",
+      "runAt": "2026-11-01T12:07:26.9313335Z",
       "files": null,
       "wallMs": null,
       "categories": [
         {
           "name": "CWE78_OS_Command_Injection",
-          "tp": 3600,
-          "fn": 1200,
+          "tp": 3800,
+          "fn": 1000,
           "fp": 0,
           "tn": 4800
         },
         {
           "name": "CWE134_Uncontrolled_Format_String",
-          "tp": 2220,
-          "fn": 660,
+          "tp": 2340,
+          "fn": 540,
           "fp": 0,
           "tn": 2880
         },
         {
           "name": "CWE23_Relative_Path_Traversal",
-          "tp": 1575,
-          "fn": 825,
+          "tp": 1665,
+          "fn": 735,
           "fp": 0,
           "tn": 2400
         },
         {
           "name": "CWE36_Absolute_Path_Traversal",
-          "tp": 1575,
-          "fn": 825,
+          "tp": 1665,
+          "fn": 735,
           "fp": 0,
           "tn": 2400
         },
         {
           "name": "CWE90_LDAP_Injection",
-          "tp": 360,
-          "fn": 120,
+          "tp": 380,
+          "fn": 100,
           "fp": 0,
           "tn": 480
         },
         {
           "name": "CWE114_Process_Control",
-          "tp": 360,
-          "fn": 216,
+          "tp": 380,
+          "fn": 196,
           "fp": 0,
           "tn": 576
         },
@@ -1209,15 +1209,15 @@
         },
         {
           "name": "CWE789_Uncontrolled_Mem_Alloc",
-          "tp": 576,
-          "fn": 384,
+          "tp": 608,
+          "fn": 352,
           "fp": 0,
           "tn": 960
         },
         {
           "name": "CWE680_Integer_Overflow_to_Buffer_Overflow",
-          "tp": 280,
-          "fn": 296,
+          "tp": 296,
+          "fn": 280,
           "fp": 0,
           "tn": 576
         },
@@ -1241,7 +1241,7 @@
       "id": "trustledger-cross-file",
       "name": "TrustLedger cross-file suite (internal)",
       "url": "src/__tests__/benchmarks/crossFile in the TrustLedger repository",
-      "version": "e2f90ea",
+      "version": "756c80d",
       "languages": [
         "TypeScript",
         "Python",
@@ -1251,7 +1251,7 @@
         "PHP"
       ],
       "scoring": "Our own suite: 72 small multi-file programs, each with a flow that crosses files (vulnerable) or a safe twin. Less independent than the public corpora, since we wrote it; included because no public corpus targets cross-file flows.",
-      "runAt": "2026-10-30T09:12:10.071Z",
+      "runAt": "2026-11-01T10:33:47.6357946Z",
       "files": null,
       "wallMs": null,
       "categories": [
@@ -1304,9 +1304,9 @@
     "name": "OWASP Juice Shop",
     "url": "https://github.com/juice-shop/juice-shop",
     "version": "20.3.0",
-    "runAt": "2026-10-30T10:48:12.369Z",
+    "runAt": "2026-11-01T10:30:10.2904710Z",
     "files": 966,
-    "wallMs": 92533,
+    "wallMs": 123834,
     "challenges": [
       {
         "id": "accessLogDisclosureChallenge",
@@ -1653,6 +1653,41 @@
       "date": "2026-10-29",
       "corpus": "SAST Benchmark — Rust",
       "score": 25,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 87.5,
+      "note": "Category average; helper classes scanned alongside"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Go",
+      "score": 55,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 56,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 52,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 39,
       "note": "Category average"
     }
   ]
