@@ -9,6 +9,24 @@ import { analyzeFile } from "@/lib/scanner";
 const fn = (body: string, extra = "") => `<?php\nfunction handler($req) {\n${body}\n}\n${extra}\n`;
 const weak = (code: string) => analyzeFile("app/crypto.php", code).indicators.some(i => i.id === "weak-crypto");
 
+describe("PHP weak randomness", () => {
+  const rnd = (code: string) => analyzeFile("app/token.php", code).indicators.some(i => i.id === "insecure-randomness");
+  it("tokens and OTPs from uniqid, str_shuffle, array_rand, lcg_value, microtime or time()", () => {
+    expect(rnd(fn(`    $token = uniqid('sess_', true);`))).toBe(true);
+    expect(rnd(fn(`    $token = substr(str_shuffle($chars), 0, 16);`))).toBe(true);
+    expect(rnd(fn(`    $otp = (int)(lcg_value() * 1000000);`))).toBe(true);
+    expect(rnd(fn(`    $token = base64_encode((string)time());`))).toBe(true);
+    expect(rnd(fn(`    $resetToken = '';\n    for ($i = 0; $i < 16; $i++) {\n        $resetToken .= $chars[array_rand($chars)];\n    }`))).toBe(true);
+    expect(rnd(fn(`    $v = uniqid();\n    setcookie('csrf', $v);`))).toBe(true);
+  });
+  it("random_bytes / random_int, or a timestamp nobody trusts, is fine", () => {
+    expect(rnd(fn(`    $token = bin2hex(random_bytes(32));`))).toBe(false);
+    expect(rnd(fn(`    $otp = random_int(100000, 999999);`))).toBe(false);
+    expect(rnd(fn(`    $token = substr(str_shuffle(bin2hex(random_bytes(16))), 0, 16);`))).toBe(false);
+    expect(rnd(fn(`    $started = microtime(true);\n    echo $started;`))).toBe(false);
+  });
+});
+
 describe("PHP weak cipher use", () => {
   it("ECB, DES, RC4 and Blowfish, also after an argument with parentheses", () => {
     expect(weak(fn(`    $enc = openssl_encrypt($req->param('data'), 'AES-128-ECB', $key);`))).toBe(true);

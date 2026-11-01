@@ -1620,8 +1620,9 @@ function checkNumericSinks(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Tai
     return;
   }
   const alloc = (path && /(?:^|::)(?:Vec|String|VecDeque|HashMap|BytesMut)::with_capacity$/.test(path)) || (recv && /^(?:reserve|reserve_exact)$/.test(name)) ? args[0] : undefined;
-  // sized by a value already in memory (`String::with_capacity(s.len())`): no amplification beyond what was received
-  if (alloc && numericTaint(m(alloc)) && !/^[\w.]+\.len\(\)$/.test(alloc.text)) {
+  // sized by a value already in memory (`String::with_capacity(s.len())`, `s.len() + 16`, `s.len() * 2`): no amplification
+  // beyond what was received
+  if (alloc && numericTaint(m(alloc)) && !/^[\w.]+\.len\(\)(?:\s*[+*]\s*\d{1,4})?$/.test(alloc.text)) {
     fire("integer-overflow", alloc, path ?? `.${name}`, `Request-chosen size '${alloc.text.slice(0, 60)}' reserves memory (${path ?? name}) with no upper bound — cap it first`);
   }
 }
@@ -2347,7 +2348,25 @@ function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintRustFinding[
       }
     }
   }
+  // Hand-rolled "encryption": data XORed with a key byte by byte, or an RC4 key schedule written out
+  for (const [, f] of ctx.fns) {
+    if (!f.body) continue;
+    const xor = [...findAllNodes(f.body, "binary_expression"), ...findAllNodes(f.body, "compound_assignment_expr")]
+      .find(n => /^\^=?$/.test(operatorOf(n)) && insideLoopOrClosure(n, f.body!) && [field(n, "left"), field(n, "right")].some(o => !!o && KEY_OPERAND_RE.test(o.text)));
+    if (xor) emit(ctx, "weak-crypto", xor, "XOR with a key", "XOR cipher", "Data is \"encrypted\" by XOR with a key — trivially reversible from a little known plaintext; use an AEAD (aes-gcm, chacha20poly1305)");
+    const ksa = /\(\s*0\s*\.\.=?\s*255(?:u8)?\s*\)\s*\.collect/.test(f.body.text) && /\.swap\s*\(/.test(f.body.text);
+    if (ksa) emit(ctx, "weak-crypto", f.body, "RC4 key schedule", "RC4", "An RC4 key schedule is implemented by hand — RC4 is broken (biased keystream); use an AEAD (aes-gcm, chacha20poly1305)");
+  }
   return ctx.findings;
+}
+
+/** `key[i]`, `key[i % key.len()]`, `key_bytes[i]`, a scalar `key`: an operand that is (part of) a key. */
+const KEY_OPERAND_RE = /^\*?\w*key\w*(?:\s*\[[^\]]*\])?$/i;
+function insideLoopOrClosure(n: SyntaxNode, body: SyntaxNode): boolean {
+  for (let p = n.parent; p && p !== body; p = p.parent) {
+    if (/^(?:for_expression|while_expression|loop_expression|closure_expression)$/.test(p.type)) return true;
+  }
+  return false;
 }
 
 function drainSeeded(ctx: EngineCtx) {

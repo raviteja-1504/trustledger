@@ -60,7 +60,8 @@ describe("weak crypto", () => {
   it("SHA-256 of data, AES-GCM/CBC and bcrypt are fine", () => {
     expect(crypto(`Digest::SHA256.hexdigest(data)`)).toBe(0);
     expect(crypto(`OpenSSL::Cipher.new('AES-256-GCM')`)).toBe(0);
-    expect(crypto(`OpenSSL::Cipher.new('AES-256-CBC')`)).toBe(0);
+    // CBC is fine when the file adds a MAC; alone it is unauthenticated encryption (rubyCategoryGaps.test.ts)
+    expect(crypto(`OpenSSL::Cipher.new('AES-256-CBC')\n  mac = OpenSSL::HMAC.hexdigest('SHA256', mac_key, data)`)).toBe(0);
     expect(crypto(`BCrypt::Password.create(password)`)).toBe(0);
   });
 });

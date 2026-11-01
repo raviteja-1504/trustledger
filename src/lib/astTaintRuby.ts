@@ -613,6 +613,13 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       const m = argsMask();
       return DECODER_CALLS.has(callee) ? (m & ALL) | ((m >>> SHADOW) & ALL) : m;
     }
+    // `UserProfile.new(name, bio)` for a class of this file whose initialize takes arguments: the object holds them
+    // (field-insensitive, like `obj.attr = x`), so `profile.to_s` / `profile.bio` read them back
+    if (recv && name === "new" && (recv.type === "constant" || recv.type === "scope_resolution")) {
+      const cls = recv.text.replace(/^::/, "");
+      const init = [...ctx.methods.values()].find(m => m.name === "initialize" && m.className === cls && m.params.length > 0);
+      if (init) return argsMask();
+    }
     if (recv) {
       const rm = mask(recv, env);
       return ARG_FLOW_METHODS.has(name) ? rm | argsMask() : rm;
@@ -1556,11 +1563,19 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const a = pos[0];
     if (a) fireOn(ctx, "xss", node, a, mask(a, env), "raw");
   }
+  // javascript_tag("var g = '#{name}';"): the string is emitted as a <script> body -- HTML escaping doesn't apply there
+  if (!recv && name === "javascript_tag" && pos[0]) {
+    fireOn(ctx, "xss", node, pos[0], mask(pos[0], env), "javascript_tag", `Request input reaches javascript_tag(...) — it runs as script; pass it through j()/escape_javascript or to_json`);
+  }
   if (!recv && name === "link_to" && pos[1]) {
     // link_to "x", params[:url] -- a `javascript:` URL runs on click
     const parts = decomposeString(resolveVar(pos[1]), ctx);
     const startsLiteral = parts[0]?.kind === "literal" && /^(?:https?:\/\/|\/)/.test(parts[0].text);
-    if (!startsLiteral) fireOn(ctx, "xss", node, pos[1], mask(pos[1], env), "link_to", `Request input '${pos[1].text.slice(0, 60)}' is used as a link target — a javascript: URL runs on click; only allow http(s) or relative URLs`);
+    // a target proven to name a vetted host or a relative path (the redirect class cleared by a guard): no javascript: URL
+    const m1 = mask(pos[1], env);
+    const vetted = (m1 & SinkClass.XSS) !== 0 && (m1 & SinkClass.REDIRECT) === 0 && wasCleared(m1, SinkClass.REDIRECT);
+    if (vetted) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+    else if (!startsLiteral) fireOn(ctx, "xss", node, pos[1], mask(pos[1], env), "link_to", `Request input '${pos[1].text.slice(0, 60)}' is used as a link target — a javascript: URL runs on click; only allow http(s) or relative URLs`);
   }
 
   // ── Template injection ──

@@ -80,8 +80,10 @@ const TABLES: Record<SanitizerLang, Table> = {
       // strconv.Quote escapes CR/LF; replacing "\n" (or "\r") with text free of line breaks -- CodeQL's Go
       // log-injection sanitizer: the two are usually chained, each step accepted on its own
       "strconv.Quote": C.HEADER, "strconv.QuoteToASCII": C.HEADER,
-      "strings.ReplaceAll": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
-      "strings.Replace": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
+      // the replacement may not put a line break back: a real \n / \r escape is an ODD run of backslashes before it
+      // ("\\n" writes a backslash and an n -- the usual way to make the break visible in the log)
+      "strings.ReplaceAll": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/(?:^|[^\\])(?:\\\\)*\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
+      "strings.Replace": (_callee, args) => (/^"(?:\\r)?\\n"$|^"\\r"$/.test((args[1] ?? "").trim()) && !/(?:^|[^\\])(?:\\\\)*\\[rn]|\n/.test(args[2] ?? "") ? C.HEADER : 0),
     },
     tail: {},
   },
@@ -171,6 +173,8 @@ const TABLES: Record<SanitizerLang, Table> = {
       quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL,
       // s.gsub(/[\r\n]/, "_") / s.delete("\r\n"): no line break left -- one header line, one log entry
       gsub: (_callee, args) => {
+        // s.gsub('<', '<') / ('<', '&lt;'): no tag can open, in HTML or inside a <script> (json_escape's chain)
+        if (/^['"]<['"]$/.test((args[0] ?? "").trim()) && /^['"](?:\\u003c|&lt;|&#0*60;|&#x0*3c;)['"]$/i.test((args[1] ?? "").trim())) return XSS;
         const body = /^\/(.*)\/[a-z]*$/s.exec((args[0] ?? "").trim())?.[1];
         if (body === undefined) return 0;
         if (removesLineBreaks(body) && !/\\[rn]/.test(args[1] ?? "")) return C.HEADER;

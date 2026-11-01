@@ -439,9 +439,20 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // name allows a _KEY/_TOKEN/_VALUE suffix to catch real-world names like
   // SECRET_KEY (Django/Flask/Rails) and AUTH_TOKEN without using a greedy
   // \w* that would also match unrelated names like "secretary_name".
-  { re: /(?:password|passwd|pwd)\s*=\s*["']([^"']{8,})["']/i,                  label: "Hardcoded password",          severity: "critical", genericValue: true },
-  { re: /(?:api_key|apikey|api_secret)\s*=\s*["']([^"']{8,})["']/i,            label: "Hardcoded API key",           severity: "critical", genericValue: true },
-  { re: /(?:secret|token)(?:_?key|_?token|_?value)?\s*=\s*["']([^"']{12,})["']/i, label: "Hardcoded secret",          severity: "high",     genericValue: true },
+  // `=`, Go's `:=`, and a field / key set to a literal (`Password: "..."` in a struct, an object, a YAML-ish map)
+  // ...with an optional type between the name and the value: Rust `const DB_PASSWORD: &str = "..."`, TS / Kotlin
+  // `password: string = "..."`, Go `var password string = "..."`; a Rust byte string (b"...") counts as a literal
+  { re: /(?:password|passwd|pwd)["']?(?:\s*:\s*&?(?:'static\s+)?[\w:.<>\[\]*]+|\s+[\w.\[\]*]+)?\s*(?::=|=|:)\s*b?["']([^"']{8,})["']/i, label: "Hardcoded password", severity: "critical", genericValue: true },
+  { re: /(?:api_key|apikey|api_secret)["']?(?:\s*:\s*&?(?:'static\s+)?[\w:.<>\[\]*]+|\s+[\w.\[\]*]+)?\s*(?::=|=|:)\s*b?["']([^"']{8,})["']/i, label: "Hardcoded API key", severity: "critical", genericValue: true },
+  { re: /(?:secret|token)(?:_?key|_?token|_?value)?["']?(?:\s*:\s*&?(?:'static\s+)?[\w:.<>\[\]*]+|\s+[\w.\[\]*]+)?\s*(?::=|=|:)\s*b?["']([^"']{12,})["']/i, label: "Hardcoded secret", severity: "high", genericValue: true },
+  // any URL with a password in its userinfo (redis://:pw@h, https://admin:pw@h, amqp://u:pw@h); a template is none
+  // (the scheme is bounded: an unbounded [a-z0-9+.-]* rescans a minified `x+x+x+...` line from every position)
+  { re: /\b[a-z][a-z0-9+.-]{0,20}:\/\/(?![^@\s"']{0,200}(?:%[sdvq]|\{|\$))[^@\s/:"']{0,100}:([^@\s/"'{}$%]{4,200})@[\w.-]+/i, label: "Credentials in URL", severity: "critical", genericValue: true },
+  // a literal handed straight to an authenticating call: smtp.PlainAuth(identity, user, "pw", host), a JWT signed with
+  // []byte("literal"), a key built from a byte literal
+  { re: /\bsmtp\.PlainAuth\s*\([^,]*,[^,]*,\s*["']([^"']{4,})["']/,             label: "SMTP password",               severity: "critical", genericValue: true },
+  { re: /\.SignedString\s*\(\s*\[\]byte\s*\(\s*["']([^"']{8,})["']/,              label: "JWT signing key",             severity: "critical", genericValue: true },
+  { re: /\b\w*(?:key|secret)\w*\s*(?::=|=)\s*\[\]byte\s*\(\s*["']([^"']{16,})["']/i, label: "Hardcoded key",            severity: "critical", genericValue: true },
   { re: /(?:access_token|ACCESS_TOKEN)\s*=\s*["']([A-Za-z0-9_\-]{20,})["']/i, label: "Hardcoded access token",      severity: "high",     genericValue: true },
 ];
 
@@ -1077,8 +1088,8 @@ const INSECURE_RANDOM_RE = [
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*(?::=|=).*\brand\.(?:Int\(\)|Intn|Int31\b|Int63\b|Int31n|Int63n|Float32|Float64|Perm|Shuffle)\s*\(?/i,
   // PHP
   /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\b(?:rand|mt_rand)\s*\(/i,
-  // Ruby
-  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\bKernel\.rand\b|\brand\s*\(\s*\d/i,
+  // Ruby (grouped: a bare `rand(5)` for a delay or a sample is no secret -- findInsecureRandomnessRuby follows the value)
+  /(?:token|secret|key|password|salt|nonce|csrf|iv)\w*\s*=.*\b(?:Kernel\.rand\b|rand\s*\(\s*\d)/i,
 ];
 
 const REDOS_RE = [
@@ -1672,7 +1683,10 @@ function findHighEntropySecrets(lines: string[], file_path: string): ScanIndicat
       // Skip if already caught by known patterns
       if (SECRET_PATTERNS.some(p => p.re.test(line))) continue;
       const e = shannonEntropy(s);
-      if (e > 4.2) {
+      // hex has 16 symbols, so even a random hex key stays under 4 bits/char: judge it against its own alphabet --
+      // 32+ hex digits close to that maximum, unless the line is about a hash / digest / checksum, not a credential
+      const hexKey = /^[0-9a-f]{32,}$/i.test(s) && e > 3.5 && !/hash|digest|checksum|sha\d|md5|integrity|commit|fingerprint|etag|uuid/i.test(line);
+      if (e > 4.2 || hexKey) {
         found.push({ id:"high-entropy-secret", label:"High-Entropy Secret", severity:"critical", line:i+1,
           detail:`${e.toFixed(1)} bits/char entropy in credential context — likely a hardcoded key or token` });
         break; // one per line is enough
@@ -3055,9 +3069,72 @@ const RB_WEAK_HASH_RE = /\b(?:OpenSSL::)?Digest::(?:MD5|MD4|SHA1)\b|\bOpenSSL::D
 const RB_FAST_PASSWORD_HASH_RE = /\b(?:OpenSSL::)?Digest::(?:SHA\d+|SHA2|RMD160)\.(?:hexdigest|digest|base64digest)\s*\(\s*[^)]*\b\w*(?:pass(?:word|wd)?|pwd)\w*/i;
 const RB_WEAK_CIPHER_RE = /\bOpenSSL::Cipher(?:::Cipher)?\.new\s*\(\s*["'](?:[\w-]*-ECB|DES(?:-[\w-]+)?|DES-EDE3?(?:-[\w-]+)?|RC2(?:-[\w-]+)?|RC4(?:-[\w-]+)?|BF(?:-[\w-]+)?|Blowfish)["']|\bOpenSSL::Cipher::(?:DES|RC2|RC4|BF)\.new\b/i;
 
-function findWeakCryptoRuby(lines: string[]): ScanIndicator[] {
+// Ruby: a token / nonce / key made from Kernel#rand / Random (Array#sample and #shuffle use it too), the clock, the
+// process id or an object id -- predictable or a few seconds of guessing away. SecureRandom (or `random: SecureRandom`)
+// is the fix and stays silent.
+const RB_WEAK_RANDOM_RE = /(?<![\w:])rand\b(?!om)|\bRandom\.(?:rand|new)\b|\.(?:sample|shuffle)\b(?!\s*\(\s*random:\s*SecureRandom)|\bTime\.now\b|\bobject_id\b|\bProcess\.pid\b/;
+const RB_SECURITY_NAME_RE = /token|secret|password|passwd|salt|nonce|csrf|otp|session|api_?key|\bkey\b|_key\b|reset|invite|verification/i;
+function findInsecureRandomnessRuby(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
   for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^\s*@?([a-z_]\w*)\s*=\s*(.+)$/.exec(line);
+    if (!m || isNonExecutableLine(line) || /SecureRandom/.test(line) || !RB_WEAK_RANDOM_RE.test(m[2])) continue;
+    let stored = RB_SECURITY_NAME_RE.test(m[1]);
+    if (!stored) {
+      // the value goes into the session / a cookie / a security-named variable within the next lines
+      const use = new RegExp(`\\bsession\\s*\\[[^\\]]+\\]\\s*=\\s*${m[1]}\\b|cookies?\\s*\\[[^\\]]+\\]\\s*=\\s*${m[1]}\\b|\\b\\w*(?:token|secret|nonce|csrf|otp|key)\\w*\\s*=\\s*${m[1]}\\b`, "i");
+      stored = lines.slice(i + 1, i + 26).some(l => use.test(l));
+    }
+    if (!stored) continue;
+    found.push({ id: "insecure-randomness", label: "Insecure Randomness", severity: "high", line: i + 1,
+      detail: `'${m[1]}' is made from a predictable source (rand / Random / Array#sample / the clock / a process or object id) -- use SecureRandom.hex / urlsafe_base64 / uuid` });
+  }
+  return found;
+}
+
+// PHP: the same, from rand / mt_rand / lcg_value / array_rand / str_shuffle / shuffle (all the non-cryptographic
+// Mersenne Twister), uniqid / microtime / time() / getmypid (the clock and the pid). random_bytes / random_int are the fix.
+const PHP_SECURITY_NAME_RE = RB_SECURITY_NAME_RE;
+const PHP_WEAK_RANDOM_RE =/\b(?:rand|mt_rand|lcg_value|array_rand|str_shuffle|shuffle|uniqid|microtime|getmypid)\s*\(|\btime\s*\(\s*\)/;
+function findInsecureRandomnessPHP(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^\s*\$(\w+)\s*\.?=\s*(.+)$/.exec(line);
+    if (!m || isNonExecutableLine(line) || /\b(?:random_bytes|random_int|openssl_random_pseudo_bytes|sodium_)/.test(line) || !PHP_WEAK_RANDOM_RE.test(m[2])) continue;
+    if (INSECURE_RANDOM_RE.some(r => r.test(line))) continue;   // the generic rule already reports it
+    let stored = PHP_SECURITY_NAME_RE.test(m[1]);
+    if (!stored) {
+      const use = new RegExp(`setcookie\\s*\\([^)]*\\$${m[1]}\\b|\\$_SESSION\\s*\\[[^\\]]+\\]\\s*=\\s*\\$${m[1]}\\b|\\$\\w*(?:token|secret|nonce|csrf|otp|key)\\w*\\s*=\\s*[^;]*\\$${m[1]}\\b`, "i");
+      stored = lines.slice(i + 1, i + 26).some(l => use.test(l));
+    }
+    if (!stored) continue;
+    found.push({ id: "insecure-randomness", label: "Insecure Randomness", severity: "high", line: i + 1,
+      detail: `'$${m[1]}' is made from a predictable source (rand / mt_rand / str_shuffle / uniqid / microtime / time) -- use random_bytes() / random_int() / bin2hex(random_bytes(32))` });
+  }
+  return found;
+}
+
+// an unauthenticated block-cipher mode, and an IV / nonce set to a literal (`cipher.iv = "\x00" * 16`, `"fixedivfixediv12"`)
+const RB_UNAUTHENTICATED_MODE_RE = /\bOpenSSL::Cipher(?:::Cipher)?\.new\s*\(\s*["'][\w-]*-(?:CBC|CTR|CFB\d*|OFB)["']/i;
+const RB_FIXED_IV_RE = /\.iv\s*=\s*(?:["'][^"'#]*["'](?:\s*\*\s*\d+)?|\[[\d,\s]*\]\.pack)\s*$/;
+
+function findWeakCryptoRuby(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  // encrypt-then-MAC, or an authenticated box, somewhere in the file
+  const authenticated = lines.some(l => /\bOpenSSL::HMAC\b|\bRbNaCl::(?:SimpleBox|SecretBox|AEAD)|ActiveSupport::MessageEncryptor/.test(l));
+  for (let i = 0; i < lines.length; i++) {
+    if (!isNonExecutableLine(lines[i]) && RB_FIXED_IV_RE.test(lines[i])) {
+      found.push({ id: "weak-crypto", label: "Fixed IV", severity: "high", line: i + 1,
+        detail: "The cipher's IV / nonce is a literal -- every message is encrypted the same way (and a repeated GCM nonce leaks the authentication key); use cipher.random_iv" });
+      continue;
+    }
+    if (!isNonExecutableLine(lines[i]) && !authenticated && RB_UNAUTHENTICATED_MODE_RE.test(lines[i])) {
+      found.push({ id: "weak-crypto", label: "Unauthenticated Encryption", severity: "medium", line: i + 1,
+        detail: "CBC/CTR/CFB/OFB encryption with no MAC anywhere in this file -- the ciphertext can be altered undetected (CBC padding errors become a decryption oracle); use aes-256-gcm, or encrypt-then-OpenSSL::HMAC" });
+      continue;
+    }
     const line = lines[i];
     if (isNonExecutableLine(line) || WEAK_CRYPTO_RE.some(r => r.test(line))) continue;
     if (RB_WEAK_CIPHER_RE.test(line)) {
@@ -7251,8 +7328,13 @@ function findAstTaintGoFindings(
   };
   return scanAstTaintGo(content, filePath, rootNode, idorAuthCheckNearby, suppressed, { crossFileFacts }).map(f => ({
     id: f.id, label: astTaintGoLabel(f.id), severity: astTaintGoSeverity(f.id),
-    line: f.line, detail: f.detail, confidence: 95,
+    line: f.line,
+    detail: f.entryPointSeeded
+      ? `${f.detail} [input assumed untrusted: string parameter of a function with no caller in this file]`
+      : f.detail,
+    confidence: f.entryPointSeeded ? 70 : 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
+    sourceAssumed: f.entryPointSeeded || undefined,
   }));
 }
 
@@ -7623,9 +7705,9 @@ export function analyzeFile(
     ...findInsecureRandomnessGoFunc(codeLines),
     ...findInsecureRandomnessCSharpFunc(codeLines),
     ...(lang === "python" ? [...findInsecureRandomnessPython(codeLines), ...findWeakHashPython(codeLines), ...findCookieFlagsPython(codeLines)] : []),
-    ...(lang === "php" ? findWeakCryptoPHP(codeLines) : []),
+    ...(lang === "php" ? [...findWeakCryptoPHP(codeLines), ...findInsecureRandomnessPHP(codeLines)] : []),
     ...(lang === "java" ? [...findInsecureRandomnessJava(codeLines), ...findCookieFlagsJava(codeLines)] : []),
-    ...(lang === "ruby" ? findWeakCryptoRuby(codeLines) : []),
+    ...(lang === "ruby" ? [...findWeakCryptoRuby(codeLines), ...findInsecureRandomnessRuby(codeLines)] : []),
     ...findReDoS(codeLines),
     ...findOpenRedirect(codeLines),
     ...findNamedTaintOpenRedirectJS(codeLines),

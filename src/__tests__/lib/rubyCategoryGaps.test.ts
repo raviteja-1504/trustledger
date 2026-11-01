@@ -114,6 +114,56 @@ describe("log injection into the process's streams and log files", () => {
   });
 });
 
+describe("weak randomness", () => {
+  it("tokens, nonces and keys from rand, sample/shuffle, the clock or an object id", () => {
+    expect(ids(handler(`  token = chars.sample(32).join`))).toContain("insecure-randomness");
+    expect(ids(handler(`  token = charset.shuffle.first(32).join`))).toContain("insecure-randomness");
+    expect(ids(handler(`  token = Time.now.to_i.to_s(36)`))).toContain("insecure-randomness");
+    expect(ids(handler(`  key = (rand * 1_000_000_000).to_i.to_s(16)`))).toContain("insecure-randomness");
+    expect(ids(handler(`  value = rand(100_000)\n  session[:otp] = value`))).toContain("insecure-randomness");
+  });
+  it("SecureRandom, or randomness that guards nothing, is fine", () => {
+    expect(ids(handler(`  token = SecureRandom.hex(32)`))).not.toContain("insecure-randomness");
+    expect(ids(handler(`  token = chars.sample(32, random: SecureRandom).join`))).not.toContain("insecure-randomness");
+    expect(ids(handler(`  delay = rand(5)\n  sleep(delay)`))).not.toContain("insecure-randomness");
+    expect(ids(handler(`  started = Time.now\n  BenchmarkResponse.ok(started.to_s)`))).not.toContain("insecure-randomness");
+  });
+});
+
+describe("XSS", () => {
+  it("request data carried through a local class's constructor into HTML", () => {
+    const cls = `class Profile\n  def initialize(name)\n    @name = name\n  end\n  def to_s\n    @name\n  end\nend\n`;
+    expect(ids(cls + handler(`  p = Profile.new(req.param('name'))\n  html = "<h2>#{p.to_s}</h2>"\n  BenchmarkResponse.html(raw(html))`))).toContain("xss");
+    expect(ids(cls + handler(`  p = Profile.new('guest')\n  html = "<h2>#{p.to_s}</h2>"\n  BenchmarkResponse.html(raw(html))`))).not.toContain("xss");
+  });
+  it("javascript_tag with request input; a value escaped for script is not", () => {
+    expect(ids(handler(`  html = javascript_tag("var g = '#{req.param('name')}';")`))).toContain("xss");
+    expect(ids(handler(`  html = javascript_tag("var g = '#{j(req.param('name'))}';")`))).not.toContain("xss");
+  });
+  it("a JSON value with < > & escaped for a script block is safe", () => {
+    expect(ids(handler(`  safe = req.param('v').to_json.gsub('<', '\\u003c').gsub('>', '\\u003e').gsub('&', '\\u0026')\n  BenchmarkResponse.html(raw("<script>var d = #{safe};</script>"))`))).not.toContain("xss");
+    expect(ids(handler(`  v = req.param('v')\n  BenchmarkResponse.html(raw("<script>var d = '#{v}';</script>"))`))).toContain("xss");
+  });
+  it("link_to with a URL checked against an allow-listed host is not a javascript: link", () => {
+    const link = (cond: string) => handler(`  url = req.param('url')\n  parsed = URI.parse(url) rescue nil\n  safe_url = (${cond}) ? url : '#'\n  link_to('Visit', safe_url)`);
+    expect(ids(link(`parsed && ALLOWED_HOSTS.include?(parsed.host)`).replace("def handler", "ALLOWED_HOSTS = %w[app.example.com].freeze\ndef handler"))).not.toContain("xss");
+    expect(ids(link(`url.length < 200`))).toContain("xss");
+  });
+});
+
+describe("cipher use", () => {
+  const enc = (lines: string, extra = "") => ids(handler(`  cipher = OpenSSL::Cipher.new('${lines}')\n  cipher.encrypt\n  cipher.key = cipher.random_key\n${extra}\n  BenchmarkResponse.ok(cipher.update('x') + cipher.final)`));
+  it("CBC with no MAC in the file, and a literal IV (also a zero GCM nonce)", () => {
+    expect(enc("AES-256-CBC", "  cipher.iv = cipher.random_iv")).toContain("weak-crypto");
+    expect(enc("AES-256-GCM", `  cipher.iv = "\\x00" * 12`)).toContain("weak-crypto");
+    expect(enc("AES-256-GCM", `  cipher.iv = 'fixedivfixediv12'`)).toContain("weak-crypto");
+  });
+  it("GCM with a random nonce, or CBC followed by an HMAC, is fine", () => {
+    expect(enc("AES-256-GCM", "  cipher.iv = cipher.random_iv")).not.toContain("weak-crypto");
+    expect(enc("AES-256-CBC", "  cipher.iv = cipher.random_iv\n  mac = OpenSSL::HMAC.hexdigest('SHA256', mac_key, 'x')")).not.toContain("weak-crypto");
+  });
+});
+
 describe("an alphabet does not make reflection safe", () => {
   it("Object.const_get on an identifier-only value is still unsafe reflection", () => {
     expect(ids(handler(`  safe = req.param('klass').gsub(/[^A-Za-z0-9:]/, '')\n  klass = Object.const_get(safe)`))).toContain("unsafe-reflection");

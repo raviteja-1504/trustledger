@@ -91,6 +91,8 @@ export interface AstTaintGoFinding {
   trace?: TraceStep[];
   /** Set when the sink is inside another package's function (a cross-package summary hit): where it really is. */
   calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
+  /** Found only by treating a function's string parameters as input (nothing in the file calls it): lower confidence. */
+  entryPointSeeded?: boolean;
 }
 
 /** Cross-package inputs (see computeGoFuncSinkFacts). */
@@ -551,6 +553,23 @@ function execCommandArgvGo(call: SyntaxNode): { command: SyntaxNode[]; argv: Syn
   return { command: [list[0]], argv: list.slice(1, endOfOptions > 0 ? endOfOptions : undefined) };
 }
 
+/** A format literal whose every verb prints its value quoted or as a number (%q, %d, %x ...): no raw %s / %v. */
+function onlyQuotingVerbsGo(fmtArg: SyntaxNode | undefined): boolean {
+  if (fmtArg?.type !== "interpreted_string_literal") return false;
+  const verbs = fmtArg.text.match(/%[-+# 0-9.*]*[a-zA-Z]/g) ?? [];
+  return verbs.length > 0 && verbs.every(v => !/[sv]$/.test(v));
+}
+
+/** os.Stderr, log.Writer(), or a file opened (os.OpenFile / os.Create) on a path that names a log. */
+function isLogWriterGo(w: SyntaxNode, at: SyntaxNode): boolean {
+  if (/^(?:os\.Stderr|log\.Writer\(\))$/.test(w.text.replace(/\s+/g, ""))) return true;
+  if (w.type !== "identifier") return false;
+  const def = lastAssignmentGo(w.text, at);
+  const fn = def?.type === "call_expression" ? calleeTextGo(def.childForFieldName("function") ?? def) : null;
+  const path = def && fn && /^os\.(?:OpenFile|Create)$/.test(fn) ? goStringLiteralValue(argListOfGo(def)[0] ?? def) : null;
+  return !!path && /(?:^|\/)logs?\/|\.log$/i.test(path);
+}
+
 function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -610,6 +629,16 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     return { id: "xss", sinkExpr: text, args: args.slice(-1) };
   }
   if (/^template\.(?:HTML|JS|JSStr|URL|CSS|HTMLAttr)$/.test(text) && args[0]) return { id: "xss", sinkExpr: text, args: [args[0]] };
+  // fmt.Fprintf(os.Stderr / log.Writer() / an appended .log file, ...): the process's log, written raw
+  if (/^fmt\.Fprint(?:f|ln)?$/.test(text) && args[0] && isLogWriterGo(args[0], call)) {
+    // fmt.Fprintf(w, "by %q", u): %q quotes (escapes CR/LF), like log.Printf below
+    if (text === "fmt.Fprintf" && onlyQuotingVerbsGo(args[1])) return null;
+    return { id: "log-injection", sinkExpr: text, args: args.slice(1) };
+  }
+  // slog.Info("msg " + x, "k", v): the default handler prints the message raw; key/value attributes are quoted
+  if (receiverText === "slog" && /^(?:Info|Warn|Error|Debug|Log)$/.test(tail) && args[0]) {
+    return { id: "log-injection", sinkExpr: text, args: [tail === "Log" ? args[2] ?? args[0] : args[0]] };
+  }
   // log.Printf("login failed for %s", user): a CR/LF in it forges a separate entry (zap/slog/zerolog fields are structured)
   if (GO_LOG_TAILS_RE.test(tail) && GO_LOGGER_RE.test(receiverText)) {
     // log.Printf("user=%q", u): %q quotes (escapes CR/LF); only %s / %v verbs print a value raw
@@ -1136,7 +1165,11 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       if (clears !== null && clears !== 0) return args[0] ? applyClears(taintMask(args[0], env), clears) : 0;
       // a local function that replaces "<" with an HTML entity is structurally an escaper
       if (goCtx.htmlEscapers.has(text)) return args[0] ? applyClears(taintMask(args[0], env), classOf("xss")) : 0;
-      if (isFormatCall(text)) return args.reduce((m, a) => m | taintMask(a, env), 0);
+      if (isFormatCall(text)) {
+        const m = args.reduce((acc, a) => acc | taintMask(a, env), 0);
+        // fmt.Sprintf("user=%q", u): every value quoted (CR/LF escaped) or numeric -- no raw line break in the result
+        return text === "fmt.Sprintf" && onlyQuotingVerbsGo(args[0]) ? applyClears(m, SinkClass.HEADER) : m;
+      }
       // Curated stdlib passthroughs; a decoder re-taints what an earlier encoder cleared.
       if (GO_PASSTHROUGH.has(text) || GO_BASE64_RE.test(text)) {
         const m = orArgs(args, env);
@@ -1165,7 +1198,9 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
         const shapes = callee?.paramShapes ?? [];
         let m = 0;
         for (const [i, surviving] of propIdx) {
-          if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+          // index -1: what the function returns whatever it is passed (it reads the request itself)
+          if (i === -1) m |= surviving;
+          else if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
         }
         if (m) return m;
       }
@@ -1323,6 +1358,12 @@ function computeReturnTaintPropagatingGo(
     surviving &= ALL;
     if (surviving) propagatingIdx.set(shape.index, surviving);
   }
+  // nothing seeded: a helper that reads the request itself (`func getUserInput(r *http.Request) string { return
+  // r.URL.Query().Get("u") }`) returns input whatever its caller passes -- recorded under index -1
+  let intrinsic = 0;
+  createWalkerGo({ localFns, propagating, root, descendFunctions: false, onReturn: (expr, env, mask) => { intrinsic |= mask(expr, env); } })
+    .walk(fn.body, new Map());
+  if (intrinsic & ALL) propagatingIdx.set(-1, intrinsic & ALL);
   return propagatingIdx;
 }
 
@@ -2930,6 +2971,29 @@ export function scanAstTaintGo(
     // identical to one already walked, while still allowing a re-walk once
     // that function's seed set has genuinely grown.
     drainSeeded();
+
+    // Entry points: a function nothing in this file calls -- a helper or library API (`getUser(db, username string)`)
+    // whose callers live elsewhere -- with its string-like parameters taken as untrusted input. Handlers (they read the
+    // request themselves), main/init and tests are not. What only this finds is marked entryPointSeeded (lower
+    // confidence) -- the caller may well pass a constant.
+    const calledHere = new Set(findAllNodesGo(root, "call_expression").map(c => calleeTextGo(c.childForFieldName("function") ?? c)?.split(".").pop() ?? ""));
+    const beforeEntry = findings.length;
+    for (const decl of [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]) {
+      const name = decl.childForFieldName("name")?.text ?? "";
+      const body = decl.childForFieldName("body");
+      const params = decl.childForFieldName("parameters");
+      if (!body || !params || calledHere.has(name) || /^(?:main|init|Test\w*|Benchmark\w*|Fuzz\w*|Example\w*)$/.test(name)) continue;
+      if (/http\.Request\b|\*gin\.Context|echo\.Context|\*fiber\.Ctx/.test(params.text)) continue;
+      const env: Env = new Map();
+      for (const shape of paramShapesOfGo(decl)) {
+        const pd = findAllNodesGo(params, "parameter_declaration").find(p => p.childrenForFieldName("name").some(n => n?.text === shape.name));
+        if (/^(?:string|\[\]byte|\[\]string|interface\{\}|any)$/.test(pd?.childForFieldName("type")?.text ?? "")) env.set(shape.name, ALL);
+      }
+      if (env.size === 0) continue;
+      walker.walk(body, env);
+    }
+    drainSeeded();
+    for (let i = beforeEntry; i < findings.length; i++) findings[i] = { ...findings[i], entryPointSeeded: true };
 
     // A hand-rolled JWT payload decode in a file that never verifies a signature
     if (!/golang-jwt|dgrijalva\/jwt-go|go-jose|jwt\.Parse|jwt\.Verify|lestrrat/.test(content)) {

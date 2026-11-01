@@ -62,7 +62,11 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     cipher use (64-bit ciphers, ECB, fixed IVs, unauthenticated modes, XOR), host-gate / suffix / resolved-address
 //     guards, numeric argv proofs; Rust uploads, LDAP escapers, extracted-host guards; PHP cipher use and
 //     unserialize allowed_classes / HMAC; raw Set-Cookie built on an earlier line; alphabets no longer clear EVAL.
-export const SCAN_CACHE_VERSION = 20;
+// 21: Go entry points (string parameters of functions nothing in the file calls) and intrinsic return summaries (a
+//     helper that reads the request), slog / log-file / stderr log sinks, %q and escaped-newline proofs; Ruby and PHP
+//     weak randomness and Ruby cipher use, constructor taint, javascript_tag; Rust key-XOR / RC4 ciphers; secrets in
+//     typed constants, `:=` / struct fields, URL userinfo, SMTP / JWT literals and hex keys.
+export const SCAN_CACHE_VERSION = 21;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

@@ -60,6 +60,22 @@ describe("LDAP", () => {
   });
 });
 
+describe("hand-rolled ciphers", () => {
+  const h = (body: string) => ids(handler(`    let data = req.param("data");\n${body}\n    super::shared::BenchmarkResponse::ok("done")`));
+  it("data XORed with a key in a loop or closure, and an RC4 key schedule", () => {
+    expect(h(`    let key = [0x42u8; 32];\n    let out: Vec<u8> = data.bytes().enumerate().map(|(i, b)| b ^ key[i % 32]).collect();`)).toContain("weak-crypto");
+    expect(h(`    let key = b"0123456789abcdef";\n    let mut r = data.as_bytes().to_vec();\n    for (i, byte) in r.iter_mut().enumerate() {\n        *byte ^= key[i % key.len()];\n    }`)).toContain("weak-crypto");
+    expect(h(`    let key = b"rc4-key";\n    let mut s: Vec<u8> = (0..=255).collect();\n    let mut j: u8 = 0;\n    for i in 0..256 {\n        j = j.wrapping_add(s[i]).wrapping_add(key[i % key.len()]);\n        s.swap(i, j as usize);\n    }`)).toContain("weak-crypto");
+  });
+  it("a checksum XOR, or a single XOR outside any loop, is not encryption", () => {
+    expect(h(`    let mut sum = 0u8;\n    for b in data.bytes() {\n        sum ^= b;\n    }`)).not.toContain("weak-crypto");
+    expect(h(`    let mixed = seed ^ key_hash;`)).not.toContain("weak-crypto");
+  });
+  it("Vec::with_capacity(s.len() + 16) is not attacker-sized", () => {
+    expect(h(`    let mut v: Vec<u8> = Vec::with_capacity(data.len() + 16);\n    v.push(1);`)).not.toContain("integer-overflow");
+  });
+});
+
 describe("open redirect", () => {
   const HELPERS = `fn extract_host(url: &str) -> String { url.split('/').nth(2).unwrap_or("").to_string() }\nfn is_allowed_host(host: &str) -> bool { matches!(host, "example.com" | "app.example.com") }`;
   it("a host extracted from the URL and matched against literals vets the URL", () => {
