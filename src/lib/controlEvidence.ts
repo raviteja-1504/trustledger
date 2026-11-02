@@ -366,7 +366,7 @@ export interface FactRows {
   now: string;
   activeRepos: readonly string[];
   scans: ReadonlyArray<{ id: string; repo: string; pr_number: number | null; pr_author: string | null; created_at: string }>;
-  riskyFiles: ReadonlyArray<{ scan_id: string; file_path: string; ai_percentage: number | null }>;
+  riskyFiles: ReadonlyArray<{ scan_id: string; file_path: string; ai_percentage: number | null; risk_score?: string | null }>;
   attestations: ReadonlyArray<{ scan_id: string; file_path: string; reviewer_github: string | null }>;
   violations: ReadonlyArray<{ scan_id: string; file_path: string; status: string; sla_deadline: string | null }>;
   secrets: { open: number; open_critical: number; resolved_in_period: number };
@@ -379,17 +379,42 @@ export interface FactRows {
 /** A file at least this AI-written counts as "mostly AI-written" (same threshold as the Trust Score). */
 export const AI_HEAVY_SHARE = 0.5;
 
-export function deriveFacts(rows: FactRows): ComplianceFacts {
-  const active = new Set(rows.activeRepos);
-  const scanById = new Map(rows.scans.map(s => [s.id, s]));
-
-  // Each pull request's latest scan: earlier pushes are superseded by later ones.
+/** Each pull request's latest scan in the period: earlier pushes are superseded by later ones. */
+function latestScanByPr(scans: FactRows["scans"]): Map<string, FactRows["scans"][number]> {
   const latestByPr = new Map<string, FactRows["scans"][number]>();
-  for (const sc of rows.scans) {
+  for (const sc of scans) {
     const k = `${sc.repo}::${sc.pr_number ?? 0}`;
     const cur = latestByPr.get(k);
     if (!cur || sc.created_at > cur.created_at) latestByPr.set(k, sc);
   }
+  return latestByPr;
+}
+
+export interface UnreviewedFile { repo: string; pr_number: number; scan_id: string; file_path: string; risk_score: string; ai_percentage: number }
+
+/**
+ * The HIGH/CRITICAL files the "High-risk changes reviewed" check counts as not reviewed -- the same files, by the same
+ * rule (each pull request's latest scan; no sign-off on that scan and file) -- so a report's gap list and its CC8.1
+ * count always agree. CRITICAL first, then by repository, pull request and path.
+ */
+export function unreviewedRiskyFiles(rows: Pick<FactRows, "scans" | "riskyFiles" | "attestations">): UnreviewedFile[] {
+  const latest = new Map([...latestScanByPr(rows.scans).values()].map(s => [s.id, s]));
+  const attested = new Set(rows.attestations.map(a => `${a.scan_id}::${a.file_path}`));
+  const rank = (r: string) => (r === "CRITICAL" ? 0 : 1);
+  return rows.riskyFiles
+    .filter(f => latest.has(f.scan_id) && !attested.has(`${f.scan_id}::${f.file_path}`))
+    .map(f => {
+      const sc = latest.get(f.scan_id)!;
+      return { repo: sc.repo, pr_number: sc.pr_number ?? 0, scan_id: f.scan_id, file_path: f.file_path, risk_score: f.risk_score ?? "HIGH", ai_percentage: f.ai_percentage ?? 0 };
+    })
+    .sort((a, b) => rank(a.risk_score) - rank(b.risk_score) || a.repo.localeCompare(b.repo) || a.pr_number - b.pr_number || a.file_path.localeCompare(b.file_path));
+}
+
+export function deriveFacts(rows: FactRows): ComplianceFacts {
+  const active = new Set(rows.activeRepos);
+  const scanById = new Map(rows.scans.map(s => [s.id, s]));
+
+  const latestByPr = latestScanByPr(rows.scans);
   const latestIds = new Set([...latestByPr.values()].map(x => x.id));
 
   const attested = new Set(rows.attestations.map(a => `${a.scan_id}::${a.file_path}`));

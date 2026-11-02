@@ -55,6 +55,20 @@ export interface ChangeRegister {
   branch_protection?: BranchProtection[];
 }
 
+/** Repositories not read in full, grouped by reason (19 repositories with one reason read as one line, not 19). */
+export function unreadByReason(coverage: readonly RepoCoverage[]): Array<{ reason: string; repos: string[] }> {
+  const groups = new Map<string, string[]>();
+  for (const c of coverage) {
+    if (c.read && !c.truncated) continue;
+    const reason = c.reason ?? "not read in full";
+    groups.set(reason, [...(groups.get(reason) ?? []), c.repo]);
+  }
+  return [...groups].map(([reason, repos]) => ({ reason, repos }));
+}
+
+/** Whether any repository was read at all: if none was, the register has no population, not an empty one. */
+export const anyRepoRead = (coverage: readonly RepoCoverage[]) => coverage.some(c => c.read);
+
 /** The control each framework's register evidences. Only these frameworks carry a change register. */
 export const REGISTER_CONTROL: Readonly<Record<string, string>> = { soc2: "CC8.1", iso27001: "A.8.32", pcidss: "6.2.3" };
 

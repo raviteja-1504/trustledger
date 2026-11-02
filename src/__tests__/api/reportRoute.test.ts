@@ -22,7 +22,7 @@ jest.mock("@/lib/serverErrors", () => ({ reportServerError: () => {} }));
 jest.mock("@/lib/logger", () => ({ logger: { error: () => {} } }));
 jest.mock("@/lib/evidenceEngine", () => ({
   collectEvidence: async () => ({ framework: evidenceFramework, framework_name: "SOC 2", standard: "AICPA", scope: "x", status_counts: {}, controls: [],
-    facts: { risky: { total: 0, reviewed: 0 }, reviews: { independent: 0, self: 0 } } }),
+    facts: { risky: { total: 0, reviewed: 0 }, reviews: { independent: 0, self: 0 } }, unreviewed }),
 }));
 let registerFails = false;
 const registerLoads: string[] = [];
@@ -37,15 +37,19 @@ jest.mock("@/lib/changeRegisterLoader", () => ({
   },
 }));
 let evidenceFramework = "soc2";
+let unreviewed: unknown[] = [];
+let tableRows: Record<string, unknown[]> = {};
 const inserted: unknown[] = [];
 jest.mock("@/lib/supabase", () => ({
   createServiceClient: () => ({
     from: (table: string) => {
+      let span: [number, number] = [0, 999_999];
       const q = {
         select: () => q, eq: () => q, gte: () => q, lte: () => q, order: () => q, limit: () => q,
+        range: (f: number, t: number) => { span = [f, t]; return q; },
         single: async () => ({ data: { name: "Acme", slug: "acme", github_org: null } }),
         insert: async (r: unknown) => { inserted.push({ table, r }); return { error: null }; },
-        then: (res: (v: unknown) => unknown) => Promise.resolve({ data: [], count: 0, error: null }).then(res),
+        then: (res: (v: unknown) => unknown) => Promise.resolve({ data: (tableRows[table] ?? []).slice(span[0], span[1] + 1), count: 0, error: null }).then(res),
       };
       return q;
     },
@@ -63,7 +67,7 @@ const post = () => POST(new NextRequest(new URL("/api/report", "https://app.exam
 }));
 
 const KEY = process.env.EXPORT_SIGNING_KEY, CRON = process.env.CRON_SECRET;
-beforeEach(() => { rendered = null; renderFails = false; inserted.length = 0; registerFails = false; registerLoads.length = 0; evidenceFramework = "soc2"; process.env.EXPORT_SIGNING_KEY = "test-signing-material"; delete process.env.CRON_SECRET; });
+beforeEach(() => { rendered = null; renderFails = false; inserted.length = 0; registerFails = false; registerLoads.length = 0; evidenceFramework = "soc2"; unreviewed = []; tableRows = {}; process.env.EXPORT_SIGNING_KEY = "test-signing-material"; delete process.env.CRON_SECRET; });
 afterAll(() => { process.env.EXPORT_SIGNING_KEY = KEY; process.env.CRON_SECRET = CRON; });
 
 describe("POST /api/report", () => {
@@ -167,6 +171,23 @@ describe("POST /api/report with an Ed25519 key: a bundle anyone can verify", () 
     expect((await (await postBundle()).json()).evidence.record.framework_view.kind).toBe("iso_soa");
     evidenceFramework = "soc2";
     expect((await (await postBundle()).json()).evidence.record).not.toHaveProperty("framework_view");
+  });
+
+  it("lists every gap, sign-off and secret -- past one database page -- with tidy secret labels", async () => {
+    unreviewed = Array.from({ length: 640 }, (_, i) => ({ repo: "acme/api", pr_number: 1, scan_id: "s", file_path: `f${i}.py`, risk_score: "CRITICAL", ai_percentage: 0.1 }));
+    tableRows = {
+      attestations: Array.from({ length: 1200 }, (_, i) => ({ id: `a${i}`, scan_id: "s", file_path: `f${i}`, risk_score: "HIGH", reviewer_email: "r@acme.test", payload_hash: "h", created_at: "2026-09-10T00:00:00Z" })),
+      secret_findings: [
+        { id: "x1", file_path: "a.tf", secret_type: "generic", severity: "HIGH", label: "Hardcoded Hardcoded secret", status: "open", created_at: "2026-09-10T00:00:00Z" },
+        { id: "x2", file_path: "b.ts", secret_type: "pem", severity: "CRITICAL", label: "Hardcoded Private key", status: "open", created_at: "2026-09-10T00:00:00Z" },
+      ],
+    };
+    const { record } = (await (await postBundle()).json()).evidence;
+    expect(record.gaps).toHaveLength(640);
+    expect(record.gaps[0]).toEqual({ repo: "acme/api", pr_number: 1, file_path: "f0.py", risk_score: "CRITICAL", ai_percentage: 0.1 });
+    expect(record.attestations).toHaveLength(1200);
+    expect(record.metrics.total_attestations).toBe(1200);
+    expect(record.secrets.map((s: { label: string }) => s.label)).toEqual(["Hardcoded secret", "Hardcoded Private key"]);
   });
 
   it("signs with Ed25519 even when no HMAC key is set", async () => {

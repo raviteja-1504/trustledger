@@ -14,8 +14,8 @@ import { loadShadowAi } from "@/lib/shadowAiStore";
 import { allRows } from "@/lib/allRows";
 import { builtinPermissions, canAttestAny, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 import {
-  FRAMEWORKS, STATUS_LABEL, countStatuses, deriveFacts, evaluateChecks, evaluateFramework, normalizeFrameworkId,
-  type CheckResult, type ComplianceFacts, type ControlWriteUp, type EvidenceStatus, type FactRows,
+  FRAMEWORKS, STATUS_LABEL, countStatuses, deriveFacts, evaluateChecks, evaluateFramework, normalizeFrameworkId, unreviewedRiskyFiles,
+  type CheckResult, type ComplianceFacts, type ControlWriteUp, type EvidenceStatus, type FactRows, type UnreviewedFile,
 } from "@/lib/controlEvidence";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,6 +57,8 @@ export interface EvidencePackage {
   controls:        ControlEvidence[];
   audit_integrity: { valid: boolean; total: number };
   facts:           ComplianceFacts;
+  /** Every high-risk file the review check counts as not reviewed (lib/controlEvidence.ts unreviewedRiskyFiles). */
+  unreviewed:      UnreviewedFile[];
   summary: {
     total_scans:         number;
     total_attestations:  number;
@@ -109,7 +111,7 @@ export async function loadFactRows(db: Db, orgId: string, periodStart: string, p
   const days = Math.max(1, Math.ceil((now.getTime() - new Date(periodStart).getTime()) / 86400_000));
 
   const [riskyFiles, attestations, violations, openSecrets, openCritical, resolvedSecrets, filesAnalyzed, audit, members, ai] = await Promise.all([
-    inChunks(ids, (c, f, t) => db.from("scan_files").select("scan_id, file_path, ai_percentage").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["riskyFiles"][number][] | null }>),
+    inChunks(ids, (c, f, t) => db.from("scan_files").select("scan_id, file_path, ai_percentage, risk_score").eq("org_id", orgId).in("scan_id", c).in("risk_score", ["CRITICAL", "HIGH"]).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["riskyFiles"][number][] | null }>),
     inChunks(ids, (c, f, t) => db.from("attestations").select("scan_id, file_path, reviewer_github").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["attestations"][number][] | null }>),
     inChunks(ids, (c, f, t) => db.from("violations").select("scan_id, file_path, status, sla_deadline").eq("org_id", orgId).in("scan_id", c).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).order("id", { ascending: true }).range(f, t) as unknown as PromiseLike<{ data: FactRows["violations"][number][] | null }>),
     db.from("secret_findings").select("id", { count: "exact", head: true }).eq("org_id", orgId).eq("status", "open"),
@@ -133,7 +135,7 @@ export async function loadFactRows(db: Db, orgId: string, periodStart: string, p
 }
 
 /** Package for one framework from already-derived facts (pure; tested directly). */
-export function buildPackage(rawFramework: string, facts: ComplianceFacts, rows: Pick<FactRows, "scans" | "attestations" | "audit">, generatedAt: string): EvidencePackage {
+export function buildPackage(rawFramework: string, facts: ComplianceFacts, rows: Pick<FactRows, "scans" | "attestations" | "audit"> & Partial<Pick<FactRows, "riskyFiles">>, generatedAt: string): EvidencePackage {
   const fw = FRAMEWORKS.find(f => f.id === normalizeFrameworkId(rawFramework))!;
   const controls = evaluateFramework(fw, evaluateChecks(facts));
   const tested = controls.filter(c => c.status !== "not_tested");
@@ -150,6 +152,7 @@ export function buildPackage(rawFramework: string, facts: ComplianceFacts, rows:
     })),
     audit_integrity: { valid: rows.audit.valid, total: rows.audit.total },
     facts,
+    unreviewed: unreviewedRiskyFiles({ scans: rows.scans, attestations: rows.attestations, riskyFiles: rows.riskyFiles ?? [] }),
     summary: {
       total_scans: rows.scans.length,
       total_attestations: rows.attestations.length,

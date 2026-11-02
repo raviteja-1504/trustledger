@@ -21,6 +21,8 @@ import { loadChangeRegister } from "@/lib/changeRegisterLoader";
 import { REGISTER_CONTROL, registerForReport, type ReportChangeRegister } from "@/lib/changeRegister";
 import { frameworkById } from "@/lib/controlEvidence";
 import { frameworkView } from "@/lib/frameworkViews";
+import { allRows } from "@/lib/allRows";
+import { tidySecretLabel } from "@/lib/findingCatalog";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -44,28 +46,23 @@ export async function POST(req: NextRequest) {
 
   const db = createServiceClient();
 
-  // Pull scan + attestation data for the period
-  const { data: scans } = await db
-    .from("scans")
-    .select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
-    .eq("org_id", org_id)
-    .gte("created_at", body.period_start)
-    .lte("created_at", body.period_end)
-    .order("created_at", { ascending: true });
-
-  const { data: attestations } = await db
-    .from("attestations")
-    .select("id, scan_id, file_path, risk_score, reviewer_email, payload_hash, created_at")
-    .eq("org_id", org_id)
-    .gte("created_at", body.period_start)
-    .lte("created_at", body.period_end);
-
-  const { data: secrets } = await db
-    .from("secret_findings")
-    .select("id, file_path, secret_type, severity, label, status, created_at")
-    .eq("org_id", org_id)
-    .gte("created_at", body.period_start)
-    .lte("created_at", body.period_end);
+  // Every scan, sign-off and secret finding in the period -- paged, so a list longer than one PostgREST page (1000
+  // rows) is not cut short: the report lists them all.
+  type ScanRow = { id: string; repo_full_name: string; overall_risk: string; total_ai_percentage: number; file_count: number; created_at: string };
+  type AttestRow = { id: string; scan_id: string; file_path: string; risk_score: string; reviewer_email: string; payload_hash: string; created_at: string };
+  type SecretRow = { id: string; file_path: string; secret_type: string; severity: string; label: string; status: string; created_at: string };
+  const [{ data: scans }, { data: attestations }, { data: secretRows }] = await Promise.all([
+    allRows<ScanRow>((from, to) => db.from("scans").select("id, repo_full_name, overall_risk, total_ai_percentage, file_count, created_at")
+      .eq("org_id", org_id).gte("created_at", body.period_start).lte("created_at", body.period_end)
+      .order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to) as unknown as PromiseLike<{ data: ScanRow[] | null }>),
+    allRows<AttestRow>((from, to) => db.from("attestations").select("id, scan_id, file_path, risk_score, reviewer_email, payload_hash, created_at")
+      .eq("org_id", org_id).gte("created_at", body.period_start).lte("created_at", body.period_end)
+      .order("created_at", { ascending: false }).order("id", { ascending: true }).range(from, to) as unknown as PromiseLike<{ data: AttestRow[] | null }>),
+    allRows<SecretRow>((from, to) => db.from("secret_findings").select("id, file_path, secret_type, severity, label, status, created_at")
+      .eq("org_id", org_id).gte("created_at", body.period_start).lte("created_at", body.period_end)
+      .order("created_at", { ascending: false }).order("id", { ascending: true }).range(from, to) as unknown as PromiseLike<{ data: SecretRow[] | null }>),
+  ]);
+  const secrets = secretRows.map(s => ({ ...s, label: tidySecretLabel(s.label) }));
 
   const { data: org } = await db
     .from("organizations")
@@ -77,20 +74,6 @@ export async function POST(req: NextRequest) {
   // Evidence pages use (lib/evidenceEngine.ts), not a fourth independently
   // -invented scoring formula. Drives the PDF's Compliance Mapping section.
   const evidence = await collectEvidence(org_id, body.framework, body.period_start, body.period_end);
-
-  // File-level risk data for the period -- scan_files carries the actual
-  // per-file risk classification that `scans` (scan-level rows) doesn't,
-  // needed for a real Risk Overview breakdown and Gap Analysis below.
-  // Bounded like every other list in this report; the report's headline
-  // *counts* still come from exact head:true COUNT queries, not row length.
-  const { data: riskFileRows } = await db
-    .from("scan_files")
-    .select("scan_id, file_path, risk_score, ai_percentage, created_at, scans(repo_full_name, pr_number)")
-    .eq("org_id", org_id)
-    .gte("created_at", body.period_start)
-    .lte("created_at", body.period_end)
-    .order("created_at", { ascending: false })
-    .limit(1000);
 
   const countByRisk = async (risk: string) => {
     const { count } = await db
@@ -106,18 +89,11 @@ export async function POST(req: NextRequest) {
     ["CRITICAL", "HIGH", "MEDIUM", "LOW"].map(countByRisk)
   );
 
-  const attestedFileSet = new Set((attestations ?? []).map(a => `${a.scan_id}::${a.file_path}`));
-  type RiskFileRow = { scan_id: string; file_path: string; risk_score: string; ai_percentage: number; created_at: string; scans: { repo_full_name: string; pr_number: number } | null };
-  const gapFiles = ((riskFileRows ?? []) as unknown as RiskFileRow[])
-    .filter(f => (f.risk_score === "CRITICAL" || f.risk_score === "HIGH") && !attestedFileSet.has(`${f.scan_id}::${f.file_path}`))
-    .slice(0, 15)
-    .map(f => ({
-      repo:       f.scans?.repo_full_name ?? "",
-      pr_number:  f.scans?.pr_number ?? 0,
-      file_path:  f.file_path,
-      risk_score: f.risk_score,
-      ai_percentage: f.ai_percentage,
-    }));
+  // Every high-risk file still without a sign-off: exactly the files the "High-risk changes reviewed" check counts
+  // (each pull request's latest scan), so the gap list and the CC8.1 / A.8.28 numbers agree.
+  const gapFiles = evidence.unreviewed.map(f => ({
+    repo: f.repo, pr_number: f.pr_number, file_path: f.file_path, risk_score: f.risk_score, ai_percentage: f.ai_percentage,
+  }));
 
   // Report Reference -- one id used consistently in the PDF header, the
   // Report Reference section, the footer, and the report_generations row

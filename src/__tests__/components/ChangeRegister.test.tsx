@@ -27,6 +27,7 @@ const protection = [
   normalizeProtection({ repo: "acme/api", branch: "main", protected: true, classic: "none",
     rules: [{ type: "pull_request", parameters: { required_approving_review_count: 2 } }, { type: "non_fast_forward" }] }),
   normalizeProtection({ repo: "acme/web", branch: null, protected: null, rules: null, classic: "unreadable", error: "not installed" }),
+  normalizeProtection({ repo: "acme/app", branch: "main", protected: true, rules: [], classic: "unreadable" }),
 ];
 const register = { ...buildRegister({
   period_start: "2026-10-01T00:00:00Z", period_end: "2026-10-31T23:59:59Z",
@@ -65,18 +66,35 @@ describe("ChangeRegister", () => {
     expect(within(summary).getByText("Approved before merge").previousSibling?.textContent).toBe("20");
     expect(within(summary).getByText("With exceptions").previousSibling?.textContent).toBe("10");
     expect(screen.getByRole("alert")).toHaveTextContent("Population incomplete");
-    expect(screen.getByRole("alert")).toHaveTextContent("acme/web: The TrustLedger GitHub App is not installed");
+    expect(screen.getByRole("alert")).toHaveTextContent("The TrustLedger GitHub App is not installed (1 repository): acme/web");
   });
 
-  it("shows how merging is protected, Unknown where GitHub wouldn't say", async () => {
+  it("shows how merging is protected for the repositories read, Unknown where GitHub wouldn't say", async () => {
     await built();
     const table = screen.getByRole("table", { name: "Branch protection" });
     const api = within(table).getByText("acme/api").closest("tr")!;
     expect(within(api).getAllByText("Yes")).toHaveLength(2);       // pull request required, force push blocked
     expect(within(api).getByText("2")).toBeInTheDocument();
-    const web = within(table).getByText("acme/web").closest("tr")!;
-    expect(within(web).getAllByText("Unknown").length).toBeGreaterThan(0);
-    expect(screen.getByText(/acme\/web: GitHub couldn't be read for this repository/)).toBeInTheDocument();
+    const app = within(table).getByText("acme/app").closest("tr")!;
+    expect(within(app).getAllByText("Unknown").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Administration: read.*\(acme\/app\)/)).toBeInTheDocument();
+    // a repository GitHub couldn't be read for is listed once under the population, not as a row of Unknowns
+    expect(within(table).queryByText("acme/web")).toBeNull();
+  });
+
+  it("no repository readable: says the register isn't available, once per reason", async () => {
+    const saved = { ...register };
+    Object.assign(register, { coverage: [{ repo: "acme/api", read: false, pulls: 0, reason: "The TrustLedger GitHub App is not installed" },
+      { repo: "acme/web", read: false, pulls: 0, reason: "The TrustLedger GitHub App is not installed" }], complete: false });
+    try {
+      await built();
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("Register not available: no repository could be read");
+      expect(alert).toHaveTextContent("The TrustLedger GitHub App is not installed (2 repositories): acme/api, acme/web");
+      expect(alert).toHaveTextContent("missing evidence, not evidence that no changes were made");
+    } finally {
+      Object.assign(register, saved);
+    }
   });
 
   it("lists the exceptions first, and every pull request on the other tab", async () => {

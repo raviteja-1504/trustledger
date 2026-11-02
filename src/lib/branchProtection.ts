@@ -38,6 +38,8 @@ export interface RawProtection {
 export interface BranchProtection {
   repo: string;
   branch: string | null;
+  /** Whether GitHub was read for this repository at all (false: every setting is unknown, see `limits`). */
+  read: boolean;
   /** Approvals needed to merge into the branch: 0 when a pull request isn't required, null when it couldn't be read. */
   approvals_required: number | null;
   pull_request_required: boolean | null;
@@ -57,7 +59,7 @@ const anyTrue = (...v: Array<boolean | undefined | null>) => v.some(x => x === t
 
 export function normalizeProtection(raw: RawProtection): BranchProtection {
   const empty: BranchProtection = {
-    repo: raw.repo, branch: raw.branch, approvals_required: null, pull_request_required: null, dismiss_stale_approvals: null,
+    repo: raw.repo, branch: raw.branch, read: false, approvals_required: null, pull_request_required: null, dismiss_stale_approvals: null,
     code_owner_review: null, last_push_approval: null, required_status_checks: [], force_push_blocked: null, admins_included: null,
     sources: [], limits: [],
   };
@@ -83,7 +85,7 @@ export function normalizeProtection(raw: RawProtection): BranchProtection {
   const known = (v: boolean) => (v ? true : classicUnknown ? null : false);
 
   return {
-    repo: raw.repo, branch: raw.branch,
+    repo: raw.repo, branch: raw.branch, read: true,
     pull_request_required: known(prRequired),
     approvals_required: prRequired ? approvals : classicUnknown ? null : 0,
     dismiss_stale_approvals: known(anyTrue(...pr.map(p => p.dismiss_stale_reviews_on_push as boolean), reviews?.dismiss_stale_reviews)),

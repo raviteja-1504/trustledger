@@ -98,7 +98,7 @@ describe("PDF elements", () => {
       const text = textOf({ change_register: register });
       expect(text).toContain("5. Change-Management Register (CC8.1)");
       expect(text).toContain("POPULATION INCOMPLETE");
-      expect(text).toContain("acme/web: GitHub App has no access");
+      expect(text).toContain("GitHub App has no access (1 repository): acme/web");
       expect(text).toContain("Exceptions (1)");
       expect(text).toContain("acme/api#2");
       expect(text).toContain("Merged without an approval from someone other than the author");
@@ -106,6 +106,20 @@ describe("PDF elements", () => {
       expect(text).toContain("seed ABC-123");
       expect(text).toContain("acme/api#1");   // no exceptions: listed only in the sample
       expect(text).toContain("6. Attestation Evidence");
+    });
+
+    it("no repository readable: says the register isn't available (no zero tiles, no 'every pull request has the evidence')", () => {
+      const coverage = ["acme/api", "acme/web", "acme/app"].map(repo => ({ repo, read: false, pulls: 0, reason: "The TrustLedger GitHub App is not installed" }));
+      const none = registerForReport(buildRegister({ period_start: "2026-09-01T00:00:00Z", period_end: "2026-10-01T00:00:00Z", pulls: [],
+        reviews: new Map(), scans: [], riskyFiles: [], signoffs: [], coverage }), "ABC-123", 25);
+      const text = textOf({ change_register: none });
+      expect(text).toContain("REGISTER NOT AVAILABLE FOR THIS REPORT");
+      expect(text).toContain("missing evidence, not evidence that no changes were made");
+      // one line for the shared reason, not one per repository
+      expect(text.match(/not installed/g)).toHaveLength(1);
+      expect(text).toContain("The TrustLedger GitHub App is not installed (3 repositories): acme/api, acme/web, acme/app");
+      expect(text).not.toContain("Every merged pull request");
+      expect(text).not.toContain("Pull requests merged");
     });
 
     it("prints the branch-protection snapshot with what couldn't be read", () => {
@@ -116,7 +130,38 @@ describe("PDF elements", () => {
       expect(text).toContain("How merging is protected (default branch, as of report generation)");
       expect(text).toContain("acme/api (main)");
       expect(text).toContain("Unknown");
-      expect(text).toMatch(/acme\/api: Classic branch protection is on, but the TrustLedger GitHub App can't read its settings/);
+      expect(text).toMatch(/Classic branch protection is on, but the TrustLedger GitHub App can't read its settings.*\(all repositories above\)/);
+    });
+
+    it("leaves repositories that weren't read out of the protection table (they are listed once above)", () => {
+      const { normalizeProtection } = jest.requireActual("@/lib/branchProtection");
+      const text = textOf({ change_register: { ...register, branch_protection: [
+        normalizeProtection({ repo: "acme/api", branch: "main", protected: true, rules: [{ type: "non_fast_forward" }], classic: "none" }),
+        normalizeProtection({ repo: "acme/web", branch: null, protected: null, rules: null, classic: "unreadable", error: "GitHub App has no access" }),
+      ] } });
+      expect(text).toContain("acme/api (main)");
+      expect(text).not.toMatch(/GitHub couldn't be read for this repository/);
+    });
+
+    it("prints every sign-off, gap and secret, with their counts", () => {
+      const attestations = Array.from({ length: 45 }, (_, i) => ({ file_path: `src/a${i}.ts`, risk_score: "HIGH", reviewer_email: "r@acme.test", created_at: "2026-09-10T00:00:00Z" }));
+      const gaps = Array.from({ length: 60 }, (_, i) => ({ repo: "acme/api", pr_number: 1, file_path: `src/g${i}.py`, risk_score: "CRITICAL", ai_percentage: 0.1 }));
+      const secrets = Array.from({ length: 33 }, (_, i) => ({ file_path: `cfg/s${i}.tf`, severity: "HIGH", label: "Hardcoded secret", status: "open", created_at: "2026-09-10T00:00:00Z" }));
+      const out = toRendererElements(asReact19(React.createElement(buildReportDocument, { data: { ...reportData, attestations, gaps, secrets } as never,
+        signature: { algorithm: "HMAC-SHA256", value: "f".repeat(64), record_sha256: "e".repeat(64) } })), loadRendererReact());
+      let text = "";
+      const walk = (n: unknown): void => {
+        if (Array.isArray(n)) return n.forEach(walk);
+        if (typeof n === "string" || typeof n === "number") { text += `${n} `; return; }
+        if (n && typeof n === "object") walk((n as { props: { children?: unknown } }).props.children);
+      };
+      walk(out);
+      expect(text).toContain("src/a44.ts");
+      expect(text).toContain("src/g59.py");
+      expect(text).toContain("cfg/s32.tf");
+      expect(text).toMatch(/Attestation Evidence \( 45 +records\)/);
+      expect(text).toMatch(/Gap Analysis & Remediation\s*\(60 high-risk files without a sign-off\)/);
+      expect(text).toMatch(/Secret Findings \(\s*33\s*\)/);
     });
 
     it("the framework view prints under Control Evidence", () => {

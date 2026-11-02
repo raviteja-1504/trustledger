@@ -121,6 +121,11 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "ai-comment-pattern":       { title: "AI Comment Pattern",             description: "Comment verbosity and style strongly match AI generation signatures." },
 };
 
+/** A secret finding's label as stored before the scanner stopped doubling the prefix ("Hardcoded Hardcoded secret"). */
+export function tidySecretLabel(label: string): string {
+  return label.replace(/^Hardcoded\s+(?=hardcoded\b)/i, "");
+}
+
 /** Title, description and CWE for a finding id, whichever source knows it. */
 export function findingMeta(id: string, fallbackLabel?: string): CatalogEntry {
   const entry = FINDING_CATALOG[id];

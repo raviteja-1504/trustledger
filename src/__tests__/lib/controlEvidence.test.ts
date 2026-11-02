@@ -3,7 +3,7 @@
  * a control is as strong as its weakest check, and the framework catalogue cites the right controls.
  */
 import {
-  CHECK_INFO, FRAMEWORKS, STATUS_LABEL, deriveFacts, evaluateChecks, evaluateFramework, frameworkById, normalizeFrameworkId, countStatuses,
+  CHECK_INFO, FRAMEWORKS, STATUS_LABEL, deriveFacts, evaluateChecks, evaluateFramework, frameworkById, normalizeFrameworkId, countStatuses, unreviewedRiskyFiles,
   type ComplianceFacts, type FactRows,
 } from "@/lib/controlEvidence";
 import { buildOverview, buildPackage } from "@/lib/evidenceEngine";
@@ -56,6 +56,24 @@ describe("deriveFacts", () => {
     expect(f.repos).toEqual({ active: 2, scanned: 1 });
     expect(f.risky).toEqual({ total: 3, reviewed: 2, ai_heavy_total: 2, ai_heavy_reviewed: 2 });
     expect(f.reviews).toEqual({ total: 3, independent: 1, self: 1, unknown: 1 });
+  });
+
+  it("the gap list is exactly the files the review check counts as not reviewed, CRITICAL first", () => {
+    const r = rows({ riskyFiles: [
+      { scan_id: "s1", file_path: "old.ts", ai_percentage: 0.9, risk_score: "CRITICAL" },   // superseded scan
+      { scan_id: "s1", file_path: "gone.ts", ai_percentage: 0.9, risk_score: "CRITICAL" },  // superseded and unsigned: still not a gap
+      { scan_id: "s2", file_path: "a.ts", ai_percentage: 0.8, risk_score: "HIGH" },          // signed off
+      { scan_id: "s2", file_path: "b.ts", ai_percentage: 0.1, risk_score: "HIGH" },
+      { scan_id: "s3", file_path: "d.ts", ai_percentage: 0.2, risk_score: "CRITICAL" },
+      { scan_id: "s3", file_path: "c.ts", ai_percentage: 0.5, risk_score: "HIGH" },          // signed off
+    ] });
+    const gaps = unreviewedRiskyFiles(r);
+    const f = deriveFacts(r);
+    expect(gaps).toHaveLength(f.risky.total - f.risky.reviewed);
+    expect(gaps).toEqual([
+      { repo: "acme/api", pr_number: 8, scan_id: "s3", file_path: "d.ts", risk_score: "CRITICAL", ai_percentage: 0.2 },
+      { repo: "acme/api", pr_number: 7, scan_id: "s2", file_path: "b.ts", risk_score: "HIGH", ai_percentage: 0.1 },
+    ]);
   });
 
   it("open findings are the latest row per file; overdue means past its deadline now", () => {

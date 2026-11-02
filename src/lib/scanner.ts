@@ -1720,7 +1720,8 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       // A PEM header with no key after it is code that builds or strips one (WebGoat's CryptoUtil writes
       // "-----BEGIN PRIVATE KEY-----\n" + base64(key)), not an embedded key.
       if (label === "Private key" && !hasPemKeyBody(lines, i, m.index + m[0].length)) continue;
-      found.push({ id:"hardcoded-secret", label:`Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
+      // "Hardcoded secret" / "Hardcoded password" patterns already say so: don't prefix them twice
+      found.push({ id:"hardcoded-secret", label: /^hardcoded\b/i.test(label) ? label : `Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
     }
   }
   if (isPropertiesFile && !isTestFile) {

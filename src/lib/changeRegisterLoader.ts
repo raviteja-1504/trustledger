@@ -52,16 +52,26 @@ export async function loadChangeRegister(db: Db, orgId: string, periodStart: str
     return tokens.get(id)!;
   };
 
+  // The installation each repository's own scans came through: the webhook records it on every scan, while a
+  // github_installations row is written only by the App's setup callback -- an org can have scans and no such row.
+  const scanInstall = new Map<string, number>();
+  await mapWithConcurrency(repos, REVIEW_CONCURRENCY, async repo => {
+    const { data } = await (db.from("scans").select("installation_id").eq("org_id", orgId).eq("repo_full_name", repo)
+      .not("installation_id", "is", null).order("created_at", { ascending: false }).limit(1) as unknown as Promise<{ data: Array<{ installation_id: number | null }> | null }>);
+    if (data?.[0]?.installation_id) scanInstall.set(repo, data[0].installation_id);
+  });
+
   const pulls: MergedPull[] = [];
   const coverage: RepoCoverage[] = [];
   const tokenByRepo = new Map<string, string>();
   for (const repo of repos) {
     const [owner, name] = repo.split("/");
-    // same choice as lib/connectedRepo.ts: the installation that owns this repository, else the first one
-    const install = (installs ?? []).find(i => (i.github_org ?? "").toLowerCase() === owner.toLowerCase()) ?? (installs ?? [])[0];
-    if (!install) { coverage.push({ repo, read: false, pulls: 0, reason: "The TrustLedger GitHub App is not installed" }); continue; }
+    // the installation on the repository's owner, else the one its scans came through, else the org's first one
+    const installationId = (installs ?? []).find(i => (i.github_org ?? "").toLowerCase() === owner.toLowerCase())?.installation_id
+      ?? scanInstall.get(repo) ?? (installs ?? [])[0]?.installation_id;
+    if (!installationId) { coverage.push({ repo, read: false, pulls: 0, reason: "The TrustLedger GitHub App is not installed" }); continue; }
     try {
-      const token = await tokenFor(install.installation_id);
+      const token = await tokenFor(installationId);
       const { pulls: merged, truncated } = await listMergedPullRequests(token, owner, name, periodStart, periodEnd, MAX_PULLS_PER_REPO);
       tokenByRepo.set(repo, token);
       pulls.push(...merged.map(p => ({ ...p, repo })));

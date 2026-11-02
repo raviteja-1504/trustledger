@@ -22,6 +22,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { validateBody, SecretUpdateSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
 import { cached, cacheKeys, TTL, invalidateSecretsCache } from "@/lib/cache";
+import { tidySecretLabel } from "@/lib/findingCatalog";
 
 interface ScanJoin { repo_full_name: string; pr_number: number; pr_author: string | null }
 
@@ -70,7 +71,7 @@ export async function GET(req: NextRequest) {
         id:            f.id,
         severity:      f.severity,
         type:          f.secret_type,
-        label:         f.label,
+        label:         tidySecretLabel(f.label),
         file_path:     f.file_path,
         repo:          scan?.repo_full_name ?? "",
         pr_number:     scan?.pr_number ?? 0,

@@ -13,6 +13,7 @@ import {
 import { WORDMARK_PNG_DATA_URI, WORDMARK_ASPECT } from "./brandAssets";
 import { FRAMEWORKS, normalizeFrameworkId } from "./controlEvidence";
 import { EXCEPTION_INFO, REGISTER_CONTROL, pullKey, type RegisterRow, type ReportChangeRegister } from "./changeRegister";
+import { anyRepoRead, unreadByReason } from "./changeRegisterShared";
 import { FRAMEWORK_VIEW_TITLE, type FrameworkView } from "./frameworkViews";
 import { protectionValue } from "./branchProtection";
 
@@ -316,7 +317,6 @@ function FrameworkViewPdf({ view }: { view: FrameworkView }) {
 
 // ── Change-management register page ───────────────────────────────────────────
 
-const MAX_EXCEPTION_ROWS = 40;
 
 function RegisterTable({ rows }: { rows: RegisterRow[] }) {
   return (
@@ -358,15 +358,47 @@ function ChangeRegisterPage({ register, control, reportId }: { register: ReportC
   const withExceptions = register.rows.filter(r => r.exceptions.length > 0);
   const byKey = new Map(register.rows.map(r => [pullKey(r.repo, r.number), r]));
   const sampled = register.sample.picked.map(p => byKey.get(pullKey(p.repo, p.number))).filter((r): r is RegisterRow => !!r);
-  const notRead = register.coverage.filter(c => !c.read || c.truncated);
-  return (
-    <Page size="A4" style={S.page} wrap>
+  const unread = unreadByReason(register.coverage);
+  const unreadList = unread.map(g => (
+    <Text key={g.reason} style={S.scopeText}>• {g.reason} ({g.repos.length} {g.repos.length === 1 ? "repository" : "repositories"}): {g.repos.join(", ")}</Text>
+  ));
+  const heading = (
+    <>
       <Text style={S.pageHeading}>5. Change-Management Register ({control})</Text>
       <Text style={S.pageSubheading}>
         Every pull request merged in the period: who approved it before the merge, whether TrustLedger scanned it, and
         whether its HIGH/CRITICAL files were signed off before it merged. The full register, one row per pull request
         with its SHA-256, is in the signed evidence record supplied with this report.
       </Text>
+    </>
+  );
+
+  // no repository could be read: there is no population to report on, which is not the same as "no changes"
+  if (!anyRepoRead(register.coverage)) {
+    return (
+      <Page size="A4" style={S.page} wrap>
+        {heading}
+        <View style={S.scopeBox}>
+          <Text style={S.scopeLabel}>REGISTER NOT AVAILABLE FOR THIS REPORT</Text>
+          <Text style={[S.scopeText, { marginBottom:4 }]}>
+            None of the {register.coverage.length} connected repositories could be read from GitHub, so this report holds no
+            change register, no exceptions and no auditor sample for the period. This is missing evidence, not evidence that
+            no changes were made.
+          </Text>
+          {unreadList}
+        </View>
+        {footer}
+      </Page>
+    );
+  }
+
+  // repositories GitHub couldn't be read for are already listed under the population; the table shows the rest
+  const protectionRead = (register.branch_protection ?? []).filter(p => p.read);
+  const protectionLimits = new Map<string, string[]>();
+  for (const p of protectionRead) for (const l of p.limits) protectionLimits.set(l, [...(protectionLimits.get(l) ?? []), p.repo]);
+  return (
+    <Page size="A4" style={S.page} wrap>
+      {heading}
 
       <View style={S.metricsRow}>
         <View style={S.metricCard}><Text style={S.metricValue}>{s.merged}</Text><Text style={S.metricLabel}>Pull requests merged</Text></View>
@@ -382,27 +414,26 @@ function ChangeRegisterPage({ register, control, reportId }: { register: ReportC
       ) : (
         <View style={S.scopeBox}>
           <Text style={S.scopeLabel}>POPULATION INCOMPLETE</Text>
-          {notRead.map(c => <Text key={c.repo} style={S.scopeText}>• {c.repo}: {c.reason ?? "not read in full"}</Text>)}
-          <Text style={S.scopeText}>Changes in these repositories may be missing from the register and the sample.</Text>
+          {unreadList}
+          <Text style={S.scopeText}>Changes in these repositories are missing from the register and the sample.</Text>
         </View>
       )}
 
       <View style={S.section}>
         <Text style={S.sectionTitle}>Exceptions ({withExceptions.length})</Text>
-        {withExceptions.length === 0 ? (
-          <View style={S.gapOkBox}><Text style={S.gapOkText}>✓ Every merged pull request has the evidence above</Text></View>
+        {s.merged === 0 ? (
+          <Text style={S.ctrlEvidenceRow}>No pull requests were merged in the period in the repositories that were read.</Text>
+        ) : withExceptions.length === 0 ? (
+          <View style={S.gapOkBox}><Text style={S.gapOkText}>✓ Every merged pull request read has the evidence above</Text></View>
         ) : (
           <>
-            <RegisterTable rows={withExceptions.slice(0, MAX_EXCEPTION_ROWS)} />
-            {withExceptions.length > MAX_EXCEPTION_ROWS && (
-              <Text style={S.ctrlEvidenceRow}>+ {withExceptions.length - MAX_EXCEPTION_ROWS} more in the evidence record.</Text>
-            )}
+            <RegisterTable rows={withExceptions} />
             <Text style={S.ctrlEvidenceRow}>&quot;Approved on an earlier commit&quot; is an observation (later commits were not re-approved); the others are exceptions.</Text>
           </>
         )}
       </View>
 
-      {(register.branch_protection ?? []).length > 0 && (
+      {protectionRead.length > 0 && (
         <View style={S.section}>
           <Text style={S.sectionTitle}>How merging is protected (default branch, as of report generation)</Text>
           <Text style={[S.ctrlEvidenceRow, { marginBottom:6 }]}>
@@ -413,7 +444,7 @@ function ChangeRegisterPage({ register, control, reportId }: { register: ReportC
               <Text style={[S.th, { flex:1.8 }]}>Repository</Text><Text style={S.th}>PR required</Text><Text style={[S.th, { flex:0.8 }]}>Approvals</Text>
               <Text style={S.th}>Stale approvals dismissed</Text><Text style={[S.th, { flex:1.4 }]}>Required checks</Text><Text style={S.th}>Force push blocked</Text>
             </View>
-            {register.branch_protection!.map((p, i) => (
+            {protectionRead.map((p, i) => (
               <View key={p.repo} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
                 <Text style={[S.td, { flex:1.8 }]}>{p.repo}{p.branch ? ` (${p.branch})` : ""}</Text>
                 <Text style={S.td}>{protectionValue(p.pull_request_required)}</Text>
@@ -424,9 +455,9 @@ function ChangeRegisterPage({ register, control, reportId }: { register: ReportC
               </View>
             ))}
           </View>
-          {register.branch_protection!.flatMap(p => p.limits.map(l => (
-            <Text key={`${p.repo}${l}`} style={[S.ctrlEvidenceRow, S.statusPartial]}>{p.repo}: {l}</Text>
-          )))}
+          {[...protectionLimits].map(([l, repos]) => (
+            <Text key={l} style={[S.ctrlEvidenceRow, S.statusPartial]}>{l} ({repos.length === protectionRead.length ? "all repositories above" : repos.join(", ")})</Text>
+          ))}
         </View>
       )}
 
@@ -453,10 +484,9 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
     certBody: ASSESSOR[fw?.id ?? ""] ?? "—",
     scopeNote: data.evidence_scope?.scope ?? fw?.scope ?? "This report shows evidence recorded by TrustLedger for the period below. It is not a substitute for a formal audit.",
   };
-  const topScans = data.scans
-    .filter(s => s.overall_risk === "CRITICAL" || s.overall_risk === "HIGH")
-    .slice(0, 15);
-  const recentAttests = data.attestations.slice(0, 20);
+  // every row, not the first few: the tables continue across pages
+  const topScans = data.scans.filter(s => s.overall_risk === "CRITICAL" || s.overall_risk === "HIGH");
+  const recentAttests = data.attestations;
   const rb = data.risk_breakdown;
   const rbTotal = Math.max(1, rb.critical + rb.high + rb.medium + rb.low);
   const riskRows: Array<{ label: string; count: number; color: string }> = [
@@ -569,7 +599,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
                 <Text style={S.th}>Date</Text>
               </View>
               {topScans.map((s, i) => (
-                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
+                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
                   <Text style={[S.td, { flex:2 }]}>{s.repo_full_name}</Text>
                   <Text style={[S.td, riskStyle(s.overall_risk)]}>{s.overall_risk}</Text>
                   <Text style={S.td}>{fmtPct(s.total_ai_percentage)}</Text>
@@ -638,7 +668,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
             <Text style={S.th}>Date</Text>
           </View>
           {recentAttests.map((a, i) => (
-            <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
+            <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
               <Text style={[S.td, { flex:2 }]}>{shortPath(a.file_path)}</Text>
               <Text style={[S.td, riskStyle(a.risk_score)]}>{a.risk_score}</Text>
               <Text style={[S.td, { flex:1.5 }]}>{a.reviewer_email}</Text>
@@ -648,7 +678,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
         </View>
 
         <View style={S.section}>
-          <Text style={S.sectionTitle}>{6 + n}. Gap Analysis &amp; Remediation</Text>
+          <Text style={S.sectionTitle}>{6 + n}. Gap Analysis &amp; Remediation{data.gaps.length ? ` (${data.gaps.length} high-risk files without a sign-off)` : ""}</Text>
           {data.gaps.length === 0 ? (
             <View style={S.gapOkBox}>
               <Text style={S.gapOkText}>✓ No open gaps identified for this audit period</Text>
@@ -664,7 +694,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
                 <Text style={S.th}>AI %</Text>
               </View>
               {data.gaps.map((g, i) => (
-                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
+                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
                   <Text style={[S.td, { flex:2 }]}>{shortPath(g.file_path)}</Text>
                   <Text style={[S.td, { flex:1.3 }]}>{g.repo}</Text>
                   <Text style={S.td}>{g.pr_number > 0 ? `#${g.pr_number}` : "—"}</Text>
@@ -683,7 +713,7 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
       <Page size="A4" style={S.page}>
         {data.secrets.length > 0 && (
           <View style={{ marginBottom:8 }}>
-            <Text style={S.sectionTitle}>{7 + n}. Secret Findings</Text>
+            <Text style={S.sectionTitle}>{7 + n}. Secret Findings ({data.secrets.length})</Text>
             <View style={S.table}>
               <View style={S.tableHead}>
                 <Text style={[S.th, { flex:2 }]}>File</Text>
@@ -691,8 +721,8 @@ export function buildReportDocument({ data, signature }: { data: ReportData; sig
                 <Text style={S.th}>Severity</Text>
                 <Text style={S.th}>Status</Text>
               </View>
-              {data.secrets.slice(0,20).map((s, i) => (
-                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]}>
+              {data.secrets.map((s, i) => (
+                <View key={i} style={[S.tableRow, i % 2 ? S.tableRowAlt : {}]} wrap={false}>
                   <Text style={[S.td, { flex:2 }]}>{shortPath(s.file_path)}</Text>
                   <Text style={S.td}>{s.label}</Text>
                   <Text style={[S.td, riskStyle(s.severity)]}>{s.severity}</Text>

@@ -45,12 +45,14 @@ function fakeDb() {
       const filters: Array<(r: Row) => boolean> = [];
       let range: [number, number] | null = null;
       const q = {
-        select: () => q, order: () => q, limit: () => q,
+        select: () => q, order: () => q,
         eq: (c: string, v: unknown) => { filters.push(r => r[c] === v); return q; },
+        not: (c: string, op: string, v: unknown) => { if (op === "is" && v === null) filters.push(r => r[c] != null); return q; },
         in: (c: string, vs: unknown[]) => { filters.push(r => vs.includes(r[c])); return q; },
         gte: (c: string, v: string) => { filters.push(r => String(r[c]) >= v); return q; },
         lte: (c: string, v: string) => { filters.push(r => String(r[c]) <= v); return q; },
         range: (f: number, t: number) => { range = [f, t]; return q; },
+        limit: (n: number) => { range = [0, n - 1]; return q; },
         then: (res: (v: unknown) => unknown) => {
           if (failTable === table) return Promise.resolve({ data: null, error: { message: "boom" } }).then(res);
           const rows = (tables[table] ?? []).filter(r => filters.every(f => f(r)));
@@ -110,6 +112,15 @@ describe("loadChangeRegister", () => {
     const reg = await load();
     expect(reg.coverage.find(c => c.repo === "acme/web")).toMatchObject({ read: false, reason: expect.stringContaining("404") });
     expect(reg.complete).toBe(false);
+  });
+
+  it("no installation row: a repository whose scans came through the App is read through that installation", async () => {
+    tables.github_installations = [];
+    tables.scans.push({ id: "s9", org_id: "org-1", repo_full_name: "acme/web", pr_number: 4, commit_sha: "x", created_at: "2026-09-01T00:00:00Z", overall_risk: "LOW", installation_id: 42 });
+    const reg = await load();
+    expect(ghCalls.filter(c => c.startsWith("pulls"))).toEqual(["pulls acme/web tok-42"]);
+    expect(reg.coverage.find(c => c.repo === "acme/web")).toMatchObject({ read: true });
+    expect(reg.coverage.find(c => c.repo === "acme/api")).toMatchObject({ read: false, reason: expect.stringContaining("not installed") });
   });
 
   it("no installation: every repository is not read, with the reason", async () => {

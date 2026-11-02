@@ -13,7 +13,7 @@ import Link from "next/link";
 import { authedFetch } from "@/lib/useRealData";
 import { protectionValue, type BranchProtection } from "@/lib/branchProtection";
 import {
-  DEFAULT_SAMPLE_SIZE, EXCEPTION_INFO, drawSample, registerToCsv, type ChangeRegister as Register, type ExceptionCode, type RegisterRow,
+  DEFAULT_SAMPLE_SIZE, EXCEPTION_INFO, anyRepoRead, drawSample, registerToCsv, unreadByReason, type ChangeRegister as Register, type ExceptionCode, type RegisterRow,
 } from "@/lib/changeRegisterShared";
 
 const ROWS = 50;
@@ -45,7 +45,10 @@ function ExceptionChips({ codes }: { codes: ExceptionCode[] }) {
 function ProtectionTable({ rows }: { rows: BranchProtection[] }) {
   const cell = (v: boolean | number | null, good: boolean) =>
     <span className={v === null ? "text-gray-400" : good ? "text-emerald-700 font-semibold" : "text-rose-700 font-semibold"}>{protectionValue(v)}</span>;
-  const limits = rows.flatMap(r => r.limits.map(l => `${r.repo}: ${l}`));
+  // one line per distinct limit, naming the repositories it applies to
+  const byLimit = new Map<string, string[]>();
+  for (const r of rows) for (const l of r.limits) byLimit.set(l, [...(byLimit.get(l) ?? []), r.repo]);
+  const limits = [...byLimit].map(([l, repos]) => `${l} (${repos.length === rows.length ? "all repositories above" : repos.join(", ")})`);
   return (
     <div className="rounded-xl border border-gray-200 overflow-hidden">
       <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100">
@@ -157,7 +160,9 @@ export default function ChangeRegister({ start, end, control, color }: { start: 
   const sample = useMemo(() => (current && seed ? drawSample(current.rows, size, seed) : []), [current, seed, size]);
   const listed = view === "exceptions" ? exceptionRows : current?.rows ?? [];
   const s = current?.summary;
-  const base = `trustledger-change-register-${start}-${end}`;
+  const nothingRead = !!current && !anyRepoRead(current.coverage);
+  const protectionRead = (current?.branch_protection ?? []).filter(p => p.read);
+  const base =`trustledger-change-register-${start}-${end}`;
 
   return (
     <div className="space-y-3">
@@ -204,13 +209,21 @@ export default function ChangeRegister({ start, end, control, color }: { start: 
             </p>
           ) : (
             <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-amber-800">Population incomplete</p>
-              <ul className="mt-1 space-y-0.5">
-                {current.coverage.filter(c => !c.read || c.truncated).map(c => (
-                  <li key={c.repo} className="text-[11px] text-amber-900"><span className="font-semibold">{c.repo}</span>: {c.reason ?? "not read in full"}</li>
+              <p className="text-[10px] font-black uppercase tracking-widest text-amber-800">
+                {nothingRead ? "Register not available: no repository could be read" : "Population incomplete"}
+              </p>
+              <ul className="mt-1 space-y-1">
+                {unreadByReason(current.coverage).map(g => (
+                  <li key={g.reason} className="text-[11px] text-amber-900">
+                    <span className="font-semibold">{g.reason}</span> ({g.repos.length} {g.repos.length === 1 ? "repository" : "repositories"}): {g.repos.join(", ")}
+                  </li>
                 ))}
               </ul>
-              <p className="text-[11px] text-amber-900 mt-1">Changes in these repositories may be missing from the register and the sample.</p>
+              <p className="text-[11px] text-amber-900 mt-1">
+                {nothingRead
+                  ? "This is missing evidence, not evidence that no changes were made."
+                  : "Changes in these repositories are missing from the register and the sample."}
+              </p>
             </div>
           )}
 
@@ -254,7 +267,7 @@ export default function ChangeRegister({ start, end, control, color }: { start: 
             )}
           </div>
 
-          {current.branch_protection && current.branch_protection.length > 0 && <ProtectionTable rows={current.branch_protection} />}
+          {protectionRead.length > 0 && <ProtectionTable rows={protectionRead} />}
 
           <div className="rounded-xl border border-gray-200 overflow-hidden">
             <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 space-y-2">
