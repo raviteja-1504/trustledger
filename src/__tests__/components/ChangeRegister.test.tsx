@@ -48,6 +48,8 @@ const blobText = (b: Blob) => new Promise<string>(res => { const r = new FileRea
 const prsIn =(label: string) => within(screen.getByRole("table", { name: label })).getAllByRole("link", { name: /^acme\/api#\d+$/ }).map(a => a.textContent);
 
 beforeEach(() => { fail = false; urls.length = 0; });
+// jsdom's FileReader and table renders are slow under full-suite load; the 5 s default timed out there
+jest.setTimeout(30_000);
 
 describe("ChangeRegister", () => {
   it("doesn't read GitHub until asked, then asks for the whole period through the end of its last day", async () => {

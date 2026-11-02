@@ -1,0 +1,11 @@
+package main
+import ("net/http"; "os")
+type Writer func(string) error
+func save(path string) error { return os.WriteFile(path, []byte("report"), 0644) }
+func dispatch(path string, writer Writer) error { return writer(path) }
+func handler(w http.ResponseWriter, r *http.Request) {
+  path := r.URL.Query().Get("path")
+  _ = dispatch(path, save)
+  w.Write([]byte("done"))
+}
+func main() { http.HandleFunc("/save", handler); http.ListenAndServe(":8080", nil) }

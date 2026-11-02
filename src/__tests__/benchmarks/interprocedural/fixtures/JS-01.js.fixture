@@ -1,0 +1,9 @@
+const express = require("express");
+const app = express();
+function capture(req, res, next) { res.locals.term = req.query.term; next(); }
+function render(model) { return `<h1>${model.page.title}</h1>`; }
+app.get("/search", capture, (req, res) => {
+  const model = { page: { title: res.locals.term } };
+  const html = render(model);
+  res.type("html").send(html);
+});

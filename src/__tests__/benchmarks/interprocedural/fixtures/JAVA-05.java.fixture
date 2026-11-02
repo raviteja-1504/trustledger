@@ -1,0 +1,20 @@
+import java.io.*;
+import javax.servlet.*;
+import javax.servlet.http.*;
+import javax.xml.parsers.*;
+import org.xml.sax.InputSource;
+public class XmlServlet extends HttpServlet {
+  protected void doPost(HttpServletRequest req, HttpServletResponse res) throws IOException {
+    try {
+      String xml = new String(req.getInputStream().readAllBytes());
+      parse(xml);
+      res.getWriter().write("parsed");
+    } catch (Exception e) { res.sendError(400); }
+  }
+  private void parse(String xml) throws Exception {
+    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+    // Deliberately does not disable external entity processing.
+    DocumentBuilder builder = factory.newDocumentBuilder();
+    builder.parse(new InputSource(new StringReader(xml)));
+  }
+}

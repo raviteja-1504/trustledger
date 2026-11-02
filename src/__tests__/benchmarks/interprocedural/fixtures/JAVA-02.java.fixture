@@ -1,0 +1,21 @@
+import java.io.*;
+import java.util.concurrent.*;
+import javax.servlet.*;
+import javax.servlet.http.*;
+public class AsyncDeserializeServlet extends HttpServlet {
+  private final ExecutorService executor = Executors.newSingleThreadExecutor();
+  protected void doPost(HttpServletRequest req, HttpServletResponse res) throws IOException {
+    byte[] payload = req.getInputStream().readAllBytes();
+    executor.submit(() -> {
+      try { process(payload); }
+      catch (Exception e) { throw new RuntimeException(e); }
+    });
+    res.getWriter().write("submitted");
+  }
+  private void process(byte[] bytes) throws Exception { deserialize(bytes); }
+  private Object deserialize(byte[] bytes) throws Exception {
+    try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+      return in.readObject();
+    }
+  }
+}

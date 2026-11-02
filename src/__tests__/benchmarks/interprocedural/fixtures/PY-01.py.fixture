@@ -1,0 +1,14 @@
+from flask import Flask, request
+import requests
+app = Flask(__name__)
+STATE = {}
+def store(key, value): STATE[key] = value
+def load(key): return STATE.get(key)
+class Fetcher:
+    def fetch(self, target): return self.send(target)
+    def send(self, target): return requests.get(target, timeout=4)
+@app.get("/fetch")
+def fetch():
+    store("target", request.args.get("url"))
+    target = load("target")
+    return Fetcher().fetch(target).text

@@ -41,7 +41,9 @@ import {
   mergeSinkFacts, dropOnPathDuplicates, crossFileTrace, displayFnName, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
-import { NUMERIC_CLEARS } from "./taint/sanitizers";
+import { sanitizerClears } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkLabel, sinkModelsFor } from "./taint/models/sinks";
 import { evalConstExpr } from "./taint/constEval";
 
 declare const __non_webpack_require__: NodeJS.Require | undefined;
@@ -399,8 +401,7 @@ const COPY_INTO: Record<string, number[]> = {
 };
 /** Unbounded copies: writing attacker data through these overflows the destination. */
 const UNBOUNDED_COPY = new Set(["strcpy", "strcat", "wcscpy", "wcscat", "sprintf", "swprintf", "vsprintf", "lstrcpy", "lstrcat"]);
-const RETURN_PASSTHROUGH = new Set(["strdup", "strndup", "wcsdup", "_strdup", "_wcsdup", "strchr", "strrchr", "strstr", "strtok", "basename", "dirname", "string", "wstring", "c_str", "data", "substr", "str", "to_string"]);
-const NUMERIC_CONVERSIONS = new Set(["atoi", "atol", "atoll", "atof", "strtol", "strtoul", "strtoll", "strtoull", "strtod", "strtof", "wcstol", "wcstoul", "_wtoi", "stoi", "stol", "stoul", "stoll", "stof", "stod"]);
+const RETURN_PASSTHROUGH = propagatorNames("cpp", "call-args");
 const ALLOCATORS = new Set(["malloc", "calloc", "realloc", "aligned_alloc", "valloc", "alloca", "strdup", "strndup", "wcsdup"]);
 /** Library calls that dereference a pointer argument (index -1: every argument): passing NULL to them crashes. */
 const DEREF_ARGS: Record<string, number> = {
@@ -502,7 +503,9 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
   const { name, recv, args } = callInfo(call);
   const api = baseApi(name);
   if (RETURN_SOURCES.has(api)) return ALL;
-  if (NUMERIC_CONVERSIONS.has(api)) return applySanitizer(mask(args[0] ?? null, env, ctx), NUMERIC_CLEARS);
+  // the shared sanitizer table (taint/sanitizers.ts, the model registry's sanitizer models): atoi/strtol/stoi...
+  const clears = sanitizerClears("cpp", api);
+  if (clears !== null) return applySanitizer(mask(args[0] ?? null, env, ctx), clears);
   if (RETURN_PASSTHROUGH.has(api)) return recv ? mask(recv, env, ctx) : mask(args[0] ?? null, env, ctx);
   if (recv && /^(?:append|insert|replace|assign|operator\+=)$/.test(api)) return mask(recv, env, ctx) | args.reduce((m, a) => m | mask(a, env, ctx), 0);
   // a local function: what its return carries from these arguments, plus what it reads itself
@@ -766,8 +769,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     // LDAP filter
     const li = LDAP_FILTER_ARG[api];
     if (li !== undefined && args[li]) fireOn(ctx, "ldap-injection", call, args[li], argM[li] ?? 0, name);
-    // libcurl URL
-    if (api === "curl_easy_setopt" && /CURLOPT_URL/.test(args[1]?.text ?? "") && args[2]) fireOn(ctx, "ssrf", call, args[2], argM[2] ?? 0, "curl_easy_setopt(CURLOPT_URL)");
+    // libcurl URL (models/sinks.ts)
+    for (const { model, positions } of sinkModelsFor("cpp", api)) {
+      const when = model.args.whenArg;
+      if (when && !new RegExp(when.pattern).test(args[when.index]?.text ?? "")) continue;
+      for (const p of positions) if (args[p]) fireOn(ctx, model.rule as AstTaintCppId, call, args[p], argM[p] ?? 0, sinkLabel(model, api));
+    }
     // loading a library the caller names
     if (/^(?:dlopen|LoadLibrary|LoadLibraryEx)$/.test(api) && args[0]) fireOn(ctx, "eval-exec", call, args[0], argM[0] ?? 0, name);
     // a generated temp name opened non-exclusively: another process can create (or symlink) it between the two calls

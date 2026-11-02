@@ -15,6 +15,8 @@
 import type { TraceStep } from "./taint/taintCore";
 import { SinkClass, classOf } from "./taint/taintCore";
 import { sanitizerClears, type SanitizerLang } from "./taint/sanitizers";
+import { SOURCE_MODELS, type SourceKind, type SourceModel } from "./taint/models/sources";
+import type { ModelLang } from "./taint/models/types";
 
 export interface DataFlowEvidence {
   source: {
@@ -24,6 +26,13 @@ export interface DataFlowEvidence {
     /** True when the flow starts at a value the engine only ASSUMES is untrusted (a service method's parameter),
      * not at request input it saw being read. */
     assumed: boolean;
+    /** The source-model kind (models/sources.ts) of where it starts: "http.query", "file.upload", "identity", ... */
+    kind?: SourceKind;
+    /** How far the starting value is trusted: freely client-chosen, authenticated / server-derived, or assumed
+     * untrusted by the engine without seeing it read. */
+    trust?: "untrusted" | "semi-trusted" | "assumed";
+    /** The source model that matched, when one did. */
+    model?: string;
   };
   sink: {
     file: string; line: number; expr: string;
@@ -111,6 +120,27 @@ export function classifyInput(expr: string | undefined): string | undefined {
   if (!expr) return undefined;
   for (const [re, kind] of INPUT_KINDS) if (re.test(expr)) return kind;
   return undefined;
+}
+
+// The model kind for each recognised input shape ("request parameter" -- $_REQUEST, getParameter -- can be either
+// query or body, so it gets none).
+const KIND_OF_INPUT: Record<string, SourceKind> = {
+  "URL query parameter": "http.query", "URL path parameter": "http.path", "request body": "http.body",
+  "HTTP header": "http.header", "cookie": "http.cookie",
+};
+const MODEL_LANG_BY_EXT: Array<[RegExp, ModelLang]> = [[/\.java$/, "java"], [/\.kts?$/, "kt"]];
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The source model whose API appears where a flow starts (an annotation on the parameter, a call or property on
+ * the request), for the languages that read their sources from the registry. */
+export function sourceModelAt(texts: ReadonlyArray<string | undefined>, file: string): SourceModel | undefined {
+  const lang = MODEL_LANG_BY_EXT.find(([re]) => re.test(file))?.[1];
+  if (!lang) return undefined;
+  const text = texts.filter(Boolean).join("\n");
+  return SOURCE_MODELS.find(m => m.langs.includes(lang) && new RegExp(
+    m.match.kind === "param-annotation" ? `@${escapeRe(m.match.name)}\\b`
+      : m.match.kind === "request-call" ? `\\.\\s*${escapeRe(m.match.name)}\\s*\\(`
+        : `\\.\\s*${escapeRe(m.match.name)}\\b(?!\\s*\\()`).test(text));
 }
 
 
@@ -242,6 +272,8 @@ export interface FlowInput {
   trace?: TraceStep[];
   /** The engine seeded the source as an assumed-untrusted parameter (it saw no request read or binding). */
   sourceAssumed?: boolean;
+  /** The declaration that bound a bare-name source to request data (`@RequestHeader("X-Id") String id`). */
+  sourceBinding?: string;
 }
 
 /**
@@ -266,13 +298,21 @@ export function buildDataFlowEvidence(ind: FlowInput, filePath: string): DataFlo
   const files: string[] = [];
   for (const s of trace) { const f = s.file || filePath; if (files[files.length - 1] !== f && !files.includes(f)) files.push(f); }
   if (files.length === 0) files.push(filePath);
+  const sourceFile = first?.file || filePath;
+  // what the engine saw at the start of the flow -- a model match there says what the input is and how far it's trusted
+  const model = ind.sourceAssumed ? undefined
+    : sourceModelAt(first?.kind === "source" ? [first.snippet, first.label, ind.sourceExpr, ind.sourceBinding] : [ind.sourceExpr, ind.sourceBinding], sourceFile);
+  const kind = model?.kind ?? (inputKind ? KIND_OF_INPUT[inputKind] : undefined);
   return {
     source: {
-      file: first?.file || filePath, line: first?.line ?? ind.line ?? 0, expr: sourceExpr,
+      file: sourceFile, line: first?.line ?? ind.line ?? 0, expr: sourceExpr,
       inputKind,
       // Only the engine knows: a bare name can equally be a framework-bound request parameter
       // (`@RequestParam String id`) or a parameter it assumed untrusted. Its flag, not the text, decides.
       assumed: !!ind.sourceAssumed,
+      ...(kind ? { kind } : {}),
+      ...(ind.sourceAssumed ? { trust: "assumed" as const } : model ? { trust: model.trust } : inputKind ? { trust: "untrusted" as const } : {}),
+      ...(model ? { model: model.id } : {}),
     },
     sink,
     files,

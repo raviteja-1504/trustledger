@@ -1,0 +1,22 @@
+import java.util.*;
+import javax.servlet.*;
+import javax.servlet.http.*;
+import java.io.IOException;
+class CommandService {
+  void execute(List<String> values) throws Exception {
+    Iterator<String> it = values.iterator();
+    while (it.hasNext()) run(it.next());
+  }
+  void run(String value) throws Exception {
+    new ProcessBuilder("sh", "-c", "echo " + value).start();
+  }
+}
+public class CommandServlet extends HttpServlet {
+  protected void doGet(HttpServletRequest req, HttpServletResponse res) throws IOException {
+    String input = req.getParameter("value");
+    List<String> values = new ArrayList<>();
+    values.add(input);
+    try { new CommandService().execute(values); res.getWriter().write("started"); }
+    catch (Exception e) { res.sendError(500); }
+  }
+}

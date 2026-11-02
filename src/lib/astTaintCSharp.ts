@@ -68,6 +68,8 @@ import {
 import { anchoredPatternClears } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkModelFor } from "./taint/models/sinks";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
 // See astTaintPython.ts's/astTaintGo.ts's identical helper for why:
@@ -270,19 +272,12 @@ function stripGenerics(text: string): string {
 
 // Static/utility calls whose RESULT carries the taint of their arguments (string, path, URL, JSON and
 // container plumbing that neither validates nor neutralizes anything). Opaque calls stay untainted.
-const CS_PASSTHROUGH = new Set([
-  "string.Join", "String.Join", "string.Concat", "String.Concat", "string.Format", "String.Format", "string.Copy", "String.Copy",
-  "Path.Combine", "Path.GetFullPath", "Path.GetDirectoryName", "Path.ChangeExtension", "Path.GetRelativePath",
-  "WebUtility.UrlDecode", "HttpUtility.UrlDecode", "Uri.UnescapeDataString", "WebUtility.HtmlDecode", "HttpUtility.HtmlDecode",
-  "Convert.FromBase64String", "Convert.ToBase64String", "Convert.ToString",
-  "JsonConvert.SerializeObject", "JsonConvert.DeserializeObject", "JsonSerializer.Serialize", "JsonSerializer.Deserialize",
-  "Enumerable.Concat", "Enumerable.Repeat", "Task.FromResult", "Uri.EscapeUriString", "Environment.ExpandEnvironmentVariables",
-]);
+const CS_PASSTHROUGH = propagatorNames("cs", "call-args");
 const CS_ENCODING_RE = /^Encoding\.\w+\.(?:GetString|GetBytes)$|^Convert\.(?:FromBase64String|ToBase64String)$/;
-const CS_DECODERS = new Set(["WebUtility.UrlDecode", "HttpUtility.UrlDecode", "Uri.UnescapeDataString", "WebUtility.HtmlDecode", "HttpUtility.HtmlDecode", "Convert.FromBase64String"]);
+const CS_DECODERS = propagatorNames("cs", "decoder");
 // Receiver methods whose result also includes their ARGUMENTS (replacement text, joined items).
-const CS_ARG_CARRYING_METHODS = new Set(["Replace", "Concat", "Insert", "PadLeft", "PadRight", "Format", "Join", "AppendFormat"]);
-const CS_MUTATORS = new Set(["Add", "AddRange", "Append", "AppendLine", "AppendFormat", "Insert", "Push", "Enqueue", "TryAdd", "Set", "Put", "AddFirst", "AddLast"]);
+const CS_ARG_CARRYING_METHODS = propagatorNames("cs", "method-args");
+const CS_MUTATORS = propagatorNames("cs", "mutator");
 const CS_BUILTIN_METHOD_NAMES = new Set([
   "Add", "Remove", "Get", "Set", "Append", "Insert", "Contains", "Find", "First", "Select", "Where", "ToString", "Trim", "Split",
   "Replace", "Join", "Format", "Concat", "Equals", "Parse", "Write", "Read", "Close", "Execute", "Invoke", "Run", "Send", "Delete", "Create",
@@ -1107,11 +1102,6 @@ const CS_FS_TAILS = new Set([
   "ReadAllBytes", "WriteAllBytes", "Open", "OpenRead", "OpenWrite", "OpenText", "Create", "CreateText", "Delete", "Copy", "Move",
   "GetFiles", "GetDirectories", "EnumerateFiles", "CreateDirectory",
 ]);
-const CS_SSRF_TAILS = new Set([
-  "GetAsync", "PostAsync", "PutAsync", "DeleteAsync", "SendAsync", "GetStringAsync", "GetByteArrayAsync", "GetStreamAsync",
-  "PostAsJsonAsync", "PutAsJsonAsync", "DownloadString", "DownloadStringAsync", "DownloadStringTaskAsync", "DownloadData",
-  "DownloadFile", "DownloadFileAsync", "UploadString", "UploadData",
-]);
 const CS_DAPPER_TAILS = new Set([
   "Query", "QueryAsync", "QueryFirst", "QueryFirstAsync", "QueryFirstOrDefault", "QueryFirstOrDefaultAsync", "QuerySingle",
   "QuerySingleOrDefault", "Execute", "ExecuteAsync", "ExecuteScalar", "ExecuteScalarAsync", "ExecuteReader",
@@ -1276,6 +1266,7 @@ function checkCallSink(
   const rootVar = parts[0];
   // The class the static call is made on: `System.IO.File.ReadAllText` -> File, `Regex.IsMatch` -> Regex.
   const owner = parts.length >= 2 ? parts[parts.length - 2] : "";
+  const sinkModel = sinkModelFor("cs", owner ? `${owner}.${tail}` : tail);
   const argMasks = args.map(a => taintMask(a, env));
   const combined = argMasks.reduce((m, x) => m | x, 0);
   const firstIdx = argMasks.findIndex(m => (m & ALL) !== 0);
@@ -1336,9 +1327,9 @@ function checkCallSink(
     // "Content" itself); the common real shape is a concatenated HTML
     // string, already resolved by taintMask's recursive binary_expression walk.
     fire("xss", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
-  } else if (CS_SSRF_TAILS.has(tail) || (tail === "OpenRead" && !CS_FS_CLASSES.has(owner))
-             || ((tail === "Create" || tail === "CreateHttp") && (owner === "WebRequest" || owner === "HttpWebRequest"))) {
-    fireArgs("ssrf", [0]);
+  } else if (sinkModel) {
+    // HttpClient/WebClient requests, WebClient.OpenRead, WebRequest.Create (models/sinks.ts)
+    fireArgs(sinkModel.model.rule as AstTaintCSharpId, sinkModel.positions);
   } else if (tail === "Combine" && owner === "Path") {
     // `var p = Path.GetFullPath(Path.Combine(dir, name))`: building a path reads nothing -- p is judged (with any
     // StartsWith check on it) at the file call that uses it, which then also answers for the regex layer here
@@ -1436,6 +1427,7 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   // still reaches the suppression record below.
   const firstIdx = argMasks.findIndex(m => m !== 0);
   if (firstIdx < 0) return;
+  const sinkModel = sinkModelFor("cs", `new ${className}`);
   const fire = (id: AstTaintCSharpId, idx: number = firstIdx) => {
     const m = argMasks[idx] ?? 0;
     const cls = classOf(id);
@@ -1445,7 +1437,8 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   if (className === "ProcessStartInfo") checkProcessArgsCS(args, argMasks, (id, idx) => fire(id, idx));
   // `new SqlCommand(q, conn).ExecuteScalar()` -- built inline; a declared command is reported at its Execute* call instead.
   else if (CS_SQL_COMMAND_TYPES.has(className) && node.parent?.type !== "equals_value_clause" && node.parent?.type !== "assignment_expression") fire("sql-injection", 0);
-  else if (className === "HttpRequestMessage" && args.length >= 2) fire("ssrf", 1);
+  // new HttpRequestMessage(method, url) (models/sinks.ts)
+  else if (sinkModel && sinkModel.positions.every(p => p < args.length)) { for (const p of sinkModel.positions) fire(sinkModel.model.rule as AstTaintCSharpId, p); }
   else if (className === "RedirectResult") fire("open-redirect", 0);
   else if (className === "HtmlString") fire("xss", 0);
   else if (className === "Regex") fire("redos", 0);

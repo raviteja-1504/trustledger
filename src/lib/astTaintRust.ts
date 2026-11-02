@@ -41,6 +41,8 @@ import {
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkLabel, sinkModelsFor } from "./taint/models/sinks";
 import { anchoredPatternClears } from "./taint/charClass";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
@@ -319,21 +321,10 @@ const OPAQUE_RESULT_METHODS = new Set([
   "is_ascii", "is_char_boundary", "chars_count", "capacity", "find_iter_count", "is_alphanumeric",
 ]);
 /** Methods whose ARGUMENTS also flow into the result. */
-const ARG_FLOW_METHODS = new Set([
-  "push_str", "push", "extend", "insert", "replace", "replacen", "unwrap_or", "or", "chain", "join", "with_file_name",
-  "with_extension", "concat", "append", "add", "set_path", "set_query", "set_host", "query", "header", "body", "uri", "url",
-  "path", "or_else", "unwrap_or_else", "map_or", "extend_from_slice", "zip", "and",
-]);
-const MUTATOR_METHODS = new Set(["push_str", "push", "extend", "insert", "append", "extend_from_slice", "write_str", "write_all", "push_front", "push_back", "set_path", "set_query", "set_host"]);
+const ARG_FLOW_METHODS = propagatorNames("rs", "method-args");
+const MUTATOR_METHODS = propagatorNames("rs", "mutator");
 /** Path calls whose result carries their arguments. Uppercase-first single identifiers (Some, Ok, tuple structs) too. */
-const PASSTHROUGH_PATHS = new Set([
-  "String::from", "PathBuf::from", "Path::new", "OsString::from", "OsStr::new", "Url::parse", "Url::join", "Uri::from_str",
-  "Uri::try_from", "Cow::from", "Box::new", "Arc::new", "Rc::new", "urlencoding::decode", "percent_decode_str",
-  "percent_encoding::percent_decode_str", "base64::decode", "serde_json::from_str", "serde_json::from_slice",
-  "serde_json::from_value", "serde_urlencoded::from_str", "serde_qs::from_str", "toml::from_str", "serde_yaml::from_str",
-  "String::from_utf8", "String::from_utf8_lossy", "str::from_utf8", "std::str::from_utf8", "Vec::from", "Document::from",
-  "bson::to_document", "Value::from", "STANDARD.decode", "general_purpose::STANDARD.decode",
-]);
+const PASSTHROUGH_PATHS = propagatorNames("rs", "call-args");
 const DECODER_RE = /(?:urlencoding::decode|percent_decode_str|base64::decode|\.decode)$/;
 /** Iterator / Option / Result adaptors: the closure parameter is the receiver's element(s). */
 const ELEMENT_CLOSURES = new Set([
@@ -368,8 +359,6 @@ function namesClientFile(arg: SyntaxNode, at: SyntaxNode): boolean {
   return [...arg.text.matchAll(/\b([a-z_]\w*)\b/g)].some(m => new RegExp(`\\blet\\s+(?:mut\\s+)?${m[1]}\\s*(?::[^=]+)?=\\s*[^;]*${CLIENT_FILE_NAME_RE.source}`, "i").test(fnBody));
 }
 const FS_TWO_ARGS =/(?:^|::)fs::(?:copy|rename|hard_link|soft_link|symlink)$/;
-const HTTP_FREE_FNS = /^(?:reqwest::get|reqwest::blocking::get|ureq::get|ureq::post|ureq::put|ureq::delete|ureq::request|surf::get|surf::post|isahc::get|isahc::post|attohttpc::get|attohttpc::post|minreq::get|minreq::post|TcpStream::connect|UdpSocket::connect|tokio::net::TcpStream::connect)$/;
-const HTTP_CLIENT_METHODS = new Set(["get", "post", "put", "delete", "patch", "head", "request"]);
 const HTTP_CLIENT_TYPE_RE = /^(?:Client|ClientWithMiddleware|Agent|HttpClient)$/;
 const REDIRECT_FNS = /(?:^|::)Redirect::(?:to|temporary|permanent|see_other|found|moved)$/;
 const SECRET_NAME_RE = /secret|token|password|passwd|api_?key|apikey|hmac|signature|digest/i;
@@ -1773,12 +1762,12 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (recv && name === "open" && args[0] && /OpenOptions/.test(recvText)) fireOn(ctx, "path-traversal", node, args[0], mask(args[0], env), "OpenOptions.open");
 
   // ── SSRF ──
-  if (full && HTTP_FREE_FNS.test(full.replace(/^std::net::/, "")) && args[0]) checkSsrfArg(ctx, node, args[0], env, mask, full);
-  if (recv && HTTP_CLIENT_METHODS.has(name) && isHttpClient(recv, ctx)) {
-    const urlArg = name === "request" ? args[1] : args[0];
-    if (urlArg) checkSsrfArg(ctx, node, urlArg, env, mask, `${recvText}.${name}`);
+  // (models/sinks.ts) matched on the receiver's own text (`Request::builder()`), named by its chain (`client.get`)
+  for (const { model, positions } of sinkModelsFor("rs", recv ? `${recv.text}.${name}` : full)) {
+    if (model.args.select === "http-client-receiver" && !(recv && isHttpClient(recv, ctx))) continue;
+    const label = sinkLabel(model, recv ? `${recvText}.${name}` : full);
+    for (const p of positions) if (args[p]) checkSsrfArg(ctx, node, args[p], env, mask, label);
   }
-  if (recv && name === "uri" && args[0] && /Request::builder|Request::get|Request::post|builder\(\)/.test(recv.text)) checkSsrfArg(ctx, node, args[0], env, mask, "Request::builder().uri");
 
   // ── Redirect ──
   if (full && REDIRECT_FNS.test(full) && args[0]) checkRedirect(ctx, node, args[0], env, mask, two);

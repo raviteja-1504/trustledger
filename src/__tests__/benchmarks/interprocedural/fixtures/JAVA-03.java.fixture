@@ -1,0 +1,18 @@
+import javax.servlet.*;
+import javax.servlet.http.*;
+import java.io.IOException;
+abstract class Redirector {
+  abstract void redirect(HttpServletResponse response, String target) throws IOException;
+}
+class ExternalRedirector extends Redirector {
+  @Override void redirect(HttpServletResponse response, String target) throws IOException {
+    response.sendRedirect(target);
+  }
+}
+public class RedirectServlet extends HttpServlet {
+  private final Redirector redirector = new ExternalRedirector();
+  protected void doGet(HttpServletRequest req, HttpServletResponse res) throws IOException {
+    String target = req.getParameter("next");
+    redirector.redirect(res, target);
+  }
+}

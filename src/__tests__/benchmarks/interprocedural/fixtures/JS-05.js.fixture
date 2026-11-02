@@ -1,0 +1,12 @@
+const express = require("express");
+const axios = require("axios");
+const app = express(), targets = new Map();
+function remember(k, v) { targets.set(k, v); }
+function recall(k) { return targets.get(k); }
+async function fetchTarget(url) { return axios.get(url); }
+app.get("/proxy", async (req, res) => {
+  remember("next", req.query.url);
+  const target = recall("next");
+  const result = await fetchTarget(target);
+  res.send(String(result.status));
+});

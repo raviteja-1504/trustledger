@@ -134,6 +134,8 @@ export function buildSarifReport(
           ...(ind.flow ? {
             "trustledger/sinkKey": ind.flow.sinkKey,
             "trustledger/sinkArgument": ind.flow.sink.role,
+            ...(ind.flow.source.kind ? { "trustledger/sourceKind": ind.flow.source.kind } : {}),
+            ...(ind.flow.source.trust ? { "trustledger/sourceTrust": ind.flow.source.trust } : {}),
             ...(ind.flow.sanitizers.length ? { "trustledger/sanitizers": ind.flow.sanitizers.map(z => `${z.call} (${z.neutralises.join(", ")})${z.protectsSink ? "" : " — does not protect this sink"}`) } : {}),
           } : {}),
           ...(ind.reachability ? { "trustledger/reachability": ind.reachability } : {}),

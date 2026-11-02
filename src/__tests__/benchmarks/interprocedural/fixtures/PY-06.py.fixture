@@ -1,0 +1,10 @@
+from flask import Flask, request, Response
+app = Flask(__name__)
+def transform(value, callback):
+    intermediate = value
+    return callback(intermediate)
+def render(value): return "<h1>" + value + "</h1>"
+@app.get("/page")
+def page():
+    html = transform(request.args.get("name"), render)
+    return Response(html, mimetype="text/html")

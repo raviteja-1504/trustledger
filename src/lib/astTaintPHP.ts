@@ -88,6 +88,8 @@ import {
 import { anchoredPatternClears, delimitedPatternBody } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkLabel, sinkModelFor } from "./taint/models/sinks";
 import { assessSqlInjection, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 
@@ -318,19 +320,10 @@ const PHP_WILDCARD_VAR = "\\u0000wildcard";
 
 // Static/utility functions whose RESULT carries the taint of their arguments (string/array plumbing that
 // neither validates nor neutralizes anything). Opaque calls stay untainted, exactly as before.
-const PHP_PASSTHROUGH = new Set([
-  "trim", "ltrim", "rtrim", "strtolower", "strtoupper", "mb_strtolower", "mb_strtoupper", "ucfirst", "lcfirst",
-  "ucwords", "nl2br", "addslashes", "stripslashes", "wordwrap", "str_pad", "str_repeat", "number_format",
-  "substr", "mb_substr", "sprintf", "vsprintf", "str_replace", "str_ireplace", "preg_replace", "preg_replace_callback",
-  "implode", "join", "explode", "array_merge", "array_merge_recursive", "array_combine", "array_values", "array_keys",
-  "array_map", "array_filter", "array_slice", "array_unique", "array_reverse", "array_pad",
-  "json_encode", "json_decode", "serialize", "realpath", "dirname", "pathinfo",
-  "base64_encode", "base64_decode", "bin2hex", "hex2bin", "htmlspecialchars_decode", "html_entity_decode",
-  "urldecode", "rawurldecode",
-]);
+const PHP_PASSTHROUGH = propagatorNames("php", "call-args");
 // Decoders re-taint what a sanitizer cleared (encode-then-decode round trip) -- SHADOW-bit retaint,
 // matching every other engine's identical decoder table.
-const PHP_DECODERS = new Set(["urldecode", "rawurldecode", "base64_decode", "html_entity_decode", "htmlspecialchars_decode"]);
+const PHP_DECODERS = propagatorNames("php", "decoder");
 const PHP_SECRET_NAME_RE = /secret|token|password|passwd|apikey|api_key|hmac|signature/i;
 
 function isTaintSourceExprPHP(node: SyntaxNode): boolean {
@@ -837,7 +830,6 @@ const CALLABLE_ARG_PHP = new Map<string, number>([
   ["array_filter", 1], ["array_reduce", 1], ["iterator_apply", 1], ["register_shutdown_function", 0],
   ["set_error_handler", 0], ["set_exception_handler", 0], ["spl_autoload_register", 0],
 ]);
-const URL_CAPABLE_READS_PHP = new Set(["fopen", "file_get_contents", "readfile", "file", "parse_ini_file"]);
 const PATH_FIRST_ARG_PHP = new Set([
   "unlink", "rmdir", "mkdir", "glob", "stat", "lstat", "touch", "chmod", "chown", "chgrp", "scandir", "opendir", "dir",
   "highlight_file", "show_source", "fpassthru", "readlink", "realpath_cache_get", "tempnam", "is_writable", "disk_free_space",
@@ -955,6 +947,7 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
   const fnNode = node.childForFieldName("function");
   const fnName = fnNode?.type === "name" ? fnNode.text : null;
   if (!fnName) return;
+  const sinkModel = sinkModelFor("php", fnName);
   const args = argListOfPHP(node);
   const argMasks = args.map(a => taintMask(a, env));
   const combined = argMasks.reduce((m, x) => m | x, 0);
@@ -1018,12 +1011,26 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // function_call_expression -- kept as a harmless defensive fallback
     // only, matching checkIncludeExpressionSink below for the real path.
     fire("file-inclusion");
-  } else if (URL_CAPABLE_READS_PHP.has(fnName)) {
-    // The path only -- not fopen's mode. PHP's URL wrappers make these fetch `http://...` too: after a URL scheme the
-    // value picks the request (SSRF); after a local path prefix, the file; a value starting the argument picks either.
-    const lead = args[0] ? leadingLiteralPHP(args[0]) : "";
-    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(lead)) fireArg("path-traversal", 0);
-    if (lead === "" || /^(?:https?|ftps?):\/\//i.test(lead)) fireArg("ssrf", 0);
+  } else if (sinkModel) {
+    // stream reads, sockets, curl (models/sinks.ts)
+    const id = sinkModel.model.rule as AstTaintPHPId;
+    for (const p of sinkModel.positions) {
+      if (sinkModel.model.args.select === "url-wrapper") {
+        // The path only -- not fopen's mode. PHP's URL wrappers make these fetch `http://...` too: after a URL scheme the
+        // value picks the request (SSRF); after a local path prefix, the file; a value starting the argument picks either.
+        const lead = args[p] ? leadingLiteralPHP(args[p]) : "";
+        if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(lead)) fireArg("path-traversal", p);
+        if (lead === "" || /^(?:https?|ftps?):\/\//i.test(lead)) fireArg(id, p);
+      } else if (sinkModel.model.args.select === "curl-option") {
+        // curl_setopt($ch, OPTION, $value): only options that choose WHERE the request goes. POSTFIELDS,
+        // HTTPHEADER, USERAGENT... are sent to that destination, so tainting them is not SSRF.
+        const valueIdx = curlDestinationValueIdx(args, p - 1);
+        if (valueIdx >= 0) fireArg(id, valueIdx);
+        else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id, line: lineOf(node) });
+      } else {
+        fireArg(id, p);
+      }
+    }
   } else if (fnName === "file_put_contents" || PATH_FIRST_ARG_PHP.has(fnName)) {
     // The path only -- not the data file_put_contents writes, nor mkdir's mode.
     fireArg("path-traversal", 0);
@@ -1031,8 +1038,6 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
     // copy($from, $to) / rename / link / symlink: either path; move_uploaded_file($tmp, $dest): the destination
     if (fnName !== "move_uploaded_file") fireArg("path-traversal", 0);
     fireArg("path-traversal", 1);
-  } else if (fnName === "fsockopen" || fnName === "pfsockopen" || fnName === "stream_socket_client") {
-    fireArg("ssrf", 0);
   } else if (fnName === "header") {
     // header("Location: " . $tainted) is open-redirect; header("X-Anything:
     // " . $tainted) for any other header name is header-injection -- same
@@ -1059,18 +1064,10 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
   } else if (fnName === "preg_replace" && /^(['"])([^\w\s\\])[\s\S]*\2[a-zA-Z]*e[a-zA-Z]*\1$/.test(args[0]?.text ?? "")) {
     // the /e modifier evaluates the replacement as PHP code
     fireArg("eval-exec", 1);
-  } else if (fnName === "curl_init") {
-    if (args[0]) fire("ssrf", argMasks[0], args[0].text);
   } else if ((fnName === "preg_match" || fnName === "preg_match_all" || fnName === "preg_replace" || fnName === "preg_replace_callback" || fnName === "preg_split")
              && args[0] && (argMasks[0] & ALL)) {
     // The PATTERN itself (not the subject/data being matched) is attacker-controlled.
     fire("redos", argMasks[0], args[0].text);
-  } else if (fnName === "curl_setopt") {
-    // curl_setopt($ch, OPTION, $value): only options that choose WHERE the request goes. POSTFIELDS,
-    // HTTPHEADER, USERAGENT... are sent to that destination, so tainting them is not SSRF.
-    const valueIdx = curlDestinationValueIdx(args, 1);
-    if (valueIdx >= 0) fireArg("ssrf", valueIdx);
-    else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id: "ssrf", line: lineOf(node) });
   }
 }
 
@@ -1114,6 +1111,8 @@ function isTemplateEnginePHP(receiver: SyntaxNode | null | undefined, ctx: Engin
 function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const methodName = node.childForFieldName("name")?.text;
   if (!methodName) return;
+  const receiverText = node.namedChildren[0]?.text ?? "";
+  const sinkModel = sinkModelFor("php", `${receiverText}.${methodName}`);
   const args = argListOfPHP(node);
   const argMasks = args.map(a => taintMask(a, env));
   const combined = argMasks.reduce((m, x) => m | x, 0);
@@ -1161,11 +1160,14 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
     // $twig->render($name) / $latte->renderToString($tpl) / $smarty->display($tpl): the request picks the template
     // itself (a string loader compiles it as source; a filesystem loader reads whatever path it names)
     fireArg("ssti", 0);
-  } else if (methodName === "setopt") {
-    // $curl->setopt(OPTION, $value): the same destination-only rule as curl_setopt($ch, OPTION, $value).
-    const valueIdx = curlDestinationValueIdx(args, 0);
-    if (valueIdx >= 0) fireArg("ssrf", valueIdx, "curl_setopt");
-    else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id: "ssrf", line: lineOf(node) });
+  } else if (sinkModel?.model.args.select === "curl-option") {
+    // $curl->setopt(OPTION, $value): the same destination-only rule as curl_setopt($ch, OPTION, $value) (models/sinks.ts)
+    const id = sinkModel.model.rule as AstTaintPHPId;
+    for (const p of sinkModel.positions) {
+      const valueIdx = curlDestinationValueIdx(args, p - 1);
+      if (valueIdx >= 0) fireArg(id, valueIdx, sinkLabel(sinkModel.model, `${receiverText}.${methodName}`));
+      else if (valueIdx === -1 && argMasks.some(m => m & ALL)) ctx.suppressed?.push({ id, line: lineOf(node) });
+    }
   }
 }
 

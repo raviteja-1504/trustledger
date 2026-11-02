@@ -1,0 +1,90 @@
+{
+  "JS-01": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "JS-02": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "JS-03": {
+    "outcome": "partial",
+    "twin": "clean"
+  },
+  "JS-04": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "JS-05": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "JS-06": {
+    "outcome": "partial",
+    "twin": "clean"
+  },
+  "PY-01": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PY-02": {
+    "outcome": "partial",
+    "twin": "clean"
+  },
+  "PY-03": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PY-04": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PY-05": {
+    "outcome": "miss",
+    "twin": "clean"
+  },
+  "PY-06": {
+    "outcome": "partial",
+    "twin": "clean"
+  },
+  "GO-01": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "GO-02": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "GO-03": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "GO-04": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "GO-05": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "JAVA-01": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "JAVA-02": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "JAVA-03": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "JAVA-04": {
+    "outcome": "pass",
+    "twin": "clean"
+  },
+  "JAVA-05": {
+    "outcome": "pass",
+    "twin": "clean"
+  }
+}

@@ -1,0 +1,15 @@
+from flask import Flask, request
+app = Flask(__name__)
+class RequestModel:
+    def __init__(self, path): self.metadata = {"files": [path]}
+def select_file(model):
+    files = model.metadata["files"]
+    selected = files[0]
+    return selected
+def read_file(path):
+    with open(path, "r", encoding="utf-8") as handle: return handle.read()
+@app.get("/read")
+def read():
+    model = RequestModel(request.args.get("path"))
+    path = select_file(model)
+    return read_file(path)

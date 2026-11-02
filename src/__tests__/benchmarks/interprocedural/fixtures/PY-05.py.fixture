@@ -1,0 +1,14 @@
+import asyncio
+import requests
+from flask import Flask, request
+app = Flask(__name__)
+async def fetch_url(target):
+    return await asyncio.to_thread(requests.get, target, timeout=4)
+async def run_job(target):
+    task = asyncio.create_task(fetch_url(target))
+    return await task
+@app.get("/async-fetch")
+def fetch():
+    target = request.args.get("url")
+    response = asyncio.run(run_job(target))
+    return str(response.status_code)

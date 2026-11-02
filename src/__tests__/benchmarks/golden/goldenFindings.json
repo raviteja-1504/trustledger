@@ -1,0 +1,706 @@
+{
+ "hard/HardCSharpBenchmark.cs.fixture": [
+  "HardCSharpBenchmark.cs:102 sql-injection <- \"SELECT * FROM users WHERE id = '\" + id + \"'\"",
+  "HardCSharpBenchmark.cs:106 sql-injection <- id",
+  "HardCSharpBenchmark.cs:110 ssti <- template",
+  "HardCSharpBenchmark.cs:110 xss <- Scriban.Template.Parse(template).Render(new { user })",
+  "HardCSharpBenchmark.cs:113 eval-exec <- expression",
+  "HardCSharpBenchmark.cs:116 eval-exec <- cls",
+  "HardCSharpBenchmark.cs:119 nosql-injection <- filter",
+  "HardCSharpBenchmark.cs:123 idor <- -",
+  "HardCSharpBenchmark.cs:123 nosql-injection <- m",
+  "HardCSharpBenchmark.cs:127 ldap-injection <- user",
+  "HardCSharpBenchmark.cs:130 xpath-injection <- \"/users/user[name/text()='\" + user + \"']\"",
+  "HardCSharpBenchmark.cs:130 xxe <- -",
+  "HardCSharpBenchmark.cs:136 header-injection <- WebUtility.UrlDecode(location)",
+  "HardCSharpBenchmark.cs:140 xss <- sb.ToString()",
+  "HardCSharpBenchmark.cs:143 xss <- body",
+  "HardCSharpBenchmark.cs:146 ssrf <- \"http://\" + host + \"/image\"",
+  "HardCSharpBenchmark.cs:149 ssrf <- url",
+  "HardCSharpBenchmark.cs:152 command-injection <- new ProcessStartInfo(\"sh\", \"-c \\\"\" + program + \" \" + arg + \"\\\"\")",
+  "HardCSharpBenchmark.cs:155 path-traversal <- Path.Combine(BaseDir, entry)",
+  "HardCSharpBenchmark.cs:158 sql-injection <- accountId",
+  "HardCSharpBenchmark.cs:162 xss <- WithValue(q, x => \"<div>\" + x + \"</div>\")",
+  "HardCSharpBenchmark.cs:165 xss <- v",
+  "HardCSharpBenchmark.cs:168 xss <- \"<div>\" + dec + \"</div>\"",
+  "HardCSharpBenchmark.cs:172 xss <- \"<div>\" + SanitizeThenAppend(value, suffix) + \"</div>\"",
+  "HardCSharpBenchmark.cs:175 xss <- \"<p>\" + o + \"</p>\"",
+  "HardCSharpBenchmark.cs:178 xss <- \"<div>\" + obj[\"value\"] + \"</div>\"",
+  "HardCSharpBenchmark.cs:181 sql-injection <- m[field]",
+  "HardCSharpBenchmark.cs:185 xss <- \"<div>\" + Combine(\"values\", a, b, c) + \"</div>\"",
+  "HardCSharpBenchmark.cs:189 xss <- MapValue(value, x => \"<span>\" + x + \"</span>\")",
+  "HardCSharpBenchmark.cs:192 sql-injection <- id",
+  "HardCSharpBenchmark.cs:197 xss <- Then(x, y => \"<img src='\" + y + \"'>\")",
+  "HardCSharpBenchmark.cs:203 sql-injection <- sort",
+  "HardCSharpBenchmark.cs:206 redos <- pattern",
+  "HardCSharpBenchmark.cs:209 redos <- p",
+  "HardCSharpBenchmark.cs:213 eval-exec <- module",
+  "HardCSharpBenchmark.cs:216 path-traversal <- Path.GetFullPath(Path.Combine(\"/etc/myapp\", name + \".json\"))",
+  "HardCSharpBenchmark.cs:219 header-injection <- parsed[\"value\"]",
+  "HardCSharpBenchmark.cs:223 xss <- \"<span>\" + Choose(a, b, pick == \"1\") + \"</span>\"",
+  "HardCSharpBenchmark.cs:227 xss <- MakeRenderer(value)()",
+  "HardCSharpBenchmark.cs:233 mass-assignment <- Account",
+  "HardCSharpBenchmark.cs:236 jwt-none-alg <- bearer token",
+  "HardCSharpBenchmark.cs:239 weak-crypto <- -",
+  "HardCSharpBenchmark.cs:242 timing-attack <- token",
+  "HardCSharpBenchmark.cs:245 insecure-randomness <- -",
+  "HardCSharpBenchmark.cs:248 command-injection <- \"-c \\\"echo \" + env[\"TOOL_ARGS\"] + \"\\\"\"",
+  "HardCSharpBenchmark.cs:251 insecure-deserialization <- new MemoryStream(Convert.FromBase64String(state))",
+  "HardCSharpBenchmark.cs:252 xxe <- -",
+  "HardCSharpBenchmark.cs:253 insecure-deserialization <- json",
+  "HardCSharpBenchmark.cs:254 command-injection <- program",
+  "HardCSharpBenchmark.cs:255 path-traversal <- Path.Combine(BaseDir, filename)",
+  "HardCSharpBenchmark.cs:256 sql-injection <- value",
+  "HardCSharpBenchmark.cs:257 xss <- \"<p>\" + v + \"</p>\"",
+  "HardCSharpBenchmark.cs:30 hardcoded-secret <- -",
+  "HardCSharpBenchmark.cs:30 weak-signing-secret <- -",
+  "HardCSharpBenchmark.cs:40 sql-injection <- q",
+  "HardCSharpBenchmark.cs:41 command-injection <- \"-c \" + cmd",
+  "HardCSharpBenchmark.cs:44 sql-injection <- n",
+  "HardCSharpBenchmark.cs:49 sql-injection <- BuildSearch(state)",
+  "HardCSharpBenchmark.cs:53 sql-injection <- stored",
+  "HardCSharpBenchmark.cs:61 command-injection <- c.Executable",
+  "HardCSharpBenchmark.cs:65 path-traversal <- DecodeTwice(name)",
+  "HardCSharpBenchmark.cs:66 path-traversal <- ResolveUpload(name)",
+  "HardCSharpBenchmark.cs:69 path-traversal <- Path.GetFullPath(Path.Combine(BaseDir, f))",
+  "HardCSharpBenchmark.cs:73 ssrf <- BuildTarget(host, port, path)",
+  "HardCSharpBenchmark.cs:76 ssrf <- url",
+  "HardCSharpBenchmark.cs:80 open-redirect <- NormalizeUrl(next)",
+  "HardCSharpBenchmark.cs:85 xss <- SendToBrowser(render())",
+  "HardCSharpBenchmark.cs:88 header-injection <- \"attachment; filename=\" + value",
+  "HardCSharpBenchmark.cs:91 mass-assignment <- s",
+  "HardCSharpBenchmark.cs:95 mass-assignment <- typeof(Config).GetProperty(field)",
+  "HardCSharpBenchmark.cs:98 sql-injection <- id"
+ ],
+ "hard/HardJavaBenchmark.java.fixture": [
+  "HardJavaBenchmark.java:101 sql-injection <- m",
+  "HardJavaBenchmark.java:103 xss <- \"<div>\"",
+  "HardJavaBenchmark.java:105 xss <- map",
+  "HardJavaBenchmark.java:107 sql-injection <- id",
+  "HardJavaBenchmark.java:109 xss <- map",
+  "HardJavaBenchmark.java:11 hardcoded-secret <- -",
+  "HardJavaBenchmark.java:113 sql-injection <- col",
+  "HardJavaBenchmark.java:115 redos <- pattern",
+  "HardJavaBenchmark.java:117 redos <- p",
+  "HardJavaBenchmark.java:119 eval-exec <- name",
+  "HardJavaBenchmark.java:121 path-traversal <- Path.of(\"/etc/myapp\",name+\".json\").toAbsolutePath()",
+  "HardJavaBenchmark.java:123 header-injection <- restored",
+  "HardJavaBenchmark.java:125 xss <- \"<span>\"",
+  "HardJavaBenchmark.java:127 xss <- f",
+  "HardJavaBenchmark.java:132 mass-assignment <- e",
+  "HardJavaBenchmark.java:134 jwt-none-alg <- token",
+  "HardJavaBenchmark.java:136 weak-crypto <- MD5",
+  "HardJavaBenchmark.java:138 timing-attack <- supplied",
+  "HardJavaBenchmark.java:142 command-injection <- new String[]{\"sh\",\"-c\",\"echo \"+env.get(\"TOOL_ARGS\")}",
+  "HardJavaBenchmark.java:145 insecure-deserialization <- ObjectInputStream",
+  "HardJavaBenchmark.java:146 xxe <- -",
+  "HardJavaBenchmark.java:147 xxe <- -",
+  "HardJavaBenchmark.java:148 ldap-injection <- host",
+  "HardJavaBenchmark.java:149 weak-crypto <- -",
+  "HardJavaBenchmark.java:15 sql-injection <- q",
+  "HardJavaBenchmark.java:150 hardcoded-secret <- -",
+  "HardJavaBenchmark.java:151 sql-injection <- id",
+  "HardJavaBenchmark.java:19 sql-injection <- id",
+  "HardJavaBenchmark.java:21 sql-injection <- o",
+  "HardJavaBenchmark.java:23 sql-injection <- saved",
+  "HardJavaBenchmark.java:25 command-injection <- host",
+  "HardJavaBenchmark.java:27 argument-injection <- arg",
+  "HardJavaBenchmark.java:27 command-injection <- exe",
+  "HardJavaBenchmark.java:29 path-traversal <- Path.of(BASE_DIR,decode2(name))",
+  "HardJavaBenchmark.java:31 path-traversal <- Path.of(BASE_DIR,name).toAbsolutePath().normalize()",
+  "HardJavaBenchmark.java:33 ssrf <- new URL(\"http\",host,Integer.parseInt(port),path)",
+  "HardJavaBenchmark.java:35 ssrf <- new URL(u)",
+  "HardJavaBenchmark.java:39 xss <- (",
+  "HardJavaBenchmark.java:42 header-injection <- v",
+  "HardJavaBenchmark.java:44 mass-assignment <- e",
+  "HardJavaBenchmark.java:48 mass-assignment <- field",
+  "HardJavaBenchmark.java:50 sql-injection <- id",
+  "HardJavaBenchmark.java:52 sql-injection <- id",
+  "HardJavaBenchmark.java:55 sql-injection <- id",
+  "HardJavaBenchmark.java:57 ssti <- template",
+  "HardJavaBenchmark.java:59 eval-exec <- expression",
+  "HardJavaBenchmark.java:61 eval-exec <- cls",
+  "HardJavaBenchmark.java:67 ldap-injection <- u",
+  "HardJavaBenchmark.java:69 xpath-injection <- u",
+  "HardJavaBenchmark.java:73 header-injection <- URLDecoder.decode(x,\"UTF-8\")",
+  "HardJavaBenchmark.java:75 xss <- b",
+  "HardJavaBenchmark.java:77 xss <- b",
+  "HardJavaBenchmark.java:79 ssrf <- new URL(\"http://\"+host+\"/internal\")",
+  "HardJavaBenchmark.java:81 ssrf <- new URL(u)",
+  "HardJavaBenchmark.java:83 command-injection <- new String[]{\"sh\",\"-c\",program+\" \"+arg}",
+  "HardJavaBenchmark.java:85 path-traversal <- name",
+  "HardJavaBenchmark.java:87 sql-injection <- id",
+  "HardJavaBenchmark.java:89 xss <- f",
+  "HardJavaBenchmark.java:91 xss <- enc",
+  "HardJavaBenchmark.java:93 xss <- \"<div>\"",
+  "HardJavaBenchmark.java:95 xss <- \"<div>\"",
+  "HardJavaBenchmark.java:97 xss <- \"<p>\"",
+  "HardJavaBenchmark.java:99 xss <- \"<div>\""
+ ],
+ "hard/hard.go.fixture": [
+  "hard.go:104 ssrf <- t",
+  "hard.go:113 ssrf <- u",
+  "hard.go:128 open-redirect <- normalizeURL(r.URL.Query().Get(\"next\"))",
+  "hard.go:136 xss <- sendToBrowser(render())",
+  "hard.go:142 header-injection <- \"attachment; filename=\"+v",
+  "hard.go:154 mass-assignment <- s",
+  "hard.go:168 mass-assignment <- name",
+  "hard.go:176 sql-injection <- \"SELECT * FROM invoices WHERE id = '\" + id + \"'\"",
+  "hard.go:184 sql-injection <- \"SELECT * FROM users WHERE id = '\" + id + \"'\"",
+  "hard.go:192 sql-injection <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" + id ",
+  "hard.go:202 ssti <- r.FormValue(\"template\")",
+  "hard.go:208 eval-exec <- r.FormValue(\"plugin\")",
+  "hard.go:216 eval-exec <- r.FormValue(\"method\")",
+  "hard.go:230 nosql-injection <- body[\"username\"]",
+  "hard.go:237 nosql-injection <- deepMerge(map[string]interface{}{\"active\": true}, f)",
+  "hard.go:243 ldap-injection <- \"(&(objectClass=person)(uid=\" + r.URL.Query().Get(\"user\") + ",
+  "hard.go:249 sql-injection <- -",
+  "hard.go:249 xpath-injection <- \"/users/user[name/text()='\" + r.URL.Query().Get(\"user\") + \"'",
+  "hard.go:26 hardcoded-secret <- -",
+  "hard.go:263 header-injection <- d",
+  "hard.go:273 xss <- b.String()",
+  "hard.go:280 xss <- v",
+  "hard.go:285 xss <- body",
+  "hard.go:294 ssrf <- \"http://\" + host + \"/image\"",
+  "hard.go:303 ssrf <- u",
+  "hard.go:308 command-injection <- r.FormValue(\"program\")+\" \"+r.FormValue(\"arg\")",
+  "hard.go:313 path-traversal <- filepath.Join(baseDir, r.FormValue(\"entry\"))",
+  "hard.go:319 sql-injection <- \"SELECT * FROM users WHERE id = '\" + id + \"'\"",
+  "hard.go:328 xss <- withValue(r.URL.Query().Get(\"q\"), func(x string) string { re",
+  "hard.go:336 xss <- escapeHTML(r.URL.Query().Get(\"value\"))",
+  "hard.go:343 xss <- \"<div>\"+dec+\"</div>\"",
+  "hard.go:349 xss <- \"<div>\"+sanitizeThenAppend(r.URL.Query().Get(\"value\"), r.URL",
+  "hard.go:359 xss <- \"<p>\"+out+\"</p>\"",
+  "hard.go:366 xss <- \"<div>\"+obj[\"value\"]+\"</div>\"",
+  "hard.go:374 sql-injection <- \"SELECT * FROM records WHERE value = '\" + m[field] + \"'\"",
+  "hard.go:381 xss <- \"<div>\"+combine(\"values\", q.Get(\"a\"), q.Get(\"b\"), q.Get(\"c\")",
+  "hard.go:387 xss <- mapValue(r.URL.Query().Get(\"value\"), func(x string) string {",
+  "hard.go:394 sql-injection <- id",
+  "hard.go:396 sql-injection <- q",
+  "hard.go:40 sql-injection <- q",
+  "hard.go:403 xss <- then(x, func(y string) string { return \"<img src='\" + y + \"'",
+  "hard.go:41 command-injection <- cmd",
+  "hard.go:413 sql-injection <- \"SELECT * FROM users ORDER BY \" + r.URL.Query().Get(\"sort\")",
+  "hard.go:418 redos <- r.URL.Query().Get(\"pattern\")",
+  "hard.go:423 redos <- \"(?i)\" + p",
+  "hard.go:431 eval-exec <- r.URL.Query().Get(\"symbol\")",
+  "hard.go:436 path-traversal <- filepath.Join(\"/etc/myapp\", r.URL.Query().Get(\"name\")+\".json",
+  "hard.go:445 header-injection <- parsed[\"value\"]",
+  "hard.go:456 xss <- \"<span>\"+choose(r.FormValue(\"a\"), r.FormValue(\"b\"), r.FormVa",
+  "hard.go:46 sql-injection <- n",
+  "hard.go:465 xss <- makeRenderer(r.URL.Query().Get(\"value\"))()",
+  "hard.go:484 mass-assignment <- a",
+  "hard.go:488 jwt-none-alg <- token",
+  "hard.go:500 weak-crypto <- md5.Sum",
+  "hard.go:506 timing-attack <- r.URL.Query().Get(\"token\")",
+  "hard.go:513 insecure-randomness <- -",
+  "hard.go:520 command-injection <- \"echo \"+env[\"TOOL_ARGS\"]",
+  "hard.go:526 insecure-deserialization <- gob.NewDecoder(r.Body)",
+  "hard.go:529 argument-injection <- r.FormValue(\"argument\")",
+  "hard.go:529 command-injection <- r.FormValue(\"program\")",
+  "hard.go:533 path-traversal <- filepath.Join(baseDir, f)",
+  "hard.go:537 ssti <- t",
+  "hard.go:541 sql-injection <- fmt.Sprintf(\"SELECT * FROM users WHERE name = '%s'\", v)",
+  "hard.go:544 open-redirect <- r.URL.Query().Get(\"to\")",
+  "hard.go:547 ssrf <- r.URL.Query().Get(\"u\")",
+  "hard.go:58 sql-injection <- \"SELECT * FROM users WHERE name LIKE '\" + part + \"'\"",
+  "hard.go:67 sql-injection <- \"SELECT * FROM users WHERE name = '\" + stored + \"'\"",
+  "hard.go:81 argument-injection <- c.Argument",
+  "hard.go:81 command-injection <- c.Executable",
+  "hard.go:87 path-traversal <- decodeTwice(name)",
+  "hard.go:89 path-traversal <- resolveUpload(r.URL.Query().Get(\"name\"))",
+  "hard.go:96 path-traversal <- filepath.Clean(filepath.Join(baseDir, name))"
+ ],
+ "hard/hard.php.fixture": [
+  "hard.php:101 ldap-injection <- \"(&(objectClass=person)(uid=\" . $_GET['user'] . \"))\"",
+  "hard.php:104 xpath-injection <- \"/users/user[name/text()='\" . $_GET['user'] . \"']\"",
+  "hard.php:110 header-injection <- \"X-Next: \" . urldecode($_GET['location'])",
+  "hard.php:114 xss <- \"<li>\" . $c . \"</li>\"",
+  "hard.php:117 xss <- $cache[$key]",
+  "hard.php:120 ssrf <- \"http://\" . $host . \"/image\"",
+  "hard.php:123 path-traversal <- $u",
+  "hard.php:123 ssrf <- $u",
+  "hard.php:126 command-injection <- $_POST['program'] . \" \" . $_POST['arg']",
+  "hard.php:129 path-traversal <- BASE_DIR . \"/\" . $_POST['entry']",
+  "hard.php:129 php-missing-session-guard <- -",
+  "hard.php:132 sql-injection <- \"SELECT * FROM users WHERE id = '\" . $id . \"'\"",
+  "hard.php:136 xss <- with_value($_GET['q'], function ($x) { return \"<div>\" . $x . \"</div>\"; })",
+  "hard.php:139 xss <- $v",
+  "hard.php:142 xss <- \"<div>\" . $dec . \"</div>\"",
+  "hard.php:146 xss <- \"<div>\" . sanitize_then_append($_GET['value'], $_GET['suffix']) . \"</div>\"",
+  "hard.php:149 xss <- \"<p>\" . $o . \"</p>\"",
+  "hard.php:15 sql-injection <- $q",
+  "hard.php:152 xss <- \"<div>\" . $obj['value'] . \"</div>\"",
+  "hard.php:155 sql-injection <- \"SELECT * FROM records WHERE value = '\" . $m[$field] . \"'\"",
+  "hard.php:159 xss <- \"<div>\" . combine(\"values\", $_GET['a'], $_GET['b'], $_GET['c']) . \"</div>\"",
+  "hard.php:16 command-injection <- $cmd",
+  "hard.php:163 xss <- map_value($_GET['value'], fn($x) => \"<span>\" . $x . \"</span>\")",
+  "hard.php:171 xss <- then_($x, function ($y) { return \"<img src='\" . $y . \"'>\"; })",
+  "hard.php:177 sql-injection <- -",
+  "hard.php:180 redos <- $_GET['pattern']",
+  "hard.php:184 redos <- compile_user_regex($_POST['pattern'])",
+  "hard.php:187 file-inclusion <- $_GET['module'] . \".php\"",
+  "hard.php:187 path-traversal <- -",
+  "hard.php:19 sql-injection <- -",
+  "hard.php:190 path-traversal <- realpath(\"/etc/myapp/\" . $_GET['name'] . \".json\")",
+  "hard.php:190 ssrf <- realpath(\"/etc/myapp/\" . $_GET['name'] . \".json\")",
+  "hard.php:193 header-injection <- \"X-Value: \" . $parsed['value']",
+  "hard.php:197 xss <- \"<span>\" . choose($_POST['a'], $_POST['b'], $_POST['pick'] === \"1\") . \"</span>\"",
+  "hard.php:201 xss <- $r()",
+  "hard.php:207 mass-assignment <- $k",
+  "hard.php:211 jwt-none-alg <- bearer token",
+  "hard.php:214 weak-crypto <- -",
+  "hard.php:217 timing-attack <- $_GET['token']",
+  "hard.php:217 type-juggling <- $_GET['token']",
+  "hard.php:220 insecure-randomness <- -",
+  "hard.php:223 command-injection <- \"echo \" . $env['TOOL_ARGS']",
+  "hard.php:226 insecure-deserialization <- base64_decode($_POST['state'])",
+  "hard.php:226 php-missing-session-guard <- -",
+  "hard.php:227 xxe <- -",
+  "hard.php:228 variable-overwrite <- $_POST",
+  "hard.php:229 file-inclusion <- ($_GET['page'])",
+  "hard.php:229 path-traversal <- -",
+  "hard.php:230 sql-injection <- \"SELECT * FROM users WHERE name = '$n'\"",
+  "hard.php:231 open-redirect <- \"Location: \" . $_GET['to']",
+  "hard.php:232 xss <- \"<p>\" . $_GET['msg'] . \"</p>\"",
+  "hard.php:24 sql-injection <- -",
+  "hard.php:28 sql-injection <- -",
+  "hard.php:35 command-injection <- $c['executable'] . \" \" . $c['argument']",
+  "hard.php:40 path-traversal <- resolve_upload($_GET['name'])",
+  "hard.php:40 ssrf <- resolve_upload($_GET['name'])",
+  "hard.php:43 path-traversal <- realpath(BASE_DIR . \"/\" . $f)",
+  "hard.php:43 ssrf <- realpath(BASE_DIR . \"/\" . $f)",
+  "hard.php:47 path-traversal <- $t",
+  "hard.php:47 ssrf <- $t",
+  "hard.php:5 hardcoded-secret <- -",
+  "hard.php:50 ssrf <- $url",
+  "hard.php:54 open-redirect <- \"Location: \" . normalize_url($_GET['next'])",
+  "hard.php:59 xss <- send_to_browser($render())",
+  "hard.php:62 header-injection <- \"Content-Disposition: attachment; filename=\" . $v",
+  "hard.php:65 mass-assignment <- $s",
+  "hard.php:70 mass-assignment <- $name",
+  "hard.php:74 bola-missing-ownership-check <- \"SELECT * FROM invoices WHERE id = '\" . $id . \"'\"",
+  "hard.php:74 sql-injection <- \"SELECT * FROM invoices WHERE id = '\" . $id . \"'\"",
+  "hard.php:78 bola-missing-ownership-check <- \"SELECT * FROM users WHERE id = '\" . $id . \"'\"",
+  "hard.php:78 sql-injection <- \"SELECT * FROM users WHERE id = '\" . $id . \"'\"",
+  "hard.php:82 bola-missing-ownership-check <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" . $id . \"'\"",
+  "hard.php:82 sql-injection <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" . $id . \"'\"",
+  "hard.php:86 ssti <- $t",
+  "hard.php:89 eval-exec <- $_POST['expression']",
+  "hard.php:92 eval-exec <- $fn",
+  "hard.php:95 nosql-injection <- $filter",
+  "hard.php:98 nosql-injection <- deep_merge([\"active\" => true], $f)"
+ ],
+ "hard/hard.py.fixture": [
+  "hard.py:105 sql-injection <- -",
+  "hard.py:124 command-injection <- f\"{executable} {argument}\"",
+  "hard.py:138 path-traversal <- decoded",
+  "hard.py:142 path-traversal <- target",
+  "hard.py:152 path-traversal <- target",
+  "hard.py:167 ssrf <- target",
+  "hard.py:176 ssrf <- url",
+  "hard.py:188 open-redirect <- target",
+  "hard.py:188 xss <- redirect(target) if redirect else target",
+  "hard.py:201 xss <- html",
+  "hard.py:209 header-injection <- header_value",
+  "hard.py:218 mass-assignment <- source.items()",
+  "hard.py:234 mass-assignment <- name",
+  "hard.py:248 sql-injection <- -",
+  "hard.py:258 sql-injection <- -",
+  "hard.py:269 sql-injection <- -",
+  "hard.py:281 ssti <- template",
+  "hard.py:285 xss <- template",
+  "hard.py:291 eval-exec <- request_obj.form.get(\"expression\")",
+  "hard.py:300 eval-exec <- state[\"function\"]",
+  "hard.py:312 nosql-injection <- document",
+  "hard.py:320 nosql-injection <- filter_document",
+  "hard.py:330 ldap-injection <- build_ldap_filter(request_obj.args.get(\"user\"))",
+  "hard.py:342 xpath-injection <- xpath_for_user(request_obj.args.get(\"user\"))",
+  "hard.py:361 header-injection <- decoded",
+  "hard.py:374 xss <- body",
+  "hard.py:382 xss <- response_cache[cache_key]",
+  "hard.py:385 xss <- body",
+  "hard.py:396 ssrf <- url",
+  "hard.py:408 ssrf <- target",
+  "hard.py:420 command-injection <- command",
+  "hard.py:425 path-traversal <- destination",
+  "hard.py:443 sql-injection <- -",
+  "hard.py:458 xss <- value",
+  "hard.py:473 xss <- html",
+  "hard.py:480 xss <- html",
+  "hard.py:491 xss <- f\"<div>{output}</div>\"",
+  "hard.py:503 xss <- f\"<p>{output}</p>\"",
+  "hard.py:512 xss <- Response( f\"<div>{obj['value']}</div>\", mimetype=\"text/html\"",
+  "hard.py:522 sql-injection <- -",
+  "hard.py:530 xss <- combine( \"values\", request_obj.args.get(\"a\"), request_obj.ar",
+  "hard.py:546 xss <- result",
+  "hard.py:550 sql-injection <- -",
+  "hard.py:569 xss <- result",
+  "hard.py:584 sql-injection <- -",
+  "hard.py:593 redos <- pattern",
+  "hard.py:597 redos <- pattern",
+  "hard.py:601 redos <- request_obj.form.get(\"input\")",
+  "hard.py:606 eval-exec <- module_name",
+  "hard.py:612 path-traversal <- f\"{name}.json\"",
+  "hard.py:614 path-traversal <- candidate",
+  "hard.py:626 header-injection <- parsed[\"value\"]",
+  "hard.py:636 xss <- f\"<span>{value}</span>\"",
+  "hard.py:649 xss <- html",
+  "hard.py:668 mass-assignment <- key",
+  "hard.py:675 jwt-none-alg <- token",
+  "hard.py:68 sql-injection <- query",
+  "hard.py:693 weak-crypto <- -",
+  "hard.py:699 timing-attack <- supplied",
+  "hard.py:705 insecure-randomness <- -",
+  "hard.py:71 command-injection <- command",
+  "hard.py:711 command-injection <- f\"echo {env['TOOL_ARGS']}\"",
+  "hard.py:726 insecure-deserialization <- raw",
+  "hard.py:731 insecure-deserialization <- request_obj.form.get(\"yaml\")",
+  "hard.py:738 ssti <- template",
+  "hard.py:738 xss <- template.format( user=request_obj.form.get(\"user\"), role=req",
+  "hard.py:746 sql-injection <- value",
+  "hard.py:747 sql-injection <- -",
+  "hard.py:754 argument-injection <- argument",
+  "hard.py:754 command-injection <- executable",
+  "hard.py:76 sql-injection <- -",
+  "hard.py:761 path-traversal <- os.path.join(BASE_UPLOAD, filename)",
+  "hard.py:766 ssti <- request_obj.form.get(\"template\")",
+  "hard.py:91 sql-injection <- -"
+ ],
+ "hard/hard.ts.fixture": [
+  "hard.ts:111 path-traversal <- resolveUpload(String(req.query.name))",
+  "hard.ts:119 path-traversal <- path.join(BASE_UPLOAD, fakeSafeFilename(String(req.query.nam",
+  "hard.ts:134 ssrf <- target",
+  "hard.ts:137 xss <- -",
+  "hard.ts:148 ssrf <- url",
+  "hard.ts:166 open-redirect <- normalizeUrl(String(req.query.next))",
+  "hard.ts:175 xss <- sendToBrowser(renderLater(String(req.query.html))())",
+  "hard.ts:181 header-injection <- headerValue",
+  "hard.ts:190 prototype-pollution <- recursive merge",
+  "hard.ts:199 prototype-pollution <- -",
+  "hard.ts:207 prototype-pollution <- dotted-path assignment",
+  "hard.ts:220 sql-injection <- invoiceId",
+  "hard.ts:229 sql-injection <- id",
+  "hard.ts:239 sql-injection <- projectId",
+  "hard.ts:240 sql-injection <- -",
+  "hard.ts:252 eval-exec <- body",
+  "hard.ts:262 eval-exec <- String(req.body.expression)",
+  "hard.ts:272 eval-exec <- String(state.method)",
+  "hard.ts:272 xss <- String(fn(state.argument))",
+  "hard.ts:279 nosql-injection <- filter",
+  "hard.ts:287 nosql-injection <- makeFilter(req.body.filter)",
+  "hard.ts:296 xss <- ldapSearch(buildLdapFilter(String(req.query.user)))",
+  "hard.ts:305 xss <- selectXPath(xpathForUser(String(req.query.user)))",
+  "hard.ts:313 privilege-escalation <- -",
+  "hard.ts:321 header-injection <- decodeURIComponent(String(req.query.location))",
+  "hard.ts:332 xss <- `<ul>${comments.map(c => `<li>${c}</li>`).join(\"\")}</ul>`",
+  "hard.ts:340 xss <- responseCache.get(cacheKey)",
+  "hard.ts:345 xss <- body",
+  "hard.ts:353 ssrf <- host",
+  "hard.ts:363 ssrf <- target",
+  "hard.ts:375 command-injection <- cmd",
+  "hard.ts:384 path-traversal <- destination",
+  "hard.ts:391 sql-injection <- id",
+  "hard.ts:404 xss <- value",
+  "hard.ts:414 xss <- `<script>const x = '${value}';</script>`",
+  "hard.ts:421 xss <- `<div>${decoded}</div>`",
+  "hard.ts:429 xss <- `<div>${sanitizeThenAppend( String(req.query.value), String(",
+  "hard.ts:438 xss <- `<p>${output}</p>`",
+  "hard.ts:445 xss <- `<div>${obj.value}</div>`",
+  "hard.ts:452 sql-injection <- value",
+  "hard.ts:460 xss <- combine(\"values\", String(req.query.a), String(req.query.b), ",
+  "hard.ts:467 xss <- result",
+  "hard.ts:472 sql-injection <- -",
+  "hard.ts:476 sql-injection <- query",
+  "hard.ts:484 xss <- result",
+  "hard.ts:497 sql-injection <- -",
+  "hard.ts:499 sql-injection <- orderBy(String(req.query.sort))",
+  "hard.ts:504 redos <- String(req.query.pattern)",
+  "hard.ts:509 redos <- pattern",
+  "hard.ts:51 sql-injection <- -",
+  "hard.ts:517 eval-exec <- String(req.query.module)",
+  "hard.ts:523 path-traversal <- path.resolve(\"/etc/myapp\", `${name}.json`)",
+  "hard.ts:533 header-injection <- parsed.value",
+  "hard.ts:542 xss <- `<span>${input}</span>`",
+  "hard.ts:55 sql-injection <- query",
+  "hard.ts:551 xss <- makeRenderer(String(req.query.value))()",
+  "hard.ts:571 mass-assignment <- req.body",
+  "hard.ts:575 jwt-none-alg <- manual JWT decode",
+  "hard.ts:588 weak-crypto <- -",
+  "hard.ts:594 timing-attack <- String(req.query.token)",
+  "hard.ts:600 insecure-randomness <- -",
+  "hard.ts:606 command-injection <- `echo ${env.TOOL_ARGS}`",
+  "hard.ts:606 eval-exec <- -",
+  "hard.ts:66 sql-injection <- sqlPart",
+  "hard.ts:77 sql-injection <- stored",
+  "hard.ts:92 command-injection <- command",
+  "hard.ts:92 eval-exec <- -",
+  "hard.ts:97 argument-injection <- config.argument",
+  "hard.ts:97 command-injection <- config.executable"
+ ],
+ "cross-file/typescript/imported function": [
+  "src/r.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/three files: handler -> forward -> sink": [
+  "src/a.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/re-export barrel": [
+  "src/api.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/service -> repository (two hops, methods)": [
+  "src/r.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/sink in a private helper of the imported function": [
+  "src/r.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/command injection through a helper module": [
+  "src/r.ts:2 command-injection <- req.query.dir"
+ ],
+ "cross-file/typescript/negative: parameterised callee": [],
+ "cross-file/typescript/negative: callee coerces to an integer": [
+  "src/db.ts:3 sql-injection <- -"
+ ],
+ "cross-file/typescript/negative: constant argument": [
+  "src/db.ts:2 sql-injection <- -"
+ ],
+ "cross-file/typescript/negative: array .find is not the service's find": [
+  "src/r.ts:2 nosql-injection <- req.query.id",
+  "src/svc.ts:2 sql-injection <- -"
+ ],
+ "cross-file/python/imported function": [
+  "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/three modules: view -> forward -> sink": [
+  "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/namespace import (from . import db)": [
+  "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/service -> repository (two hops, methods)": [
+  "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/command injection through a helper module": [
+  "app/sh.py:3 eval-exec <- -",
+  "app/views.py:3 command-injection <- request.GET.get(\"dir\")"
+ ],
+ "cross-file/python/negative: parameterised callee": [],
+ "cross-file/python/negative: callee coerces to int": [
+  "app/db.py:3 sql-injection <- -"
+ ],
+ "cross-file/python/negative: constant argument": [
+  "app/db.py:2 sql-injection <- -"
+ ],
+ "cross-file/python/negative: str.find is not the service's find": [
+  "app/svc.py:3 sql-injection <- -"
+ ],
+ "cross-file/java/@Autowired service": [
+  "UserController.java:3 sql-injection <- id"
+ ],
+ "cross-file/java/constructor-injected service": [
+  "UserController.java:4 sql-injection <- id"
+ ],
+ "cross-file/java/controller -> service -> repository": [
+  "UserController.java:3 sql-injection <- id"
+ ],
+ "cross-file/java/command injection in a service": [
+  "UserController.java:3 command-injection <- id"
+ ],
+ "cross-file/java/negative: PreparedStatement service": [],
+ "cross-file/java/negative: same-named method on an unrelated type": [
+  "UserService.java:2 sql-injection <- -"
+ ],
+ "cross-file/java/negative: service parses an integer first": [],
+ "cross-file/java/negative: constant argument": [
+  "UserService.java:2 sql-injection <- -"
+ ],
+ "cross-file/csharp/constructor-injected field": [
+  "UserController.cs:4 bola-missing-ownership-check <- id",
+  "UserController.cs:4 sql-injection <- id"
+ ],
+ "cross-file/csharp/interface-typed field": [
+  "UserController.cs:3 bola-missing-ownership-check <- id",
+  "UserController.cs:3 sql-injection <- id"
+ ],
+ "cross-file/csharp/primary-constructor parameter": [
+  "UserController.cs:2 bola-missing-ownership-check <- id",
+  "UserController.cs:2 sql-injection <- id"
+ ],
+ "cross-file/csharp/negative: EF-parameterised service": [
+  "UserController.cs:3 bola-missing-ownership-check <- id"
+ ],
+ "cross-file/csharp/negative: same-named method on an unrelated type": [
+  "UserController.cs:3 bola-missing-ownership-check <- id",
+  "UserService.cs:2 sql-injection <- -"
+ ],
+ "cross-file/csharp/negative: service parses an integer first": [
+  "UserController.cs:3 bola-missing-ownership-check <- id",
+  "UserService.cs:2 sql-injection <- -"
+ ],
+ "cross-file/csharp/negative: constant argument": [],
+ "cross-file/go/package function": [
+  "api/c/user.go:3 sql-injection <- r.URL.Query().Get(\"id\")",
+  "api/models/store.go:3 sql-injection <- -"
+ ],
+ "cross-file/go/aliased import": [
+  "api/c/user.go:3 sql-injection <- r.URL.Query().Get(\"id\")",
+  "api/models/store.go:3 sql-injection <- -"
+ ],
+ "cross-file/go/same-package forwarder in the callee package": [
+  "api/c/user.go:3 sql-injection <- r.URL.Query().Get(\"id\")",
+  "api/models/store.go:3 sql-injection <- -"
+ ],
+ "cross-file/go/method through a struct field": [
+  "api/c/user.go:4 nosql-injection <- r.URL.Query().Get(\"id\")",
+  "api/c/user.go:4 sql-injection <- r.URL.Query().Get(\"id\")",
+  "api/models/store.go:6 sql-injection <- -"
+ ],
+ "cross-file/go/decoded filter document into a mongo lookup": [
+  "api/c/coupon.go:7 nosql-injection <- bsonMap"
+ ],
+ "cross-file/go/negative: parameterised callee": [
+  "api/models/store.go:3 sql-injection <- -",
+  "api/models/store.go:6 sql-injection <- -"
+ ],
+ "cross-file/go/negative: constant argument": [
+  "api/models/store.go:3 sql-injection <- -",
+  "api/models/store.go:6 sql-injection <- -"
+ ],
+ "cross-file/go/negative: callee converts with strconv.Atoi": [
+  "api/models/store.go:3 sql-injection <- -",
+  "api/models/store.go:6 sql-injection <- -"
+ ],
+ "cross-file/go/negative: callee sinks its own input, not the caller's argument": [
+  "api/models/p.go:2 sql-injection <- \"SELECT * FROM u WHERE id = \" + r.URL.Query().Get(\"q\")"
+ ],
+ "cross-file/php/__DIR__-anchored include": [
+  "index.php:3 sql-injection <- $_GET['id']"
+ ],
+ "cross-file/php/relative include + forwarder": [
+  "app/index.php:3 sql-injection <- $_POST['id']"
+ ],
+ "cross-file/php/constant-prefixed include": [
+  "app/index.php:3 sql-injection <- $_GET['id']"
+ ],
+ "cross-file/php/transitive include, case-insensitive call": [
+  "index.php:3 sql-injection <- $_GET['id']"
+ ],
+ "cross-file/php/command injection in an included helper": [
+  "index.php:3 command-injection <- $_GET['dir']"
+ ],
+ "cross-file/php/negative: file never included": [],
+ "cross-file/php/negative: callee applies intval": [],
+ "cross-file/php/negative: constant argument": [],
+ "cross-file/php/negative: ambiguous include suffix": [],
+ "cross-file/typescript/CommonJS require + module.exports": [
+  "src/r.js:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/namespace import (import * as db)": [
+  "src/r.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/default-exported function, awaited": [
+  "src/r.ts:2 sql-injection <- req.query.id"
+ ],
+ "cross-file/typescript/wrong-class sanitiser in the caller (basename before SQL)": [
+  "src/r.ts:3 sql-injection <- path.basename(req.query.id)"
+ ],
+ "cross-file/typescript/negative: right-class sanitiser in the caller (basename before a file read)": [],
+ "cross-file/python/renamed import (as rq)": [
+  "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/service injected through __init__": [
+  "app/views.py:6 sql-injection <- request.GET.get(\"id\")"
+ ],
+ "cross-file/python/wrong-class sanitiser in the caller (html.escape before SQL)": [
+  "app/views.py:4 sql-injection <- html.escape(request.GET.get(\"id\"))"
+ ],
+ "cross-file/python/negative: self.run_query is not the imported function": [
+  "app/db.py:2 sql-injection <- -"
+ ],
+ "cross-file/java/static utility method": [
+  "UserController.java:3 sql-injection <- id"
+ ],
+ "cross-file/java/interface field, implementation in another file": [
+  "UserController.java:3 sql-injection <- id"
+ ],
+ "cross-file/java/XPath query built in a service": [
+  "UserController.java:3 xpath-injection <- id"
+ ],
+ "cross-file/csharp/static helper class": [
+  "UserController.cs:3 bola-missing-ownership-check <- id",
+  "UserController.cs:3 sql-injection <- id"
+ ],
+ "cross-file/csharp/command injection in a service": [
+  "UserController.cs:3 command-injection <- id"
+ ],
+ "cross-file/go/method through a typed parameter": [
+  "api/c/user.go:3 sql-injection <- r.URL.Query().Get(\"id\")",
+  "api/models/store.go:6 sql-injection <- -"
+ ],
+ "cross-file/go/path traversal in a helper package": [
+  "api/c/user.go:3 path-traversal <- r.URL.Query().Get(\"f\")"
+ ],
+ "cross-file/php/class method from an included file": [
+  "index.php:4 sql-injection <- $_GET['id']"
+ ],
+ "cross-file/php/static method from an included file": [
+  "index.php:3 sql-injection <- $_GET['id']"
+ ],
+ "cross-file/php/negative: a user class's find() is not a MongoDB find()": [],
+ "cross-file/php/wrong-class sanitiser in the caller (htmlspecialchars before SQL)": [
+  "index.php:3 sql-injection <- htmlspecialchars($_GET['id'])"
+ ],
+ "interprocedural/JS-01": [],
+ "interprocedural/JS-02": [],
+ "interprocedural/JS-03": [
+  "js-03.js:12 command-injection <- command"
+ ],
+ "interprocedural/JS-04": [],
+ "interprocedural/JS-05": [],
+ "interprocedural/JS-06": [
+  "js-06.js:11 xss <- output"
+ ],
+ "interprocedural/PY-01": [],
+ "interprocedural/PY-02": [
+  "py_02.py:13 eval-exec <- -"
+ ],
+ "interprocedural/PY-03": [
+  "py_03.py:10 eval-exec <- -"
+ ],
+ "interprocedural/PY-04": [],
+ "interprocedural/PY-05": [],
+ "interprocedural/PY-06": [
+  "py_06.py:10 xss <- html"
+ ],
+ "interprocedural/GO-01": [
+  "go_01.go:6 path-traversal <- job.Path"
+ ],
+ "interprocedural/GO-02": [
+  "go_02.go:6 ssrf <- target"
+ ],
+ "interprocedural/GO-03": [
+  "go_03.go:5 command-injection <- command"
+ ],
+ "interprocedural/GO-04": [
+  "go_04.go:7 path-traversal <- destination"
+ ],
+ "interprocedural/GO-05": [
+  "go_05.go:4 path-traversal <- path"
+ ],
+ "interprocedural/JAVA-01": [
+  "SessionPathServlet.java:18 trust-boundary <- path",
+  "SessionPathServlet.java:7 path-traversal <- path"
+ ],
+ "interprocedural/JAVA-02": [
+  "AsyncDeserializeServlet.java:18 insecure-deserialization <- in"
+ ],
+ "interprocedural/JAVA-03": [
+  "RedirectServlet.java:9 open-redirect <- target"
+ ],
+ "interprocedural/JAVA-04": [
+  "CommandServlet.java:11 command-injection <- value"
+ ],
+ "interprocedural/JAVA-05": [
+  "XmlServlet.java:15 xxe <- -",
+  "XmlServlet.java:18 xxe <- new InputSource(new StringReader(xml))"
+ ]
+}

@@ -1,0 +1,14 @@
+const express = require("express");
+const { exec } = require("child_process");
+const app = express();
+async function load(req) { return Promise.resolve(req.query.arg); }
+async function prepare(value) {
+  const alias = value;
+  return "echo " + alias;
+}
+app.get("/run", async (req, res) => {
+  const raw = await load(req);
+  const command = await prepare(raw);
+  exec(command);
+  res.send("done");
+});

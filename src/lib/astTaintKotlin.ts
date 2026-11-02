@@ -50,7 +50,10 @@ import {
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry,
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { sourceNames } from "./taint/models/sources";
+import { SINK_MODELS, sinkLabel, sinkModelsFor } from "./taint/models/sinks";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 import { authzVerdict, classifyGuardName, isOwnerField, type AuthzKind } from "./taint/principal";
@@ -63,7 +66,8 @@ function nodeRequire(): NodeJS.Require {
 }
 
 /** Same finding vocabulary as Java: Kotlin findings are JVM findings everywhere downstream. */
-export type AstTaintKotlinId = AstTaintJavaId;
+// The JVM vocabulary, less what only the Java engine checks (XML parsers with external entities left on).
+export type AstTaintKotlinId = Exclude<AstTaintJavaId, "xxe">;
 
 export interface AstTaintKotlinFinding {
   id:         AstTaintKotlinId;
@@ -328,25 +332,13 @@ function classAnnotationNodes(cls: SyntaxNode): SyntaxNode[] {
 
 // ── Sources ────────────────────────────────────────────────────────────────────────────────────────────────
 
-const SPRING_SOURCE_ANNOTATIONS = new Set([
-  "PathVariable", "RequestParam", "RequestBody", "RequestHeader", "ModelAttribute", "CookieValue", "MatrixVariable", "RequestPart",
-  "QueryParam", "PathParam", "FormParam", "HeaderParam", "CookieParam", "BeanParam", "MatrixParam",
-]);
+// Spring/JAX-RS parameter annotations, Servlet + WebFlux request methods, and Kotlin's property syntax for the
+// same getters (`request.queryString`): shared JVM source models (taint/models/sources.ts).
+const SPRING_SOURCE_ANNOTATIONS = sourceNames("kt", "param-annotation");
 /** Parameter types that can't carry an injection payload -- still attacker-CHOSEN (which record), so CONTROL stays. */
 const SAFE_SCALAR_TYPE_RE = /^(?:Int|Long|Short|Byte|Double|Float|Boolean|UInt|ULong|UUID|LocalDate|LocalDateTime|LocalTime|Instant|OffsetDateTime|ZonedDateTime|BigDecimal|BigInteger|Integer|Character|Char)$/;
-const SERVLET_SOURCE_CALLS = new Set([
-  "getParameter", "getHeader", "getParameterValues", "getQueryString", "getParameterMap", "getParameterNames",
-  "getHeaders", "getCookies", "getRequestURI", "getRequestURL", "getPathInfo", "getReader", "getInputStream", "getPart",
-  "getParts", "getRemoteUser",
-  // WebFlux ServerRequest / ServerHttpRequest
-  "queryParam", "queryParams", "pathVariable", "pathVariables", "formData", "multipartData", "bodyToMono", "bodyToFlux",
-  "awaitBody", "awaitBodyOrNull", "awaitFormData", "awaitMultipartData",
-]);
-/** Kotlin property syntax for the same getters (`request.queryString`). */
-const SERVLET_SOURCE_PROPS = new Set([
-  "queryString", "requestURI", "requestURL", "pathInfo", "cookies", "inputStream", "reader", "parameterMap", "parameterNames",
-  "headerNames", "queryParams", "headers", "uri", "body", "parts",
-]);
+const SERVLET_SOURCE_CALLS = sourceNames("kt", "request-call");
+const SERVLET_SOURCE_PROPS = sourceNames("kt", "request-property");
 const REQUEST_VAR_RE = /^(?:request|req|httpRequest|servletRequest|httpServletRequest|serverRequest)$/;
 const REQUEST_TYPE_RE = /^(?:Http)?ServletRequest(?:Wrapper)?$|^WebRequest$|^NativeWebRequest$|^ServerHttpRequest$|^ServerRequest$/;
 /** Android: text a user types into an input view (`EditText.text`), what another app put in an Intent, a deep link's query
@@ -393,22 +385,11 @@ const OPAQUE_RESULT_METHODS = new Set([
 ]);
 const OPAQUE_PROPS = new Set(["size", "length", "indices", "lastIndex", "isEmpty", "isNotEmpty", "javaClass", "hashCode", "class"]);
 /** Methods on a value whose ARGUMENTS also flow into the result. */
-const ARG_FLOW_METHODS = new Set([
-  "plus", "format", "replace", "replaceFirst", "replaceRange", "append", "appendLine", "insert", "concat", "copy", "resolve",
-  "resolveSibling", "queryParam", "path", "pathSegment", "host", "scheme", "uri", "fromUriString", "fromHttpUrl", "port",
-  "plusElement", "zip", "padStart", "padEnd", "replaceAll", "with", "withPath", "setPath", "addPathSegment", "addQueryParameter",
-  "build", "buildAndExpand", "expand", "header", "body", "put", "putIfAbsent", "getOrDefault", "getOrElse", "orElse", "or",
-]);
+const ARG_FLOW_METHODS = propagatorNames("kt", "method-args");
 /** Methods that write their arguments INTO the receiver variable. */
-const MUTATOR_METHODS = new Set(["append", "appendLine", "add", "addAll", "put", "putAll", "set", "insert", "push", "offer", "addFirst", "addLast", "plusAssign", "putIfAbsent", "setProperty"]);
+const MUTATOR_METHODS = propagatorNames("kt", "mutator");
 /** Functions / constructors whose result carries their arguments. Uppercase constructors carry them by default. */
-const PASSTHROUGH_CALLS = new Set([
-  "String.format", "listOf", "mutableListOf", "arrayListOf", "arrayOf", "setOf", "mutableSetOf", "hashSetOf", "mapOf",
-  "mutableMapOf", "hashMapOf", "linkedMapOf", "requireNotNull", "checkNotNull", "URI.create", "Paths.get", "Path.of",
-  "URLDecoder.decode", "String.valueOf", "Objects.toString", "Objects.requireNonNull", "UriComponentsBuilder.fromHttpUrl",
-  "UriComponentsBuilder.fromUriString", "MessageFormat.format", "StringBuilder", "buildString", "sequenceOf", "Optional.of",
-  "Optional.ofNullable", "Base64.getDecoder.decode", "Base64.getUrlDecoder.decode", "Base64.getMimeDecoder.decode",
-]);
+const PASSTHROUGH_CALLS = propagatorNames("kt", "call-args");
 const DECODER_RE = /(?:URLDecoder\.decode|getDecoder\.decode|getUrlDecoder\.decode|getMimeDecoder\.decode)$/;
 /** Lambda-taking calls: what the result is. */
 const RECEIVER_RESULT_LAMBDAS = new Set(["also", "apply", "takeIf", "takeUnless", "filter", "filterNot", "onEach", "sortedBy", "sortedByDescending", "distinctBy", "filterIndexed", "ifEmpty", "ifBlank"]);
@@ -451,9 +432,8 @@ const FILES_FIRST_ARG = new Set([
 ]);
 /** `File(x).name` / `Paths.get(x).fileName`: only the last segment survives -- reading it is not a traversal. */
 const NAME_ONLY_MEMBERS = new Set(["name", "fileName", "nameWithoutExtension", "extension", "getName", "getFileName"]);
-const URL_READ_METHODS = new Set(["openConnection", "openStream", "readText", "readBytes", "getContent", "content"]);
-const REST_TEMPLATE_METHODS = new Set(["getForObject", "getForEntity", "postForObject", "postForEntity", "exchange", "patchForObject", "postForLocation", "headForHeaders", "optionsForAllow"]);
-const HTTP_CLIENT_METHODS = new Set(["get", "post", "put", "delete", "patch", "head", "options", "request", "prepareGet", "preparePost", "preparePut", "prepareDelete", "prepareRequest", "submitForm"]);
+// the request methods of an HTTP client (models/sinks.ts kt:http-client), also the calls whose lambda can set `url(...)`
+const HTTP_CLIENT_METHODS = new Set(SINK_MODELS.flatMap(m => m.id === "kt:http-client" && m.match.kind === "receiver" ? m.match.methods : []));
 const HTTP_CLIENT_RECV_RE = /client|http|restTemplate|webClient|okHttp/i;
 const HTTP_CLIENT_TYPE_RE = /^(?:HttpClient|OkHttpClient|RestTemplate|WebClient|RestClient|CloseableHttpClient)$/;
 const HTTP_HEADER_NAME_RE = /^(?:X-[\w-]+|Content-[\w-]+|Location|Set-Cookie|Refresh|Link|Cache-Control|Access-Control-[\w-]+|Authorization|Cookie|Retry-After|WWW-Authenticate|Referer|Origin|Host)$/i;
@@ -1590,35 +1570,41 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── SSRF ──
-  if (recv && REST_TEMPLATE_METHODS.has(name) && pos[0]) checkSsrfArg(ctx, node, pos[0], env, mask, `RestTemplate.${name}`);
-  if (recv && URL_READ_METHODS.has(name)) {
-    // URL(x).readText() / URI(x).toURL().openConnection() / a URL held in a variable
-    let base: SyntaxNode | null = recv;
-    if (base.type === "call_expression" && callParts(base).name === "toURL") base = callParts(base).recv;
-    if (base?.type === "simple_identifier") base = resolveVar(base);
-    if (base?.type === "call_expression" && /^(?:URL|URI|URI\.create)$/.test(calleeText(base) ?? "")) {
-      const a = positionalArgs(base)[0];
-      if (a) checkSsrfArg(ctx, node, a, env, mask, `URL.${name}`);
-    } else if (recv.type === "simple_identifier" && /^(?:URL|URI)$/.test(recvType)) {
-      fireOn(ctx, "ssrf", node, recv, mask(recv, env), `URL.${name}`);
+  // each matching model is judged on its own, in registry order (models/sinks.ts)
+  const sinkCallee = ctor ? `new ${ctor}` : recv ? `${recvText}.${name}` : name;
+  for (const { model, positions } of sinkModelsFor("kt", sinkCallee)) {
+    const id = model.rule as AstTaintKotlinId;
+    const label = sinkLabel(model, sinkCallee);
+    const keyword = model.args.keywords?.map(k => namedArg(node, k)).find(a => !!a);
+    const targets = keyword ? [keyword] : positions.map(i => pos[i]).filter((a): a is SyntaxNode => !!a);
+    const judge = (a: SyntaxNode) => model.target === "host" ? fireOn(ctx, id, node, a, mask(a, env), label) : checkSsrfArg(ctx, node, a, env, mask, label);
+    switch (model.args.select) {
+      case "url-receiver": {
+        // URL(x).readText() / URI(x).toURL().openConnection() / a URL held in a variable
+        let base: SyntaxNode | null = recv;
+        if (base?.type === "call_expression" && callParts(base).name === "toURL") base = callParts(base).recv;
+        if (base?.type === "simple_identifier") base = resolveVar(base);
+        if (base?.type === "call_expression" && /^(?:URL|URI|URI\.create)$/.test(calleeText(base) ?? "")) {
+          const a = positionalArgs(base)[0];
+          if (a) checkSsrfArg(ctx, node, a, env, mask, label);
+        } else if (recv?.type === "simple_identifier" && /^(?:URL|URI)$/.test(recvType)) {
+          fireOn(ctx, id, node, recv, mask(recv, env), label);
+        }
+        break;
+      }
+      case "http-client-receiver":
+        if (isHttpClientReceiver(recv, ctx)) for (const a of targets) if (a.type !== "lambda_literal") judge(a);
+        break;
+      case "client-request-lambda":
+        if (targets.length && insideLambdaOf(node, c => HTTP_CLIENT_METHODS.has(callParts(c).name) && isHttpClientReceiver(callParts(c).recv, ctx))) targets.forEach(judge);
+        break;
+      case "receiver-value":
+        if (recv) judge(recv);
+        break;
+      default:
+        targets.forEach(judge);
     }
   }
-  if (recv && name === "uri" && pos[0] && (/webclient|client|HttpRequest|newBuilder/i.test(recvText) || /\.(?:get|post|put|delete|patch|head|method)$/.test(recvText))) {
-    checkSsrfArg(ctx, node, pos[0], env, mask, `${recvText.split(".")[0]}.uri`);
-  }
-  if (recv && (name === "url" || name === "baseUrl") && pos[0] && /Builder|builder|WebClient|RestClient/.test(recvText)) checkSsrfArg(ctx, node, pos[0], env, mask, `${name}`);
-  if (!recv && name === "url" && pos[0] && insideLambdaOf(node, c => HTTP_CLIENT_METHODS.has(callParts(c).name) && isHttpClientReceiver(callParts(c).recv, ctx))) {
-    checkSsrfArg(ctx, node, pos[0], env, mask, "client.request { url(...) }");
-  }
-  if (recv && HTTP_CLIENT_METHODS.has(name) && isHttpClientReceiver(recv, ctx) && !REST_TEMPLATE_METHODS.has(name)) {
-    const a = namedArg(node, "urlString") ?? pos[0];
-    if (a && a.type !== "lambda_literal") checkSsrfArg(ctx, node, a, env, mask, `${recvText}.${name}`);
-  }
-  if (["WebClient.create", "HttpRequest.newBuilder", "Jsoup.connect", "InetAddress.getByName", "InetAddress.getAllByName", "Fuel.get", "Fuel.post", "Fuel.put", "Fuel.delete"].includes(ct) && pos[0]) {
-    checkSsrfArg(ctx, node, pos[0], env, mask, ct);
-  }
-  if (recv && /^http(?:Get|Post|Put|Delete|Patch|Head)$/.test(name)) checkSsrfArg(ctx, node, recv, env, mask, `.${name}()`);
-  if (ctor === "Socket" && pos[0]) fireOn(ctx, "ssrf", node, pos[0], mask(pos[0], env), "Socket");
 
   // ── Redirect ──
   if (recv && name === "sendRedirect" && pos[0]) checkRedirectTarget(ctx, node, pos[0], env, mask, "sendRedirect");

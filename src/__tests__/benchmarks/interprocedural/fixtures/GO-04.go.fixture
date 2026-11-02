@@ -1,0 +1,16 @@
+package main
+import ("net/http"; "os"; "path/filepath")
+func extract(root, name string) error {
+  entries := map[string]string{"entry": name}
+  selected := entries["entry"]
+  destination := filepath.Join(root, selected)
+  file, err := os.Create(destination)
+  if err != nil { return err }
+  return file.Close()
+}
+func handler(w http.ResponseWriter, r *http.Request) {
+  name := r.URL.Query().Get("name")
+  _ = extract("/tmp/unpack", name)
+  w.Write([]byte("done"))
+}
+func main() { http.HandleFunc("/extract", handler); http.ListenAndServe(":8080", nil) }

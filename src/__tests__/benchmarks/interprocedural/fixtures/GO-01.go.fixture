@@ -1,0 +1,14 @@
+package main
+import ("net/http"; "os")
+type Job struct { Path string }
+var jobs = make(chan Job)
+func makeJob(path string) Job { return Job{Path: path} }
+func write(job Job) { _ = os.WriteFile(job.Path, []byte("data"), 0644) }
+func worker() { for job := range jobs { write(job) } }
+func handler(w http.ResponseWriter, r *http.Request) {
+  path := r.URL.Query().Get("path")
+  job := makeJob(path)
+  jobs <- job
+  w.Write([]byte("queued"))
+}
+func main() { go worker(); http.HandleFunc("/write", handler); http.ListenAndServe(":8080", nil) }

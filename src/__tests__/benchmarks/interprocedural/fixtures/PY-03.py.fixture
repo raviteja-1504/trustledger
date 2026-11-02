@@ -1,0 +1,14 @@
+from flask import Flask, request
+import subprocess
+app = Flask(__name__)
+def arguments():
+    value = request.args.get("cmd")
+    yield value
+def consume(values):
+    for item in values:
+        command = "echo " + item
+        subprocess.run(command, shell=True)
+@app.get("/run")
+def run():
+    consume(arguments())
+    return "submitted"

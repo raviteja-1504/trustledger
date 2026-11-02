@@ -1,0 +1,18 @@
+package main
+import "net/http"
+type Fetcher interface { Fetch(string) error }
+type Client struct{}
+func (c *Client) Fetch(target string) error {
+  resp, err := http.Get(target)
+  if err != nil { return err }
+  defer resp.Body.Close()
+  return nil
+}
+func execute(f Fetcher, target string) error { return f.Fetch(target) }
+func handler(w http.ResponseWriter, r *http.Request) {
+  target := r.URL.Query().Get("url")
+  var fetcher Fetcher = &Client{}
+  _ = execute(fetcher, target)
+  w.Write([]byte("done"))
+}
+func main() { http.HandleFunc("/proxy", handler); http.ListenAndServe(":8080", nil) }

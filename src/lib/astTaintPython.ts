@@ -54,6 +54,8 @@ import {
   type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkModelFor } from "./taint/models/sinks";
 import { authzVerdict, classifyGuardName, isAuthenticationGuardName, isMutatingLookup, isOwnerField, isPrincipalParamName, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
 import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
 
@@ -759,21 +761,16 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
     const exe = cmd.namedChildren.find(c => !!c) ?? null;
     return exe ? { id: "command-injection", sinkExpr: text, args: [exe] } : null;
   }
-  if (((parts[0] === "requests" || resolvedModule === "requests") &&
-       ["get", "post", "put", "delete", "patch", "request", "head"].includes(tail)) ||
-      ((parts[0] === "httpx" || resolvedModule === "httpx") &&
-       ["get", "post", "put", "delete", "patch", "request", "head", "stream"].includes(tail))) {
-    // Where the request goes -- the URL, and `proxies` (the request is routed through that host) -- not the
-    // params/data/json/headers/cookies sent there. request()/stream() take (method, url).
-    const url = keywordArgPy(args, ["url"]) ?? positional[tail === "request" || tail === "stream" ? 1 : 0];
-    const target = [url, keywordArgPy(args, ["proxies", "proxy"])].filter((n): n is SyntaxNode => !!n);
-    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
-  }
-  if (text === "urllib.request.urlopen" || (resolvedModule === "urllib.request" && tail === "urlopen") ||
-      (resolvedModule === "urllib" && text.endsWith("urlopen")) || text === "urllib.request.Request" ||
-      (resolvedModule === "urllib.request" && tail === "Request")) {
-    const url = first ?? keywordArgPy(args, ["url"]);
-    return url ? { id: "ssrf", sinkExpr: text, args: [url] } : null;
+  // HTTP clients (taint/models/sinks.ts): where the request goes -- the URL (by keyword, else position), and `proxies`
+  // (the request is routed through that host) -- not the params/data/json/headers/cookies sent there
+  const modelled = sinkModelFor("py", text, resolvedModule);
+  if (modelled) {
+    const { model, positions } = modelled;
+    const byKeyword = model.args.keywords ? keywordArgPy(args, model.args.keywords) ?? null : null;
+    // keyword first (requests.get(url=...)), or the position first (urlopen(url) before urlopen(url=...))
+    const url = model.args.keywordFallback ? positional[positions[0]] ?? byKeyword : byKeyword ?? positional[positions[0]];
+    const target = [url, model.args.extraKeywords ? keywordArgPy(args, model.args.extraKeywords) : null].filter((n): n is SyntaxNode => !!n);
+    return target.length ? { id: model.rule as AstTaintPyId, sinkExpr: text, args: target } : null;
   }
   if (text === "os.path.join" || (resolvedModule === "os.path" && tail === "join")) {
     return { id: "path-traversal", sinkExpr: text, args: positional };
@@ -965,29 +962,10 @@ const MODEL_READ_METHODS_PY = new Set(["get", "filter", "all", "first", "last", 
  * taintMask's existing field-sensitive `recv.field` tracking via a plain identifier read of the receiver. */
 const MODEL_SAVE_METHODS_PY = new Set(["save"]);
 
-const PY_PASSTHROUGH = new Set([
-  "str", "bytes", "bytearray", "repr", "ascii", "list", "tuple", "set", "frozenset", "dict", "sorted", "reversed",
-  "enumerate", "zip", "map", "filter", "iter", "next", "getattr", "copy.copy", "copy.deepcopy",
-  "json.loads", "json.dumps", "json.load",
-  // Regex substitution reshapes a string without validating it. (re.escape is deliberately absent: its result
-  // stays untainted so a pattern built from it isn't reported as regex injection -- there is no dedicated ReDoS
-  // class to clear on its own.)
-  "re.sub", "re.subn",
-  "base64.b64decode", "base64.b64encode", "base64.urlsafe_b64decode", "base64.urlsafe_b64encode",
-  "b64decode", "b64encode", "urlsafe_b64decode", "urlsafe_b64encode",
-  "urllib.parse.unquote", "urllib.parse.unquote_plus", "urllib.parse.unquote_to_bytes", "urllib.parse.urljoin",
-  "urllib.parse.urlparse", "urllib.parse.urlunparse", "urllib.parse.urlsplit", "urllib.parse.urlunsplit",
-  "urllib.parse.parse_qs", "urllib.parse.parse_qsl", "urllib.parse.urlencode",
-  "unquote", "unquote_plus", "urljoin", "urlparse", "urlunparse", "urlsplit", "urlunsplit", "parse_qs", "parse_qsl",
-  "os.path.join", "os.path.abspath", "os.path.normpath", "os.path.realpath", "os.path.expanduser", "os.path.dirname",
-  "os.fspath", "pathlib.Path", "Path", "PurePath", "html.unescape", "textwrap.dedent", "shlex.split",
-]);
-const PY_DECODERS = new Set([
-  "urllib.parse.unquote", "urllib.parse.unquote_plus", "urllib.parse.unquote_to_bytes", "unquote", "unquote_plus",
-  "base64.b64decode", "base64.urlsafe_b64decode", "b64decode", "urlsafe_b64decode", "html.unescape",
-]);
+const PY_PASSTHROUGH = propagatorNames("py", "call-args");
+const PY_DECODERS = propagatorNames("py", "decoder");
 // Methods whose result also includes their ARGUMENTS (joined items, replacement text, defaults).
-const PY_ARG_CARRYING_METHODS = new Set(["join", "replace", "format", "ljust", "rjust", "center", "removeprefix", "removesuffix"]);
+const PY_ARG_CARRYING_METHODS = propagatorNames("py", "method-args");
 // d.get(key, default) / d.pop(key, default): only the DEFAULT can be the result besides the receiver's own contents
 const PY_DEFAULT_CARRYING_METHODS = new Set(["get", "pop", "setdefault"]);
 // A local class method sharing one of these names is indistinguishable from the builtin -- not resolved by name.
@@ -1471,6 +1449,7 @@ function makeTaintMaskPy(
   localFns: Map<string, LocalFn>, propagating: PropagatingPy, inDjangoRequestFn: boolean,
   sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>, storedProvenance?: StoredProvenanceIO,
   sourceCall?: (call: SyntaxNode) => number,
+  passMethods?: PassMethodsPy,
 ) {
   let fnValueDepth = 0;
   const constEval = makeConstEvalPy();
@@ -1691,8 +1670,13 @@ function makeTaintMaskPy(
       // "...{}...".format(x) / sep.join(items) / d.get(k, default): the result also includes the arguments
       const withArgs = attr.attribute && PY_ARG_CARRYING_METHODS.has(attr.attribute) ? argsMask(args, env)
         : attr.attribute && PY_DEFAULT_CARRYING_METHODS.has(attr.attribute) && args[1] ? taintMask(args[1], env) : 0;
+      // `thing.doSomething(x)` on an object of some batch class: every batch method of that name returns argument i
+      // (builtin method names never get here: computePassMethodsPy leaves them out)
+      const pass = attr.attribute ? passMethods?.get(attr.attribute) : undefined;
+      let passed = 0;
+      if (pass) for (const [i, surviving] of pass) if (args[i]) passed |= taintMask(args[i], env) & surviving;
       // Passthrough method call on an already-tainted receiver (.strip()/.lower()/etc).
-      return recv | withArgs;
+      return recv | withArgs | passed;
     }
     return 0;
   };
@@ -1918,6 +1902,8 @@ interface WalkHooksPy {
   storedProvenance?: StoredProvenanceIO;
   /** Cross-file request-source helpers (main scan only; see makeSourceCallResolverPy). */
   sourceCall?: (call: SyntaxNode) => number;
+  /** Batch methods that return what they are given, by name (main scan only; see computePassMethodsPy). */
+  passMethods?: PassMethodsPy;
 }
 
 function createWalkerPy(h: WalkHooksPy) {
@@ -1925,7 +1911,7 @@ function createWalkerPy(h: WalkHooksPy) {
   const masks = new Map<boolean, TaintMaskFnPy>();
   const maskFor = (django: boolean): TaintMaskFnPy => {
     let m = masks.get(django);
-    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance, h.sourceCall); masks.set(django, m); }
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance, h.sourceCall, h.passMethods); masks.set(django, m); }
     return m;
   };
 
@@ -3099,6 +3085,34 @@ function classMethodsPy(root: SyntaxNode): Array<{ cls: string; name: string; fn
   return out;
 }
 
+/** Method name -> argument index (after `self`) -> the classes that survive from that argument to the return. */
+export type PassMethodsPy = ReadonlyMap<string, ReadonlyMap<number, number>>;
+
+/**
+ * Cross-file PASS-THROUGH methods: for every instance method of this file's classes (`Thing1.doSomething(self, x)`),
+ * which arguments reach its return value. scanner.ts keeps a name only when every batch definition of it passes the
+ * same argument through (a factory-made object may be any of them), so `thing.doSomething(param)` carries `param`.
+ * A method passing nothing through is listed too (empty), so it vetoes its name.
+ */
+export function computePassMethodsPy(content: string, filePath: string, presparsed?: SyntaxNode | null): Array<[string, Array<[number, number]>]> {
+  const out: Array<[string, Array<[number, number]>]> = [];
+  try {
+    const root = presparsed ?? parsePythonSourceSync(content, filePath);
+    if (!root) return out;
+    const localFns = collectLocalFunctionsPy(root);
+    const propagating = buildPropagatingMapPy(localFns, root);
+    for (const m of classMethodsPy(root)) {
+      if (!m.bound || PY_BUILTIN_METHOD_NAMES.has(m.name)) continue;
+      const shift = m.fn.paramShapes[0]?.name === "self" || m.fn.paramShapes[0]?.name === "cls" ? 1 : 0;
+      const found = computeReturnTaintPropagatingPy(m.fn, localFns, propagating, root);
+      out.push([m.name, [...found].filter(([i]) => i >= shift).map(([i, mask]) => [i - shift, mask] as [number, number])]);
+    }
+  } catch (err) {
+    console.error(`[astTaintPython] threw computing pass-through methods for ${filePath}:`, err);
+  }
+  return out;
+}
+
 /**
  * Cross-file request SOURCES: this file's module-level functions and class methods whose return value is request
  * data even when called with nothing tainted -- `def get_param(name): return request.args.get(name)`, or a wrapper
@@ -3264,6 +3278,8 @@ export function scanAstTaintPython(
   storedProvenance?: StoredProvenanceIO,
   // Batch-wide helpers that return request data (computeSourceFunctionsPy, module-qualified by scanner.ts).
   sourceFns?: ReadonlyMap<string, number>,
+  // Batch-wide pass-through methods (computePassMethodsPy, combined by scanner.ts).
+  passMethods?: PassMethodsPy,
 ): AstTaintPyFinding[] {
   try {
     const root = presparsed ?? parsePythonSourceSync(content, filePath);
@@ -3728,7 +3744,7 @@ export function scanAstTaintPython(
       if (m & classOf("xss")) emit("xss", expr, sourceLabelPy(expr), "handler return value");
     };
 
-    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance, sourceCall });
+    const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance, sourceCall, passMethods });
     const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
 
     walk(root, new Map(), false);

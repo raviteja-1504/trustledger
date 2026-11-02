@@ -1,0 +1,16 @@
+from flask import Flask, request
+from functools import wraps
+app = Flask(__name__)
+def capture(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        self.expression = request.args.get("expression")
+        return func(self, *args, **kwargs)
+    return wrapper
+class Calculator:
+    def __init__(self): self.expression = None
+    @capture
+    def run(self): return eval(self.expression)
+calculator = Calculator()
+@app.get("/calculate")
+def calculate(): return str(calculator.run())

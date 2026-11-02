@@ -57,6 +57,8 @@ import {
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkModelFor } from "./taint/models/sinks";
 import { anchoredPatternClears } from "./taint/charClass";
 import { authzVerdict, classifyGuardName, type AuthzKind } from "./taint/principal";
 
@@ -312,26 +314,12 @@ function setGoRequestVars(names: Iterable<string>, fields: Iterable<string> = []
 
 // Stdlib/utility calls whose RESULT carries the taint of their arguments (string, path, URL, JSON and
 // container plumbing that neither validates nor neutralizes anything). Opaque calls stay untainted.
-const GO_PASSTHROUGH = new Set([
-  "strings.TrimSpace", "strings.Trim", "strings.TrimLeft", "strings.TrimRight", "strings.TrimPrefix", "strings.TrimSuffix",
-  "strings.TrimFunc", "strings.ToLower", "strings.ToUpper", "strings.ToTitle", "strings.Title", "strings.Replace",
-  "strings.ReplaceAll", "strings.Join", "strings.Split", "strings.SplitN", "strings.SplitAfter", "strings.Fields",
-  "strings.Repeat", "strings.Map", "strings.NewReader", "strings.Clone",
-  "bytes.TrimSpace", "bytes.Trim", "bytes.ToLower", "bytes.ToUpper", "bytes.ReplaceAll", "bytes.NewBuffer",
-  "bytes.NewBufferString", "bytes.NewReader", "bytes.Join", "bytes.Split",
-  "fmt.Errorf", "url.QueryUnescape", "url.PathUnescape", "url.Parse", "url.ParseRequestURI", "url.JoinPath",
-  "filepath.Join", "filepath.Clean", "filepath.Abs", "filepath.Dir", "filepath.ToSlash", "filepath.FromSlash", "filepath.Rel",
-  "path.Join", "path.Clean", "path.Dir", "json.Marshal", "json.MarshalIndent", "json.NewDecoder", "xml.NewDecoder",
-  "gob.NewDecoder", "yaml.NewDecoder", "io.ReadAll", "ioutil.ReadAll", "bufio.NewReader", "bufio.NewScanner",
-  "html.UnescapeString", "hex.DecodeString", "hex.EncodeToString", "strconv.Quote", "template.HTML", "template.JS",
-  "template.JSStr", "template.URL", "template.CSS", "template.HTMLAttr", "textwrap.Dedent", "strconv.Itoa", "strconv.FormatInt",
-  "strconv.FormatUint",
-]);
-const GO_DECODERS = new Set(["url.QueryUnescape", "url.PathUnescape", "html.UnescapeString", "hex.DecodeString"]);
+const GO_PASSTHROUGH = propagatorNames("go", "call-args");
+const GO_DECODERS = propagatorNames("go", "decoder");
 const GO_BASE64_RE = /(?:^|\.)base64\.\w+\.(?:DecodeString|EncodeToString)$|(?:^|\.)base64\.(?:StdEncoding|URLEncoding|RawStdEncoding|RawURLEncoding)\.(?:DecodeString|EncodeToString)$/;
 // Methods whose result also includes their ARGUMENTS (replacement text) and container mutators.
-const GO_ARG_CARRYING_METHODS = new Set(["Replace", "ReplaceAll", "Join", "Sprintf", "Format"]);
-const GO_MUTATORS = new Set(["WriteString", "Write", "WriteByte", "WriteRune", "Add", "Set", "Push", "Store", "Put", "Insert", "Append", "Enqueue"]);
+const GO_ARG_CARRYING_METHODS = propagatorNames("go", "method-args");
+const GO_MUTATORS = propagatorNames("go", "mutator");
 const GO_BUILTIN_METHOD_NAMES = new Set([
   "Get", "Set", "Add", "Del", "Write", "WriteString", "Read", "Close", "Query", "Exec", "Execute", "Encode", "Decode",
   "String", "Error", "Join", "Split", "Replace", "Sprintf", "Format", "Lookup", "Open", "Run", "Do", "Next", "Scan",
@@ -588,12 +576,10 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     const cmd = execCommandArgvGo(call);
     return cmd ? { id: "command-injection", sinkExpr: text, args: cmd.command } : null;
   }
-  if (text === "http.Get" || text === "http.Post" || text === "http.Head" || text === "http.PostForm" ||
-      (["Get", "Post", "Head", "PostForm"].includes(tail) && /(?:^|\.)(?:client|Client|httpClient|http\.DefaultClient)$/.test(receiverText)) ||
-      /^net\.(?:Dial|DialTimeout|DialTCP|DialUDP)$/.test(text)) {
-    // The URL (or dial address) only: Post's content type and body, PostForm's values, are sent TO it.
-    return { id: "ssrf", sinkExpr: text, args: /^net\./.test(text) ? args.slice(1, 2) : args.slice(0, 1) };
-  }
+  // HTTP clients and dialers: the sink models (taint/models/sinks.ts) say which argument is the URL / address --
+  // Post's content type and body, PostForm's values, are sent TO it
+  const modelled = sinkModelFor("go", text);
+  if (modelled) return { id: modelled.model.rule as AstTaintGoId, sinkExpr: text, args: modelled.positions.map(i => args[i]).filter((a): a is SyntaxNode => !!a) };
   if ((head === "os" && FS_SINKS_GO.has(tail)) || (head === "ioutil" && (tail === "ReadFile" || tail === "WriteFile" || tail === "ReadDir")) ||
       /^filepath\.Walk(?:Dir)?$/.test(text) || text === "os.DirFS") {
     return { id: "path-traversal", sinkExpr: text, args: args.slice(0, 1).length ? args.slice(0, 1) : args };
@@ -2482,11 +2468,32 @@ export function scanAstTaintGo(
             const lTarget = left?.namedChildren.length === 1 ? left.namedChildren[0] : null;
             const rExpr = right?.namedChildren.length === 1 ? right.namedChildren[0] : null;
             if (lTarget?.type === "identifier" && rExpr) out.push({ name: lTarget.text, position: n.startIndex, rhsText: rExpr.text, line: lineOf(rExpr) });
+          } else if (n.type === "range_clause") {
+            // `for job := range jobs`: each loop variable is an element of what it ranges over
+            const right = n.childForFieldName("right");
+            for (const id of identifiersOf(n.childForFieldName("left") ?? n)) if (right) out.push({ name: id.text, position: n.startIndex, rhsText: right.text, line: lineOf(n) });
           }
           for (const c of n.namedChildren) if (c) visit(c);
         };
         visit(scope);
         return out;
+      },
+      // a closure's captured names come from the function it is written in
+      outerScope: (scope) => (scope.type === "func_literal" && scope.parent ? findEnclosingFunctionNodeGo(scope.parent) : null),
+      // a package-level variable (a channel, a map, a value) written in one function and read in another
+      globalWrites: (name) => {
+        if (!modulePkgNames.has(name)) return [];
+        const out: Array<{ scope: SyntaxNode | null; position: number; line: number; rhsText: string; label: string }> = [];
+        for (const s of findAllNodesGo(root, "send_statement")) {
+          const val = s.childForFieldName("value");
+          if (rootIdentGo(s.childForFieldName("channel"))?.text === name && val) out.push({ scope: findEnclosingFunctionNodeGo(s), position: s.startIndex, line: lineOf(s), rhsText: val.text, label: s.text });
+        }
+        for (const a of findAllNodesGo(root, "assignment_statement")) {
+          const target = a.childForFieldName("left")?.namedChildren[0];
+          const val = a.childForFieldName("right")?.namedChildren[0];
+          if (target && val && rootIdentGo(target)?.text === name && findEnclosingFunctionNodeGo(a)) out.push({ scope: findEnclosingFunctionNodeGo(a), position: a.startIndex, line: lineOf(a), rhsText: val.text, label: a.text });
+        }
+        return out.sort((x, y) => x.position - y.position);
       },
       // interprocedural trace hooks (see buildBackwardTraceGeneric)
       scopeInfo: (scope) => {
@@ -2512,9 +2519,21 @@ export function scanAstTaintGo(
         visit(body);
         return { scope: decl, params: positionalParamsGo(decl), line: lineOf(decl), returns };
       },
-      callSitesOf: (name) => findAllNodesGo(root, "call_expression")
-        .filter(c => { const f = c.childForFieldName("function"); return (f?.type === "identifier" && f.text === name) || (f?.type === "selector_expression" && f.childForFieldName("field")?.text === name); })
-        .map(c => ({ scope: findEnclosingFunctionNodeGo(c), position: c.startIndex, line: lineOf(c), text: c.text })),
+      callSitesOf: (name) => {
+        const calls = findAllNodesGo(root, "call_expression");
+        const direct = calls.filter(c => { const f = c.childForFieldName("function"); return (f?.type === "identifier" && f.text === name) || (f?.type === "selector_expression" && f.childForFieldName("field")?.text === name); });
+        // passed as a value (`dispatch(path, save)`): the receiving function's calls of that parameter (`writer(path)`)
+        // are calls of this one
+        const viaValue = calls.flatMap(c => {
+          const callee = c.childForFieldName("function");
+          const decl = callee?.type === "identifier" ? localFns.get(callee.text) : undefined;
+          const at = argListOfGo(c).findIndex(a => a.type === "identifier" && a.text === name);
+          const param = decl && at >= 0 ? decl.paramShapes.find(s => s.index === at)?.name : undefined;
+          if (!decl || !param) return [];
+          return findAllNodesGo(decl.body, "call_expression").filter(x => x.childForFieldName("function")?.type === "identifier" && x.childForFieldName("function")!.text === param);
+        });
+        return [...direct, ...viaValue].map(c => ({ scope: findEnclosingFunctionNodeGo(c), position: c.startIndex, line: lineOf(c), text: c.text }));
+      },
     };
 
     const emit = (id: AstTaintGoId, node: SyntaxNode, sourceExpr: string, sinkExpr: string, detailOverride?: string) => {
@@ -2531,6 +2550,23 @@ export function scanAstTaintGo(
 
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
+
+    // Local functions passed as values to local functions: callee -> its parameter -> the functions bound to it
+    // (`dispatch(path, save)` binds dispatch's `writer` to save).
+    const fnValueArgs = new Map<string, Map<string, Set<string>>>();
+    for (const c of findAllNodesGo(root, "call_expression")) {
+      const callee = c.childForFieldName("function");
+      const decl = callee?.type === "identifier" ? localFns.get(callee.text) : undefined;
+      if (!decl) continue;
+      argListOfGo(c).forEach((a, i) => {
+        const param = decl.paramShapes.find(s => s.index === i)?.name;
+        if (a.type !== "identifier" || !localFns.has(a.text) || !param) return;
+        const byParam = fnValueArgs.get(callee!.text) ?? new Map<string, Set<string>>();
+        byParam.set(param, (byParam.get(param) ?? new Set<string>()).add(a.text));
+        fnValueArgs.set(callee!.text, byParam);
+      });
+    }
+    const passedAsValue = new Set([...fnValueArgs.values()].flatMap(m => [...m.values()].flatMap(s => [...s])));
 
     // First argument tainted for `id`'s class, if any. When none is but one
     // was tainted-then-positively-cleared, records a suppression instead
@@ -2797,8 +2833,11 @@ export function scanAstTaintGo(
       // Same-file interprocedural seeding (one hop) -- mirrors
       // astTaint.ts/astTaintPython.ts exactly.
       const seedField = fn?.type === "selector_expression" ? fn.childForFieldName("field")?.text ?? null : null;
-      const seedName = fn?.type === "identifier" ? fn.text : seedField && !GO_BUILTIN_METHOD_NAMES.has(seedField) ? seedField : null;
-      if (seedName && localFns.has(seedName)) {
+      const directName = fn?.type === "identifier" ? fn.text : seedField && !GO_BUILTIN_METHOD_NAMES.has(seedField) ? seedField : null;
+      // a call of a function-valued parameter (`writer(path)` in `dispatch(path, save)`): a call of the function bound to it
+      const encName = fn?.type === "identifier" && !localFns.has(fn.text) ? findEnclosingFunctionNodeGo(node)?.childForFieldName("name")?.text : undefined;
+      const boundNames = encName ? [...(fnValueArgs.get(encName)?.get(fn!.text) ?? [])] : [];
+      for (const seedName of [directName, ...boundNames]) if (seedName && localFns.has(seedName)) {
         const fnName = seedName;
         const localFn = localFns.get(fnName)!;
         const taintedIdx = new Map<number, number>();
@@ -3023,7 +3062,8 @@ export function scanAstTaintGo(
       const name = decl.childForFieldName("name")?.text ?? "";
       const body = decl.childForFieldName("body");
       const params = decl.childForFieldName("parameters");
-      if (!body || !params || calledHere.has(name) || /^(?:main|init|Test\w*|Benchmark\w*|Fuzz\w*|Example\w*)$/.test(name)) continue;
+      // (passed as a value to a function of this file: its calls through that value are calls -- see fnValueArgs)
+      if (!body || !params || calledHere.has(name) || passedAsValue.has(name) || /^(?:main|init|Test\w*|Benchmark\w*|Fuzz\w*|Example\w*)$/.test(name)) continue;
       if (/http\.Request\b|\*gin\.Context|echo\.Context|\*fiber\.Ctx/.test(params.text)) continue;
       const env: Env = new Map();
       for (const shape of paramShapesOfGo(decl)) {

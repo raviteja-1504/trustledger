@@ -66,6 +66,9 @@ const ID_TO_CLASS: Record<string, number> = {
 
 /** Sink class for a finding id. Unknown ids (e.g. authorization findings,
  * which are not taint-class based) map to ALL so they never get masked out. */
+/** The rule -> sink-class table itself, read-only (the model registry's taxonomy is built from it). */
+export const RULE_SINK_CLASSES: Readonly<Record<string, number>> = ID_TO_CLASS;
+
 export function classOf(findingId: string): number {
   return ID_TO_CLASS[findingId] ?? ALL;
 }
@@ -524,6 +527,15 @@ export interface TraceResolver<N> {
   functionInfo?(name: string): { scope: N; params: string[]; line: number; returns: Array<{ text: string; position: number; line: number }> } | null;
   /** Every call of the named local function in this file: the scope it is in, where, and its source text. */
   callSitesOf?(name: string): Array<{ scope: N | null; position: number; line: number; text: string }>;
+  /** The function lexically enclosing a closure scope (a Go func literal, a Java lambda, a nested Python def), or
+   * null: a name a closure doesn't define itself is the one it captured from there. Optional. */
+  outerScope?(scope: N): N | null;
+  /** Writes to a package/module-level variable anywhere in the file (`jobs <- job`, `STATE[key] = value`): a value
+   * one function stores there and another reads back. Optional. */
+  globalWrites?(name: string): Array<{ scope: N | null; position: number; line: number; rhsText: string; label: string }>;
+  /** A read from a keyed store (`session.getAttribute("k")`, `STATE.get("k")`, `targets.get(k)`): the writes under that
+   * key (`session.setAttribute("k", v)`) it reads back, wherever they are. Optional. */
+  storeWrites?(text: string): Array<{ scope: N | null; position: number; line: number; rhsText: string; label: string }>;
 }
 
 /** `f.name` / `$f->name` / `a.b.c`: a field path a resolver may record a write to. */
@@ -623,6 +635,15 @@ export function buildBackwardTraceGeneric<N>(
     const crossSteps = resolver.crossFileHop?.(curText);
     if (crossSteps && crossSteps.length > 0) { backward.push(...crossSteps); break; }
 
+    // a read from a keyed store: continue at the write under that key (`session.setAttribute("k", v)` -> v)
+    const stored = (resolver.storeWrites?.(curText.replace(/^\(\s*[\w.<>[\]]+\s*\)\s*/, "")) ?? []).filter(w => !TRACE_LITERAL_RE.test(w.rhsText.trim()));
+    if (stored.length > 0) {
+      const w = stored[stored.length - 1];
+      backward.push({ file: filePath, line: w.line, kind: "assignment", label: w.label.slice(0, 90), snippet: w.label.slice(0, 100) });
+      scope = w.scope; curPos = w.position; curLine = w.line; curText = w.rhsText.trim();
+      continue;
+    }
+
     if (BARE_IDENTIFIER_RE.test(curText)) {
       const visitKey = `${scope ? resolver.position(scope) : -1}:${curText}`;
       if (visited.has(visitKey)) break; // a re-assignment cycle -- stop rather than loop
@@ -639,13 +660,31 @@ export function buildBackwardTraceGeneric<N>(
         }
         // a parameter of the function the walk is in: up to a caller that passes something other than a literal
         const p = frames.length === 0 ? paramIndexInScope(curText) : null;
+        // (not a call inside this same function: a recursive call, or a same-named method of another class it calls,
+        // passes its own value -- it is not where the value came from)
         const site = p ? resolver.callSitesOf!(p.info.name)
+          .filter(s => !scope || s.scope !== scope)
           .map(s => ({ ...s, arg: splitCallArgs(firstCallText(s.text))?.[p.index] }))
           .find(s => s.arg !== undefined && !TRACE_LITERAL_RE.test(s.arg.trim())) : undefined;
         if (p && site) {
           backward.push({ file: filePath, line: p.info.line, kind: "parameter", label: `${curText} — parameter of ${p.info.name}`, snippet: curText });
           backward.push({ file: filePath, line: site.line, kind: "call", label: `passes it to ${displayFnName(p.info.name)}(…)`, snippet: site.text.replace(/\s+/g, " ").slice(0, 100) });
           scope = site.scope; curPos = site.position; curLine = site.line; curText = site.arg!.trim();
+          continue;
+        }
+        // a closure's captured variable: continue in the enclosing function, from where the closure is written
+        const outer = scope ? resolver.outerScope?.(scope) ?? null : null;
+        if (outer && scope && (resolver.assignmentsIn(outer).some(a => a.name === curText && a.position < resolver.position(scope!))
+            || (resolver.scopeInfo?.(outer)?.params ?? []).includes(curText))) {
+          curPos = resolver.position(scope); scope = outer;
+          continue;
+        }
+        // a package/module-level variable another function wrote: continue at that write
+        const writes = frames.length === 0 ? (resolver.globalWrites?.(curText) ?? []).filter(w => !TRACE_LITERAL_RE.test(w.rhsText.trim())) : [];
+        if (writes.length > 0) {
+          const w = writes[writes.length - 1];
+          backward.push({ file: filePath, line: w.line, kind: "assignment", label: w.label.slice(0, 90), snippet: w.label.slice(0, 100) });
+          scope = w.scope; curPos = w.position; curLine = w.line; curText = w.rhsText.trim();
           continue;
         }
         // a bare name that is a function of this file: a call written without parentheses (Ruby's `name = user_input`)
@@ -697,8 +736,23 @@ export function buildBackwardTraceGeneric<N>(
       continue;
     }
 
+    // An argument that only ever holds literals can't be what carries the input (`filepath.Join(root, selected)`
+    // where every caller passes root as a constant): the walk follows another argument instead.
+    const literalOnly = (a: string): boolean => {
+      const t = a.trim();
+      if (!BARE_IDENTIFIER_RE.test(t)) return false;
+      const top = frames[frames.length - 1];
+      if (top?.params.includes(t)) return TRACE_LITERAL_RE.test((top.args[top.params.indexOf(t)] ?? "").trim());
+      const p = frames.length === 0 ? paramIndexInScope(t) : null;
+      if (p) {
+        const sites = resolver.callSitesOf?.(p.info.name) ?? [];
+        return sites.length > 0 && sites.every(s => TRACE_LITERAL_RE.test((splitCallArgs(firstCallText(s.text))?.[p.index] ?? "").trim()));
+      }
+      const w = assignedBefore(t, curPos);
+      return w.length > 0 && w.every(x => TRACE_LITERAL_RE.test(x.rhsText.trim()));
+    };
     const firstArg = extractFirstCallArg(curText);
-    if (firstArg !== null && !TRACE_LITERAL_RE.test(firstArg) && firstArg.replace(/^&\s*/, "") !== assignedVar) {
+    if (firstArg !== null && !TRACE_LITERAL_RE.test(firstArg) && firstArg.replace(/^&\s*/, "") !== assignedVar && !(inter && literalOnly(firstArg))) {
       backward.push({ file: filePath, line: curLine, kind: "call", label: curText.slice(0, 80), snippet: curText.slice(0, 100) });
       curText = firstArg;
       continue;
@@ -708,7 +762,7 @@ export function buildBackwardTraceGeneric<N>(
     // (not the variable this call fills: `snprintf(sql, ..., getenv("V"))` is the assignment of `sql`, so its input is
     // the other argument)
     const liveArgs = inter && firstArg !== null ? (splitCallArgs(firstCallText(curText)) ?? [])
-      .filter(a => !TRACE_LITERAL_RE.test(a.trim()) && a.trim().replace(/^&\s*/, "") !== assignedVar) : [];
+      .filter(a => !TRACE_LITERAL_RE.test(a.trim()) && a.trim().replace(/^&\s*/, "") !== assignedVar && !literalOnly(a)) : [];
     if (liveArgs.length > 0) {
       const pick = liveArgs.find(a => REQUEST_INPUT_RE.test(a))
         ?? liveArgs.find(a => BARE_IDENTIFIER_RE.test(a) && known(a))

@@ -16,7 +16,7 @@
 import { ALL, SinkClass as C, URL_SAFE } from "./taintCore";
 import { anchoredPatternClears, charClassClears, delimitedPatternBody, removesLineBreaks } from "./charClass";
 
-export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs";
+export type SanitizerLang = "js" | "py" | "go" | "java" | "cs" | "php" | "rb" | "kt" | "rs" | "cpp";
 
 /** A fixed mask, or a function of the callee text and argument source texts
  * (for entries whose effect depends on a receiver or a flag argument). */
@@ -225,7 +225,23 @@ const TABLES: Record<SanitizerLang, Table> = {
     },
     tail: {},
   },
+  // C/C++: matched on the function's base name (`std::stoi` -> `stoi`, see astTaintCpp.ts baseApi). A parsed
+  // number has no injection syntax left -- and is still attacker-CONTROLLED (a size, an index).
+  cpp: {
+    exact: {
+      atoi: NUMERIC, atol: NUMERIC, atoll: NUMERIC, atof: NUMERIC, strtol: NUMERIC, strtoul: NUMERIC, strtoll: NUMERIC,
+      strtoull: NUMERIC, strtod: NUMERIC, strtof: NUMERIC, wcstol: NUMERIC, wcstoul: NUMERIC, _wtoi: NUMERIC,
+      stoi: NUMERIC, stol: NUMERIC, stoul: NUMERIC, stoll: NUMERIC, stof: NUMERIC, stod: NUMERIC,
+    },
+    tail: {},
+  },
 };
+
+/** Every sanitizer entry, read-only, as the model registry lists them (taint/models/registry.ts). */
+export function sanitizerEntries(): Array<{ lang: SanitizerLang; name: string; match: "exact" | "tail"; clears: number | "depends-on-arguments" }> {
+  return (Object.keys(TABLES) as SanitizerLang[]).flatMap(lang => (["exact", "tail"] as const).flatMap(match =>
+    Object.entries(TABLES[lang][match]).map(([name, c]) => ({ lang, name, match, clears: typeof c === "function" ? "depends-on-arguments" as const : c }))));
+}
 
 /**
  * Classes neutralized by calling `calleeText` (with the given argument source

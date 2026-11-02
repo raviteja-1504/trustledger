@@ -33,6 +33,8 @@ import {
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkModelFor } from "./taint/models/sinks";
 import { charClassClears, removesLineBreaks } from "./taint/charClass";
 import { hasNestedQuantifier } from "./taint/regexShape";
 import { authzVerdict, classifyGuardName, isMutatingLookup, isOwnerField, mentionsRoleFeature, type AuthzKind } from "./taint/principal";
@@ -236,8 +238,6 @@ const FS_SINK_NAMES = new Set([
   "readFile", "readFileSync", "writeFile", "writeFileSync",
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
 ]);
-const HTTP_SINK_NAMES = new Set(["get", "post", "put", "delete", "patch", "request"]);
-const HTTP_CLIENT_MODULES = new Set(["needle", "got", "request", "superagent", "node-fetch", "undici", "cross-fetch"]);
 const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare"]);
 
 interface SinkMatch { id: AstTaintId; sinkExpr: string; args: readonly ts.Expression[] }
@@ -604,21 +604,18 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (text === "document.write" || text === "document.writeln") {
     return { id: "xss", sinkExpr: text, args: call.arguments };
   }
-  if (
-    text === "fetch" || text.startsWith("axios") ||
-    ((text === "http.get" || text === "http.request" || text === "https.get" || text === "https.request") ) ||
-    (resolvedModule === "http" || resolvedModule === "https") && HTTP_SINK_NAMES.has(tail)
-  ) {
-    const target = requestTargetArgs(call);
-    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
-  }
-  // HTTP client packages: got(url) / needle.get(url) / request.post(url) / superagent.get(url)
-  if (resolvedModule && HTTP_CLIENT_MODULES.has(resolvedModule) && (parts.length === 1 || HTTP_SINK_NAMES.has(tail) || tail === "head" || tail === "fetch")) {
-    // needle("get", url) / needle.request("get", url) / superagent("GET", url): the method comes first
-    const m0 = call.arguments.length >= 2 ? unwrapExpr(call.arguments[0]) : undefined;
-    const methodFirst = !!m0 && ts.isStringLiteralLike(m0) && /^(?:get|post|put|delete|patch|head|options)$/i.test(m0.text);
-    const target = requestTargetArgs(call, methodFirst ? 1 : 0);
-    return target.length ? { id: "ssrf", sinkExpr: text, args: target } : null;
+  // HTTP clients -- fetch, Node's http/https, axios, got/needle/request/superagent/... (taint/models/sinks.ts): the URL,
+  // or an options object's url/host/path/proxy
+  const modelled = sinkModelFor("js", text, resolvedModule);
+  if (modelled) {
+    let from = modelled.positions[0];
+    if (modelled.model.args.select === "request-target-method-first") {
+      // needle("get", url) / needle.request("get", url) / superagent("GET", url): the method comes first
+      const m0 = call.arguments.length >= 2 ? unwrapExpr(call.arguments[0]) : undefined;
+      if (m0 && ts.isStringLiteralLike(m0) && /^(?:get|post|put|delete|patch|head|options)$/i.test(m0.text)) from = 1;
+    }
+    const target = requestTargetArgs(call, from);
+    return target.length ? { id: modelled.model.rule as AstTaintId, sinkExpr: text, args: target } : null;
   }
   if (parts[0] === "fs" && FS_SINK_NAMES.has(tail)) {
     // The path only: what writeFile writes, or the options/callback, can't choose which file is touched.
@@ -761,18 +758,12 @@ type Env = TaintEnv;
 // Builtins whose RESULT carries the taint of their arguments (string/JSON/URL/path plumbing that
 // neither validates nor neutralizes anything). Opaque calls stay untainted -- these are the curated
 // exceptions, not a default flip. Decoders additionally RESTORE classes an earlier encoder cleared.
-const PASSTHROUGH_CALLS = new Set([
-  "String", "JSON.parse", "JSON.stringify", "Buffer.from", "Buffer.concat", "path.join", "path.resolve",
-  "path.normalize", "path.format", "path.relative", "path.dirname", "Object.assign", "Object.values",
-  "Object.entries", "Object.keys", "Object.fromEntries", "Array.from", "Array.of", "Promise.resolve",
-  "Promise.all", "Promise.race", "Promise.allSettled", "String.raw", "structuredClone", "url.format",
-  "querystring.stringify", "querystring.parse", "decodeURIComponent", "decodeURI", "unescape", "atob", "btoa",
-]);
+const PASSTHROUGH_CALLS = propagatorNames("js", "call-args");
 // JSON.parse undoes JSON.stringify's escaping: a CR/LF escaped as \r\n is a real line break again
-const DECODERS = new Set(["decodeURIComponent", "decodeURI", "unescape", "atob", "JSON.parse"]);
-const PASSTHROUGH_NEW = new Set(["URL", "URLSearchParams", "Buffer", "String", "Array", "Set", "Map", "Error"]);
+const DECODERS = propagatorNames("js", "decoder");
+const PASSTHROUGH_NEW = propagatorNames("js", "constructor-args");
 // Methods whose result also includes their ARGUMENTS (replacement text, appended strings).
-const ARG_CARRYING_METHODS = new Set(["replace", "replaceAll", "concat", "padStart", "padEnd"]);
+const ARG_CARRYING_METHODS = propagatorNames("js", "method-args");
 const CALLBACK_RESULT_METHODS = new Set(["then", "map", "flatMap"]);
 /** node:vm entry points that run a code string (the sandbox, when any, is the second argument). */
 const VM_SANDBOX_TAILS = new Set(["runInContext", "runInNewContext", "runInThisContext", "compileFunction"]);

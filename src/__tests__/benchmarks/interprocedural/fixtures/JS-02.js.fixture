@@ -1,0 +1,12 @@
+const express = require("express");
+const { EventEmitter } = require("events");
+const { exec } = require("child_process");
+const app = express(), bus = new EventEmitter();
+function makeJob(value) { return { command: value }; }
+function format(job) { return "echo " + job.command; }
+bus.on("job", job => { const command = format(job); exec(command); });
+app.get("/run", (req, res) => {
+  const job = makeJob(req.query.command);
+  bus.emit("job", job);
+  res.send("queued");
+});

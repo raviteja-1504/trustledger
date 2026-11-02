@@ -32,6 +32,7 @@ import {
   isModelFile, modelLocalNamesInFile, blockCommentSpans,
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
+import { stringTextSpans } from "./stringSpans";
 import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
@@ -55,7 +56,7 @@ import type * as ts from "typescript";
 import {
   parsePythonSourceSync, isPythonParserReady, scanAstTaintPython,
   findEnclosingFunctionNamePy, findNodeAtRowPy, astTaintPySeverity, astTaintPyLabel,
-  computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy, computeSourceFunctionsPy,
+  computeExportTaintSummaryPy, computeExportSinkSummaryPy, collectImportEdgesPy, computeSourceFunctionsPy, computePassMethodsPy, type PassMethodsPy,
   isModelFilePy, modelLocalNamesInFilePy,
 } from "./astTaintPython";
 import type { ParamShape as PyParamShape } from "./astTaintPython";
@@ -1022,6 +1023,9 @@ const CMD_INJECTION_RE = [
   /Process\.Start\s*\([^)]*Request\.(?:Query|Form)\b/i,
 ];
 
+/** Rules whose regex-layer findings are dropped on files a data-flow engine analysed (see analyzeFile). */
+export const ENGINE_OWNED_RULES: ReadonlySet<string> = new Set(["ssrf"]);
+
 const SSRF_RE = [
   /(?:fetch|axios\.(?:get|post|put|delete|patch))\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
   /new\s+URL\s*\(\s*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
@@ -1644,6 +1648,14 @@ const HTML_DISPLAY_TEXT_RE = /<!--[\s\S]*?-->|<(pre|code)\b[^>]*>[\s\S]*?<\/\1\s
  * line's fixed version right beside it inside a comment -- or a code sample in a docs page read as live code.
  * Secrets are still searched for in the original lines: a key in a comment is still a leaked key.
  */
+/** codeOnlyLines with string text blanked too (lib/stringSpans.ts), for detectors that look for CALLS (eval(…), new Function(…)): JS/TS
+ *  only, where the syntax tree says exactly what is a string. Other languages get `codeLines` unchanged. */
+function callOnlyLines(codeLines: string[], sf: ts.SourceFile | null): string[] {
+  if (!sf) return codeLines;
+  const spans = stringTextSpans(sf);
+  return spans.length ? blankSpans(codeLines.join("\n"), spans).split("\n") : codeLines;
+}
+
 function codeOnlyLines(content: string, lines: string[], filePath: string, sf: ts.SourceFile | null): string[] {
   let spans: Array<[number, number]> = [];
   if (sf) spans = blockCommentSpans(sf);
@@ -2836,9 +2848,23 @@ function findNamedTaintOpenRedirectGo(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// `new URL(x)` only parses a URL. Route handlers read their own query string with `new URL(req.url)` -- that was
+// a critical "SSRF" on nearly every handler of a Next.js app (35 in TrustLedger's own source). It is a request
+// forgery only when the parsed URL is then fetched (urlIsFetched), as findSSRFTainted already required.
+const isNewUrlPattern = (re: RegExp) => /^new\\s\+URL/.test(re.source);
+
 function findSSRF(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, SSRF_RE, "ssrf", "Server-Side Request Forgery", "critical",
-    "User-controlled URL in HTTP request — validate against allowlist or use SSRF-safe library");
+  const detail = "User-controlled URL in HTTP request — validate against allowlist or use SSRF-safe library";
+  const found = runDetector(lines, SSRF_RE.filter(re => !isNewUrlPattern(re)), "ssrf", "Server-Side Request Forgery", "critical", detail);
+  const seen = new Set(found.map(f => (f.line ?? 0) - 1));
+  for (const re of SSRF_RE.filter(isNewUrlPattern)) {
+    for (let i = 0; i < lines.length; i++) {
+      if (seen.has(i) || isNonExecutableLine(lines[i]) || !re.test(lines[i]) || !urlIsFetched(lines, i)) continue;
+      seen.add(i);
+      found.push({ id: "ssrf", label: "Server-Side Request Forgery", severity: "critical", line: i + 1, detail });
+    }
+  }
+  return found;
 }
 
 function findPathTraversal(lines: string[]): ScanIndicator[] {
@@ -4401,6 +4427,26 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
 // it was assigned to within the next 15 lines (`u.openConnection()`, `fetch(u)`).
 const NEW_URL_SINK_RE = /new\s+URL\s*\(\s*\w+/;
 const URL_FETCH_CALL_RE = /\.\s*(?:openConnection|openStream|getContent)\s*\(/;
+/**
+ * A JVM flow that starts at a bare parameter name (`id`, bound by `@RequestHeader("X-Id") String id`): that
+ * parameter's declaration in the nearest enclosing signature, so the evidence can say which binding made it
+ * request input (UTM step 6). Only within this file, and only for an annotated declaration of exactly that name.
+ */
+export function jvmParamBinding(ind: Pick<ScanIndicator, "sourceExpr" | "trace" | "line">, filePath: string, lines: readonly string[]): string | undefined {
+  if (!/\.(?:java|kts?)$/.test(filePath)) return undefined;
+  const first = ind.trace?.[0];
+  const name = first?.kind === "source" ? first.label : ind.sourceExpr;
+  if (!name || !/^[A-Za-z_]\w*$/.test(name) || (first?.file && first.file !== filePath)) return undefined;
+  const from = Math.min(lines.length, first?.line ?? ind.line ?? 0) - 1;
+  const java = new RegExp(`(?:@\\w+(?:\\([^)]*\\))?\\s+)+(?:final\\s+)?[\\w.<>\\[\\]?, ]+?\\s+${name}\\s*[,)]`);
+  const kotlin = new RegExp(`(?:@\\w+(?:\\([^)]*\\))?\\s+)+(?:va[lr]\\s+)?${name}\\s*:`);
+  for (let i = from; i >= 0 && i >= from - 200; i--) {
+    const m = java.exec(lines[i]) ?? kotlin.exec(lines[i]);
+    if (m) return m[0];
+  }
+  return undefined;
+}
+
 function urlIsFetched(lines: string[], i: number): boolean {
   if (URL_FETCH_CALL_RE.test(lines[i]) || /\b(?:fetch|axios|got|request)\s*\(\s*new\s+URL/.test(lines[i])) return true;
   const v = /(\w+)\s*=\s*new\s+URL\s*\(/.exec(lines[i])?.[1];
@@ -7491,8 +7537,9 @@ function findAstTaintPythonFindings(
   crossFileSinks?: Map<string, { sinks: ParamSinkFact[]; fromModule: string }>,
   storedProvenance?: StoredProvenanceIO,
   sourceFns?: ReadonlyMap<string, number>,
+  passMethods?: PassMethodsPy,
 ): ScanIndicator[] {
-  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks, storedProvenance, sourceFns).map(f => ({
+  return scanAstTaintPython(content, filePath, rootNode, suppressed, crossFileShapes, crossFileSinks, storedProvenance, sourceFns, passMethods).map(f => ({
     id: f.id, label: astTaintPyLabel(f.id), severity: f.severityOverride ?? astTaintPySeverity(f.id),
     line: f.line, detail: f.detail, confidence: 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
@@ -7725,6 +7772,8 @@ export function analyzeFile(
   crossFilePySources?: ReadonlyMap<string, number>,
   // Same as crossFileRust, for C/C++ (callers -> functions defined in other translation units).
   crossFileCpp?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
+  // Python methods that, wherever in the batch they are defined, return what they are given (collectPassMethodsPy).
+  crossFilePyPassMethods?: PassMethodsPy,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -7865,7 +7914,7 @@ export function analyzeFile(
   const suppressedSinks: SuppressedSink[] = [];
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
-    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources) : []),
+    ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources, crossFilePyPassMethods) : []),
     ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods, crossFileJava?.passMethods) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts, crossFileCSharp?.callerArgs) : []),
@@ -7902,7 +7951,8 @@ export function analyzeFile(
     ...(lang === "kotlin" ? findKotlinTaintFindings(codeLines) : []),
     // Ruby: input read into variables, calls without parentheses, backticks, Rails-specific sinks
     ...(lang === "ruby" ? findRubyTaintFindings(codeLines) : []),
-    ...findEvalExec(codeLines),
+    // calls only: in JS/TS, "eval()" inside a string (a description, a title, a sample shown in the UI) is text
+    ...findEvalExec(callOnlyLines(codeLines, tsSourceFile)),
     ...findJwtBypass(codeLines),
     ...(lang === "typescript" || lang === "javascript" || lang === "java" || lang === "kotlin" || lang === "golang" ? findJwtDecodeWithoutVerify(codeLines) : []),
     ...findTlsVerificationDisabled(codeLines),
@@ -7999,10 +8049,13 @@ export function analyzeFile(
     ...findTemplateAutoescapeOff(codeLines),
   ];
   const suppressedKeys = new Set(suppressedSinks.map(x => `${x.id}:${x.line}`));
+  // The exception to the rule above: rules whose sinks every engine reads from the model registry and whose regex
+  // layer, measured, adds nothing on files an engine analysed. SSRF (UTM step 4): over the whole test suite, Juice
+  // Shop, NodeGoat, OWASP Benchmark Java, WebGoat and crAPI, the regex layer's only SSRF findings beside the engines'
+  // were two supertest `request(app)` calls in a Juice Shop test file. Files no engine parsed keep the regex.
+  const engineRan = !!(tsSourceFile || pyTree || javaCst || goTree || csTree || phpTree || rubyTree || kotlinTree || rustTree || cppTree);
   const vulnIndicatorsRaw: ScanIndicator[] = [
-    ...(suppressedKeys.size === 0
-      ? regexVulnIndicatorsRaw
-      : regexVulnIndicatorsRaw.filter(i => !suppressedKeys.has(`${i.id}:${i.line ?? ""}`))),
+    ...regexVulnIndicatorsRaw.filter(i => !suppressedKeys.has(`${i.id}:${i.line ?? ""}`) && !(engineRan && ENGINE_OWNED_RULES.has(i.id))),
     ...astIndicators,
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
@@ -8052,7 +8105,7 @@ export function analyzeFile(
   // Canonical evidence for every data-flow finding: exact sink + argument role, files crossed, sanitisers on
   // the path (their steps are marked in the trace), canonical sink identity. Read by every surface.
   for (const ind of indicators) {
-    const flow = buildDataFlowEvidence(ind, file_path);
+    const flow = buildDataFlowEvidence({ ...ind, sourceBinding: jvmParamBinding(ind, file_path, lines) }, file_path);
     if (flow) ind.flow = flow;
   }
   // (Fingerprints are assigned further down, once EVERY indicator -- AI signals, attribution, watermark,
@@ -8702,6 +8755,33 @@ function convergeJavaSourceMethods(
  * a library interface (`Function`, `Comparator`) does not change what every call through that interface returns, and
  * a name many files declare for themselves (a private inner `Test` in each) cannot be told apart by its simple name.
  */
+/**
+ * Python: methods that return what they are given wherever the batch defines them (computePassMethodsPy), by name.
+ * A call on an object the engine can't type (`helpers.ThingFactory.createThing().doSomething(param)` -- the factory
+ * picks the class at run time) may reach any definition, so an argument counts only when EVERY definition of that
+ * name passes it through, with the classes all of them let survive. `roots` are the batch's files that define classes.
+ */
+export function collectPassMethodsPy(
+  roots: ReadonlyMap<string, PySyntaxNode>, contentOf: ReadonlyMap<string, string>,
+): Map<string, Map<number, number>> {
+  const out = new Map<string, Map<number, number>>();
+  const defs = new Map<string, Array<Map<number, number>>>();
+  for (const [path, root] of roots) {
+    const content = contentOf.get(path);
+    if (content === undefined) continue;
+    for (const [name, entries] of computePassMethodsPy(content, path, root)) defs.set(name, [...(defs.get(name) ?? []), new Map(entries)]);
+  }
+  for (const [name, all] of defs) {
+    const common = new Map<number, number>();
+    for (const [i, mask] of all[0]) {
+      const m = all.reduce((acc, d) => acc & (d.get(i) ?? 0), mask);
+      if (m) common.set(i, m);
+    }
+    if (common.size) out.set(name, common);
+  }
+  return out;
+}
+
 function collectJavaPassThroughMethods(
   csts: ReadonlyMap<string, JavaCstNode>, files: readonly { path: string; content: string }[],
 ): Map<string, Array<[number, number]>> {
@@ -9111,7 +9191,16 @@ export function runScan(input: ScanInput): ScanOutput {
     if (content === undefined) continue;
     for (const [name, mask] of computeSourceFunctionsPy(content, path, root)) pySourceFns.set(`${mod}.${name}`, mask);
   }
-  const pySourceFnsDigest = pySourceFns.size ? [...pySourceFns].map(([k, m]) => `${k}=${m}`).sort().join("\n") : "";
+  // Every Python file with a class takes part -- a file restored from the module cache (not parsed above) too, or
+  // its non-passing definition would stop vetoing its name and an incremental scan could report more than a full one.
+  const pyClassFiles = allFiles.filter(f => detectLanguage(f.path) === "python" && /^\s*class\s/m.test(f.content));
+  const pyPassMethods = collectPassMethodsPy(
+    new Map(pyClassFiles.flatMap(f => { const root = pySourceFiles.get(f.path) ?? (isPythonParserReady() ? parsePythonSourceSync(f.content, f.path) : null); return root ? [[f.path, root] as const] : []; })),
+    new Map(pyClassFiles.map(f => [f.path, f.content])),
+  );
+  // a Python file's result also depends on which methods elsewhere pass their arguments through
+  const pySourceFnsDigest = (pySourceFns.size ? [...pySourceFns].map(([k, m]) => `${k}=${m}`).sort().join("\n") : "")
+    + (pyPassMethods.size ? "\npass:" + [...pyPassMethods].map(([k, v]) => `${k}=${[...v].map(([i, m]) => `${i}:${m}`).join(",")}`).sort().join(";") : "");
 
   // ── Stored/second-order provenance (Sequelize/Mongoose + Django ORM) -- see taintCore.ts's
   // StoredProvenanceIO docblock. A batch-wide registry, built AFTER the cross-file bridges above so
@@ -9336,6 +9425,7 @@ export function runScan(input: ScanInput): ScanOutput {
           rustTrees.has(f.path) ? { tree: rustTrees.get(f.path), facts: rustFacts } : undefined,
           pySourceFiles.has(f.path) ? pySourceFns : undefined,
           cppTrees.has(f.path) ? { tree: cppTrees.get(f.path), facts: cppFacts } : undefined,
+          pySourceFiles.has(f.path) && pyPassMethods.size ? pyPassMethods : undefined,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused

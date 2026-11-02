@@ -57,6 +57,8 @@ import {
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
+import { propagatorNames } from "./taint/models/propagators";
+import { sinkModelsFor, type SinkLookup } from "./taint/models/sinks";
 import { anchoredPatternClears } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { assessSqlInjection, assessSsrfUrl, type UrlPart } from "./taint/sinkShape";
@@ -267,22 +269,13 @@ const OPAQUE_RESULT_METHODS = new Set([
   "include?", "start_with?", "end_with?", "match?", "is_a?", "kind_of?", "instance_of?", "respond_to?",
 ]);
 /** Methods on a value whose ARGUMENTS also flow into the result (`a.concat(b)`, `s.gsub(x, y)`, `h.merge(other)`). */
-const ARG_FLOW_METHODS = new Set([
-  "concat", "prepend", "insert", "sub", "gsub", "sub!", "gsub!", "replace", "merge", "merge!", "update", "reverse_merge",
-  "deep_merge", "push", "append", "unshift", "<<", "+", "join", "format", "%", "center", "ljust", "rjust", "zip", "product",
-]);
+const ARG_FLOW_METHODS = propagatorNames("rb", "method-args");
 /** Methods that write their arguments INTO the receiver variable (`q << x`, `parts.push(x)`, `h.merge!(x)`). */
-const MUTATOR_METHODS = new Set(["<<", "concat", "prepend", "insert", "push", "append", "unshift", "merge!", "update", "replace", "store", "[]="]);
+const MUTATOR_METHODS = propagatorNames("rb", "mutator");
 /** Functions / constructors whose result carries their arguments' taint (string, URI, path and JSON plumbing). */
-const PASSTHROUGH_CALLS = new Set([
-  "format", "sprintf", "String", "Array", "Hash", "URI", "URI.parse", "URI.join", "URI::HTTP.build", "URI::HTTPS.build",
-  "File.join", "File.expand_path", "File.absolute_path", "File.realpath", "Pathname.new", "Pathname", "Rails.root.join",
-  "Base64.decode64", "Base64.strict_decode64", "Base64.urlsafe_decode64", "Base64.encode64", "Base64.strict_encode64",
-  "CGI.unescape", "URI.decode_www_form_component", "Rack::Utils.unescape", "JSON.parse", "JSON.generate", "Oj.dump",
-  "ActiveSupport::JSON.decode", "declared", "OpenStruct.new", "Struct.new", "Kernel.format", "Kernel.sprintf",
-]);
+const PASSTHROUGH_CALLS = propagatorNames("rb", "call-args");
 /** Decoders re-taint what an encoder cleared (an encode/decode round trip undoes the encoding). */
-const DECODER_CALLS = new Set(["Base64.decode64", "Base64.strict_decode64", "Base64.urlsafe_decode64", "CGI.unescape", "URI.decode_www_form_component", "Rack::Utils.unescape"]);
+const DECODER_CALLS = propagatorNames("rb", "decoder");
 /** Block-taking iterators whose block parameters are the receiver's elements. */
 const SINATRA_ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete"]);
 const RB_LOG_METHODS = new Set(["debug", "info", "warn", "error", "fatal", "unknown", "add", "log"]);
@@ -335,11 +328,8 @@ const SHELL_CALLS = new Set([
 const FILE_CALL_RE = /^(?:::)?(?:File|IO|Dir|FileUtils)\.\w+[?!]?$/;
 const FILE_SAFE_METHODS = new Set(["basename", "extname", "dirname", "join", "expand_path", "absolute_path", "split", "fnmatch", "fnmatch?", "path", "pwd", "home", "tmpdir"]);
 const PATH_RECEIVER_SINKS = new Set(["read", "binread", "readlines", "write", "binwrite", "open", "each_line", "delete", "unlink", "rmtree", "children", "entries", "opendir"]);
-const HOST_CONNECT_RE = /^(?:::)?(?:Socket\.tcp|TCPSocket\.(?:new|open)|Net::(?:SMTP|FTP|Telnet|POP3|IMAP)\.(?:start|new|open)|Net::LDAP\.new|Redis\.new|Elasticsearch::Client\.new)$/;
-/** Fetch a URL -- or read a local path, which a fixed leading directory keeps it (assessed like any request URL). */
-const URL_OR_PATH_FETCH_RE = /^(?:::)?(?:MiniMagick::Image\.open|WickedPdf\.new\.pdf_from_url)$/;
+/** The HTTP client classes whose instances' request methods are sinks (models/sinks.ts rb:http-client). */
 const HTTP_CLIENT_CLASS_RE = /^(?:::)?(?:Patron::Session|Async::HTTP::Internet|HTTPClient|Net::HTTP|Faraday::Connection|HTTPX::Session)$/;
-const SSRF_CALL_RE =/^(?:::)?(?:Net::HTTP\.(?:get|get_response|get_print|post|post_form|start|new)|URI\.open|(?:HTTParty|Faraday|RestClient|Excon|HTTP|Typhoeus|HTTPX|Curl)\.(?:get|post|put|patch|delete|head|options|request|new|follow|via|stream_get)|RestClient::Request\.(?:execute|new)|Typhoeus::Request\.new|Faraday::Connection\.new|OpenURI\.open_uri)$/;
 const DESERIAL_CALL_RE = /^(?:::)?(?:Marshal\.(?:load|restore)|YAML\.(?:load|unsafe_load|load_file|unsafe_load_file|load_stream)|Psych\.(?:load|unsafe_load|load_stream)|Oj\.(?:load|object_load)|JSON\.load|Ox\.load)$/;
 const SSTI_CALL_RE = /^(?:::)?(?:ERB\.new|Erubi::Engine\.new|Erubis::Eruby\.new|Haml::Engine\.new|Haml::Template\.new|Slim::Template\.new|Tilt::\w+\.new|Mustache\.render)$/;
 const REFLECTION_METHODS = new Set(["send", "public_send", "__send__", "try", "try!", "instance_variable_get", "instance_variable_set", "method", "public_method", "const_get", "class_variable_get", "class_variable_set"]);
@@ -1479,21 +1469,26 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
 
   // ── SSRF ──
   // a connection to a request-chosen host: sockets, mail, FTP, LDAP, Redis, Elasticsearch, URL-fetching renderers
-  if (HOST_CONNECT_RE.test(callee)) {
-    const target = keywordArg(node, "host") ?? keywordArg(node, "url") ?? keywordArg(node, "hosts") ?? pos[0];
-    if (target) fireOn(ctx, "ssrf", node, target, mask(target, env), sinkName);
-  }
+  // (models/sinks.ts) a host is judged by taint; of the URL sinks, the first that applies is judged once, by shape
   // `sess = Patron::Session.new; sess.get(url)` / `Async::HTTP::Internet.new.get(url)`: an HTTP client instance
   const clientType = recv?.type === "identifier" ? ctx.varTypes.get(recv.text) : recv?.type === "call" ? constructedClass(recv) : undefined;
-  const instanceRequest = !!clientType && HTTP_CLIENT_CLASS_RE.test(clientType) && /^(?:get|post|put|patch|delete|head|request|get_content|post_content)$/.test(name);
-  if (SSRF_CALL_RE.test(callee) || instanceRequest || URL_OR_PATH_FETCH_RE.test(callee)) {
-    const urlArg = keywordArg(node, "url") ?? pos[0];
+  const isClientInstance = !!clientType && HTTP_CLIENT_CLASS_RE.test(clientType);
+  const sinkHits = sinkModelsFor("rb", callee);
+  const argFor = ({ model, positions }: SinkLookup) => model.args.keywords?.map(k => keywordArg(node, k)).find(a => !!a) ?? pos[positions[0]];
+  for (const hit of sinkHits.filter(h => h.model.target === "host")) {
+    const target = argFor(hit);
+    if (target) fireOn(ctx, hit.model.rule as AstTaintRubyId, node, target, mask(target, env), sinkName);
+  }
+  const urlHit = sinkHits.find(h => h.model.target !== "host" && (h.model.args.select !== "http-client-receiver" || isClientInstance));
+  if (urlHit) {
+    const id = urlHit.model.rule as AstTaintRubyId;
+    const urlArg = argFor(urlHit);
     if (urlArg) {
       const parts = decomposeString(resolveUnguarded(urlArg, SinkClass.SSRF, env, mask), ctx);
       const verdict = assessSsrfUrl(parts, n => mask(n, env));
-      if (verdict.verdict === "vulnerable") emit(ctx, "ssrf", node, (verdict.culprit ?? urlArg).text, sinkName);
-      else if (verdict.verdict === "no-taint") fireOn(ctx, "ssrf", node, urlArg, mask(urlArg, env), sinkName);
-      else ctx.suppressed?.push({ id: "ssrf", line: lineOf(node) });
+      if (verdict.verdict === "vulnerable") emit(ctx, id, node, (verdict.culprit ?? urlArg).text, sinkName);
+      else if (verdict.verdict === "no-taint") fireOn(ctx, id, node, urlArg, mask(urlArg, env), sinkName);
+      else ctx.suppressed?.push({ id, line: lineOf(node) });
     }
   }
 
