@@ -3,10 +3,12 @@
 import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useSidebar } from "@/lib/sidebar";
+import { probeApi, recheckAfter, RECHECK_OFFLINE_MS, type ApiStatus } from "@/lib/apiHealth";
 
 const VERSION  = "v1.0.0";
 
-type APIStatus = "online" | "offline" | "checking";
+type APIStatus = ApiStatus | "checking";
+const LABEL: Record<APIStatus, string> = { online: "API online", offline: "API offline", "no-network": "You're offline", checking: "Connecting…" };
 
 export default function StatusBar() {
   const pathname = usePathname() ?? "/";
@@ -16,23 +18,35 @@ export default function StatusBar() {
   const [refreshAgo,  setRefreshAgo]  = useState("");
   const [now,         setNow]         = useState<Date | null>(null); // null until after hydration
 
-  // Check API health every 5 min, skipped while the tab is hidden. This
-  // component is mounted globally on every page for every user, so its
-  // poll cost multiplies across the whole session base -- a status
-  // indicator doesn't need sub-minute freshness.
+  // Check API health (lib/apiHealth.ts): every 5 min while healthy, every 30 s while not, skipped while the tab is
+  // hidden. This component is mounted globally on every page for every user, so its poll cost multiplies across the
+  // whole session base -- a healthy indicator doesn't need sub-minute freshness. The browser's own online/offline
+  // events re-check at once.
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let alive = true;
     async function check() {
-      try {
-        const res = await fetch("/healthz", { signal: AbortSignal.timeout(3000) });
-        setApiStatus(res.ok ? "online" : "offline");
-      } catch {
-        setApiStatus("offline");
-      }
+      if (timer) clearTimeout(timer);
+      const status = await probeApi();
+      if (!alive) return;
+      setApiStatus(status);
       setLastCheck(new Date());
+      next(recheckAfter(status));
     }
-    check();
-    const id = setInterval(() => { if (!document.hidden) check(); }, 300_000);
-    return () => clearInterval(id);
+    // a hidden tab doesn't check: it looks again a little later
+    function next(ms: number) {
+      timer = setTimeout(() => { if (document.hidden) next(RECHECK_OFFLINE_MS); else void check(); }, ms);
+    }
+    const recheck = () => { void check(); };
+    void check();
+    window.addEventListener("online", recheck);
+    window.addEventListener("offline", recheck);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("online", recheck);
+      window.removeEventListener("offline", recheck);
+    };
   }, []);
 
   // Set clock after mount (avoids server/client hydration mismatch)
@@ -71,8 +85,8 @@ export default function StatusBar() {
             apiStatus === "offline"  ? "bg-rose-400" :
                                        "bg-amber-400 animate-pulse"
           }`} />
-          <span style={{ color: apiStatus==="online" ? "rgba(52,211,153,0.7)" : apiStatus==="offline" ? "rgba(248,113,113,0.7)" : "rgba(251,191,36,0.7)" }}>
-            {apiStatus === "checking" ? "Connecting…" : `API ${apiStatus}`}
+          <span role="status" style={{ color: apiStatus==="online" ? "rgba(52,211,153,0.7)" : apiStatus==="offline" ? "rgba(248,113,113,0.7)" : "rgba(251,191,36,0.7)" }}>
+            {LABEL[apiStatus]}
           </span>
           {lastCheck && refreshAgo && (
             <span className="opacity-50">· checked {refreshAgo}</span>
@@ -93,9 +107,7 @@ export default function StatusBar() {
         <span className="opacity-30">|</span>
         <span className="font-mono tabular-nums opacity-50">{timeStr}</span>
         <a
-          href="https://github.com/anthropics/claude-code/issues"
-          target="_blank"
-          rel="noopener noreferrer"
+          href="/security"
           className="opacity-30 hover:opacity-60 transition-opacity"
           title="Report an issue">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

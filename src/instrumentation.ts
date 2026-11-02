@@ -22,44 +22,11 @@ export async function register() {
     const { registerShutdownHandlers } = await import("./lib/shutdown");
     registerShutdownHandlers();
 
-    // 3. Warm the Python AST taint engine's WASM parser (Phase 2 of the
-    //    multi-language OWASP hardening effort) so the first real scan on
-    //    this instance doesn't fall back to regex-only while it's still
-    //    initializing -- see astTaintPython.ts's own docblock for why this
-    //    is a best-effort warm-up rather than a hard startup dependency.
-    const { warmPythonTaintEngine } = await import("./lib/astTaintPython");
-    warmPythonTaintEngine().catch(() => { /* already logged inside astTaintPython.ts */ });
-
-    // 3b. Same warm-up for the Go AST taint engine (Phase 4) -- see
-    //     astTaintGo.ts's own docblock.
-    const { warmGoTaintEngine } = await import("./lib/astTaintGo");
-    warmGoTaintEngine().catch(() => { /* already logged inside astTaintGo.ts */ });
-
-    // 3c. Same warm-up for the C# AST taint engine -- see
-    //     astTaintCSharp.ts's own docblock.
-    const { warmCSharpTaintEngine } = await import("./lib/astTaintCSharp");
-    warmCSharpTaintEngine().catch(() => { /* already logged inside astTaintCSharp.ts */ });
-
-    // 3d. Same warm-up for the PHP AST taint engine -- see
-    //     astTaintPHP.ts's own docblock.
-    const { warmPhpTaintEngine } = await import("./lib/astTaintPHP");
-    warmPhpTaintEngine().catch(() => { /* already logged inside astTaintPHP.ts */ });
-
-    // 3e. Same warm-up for the Ruby AST taint engine -- see astTaintRuby.ts.
-    const { warmRubyTaintEngine } = await import("./lib/astTaintRuby");
-    warmRubyTaintEngine().catch(() => { /* already logged inside astTaintRuby.ts */ });
-
-    // 3f. Same warm-up for the Kotlin AST taint engine -- see astTaintKotlin.ts.
-    const { warmKotlinTaintEngine } = await import("./lib/astTaintKotlin");
-    warmKotlinTaintEngine().catch(() => { /* already logged inside astTaintKotlin.ts */ });
-
-    // 3g. Same warm-up for the Rust AST taint engine -- see astTaintRust.ts.
-    const { warmRustTaintEngine } = await import("./lib/astTaintRust");
-    warmRustTaintEngine().catch(() => { /* already logged inside astTaintRust.ts */ });
-
-    // 3h. Same warm-up for the C/C++ AST taint engine -- see astTaintCpp.ts.
-    const { warmCppTaintEngine } = await import("./lib/astTaintCpp");
-    warmCppTaintEngine().catch(() => { /* already logged inside astTaintCpp.ts */ });
+    // 3. The tree-sitter data-flow engines are NOT loaded here. This hook runs on the cold start of every Node.js
+    //    function -- /healthz, /api/me, every page's data -- and Next.js waits for it before serving the first
+    //    request, so importing all eight engines here added their load time to every cold request (enough to fail
+    //    the status bar's health check, which then showed "API offline"). The routes that scan wait for the engines
+    //    themselves before scanning (lib/engineWarmup.ts ensureTaintEngines; the demo warms what its samples need).
 
     // 4. Log startup banner
     const isDemo = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";

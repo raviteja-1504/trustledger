@@ -1,9 +1,8 @@
 /**
- * Wait for the tree-sitter data-flow engines (Python, Go, C#, PHP) before scanning.
+ * Wait for the tree-sitter data-flow engines (Python, Go, C#, PHP, Ruby, Kotlin, Rust, C/C++) before scanning.
  *
- * instrumentation.ts starts loading them when the server boots but does not wait, so on a cold serverless
- * start a scan could run before a parser is ready and those files would silently get pattern checks only.
- * Every scan entry point awaits this first. Bounded: if an engine can't load within `timeoutMs`, the scan
+ * Nothing loads them at server start (that slowed every route's cold start, see instrumentation.ts), so a scan
+ * that didn't wait would give those files pattern checks only. Every scan entry point awaits this first. Bounded: if an engine can't load within `timeoutMs`, the scan
  * goes ahead and its health report (scanHealth.ts) says which files lost data-flow analysis.
  * Server-only.
  */
