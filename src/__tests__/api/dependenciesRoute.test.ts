@@ -12,8 +12,18 @@ let db: ReturnType<typeof fakeSupabase>;
 let seen: Array<{ repo: string; scan_id: string; files: Array<{ file_path: string; content: string | null }> }> = [];
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
 jest.mock("@/app/api/_middleware", () => ({ verifyApiKey: async () => ({ org_id: "org-1" }) }));
-jest.mock("@/lib/cache", () => ({ cached: async (_k: string, _t: number, fn: () => unknown) => fn(), cacheKeys: { dependencies: (o: string) => `d:${o}` }, TTL: { DEPENDENCIES: 1 } }));
-jest.mock("@/lib/dependencyScan", () => ({ deriveFindings: async (scans: typeof seen) => { seen = scans; return []; } }));
+const store = new Map<string, unknown>();
+jest.mock("@/lib/cache", () => {
+  const actual = jest.requireActual("@/lib/cache");
+  return {
+    singleFlight: actual.singleFlight,
+    cacheGet: async (k: string) => (store.has(k) ? store.get(k) : null),
+    cacheSet: async (k: string, v: unknown) => { store.set(k, JSON.parse(JSON.stringify(v))); },
+    cacheKeys: { dependencies: (o: string) => `d:${o}` }, TTL: { DEPENDENCIES: 1 },
+  };
+});
+let computations = 0;
+jest.mock("@/lib/dependencyScan", () => ({ deriveFindings: async (scans: typeof seen) => { computations++; seen = scans; return []; } }));
 jest.mock("@/lib/manifestPackages", () => ({ collectManifestPackages: () => [] }));
 jest.mock("@/lib/contentByHash", () => ({ fetchContentByHash: async (_db: unknown, _o: string, hashes: string[]) => new Map(hashes.map(h => [h, `content of ${h}`])) }));
 
@@ -21,6 +31,42 @@ import { GET } from "@/app/api/dependencies/route";
 
 const scan = (id: string, repo: string, at: string) => ({ id, org_id: "org-1", repo_full_name: repo, pr_number: 1, created_at: at });
 const file = (scan_id: string, path: string, content: string | null, hash: string | null = null) => ({ org_id: "org-1", scan_id, file_path: path, content, content_hash: hash, ai_percentage: 0.5 });
+
+beforeEach(() => { store.clear(); computations = 0; });
+const get = () => GET(new NextRequest(new URL("/api/dependencies", "https://app.example")));
+
+describe("caching: reused until a scan lands, never stale", () => {
+  const seed = () => { db = fakeSupabase({ scans: [scan("s1", "o/api", "2026-10-01T00:00:00Z")], scan_files: [file("s1", "package.json", "{}")] }); };
+
+  it("a repeat call reuses the result", async () => {
+    seed();
+    await get(); await get();
+    expect(computations).toBe(1);
+  });
+
+  it("a new scan is a new version: recomputed at once", async () => {
+    seed();
+    await get();
+    (db.client.from("scans") as unknown as { rows: unknown[] }).rows.push(scan("s2", "o/api", "2026-10-02T00:00:00Z"));
+    await get();
+    expect(computations).toBe(2);
+    expect(seen[0].scan_id).toBe("s2");
+  });
+
+  it("the scan pipeline deleting the key (once a scan's files are written) forces a recompute", async () => {
+    seed();
+    await get();
+    store.delete("d:org-1");
+    await get();
+    expect(computations).toBe(2);
+  });
+
+  it("calls arriving together share one computation", async () => {
+    seed();
+    await Promise.all([get(), get(), get(), get()]);
+    expect(computations).toBe(1);
+  });
+});
 
 it("every repository's latest scan, and every file of it, reach the dependency analysis", async () => {
   const busy = Array.from({ length: 1500 }, (_, i) => scan(`a${i}`, "o/api", `2026-09-${String(1 + (i % 28)).padStart(2, "0")}T00:00:00Z`));

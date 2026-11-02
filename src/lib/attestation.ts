@@ -91,25 +91,25 @@ async function syncCheckRunToSuccess(
   }
 }
 
-export async function performAttestation(db: Db, params: AttestParams): Promise<AttestOutcome> {
+/**
+ * How a caller runs work that doesn't decide the response (the org-wide incident sync): POST /api/attest hands it
+ * to next/server's after(), so the reviewer isn't kept waiting on it; by default it runs inline.
+ */
+export type Defer = (task: () => Promise<void>) => void;
+
+export async function performAttestation(db: Db, params: AttestParams, opts: { defer?: Defer } = {}): Promise<AttestOutcome> {
   const { org_id, user_id, scan_id, file_path, reviewer_email, reviewer_github, permissions } = params;
   const now = new Date().toISOString();
 
-  const { data: scan } = await db
-    .from("scans")
-    .select("id, repo_full_name, overall_risk, check_run_id, installation_id")
-    .eq("id", scan_id)
-    .eq("org_id", org_id)
-    .single();
+  // Independent reads, at once: the scan, the file, an existing sign-off, and the org's merge gate.
+  const [{ data: scan }, { data: file }, { data: existing }, gate] = await Promise.all([
+    db.from("scans").select("id, repo_full_name, overall_risk, check_run_id, installation_id").eq("id", scan_id).eq("org_id", org_id).single(),
+    db.from("scan_files").select("risk_score, content_hash").eq("scan_id", scan_id).eq("file_path", file_path).single(),
+    db.from("attestations").select("id, created_at").eq("scan_id", scan_id).eq("file_path", file_path).maybeSingle(),
+    loadGate(db, org_id),
+  ]);
 
   if (!scan) return { ok: false, reason: "scan_not_found" };
-
-  const { data: file } = await db
-    .from("scan_files")
-    .select("risk_score, content_hash")
-    .eq("scan_id", scan_id)
-    .eq("file_path", file_path)
-    .single();
 
   // Checked against the file's stored risk, not anything the client sends: a role may sign off HIGH files
   // but not CRITICAL ones. A file with no row is treated as lower-risk (UNKNOWN), as it is recorded below.
@@ -122,14 +122,7 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
   // an ON CONFLICT clause (Supabase's .upsert() uses this internally). Use a
   // SELECT-then-INSERT pattern instead: if the record already exists (duplicate
   // click, retry after network error, attest-all re-run) just return the
-  // existing row; otherwise insert a fresh one.
-  const { data: existing } = await db
-    .from("attestations")
-    .select("id, created_at")
-    .eq("scan_id", scan_id)
-    .eq("file_path", file_path)
-    .maybeSingle();
-
+  // existing row (read above); otherwise insert a fresh one.
   let attestation: { id: string; created_at: string };
   if (existing) {
     attestation = existing as { id: string; created_at: string };
@@ -153,31 +146,30 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     attestation = inserted as { id: string; created_at: string };
   }
 
-  // Mark the file as attested in scan_files so the PR page shows the correct
-  // state on reload without relying on localStorage.
-  await db
-    .from("scan_files")
-    .update({ attested: true })
-    .eq("scan_id", scan_id)
-    .eq("file_path", file_path);
-
   // The sign-off covers this file's CONTENT: every scan of this repo where the file is byte-identical (the same
   // content_hash) -- a newer push or PR that didn't touch it, or an older scan of the same code. It used to resolve
   // the file's violations in EVERY scan of the repo, so another PR's different version of the file lost its
   // violation without anyone reviewing it; and attesting through an older scan's link never reached the newer scan
   // whose check, alert and incident were waiting on it.
-  const { data: repoScans } = await db
-    .from("scans")
-    .select("id")
-    .eq("org_id", org_id)
-    .eq("repo_full_name", scan.repo_full_name);
-  const repoScanIds = (repoScans ?? []).map((s: { id: string }) => s.id).filter((id: string) => id !== scan_id);
+  // Found from the copies of this content (few), then kept to this repo -- not by listing every scan of the repo and
+  // sending all their ids back in the next query, which grew with every scan.
   const contentHash = (file as { content_hash?: string | null } | null)?.content_hash ?? null;
-  const { data: sameContentRows } = contentHash && repoScanIds.length > 0
-    ? await db.from("scan_files").select("scan_id")
-        .eq("org_id", org_id).eq("file_path", file_path).eq("content_hash", contentHash).in("scan_id", repoScanIds)
-    : { data: [] };
-  const sameContent = [...new Set((sameContentRows ?? []).map((r: { scan_id: string }) => r.scan_id))];
+  const findSameContent = async (): Promise<string[]> => {
+    if (!contentHash) return [];
+    const { data: copies } = await db.from("scan_files").select("scan_id")
+      .eq("org_id", org_id).eq("file_path", file_path).eq("content_hash", contentHash);
+    const ids = [...new Set((copies ?? []).map((r: { scan_id: string }) => r.scan_id))].filter(id => id !== scan_id);
+    if (ids.length === 0) return [];
+    const { data: inRepo } = await db.from("scans").select("id")
+      .eq("org_id", org_id).eq("repo_full_name", scan.repo_full_name).in("id", ids);
+    return [...new Set((inRepo ?? []).map((s: { id: string }) => s.id))];
+  };
+  const [, sameContent] = await Promise.all([
+    // Mark the file as attested in scan_files so the PR page shows the correct state on reload without relying on
+    // localStorage.
+    db.from("scan_files").update({ attested: true }).eq("scan_id", scan_id).eq("file_path", file_path),
+    findSameContent(),
+  ]);
   if (sameContent.length > 0) {
     const { data: already } = await db.from("attestations").select("scan_id")
       .eq("org_id", org_id).eq("file_path", file_path).in("scan_id", sameContent);
@@ -207,7 +199,6 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
   // Each covered scan whose blocking files (the org's merge gate: CRITICAL, and HIGH unless the org turned that
   // off) are now all signed off: its PR alert is done and its GitHub check unblocks. Newest first, bounded -- a
   // file unchanged across many pushes is covered by every one of them.
-  const gate = await loadGate(db, org_id);
   const { data: coveredScans } = await db
     .from("scans")
     .select("id, check_run_id, installation_id, created_at")
@@ -215,52 +206,53 @@ export async function performAttestation(db: Db, params: AttestParams): Promise<
     .in("id", covered)
     .order("created_at", { ascending: false })
     .limit(20);
-  for (const s of (coveredScans ?? []) as { id: string; check_run_id: number | null; installation_id: number | null }[]) {
-    if (await countOpenBlocking(db, s.id, gate, org_id)) continue;
-    await db.from("alerts")
-      .update({ status: "resolved", resolved_at: now })
-      .eq("org_id", org_id)
-      .eq("scan_id", s.id)
-      .eq("alert_type", "policy")
-      .in("status", ["firing", "acknowledged", "snoozed"]);
-    if (s.check_run_id && s.installation_id) {
-      await syncCheckRunToSuccess(db, s.id, s.installation_id, scan.repo_full_name, s.check_run_id);
-    }
-  }
+  // Each covered scan independently: they used to be checked one after another, a GitHub call apiece.
+  await Promise.all(((coveredScans ?? []) as { id: string; check_run_id: number | null; installation_id: number | null }[]).map(async s => {
+    if (await countOpenBlocking(db, s.id, gate, org_id)) return;
+    await Promise.all([
+      db.from("alerts")
+        .update({ status: "resolved", resolved_at: now })
+        .eq("org_id", org_id)
+        .eq("scan_id", s.id)
+        .eq("alert_type", "policy")
+        .in("status", ["firing", "acknowledged", "snoozed"]),
+      s.check_run_id && s.installation_id ? syncCheckRunToSuccess(db, s.id, s.installation_id, scan.repo_full_name, s.check_run_id) : null,
+    ]);
+  }));
 
-  // And every policy alert of the repo once nothing in it is open (alerts of superseded scans included).
-  if (!(await hasOpenRepoViolations(db, org_id, scan.repo_full_name, blockingRisks(gate)))) {
-    await db.from("alerts")
+  await Promise.all([
+    // And every policy alert of the repo once nothing in it is open (alerts of superseded scans included).
+    hasOpenRepoViolations(db, org_id, scan.repo_full_name, blockingRisks(gate)).then(open => open ? null : db.from("alerts")
       .update({ status: "resolved", resolved_at: now })
       .eq("org_id", org_id)
       .eq("repo", scan.repo_full_name)
       .eq("alert_type", "policy")
-      .in("status", ["firing", "acknowledged", "snoozed"]);
-  }
+      .in("status", ["firing", "acknowledged", "snoozed"])),
+    writeAuditLog(db, {
+      org_id,
+      event_type:    "attestation",
+      actor_id:      user_id ?? null,
+      actor_email:   reviewer_email,
+      resource_type: "attestation",
+      resource_id:   attestation.id,
+      payload: {
+        scan_id, file_path,
+        repo:         scan.repo_full_name,
+        risk_score:   file?.risk_score ?? "UNKNOWN",
+        payload_hash: payloadHash,
+      },
+    }),
+    // Invalidate dashboard cache so new attestation is reflected immediately —
+    // must cover every day-window the dashboard UI can request (7/30/90).
+    ...[7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))),
+  ]);
 
-  await writeAuditLog(db, {
-    org_id,
-    event_type:    "attestation",
-    actor_id:      user_id ?? null,
-    actor_email:   reviewer_email,
-    resource_type: "attestation",
-    resource_id:   attestation.id,
-    payload: {
-      scan_id, file_path,
-      repo:         scan.repo_full_name,
-      risk_score:   file?.risk_score ?? "UNKNOWN",
-      payload_hash: payloadHash,
-    },
-  });
-
-  // Invalidate dashboard cache so new attestation is reflected immediately —
-  // must cover every day-window the dashboard UI can request (7/30/90).
-  await Promise.all([7, 30, 90].map(days => cacheDel(cacheKeys.dashboard(org_id, days))));
-
-  // Attesting a file can clear the trigger for an auto-generated incident —
-  // best-effort. Only CRITICAL/HIGH files can ever affect incident state.
+  // Attesting a file can clear the trigger for an auto-generated incident — best-effort, and an org-wide
+  // aggregation: deferred past the response when the caller can, so the reviewer isn't kept waiting on it.
+  // Only CRITICAL/HIGH files can ever affect incident state.
   if (file?.risk_score === "CRITICAL" || file?.risk_score === "HIGH") {
-    await syncAutoIncidents(db, org_id);
+    if (opts.defer) opts.defer(() => syncAutoIncidents(db, org_id));
+    else await syncAutoIncidents(db, org_id);
   }
 
   return { ok: true, attestation_id: attestation.id, payload_hash: payloadHash, attested_at: attestation.created_at };

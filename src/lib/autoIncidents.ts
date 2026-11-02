@@ -69,9 +69,19 @@ async function keepOldest(
 /** One sync per org at a time in this server instance: pages that load together each trigger one, and running
  *  them side by side is what let each insert its own copy of the same incident. */
 const inFlight = new Map<string, Promise<void>>();
+/** A sync waiting for the running one to finish. It hasn't read anything yet, so it will see every change made
+ *  before it starts: later callers share it instead of queueing one org-wide aggregation each ("attest all" fired
+ *  one per file, and each recomputed everything, one after another). */
+const queued = new Map<string, Promise<void>>();
 
 export function syncAutoIncidents(db: SupabaseClient<Database>, orgId: string): Promise<void> {
-  const run = (inFlight.get(orgId) ?? Promise.resolve()).then(() => syncAutoIncidentsOnce(db, orgId));
+  const waiting = queued.get(orgId);
+  if (waiting) return waiting;
+  const run = (inFlight.get(orgId) ?? Promise.resolve()).then(() => {
+    queued.delete(orgId);   // started: from here on, a new caller's changes may be too late for it
+    return syncAutoIncidentsOnce(db, orgId);
+  });
+  queued.set(orgId, run);
   inFlight.set(orgId, run);
   void run.finally(() => { if (inFlight.get(orgId) === run) inFlight.delete(orgId); });
   return run;

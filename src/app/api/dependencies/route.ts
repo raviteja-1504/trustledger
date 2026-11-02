@@ -20,10 +20,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { safeError } from "@/lib/errors";
-import { cached, cacheKeys, TTL } from "@/lib/cache";
+import { cacheGet, cacheKeys, cacheSet, singleFlight, TTL } from "@/lib/cache";
 import { deriveFindings, type ScanForDeps, type DepFinding } from "@/lib/dependencyScan";
 import { collectManifestPackages, type ManifestPackage } from "@/lib/manifestPackages";
 import { fetchContentByHash } from "@/lib/contentByHash";
+import { versionedKey } from "@/lib/orgDataVersion";
 
 interface DependencyResult { findings: DepFinding[]; manifestPackages: ManifestPackage[] }
 
@@ -47,9 +48,24 @@ export async function GET(req: NextRequest) {
   if (error) return NextResponse.json({ error }, { status: 401 });
 
   try {
-    const { findings, manifestPackages } = await cached(
-      cacheKeys.dependencies(org_id), TTL.DEPENDENCIES, () => computeFindings(org_id),
-    );
+    // The findings change only when a scan lands (or a release changes the package data), so the cached copy records
+    // the org's latest scan and the deployment it was computed for, and is reused until either changes -- not
+    // recomputed every few minutes. It stays under the plain key, which the scan pipeline deletes once a scan's files
+    // are written: a copy taken while a new scan's files were still arriving is dropped then. If the latest scan
+    // can't be read, compute without caching rather than risk a stale result.
+    const version = await dependenciesVersion(org_id);
+    const key = cacheKeys.dependencies(org_id);
+    const hit = version == null ? null : await cacheGet<{ version: string; result: DependencyResult }>(key);
+    const { findings, manifestPackages } = version == null
+      ? await computeFindings(org_id)
+      : hit?.version === version
+        ? hit.result
+        // concurrent misses share one computation
+        : await singleFlight(versionedKey(key, version), async () => {
+            const result = await computeFindings(org_id);
+            await cacheSet(key, { version, result }, TTL.DEPENDENCIES);
+            return result;
+          });
 
     const counts = {
       vulnerable:    findings.filter(f => f.type === "vulnerable").length,
@@ -64,6 +80,17 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     return safeError(err, { code: "dependencies_fetch_failed", message: "We couldn't load dependency findings right now. Please try again." });
   }
+}
+
+/** What the findings are computed from: the org's newest scan (each repo's latest scan only changes when one lands)
+ *  and the deployed code (its package and advisory data). Null when the newest scan can't be read. */
+async function dependenciesVersion(orgId: string): Promise<string | null> {
+  const { data, error } = await (createServiceClient().from("scans").select("id, created_at").eq("org_id", orgId)
+    .order("created_at", { ascending: false }).order("id", { ascending: true }).limit(1).maybeSingle() as unknown as
+    Promise<{ data: { id: string; created_at: string } | null; error: unknown }>);
+  if (error) return null;
+  const release = process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.VERCEL_DEPLOYMENT_ID ?? "local";
+  return `${release.slice(0, 12)}|${data ? `${data.created_at}|${data.id}` : "none"}`;
 }
 
 async function computeFindings(orgId: string): Promise<DependencyResult> {

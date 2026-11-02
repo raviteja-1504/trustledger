@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, permissionsFor } from "../_middleware";
 import { validateBody, AttestSchema } from "@/lib/validation";
@@ -13,6 +13,8 @@ import {
 const PAGE = 1000;
 const MAX_ROWS = 10_000;
 const IN_CHUNK = 200;
+// file paths are long: fewer per request keeps the query string within URL limits
+const PATH_CHUNK = 50;
 const ISO = /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z)?$/;
 type Page<T> = PromiseLike<{ data: T[] | null; error: unknown }>;
 
@@ -63,14 +65,21 @@ export async function GET(req: NextRequest) {
 
     const scanIds = [...new Set(attestations.map(a => a.scan_id))];
     const chunks = Array.from({ length: Math.ceil(scanIds.length / IN_CHUNK) }, (_, i) => scanIds.slice(i * IN_CHUNK, (i + 1) * IN_CHUNK));
+    // Only the files that were signed off: every MEDIUM-and-above file of those scans (with their findings) was read
+    // to describe a handful of them -- thousands of rows for a period with a hundred sign-offs.
+    const fileQueries = chunks.flatMap(ids => {
+      const inChunk = new Set(ids);
+      const paths = [...new Set(attestations.filter(a => inChunk.has(a.scan_id)).map(a => a.file_path))];
+      return Array.from({ length: Math.ceil(paths.length / PATH_CHUNK) }, (_, i) => ({ ids, paths: paths.slice(i * PATH_CHUNK, (i + 1) * PATH_CHUNK) }));
+    });
     const [scans, files] = await Promise.all([
       Promise.all(chunks.map(ids => all<RecordScanRow>((f, t) => db.from("scans")
         .select("id, repo_full_name, pr_number, commit_sha, branch, pr_author, created_at")
         .eq("org_id", org_id).in("id", ids).order("id", { ascending: true }).range(f, t) as unknown as Page<RecordScanRow>))).then(x => x.flat()),
-      Promise.all(chunks.map(ids => all<RecordFileRow>((f, t) => db.from("scan_files")
+      Promise.all(fileQueries.map(({ ids, paths }) => all<RecordFileRow>((f, t) => db.from("scan_files")
         .select("scan_id, file_path, risk_indicators, ai_percentage")
-        // Attested files are MEDIUM and above; skipping LOW files skips most of each scan.
-        .eq("org_id", org_id).in("scan_id", ids).in("risk_score", ["CRITICAL", "HIGH", "MEDIUM"]).order("file_path", { ascending: true }).range(f, t) as unknown as Page<RecordFileRow>))).then(x => x.flat()),
+        .eq("org_id", org_id).in("scan_id", ids).in("file_path", paths)
+        .order("scan_id", { ascending: true }).order("file_path", { ascending: true }).range(f, t) as unknown as Page<RecordFileRow>))).then(x => x.flat()),
     ]);
 
     // Scope: one repository, and/or a developer's own pull requests.
@@ -80,6 +89,13 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     return safeError(err, { code: "attestation_records_failed", message: "We couldn't load attestation records right now. Please try again." });
   }
+}
+
+/** Runs best-effort follow-up work after the response is sent (next/server after(), kept alive by the platform);
+ * outside a request scope after() throws, and the task then runs without being awaited. */
+function runAfterResponse(task: () => Promise<void>) {
+  const safe = () => task().catch(err => console.error("Deferred attestation follow-up failed:", err));
+  try { after(safe); } catch { void safe(); }
 }
 
 export async function POST(req: NextRequest) {
@@ -115,7 +131,7 @@ export async function POST(req: NextRequest) {
     reviewer_email:  reviewerEmail,
     reviewer_github: reviewerGithub,
     permissions:     await permissionsFor(auth),
-  });
+  }, { defer: runAfterResponse });
 
   if (!result.ok) {
     if (result.reason === "forbidden") {

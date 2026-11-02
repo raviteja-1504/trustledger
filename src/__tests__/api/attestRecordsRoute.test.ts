@@ -63,6 +63,22 @@ describe("GET /api/attest", () => {
     expect((await get("until=2026-10-31")).status).toBe(400);
   });
 
+  it("each signed-off file is described from its own scan file, however many there are (paths read in chunks)", async () => {
+    const many = Array.from({ length: 120 }, (_, i) => att(`m${i}`, "s1", "2026-10-05T00:00:00Z"));
+    seed(many);
+    const files = (db.client.from("scan_files") as unknown as { rows: Record<string, unknown>[] }).rows;
+    files.length = 0;
+    for (let i = 0; i < 120; i++) files.push({ org_id: "org-1", scan_id: "s1", file_path: `m${i}.ts`, risk_score: i === 7 ? "LOW" : "HIGH", risk_indicators: [`rule-${i}`], ai_percentage: 0.1 });
+    // files nobody signed off are not needed
+    for (let i = 0; i < 300; i++) files.push({ org_id: "org-1", scan_id: "s1", file_path: `other${i}.ts`, risk_score: "MEDIUM", risk_indicators: ["x"], ai_percentage: 0 });
+    const { body } = await get("since=2026-10-01&until=2026-10-31");
+    expect(body.records).toHaveLength(120);
+    const byId = Object.fromEntries(body.records.map((r: { id: string; findings: string[] }) => [r.id, r.findings]));
+    expect(byId.m0).toEqual(["rule-0"]);
+    expect(byId.m119).toEqual(["rule-119"]);
+    expect(byId.m7).toEqual(["rule-7"]);   // a LOW file someone signed off is described too
+  });
+
   it("reads past the 1000-row cap", async () => {
     seed(Array.from({ length: 1500 }, (_, i) => att(`b${i}`, "s1", "2026-10-05T00:00:00Z")), { maxRows: 1000 });
     expect((await get("since=2026-10-01&until=2026-10-31")).body.summary.records).toBe(1500);

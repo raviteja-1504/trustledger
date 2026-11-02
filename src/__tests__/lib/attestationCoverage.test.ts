@@ -68,6 +68,18 @@ it("another PR's different version of the file keeps its violation, alert and bl
   expect((updateCheckRun as jest.Mock).mock.calls.map(c => c[3])).not.toContain(13);
 });
 
+it("the same content in another repository is not covered: a sign-off belongs to its own repo", async () => {
+  const db = seed();
+  rows(db, "scans").push({ id: "s9", org_id: ORG, repo_full_name: "acme/web", pr_number: 5, check_run_id: 19, installation_id: 7, created_at: "2026-10-04T00:00:00Z" });
+  rows(db, "scan_files").push({ scan_id: "s9", org_id: ORG, file_path: "auth.ts", risk_score: "CRITICAL", content_hash: "A" });
+  rows(db, "violations").push({ id: "v-s9", org_id: ORG, scan_id: "s9", file_path: "auth.ts", risk_score: "CRITICAL", status: "open" });
+  await performAttestation(db.client as never, {
+    org_id: ORG, user_id: "u1", scan_id: "s1", file_path: "auth.ts", reviewer_email: "rev@a.test", permissions: ALL_PERMISSIONS,
+  });
+  expect(rows(db, "attestations").map(a => a.scan_id).sort()).toEqual(["s1", "s2"]);
+  expect(rows(db, "violations").find(v => v.id === "v-s9")?.status).toBe("open");
+});
+
 describe("the org's merge gate decides what still holds a scan (lib/mergeGate.ts)", () => {
   const waitingOnHigh = (blockHigh: boolean | null) => {
     const db = seed();

@@ -93,6 +93,23 @@ export async function cacheDelPrefix(prefix: string): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
+/** Misses being computed in this instance, by key: concurrent callers of the same key share one computation (pages
+ *  that load together -- the sidebar badge and the page itself -- each used to recompute the same expensive result). */
+const computing = new Map<string, Promise<unknown>>();
+
+/** Runs `fn` once for concurrent callers of the same key in this instance; they all get its result. */
+export async function singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const pending = computing.get(key);
+  if (pending) return pending as Promise<T>;
+  const run = fn();
+  computing.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (computing.get(key) === run) computing.delete(key);
+  }
+}
+
 /** Wrap an async function with caching. */
 export async function cached<T>(
   key:        string,
@@ -101,9 +118,11 @@ export async function cached<T>(
 ): Promise<T> {
   const hit = await cacheGet<T>(key);
   if (hit !== null) return hit;
-  const result = await fn();
-  await cacheSet(key, result, ttlSeconds);
-  return result;
+  return singleFlight(key, async () => {
+    const result = await fn();
+    await cacheSet(key, result, ttlSeconds);
+    return result;
+  });
 }
 
 // ── Cache key builders ─────────────────────────────────────────────────────
@@ -153,6 +172,7 @@ export const TTL = {
   SECRETS:     60,   //  1 minute (changes frequently)
   ORG_SETTINGS:600,  // 10 minutes
   BILLING:     300,  //  5 minutes
-  DEPENDENCIES:300,  //  5 minutes (parsing every repo's file content is expensive)
+  DEPENDENCIES:3600, //  1 hour: keyed by the org's latest scan and the deployment, so a new scan or release is a new
+                     //  key at once; the TTL only bounds how long advisory data fetched during the parse is reused
   VULN_INTEL:  86400,// 24 hours (CVE data changes slowly — day-scale, not request-scale)
 };
