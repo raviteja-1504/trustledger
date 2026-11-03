@@ -1,50 +1,50 @@
 {
   "JS-01": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "JS-02": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "JS-03": {
-    "outcome": "partial",
+    "outcome": "pass",
     "twin": "clean"
   },
   "JS-04": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "JS-05": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "JS-06": {
-    "outcome": "partial",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-01": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-02": {
-    "outcome": "partial",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-03": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-04": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-05": {
-    "outcome": "miss",
+    "outcome": "pass",
     "twin": "clean"
   },
   "PY-06": {
-    "outcome": "partial",
+    "outcome": "pass",
     "twin": "clean"
   },
   "GO-01": {

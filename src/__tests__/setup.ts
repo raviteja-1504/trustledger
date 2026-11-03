@@ -1,5 +1,16 @@
 import "@testing-library/jest-dom";
 
+// Node 20+ globals the app relies on (package.json "engines": ">=20"), filled in only when the Node running the
+// tests is older (Node 18: no global File, no global WebCrypto). Production never takes these branches.
+if (typeof globalThis.File === "undefined") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  Object.defineProperty(globalThis, "File", { value: require("buffer").File, configurable: true, writable: true });
+}
+if (!globalThis.crypto?.subtle) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  Object.defineProperty(globalThis, "crypto", { value: require("crypto").webcrypto, configurable: true, writable: true });
+}
+
 // Mock Next.js navigation
 jest.mock("next/navigation", () => ({
   useRouter:      () => ({ push: jest.fn(), replace: jest.fn(), back: jest.fn() }),

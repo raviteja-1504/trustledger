@@ -715,13 +715,32 @@ function xxeEnabledParserPy(call: SyntaxNode, parserName: string): boolean {
 function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
+  const args = argListOf(call);
+  // a call that runs a function it is handed, with the rest of its arguments -- `asyncio.to_thread(requests.get,
+  // target)`, `loop.run_in_executor(None, requests.get, target)`: judged as that function's own call
+  const text = calleeTextPy(fnNode);
+  if (text) {
+    const parts = text.split(".");
+    const resolvedModule = importMap.get(parts[0]) ?? parts[0];
+    const tail = parts[parts.length - 1];
+    const fnAt = text === "asyncio.to_thread" || (resolvedModule === "asyncio" && tail === "to_thread") ? 0 : tail === "run_in_executor" ? 1 : -1;
+    const positional = args.filter(a => a.type !== "keyword_argument");
+    const f = fnAt >= 0 ? positional[fnAt] : undefined;
+    if (f && (f.type === "identifier" || f.type === "attribute")) {
+      return matchCalleePy(call, f, args.filter(a => !positional.slice(0, fnAt + 1).includes(a)), importMap, evalAliases);
+    }
+  }
+  return matchCalleePy(call, fnNode, args, importMap, evalAliases);
+}
+
+/** The sink a call to `fnNode` with `args` is (see matchSinkPy). */
+function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[], importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
   const text = calleeTextPy(fnNode);
   if (!text) return null;
   const parts = text.split(".");
   const head = parts[0];
   const tail = parts[parts.length - 1];
   const resolvedModule = importMap.get(head) ?? head;
-  const args = argListOf(call);
   const positional = args.filter(a => a.type !== "keyword_argument");
   const first = positional[0];
 
@@ -1037,6 +1056,12 @@ function assignmentsInPy(scope: SyntaxNode): Array<{ name: string; position: num
       const right = n.childForFieldName("right");
       if (left?.type === "identifier" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: right.startPosition.row + 1 });
     }
+    // `for item in values:` -- each item is one of the iterable's values
+    if (n.type === "for_statement") {
+      const left = n.childForFieldName("left");
+      const right = n.childForFieldName("right");
+      if (left?.type === "identifier" && right) out.push({ name: left.text, position: n.startIndex, rhsText: right.text, line: n.startPosition.row + 1 });
+    }
     for (const c of n.namedChildren) if (c) visit(c);
   };
   visit(scope);
@@ -1060,13 +1085,21 @@ function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
       return name ? { name, params: params(scope), line: lineOf(scope) } : null;
     },
     functionInfo: name => {
+      // a class of this file: constructing it "returns" what its __init__ keeps in fields (`self.metadata = {...}`)
+      const init = defs().find(d => d.childForFieldName("name")?.text === "__init__" && enclosingClassNamePy(d) === name);
+      const initBody = init?.childForFieldName("body");
+      if (init && initBody) {
+        const writes = selfFieldWritesPy({ paramShapes: paramShapesOfPy(init), body: initBody }).map(w => w.childForFieldName("right")!);
+        if (writes.length) return { scope: init, params: params(init), line: lineOf(init), returns: writes.map(e => ({ text: e.text, position: e.startIndex, line: lineOf(e) })) };
+      }
       const fn = defs().find(d => d.childForFieldName("name")?.text === name);
       const body = fn?.childForFieldName("body");
       if (!fn || !body) return null;
       const returns: Array<{ text: string; position: number; line: number }> = [];
       const v = (n: SyntaxNode) => {
         if (n.type === "function_definition" || n.type === "lambda") return; // a nested function's returns are its own
-        if (n.type === "return_statement" && n.namedChildren[0]) { const e = n.namedChildren[0]; returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
+        // a generator's yielded values are what calling it produces
+        if ((n.type === "return_statement" || n.type === "yield") && n.namedChildren[0]) { const e = n.namedChildren[0]; returns.push({ text: e.text, position: e.startIndex, line: lineOf(e) }); }
         for (const c of n.namedChildren) if (c) v(c);
       };
       v(body);
@@ -1078,8 +1111,64 @@ function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
         if (n.type === "call") {
           const f = n.childForFieldName("function");
           const called = f?.type === "identifier" ? f.text : f?.type === "attribute" ? f.childForFieldName("attribute")?.text : null;
-          // a module-level call's scope is the module
-          if (called === name) out.push({ scope: enclosingFunctionPy(n) ?? root, position: n.startIndex, line: lineOf(n), text: n.text });
+          // a module-level call's scope is the module; on a receiver that is itself a call (`Fetcher().fetch(target)`),
+          // the text is the method call alone -- the trace reads the arguments of the text's first call
+          const receiverCalls = f?.type === "attribute" && f.childForFieldName("object")?.type === "call";
+          const text = receiverCalls ? `${called}${n.childForFieldName("arguments")?.text ?? "()"}` : n.text;
+          if (called === name) out.push({ scope: enclosingFunctionPy(n) ?? root, position: n.startIndex, line: lineOf(n), text });
+        }
+        for (const c of n.namedChildren) if (c) v(c);
+      };
+      v(root);
+      return out;
+    },
+    // a read of a module-level container (`STATE.get(key)`, `STATE[key]`): the writes into it made inside functions
+    // (`STATE[key] = value`, `STATE.setdefault(k, v)`, `STATE.append(v)`), whose value it hands back
+    storeWrites: text => {
+      // `self.x` set by a decorator's wrapper before it runs the method (`self.expression = request.args.get(...)`
+      // then `return func(self, ...)`)
+      const field = /^self\.([A-Za-z_]\w*)$/.exec(text.trim())?.[1];
+      if (field) {
+        const out: Array<{ scope: SyntaxNode | null; position: number; line: number; rhsText: string; label: string; via?: { line: number; label: string } }> = [];
+        for (const deco of root.namedChildren) {
+          if (deco?.type !== "function_definition") continue;
+          const visit = (n: SyntaxNode, self: string | null, wrapper: SyntaxNode | null) => {
+            if (n.type === "function_definition" && n !== deco) { self = paramNamesOf(n)[0] ?? null; wrapper = n; }
+            if (self && wrapper && n.type === "assignment") {
+              const left = n.childForFieldName("left"), right = n.childForFieldName("right");
+              if (left?.type === "attribute" && left.childForFieldName("object")?.text === self && left.childForFieldName("attribute")?.text === field && right) {
+                const callsFunc = (x: SyntaxNode): SyntaxNode | null => {
+                  if (x.type === "return_statement" && /^return\s+\w+\(\s*\w+/.test(x.text)) return x;
+                  for (const c of x.namedChildren) { const r = c ? callsFunc(c) : null; if (r) return r; }
+                  return null;
+                };
+                const ret = callsFunc(wrapper);
+                out.push({ scope: wrapper, position: right.startIndex, line: lineOf(n), rhsText: right.text, label: `${n.text.replace(/\s+/g, " ")} — set by decorator ${deco.childForFieldName("name")?.text}`,
+                  ...(ret ? { via: { line: lineOf(ret), label: `${ret.text.replace(/\s+/g, " ")} — the decorator runs the method` } } : {}) });
+              }
+            }
+            for (const c of n.namedChildren) if (c) visit(c, self, wrapper);
+          };
+          visit(deco, null, null);
+        }
+        return out;
+      }
+      const name = /^([A-Za-z_]\w*)\s*(?:\.\s*(?:get|pop|setdefault)\s*\(|\[)/.exec(text)?.[1];
+      const moduleLevel = name && root.namedChildren.some(st => st?.type === "expression_statement" && st.namedChildren[0]?.type === "assignment"
+        && st.namedChildren[0].childForFieldName("left")?.text === name);
+      if (!moduleLevel) return [];
+      const out: Array<{ scope: SyntaxNode | null; position: number; line: number; rhsText: string; label: string }> = [];
+      const v = (n: SyntaxNode) => {
+        const fn = enclosingFunctionPy(n);
+        if (fn && n.type === "assignment" && n.childForFieldName("left")?.type === "subscript"
+            && n.childForFieldName("left")!.childForFieldName("value")?.text === name && n.childForFieldName("right")) {
+          const right = n.childForFieldName("right")!;
+          out.push({ scope: fn, position: right.startIndex, line: lineOf(n), rhsText: right.text, label: `${n.text.replace(/\s+/g, " ")} — stored in ${name}` });
+        } else if (fn && n.type === "call" && n.childForFieldName("function")?.type === "attribute"
+            && n.childForFieldName("function")!.childForFieldName("object")?.text === name
+            && PY_MUTATING_METHODS.has(n.childForFieldName("function")!.childForFieldName("attribute")?.text ?? "")) {
+          const last = argListOf(n).at(-1);
+          if (last) out.push({ scope: fn, position: last.startIndex, line: lineOf(n), rhsText: last.text, label: `${n.text.replace(/\s+/g, " ")} — stored in ${name}` });
         }
         for (const c of n.namedChildren) if (c) v(c);
       };
@@ -1616,7 +1705,8 @@ function makeTaintMaskPy(
     // the classes that survive the callee's own body count. Also resolves
     // `obj.method(x)` / `self.method(x)` to a local class method by name.
     const fnName = fn?.type === "identifier" ? fn.text
-      : attr?.attribute && (attr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(attr.attribute)) ? attr.attribute : null;
+      : methodKeyPy(fn, localFns)
+        ?? (attr?.attribute && (attr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(attr.attribute)) ? attr.attribute : null);
     if (fnName) {
       const propIdx = propagating.get(fnName);
       if (propIdx) {
@@ -1649,6 +1739,12 @@ function makeTaintMaskPy(
     if (fn && (fn.type === "call" || fn.type === "lambda" || fn.type === "parenthesized_expression")) {
       const inner = fn.type === "parenthesized_expression" ? fn.namedChildren[0] : fn;
       if (inner) return taintMask(inner, env);
+    }
+    // `RequestModel(request.args.get("path"))`: an instance of a class of this file holds what its __init__ keeps
+    const ctor = fn?.type === "identifier" ? localFns.get(`${fn.text}.__init__`) : undefined;
+    if (ctor) {
+      const kept = constructorKeptArgsPy(ctor);
+      if (kept.length) return kept.reduce((m, i) => m | (args[i] && args[i].type !== "keyword_argument" ? taintMask(args[i], env) : 0), 0);
     }
     if (fn?.type === "identifier" && !propagating.has(fn.text)) {
       if (isParamOfEnclosingFnPy(fn)) return argsMask(args, env);
@@ -1936,7 +2032,33 @@ function createWalkerPy(h: WalkHooksPy) {
     const fenv = cloneEnv(env);
     const seeded = isFastApiHandler(fn);
     for (const prm of paramNamesOf(fn)) fenv.set(prm, seeded ? ALL : 0);
+    for (const [field, mask] of decoratorSelfFields(fn, maskFor(django))) fenv.set(`self.${field}`, mask);
     walk(body, fenv, django);
+  };
+  // `@capture` on a method, where capture's wrapper does `self.expression = request.args.get(...)` before calling it:
+  // inside the method, self.expression is that request input
+  const decoratorSelfFields = (fn: SyntaxNode, tm: TaintMaskFnPy): Array<[string, number]> => {
+    if (fn.parent?.type !== "decorated_definition") return [];
+    const out: Array<[string, number]> = [];
+    for (const d of fn.parent.namedChildren) {
+      if (d?.type !== "decorator") continue;
+      const name = /^@\s*([A-Za-z_]\w*)/.exec(d.text)?.[1];
+      const deco = name ? h.root.namedChildren.find(s => s?.type === "function_definition" && s.childForFieldName("name")?.text === name) : undefined;
+      const visit = (n: SyntaxNode, inWrapper: string | null) => {
+        if (n.type === "function_definition" && n !== deco) inWrapper = paramNamesOf(n)[0] ?? null;
+        if (inWrapper && n.type === "assignment") {
+          const left = n.childForFieldName("left"), right = n.childForFieldName("right");
+          if (left?.type === "attribute" && left.childForFieldName("object")?.text === inWrapper && right) {
+            const m = tm(right, new Map()) & ALL;
+            const field = left.childForFieldName("attribute")?.text;
+            if (m && field) out.push([field, m]);
+          }
+        }
+        for (const c of n.namedChildren) if (c) visit(c, inWrapper);
+      };
+      if (deco) visit(deco, null);
+    }
+    return out;
   };
 
   const walk = (node: SyntaxNode, env: Env, django: boolean): boolean => {
@@ -2083,6 +2205,13 @@ function createWalkerPy(h: WalkHooksPy) {
       case "raise_statement":
         for (const c of node.namedChildren) if (c) walk(c, env, django);
         return true;
+
+      // a generator's `yield v` is what calling it produces (`for item in arguments()` iterates the yielded values)
+      case "yield": {
+        const v = node.namedChildren[0];
+        if (v) { walk(v, env, django); h.onReturn?.(v, env, taintMask); }
+        return false;
+      }
 
       default:
         break;
@@ -3214,13 +3343,63 @@ function moduleLevelInstancesPy(root: SyntaxNode): Map<string, string[]> {
   return out;
 }
 
+/** `self.<field> = <expr>` statements of a constructor body (top level of the body, any nesting of the value). */
+function selfFieldWritesPy(init: LocalFn): SyntaxNode[] {
+  const out: SyntaxNode[] = [];
+  const v = (n: SyntaxNode) => {
+    if (n.type === "function_definition" || n.type === "lambda") return;
+    if (n.type === "assignment") {
+      const left = n.childForFieldName("left");
+      if (left?.type === "attribute" && left.childForFieldName("object")?.text === "self" && n.childForFieldName("right")) out.push(n);
+    }
+    for (const c of n.namedChildren) if (c) v(c);
+  };
+  v(init.body);
+  return out;
+}
+/** Which constructor arguments (0 = the first after `self`) a class keeps in its fields: `RequestModel(path)` whose
+ * `__init__` does `self.metadata = {"files": [path]}` holds `path`. */
+function constructorKeptArgsPy(init: LocalFn): number[] {
+  const names = new Set<string>();
+  const ids = (n: SyntaxNode) => { if (n.type === "identifier") names.add(n.text); for (const c of n.namedChildren) if (c) ids(c); };
+  for (const w of selfFieldWritesPy(init)) ids(w.childForFieldName("right")!);
+  const params = init.paramShapes.filter(s => s.name !== "self");
+  return params.filter(p => names.has(p.name)).map(p => p.index - (init.paramShapes[0]?.name === "self" ? 1 : 0));
+}
+
+/** The class a `def` is a method of, or null. */
+function enclosingClassNamePy(def: SyntaxNode): string | null {
+  let p = def.parent;
+  if (p?.type === "decorated_definition") p = p.parent;
+  const cls = p?.type === "block" ? p.parent : null;
+  return cls?.type === "class_definition" ? cls.childForFieldName("name")?.text ?? null : null;
+}
+
+/** The `Class.method` key a method call resolves to when its receiver says which class it is: `Fetcher().fetch(x)`,
+ * or `self.send(x)` inside class Fetcher -- a bare name may belong to another function (a route also called `fetch`). */
+function methodKeyPy(fnNode: SyntaxNode | null, localFns: ReadonlyMap<string, LocalFn>): string | null {
+  if (fnNode?.type !== "attribute") return null;
+  const obj = fnNode.childForFieldName("object"), attr = fnNode.childForFieldName("attribute")?.text;
+  if (!obj || !attr) return null;
+  let cls: string | null = null;
+  if (obj.type === "call" && obj.childForFieldName("function")?.type === "identifier") cls = obj.childForFieldName("function")!.text;
+  else if (obj.type === "identifier" && obj.text === "self") {
+    for (let p = fnNode.parent; p; p = p.parent) if (p.type === "function_definition") { cls = enclosingClassNamePy(p); break; }
+  }
+  return cls && localFns.has(`${cls}.${attr}`) ? `${cls}.${attr}` : null;
+}
+
 function collectLocalFunctionsPy(root: SyntaxNode): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: SyntaxNode) => {
     if (node.type === "function_definition") {
       const name = node.childForFieldName("name")?.text;
       const body = node.childForFieldName("body");
-      if (name && body) fns.set(name, { paramShapes: paramShapesOfPy(node), body });
+      if (name && body) {
+        fns.set(name, { paramShapes: paramShapesOfPy(node), body });
+        const cls = enclosingClassNamePy(node);
+        if (cls) fns.set(`${cls}.${name}`, { paramShapes: paramShapesOfPy(node), body });
+      }
     }
     for (const child of node.namedChildren) if (child) visit(child);
   };
@@ -3555,7 +3734,8 @@ export function scanAstTaintPython(
       const fnNode = node.childForFieldName("function");
       const seedAttr = fnNode?.type === "attribute" ? attributeParts(fnNode) : null;
       const seedName = fnNode?.type === "identifier" ? fnNode.text
-        : seedAttr?.attribute && (seedAttr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(seedAttr.attribute)) ? seedAttr.attribute : null;
+        : methodKeyPy(fnNode, localFns)
+          ?? (seedAttr?.attribute && (seedAttr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(seedAttr.attribute)) ? seedAttr.attribute : null);
       if (seedName && localFns.has(seedName)) {
         const fnName = seedName;
         const fn = localFns.get(fnName)!;
@@ -3747,11 +3927,25 @@ export function scanAstTaintPython(
     const walker = createWalkerPy({ localFns, propagating, root, descendFunctions: true, onCall, onNode, onReturn, sticky, crossFileShapes, storedProvenance, sourceCall, passMethods });
     const walk = (node: SyntaxNode, env: Env, django: boolean) => walker.walk(node, env, django);
 
+    // A helper that reads a module-level container back (`def load(key): return STATE.get(key)`) returns request
+    // input once that container holds some: its summary was built before any was stored, so add it now (index -1).
+    const refreshStickyReturns = () => {
+      for (const [name, fn] of localFns) {
+        let own = 0;
+        createWalkerPy({ localFns, propagating, root, descendFunctions: false, sticky, crossFileShapes, sourceCall, passMethods,
+          onReturn: (expr, env, tm) => { if (expr) own |= tm(expr, env); } }).walk(fn.body, new Map(), false);
+        own &= ALL;
+        const cur = propagating.get(name) ?? new Map<number, number>();
+        if (!own || ((cur.get(-1) ?? 0) | own) === (cur.get(-1) ?? 0)) continue;
+        propagating.set(name, new Map([...cur, [-1, (cur.get(-1) ?? 0) | own]]));
+      }
+    };
     walk(root, new Map(), false);
     // A container written by a function declared AFTER the one that reads it: walk again with what the
     // first pass learned (findings dedupe by id+line).
     for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
       stickyDirty = false;
+      refreshStickyReturns();
       walk(root, new Map(), false);
     }
 
@@ -3777,24 +3971,34 @@ export function scanAstTaintPython(
     // second/third hop -- bounded by MAX_PROPAGATION_ROUNDS_PY rather than
     // left as an unbounded/accidental side effect of Map iteration order.
     const walkedSignaturesPy = new Set<string>();
-    for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
-      const toWalk = Array.from(seededParams.entries());
-      let changed = false;
-      for (const [fnName, idxSet] of toWalk) {
-        const fn = localFns.get(fnName);
-        if (!fn) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
-        if (walkedSignaturesPy.has(signature)) continue;
-        walkedSignaturesPy.add(signature);
-        changed = true;
-        const env: Env = new Map();
-        for (const [idx, m] of idxSet) {
-          const shape = fn.paramShapes[idx];
-          if (shape) env.set(shape.name, m);
+    for (let outer = 0; outer < FIXED_POINT_CAP; outer++) {
+      for (let round = 0; round < MAX_PROPAGATION_ROUNDS_PY; round++) {
+        const toWalk = Array.from(seededParams.entries());
+        let changed = false;
+        for (const [fnName, idxSet] of toWalk) {
+          const fn = localFns.get(fnName);
+          if (!fn) continue;
+          const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+          if (walkedSignaturesPy.has(signature)) continue;
+          walkedSignaturesPy.add(signature);
+          changed = true;
+          const env: Env = new Map();
+          for (const [idx, m] of idxSet) {
+            const shape = fn.paramShapes[idx];
+            if (shape) env.set(shape.name, m);
+          }
+          walk(fn.body, env, false);
         }
-        walk(fn.body, env, false);
+        if (!changed) break;
       }
-      if (!changed) break;
+      // A helper walked with a tainted argument stored it in a module-level container (`store(key, value)` doing
+      // `STATE[key] = value`): every function reading the container back must see it -- walk the file again.
+      if (!stickyDirty) break;
+      for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
+        stickyDirty = false;
+        refreshStickyReturns();
+        walk(root, new Map(), false);
+      }
     }
 
     return findings;

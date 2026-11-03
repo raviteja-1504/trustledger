@@ -83,21 +83,28 @@ describe("deeply nested code", () => {
 });
 
 describe("regex time on long runs and long lines", () => {
-  // Each took minutes before (and grew quadratically); now each is seconds.
-  const CASES: [string, string][] = [
-    ["spaces.js", "const x = \"" + " ".repeat(300 * KB) + "\";"],
-    ["a.js", "a".repeat(300 * KB)],
-    ["var.js", "var a = ".repeat(Math.floor(200 * KB / 8))],
-    ["stmts.js", "const x = 1; ".repeat(Math.floor(200 * KB / 13)) + "const y = req.query.a;"],
-    ["a.py", "a".repeat(300 * KB)],
-    ["ldap.ts", "filter = `" + "(a=".repeat(Math.floor(200 * KB / 3))],
-    ["arrow.js", "a = (".repeat(Math.floor(200 * KB / 5))],
-    ["Dockerfile", "FROM x\n" + "RUN a \\\n".repeat(Math.floor(450 * KB / 8))],
+  // Each took minutes before, because the time grew QUADRATICALLY with the run's length; now it grows linearly. That
+  // is what is checked: the input at half size and at full size, timed in this process's CPU time -- linear roughly
+  // doubles, quadratic quadruples, and a busy machine (other test workers, garbage collection) slows both alike. A
+  // fixed budget alone failed under full-suite load (the 450 KB Dockerfile is ~7 s of CPU alone) with nothing wrong.
+  const cpuTimed = (fn: () => unknown): number => { const c = process.cpuUsage(); fn(); const d = process.cpuUsage(c); return (d.user + d.system) / 1000; };
+  const CASES: [string, (scale: number) => string][] = [
+    ["spaces.js", s => "const x = \"" + " ".repeat(Math.floor(300 * KB * s)) + "\";"],
+    ["a.js", s => "a".repeat(Math.floor(300 * KB * s))],
+    ["var.js", s => "var a = ".repeat(Math.floor(200 * KB * s / 8))],
+    ["stmts.js", s => "const x = 1; ".repeat(Math.floor(200 * KB * s / 13)) + "const y = req.query.a;"],
+    ["a.py", s => "a".repeat(Math.floor(300 * KB * s))],
+    ["ldap.ts", s => "filter = `" + "(a=".repeat(Math.floor(200 * KB * s / 3))],
+    ["arrow.js", s => "a = (".repeat(Math.floor(200 * KB * s / 5))],
+    ["Dockerfile", s => "FROM x\n" + "RUN a \\\n".repeat(Math.floor(450 * KB * s / 8))],
   ];
-  it.each(CASES)("%s is scanned in seconds", (path, content) => {
-    const [, ms] = timed(() => scan(path, content));
-    expect(ms).toBeLessThan(15000);
-  }, 120000);
+  it.each(CASES)("%s is scanned in time that grows linearly", (path, content) => {
+    const half = cpuTimed(() => scan(path, content(0.5)));
+    const full = cpuTimed(() => scan(path, content(1)));
+    expect(full).toBeLessThan(60000);
+    // below half a second, timer noise outweighs the ratio
+    if (full > 500) expect(full / Math.max(half, 1)).toBeLessThan(3);
+  }, 240000);
 
   it("a finding after a long run keeps its exact line number", () => {
     const js = "const a = req.query.a;\nconst pad = \"" + " ".repeat(50 * KB) + "\";\neval(a);\n";

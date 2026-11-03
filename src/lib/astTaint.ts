@@ -1025,6 +1025,24 @@ function calleeFnName(callee: ts.Expression): string | null {
   return null;
 }
 
+const EMIT_METHODS = new Set(["emit"]);
+const LISTEN_METHODS = new Set(["on", "once", "addListener", "prependListener", "prependOnceListener"]);
+/** `bus.emit("job", ...)` / `bus.on("job", ...)`: the emitter's name and the literal event name (one hop of receiver
+ * text only -- an emitter and its listener are paired by receiver name and event name). */
+function emitterEvent(n: ts.Node, methods: ReadonlySet<string>): { emitter: string; event: string } | null {
+  if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression) || !methods.has(n.expression.name.text)) return null;
+  const recv = n.expression.expression, ev = n.arguments[0];
+  if (!ts.isIdentifier(recv) || !ev || !ts.isStringLiteralLike(ev)) return null;
+  return { emitter: recv.text, event: ev.text };
+}
+
+/** Express's per-request store: `res.locals.term` (any of the usual response names, sub-fields included) -> the one
+ * key middleware writes and a later handler reads (`capture` sets `res.locals.term = req.query.term`). */
+function resLocalsKey(path: string | null | undefined): string | null {
+  const m = path ? /^(?:res|response|reply|resp)\.locals\.(\w+)/.exec(path) : null;
+  return m ? `res.locals.${m[1]}` : null;
+}
+
 function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO) {
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
@@ -1051,7 +1069,9 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       const baseMask = ts.isIdentifier(base)
         ? (env.get(base.text) ?? 0) | (sticky && !isShadowed(base) ? (sticky.get(base.text) ?? 0) : 0)
         : taintMask(base, env);
-      return (path ? (env.get(path) ?? 0) : 0) | baseMask;
+      // what a middleware stored in res.locals for this request
+      const locals = sticky && resLocalsKey(path);
+      return (path ? (env.get(path) ?? 0) : 0) | baseMask | (locals ? (sticky.get(locals) ?? 0) : 0);
     }
     // arr[i] / obj[key]: an element of a tainted container is tainted; a lookup on a global object
     // with an attacker-chosen key selects an attacker-chosen member.
@@ -3021,6 +3041,8 @@ export function scanAstTaint(
       if (depth > 6) return false;
       const u = unwrapExpr(e);
       if (isTaintSourceExpr(u)) return true;
+      // read back from memory that holds request data (`res.locals.term`, a module-scope Map)
+      if (stickyContainerRead(u)) return true;
       if (ts.isIdentifier(u)) {
         const init = initializerOf.get(u.text);
         return !!init && init !== e && reachesSource(init, depth + 1);
@@ -3040,7 +3062,8 @@ export function scanAstTaint(
       // a parameter of the enclosing function: the value came in from the caller (followed by buildTrace)
       const param = ids.find(o => { const f = enclosingFn(o); return !!f && paramNamesOf(f).includes((unwrapExpr(o) as ts.Identifier).text); });
       if (param) return param;
-      return ids.length === 1 && ops.length === 1 ? ids[0] : undefined;
+      // the only non-literal part: the taint can only have come from it (`<div>${super.render()}</div>`)
+      return ops.length === 1 ? ops[0] : undefined;
     };
     // ── interprocedural trace support: the functions of this file by name, their call sites and their returns ──
     type FnNode = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
@@ -3060,6 +3083,66 @@ export function scanAstTaint(
       return fnsByName.get(name);
     };
     const enclosingFn = (n: ts.Node): FnNode | undefined => { for (let p = n.parent; p; p = p.parent) if (isFnNode(p)) return p; return undefined; };
+    // ── classes, for method calls: `renderer.render()` on a `new HtmlRenderer()`, `super.render()`, `this.value` ──
+    let classesByName: Map<string, ts.ClassDeclaration> | null = null;
+    const classDecl = (name: string): ts.ClassDeclaration | undefined => {
+      if (!classesByName) {
+        classesByName = new Map();
+        const visit = (n: ts.Node) => { if (ts.isClassDeclaration(n) && n.name && !classesByName!.has(n.name.text)) classesByName!.set(n.name.text, n); ts.forEachChild(n, visit); };
+        visit(sourceFile);
+      }
+      return classesByName.get(name);
+    };
+    const parentClass = (c: ts.ClassDeclaration): ts.ClassDeclaration | undefined => {
+      const ext = c.heritageClauses?.find(h => h.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+      return ext && ts.isIdentifier(ext) ? classDecl(ext.text) : undefined;
+    };
+    /** Method `m` of class `c` or the nearest class it extends. */
+    const methodOf = (c: ts.ClassDeclaration | undefined, m: string): ts.MethodDeclaration | undefined => {
+      for (let cur = c, depth = 0; cur && depth < 8; cur = parentClass(cur), depth++) {
+        const md = cur.members.find((x): x is ts.MethodDeclaration => ts.isMethodDeclaration(x) && !!x.name && ts.isIdentifier(x.name) && x.name.text === m && !!x.body);
+        if (md) return md;
+      }
+      return undefined;
+    };
+    const enclosingClass = (n: ts.Node): ts.ClassDeclaration | undefined => { for (let p = n.parent; p; p = p.parent) if (ts.isClassDeclaration(p)) return p; return undefined; };
+    /** The class a value was constructed from: `x` initialised as `new C(...)`. */
+    const instanceClass = (e: ts.Expression): ts.ClassDeclaration | undefined => {
+      const u = unwrapExpr(e);
+      const init = ts.isIdentifier(u) ? initializerOf.get(u.text) : u;
+      const cls = newExprClass(init);
+      return cls ? classDecl(cls) : undefined;
+    };
+    /** Whether class `c` is `ancestor` or extends it. */
+    const isSubclass = (c: ts.ClassDeclaration | undefined, ancestor: ts.ClassDeclaration): boolean => {
+      for (let cur = c, depth = 0; cur && depth < 8; cur = parentClass(cur), depth++) if (cur === ancestor) return true;
+      return false;
+    };
+    /** The method a call runs, when its receiver tells: `super.m()` -> the parent's, `x.m()` on a `new C()` -> C's (or inherited). */
+    const methodCalled = (c: ts.CallExpression): ts.MethodDeclaration | undefined => {
+      if (!ts.isPropertyAccessExpression(c.expression)) return undefined;
+      const name = c.expression.name.text, recv = c.expression.expression;
+      if (recv.kind === ts.SyntaxKind.SuperKeyword) { const own = enclosingClass(c); return methodOf(own && parentClass(own), name); }
+      if (recv.kind === ts.SyntaxKind.ThisKeyword) return methodOf(enclosingClass(c), name);
+      return methodOf(instanceClass(recv), name);
+    };
+    /** Where `this.f` (read in a method of class `c`) was set: `this.f = v` in the class, or `x.f = v` on an instance. */
+    const fieldWriteOf = (c: ts.ClassDeclaration, f: string): ts.BinaryExpression | undefined => {
+      let found: ts.BinaryExpression | undefined;
+      const visit = (n: ts.Node) => {
+        if (found) return;
+        if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(n.left)
+            && n.left.name.text === f && !isLiteralExpr(unwrapExpr(n.right))) {
+          const obj = n.left.expression;
+          const onThis = obj.kind === ts.SyntaxKind.ThisKeyword && isSubclass(enclosingClass(n), c);
+          const onInstance = ts.isIdentifier(obj) && isSubclass(instanceClass(obj), c);
+          if (onThis || onInstance) found = n;
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sourceFile);
+      return found;
+    };
     const paramNamesOf = (f: FnNode) => f.parameters.map(p => (ts.isIdentifier(p.name) ? p.name.text : ""));
     const calleeName = (c: ts.CallExpression): string | undefined =>
       ts.isIdentifier(c.expression) ? c.expression.text : ts.isPropertyAccessExpression(c.expression) ? c.expression.name.text : undefined;
@@ -3077,8 +3160,39 @@ export function scanAstTaint(
       return out;
     };
 
+    /** Where a function wrote request data into module-scope container `name` (`targets.set(k, v)`, `cache[k] = v`,
+     * `list.push(x)`): the write and the value stored -- what a read of the container hands back. */
+    const containerWriteOf = (name: string): { at: ts.Node; value: ts.Expression; fn?: string } | undefined => {
+      let found: { at: ts.Node; value: ts.Expression; fn?: string } | undefined;
+      const visit = (n: ts.Node) => {
+        if (found) return;
+        const fn = enclosingFn(n);
+        if (fn && ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && MUTATING_METHODS.has(n.expression.name.text)
+            && rootIdentifier(n.expression.expression)?.text === name) {
+          const value = [...n.arguments].reverse().find(a => !isFunctionExpr(a) && !isLiteralExpr(unwrapExpr(a)));
+          if (value) found = { at: n, value, fn: fnNameOf(fn) };
+        } else if (fn && ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && !isLiteralExpr(unwrapExpr(n.right))
+            && (rootIdentifier(n.left)?.text === name || (ts.isPropertyAccessExpression(n.left) && resLocalsKey(calleeText(n.left)) === name))) {
+          found = { at: n, value: n.right, fn: fnNameOf(fn) };
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sourceFile);
+      return found;
+    };
+    /** A read of a module-scope container that holds request data (sticky): the container it reads, else undefined. */
+    const stickyContainerRead = (e: ts.Expression): string | undefined => {
+      const locals = ts.isPropertyAccessExpression(e) ? resLocalsKey(calleeText(e)) : null;
+      if (locals) return (sticky.get(locals) ?? 0) & ALL ? locals : undefined;
+      const base = ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) ? e.expression.expression
+        : ts.isElementAccessExpression(e) || ts.isPropertyAccessExpression(e) ? e.expression : ts.isIdentifier(e) ? e : undefined;
+      const root = base && rootIdentifier(base);
+      return root && moduleScopeNames.has(root.text) && !isShadowed(root) && ((sticky.get(root.text) ?? 0) & ALL) ? root.text : undefined;
+    };
+
     const buildTrace = (sinkNode: ts.Node, taintedArgExpr: ts.Expression | undefined, sinkExpr: string): TraceStep[] => {
       const backward: TraceStep[] = [];
+      const containersVisited = new Set<string>();
       const visitedIds = new Set<string>();
       // the callees the walk went down into, innermost last: a parameter met inside one returns to THAT call's argument
       const frames: Array<{ fn: string; params: string[]; args: readonly ts.Expression[]; line: number }> = [];
@@ -3090,6 +3204,19 @@ export function scanAstTaint(
           continue;
         }
         const text = cur.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
+        // read back from a module-scope container (`targets.get(k)`): to the write that stored the value there
+        const container = stickyContainerRead(cur);
+        const write = container && !containersVisited.has(container) ? containerWriteOf(container) : undefined;
+        if (container && write) {
+          containersVisited.add(container);
+          backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: `${text} — read back from ${container}`, snippet: text });
+          backward.push({ file: filePath, line: lineOf(write.at), kind: "assignment",
+            label: `${write.at.getText(sourceFile).replace(/\s+/g, " ").slice(0, 70)} — stored in ${container}${write.fn ? ` by ${write.fn}` : ""}`,
+            snippet: write.at.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+          frames.length = 0;   // the write ran in another call: its parameters come from that function's callers
+          cur = write.value;
+          continue;
+        }
         if (ts.isIdentifier(cur)) {
           const fnHere = enclosingFn(cur);
           const visitKey = `${fnHere?.pos ?? -1}:${cur.text}`;
@@ -3097,6 +3224,49 @@ export function scanAstTaint(
           visitedIds.add(visitKey);
           const init = initializerOf.get(cur.text);
           const paramIdx = fnHere ? paramNamesOf(fnHere).indexOf(cur.text) : -1;
+          // a parameter of a function passed to a helper of this file (`scheduleWrite(p, path => fs.writeFileSync(path))`):
+          // to where the helper calls it back (`callback(captured)`), then on through the helper with that call's arguments
+          const cbSite = fnHere && paramIdx >= 0 && fnHere.parent && ts.isCallExpression(fnHere.parent) && ts.isIdentifier(fnHere.parent.expression)
+            ? fnHere.parent : undefined;
+          const helper = cbSite ? localFn((cbSite.expression as ts.Identifier).text) : undefined;
+          const cbParam = helper && cbSite ? paramNamesOf(helper)[cbSite.arguments.indexOf(fnHere as ts.Expression)] : undefined;
+          let callBack: ts.CallExpression | undefined;
+          if (helper && cbParam) {
+            const findCall = (n: ts.Node) => {
+              if (callBack) return;
+              if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === cbParam && n.arguments[paramIdx]) callBack = n;
+              ts.forEachChild(n, findCall);
+            };
+            if (helper.body) findCall(helper.body);
+          }
+          // a parameter of an event listener (`bus.on("job", job => ...)`): to the `bus.emit("job", job)` that sent it
+          const listen = fnHere && paramIdx >= 0 && fnHere.parent ? emitterEvent(fnHere.parent, LISTEN_METHODS) : null;
+          let emitCall: ts.CallExpression | undefined;
+          if (listen && (fnHere!.parent as ts.CallExpression).arguments.at(-1) === fnHere) {
+            const findEmit = (n: ts.Node) => {
+              if (emitCall) return;
+              const ev = emitterEvent(n, EMIT_METHODS);
+              if (ev && ev.emitter === listen.emitter && ev.event === listen.event && (n as ts.CallExpression).arguments[paramIdx + 1]) emitCall = n as ts.CallExpression;
+              ts.forEachChild(n, findEmit);
+            };
+            findEmit(sourceFile);
+          }
+          if (listen && emitCall && !entered.has(`emit:${emitCall.pos}`)) {
+            entered.add(`emit:${emitCall.pos}`);
+            backward.push({ file: filePath, line: lineOf(fnHere!), kind: "parameter", label: `${cur.text} — parameter of the "${listen.event}" listener on ${listen.emitter}`, snippet: cur.text });
+            backward.push({ file: filePath, line: lineOf(emitCall), kind: "call", label: `${emitCall.getText(sourceFile).replace(/\s+/g, " ").slice(0, 60)} — emits it`, snippet: emitCall.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+            frames.length = 0;
+            cur = emitCall.arguments[paramIdx + 1];
+            continue;
+          }
+          if (cbSite && helper && callBack) {
+            const helperName = (cbSite.expression as ts.Identifier).text;
+            backward.push({ file: filePath, line: lineOf(fnHere!), kind: "parameter", label: `${cur.text} — parameter of the function passed to ${helperName}`, snippet: cur.text });
+            backward.push({ file: filePath, line: lineOf(callBack), kind: "call", label: `${helperName} calls it back: ${callBack.getText(sourceFile).replace(/\s+/g, " ").slice(0, 60)}`, snippet: callBack.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+            frames.push({ fn: helperName, params: paramNamesOf(helper), args: cbSite.arguments, line: lineOf(cbSite) });
+            cur = callBack.arguments[paramIdx];
+            continue;
+          }
           if (!init || paramIdx >= 0) {
             const fnName = fnHere ? fnNameOf(fnHere) : undefined;
             // a parameter of the callee we came down into: back to the argument that call passed
@@ -3141,12 +3311,28 @@ export function scanAstTaint(
           backward.push({ file: filePath, line: lineOf(cur), kind: "source", label: text, snippet: text });
           break;
         }
-        // a call of a function of this file: down into what it returns (once per function)
+        // `this.value` read in a method: to where the field was set (`renderer.value = req.query.message`)
+        if (ts.isPropertyAccessExpression(cur) && cur.expression.kind === ts.SyntaxKind.ThisKeyword) {
+          const cls = enclosingClass(cur);
+          const fw = cls ? fieldWriteOf(cls, cur.name.text) : undefined;
+          if (fw && !entered.has(`field:${fw.pos}`)) {
+            entered.add(`field:${fw.pos}`);
+            const fwText = fw.getText(sourceFile).replace(/\s+/g, " ");
+            backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: `${text} — a field of the object`, snippet: text });
+            backward.push({ file: filePath, line: lineOf(fw), kind: "assignment", label: `${fwText.slice(0, 70)} — sets ${text}`, snippet: fwText.slice(0, 100) });
+            frames.length = 0;
+            cur = fw.right;
+            continue;
+          }
+        }
+        // a call of a function of this file: down into what it returns (once per function); a method resolved by
+        // its receiver (`super.render()`, `renderer.render()` on a `new HtmlRenderer()`) before a bare name lookup
         const called = ts.isCallExpression(cur) ? calleeName(cur) : undefined;
-        const callee = called && !entered.has(called) ? localFn(called) : undefined;
+        const resolved = ts.isCallExpression(cur) ? methodCalled(cur) ?? (called ? localFn(called) : undefined) : undefined;
+        const callee = resolved && !entered.has(`fn:${resolved.pos}`) ? resolved : undefined;
         const rets = callee ? returnsOf(callee) : [];
         if (ts.isCallExpression(cur) && callee && rets.length > 0) {
-          entered.add(called!);
+          entered.add(`fn:${callee.pos}`);
           const ret = rets.find(r => reachesSource(r)) ?? rets.find(r => !isLiteralExpr(unwrapExpr(r))) ?? rets[0];
           const prev = backward[backward.length - 1];
           if (!(prev && prev.line === lineOf(cur) && prev.kind === "assignment")) backward.push({ file: filePath, line: lineOf(cur), kind: "call", label: text, snippet: text });
@@ -3444,6 +3630,16 @@ export function scanAstTaint(
 
     // Taint written into module-scope containers/variables survives past the handler that wrote it
     const recordSticky = (node: ts.Node, env: Env) => {
+      // `bus.emit("job", payload)`: what each argument of that event carries, for the `bus.on("job", ...)` listener
+      const ev = emitterEvent(node, EMIT_METHODS);
+      if (ev && ts.isCallExpression(node)) {
+        node.arguments.slice(1).forEach((a, i) => {
+          const m = taintMask(a, env) & ALL;
+          const key = `event:${ev.emitter}:${ev.event}:${i}`;
+          if (m && ((sticky.get(key) ?? 0) | m) !== (sticky.get(key) ?? 0)) { sticky.set(key, (sticky.get(key) ?? 0) | m); stickyDirty = true; }
+        });
+        return;
+      }
       let target: ts.Identifier | null = null;
       let mask = 0;
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && MUTATING_METHODS.has(node.expression.name.text)) {
@@ -3452,6 +3648,13 @@ export function scanAstTaint(
       } else if (ts.isBinaryExpression(node) && (node.operatorToken.kind === ts.SyntaxKind.EqualsToken || isCompoundAssign(node.operatorToken.kind))) {
         target = rootIdentifier(node.left);
         mask = taintMask(node.right, env);
+        // `res.locals.term = req.query.term` in a middleware: the handler after it reads it back
+        const locals = ts.isPropertyAccessExpression(node.left) ? resLocalsKey(calleeText(node.left)) : null;
+        if (locals && (mask & ALL)) {
+          const next = (sticky.get(locals) ?? 0) | (mask & ALL);
+          if (next !== (sticky.get(locals) ?? 0)) { sticky.set(locals, next); stickyDirty = true; }
+          return;
+        }
       }
       if (!target || !(mask & ALL) || !moduleScopeNames.has(target.text) || isShadowed(target)) return;
       // only writes made INSIDE a function are cross-request state; top-level init is ordinary flow
@@ -3460,6 +3663,19 @@ export function scanAstTaint(
       if (!inFn) return;
       const next = (sticky.get(target.text) ?? 0) | (mask & ALL);
       if (next !== (sticky.get(target.text) ?? 0)) { sticky.set(target.text, next); stickyDirty = true; }
+    };
+    // A helper that reads a module-scope container back (`recall(k) { return targets.get(k); }`) returns request
+    // input once that container holds some: its summary was built before any was stored, so add it now.
+    const refreshStickyReturns = () => {
+      for (const [name, fn] of localFns) {
+        const own = returnMask(fn, taintMask, new Map()) & ALL;
+        if (!own) continue;
+        const shapes = propagating.get(name) ?? [];
+        const prev = shapes.find(s => s.index === RETURNS_INPUT_INDEX);
+        if (prev && ((prev.mask ?? 0) | own) === (prev.mask ?? 0)) continue;
+        propagating.set(name, [...shapes.filter(s => s.index !== RETURNS_INPUT_INDEX), { ...RETURNS_INPUT_SHAPE, mask: (prev?.mask ?? 0) | own }]
+          .sort((a, b) => a.index - b.index));
+      }
     };
 
     // Model-instance variable tracking (same-file, one hop): `const x = UserModel.build(data)` / `const x
@@ -3655,6 +3871,12 @@ export function scanAstTaint(
     };
     const callbackParamMasks = (call: ts.CallExpression, argIndex: number, env: Env): number[] | undefined => {
       if (argIndex < 0) return undefined;
+      // `bus.on("job", job => ...)`: the listener gets what `bus.emit("job", job)` sent, anywhere in the file
+      const listen = emitterEvent(call, LISTEN_METHODS);
+      if (listen && argIndex === call.arguments.length - 1) {
+        const masks = Array.from({ length: 8 }, (_, i) => sticky.get(`event:${listen.emitter}:${listen.event}:${i}`) ?? 0);
+        return masks.some(m => m) ? masks : undefined;
+      }
       const callee = call.expression;
       if (ts.isPropertyAccessExpression(callee) && CALLBACK_ELEMENT_METHODS.has(callee.name.text) && argIndex === 0) {
         const recv = taintMask(callee.expression, env) & ALL;
@@ -3677,7 +3899,8 @@ export function scanAstTaint(
           n.arguments.forEach((a, i) => { out[i] = (out[i] ?? 0) | (taintMask(a, e) & ALL); });
         }
       };
-      const w = createWalker({ taintMask, sf: fn.body.getSourceFile(), descendFunctions: false, onVisit: record });
+      // descend: the helper may call back later, from a closure (`setImmediate(() => callback(captured))`)
+      const w = createWalker({ taintMask, sf: fn.body.getSourceFile(), descendFunctions: true, onVisit: record });
       if (ts.isBlock(fn.body)) w.walkNode(fn.body, seed);
       else w.handleExpr(fn.body, seed);
       return out.some(m => m) ? out : undefined;
@@ -3706,6 +3929,7 @@ export function scanAstTaint(
     // walk again with what the first pass learned (findings dedupe by id+line).
     for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
       stickyDirty = false;
+      refreshStickyReturns();
       walkStatements(sourceFile, new Map());
     }
 
@@ -3725,25 +3949,35 @@ export function scanAstTaint(
     // (wasted, redundant work), while still allowing a re-walk once that
     // function's seed set has genuinely grown.
     const walkedSignatures = new Set<string>();
-    for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
-      const toWalk = Array.from(seededParams.entries());
-      let changed = false;
-      for (const [fnName, idxSet] of toWalk) {
-        const fn = localFns.get(fnName);
-        if (!fn) continue;
-        const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
-        if (walkedSignatures.has(signature)) continue;
-        walkedSignatures.add(signature);
-        changed = true;
-        const env: Env = new Map();
-        const shapes = paramShapesOf(fn);
-        for (const [idx, m] of idxSet) {
-          const shape = shapes[idx];
-          if (shape) env.set(shape.name, m);
+    for (let outer = 0; outer < FIXED_POINT_CAP; outer++) {
+      for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
+        const toWalk = Array.from(seededParams.entries());
+        let changed = false;
+        for (const [fnName, idxSet] of toWalk) {
+          const fn = localFns.get(fnName);
+          if (!fn) continue;
+          const signature = `${fnName}:${[...idxSet].sort((a, b) => a[0] - b[0]).map(([i, m]) => `${i}=${m}`).join(",")}`;
+          if (walkedSignatures.has(signature)) continue;
+          walkedSignatures.add(signature);
+          changed = true;
+          const env: Env = new Map();
+          const shapes = paramShapesOf(fn);
+          for (const [idx, m] of idxSet) {
+            const shape = shapes[idx];
+            if (shape) env.set(shape.name, m);
+          }
+          walkStatements(fn.body, env);
         }
-        walkStatements(fn.body, env);
+        if (!changed) break;
       }
-      if (!changed) break;
+      // A helper walked with a tainted argument stored it in a module-scope container (`remember(k, v)` doing
+      // `targets.set(k, v)`): every handler that reads the container back must see it -- walk the file again.
+      if (!stickyDirty) break;
+      for (let i = 0; i < FIXED_POINT_CAP && stickyDirty; i++) {
+        stickyDirty = false;
+        refreshStickyReturns();
+        walkStatements(sourceFile, new Map());
+      }
     }
 
     return findings;

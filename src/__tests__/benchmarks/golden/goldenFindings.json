@@ -649,25 +649,40 @@
  "cross-file/php/wrong-class sanitiser in the caller (htmlspecialchars before SQL)": [
   "index.php:3 sql-injection <- htmlspecialchars($_GET['id'])"
  ],
- "interprocedural/JS-01": [],
- "interprocedural/JS-02": [],
+ "interprocedural/JS-01": [
+  "js-01.js:8 xss <- html"
+ ],
+ "interprocedural/JS-02": [
+  "js-02.js:7 command-injection <- command"
+ ],
  "interprocedural/JS-03": [
   "js-03.js:12 command-injection <- command"
  ],
- "interprocedural/JS-04": [],
- "interprocedural/JS-05": [],
+ "interprocedural/JS-04": [
+  "js-04.js:9 path-traversal <- path"
+ ],
+ "interprocedural/JS-05": [
+  "js-05.js:6 ssrf <- url"
+ ],
  "interprocedural/JS-06": [
   "js-06.js:11 xss <- output"
  ],
- "interprocedural/PY-01": [],
+ "interprocedural/PY-01": [
+  "py_01.py:9 ssrf <- target"
+ ],
  "interprocedural/PY-02": [
-  "py_02.py:13 eval-exec <- -"
+  "py_02.py:13 eval-exec <- self.expression"
  ],
  "interprocedural/PY-03": [
+  "py_03.py:10 command-injection <- command",
   "py_03.py:10 eval-exec <- -"
  ],
- "interprocedural/PY-04": [],
- "interprocedural/PY-05": [],
+ "interprocedural/PY-04": [
+  "py_04.py:10 path-traversal <- path"
+ ],
+ "interprocedural/PY-05": [
+  "py_05.py:6 ssrf <- target"
+ ],
  "interprocedural/PY-06": [
   "py_06.py:10 xss <- html"
  ],

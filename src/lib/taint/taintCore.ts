@@ -535,7 +535,10 @@ export interface TraceResolver<N> {
   globalWrites?(name: string): Array<{ scope: N | null; position: number; line: number; rhsText: string; label: string }>;
   /** A read from a keyed store (`session.getAttribute("k")`, `STATE.get("k")`, `targets.get(k)`): the writes under that
    * key (`session.setAttribute("k", v)`) it reads back, wherever they are. Optional. */
-  storeWrites?(text: string): Array<{ scope: N | null; position: number; line: number; rhsText: string; label: string }>;
+  storeWrites?(text: string): Array<{ scope: N | null; position: number; line: number; rhsText: string; label: string;
+    /** How the stored value reaches the reader, shown between the write and the read (a decorator's
+     * `return func(self, ...)` running the method that reads `self.x`). */
+    via?: { line: number; label: string } }>;
 }
 
 /** `f.name` / `$f->name` / `a.b.c`: a field path a resolver may record a write to. */
@@ -639,8 +642,11 @@ export function buildBackwardTraceGeneric<N>(
     const stored = (resolver.storeWrites?.(curText.replace(/^\(\s*[\w.<>[\]]+\s*\)\s*/, "")) ?? []).filter(w => !TRACE_LITERAL_RE.test(w.rhsText.trim()));
     if (stored.length > 0) {
       const w = stored[stored.length - 1];
+      if (w.via) backward.push({ file: filePath, line: w.via.line, kind: "call", label: w.via.label.slice(0, 90), snippet: w.via.label.slice(0, 100) });
       backward.push({ file: filePath, line: w.line, kind: "assignment", label: w.label.slice(0, 90), snippet: w.label.slice(0, 100) });
       scope = w.scope; curPos = w.position; curLine = w.line; curText = w.rhsText.trim();
+      // the write ran in another call: its function's parameters come from that function's own callers
+      frames.length = 0;
       continue;
     }
 
@@ -719,8 +725,12 @@ export function buildBackwardTraceGeneric<N>(
       continue;
     }
 
-    // a call of a function of this file: down into what it returns (once per function -- recursion stops)
-    const callee = inter ? calleeNameOf(curText) : null;
+    // a call of a function of this file: down into what it returns (once per function -- recursion stops). A call of
+    // a parameter the caller bound to a function of this file (`callback(x)` in `transform(v, render)`) runs that one.
+    const named = inter ? calleeNameOf(curText) : null;
+    const top = frames[frames.length - 1];
+    const bound = named && top?.params.includes(named) && !resolver.functionInfo!(named) ? top.args[top.params.indexOf(named)]?.trim() : undefined;
+    const callee = bound && BARE_IDENTIFIER_RE.test(bound) && resolver.functionInfo!(bound) ? bound : named;
     const fn = callee && !entered.has(callee) ? resolver.functionInfo!(callee) : null;
     if (fn && fn.returns.length > 0) {
       entered.add(callee!);
