@@ -96,9 +96,11 @@ describe("guards", () => {
   });
 
   it("strings.HasPrefix on a cleaned/absolute path confines it", () => {
-    const body = (wrap: string) => `\tname := r.URL.Query().Get("file")\n\tbase := "/var/data"\n\tp := ${wrap}\n\tif !strings.HasPrefix(p, base) {\n\t\treturn\n\t}\n\tdata, _ := os.ReadFile(p)\n\t_ = data`;
+    const body = (wrap: string, base = "/var/data/") => `\tname := r.URL.Query().Get("file")\n\tbase := "${base}"\n\tp := ${wrap}\n\tif !strings.HasPrefix(p, base) {\n\t\treturn\n\t}\n\tdata, _ := os.ReadFile(p)\n\t_ = data`;
     expect(has(handler(body(`filepath.Clean(filepath.Join(base, name))`)), "path-traversal")).toBe(false);
     expect(has(handler(body(`base + "/" + name`)), "path-traversal")).toBe(true);
+    // a base with no trailing separator also admits the sibling /var/data_evil
+    expect(has(handler(body(`filepath.Clean(filepath.Join(base, name))`, "/var/data")), "path-traversal")).toBe(true);
   });
 
   it("a bound filepath.Join is judged where the path is used; an inline one is still a finding", () => {

@@ -4392,8 +4392,24 @@ function findCookieInsecurityOtherLangs(lines: string[]): ScanIndicator[] {
     // case. Same "absence is itself flagged, not just explicit false" gate
     // the Go/C# branches above already use (`!/HttpOnly\s*:\s*true/`
     // matches both "explicitly false" and "not present at all").
+    // session_set_cookie_params(['httponly' => true, ...]) with no 'secure' => true: the session cookie (always an
+    // auth cookie) also goes out over plain HTTP. The positional form's 4th argument is secure.
+    // a call statement (`session_set_cookie_params([...]);`), not the name inside a string or message
+    if (/^\s*(?:\\?)session_set_cookie_params\s*\(/i.test(lines[i])) {
+      const block = lines.slice(i, Math.min(lines.length, i + 12)).join(" ");
+      const callMatch = /session_set_cookie_params\s*\(([\s\S]*?)\)\s*;/i.exec(block);
+      const rawArgs = callMatch ? splitTopLevelArgs(callMatch[1]) : [];
+      const opts = rawArgs.length === 1 && rawArgs[0].trim().startsWith("[") ? rawArgs[0] : null;
+      const secure = opts ? /['"]secure['"]\s*=>\s*(?:true|1)\b/i.test(opts) : /^(?:true|1)$/i.test((rawArgs[3] ?? "").trim());
+      if (callMatch && !secure) {
+        found.push({ id:"cookie-no-secure", label:"Auth Cookie Missing Secure Flag", severity:"low",
+          line:i+1, detail:"session_set_cookie_params() without secure — the session cookie is also sent over unencrypted HTTP; set 'secure' => true" });
+      }
+      continue;
+    }
     if (/\bsetcookie\s*\(/i.test(lines[i])) {
-      const block = lines.slice(i, Math.min(lines.length, i + 6)).join(" ");
+      // an options array laid out one key per line runs well past the call's first line
+      const block = lines.slice(i, Math.min(lines.length, i + 12)).join(" ");
       const callMatch = /setcookie\s*\(([\s\S]*?)\);/i.exec(block);
       if (!callMatch) continue;
       const rawArgs = splitTopLevelArgs(callMatch[1]);

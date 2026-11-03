@@ -32,8 +32,8 @@
  *    record, not the id) -- the same contract every engine keeps.
  *  - Implicit return: a method's value is its last expression; summaries take both that and every `return`.
  *  - Instance variables persist between a controller's actions/filters (`before_action :set_user` assigns
- *    `@user` that `show` reads), so they are file-wide sticky state, re-walked to a fixed point like PHP's
- *    `global`.
+ *    `@user` that `show` reads), so they are sticky state shared by one class's methods (another class's
+ *    `@user` is a different variable), re-walked to a fixed point like PHP's `global`.
  *  - Rails' safe query forms stay clean by construction: hash conditions (`where(name: x)`), placeholders
  *    (`where("a = ?", x)`, `where(["a = ?", x])`), and `connection.quote`/`sanitize_sql*`.
  *  - BOLA is reported only where an unscoped lookup by a request-controlled id is followed by a WRITE to the
@@ -368,6 +368,8 @@ export function astTaintRubyLabel(id: AstTaintRubyId): string { return LABEL[id]
 // ── Engine context ─────────────────────────────────────────────────────────────────────────────────────────
 
 type Env = TaintEnv;
+/** A parameter binding. `**opts` is keyword + isRest (every keyword argument); a destructured `(a, b)` is one shape
+ * per name, all at the position's index (each holds part of that argument). */
 interface ParamShape { name: string; index: number; isRest: boolean; keyword: boolean }
 interface LocalMethod {
   name: string;
@@ -385,11 +387,13 @@ interface EngineCtx {
   filePath: string;
   lines: string[];
   root: SyntaxNode;
-  /** Same-file methods by bare name (first declared wins on a collision). */
+  /** Same-file methods by identity (methodId: `class#name` / `class.name`, a top-level method by its name). */
   methods: Map<string, LocalMethod>;
-  /** name -> (param index -> classes surviving to the return value) */
+  /** bare name -> every same-file method of that name (see resolveLocal) */
+  byName: Map<string, LocalMethod[]>;
+  /** methodId -> (param index -> classes surviving to the return value) */
   propagating: Map<string, Map<number, number>>;
-  /** name -> classes the return value carries regardless of arguments (it reads params itself: `user_params`) */
+  /** methodId -> classes the return value carries regardless of arguments (it reads params itself: `user_params`) */
   intrinsic: Map<string, number>;
   seeded: Map<string, Map<number, number>>;
   suppressed?: SuppressedSink[];
@@ -416,6 +420,40 @@ interface EngineCtx {
   wholeHashVars: Set<string>;
   /** Set by the walker at each sink check (it holds the env): narrows a reported source to its tainted operand. */
   refine?: (source: SyntaxNode, cls: number) => SyntaxNode;
+}
+
+/** An instance variable as the shared (filter -> action, initialize -> method) state of ITS class: `@user` of
+ * UsersController is not `@user` of another class in the file. */
+const ivarKey = (n: SyntaxNode): string => `${enclosingClassName(n) ?? ""}\u0000${n.text}`;
+
+const LIBRARY_NAMESPACE_RB = /^(?:Net|Nokogiri|REXML|LibXML|Ox|Oj|ActiveRecord|ActiveSupport|ActionController|ActionView|ActionDispatch|Rails|Rack|Sinatra|URI|CGI|ERB|Kernel|File|FileUtils|Dir|IO|Pathname|Tempfile|YAML|Psych|JSON|Marshal|Open3|Shellwords|Digest|OpenSSL|BCrypt|JWT|SecureRandom|Base64|Zlib|Sequel|Mongo|Mongoid|Redis|HTTParty|Faraday|RestClient|Typhoeus|Excon|HTTP|Liquid|Haml|Slim|Tilt|Mustache|Mail|Logger|Syslog|Regexp|String|Object|Class|Module)(?:::|$)/;
+
+/** A method's identity: its `Class#name` / `Class.name` key, or (outside any class) its name. */
+const methodId = (m: LocalMethod): string => m.key ?? m.name.toLowerCase();
+
+/**
+ * The same-file method(s) a call of `name` can run. An implicit receiver or `self` runs the enclosing class's own
+ * method (else a top-level one, else -- inherited, mixed in -- any of that name); `Klass.m` a class method of Klass;
+ * `Klass.new(...).m` / `x.m` with `x = Klass.new` an instance method of Klass. Any other receiver: none (a library
+ * object). Two classes' same-named methods never stand in for each other.
+ */
+function resolveLocal(ctx: EngineCtx, name: string, recv: SyntaxNode | null, site: SyntaxNode): LocalMethod[] {
+  // a file re-opening a library's namespace (`module Net; module LDAP; module Filter; def self.escape ...`) holds a
+  // stub or monkeypatch: the library's own model (sanitizer, safe constructor) speaks for its calls, not that body
+  const cands = (ctx.byName.get(name) ?? []).filter(m => !m.className || !LIBRARY_NAMESPACE_RB.test(m.className));
+  if (cands.length === 0) return [];
+  const ofClass = (cls: string, singleton: boolean) => cands.filter(m => m.singleton === singleton && !!m.className &&
+    (m.className === cls || m.className.endsWith(`::${cls}`) || cls.endsWith(`::${m.className}`)));
+  if (!recv || recv.type === "self") {
+    const encl = enclosingClassName(site);
+    const own = encl ? cands.filter(m => m.className === encl) : [];
+    if (own.length) return own;
+    const top = cands.filter(m => !m.className);
+    return top.length ? top : cands;
+  }
+  if (recv.type === "constant" || recv.type === "scope_resolution") return ofClass(recv.text.replace(/^::/, ""), true);
+  const t = recv.type === "call" ? constructedClass(recv) : recv.type === "identifier" ? ctx.varTypes.get(recv.text) : undefined;
+  return t ? ofClass(t, false) : [];
 }
 
 function emit(
@@ -464,12 +502,11 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         if (env.has(name)) return env.get(name)!;
         if (name === PARAMS_SOURCE) return ALL;
         // A same-file method called with no arguments looks exactly like a variable read (`user_params`).
-        const m = ctx.methods.get(name);
-        if (m && m.params.filter(p => !p.keyword).length === 0) return ctx.intrinsic.get(name) ?? 0;
-        return 0;
+        return resolveLocal(ctx, name, null, node).filter(m => m.params.filter(p => !p.keyword).length === 0)
+          .reduce((acc, m) => acc | (ctx.intrinsic.get(methodId(m)) ?? 0), 0);
       }
       case "instance_variable":
-        return (env.get(node.text) ?? 0) | (ctx.sticky.get(node.text) ?? 0);
+        return (env.get(node.text) ?? 0) | (ctx.sticky.get(ivarKey(node)) ?? 0);
       case "class_variable": case "global_variable":
         return env.get(node.text) ?? 0;
       case "heredoc_beginning": {
@@ -585,18 +622,23 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       return data ? (complete ? applyClears : applySanitizer)(mask(data, env), sc) : 0;
     }
 
-    // Same-file method: summary of what its parameters (and its own body) contribute to its return value.
-    if (!recv || recv.type === "self") {
-      const local = ctx.methods.get(name);
-      if (local) {
-        let m = ctx.intrinsic.get(name) ?? 0;
-        const prop = ctx.propagating.get(name);
+    // Same-file method: summary of what its parameters (and its own body) contribute to its return value --
+    // of every method the call may run (see resolveLocal).
+    const locals = resolveLocal(ctx, name, recv, node);
+    if (locals.length) {
+      // an object of a local class also holds what its constructor was given (`Profile.new(name).to_s`):
+      // field-insensitive, as for any receiver below
+      let m = recv && recv.type !== "self" && recv.type !== "constant" && recv.type !== "scope_resolution" ? mask(recv, env) : 0;
+      for (const local of locals) {
+        const id = methodId(local);
+        m |= ctx.intrinsic.get(id) ?? 0;
+        const prop = ctx.propagating.get(id);
         if (prop) for (const [i, surviving] of prop) {
           const bound = bindArgument(local, node, i);
           for (const a of bound) m |= mask(a, env) & surviving;
         }
-        return m;
       }
+      return m;
     }
 
     if (PASSTHROUGH_CALLS.has(callee)) {
@@ -626,11 +668,14 @@ function bindArgument(method: LocalMethod, call: SyntaxNode, index: number): Syn
   const shape = method.params.find(p => p.index === index);
   if (!shape) return [];
   if (shape.keyword) {
+    // **opts receives every keyword argument (and a **hash passed along)
+    if (shape.isRest) return argsOf(call).filter(a => a.type === "pair" || a.type === "hash_splat_argument");
     const v = keywordArg(call, shape.name);
     return v ? [v] : [];
   }
   const pos = positionalArgs(call);
-  const posIndex = method.params.filter(p => !p.keyword && p.index < index).length;
+  // positions, not names: a destructured parameter is several names at one position
+  const posIndex = new Set(method.params.filter(p => !p.keyword && p.index < index).map(p => p.index)).size;
   return shape.isRest ? pos.slice(posIndex) : pos[posIndex] ? [pos[posIndex]] : [];
 }
 
@@ -676,8 +721,18 @@ function paramShapesOf(params: SyntaxNode | null): ParamShape[] {
       }
       case "keyword_parameter":
         out.push({ name: p.childForFieldName("name")?.text ?? "", index: index++, isRest: false, keyword: true }); break;
+      case "hash_splat_parameter": {   // **opts: a hash of every keyword argument
+        const nm = p.childForFieldName("name")?.text;
+        if (nm) out.push({ name: nm, index, isRest: true, keyword: true });
+        index++;
+        break;
+      }
+      case "destructured_parameter":   // def f((name, email)) -- each name is part of one positional argument
+        for (const id of findAllNodes(p, "identifier")) out.push({ name: id.text, index, isRest: false, keyword: false });
+        index++;
+        break;
       default:
-        index++;   // block / hash-splat / destructuring parameters carry no tracked binding
+        index++;   // a block parameter carries no tracked binding
     }
   }
   return out.filter(s => s.name);
@@ -746,6 +801,34 @@ function anchoredRegexClearsRb(literal: string): number | null {
 function isResolvedPathRb(name: string, at: SyntaxNode): boolean {
   const def = lastAssignment(name, at);
   return !!def && /\b(?:File\.(?:expand_path|realpath|absolute_path)|realpath|cleanpath|expand_path)\b/.test(def.text);
+}
+
+/**
+ * Does a prefix a resolved path is checked against end at a directory boundary? A literal or interpolation ending in
+ * "/", `base + "/"`, `File.join(base, "")`, `File::SEPARATOR` does; a literal without one, or a resolved path
+ * (expand_path / realpath / Pathname#to_s, which never end in a slash), doesn't. undefined when unseen (trusted).
+ */
+function prefixEndsAtDirRb(n: SyntaxNode, depth = 0): boolean | undefined {
+  if (depth > 2) return undefined;
+  if (n.type === "string") {
+    const last = named(n).pop();
+    if (!last) return false;
+    if (last.type === "string_content") return /\/$/.test(last.text);
+    const inner = last.type === "interpolation" ? named(last)[0] : undefined;   // "#{base}" -- what base is
+    return inner ? prefixEndsAtDirRb(inner, depth + 1) : undefined;
+  }
+  if (n.type === "scope_resolution" && /^File::(?:SEPARATOR|ALT_SEPARATOR)$/.test(n.text)) return true;
+  if (n.type === "binary" && operatorOf(n) === "+") { const r = n.childForFieldName("right"); return r ? prefixEndsAtDirRb(r, depth + 1) : undefined; }
+  if (n.type === "call") {
+    const callee = calleeTextRuby(n) ?? "";
+    if (callee === "File.join") { const last = positionalArgs(n).pop(); return last ? (stringValueRb(last) === "" || prefixEndsAtDirRb(last, depth + 1)) : undefined; }
+    if (/(?:^|\.)(?:expand_path|realpath|absolute_path|cleanpath|to_s|join)$/.test(callee)) return false;
+  }
+  if (n.type === "identifier") {
+    const def = unwrapRescueRb(lastAssignment(n.text, n));
+    return def && def !== n ? prefixEndsAtDirRb(def, depth + 1) : undefined;
+  }
+  return undefined;
 }
 
 /** `expr rescue nil` -> expr. */
@@ -899,10 +982,11 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
       const host = (hostNames ?? []).filter(h => h !== n).map(h => ({ name: h, holds: "true" as const, clears: SinkClass.SSRF | SinkClass.REDIRECT }));
       return n ? [{ name: n, holds: "true" }, ...host] : host;
     }
-    // resolved.start_with?(base) after resolved = File.expand_path(...) / realpath: confined to base
+    // resolved.start_with?(base) after resolved = File.expand_path(...) / realpath: confined to base -- when base ends
+    // at a directory ("/srv/up/", base + "/", File.join(base, "")); "/srv/up" also admits the sibling /srv/up_evil
     if (name === "start_with?" && recv && args[0]) {
       const n = guardName(recv);
-      if (n && isResolvedPathRb(n, c)) return [{ name: n, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
+      if (n && isResolvedPathRb(n, c) && prefixEndsAtDirRb(args[0]) !== false) return [{ name: n, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
       // url.start_with?('/') / ('//') / ('https://example.com/'): URL facets (see combineUrlFacets)
       const lit = stringValueRb(args[0]);
       if (n && lit !== null) return urlPrefixFacets(n, lit, "starts");
@@ -1057,8 +1141,9 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         set(left.text, value); break;
       case "instance_variable": {
         set(left.text, value);
-        const next = (ctx.sticky.get(left.text) ?? 0) | (value & ALL);
-        if (next !== (ctx.sticky.get(left.text) ?? 0)) { ctx.sticky.set(left.text, next); ctx.stickyDirty = true; }
+        const key = ivarKey(left);
+        const next = (ctx.sticky.get(key) ?? 0) | (value & ALL);
+        if (next !== (ctx.sticky.get(key) ?? 0)) { ctx.sticky.set(key, next); ctx.stickyDirty = true; }
         break;
       }
       case "element_reference": {   // h[:k] = x  -- the read side resolves to the object
@@ -1184,8 +1269,9 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       assign(left, m, env, false);
       if (left?.type === "identifier" && right) {
         trackUnsafeParams(left.text, right, ctx);
+        // `client = Rails.cache` after `client = Net::HTTP.new`: no longer that class
         const t = constructedClass(right);
-        if (t) ctx.varTypes.set(left.text, t);
+        if (t) ctx.varTypes.set(left.text, t); else ctx.varTypes.delete(left.text);
       }
       if (left?.type === "element_reference") { ctx.refine = (src, cls) => culpritOf(src, cls, env, mask, ctx); checkHeaderWrite(left, right, m, ctx, node); }
       return false;
@@ -1668,8 +1754,9 @@ function permitsPrivileged(text: string): boolean {
   }
   return false;
 }
+/** A local now holds (or, reassigned, no longer holds) an unrestricted params hash / a whole submitted hash. */
 function trackUnsafeParams(name: string, right: SyntaxNode, ctx: EngineCtx) {
-  if (isUnsafeParams(right, ctx)) ctx.unsafeParamVars.add(name);
+  if (isUnsafeParams(right, ctx)) ctx.unsafeParamVars.add(name); else ctx.unsafeParamVars.delete(name);
   if (isWholeRequestHash(right, ctx)) ctx.wholeHashVars.add(name); else ctx.wholeHashVars.delete(name);
 }
 
@@ -1694,8 +1781,9 @@ function isUnsafeParams(n: SyntaxNode, ctx: EngineCtx): boolean {
   if (/^params$|^params\[:?\w+\]$/.test(t)) return false;   // Rails raises ForbiddenAttributesError for these
   if (n.type === "identifier") {
     if (ctx.unsafeParamVars.has(n.text)) return true;
-    const m = ctx.methods.get(n.text);   // user_params -> a permit-all strong-params call
-    if (m?.body && m.params.length === 0) return /\bparams\b/.test(m.body.text) && (UNSAFE_PARAMS_RE.test(m.body.text) || permitsPrivileged(m.body.text));
+    // user_params -> a permit-all strong-params call (this class's own, see resolveLocal)
+    return resolveLocal(ctx, n.text, null, n).some(m => !!m.body && m.params.length === 0 &&
+      /\bparams\b/.test(m.body.text) && (UNSAFE_PARAMS_RE.test(m.body.text) || permitsPrivileged(m.body.text)));
   }
   return false;
 }
@@ -1710,9 +1798,9 @@ function constructedClass(right: SyntaxNode): string | null {
 // ── Same-file helpers (re-walk with seeded parameters) ────────────────────────────────────────────────────
 
 function seedLocalMethod(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
-  const recv = receiverOf(node);
-  if (recv && recv.type !== "self") return;
-  const callee = ctx.methods.get(methodNameOf(node));
+  // only a call that runs exactly one method of this file -- its own class's, or a receiver's known class's
+  const resolved = resolveLocal(ctx, methodNameOf(node), receiverOf(node), node);
+  const callee = resolved.length === 1 ? resolved[0] : null;
   if (!callee?.body) return;
   const tainted = new Map<number, number>();
   for (const p of callee.params) {
@@ -1720,9 +1808,9 @@ function seedLocalMethod(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Taint
     if (m) tainted.set(p.index, m);
   }
   if (tainted.size === 0) return;
-  const existing = ctx.seeded.get(callee.name) ?? new Map<number, number>();
+  const existing = ctx.seeded.get(methodId(callee)) ?? new Map<number, number>();
   for (const [i, m] of tainted) existing.set(i, (existing.get(i) ?? 0) | m);
-  ctx.seeded.set(callee.name, existing);
+  ctx.seeded.set(methodId(callee), existing);
 }
 
 // ── Cross-file calls (facts from other files' methods) ────────────────────────────────────────────────────
@@ -1844,7 +1932,8 @@ const rubyTraceResolver: TraceResolver<SyntaxNode> = {
 function returnMask(method: LocalMethod, ctx: EngineCtx, seed: ParamShape | null): number {
   if (!method.body) return 0;
   let surviving = 0;
-  const walker = createWalker({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seeded: new Map(), stickyDirty: false, sticky: new Map(ctx.sticky) },
+  const walker = createWalker({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seeded: new Map(), stickyDirty: false, sticky: new Map(ctx.sticky),
+    unsafeParamVars: new Set(), wholeHashVars: new Set() },
     { descendLambdas: false, onReturn: (expr, env, mask) => { if (expr) surviving |= mask(expr, env); } });
   const env: Env = new Map();
   for (const p of method.params) env.set(p.name, seed && p.index === seed.index ? ALL : 0);
@@ -1880,6 +1969,23 @@ const WRITE_ACTIONS = /^(?:update|destroy|delete|edit|archive|cancel|approve|pub
 const AUTHZ_CALLS = /\b(?:authorize!?|authorize_resource|policy_scope|can\?|cannot\?|load_and_authorize_resource|authorize_action_for|verify_authorized|require_owner|ensure_owner|check_owner|correct_user|owned_by\?|belongs_to_user\?)\b/;
 const PRINCIPAL_RE = /\bcurrent_(?:user|account|member|admin|tenant|organization|org)\b|\bCurrent\.(?:user|account|tenant)\b|\bwarden\.user\b/;
 
+const RECORD_AUTHZ_CALLS = new Set(["authorize", "authorize!", "can?", "cannot?"]);
+/**
+ * Does the action authorize the record it touches? Pundit's `authorize @post` / CanCan's `authorize! :update, @post`
+ * / `can?(:update, post)` only when handed a record -- `authorize :report, :update?` (a headless policy) or
+ * `authorize Report` decides who may call the action, not which record. Owner helpers and resource loaders count as
+ * before.
+ */
+function authorizesARecord(body: SyntaxNode): boolean {
+  for (const call of findAllNodes(body, "call")) {
+    const name = methodNameOf(call);
+    if (!RECORD_AUTHZ_CALLS.has(name)) continue;
+    if (argsOf(call).some(a => a.type === "identifier" || a.type === "instance_variable" || a.type === "call" || a.type === "element_reference")) return true;
+  }
+  const withoutRecordCalls = body.text.replace(/\b(?:authorize!?|can\?|cannot\?)/g, "");
+  return AUTHZ_CALLS.test(withoutRecordCalls);
+}
+
 /** Class-level evidence: `before_action :correct_user` / `load_and_authorize_resource` / CanCan / Pundit. */
 function classAuthEvidence(classNode: SyntaxNode | null, actionName: string): Set<AuthzKind> {
   const ev = new Set<AuthzKind>();
@@ -1910,8 +2016,7 @@ function collectBola(method: LocalMethod, ctx: EngineCtx, mask: TaintMaskFn) {
   const classNode = (() => { for (let c = method.decl.parent; c; c = c.parent) if (c.type === "class") return c; return null; })();
   const className = classNode?.childForFieldName("name")?.text ?? "";
   if (!/Controller$/.test(className) || /^Admin::|::Admin::|Admin\w*Controller$/.test(method.className ?? "")) return;
-  const bodyText = method.body.text;
-  if (AUTHZ_CALLS.test(bodyText)) return;
+  if (authorizesARecord(method.body)) return;
   const evidence = classAuthEvidence(classNode, method.name);
   if (authzVerdict(evidence) === "proven") return;
 
@@ -1930,9 +2035,12 @@ function collectBola(method: LocalMethod, ctx: EngineCtx, mask: TaintMaskFn) {
     if (!idArg || !(mask(idArg, env) & SinkClass.CONTROL)) continue;
     // ownership expressed in the query itself
     if (argsOf(call).some(a => a.type === "pair" && isOwnerField(pairKeyText(a) ?? ""))) continue;
-    // ownership checked on the loaded record later: @post.user == current_user / post.user_id == current_user.id
-    const after = ctx.lines.slice(lineOf(call) - 1, method.body.endPosition.row + 1).join("\n");
-    if (PRINCIPAL_RE.test(after) && /(?:==|!=|eql\?)/.test(after) && /\b(?:user|owner|author|account|creator)(?:_id)?\b/.test(after)) continue;
+    // ownership checked on THIS loaded record later: @post.user == current_user / post.user_id == current_user.id --
+    // the record's own owner field against the principal, on one line (a check on another record proves nothing)
+    const recordVar = (() => { for (let p = call.parent; p && p.id !== method.body!.id; p = p.parent) if (p.type === "assignment") { const l = p.childForFieldName("left"); return l && (l.type === "identifier" || l.type === "instance_variable") ? l.text : null; } return null; })();
+    const ownerOfRecord = recordVar ? new RegExp(`(?:^|[^\\w@])${recordVar.replace(/[$@]/g, "\\$&")}\\.(?:user|owner|author|account|creator)(?:_id)?\\b`) : null;
+    const laterLines = ctx.lines.slice(lineOf(call), method.body.endPosition.row + 1);
+    if (ownerOfRecord && laterLines.some(l => ownerOfRecord.test(l) && PRINCIPAL_RE.test(l) && /(?:==|!=|eql\?)/.test(l))) continue;
     const writes = WRITE_ACTIONS.test(method.name) || WRITE_ON_RECORD.test(ctx.lines.slice(lineOf(call), method.body.endPosition.row + 1).join("\n"));
     if (!writes) continue;   // an unscoped READ may be of a public record -- not reported (see module docblock)
     const roleOnly = evidence.has("role");
@@ -1947,10 +2055,17 @@ function collectBola(method: LocalMethod, ctx: EngineCtx, mask: TaintMaskFn) {
 function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
   const all = collectMethods(root);
+  // every method under its own identity (two classes' `process` are two methods); the first wins only when the
+  // same class declares one twice
   const methods = new Map<string, LocalMethod>();
-  for (const m of all) if (!methods.has(m.name)) methods.set(m.name, m);
+  const byName = new Map<string, LocalMethod[]>();
+  for (const m of all) {
+    if (methods.has(methodId(m))) continue;
+    methods.set(methodId(m), m);
+    byName.set(m.name, [...(byName.get(m.name) ?? []), m]);
+  }
   const ctx: EngineCtx = {
-    filePath, lines: content.split("\n"), root, methods, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
+    filePath, lines: content.split("\n"), root, methods, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
     suppressed, findings: [], seen: new Set(), sticky: new Map(), stickyDirty: false, varTypes: new Map(),
     heredocs: heredocBodies(root), crossFileFacts, localKeys: new Set(all.map(m => m.key).filter((k): k is string => !!k)),
     unsafeParamVars: new Set(),
@@ -1963,12 +2078,19 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
 
 const walkMain = (node: SyntaxNode, env: Env, ctx: EngineCtx) => createWalker(ctx, { descendLambdas: true }).walk(node, env);
 
+/** Walk one method body: its locals are its own -- what another body bound to `attrs` says nothing about this one's. */
+function walkMethodBody(body: SyntaxNode, env: Env, ctx: EngineCtx) {
+  ctx.unsafeParamVars = new Set();
+  ctx.wholeHashVars = new Set();
+  walkMain(body, env, ctx);
+}
+
 function scanMethods(ctx: EngineCtx, structural: boolean) {
   for (const [, m] of ctx.methods) {
     if (!m.body) continue;
     const env: Env = new Map();
     for (const p of m.params) env.set(p.name, 0);   // parameters shadow sources (a `params` argument is not request input)
-    walkMain(m.body, env, ctx);
+    walkMethodBody(m.body, env, ctx);
     if (structural) collectBola(m, ctx, makeTaintMask(ctx));
   }
 }
@@ -1986,7 +2108,7 @@ function drainSeeded(ctx: EngineCtx) {
       changed = true;
       const env: Env = new Map();
       for (const p of m.params) env.set(p.name, idx.get(p.index) ?? 0);
-      walkMain(m.body, env, ctx);
+      walkMethodBody(m.body, env, ctx);
     }
     if (!changed) break;
   }

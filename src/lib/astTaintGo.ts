@@ -250,9 +250,10 @@ function isTaintSourceExprGo(node: SyntaxNode): boolean {
     // chi.URLParam(r, "id")
     if (text === "chi.URLParam" || text.endsWith(".URLParam")) return true;
     if (text === "mux.Vars") return true;
-    // gin/echo/fiber: c.Param("id") / c.Query("id") / c.QueryParam("id") / c.PostForm("id")
-    if (text.startsWith("c.")) {
-      const method = text.slice(2);
+    // gin/echo/fiber: c.Param("id") / ctx.Query("id") / ec.QueryParam("id") / c.PostForm("id") on the handler's context
+    const dot = text.indexOf(".");
+    if (dot > 0 && text.indexOf(".", dot + 1) < 0 && isFrameworkCtxGo(text.slice(0, dot))) {
+      const method = text.slice(dot + 1);
       if (GIN_ECHO_FIBER_SOURCE_METHODS.has(method) || GIN_ECHO_FIBER_METHODS.has(method)) return true;
     }
     return false;
@@ -293,11 +294,20 @@ interface GoScanCtx {
   htmlEscapers: Set<string>;    // local funcs that replace "<" with an entity
   sensitiveStructs: Set<string>;   // struct types with role/admin-like fields
   varStructTypes: Map<string, string>; // variable -> declared struct type name
+  frameworkCtxVars: Set<string>;   // parameters typed as a gin / echo / fiber handler context, whatever their name
+  otherTypedVars: Set<string>;     // parameters of any other declared type (a `c Cfg` is not a framework context)
 }
 const emptyGoCtx = (): GoScanCtx => ({
   writerVars: new Set(["w"]), pluginVars: new Set(), gobVars: new Set(), htmlEscapers: new Set(),
-  sensitiveStructs: new Set(), varStructTypes: new Map(),
+  sensitiveStructs: new Set(), varStructTypes: new Map(), frameworkCtxVars: new Set(), otherTypedVars: new Set(),
 });
+// gin, echo, fiber (also aliased: `g "github.com/gin-gonic/gin"` then `ctx *g.Context`)
+const FRAMEWORK_IMPORT_RE_GO = /(?:^|\/)(?:gin-gonic\/gin|labstack\/echo(?:\/v\d+)?|gofiber\/fiber(?:\/v\d+)?)$/;
+
+/** A handler's framework context: a parameter typed as one, or -- with no declared type seen -- the usual `c`. */
+function isFrameworkCtxGo(name: string): boolean {
+  return goCtx.frameworkCtxVars.has(name) || (FRAMEWORK_CTX_RE.test(name) && !goCtx.otherTypedVars.has(name));
+}
 // Per-scan facts. Scans are synchronous, so a module-level slot set at scan start is safe.
 let goCtx: GoScanCtx = emptyGoCtx();
 let goSourceCallRe = /^(?:r|req|request|c\.Request)\.(?:URL\.Query\(\)|(?:Header\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\s*\()/;
@@ -517,6 +527,7 @@ const FS_SINKS_GO = new Set([
   "Open", "Create", "OpenFile", "ReadFile", "WriteFile", "Remove", "RemoveAll", "Mkdir", "MkdirAll", "Rename", "Stat",
   "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown",
 ]);
+const TWO_PATH_FS_GO = new Set(["os.Rename", "os.Link", "os.Symlink"]);
 const TEMPLATE_PARSE_RE_GO = /^(?:text\/)?template\.(?:New|Must)\b[\s\S]*\.(?:Parse|ParseFiles|ParseGlob)$/;
 const SENSITIVE_FIELD_RE_GO = /^(?:role|roles|admin|is_?admin|permissions?|privileges?|scope|scopes|is_?staff|superuser|is_?superuser|groups?)$/i;
 const SECRET_NAME_RE_GO = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
@@ -582,14 +593,16 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   if (modelled) return { id: modelled.model.rule as AstTaintGoId, sinkExpr: text, args: modelled.positions.map(i => args[i]).filter((a): a is SyntaxNode => !!a) };
   if ((head === "os" && FS_SINKS_GO.has(tail)) || (head === "ioutil" && (tail === "ReadFile" || tail === "WriteFile" || tail === "ReadDir")) ||
       /^filepath\.Walk(?:Dir)?$/.test(text) || text === "os.DirFS") {
-    return { id: "path-traversal", sinkExpr: text, args: args.slice(0, 1).length ? args.slice(0, 1) : args };
+    // os.Rename(old, new) / os.Link / os.Symlink(target, link): both arguments name a path (a request-chosen
+    // destination or link is the write that escapes); every other call's path is its first argument
+    return { id: "path-traversal", sinkExpr: text, args: TWO_PATH_FS_GO.has(text) ? args.slice(0, 2) : args.slice(0, 1).length ? args.slice(0, 1) : args };
   }
   if (text === "filepath.Join") {
     return { id: "path-traversal", sinkExpr: text, args };
   }
   if (text === "http.ServeFile" && args[2]) return { id: "path-traversal", sinkExpr: text, args: [args[2]] };
   // Web-framework helpers on the handler's context (gin, echo, fiber): serve a file from a path, or redirect.
-  if (FRAMEWORK_CTX_RE.test(receiverText)) {
+  if (isFrameworkCtxGo(receiverText)) {
     if (FRAMEWORK_FILE_TAILS.has(tail) && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
     // gin c.SaveUploadedFile(file, dst) / fiber c.SaveFile(file, dst): writes to dst
     if ((tail === "SaveUploadedFile" || tail === "SaveFile") && args[1]) return { id: "path-traversal", sinkExpr: text, args: [args[1]] };
@@ -1177,22 +1190,20 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
     // params to its return value (see computeReturnTaintPropagatingGo),
     // limited to the classes that survive the callee's own body. Also resolves
     // `obj.method(x)` to a local method by name.
-    const fnName = fn?.type === "identifier" ? fn.text
-      : fn?.type === "selector_expression" && !GO_BUILTIN_METHOD_NAMES.has(fn.childForFieldName("field")?.text ?? "")
-        ? fn.childForFieldName("field")?.text ?? null : null;
-    if (fnName) {
-      const propIdx = propagating.get(fnName);
-      if (propIdx) {
-        const callee = localFns.get(fnName);
-        const shapes = callee?.paramShapes ?? [];
-        let m = 0;
+    // (several keys -- a method of a receiver whose type is unknown -- combine: any of them may run)
+    {
+      let m = 0;
+      for (const key of calleeKeysGo(fn, localFns)) {
+        const propIdx = propagating.get(key);
+        if (!propIdx) continue;
+        const shapes = localFns.get(key)?.paramShapes ?? [];
         for (const [i, surviving] of propIdx) {
           // index -1: what the function returns whatever it is passed (it reads the request itself)
           if (i === -1) m |= surviving;
           else if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
         }
-        if (m) return m;
       }
+      if (m) return m;
     }
     // calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured;
     // calling a callback PARAMETER is (recall-biased) as tainted as what it is called with
@@ -1330,15 +1341,26 @@ type TaintMaskFnGo = ReturnType<typeof makeTaintMaskGo>;
  */
 function computeReturnTaintPropagatingGo(
   fn: LocalFn, localFns: Map<string, LocalFn>, propagating: PropagatingGo, root: SyntaxNode,
+  positionalOut?: (positions: Map<number, Map<number, number>>) => void,
 ): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
+  // return position -> param index (-1: none needed) -> classes surviving to THAT value (see PositionalGo)
+  const positions = new Map<number, Map<number, number>>();
+  const atPos = (pos: number, idx: number, m: number) => {
+    if (!(m & ALL)) return;
+    const p = positions.get(pos) ?? new Map<number, number>();
+    p.set(idx, (p.get(idx) ?? 0) | (m & ALL));
+    positions.set(pos, p);
+  };
+  let multi = false;
   for (const shape of fn.paramShapes) {
     let surviving = 0;
     const walker = createWalkerGo({
       localFns, propagating, root, descendFunctions: false,
-      // Go's multi-value returns (`return a, b`): any returned expression counts.
-      onReturn: (expr, env, mask) => { surviving |= mask(expr, env); },
+      // Go's multi-value returns (`return a, b`): any returned expression counts -- and, per position, for
+      // `a, b := f(x)` (see PositionalGo).
+      onReturn: (expr, env, mask, pos) => { const m = mask(expr, env); surviving |= m; atPos(pos, shape.index, m); if (pos > 0) multi = true; },
     });
     const env: Env = new Map();
     env.set(shape.name, ALL);
@@ -1350,11 +1372,21 @@ function computeReturnTaintPropagatingGo(
   // nothing seeded: a helper that reads the request itself (`func getUserInput(r *http.Request) string { return
   // r.URL.Query().Get("u") }`) returns input whatever its caller passes -- recorded under index -1
   let intrinsic = 0;
-  createWalkerGo({ localFns, propagating, root, descendFunctions: false, onReturn: (expr, env, mask) => { intrinsic |= mask(expr, env); } })
+  createWalkerGo({ localFns, propagating, root, descendFunctions: false,
+    onReturn: (expr, env, mask, pos) => { const m = mask(expr, env); intrinsic |= m; atPos(pos, -1, m); if (pos > 0) multi = true; } })
     .walk(fn.body, new Map());
   if (intrinsic & ALL) propagatingIdx.set(-1, intrinsic & ALL);
+  if (multi) positionalOut?.(positions);
   return propagatingIdx;
 }
+
+/**
+ * Functions returning several values: function key -> return position -> param index (-1: whatever it is passed)
+ * -> classes that reach THAT value. `user, pass := split(x)` binds each target from its own position, so a constant
+ * first value stays clean and a tainted second value is not dropped. Per scan (scans are synchronous).
+ */
+type PositionalGo = Map<string, Map<number, Map<number, number>>>;
+let goPositional: PositionalGo = new Map();
 
 // Caps every bounded fixed-point loop below (same-file propagating-map
 // convergence and the call-site-seeding worklist) -- named and shared for
@@ -1374,10 +1406,20 @@ const MAX_PROPAGATION_ROUNDS = FIXED_POINT_CAP;
  */
 function buildPropagatingMapGo(localFns: Map<string, LocalFn>, root: SyntaxNode): PropagatingGo {
   const propagating: PropagatingGo = new Map();
+  goPositional = new Map();
   for (let round = 0; round < MAX_PROPAGATION_ROUNDS; round++) {
     let changed = false;
     for (const [name, fn] of localFns) {
-      const found = computeReturnTaintPropagatingGo(fn, localFns, propagating, root);
+      const found = computeReturnTaintPropagatingGo(fn, localFns, propagating, root, positions => {
+        // monotonic, like the summary itself
+        const mine = goPositional.get(name) ?? new Map<number, Map<number, number>>();
+        for (const [pos, byIdx] of positions) {
+          const p = mine.get(pos) ?? new Map<number, number>();
+          for (const [i, m] of byIdx) { if (((p.get(i) ?? 0) | m) !== (p.get(i) ?? 0)) { p.set(i, (p.get(i) ?? 0) | m); changed = true; } }
+          mine.set(pos, p);
+        }
+        goPositional.set(name, mine);
+      });
       // Monotonic merge (only ever adds a parameter or adds surviving classes).
       const merged = new Map(propagating.get(name) ?? []);
       let grew = false;
@@ -1403,18 +1445,61 @@ function positionalParamsGo(fn: SyntaxNode): string[] {
   return Array.from(out, n => n ?? "");
 }
 
+/** `func (u *Unsafe) Run(...)` -> "Unsafe" (and its receiver's name, "u"); null for a plain function. */
+function receiverOfMethodGo(decl: SyntaxNode): { type: string; name: string | null } | null {
+  if (decl.type !== "method_declaration") return null;
+  const p = findAllNodesGo(decl.childForFieldName("receiver") ?? decl, "parameter_declaration")[0];
+  const type = p?.childForFieldName("type")?.text.replace(/^\*/, "").replace(/\[.*$/, "");
+  return type ? { type, name: p?.childForFieldName("name")?.text ?? null } : null;
+}
+
+/**
+ * Every function and method of the file under its own identity: a function by name, a method as `Type.Method` --
+ * two types' `Process` methods are two summaries (and two bodies), never one overwriting the other.
+ */
 function collectLocalFunctionsGo(root: SyntaxNode): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
   const visit = (node: SyntaxNode) => {
     if (node.type === "function_declaration" || node.type === "method_declaration") {
       const name = node.childForFieldName("name")?.text;
       const body = node.childForFieldName("body");
-      if (name && body) fns.set(name, { paramShapes: paramShapesOfGo(node), body });
+      const recv = receiverOfMethodGo(node);
+      const key = recv ? `${recv.type}.${name}` : name;
+      if (name && key && body && !fns.has(key)) fns.set(key, { paramShapes: paramShapesOfGo(node), body });
     }
     for (const c of node.namedChildren) if (c) visit(c);
   };
   visit(root);
   return fns;
+}
+
+/**
+ * The local function(s) a call's callee can run, as collectLocalFunctionsGo keys: `f(x)` its function; `v.M(x)` the
+ * method of v's type when known -- a composite literal (`Unsafe{}.M`), a variable built as one (`s := &Unsafe{}`,
+ * `new(Unsafe)`, `var s Unsafe`), or the enclosing method's own receiver -- else every same-named method of the file
+ * (any may be the one; a library method name is not guessed at). Callers that need exactly one check the length.
+ */
+function calleeKeysGo(fn: SyntaxNode | null | undefined, localFns: Map<string, LocalFn>): string[] {
+  if (!fn) return [];
+  if (fn.type === "identifier") return localFns.has(fn.text) ? [fn.text] : [];
+  if (fn.type !== "selector_expression") return [];
+  const field = fn.childForFieldName("field")?.text;
+  const operand = fn.childForFieldName("operand");
+  if (!field || !operand) return [];
+  let type: string | undefined;
+  const lit = operand.type === "unary_expression" ? operand.namedChildren[0] : operand;
+  if (lit?.type === "composite_literal") type = lit.childForFieldName("type")?.text;
+  else if (operand.type === "identifier") {
+    const decl = findEnclosingFunctionNodeGo(fn);
+    const own = decl ? receiverOfMethodGo(decl) : null;
+    type = own && own.name === operand.text ? own.type : goCtx.varStructTypes.get(operand.text);
+  }
+  if (type) {
+    const key = `${type.replace(/^\*/, "")}.${field}`;
+    if (localFns.has(key)) return [key];
+  }
+  if (GO_BUILTIN_METHOD_NAMES.has(field)) return [];
+  return [...localFns.keys()].filter(k => k.endsWith(`.${field}`) && k.indexOf(".") === k.length - field.length - 1);
 }
 
 const SEVERITY: Record<AstTaintGoId, "critical" | "high" | "medium"> = {
@@ -1683,6 +1768,30 @@ function publicIpGuardGo(cond: SyntaxNode): Guard[] {
   return out;
 }
 
+/**
+ * Does a prefix a cleaned path is checked against end at a directory? `"/srv/up/"`, `base + "/"` do; a literal
+ * without the slash -- or a Clean/Abs/Join result, which never ends in one -- doesn't. undefined when the base can't
+ * be seen (`base + string(os.PathSeparator)`: trusted, as before).
+ */
+function prefixEndsAtDirGo(n: SyntaxNode, at: SyntaxNode, depth = 0): boolean | undefined {
+  if (depth > 2) return undefined;
+  const lit = goStringLiteralValue(n);
+  if (lit !== null) return /[\\/]$/.test(lit);
+  if (n.type === "binary_expression" && n.childForFieldName("operator")?.type === "+") {
+    const r = n.childForFieldName("right");
+    return r ? prefixEndsAtDirGo(r, at, depth + 1) : undefined;
+  }
+  if (n.type === "call_expression") {
+    const callee = calleeTextGo(n.childForFieldName("function") ?? n) ?? "";
+    if (/^(?:filepath\.(?:Clean|Abs|EvalSymlinks|Join)|path\.(?:Clean|Join))$/.test(callee)) return false;
+  }
+  if (n.type === "identifier") {
+    const def = lastAssignmentGo(n.text, at);
+    return def && def !== n ? prefixEndsAtDirGo(def, at, depth + 1) : undefined;
+  }
+  return undefined;
+}
+
 function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: ReadonlyMap<string, ValidationAliasGo>): Guard[] {
   switch (cond.type) {
     case "parenthesized_expression": {
@@ -1782,11 +1891,14 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
         const clears = sub !== null ? substringGuardClearsGo(sub) : null;
         return clears ? [{ name: args[0].text, holds: "false", clears }] : [];
       }
-      // strings.HasPrefix(p, base) after p := filepath.Clean/Abs(...): p resolves inside base
+      // strings.HasPrefix(p, base) after p := filepath.Clean/Abs/Join(...): p resolves inside base -- when base ends at
+      // a directory ("/srv/up/", base + string(os.PathSeparator)); "/srv/up" also admits the sibling /srv/up_evil
       if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier") {
         const def = lastAssignmentGo(args[0].text, cond);
         const dt = def?.type === "call_expression" ? calleeTextGo(def.childForFieldName("function") ?? def) : null;
-        if (dt && /^(?:filepath\.(?:Clean|Abs|EvalSymlinks)|path\.Clean)$/.test(dt)) return [{ name: args[0].text, holds: "true", clears: SinkClass.PATH }];
+        if (dt && /^(?:filepath\.(?:Clean|Abs|EvalSymlinks|Join)|path\.(?:Clean|Join))$/.test(dt) && prefixEndsAtDirGo(args[1], cond) !== false) {
+          return [{ name: args[0].text, holds: "true", clears: SinkClass.PATH }];
+        }
         // HasPrefix(next, "/app/"): a path on this origin -- "/" then a name character can't become "//host" or "/\host"
         const prefix = goStringLiteralValue(args[1]);
         return prefix !== null && /^\/[\w.-]/.test(prefix) ? [{ name: args[0].text, holds: "true", clears: SinkClass.REDIRECT }] : [];
@@ -1840,7 +1952,8 @@ interface WalkHooksGo {
   /** Sink checks / call-site seeding for one call_expression, with the env at that point. */
   onCall?: (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
   /** Called for each returned value, with the env on that path. */
-  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => void;
+  /** `pos`: which of a multi-value return's values `expr` is (0 for a single value). */
+  onReturn?: (expr: SyntaxNode, env: Env, taintMask: TaintMaskFnGo, pos: number) => void;
   /** Walk nested function bodies (main scan) or ignore them (summaries). */
   descendFunctions: boolean;
   /** Package-level container memory shared across functions (main scan only). */
@@ -1917,6 +2030,18 @@ function createWalkerGo(h: WalkHooksGo) {
       env.set(key, compound ? mask | (env.get(key) ?? 0) : mask);
       markAssignedGo(env, key, literal);
     };
+    // `user, pass := split(x)` with a local function's per-position summary: each target from its own value
+    const rhsCall = targets.length > 1 && rightVals.length === 1 && rightVals[0].type === "call_expression" ? rightVals[0] : null;
+    const posKeys = rhsCall ? calleeKeysGo(rhsCall.childForFieldName("function"), h.localFns).filter(k => goPositional.has(k)) : [];
+    if (rhsCall && posKeys.length) {
+      const args = argListOfGo(rhsCall);
+      targets.forEach((key, i) => {
+        let m = 0;
+        for (const k of posKeys) for (const [idx, surv] of goPositional.get(k)!.get(i) ?? []) m |= idx === -1 ? surv : args[idx] ? taintMask(args[idx], env) & surv : 0;
+        if (key) put(key, m, rhsCall);
+      });
+      return;
+    }
     if (targets.length > 0 && rightVals.length === 1) {
       // Single RHS value (possibly Go's multi-return form binding N LHS
       // targets to one call's multiple return values) -- only the FIRST
@@ -2084,7 +2209,7 @@ function createWalkerGo(h: WalkHooksGo) {
         for (const c of node.namedChildren) if (c) walk(c, env);
         const child = node.namedChildren[0];
         const values = child?.type === "expression_list" ? child.namedChildren : child ? [child] : [];
-        if (inline === 0) for (const v of values) if (v) h.onReturn?.(v, env, taintMask);
+        if (inline === 0) values.forEach((v, pos) => { if (v) h.onReturn?.(v, env, taintMask, pos); });
         return true;
       }
 
@@ -2376,6 +2501,14 @@ export function scanAstTaintGo(
 
     // Per-scan facts: request/writer variables, escapers, plugin/gob variables, structs with role-like fields.
     goCtx = emptyGoCtx();
+    // import local name of a web framework package (gin / echo / fiber), aliases included
+    const frameworkPkgs = new Set<string>();
+    for (const spec of findAllNodesGo(root, "import_spec")) {
+      const path = goStringLiteralValue(spec.childForFieldName("path") ?? spec) ?? "";
+      if (!FRAMEWORK_IMPORT_RE_GO.test(path)) continue;
+      const alias = spec.childForFieldName("name");
+      frameworkPkgs.add(alias?.type === "package_identifier" ? alias.text : path.split("/").filter(s => !/^v\d+$/.test(s)).pop() ?? "");
+    }
     const requestVars: string[] = [];
     const requestFields: string[] = [];
     const findDecls = (n: SyntaxNode) => {
@@ -2384,6 +2517,10 @@ export function scanAstTaintGo(
         const names = n.childrenForFieldName("name").filter((x): x is SyntaxNode => !!x).map(x => x.text);
         if (/http\.Request$/.test(type)) requestVars.push(...names);
         if (/http\.ResponseWriter$/.test(type)) for (const nm of names) goCtx.writerVars.add(nm);
+        // the package's default name counts too (a file whose imports aren't all in view)
+        const fw = /^\*?([A-Za-z_]\w*)\.(?:Context|Ctx)$/.exec(type);
+        const isFw = !!fw && (frameworkPkgs.has(fw[1]) || /^(?:gin|echo|fiber)$/.test(fw[1]));
+        for (const nm of names) (isFw ? goCtx.frameworkCtxVars : goCtx.otherTypedVars).add(nm);
         const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(type);
         if (q && importedPkgs.has(q[1])) for (const nm of names) qualifiedVarTypes.set(nm, `${importedPkgs.get(q[1])}.${q[2]}`);
       } else if (n.type === "short_var_declaration") {
@@ -2832,8 +2969,9 @@ export function scanAstTaintGo(
 
       // Same-file interprocedural seeding (one hop) -- mirrors
       // astTaint.ts/astTaintPython.ts exactly.
-      const seedField = fn?.type === "selector_expression" ? fn.childForFieldName("field")?.text ?? null : null;
-      const directName = fn?.type === "identifier" ? fn.text : seedField && !GO_BUILTIN_METHOD_NAMES.has(seedField) ? seedField : null;
+      // only a call that runs exactly one function / method of this file
+      const resolved = calleeKeysGo(fn, localFns);
+      const directName = resolved.length === 1 ? resolved[0] : null;
       // a call of a function-valued parameter (`writer(path)` in `dispatch(path, save)`): a call of the function bound to it
       const encName = fn?.type === "identifier" && !localFns.has(fn.text) ? findEnclosingFunctionNodeGo(node)?.childForFieldName("name")?.text : undefined;
       const boundNames = encName ? [...(fnValueArgs.get(encName)?.get(fn!.text) ?? [])] : [];

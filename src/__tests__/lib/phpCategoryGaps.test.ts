@@ -62,8 +62,35 @@ describe("variable overwrite", () => {
     expect(ids(fn(`    $name = $_GET['name'];\n    if (!in_array($name, ['color', 'font'], true)) return;\n    $$name = $_GET['value'];`))).not.toContain("variable-overwrite");
     expect(ids(fn(`    $varName = 'field_' . intval($_GET['id']);\n    $$varName = $_GET['val'];`))).not.toContain("variable-overwrite");
   });
+  it("extract() of request data replaces a variable set before it, unless EXTR_SKIP / EXTR_PREFIX_* keep it", () => {
+    const flow = (call: string) => ids(fn(`    $cmd = 'ls';\n    ${call};\n    system($cmd);`));
+    expect(flow(`extract($_GET)`)).toContain("command-injection");
+    expect(flow(`extract($_GET, EXTR_IF_EXISTS)`)).toContain("command-injection");
+    expect(flow(`extract($_GET, EXTR_SKIP)`)).not.toContain("command-injection");
+    expect(flow(`extract($_GET, EXTR_PREFIX_ALL, 'u')`)).not.toContain("command-injection");
+    expect(flow(`extract(['color' => $_GET['c']])`)).not.toContain("command-injection");
+    // set again after the extract: the request's value is gone
+    expect(ids(fn(`    extract($_GET);\n    $cmd = 'ls';\n    system($cmd);`))).not.toContain("command-injection");
+  });
   it("extract() of an array with fixed keys sets only those keys", () => {
     expect(ids(fn(`    $displayVars = ['color' => $_GET['color']];\n    extract($displayVars);\n    echo htmlspecialchars($color);`))).not.toContain("variable-overwrite");
+  });
+});
+
+describe("Laravel accessors are request input only on a request", () => {
+  const sink = (recv: string, params = "") => ids(`<?php\nfunction handler(${params}) {\n    $v = ${recv}('x');\n    system($v);\n}\n`);
+  it("$request / a typed request / request() / $this->request", () => {
+    expect(sink("$request->input")).toContain("command-injection");
+    expect(sink("$r->get", "Request $r")).toContain("command-injection");
+    expect(sink("request()->query")).toContain("command-injection");
+    expect(sink("$this->request->post")).toContain("command-injection");
+  });
+  it("not a cache, repository or database handle with the same method names", () => {
+    expect(sink("$cache->get")).not.toContain("command-injection");
+    expect(sink("$repo->all")).not.toContain("command-injection");
+    expect(sink("$pdo->query")).not.toContain("command-injection");
+    // named like a request but typed as something else
+    expect(sink("$request->get", "CacheItem $request")).not.toContain("command-injection");
   });
 });
 

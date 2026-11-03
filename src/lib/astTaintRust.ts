@@ -392,7 +392,10 @@ interface EngineCtx {
   content: string;
   lines: string[];
   root: SyntaxNode;
+  /** Same-file functions / methods by identity (fnId). */
   fns: Map<string, LocalFn>;
+  /** bare name -> every same-file function / method of that name (see resolveLocalRs) */
+  byName: Map<string, LocalFn[]>;
   propagating: Map<string, Map<number, number>>;
   intrinsic: Map<string, number>;
   seeded: Map<string, Map<number, number>>;
@@ -565,9 +568,14 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
   const mask = (node: SyntaxNode, env: Env): number => {
     if (ZERO_TYPES.has(node.type)) return 0;
     switch (node.type) {
-      case "identifier": return (env.get(node.text) ?? 0) | keyedUnion(env, node.text);
+      // the whole object also carries what was written into any of its fields (`x.*`, see assignTo)
+      case "identifier": return (env.get(node.text) ?? 0) | keyedUnion(env, node.text) | (env.get(`${node.text}.*`) ?? 0);
       case "field_expression": {
         const v = field(node, "value");
+        const f = field(node, "field")?.text;
+        // `user.role` after `user.name = input`: its own field write (if any) and the object's own taint, not
+        // another field's
+        if (v?.type === "identifier" && f) return (env.get(v.text) ?? 0) | keyedUnion(env, v.text) | (env.get(`${v.text}.${f}`) ?? 0);
         return v ? mask(v, env) : 0;
       }
       case "reference_expression": case "try_expression": case "await_expression": case "parenthesized_expression": {
@@ -708,14 +716,20 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
       if (sc !== null) { const a = args[0]; return a ? applySanitizer(mask(a, env), sc) : 0; }
     }
 
-    // Same-file function / method: return-value summary.
-    const local = (!recv || recv.type === "self") ? ctx.fns.get(name) : null;
-    if (local?.body && (!path || !path.includes("::") || path.startsWith("Self::") || path.startsWith("self::"))) {
-      let m = ctx.intrinsic.get(name) ?? 0;
-      const prop = ctx.propagating.get(name);
-      if (prop) for (const [i, surviving] of prop) { const a = args[i]; if (a) m |= mask(a, env) & surviving; }
-      // a hand-written RFC 4515 escaper: what it returns can't open or close a filter clause
-      return isLdapEscaperBody(local.body) ? applyClears(m, SinkClass.LDAP) : m;
+    // Same-file function / method (see resolveLocalRs): return-value summary. A method's receiver object also holds
+    // what it was built from (field-insensitive, as for any receiver below).
+    const locals = resolveLocalRs(ctx, node).filter(f => !!f.body);
+    if (locals.length) {
+      let m = recv && recv.type !== "self" ? mask(recv, env) : 0;
+      for (const local of locals) {
+        let lm = ctx.intrinsic.get(fnId(local)) ?? 0;
+        const prop = ctx.propagating.get(fnId(local));
+        // a method's argument i binds parameter i -- params exclude `self`, as the call's args do
+        if (prop) for (const [i, surviving] of prop) { const a = args[i]; if (a) lm |= mask(a, env) & surviving; }
+        // a hand-written RFC 4515 escaper: what it returns can't open or close a filter clause
+        m |= isLdapEscaperBody(local.body!) ? applyClears(lm, SinkClass.LDAP) : lm;
+      }
+      return m;
     }
 
     if (recv) {
@@ -1072,7 +1086,7 @@ function guardsOf(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[] {
     const { name, recv } = callParts(call);
     const src = argNodes(call)[0];
     const srcName = src ? guardName(src) : null;
-    if (!recv && /host/i.test(name) && ctx.fns.has(name) && srcName) extra.push({ ...g, name: srcName, clears: (g.clears ?? ALL) & (SinkClass.REDIRECT | SinkClass.SSRF) });
+    if (!recv && /host/i.test(name) && ctx.byName.has(name) && srcName) extra.push({ ...g, name: srcName, clears: (g.clears ?? ALL) & (SinkClass.REDIRECT | SinkClass.SSRF) });
   }
   return [...gs, ...extra];
 }
@@ -1148,8 +1162,9 @@ function guardsOfCondition(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[]
       return n && def && /canonicalize|normalize|clean/.test(def.text) ? [{ name: n, holds: name === "is_ok" ? "true" : "false" }] : [];
     }
     // a same-file boolean helper: `fn is_safe(s: &str) -> bool { !s.contains("..") && ... }`
-    if (!recv && ctx.fns.get(name)?.body && depth < 3) {
-      const fn = ctx.fns.get(name)!;
+    const helper = !recv ? (ctx.byName.get(name) ?? []).find(f => !f.implType && !!f.body) : undefined;
+    if (helper && depth < 3) {
+      const fn = helper;
       const kids = named(fn.body).filter(k => !/comment$/.test(k.type));
       const tail = kids[kids.length - 1];
       if (!tail || tail.type === "expression_statement" || tail.type === "let_declaration") return [];
@@ -1190,9 +1205,9 @@ function guardsOfCondition(cond: SyntaxNode, ctx: EngineCtx, depth = 0): Guard[]
       const urlGuard: Guard[] = !canonical && n && prefix !== null && (/^https?:\/\/[^/?#\\@]+\//i.test(prefix) || /^\/[^/\\]/.test(prefix))
         ? [{ name: n, holds: "true", clears: SinkClass.REDIRECT | SinkClass.SSRF }] : [];
       // a helper's parameter: the call site decides whether it was canonicalized (CANON_PARAM), so both readings stay
-      if (n && !def && ctx.fns.get(findEnclosingFunctionNameRust(c))?.params.some(p => p.name === n)) return [...urlGuard, { name: CANON_PARAM(n), holds: "true" }];
+      if (n && !def && (ctx.byName.get(findEnclosingFunctionNameRust(c)) ?? []).some(f => f.params.some(p => p.name === n))) return [...urlGuard, { name: CANON_PARAM(n), holds: "true" }];
       if (urlGuard.length) return urlGuard;
-      return n && canonical ? [{ name: n, holds: "true" }] : [];
+      return n && canonical && !requestChosenBase(args[0], c, ctx) ? [{ name: n, holds: "true" }] : [];
     }
   }
   return [];
@@ -1298,7 +1313,19 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
   const assignTo = (left: SyntaxNode, m: number, env: Env, orInto: boolean) => {
     const target = unwrapExpr(left);
-    if (target.type === "identifier") { env.set(target.text, orInto ? (env.get(target.text) ?? 0) | m : m); return; }
+    if (target.type === "identifier") {
+      env.set(target.text, orInto ? (env.get(target.text) ?? 0) | m : m);
+      // a new value: what was written into the old one's fields is gone
+      if (!orInto) for (const k of [...env.keys()]) if (k.startsWith(`${target.text}.`)) env.delete(k);
+      return;
+    }
+    // x.f = v: that field holds v (`x.f`), and the object as a whole now carries it (`x.*`) -- another field doesn't
+    if (target.type === "field_expression" && field(target, "value")?.type === "identifier" && field(target, "field")) {
+      const base = field(target, "value")!.text, f = field(target, "field")!.text;
+      env.set(`${base}.${f}`, orInto ? (env.get(`${base}.${f}`) ?? 0) | m : m);
+      env.set(`${base}.*`, (env.get(`${base}.*`) ?? 0) | m);
+      return;
+    }
     if (target.type === "field_expression" || target.type === "index_expression") {
       // s.field = x / v[i] = x -- field-insensitive: the base now carries x
       let base: SyntaxNode | null = target;
@@ -1462,7 +1489,61 @@ function constructedType(v: SyntaxNode): string | null {
     if (segs.length >= 2 && /^[A-Z]/.test(segs[segs.length - 2])) return segs[segs.length - 2];
   }
   if (cur?.type === "struct_expression") return coreType(field(cur, "name"));
+  // a unit struct's value is its name: `let s = QueryService;`
+  if (cur?.type === "identifier" && /^[A-Z]\w*$/.test(cur.text)) return cur.text;
   return null;
+}
+
+/**
+ * Was the base a resolved path is checked against chosen by the request? `PathBuf::from(&q.base)` -- built from (or
+ * one assignment away from) a value the handler's request extractors (Query / Path / Json / Form ...) bound -- proves
+ * nothing: the caller picked the directory too. State / Extension values (configuration) are not request input.
+ */
+function requestChosenBase(base: SyntaxNode | undefined, at: SyntaxNode, ctx: EngineCtx): boolean {
+  if (!base || !ctx.current) return false;
+  const names = ctx.current.params.filter(p => EXTRACTOR_TYPES.has(outerType(p.type))).flatMap(p => p.names);
+  if (names.length === 0) return false;
+  const u = unwrapExpr(base);
+  const def = u.type === "identifier" ? lastAssignment(u.text, at) : null;
+  const text = `${u.text} ${def?.text ?? ""}`;
+  return names.some(n => new RegExp(`(?:^|[^\\w.])${n}\\b`).test(text));
+}
+
+/** Enter `f`: local types are its own (its parameters', then its `let`s') -- two functions' `svc` / `req` are unrelated. */
+function enterFn(ctx: EngineCtx, f: LocalFn): void {
+  ctx.current = f;
+  ctx.varTypes = new Map();
+  for (const p of f.params) { const t = coreType(p.type); if (t && (p.pattern?.type === "identifier" || p.names.length === 1)) ctx.varTypes.set(p.name, t); }
+}
+
+/** A function's identity: its `Type.method` / `Type::assoc` / `module::fn` key (a nested fn: its name and offset). */
+const fnId = (f: LocalFn): string => f.key ?? `${f.name}@${f.decl.startIndex}`;
+
+/**
+ * The same-file function(s) a call runs, by identity: `f(x)` a free function; `Type::f` / `Self::f` that impl's;
+ * `self.m()` the current impl's method; `x.m()` the method of x's type when known (a typed parameter, `let x: T`,
+ * `T::new()`, `T { .. }`, a unit struct `T`). Another module's path, or a receiver of unknown type: none (cross-file
+ * facts and receiver propagation speak for those). Two types' same-named methods never stand in for each other.
+ */
+function resolveLocalRs(ctx: EngineCtx, node: SyntaxNode): LocalFn[] {
+  const { name, recv, path } = callParts(node);
+  const cands = ctx.byName.get(name) ?? [];
+  if (cands.length === 0) return [];
+  const ofType = (t: string, self?: boolean) => cands.filter(f => f.implType === t && (self === undefined || f.hasSelf === self));
+  if (path && path.includes("::")) {
+    const segs = path.split("::");
+    const owner = segs[segs.length - 2];
+    if (owner === "Self") return ctx.current?.implType ? ofType(ctx.current.implType) : [];
+    if (owner === "self" || owner === "crate" || owner === "super") return cands.filter(f => !f.implType);
+    return /^[A-Z]/.test(owner) ? ofType(owner) : [];
+  }
+  if (!recv) return cands.filter(f => !f.implType);
+  if (recv.type === "self") {
+    const own = ctx.current?.implType ? ofType(ctx.current.implType, true) : [];
+    return own.length ? own : cands.filter(f => f.hasSelf);
+  }
+  const t = typeOfExpr(recv, ctx) ?? constructedType(recv);
+  return t ? ofType(t, true) : [];
 }
 
 // ── Command builders ───────────────────────────────────────────────────────────────────────────────────────
@@ -2011,10 +2092,9 @@ function checkTimingCompare(node: SyntaxNode, l: SyntaxNode, r: SyntaxNode, env:
 // ── Same-file helpers (re-walk with seeded parameters) ────────────────────────────────────────────────────
 
 function seedLocalFn(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
-  const { name, recv, path } = callParts(node);
-  if (recv && recv.type !== "self") return;
-  if (path && path.includes("::") && !/^(?:Self|self)::/.test(path)) return;
-  const callee = ctx.fns.get(name);
+  // only a call that runs exactly one same-file function / method (see resolveLocalRs)
+  const resolved = resolveLocalRs(ctx, node);
+  const callee = resolved.length === 1 ? resolved[0] : null;
   if (!callee?.body) return;
   const tainted = new Map<number, number>();
   for (const p of callee.params) {
@@ -2023,9 +2103,9 @@ function seedLocalFn(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMask
     if (m) tainted.set(p.index, m);
   }
   if (tainted.size === 0) return;
-  const existing = ctx.seeded.get(callee.name) ?? new Map<number, number>();
+  const existing = ctx.seeded.get(fnId(callee)) ?? new Map<number, number>();
   for (const [i, m] of tainted) existing.set(i, (existing.get(i) ?? 0) | m);
-  ctx.seeded.set(callee.name, existing);
+  ctx.seeded.set(fnId(callee), existing);
 }
 
 // ── Cross-file calls ──────────────────────────────────────────────────────────────────────────────────────
@@ -2173,6 +2253,7 @@ function buildSummaries(ctx: EngineCtx): void {
   for (let round = 0; round < FIXED_POINT_CAP; round++) {
     let changed = false;
     for (const [name, f] of ctx.fns) {
+      enterFn(ctx, f);   // `self.m()` / `Self::m` resolve to this impl, `svc.m()` by THIS function's svc (see resolveLocalRs)
       const intrinsic = returnMask(f, ctx, null);
       if ((intrinsic | (ctx.intrinsic.get(name) ?? 0)) !== (ctx.intrinsic.get(name) ?? 0)) { ctx.intrinsic.set(name, (ctx.intrinsic.get(name) ?? 0) | intrinsic); changed = true; }
       const prop = new Map(ctx.propagating.get(name) ?? []);
@@ -2186,6 +2267,7 @@ function buildSummaries(ctx: EngineCtx): void {
     }
     if (!changed) break;
   }
+  ctx.current = null;
 }
 
 // ── Handlers and their sources ────────────────────────────────────────────────────────────────────────────
@@ -2259,7 +2341,14 @@ function collectBola(fn: LocalFn, ctx: EngineCtx) {
     if (!/^(?:==|!=)$/.test(operatorOf(b))) continue;
     const l = field(b, "left"), r = field(b, "right");
     if (!l || !r) continue;
-    const owner = (n: SyntaxNode) => isOwnerField(n.text.split(".").pop()?.replace(/\(\)$/, "") ?? "") || OWNER_COLUMN_RE.test(n.text);
+    // ...the owner of a record THIS id loaded (`post.user_id` after `let post = posts.find(id)...`): an owner check on
+    // another record (`profile.owner_id`, loaded by the user's own id) says nothing about the one the path names
+    const owner = (n: SyntaxNode) => {
+      if (!isOwnerField(n.text.split(".").pop()?.replace(/\(\)$/, "") ?? "") && !OWNER_COLUMN_RE.test(n.text)) return false;
+      const base = n.text.split(".")[0].replace(/^[&*(]+/, "");
+      const def = /^[a-z_]\w*$/.test(base) ? lastAssignment(base, b) : null;
+      return !!def && mentionsId(def);
+    };
     if ((owner(l) && mentionsPrincipal(r.text)) || (owner(r) && mentionsPrincipal(l.text))) evidence = "ownership";
   }
   for (const c of findAllNodes(body, "call_expression")) {
@@ -2310,14 +2399,21 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
   const moduleName = moduleNameOf(filePath);
   const all = collectFns(root, moduleName);
+  // every function / method under its own identity (two impls' `build` are two summaries and two bodies)
   const fns = new Map<string, LocalFn>();
-  for (const f of all) if (!fns.has(f.name)) fns.set(f.name, f);
+  const byName = new Map<string, LocalFn[]>();
+  for (const f of all) {
+    if (fns.has(fnId(f))) continue;
+    fns.set(fnId(f), f);
+    byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
+  }
+  const firstByName = new Map([...byName].map(([n, fs]) => [n, fs[0]] as const));
   const ctx: EngineCtx = {
-    filePath, content, lines: content.split("\n"), root, fns, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
+    filePath, content, lines: content.split("\n"), root, fns, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
     suppressed, findings: [], seen: new Set(), varTypes: new Map(), structFields: collectStructFields(root),
     imports: collectImports(root), cmdVars: new Map(), crossFileFacts,
     localKeys: new Set(all.flatMap(f => [f.key, ...f.altKeys]).filter((k): k is string => !!k)), current: null, moduleName,
-    warpHandlers: warpHandlersOf(root, content, fns), bodyTypes: new Map(),
+    warpHandlers: warpHandlersOf(root, content, firstByName), bodyTypes: new Map(),
   };
   // `svc: Arc<UserService>` and `State(svc): State<Arc<UserService>>` both type svc as UserService
   for (const f of all) for (const p of f.params) { const t = coreType(p.type); if (t && (p.pattern?.type === "identifier" || p.names.length === 1) && !ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, t); }
@@ -2354,7 +2450,7 @@ function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintRustFinding[
     && !f.attrs.some(a => /^(?:test|tokio::test|cfg)$/.test(attrName(a)));
   for (const [, f] of ctx.fns) {
     if (!f.body) continue;
-    ctx.current = f;
+    enterFn(ctx, f);
     ctx.cmdVars = new Map();
     walkMain(f.body, entryEnv(f, isEntry(f), ctx), ctx);
     collectBola(f, ctx);
@@ -2406,11 +2502,12 @@ function drainSeeded(ctx: EngineCtx) {
       changed = true;
       const env: Env = new Map();
       for (const p of f.params) for (const n of p.names) env.set(n, idx.get(p.index) ?? 0);
-      const prev = ctx.current;
-      ctx.current = f;
+      const prev = ctx.current, prevTypes = ctx.varTypes;
+      enterFn(ctx, f);
       ctx.cmdVars = new Map();
       walkMain(f.body, env, ctx);
       ctx.current = prev;
+      ctx.varTypes = prevTypes;
     }
     if (!changed) break;
   }

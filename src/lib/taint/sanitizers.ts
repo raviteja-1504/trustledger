@@ -122,6 +122,9 @@ const TABLES: Record<SanitizerLang, Table> = {
       mysqli_real_escape_string: C.SQL,
       // the last path segment: no directory, so it can't climb out of (or include from outside) its directory
       basename: C.PATH | C.INCLUDE,
+      // an existing local file's absolute path (or false) -- never a URL or stream wrapper, so it fetches nothing
+      // remote; WHICH local file is still the caller's (path traversal stays)
+      realpath: C.SSRF,
       pathinfo: (_callee, args) => (/PATHINFO_(?:EXTENSION|FILENAME|BASENAME)/.test(args[1] ?? "") ? C.PATH | C.INCLUDE : 0),
       // preg_replace('/[^a-z0-9_-]/', '', $x) leaves only that alphabet; removing CR/LF leaves one header line
       preg_replace: (_callee, args) => {

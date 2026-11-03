@@ -76,6 +76,20 @@ setcookie("theme", "dark");
     const result = analyzeFile("a.php", content);
     expect(result.indicators.some(i => i.id === "cookie-no-httponly")).toBe(false);
   });
+
+  const cookieIds = (content: string) => analyzeFile("a.php", content).indicators.map(i => i.id).filter(id => /^cookie-no-/.test(id));
+  it("an options array laid out one key per line is read whole: secure false is flagged, all flags set is not", () => {
+    const opts = (secure: string) => `<?php\nsetcookie('session', $token, [\n    'expires' => time() + 3600,\n    'path' => '/',\n    'samesite' => 'None',\n    'secure' => ${secure},\n    'httponly' => true,\n]);\n`;
+    expect(cookieIds(opts("false"))).toEqual(["cookie-no-secure"]);
+    expect(cookieIds(opts("true"))).toEqual([]);
+  });
+
+  it("session_set_cookie_params without secure is flagged; with it, or positional secure=true, it is not", () => {
+    expect(cookieIds(`<?php\nsession_set_cookie_params(['httponly' => true, 'samesite' => 'Lax']);\nsession_start();\n`)).toEqual(["cookie-no-secure"]);
+    expect(cookieIds(`<?php\nsession_set_cookie_params([\n    'httponly' => true,\n    'secure' => true,\n]);\n`)).toEqual([]);
+    expect(cookieIds(`<?php\nsession_set_cookie_params(0, '/', '', true, true);\n`)).toEqual([]);
+    expect(cookieIds(`<?php\nsession_set_cookie_params(0, '/', '', false, true);\n`)).toEqual(["cookie-no-secure"]);
+  });
 });
 
 describe("PHP PII/secrets in logs via error_log(...)", () => {

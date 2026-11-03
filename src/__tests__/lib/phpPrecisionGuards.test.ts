@@ -110,9 +110,11 @@ describe("guards and sanitizers", () => {
   });
 
   it("realpath + a base-prefix check confines a path (strpos === 0 and str_starts_with)", () => {
-    const confine = (check: string) => ids(handler(`    $base = '/var/files';\n    $real = realpath($base . '/' . $req->param('f'));\n    if (${check}) { return ApiResponse::badRequest('no'); }\n    $c = file_get_contents($real);`));
+    const confine = (check: string, base = "/var/files/") => ids(handler(`    $base = '${base}';\n    $real = realpath($base . $req->param('f'));\n    if (${check}) { return ApiResponse::badRequest('no'); }\n    $c = file_get_contents($real);`));
     expect(confine(`$real === false || strpos($real, $base) !== 0`)).not.toContain("path-traversal");
     expect(confine(`$real === false || !str_starts_with($real, $base)`)).not.toContain("path-traversal");
+    // a base with no trailing slash also admits the sibling /var/files-evil (realpath resolves "../files-evil/x")
+    expect(confine(`$real === false || strpos($real, $base) !== 0`, "/var/files")).toContain("path-traversal");
     // without realpath, "/var/files/../etc" passes a prefix check
     const raw = (check: string) => ids(handler(`    $base = '/var/files';\n    $p = $base . '/' . $req->param('f');\n    if (${check}) { return ApiResponse::badRequest('no'); }\n    $c = file_get_contents($p);`));
     expect(raw(`!str_starts_with($p, $base)`)).toContain("path-traversal");

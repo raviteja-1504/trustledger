@@ -273,13 +273,25 @@ function phpConcatOperands(n: SyntaxNode): SyntaxNode[] | null {
 // ── Taint sources ────────────────────────────────────────────────────────
 
 const SUPERGLOBAL_NAMES = new Set(["_GET", "_POST", "_REQUEST", "_COOKIE", "_FILES", "_SERVER"]);
-// Laravel: $request->input(...)/->query(...)/->get(...)/->all(...) -- the
-// receiver's own variable name isn't checked (matches any receiver by
-// method-name tail, same permissive-by-design posture the sanitizer tables
-// across every engine already use), since a typed `Request $request`
-// parameter has no attribute this engine can reliably read without
-// re-probing a parameter type-hint field shape that wasn't confirmed.
+// Laravel: $request->input(...)/->query(...)/->get(...)/->all(...) -- names far too common to be a source on any
+// receiver (`$cache->get()`, `$repo->all()`, `$pdo->query()`), so only on a request: see isLaravelRequestReceiverPHP.
 const LARAVEL_REQUEST_METHODS = new Set(["input", "query", "all", "post", "get"]);
+const REQUEST_VAR_NAME_RE_PHP = /^(?:request|req|httpRequest)$/i;
+
+/** The receiver of a Laravel accessor is a request: a parameter typed as one, `$request` / `$req`,
+ * `$this->request`, or the `request()` helper. */
+function isLaravelRequestReceiverPHP(recv: SyntaxNode | null | undefined, at: SyntaxNode): boolean {
+  if (!recv) return false;
+  if (recv.type === "variable_name") {
+    const name = variableBareName(recv);
+    if (!name) return false;
+    const type = paramTypeOfPHP(name, at);
+    return type ? REQUEST_TYPE_RE_PHP.test(type) : REQUEST_VAR_NAME_RE_PHP.test(name);
+  }
+  if (recv.type === "member_access_expression") return REQUEST_VAR_NAME_RE_PHP.test(recv.childForFieldName("name")?.text ?? "");
+  if (recv.type === "function_call_expression") return recv.childForFieldName("function")?.text === "request";
+  return false;
+}
 // Accessors that read client input on a parameter TYPED as a request (`Request $request`, PSR-7
 // `ServerRequestInterface $request`, an app's own `ApiRequest $req`): Laravel's cookie()/header()/route()/file(),
 // PSR-7's getQueryParams()/getParsedBody()/..., and the common param()/post()/cookie()/header() wrapper shape.
@@ -442,14 +454,17 @@ type TaintMaskFnPHP = (node: SyntaxNode, env: Env) => number;
 function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
   // What a call of a function / method of this file returns, from its summary: index -1 is what it returns whatever
   // it is passed (it reads $_GET / the request itself), every other index an argument that survives to the return.
-  const localReturnMask = (name: string, args: SyntaxNode[], env: Env): number => {
-    const propIdx = ctx.propagatingParams.get(name);
-    if (!propIdx) return 0;
-    const shapes = ctx.localFunctions.get(name)?.paramShapes ?? [];
+  // Several keys (a method call on a receiver of unknown class): any of them may run, so their results combine.
+  const localReturnMask = (keys: readonly string[], args: SyntaxNode[], env: Env): number => {
     let m = 0;
-    for (const [i, surviving] of propIdx) {
-      if (i === -1) m |= surviving;
-      else if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+    for (const key of keys) {
+      const propIdx = ctx.propagatingParams.get(key);
+      if (!propIdx) continue;
+      const shapes = ctx.localFunctions.get(key)?.paramShapes ?? [];
+      for (const [i, surviving] of propIdx) {
+        if (i === -1) m |= surviving;
+        else if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+      }
     }
     return m;
   };
@@ -534,7 +549,8 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
     }
     if (node.type === "function_call_expression") {
       const fnNode = node.childForFieldName("function");
-      const fnName = fnNode?.type === "name" ? fnNode.text : null;
+      // `\App\build(...)` / `\htmlspecialchars(...)`: the function the qualified name ends in
+      const fnName = fnNode?.type === "name" ? fnNode.text : fnNode?.type === "qualified_name" ? fnNode.text.replace(/^.*\\/, "") : null;
       const args = argListOfPHP(node);
       if (fnName) {
         // Known sanitizer: the argument's taint passes THROUGH minus only
@@ -552,7 +568,7 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       // regardless of args being a literal string.
       if (fnName === "file_get_contents" && /php:\/\/input/i.test(args[0]?.text ?? "")) return ALL;
       if (fnName) {
-        const m = localReturnMask(fnName, args, env);
+        const m = localReturnMask(calleeKeysPHP(node, ctx), args, env);
         if (m) return m;
       }
       // Curated string/array/JSON plumbing: the result carries its arguments' taint.
@@ -577,7 +593,7 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         // whose output is only safe once placed inside quotes.
         if (clears !== null) return args[0] ? (methodName === "quote" ? applyClears : applySanitizer)(taintMask(args[0], env), clears) : 0;
       }
-      if (methodName && LARAVEL_REQUEST_METHODS.has(methodName)) return ALL;
+      if (methodName && LARAVEL_REQUEST_METHODS.has(methodName) && isLaravelRequestReceiverPHP(node.namedChildren[0], node)) return ALL;
       if (methodName && TYPED_REQUEST_METHODS.has(methodName)) {
         const recv = node.namedChildren[0];
         const name = recv?.type === "variable_name" ? variableBareName(recv) : null;
@@ -585,7 +601,7 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         if (type && REQUEST_TYPE_RE_PHP.test(type)) return ALL;
       }
       // a method of this file (`$p->name()`, `$this->build($x)`): what its summary says it returns
-      const own = methodName ? localReturnMask(methodName, argListOfPHP(node), env) : 0;
+      const own = methodName ? localReturnMask(calleeKeysPHP(node, ctx), argListOfPHP(node), env) : 0;
       // Generic passthrough: a method call on an already-tainted receiver
       // stays tainted (e.g. $dirty->trim()).
       const receiver = node.namedChildren[0];
@@ -754,21 +770,57 @@ function extractFuncInfo(decl: SyntaxNode): LocalFunction | null {
   };
 }
 
+const TYPE_DECL_NODES_PHP = new Set(["class_declaration", "trait_declaration", "interface_declaration", "enum_declaration"]);
+
+/** The class / trait / interface / enum a node sits in, or null. */
+function enclosingTypeNamePHP(n: SyntaxNode): string | null {
+  for (let cur = n.parent; cur; cur = cur.parent) if (TYPE_DECL_NODES_PHP.has(cur.type)) return cur.childForFieldName("name")?.text ?? null;
+  return null;
+}
+
+/**
+ * Every function and method of the file under its own identity: a function by its lower-cased name (PHP function
+ * names are case-insensitive; a namespace doesn't change what a same-file call resolves to), a method as
+ * `class::method`. Two classes' same-named methods, or a method named like a global function, no longer share (or
+ * shadow) one summary -- and every body is scanned. A name declared twice at the same identity: first wins.
+ */
 function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
   const functions = new Map<string, LocalFunction>();
   for (const decl of [...findAllNodes(root, "function_definition"), ...findAllNodes(root, "method_declaration")]) {
     const info = extractFuncInfo(decl);
     if (!info) continue;
-    // Same bug class as astTaintCSharp.ts's collectLocalMethods (already
-    // fixed there): two different classes/functions in the same file can
-    // share a bare name, and a flat overwrite would silently lose whichever
-    // one was declared first to whichever is declared last, regardless of
-    // which one actually matters. PHP has no C#-style isEndpoint signal to
-    // arbitrate by, so the simplest safe policy is first-declared-wins.
-    if (functions.has(info.name)) continue;
-    functions.set(info.name, info);
+    const owner = decl.type === "method_declaration" ? enclosingTypeNamePHP(decl) : null;
+    const key = (owner ? `${owner}::${info.name}` : info.name).toLowerCase();
+    if (functions.has(key)) continue;
+    functions.set(key, info);
   }
   return functions;
+}
+
+/**
+ * The same-file function(s) a call can run, as localFunctions keys: `f(...)` / `\App\f(...)` its function; a method
+ * call the receiver's class (`new X`, `$x` bound to one, `X::m()`, `$this` / `self::` / `static::`) when known --
+ * otherwise every same-named method of the file, since any of them may be the one (callers that need exactly one
+ * check the length).
+ */
+function calleeKeysPHP(node: SyntaxNode, ctx: EngineCtx): string[] {
+  if (node.type === "function_call_expression") {
+    const fn = node.childForFieldName("function");
+    if (fn?.type !== "name" && fn?.type !== "qualified_name") return [];
+    const key = fn.text.replace(/^.*\\/, "").toLowerCase();
+    return ctx.localFunctions.has(key) ? [key] : [];
+  }
+  if (node.type !== "member_call_expression" && node.type !== "scoped_call_expression" && node.type !== "nullsafe_member_call_expression") return [];
+  const method = node.childForFieldName("name")?.text?.toLowerCase();
+  if (!method) return [];
+  const recv = node.type === "scoped_call_expression" ? node.childForFieldName("scope") : node.childForFieldName("object") ?? node.namedChildren[0];
+  const selfRef = recv && (recv.type === "relative_scope" || /^(?:self|static)$/i.test(recv.text) || (recv.type === "variable_name" && variableBareName(recv) === "this"));
+  const owner = selfRef ? enclosingTypeNamePHP(node) : classMethodKeyPHP(node, ctx)?.split("::")[0] ?? null;
+  if (owner) {
+    const key = `${owner}::${method}`.toLowerCase();
+    if (ctx.localFunctions.has(key)) return [key];
+  }
+  return [...ctx.localFunctions.keys()].filter(k => k.endsWith(`::${method}`));
 }
 
 /** Every method declared inside a class, with its `class::method` key (lower-cased). */
@@ -805,6 +857,34 @@ function classMethodKeyPHP(node: SyntaxNode, ctx: EngineCtx): string | null {
     return n ? `${n.text.replace(/^.*\\/, "")}::${method}` : null;
   }
   return null;
+}
+
+const HASH_FUNCTIONS_PHP = new Set(["md5", "sha1", "hash", "hash_hmac", "crypt", "md5_file", "sha1_file", "hash_file", "hash_hmac_file", "password_hash"]);
+
+/** Does `n` hold a hash digest -- the output of a hash function, a local last assigned one, or a call of a
+ * same-file function that returns one? A few hops, so `$e = mk($pw)` with `function mk($p) { return hash(...); }`
+ * counts, whatever the variables are called. */
+function isHashValuePHP(n: SyntaxNode, ctx: EngineCtx, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (n.type === "parenthesized_expression" && n.namedChildren[0]) return isHashValuePHP(n.namedChildren[0], ctx, depth + 1);
+  if (n.type === "variable_name") {
+    const name = variableBareName(n);
+    const def = name ? lastAssignmentPHP(name, n) : null;
+    return !!def && isHashValuePHP(def, ctx, depth + 1);
+  }
+  if (n.type === "function_call_expression") {
+    const fn = n.childForFieldName("function");
+    const name = fn?.type === "name" || fn?.type === "qualified_name" ? fn.text.replace(/^.*\\/, "").toLowerCase() : null;
+    if (name && HASH_FUNCTIONS_PHP.has(name)) return true;
+  }
+  if (n.type === "function_call_expression" || n.type === "member_call_expression" || n.type === "scoped_call_expression") {
+    for (const key of calleeKeysPHP(n, ctx)) {
+      const body = ctx.localFunctions.get(key)?.body;
+      const rets = body ? findAllNodes(body, "return_statement").map(r => r.namedChildren[0]).filter((v): v is SyntaxNode => !!v) : [];
+      if (rets.length > 0 && rets.every(v => isHashValuePHP(v, ctx, depth + 1))) return true;
+    }
+  }
+  return false;
 }
 
 /** Every variable name that appears in a `global $x;` declaration anywhere in the file. */
@@ -1420,6 +1500,24 @@ function guardedVariablePHP(n: SyntaxNode): string | null {
   return null;
 }
 
+/**
+ * Does the base a resolved path is prefix-checked against end at a directory boundary? `'/var/www/files/'`, or
+ * `$base . '/'`, does; `'/var/www/files'` -- or another realpath() result, which never ends in a
+ * slash -- also admits the sibling `/var/www/files-evil/...`. undefined when the base can't be seen (trusted, as before).
+ */
+function prefixEndsAtDirPHP(n: SyntaxNode | undefined, at: SyntaxNode, depth = 0): boolean | undefined {
+  if (!n || depth > 2) return undefined;
+  const lit = phpStringValue(n);
+  if (lit !== null) return /[\\/]$/.test(lit);
+  if (n.type === "binary_expression" && n.childForFieldName("operator")?.type === ".") return prefixEndsAtDirPHP(n.childForFieldName("right") ?? undefined, at, depth + 1);
+  if (n.type === "function_call_expression" && n.childForFieldName("function")?.text === "realpath") return false;
+  if (n.type === "variable_name") {
+    const def = lastAssignmentPHP(variableBareName(n) ?? "", at);
+    return def ? prefixEndsAtDirPHP(def, at, depth + 1) : undefined;
+  }
+  return undefined;
+}
+
 /** Was `$name` last bound to realpath(...) (so a prefix check on it confines the real file)? */
 function isRealpathResultPHP(name: string, at: SyntaxNode): boolean {
   const def = lastAssignmentPHP(name, at);
@@ -1486,7 +1584,7 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
         const [hay, needle] = argListOfPHP(call);
         const hayName = hay?.type === "variable_name" ? variableBareName(hay) : null;
         const whenEqual: "true" | "false" = op === "===" || op === "==" ? "true" : "false";
-        if (hayName && other.text === "0" && isRealpathResultPHP(hayName, cond)) return [{ name: hayName, holds: whenEqual, clears: SinkClass.PATH | SinkClass.INCLUDE }];
+        if (hayName && other.text === "0" && isRealpathResultPHP(hayName, cond) && prefixEndsAtDirPHP(needle, cond) !== false) return [{ name: hayName, holds: whenEqual, clears: SinkClass.PATH | SinkClass.INCLUDE }];
         const sub = needle ? phpStringValue(needle) : null;
         // strpos($u, '/') === 0 is "starts with /"; strpos($u, '://') !== false is "contains ://" -- URL facets
         if (hayName && sub !== null && other.text === "0" && (sub === "/" || sub === "//")) {
@@ -1546,7 +1644,7 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
         if (clears) return [{ name: a0, holds: "true", clears }];
       }
       // str_starts_with($real, $base) after realpath(); str_contains($x, '..')
-      if (fnName === "str_starts_with" && a0 && isRealpathResultPHP(a0, cond)) return [{ name: a0, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
+      if (fnName === "str_starts_with" && a0 && isRealpathResultPHP(a0, cond) && prefixEndsAtDirPHP(args[1], cond) !== false) return [{ name: a0, holds: "true", clears: SinkClass.PATH | SinkClass.INCLUDE }];
       // str_starts_with($u, '/') / ('//') / ('https://example.com/'), str_contains($u, '://'): URL facets
       if (fnName === "str_starts_with" && a0 && args[1] && phpStringValue(args[1]) !== null) return urlPrefixFacets(a0, phpStringValue(args[1])!, "starts");
       if (fnName === "str_contains" && a0 && args[1] && phpStringValue(args[1]) === "://") return urlPrefixFacets(a0, "://", "contains");
@@ -1566,11 +1664,13 @@ function guardsOfConditionPHP(cond: SyntaxNode, root: SyntaxNode | undefined): G
           }
         }
       }
-      // in_array(parse_url($url, PHP_URL_HOST), $allowedHosts): the URL's destination is vetted
+      // in_array(parse_url($url, PHP_URL_HOST), $allowedHosts): the URL's destination is vetted -- and a URL with one
+      // of those hosts names no local file (a bare path has no host, php://filter's is "filter", file:// refuses a
+      // remote host), so file_get_contents($url) can't read one either
       if (fnName === "in_array" && args.length >= 2 && isLiteralArrayRefPHP(args[1], root, { stringsOnly: true })) {
         const src = parsedUrlSourcePHP(args[0], cond);
         if (src) {
-          return [...(a0 ? [{ name: a0, holds: "true" as const }] : []), { name: src, holds: "true", clears: SinkClass.SSRF | SinkClass.REDIRECT }];
+          return [...(a0 ? [{ name: a0, holds: "true" as const }] : []), { name: src, holds: "true", clears: SinkClass.SSRF | SinkClass.REDIRECT | SinkClass.PATH | SinkClass.INCLUDE }];
         }
       }
       // is_numeric($parts[0]) -- a literal-indexed element (see elementKeyPHP / seedElementKeysPHP)
@@ -1913,6 +2013,15 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         const subject = inner?.type === "variable_name" ? variableBareName(inner) : null;
         const clauses = (node.childForFieldName("body") ?? node).namedChildren
           .filter(c => c?.type === "case_statement" || c?.type === "default_statement");
+        // `switch ($input) { case $expectedHash: ... }` compares each case with == -- the juggling the
+        // binary_expression check below reports for `$input == $expectedHash`
+        if (inner && (taintMask(inner, env) & ALL)) {
+          const hashCase = clauses.map(cl => cl!.childForFieldName("value")).find(v => !!v && isHashValuePHP(v, ctx));
+          if (hashCase) {
+            emit(ctx, "type-juggling", node, inner.text, "switch", undefined,
+              `switch compares input '${inner.text.slice(0, 40)}' with the hash '${hashCase.text.slice(0, 40)}' using == — PHP coerces types first ("0e1" == "0e2"); compare with hash_equals`);
+          }
+        }
         // switch on a constant: from the matching case through to the next break, when every case value is constant
         const sv = constValuePHP(inner, ctx);
         if (sv !== undefined) {
@@ -2004,7 +2113,9 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
           if (!tainted) continue;
           const numeric = other.type === "integer" || other.type === "float" || /^-?\d+(?:\.\d+)?$/.test(other.text);
           // `$storedHash`, `$expected_token`, `md5(...)` -- a hash / secret by name, camelCase included
-          const secretish = /(?:hash|token|secret|password|passwd|signature|hmac|digest|api_?key)/i.test(other.text) || /^(?:md5|sha1|crypt|hash)\s*\(/.test(other.text);
+          // ...or one by origin: `$expected = hash('sha256', $pw)`, a helper that returns md5(...)
+          const secretish = /(?:hash|token|secret|password|passwd|signature|hmac|digest|api_?key)/i.test(other.text) || /^(?:md5|sha1|crypt|hash)\s*\(/.test(other.text)
+            || isHashValuePHP(other, ctx);
           const strcmpLike = /^(?:strcmp|strcasecmp|strncmp)\s*\(/.test(input.text) && numeric;
           if (numeric || secretish || strcmpLike) {
             emit(ctx, "type-juggling", node, input.text, op, undefined,
@@ -2147,26 +2258,53 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
     if (node.type === "function_call_expression") {
       checkFunctionCallSink(node, ctx, taintMask, env);
       const fnNode = node.childForFieldName("function");
+      const ownFn = calleeKeysPHP(node, ctx)[0];
+      if (ownFn) seedLocalFunctionParams(ownFn, argListOfPHP(node), env, ctx);
       if (fnNode?.type === "name") {
-        if (ctx.localFunctions.has(fnNode.text)) seedLocalFunctionParams(fnNode.text, argListOfPHP(node), env, ctx);
-        else if (ctx.crossFileFacts?.size) checkCrossFileCallPHP(node, fnNode.text, ctx, taintMask, env);
+        if (!ownFn && ctx.crossFileFacts?.size) checkCrossFileCallPHP(node, fnNode.text, ctx, taintMask, env);
         if (fnNode.text === "extract") {
           const args = argListOfPHP(node);
-          if (args[0] && (taintMask(args[0], env) & ALL)) env.set(PHP_WILDCARD_VAR, ALL);
+          if (args[0] && (taintMask(args[0], env) & ALL)) {
+            env.set(PHP_WILDCARD_VAR, ALL);
+            // EXTR_OVERWRITE (the default) / EXTR_IF_EXISTS / EXTR_REFS also replace variables ALREADY set
+            // (`$isAdmin = false; extract($_GET);`); EXTR_SKIP keeps them, EXTR_PREFIX_* writes other names.
+            const def = args[0].type === "variable_name" ? lastAssignmentPHP(variableBareName(args[0]) ?? "", node) : args[0];
+            const literalKeys = def?.type === "array_creation_expression" && findAllNodes(def, "array_element_initializer")
+              .every(el => el.namedChildren.length === 2 && phpStringValue(el.namedChildren[0]!) !== null);
+            if (!/EXTR_SKIP|EXTR_PREFIX_/.test(args[1]?.text ?? "") && !literalKeys) {
+              for (const [k, m] of env) if (k !== PHP_WILDCARD_VAR && /^\w+$/.test(k) && !SUPERGLOBAL_NAMES.has(k)) env.set(k, m | ALL);
+            }
+          }
         }
       } else if (fnNode?.type === "variable_name") {
         checkDynamicCallSink(node, fnNode, ctx, taintMask, env);
       }
     }
     if (node.type === "scoped_call_expression") {
+      const ownMethods = calleeKeysPHP(node, ctx);
+      if (ownMethods.length === 1) seedLocalFunctionParams(ownMethods[0], argListOfPHP(node), env, ctx);
       const key = classMethodKeyPHP(node, ctx);
       if (key && !ctx.localClassMethods.has(key.toLowerCase())) checkCrossFileCallPHP(node, key, ctx, taintMask, env);
       checkResponseFactorySinkPHP(node, ctx, taintMask, env);
     }
-    // `$obj->$method()` / `new $className()`: the caller picks which method or class runs
+    // `$obj->$method()` / `new $className()` / `$className::run()`: the caller picks which method or class runs
     const dynamicName = node.type === "member_call_expression" ? node.childForFieldName("name")
-      : node.type === "object_creation_expression" ? node.namedChildren.find(c => c?.type !== "arguments") ?? null : null;
+      : node.type === "object_creation_expression" ? node.namedChildren.find(c => c?.type !== "arguments") ?? null
+      : node.type === "scoped_call_expression" ? node.childForFieldName("scope") : null;
     if (dynamicName?.type === "variable_name") checkDynamicCallSink(node, dynamicName, ctx, taintMask, env);
+    // new ReflectionClass($name) / new ReflectionMethod($obj, $name) / new ReflectionFunction($name): the same choice,
+    // made through the Reflection API (the object is then instantiated or invoked)
+    if (node.type === "object_creation_expression") {
+      const cls = node.namedChildren.find(c => c && (c.type === "name" || c.type === "qualified_name"))?.text.replace(/^.*\\/, "");
+      const args = argListOfPHP(node);
+      const named = cls === "ReflectionClass" || cls === "ReflectionFunction" ? args[0]
+        : cls === "ReflectionMethod" ? (args.length >= 2 ? args[1] : args[0]) : undefined;   // ReflectionMethod("Class::method")
+      // CONTROL alone (an allow-listed name) only picks among the names the code accepts -- as in checkDynamicCallSink
+      if (named && (taintMask(named, env) & ALL & ~SinkClass.CONTROL)) {
+        emit(ctx, "eval-exec", node, named.text, `new ${cls}`, undefined,
+          `'${named.text.slice(0, 40)}' from the request names the ${cls === "ReflectionMethod" ? "method" : cls === "ReflectionFunction" ? "function" : "class"} ${cls} loads — the caller chooses what code runs; map an allow-listed key to it instead`);
+      }
+    }
     if (node.type === "member_call_expression") {
       // A method of a class this code declares (here or in an included file) is user code: its own body
       // decides what is a sink, not a library method that happens to share its name (`->find()`).
@@ -2175,10 +2313,10 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       const userMethod = !!lower && (ctx.localClassMethods.has(lower) || !!ctx.crossFileFacts?.has(lower));
       if (!userMethod) checkMemberCallSink(node, ctx, taintMask, env);
       else if (!ctx.localClassMethods.has(lower!)) checkCrossFileCallPHP(node, key!, ctx, taintMask, env);
-      const methodName = node.childForFieldName("name")?.text;
-      if (methodName && ctx.localFunctions.has(methodName)) {
-        seedLocalFunctionParams(methodName, argListOfPHP(node), env, ctx);
-      }
+      // seeded only when the call runs exactly one method of this file (an unknown receiver's same-named
+      // methods would each be walked with arguments that may never reach them)
+      const ownMethods = calleeKeysPHP(node, ctx);
+      if (ownMethods.length === 1) seedLocalFunctionParams(ownMethods[0], argListOfPHP(node), env, ctx);
     }
     if (node.type === "include_expression" || node.type === "require_expression"
         || node.type === "include_once_expression" || node.type === "require_once_expression") {
