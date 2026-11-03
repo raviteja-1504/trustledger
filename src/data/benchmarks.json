@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-01T13:07:14.420Z",
+  "generatedAt": "2026-11-03T07:55:15.162Z",
   "engineCommit": "756c80d",
   "environment": "Measured in batch on a Windows developer workstation (single Node.js process, Jest harness) — a throughput figure, not end-to-end pull-request latency.",
   "corpora": [
@@ -786,14 +786,14 @@
         "Java"
       ],
       "scoring": "Each test case is one servlet labelled vulnerable or safe for a category; helper classes are scanned alongside, as in a whole-repository scan.",
-      "runAt": "2026-11-01T08:23:56.5637987Z",
+      "runAt": "2026-11-03T05:42:26.5238820Z",
       "files": null,
       "wallMs": null,
       "categories": [
         {
           "name": "cmdi",
-          "tp": 114,
-          "fn": 12,
+          "tp": 126,
+          "fn": 0,
           "fp": 0,
           "tn": 125
         },
@@ -813,15 +813,15 @@
         },
         {
           "name": "ldapi",
-          "tp": 24,
-          "fn": 3,
+          "tp": 27,
+          "fn": 0,
           "fp": 0,
           "tn": 32
         },
         {
           "name": "pathtraver",
-          "tp": 102,
-          "fn": 31,
+          "tp": 115,
+          "fn": 18,
           "fp": 0,
           "tn": 135
         },
@@ -836,13 +836,13 @@
           "name": "sqli",
           "tp": 272,
           "fn": 0,
-          "fp": 39,
-          "tn": 193
+          "fp": 18,
+          "tn": 214
         },
         {
           "name": "trustbound",
-          "tp": 61,
-          "fn": 22,
+          "tp": 74,
+          "fn": 9,
           "fp": 0,
           "tn": 43
         },
@@ -862,12 +862,13 @@
         },
         {
           "name": "xss",
-          "tp": 219,
-          "fn": 27,
+          "tp": 246,
+          "fn": 0,
           "fp": 0,
           "tn": 209
         }
-      ]
+      ],
+      "engineCommit": "0e73164"
     },
     {
       "id": "owasp-benchmark-python",
@@ -878,7 +879,7 @@
         "Python"
       ],
       "scoring": "Each test case is one Flask view labelled vulnerable or safe for a category; helper modules are scanned alongside.",
-      "runAt": "2026-11-01T08:44:50.0929874Z",
+      "runAt": "2026-11-02T16:06:06.2994421Z",
       "files": null,
       "wallMs": null,
       "categories": [
@@ -893,13 +894,13 @@
           "name": "codeinj",
           "tp": 20,
           "fn": 0,
-          "fp": 4,
-          "tn": 29
+          "fp": 2,
+          "tn": 31
         },
         {
           "name": "deserialization",
-          "tp": 17,
-          "fn": 1,
+          "tp": 18,
+          "fn": 0,
           "fp": 3,
           "tn": 33
         },
@@ -912,15 +913,15 @@
         },
         {
           "name": "ldapi",
-          "tp": 15,
-          "fn": 1,
+          "tp": 16,
+          "fn": 0,
           "fp": 0,
           "tn": 13
         },
         {
           "name": "pathtraver",
-          "tp": 59,
-          "fn": 6,
+          "tp": 65,
+          "fn": 0,
           "fp": 0,
           "tn": 103
         },
@@ -961,26 +962,27 @@
         },
         {
           "name": "xpathi",
-          "tp": 45,
-          "fn": 6,
+          "tp": 51,
+          "fn": 0,
           "fp": 0,
           "tn": 135
         },
         {
           "name": "xss",
-          "tp": 30,
-          "fn": 1,
+          "tp": 31,
+          "fn": 0,
           "fp": 1,
           "tn": 57
         },
         {
           "name": "xxe",
-          "tp": 6,
-          "fn": 2,
+          "tp": 8,
+          "fn": 0,
           "fp": 0,
           "tn": 20
         }
-      ]
+      ],
+      "engineCommit": "b4505ab+"
     },
     {
       "id": "juliet-cs",
@@ -1534,10 +1536,10 @@
   "falsePositives": [
     {
       "corpus": "OWASP Benchmark (Java)",
-      "caseId": "BenchmarkTest00925",
+      "caseId": "BenchmarkTest02274",
       "rule": "sql-injection",
-      "title": "A constant that passes through two helpers in other files",
-      "explanation": "The value comes from a helper method that returns a constant, then passes through an interface method created by a factory in another file before it is concatenated into SQL. The proof pass cannot see through the factory, so the line-level concatenation match is kept. Engine gap; most of the remaining BenchmarkJava SQL false positives have this shape."
+      "title": "A switch on a constant character",
+      "explanation": "The helper switches on \"ABC\".charAt(1), which is always 'B', and that arm assigns a constant; the arms that assign the request value never run. The engine does not evaluate the switch subject, so it keeps every arm and the line-level concatenation match stands. Engine gap; most of the remaining BenchmarkJava SQL false positives are constant-folding tricks of this kind (constant switches and if-conditions, fixed list and map positions)."
     },
     {
       "corpus": "SAST Benchmark — Rust",
@@ -1689,6 +1691,20 @@
       "corpus": "SAST Benchmark — Rust",
       "score": 39,
       "note": "Category average"
+    },
+    {
+      "commit": "0e73164",
+      "date": "2026-11-03",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 93.5,
+      "note": "Category average; constant-returning methods of other classes and cross-file pass-through methods in local helpers"
+    },
+    {
+      "commit": "b4505ab+",
+      "date": "2026-11-02",
+      "corpus": "OWASP Benchmark (Python)",
+      "score": 98.8,
+      "note": "Category average; measured on b4505ab plus the uncommitted Python changes of that day"
     }
   ]
 }

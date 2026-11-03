@@ -2,10 +2,10 @@
   "falsePositives": [
     {
       "corpus": "OWASP Benchmark (Java)",
-      "caseId": "BenchmarkTest00925",
+      "caseId": "BenchmarkTest02274",
       "rule": "sql-injection",
-      "title": "A constant that passes through two helpers in other files",
-      "explanation": "The value comes from a helper method that returns a constant, then passes through an interface method created by a factory in another file before it is concatenated into SQL. The proof pass cannot see through the factory, so the line-level concatenation match is kept. Engine gap; most of the remaining BenchmarkJava SQL false positives have this shape."
+      "title": "A switch on a constant character",
+      "explanation": "The helper switches on \"ABC\".charAt(1), which is always 'B', and that arm assigns a constant; the arms that assign the request value never run. The engine does not evaluate the switch subject, so it keeps every arm and the line-level concatenation match stands. Engine gap; most of the remaining BenchmarkJava SQL false positives are constant-folding tricks of this kind (constant switches and if-conditions, fixed list and map positions)."
     },
     {
       "corpus": "SAST Benchmark — Rust",
@@ -91,6 +91,8 @@
     { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Go", "score": 55, "note": "Category average" },
     { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — PHP", "score": 56, "note": "Category average" },
     { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Ruby", "score": 52, "note": "Category average" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Rust", "score": 39, "note": "Category average" }
+    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Rust", "score": 39, "note": "Category average" },
+    { "commit": "0e73164", "date": "2026-11-03", "corpus": "OWASP Benchmark (Java)", "score": 93.5, "note": "Category average; constant-returning methods of other classes and cross-file pass-through methods in local helpers" },
+    { "commit": "b4505ab+", "date": "2026-11-02", "corpus": "OWASP Benchmark (Python)", "score": 98.8, "note": "Category average; measured on b4505ab plus the uncommitted Python changes of that day" }
   ]
 }

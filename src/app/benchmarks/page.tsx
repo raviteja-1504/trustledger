@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SitePage, Section, Card, Pill, TableWrap, BORDER, CYAN, EMERALD, ROSE, AMBER, VIOLET } from "@/components/marketing/Site";
-import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput, pct, type CorpusResult } from "@/lib/benchmarkReport";
+import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput, pct, engineCommits, type CorpusResult } from "@/lib/benchmarkReport";
 
 export const metadata: Metadata = {
   title: "Benchmark report — TrustLedger",
@@ -27,7 +27,7 @@ function CorpusTable({ c }: { c: CorpusResult }) {
       <summary className="cursor-pointer list-none p-5 flex flex-wrap items-center gap-x-6 gap-y-2">
         <span className="min-w-0 flex-1">
           <span className="block font-bold text-white">{c.name} <span className="text-white/40 font-mono text-[12px]">v{c.version}</span></span>
-          <span className="block text-[12px] text-white/50">{c.languages.join(", ")} · {t.cases.toLocaleString()} labelled samples · run {fmtDate(c.runAt)}</span>
+          <span className="block text-[12px] text-white/50">{c.languages.join(", ")} · {t.cases.toLocaleString()} labelled samples · run {fmtDate(c.runAt)} · engine {c.engineCommit ?? R.engineCommit}</span>
         </span>
         <span className="font-mono text-sm"><span className="text-white/45">score </span><strong className="text-white">{t.score}</strong></span>
         <span className="font-mono text-sm"><span className="text-white/45">TPR </span><strong style={{ color: EMERALD }}>{pct(t.tpr)}</strong></span>
@@ -70,8 +70,8 @@ export default function BenchmarksPage() {
   const totalFiles = timed.reduce((s, c) => s + (c.files ?? 0), 0);
   const totalMs = timed.reduce((s, c) => s + (c.wallMs ?? 0), 0);
   return (
-    <SitePage active="/benchmarks" eyebrow={`Measured ${fmtDate(R.generatedAt)} · engine ${R.engineCommit}`} title="Benchmark report"
-      lede={<>How often the engines find real vulnerabilities, and how often they flag safe code, on public labelled benchmarks that anyone can download. Every number below comes from one run of the scorers against engine commit <code className="font-mono text-white/85">{R.engineCommit}</code>. Failures and limitations are listed alongside the wins. <a href="/benchmarks/report.json" className="underline underline-offset-2 text-white/85">Download the machine-readable report</a>.</>}>
+    <SitePage active="/benchmarks" eyebrow={`Measured ${fmtDate(R.generatedAt)} · engine ${engineCommits(R).join(", ")}`} title="Benchmark report"
+      lede={<>How often the engines find real vulnerabilities, and how often they flag safe code, on public labelled benchmarks that anyone can download. Every number below comes from a run of the scorers against engine commit <code className="font-mono text-white/85">{R.engineCommit}</code>, except where a corpus names the later engine it was re-measured on. Failures and limitations are listed alongside the wins. <a href="/benchmarks/report.json" className="underline underline-offset-2 text-white/85">Download the machine-readable report</a>.</>}>
       <Section>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <Stat label="Recall (TPR)" value={pct(all.tpr)} sub={`${all.tp.toLocaleString()} of ${(all.tp + all.fn).toLocaleString()} labelled vulnerabilities, all corpora`} color={EMERALD} />
@@ -150,7 +150,7 @@ export default function BenchmarksPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-[13.5px] text-white/65 leading-relaxed">
           <Card><p className="font-bold text-white mb-1.5">What runs</p><p>The production scanner (<code className="font-mono">runScan</code>) — every language engine, cross-file analysis and the line-level detectors — on each corpus in batches, exactly as a pull request is scanned. No benchmark-specific configuration. Helper files a corpus ships next to its test cases are scanned with them, as a whole-repository scan would.</p></Card>
           <Card><p className="font-bold text-white mb-1.5">How it is scored</p><p>A labelled case is a true positive when a finding of that category&apos;s rules lands in the case (per file, per method for Juliet&apos;s bad/good regions); a safe case with such a finding is a false positive. Counts are of labelled samples, each either vulnerable or safe: a Juliet case has one of each, so it counts twice. The mapping from our rule ids to each corpus&apos;s categories is part of the published harness.</p></Card>
-          <Card><p className="font-bold text-white mb-1.5">Reproducing it</p><p>The scorers and the probe harness are in the repository under <code className="font-mono">benchmarks/</code>, with the corpus versions and download links listed in its README. Engine commit {R.engineCommit}; report generated {fmtDate(R.generatedAt)}.</p></Card>
+          <Card><p className="font-bold text-white mb-1.5">Reproducing it</p><p>The scorers and the probe harness are in the repository under <code className="font-mono">benchmarks/</code>, with the corpus versions and download links listed in its README. Engine commit {engineCommits(R).join(", ")} (per corpus above); report generated {fmtDate(R.generatedAt)}.</p></Card>
           <Card><p className="font-bold text-white mb-1.5">What these numbers do not say</p><p>Benchmarks are small, synthetic programs. They measure whether known patterns are recognised, not how a scanner behaves on your codebase. Scores across different corpora are not comparable with each other.</p></Card>
         </div>
       </Section>

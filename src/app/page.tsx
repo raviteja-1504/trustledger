@@ -4,13 +4,13 @@
  * lib/publicCoverage.ts), so the interactive client component never hard-codes a number.
  */
 import LandingClient, { type LandingEvidence } from "./LandingClient";
-import { BENCHMARK_REPORT as R, rates, categoryAverage } from "@/lib/benchmarkReport";
+import { BENCHMARK_REPORT as R, rates, categoryAverage, engineCommits } from "@/lib/benchmarkReport";
 import { dataFlowRules, dataFlowCwes } from "@/lib/publicCoverage";
 
 export default function LandingPage() {
   const pooled = rates(R.corpora.flatMap(c => c.categories));
   const evidence: LandingEvidence = {
-    engineCommit: R.engineCommit,
+    engineCommit: engineCommits(R).join(", "),
     measuredAt: R.generatedAt.slice(0, 10),
     pooledTpr: pooled.tpr,
     pooledFpr: pooled.fpr,

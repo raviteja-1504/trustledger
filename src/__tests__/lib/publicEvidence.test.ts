@@ -5,7 +5,7 @@
  */
 import fs from "fs";
 import path from "path";
-import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput } from "@/lib/benchmarkReport";
+import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput, engineCommits } from "@/lib/benchmarkReport";
 import { dataFlowRules, rulesByLanguage, COVERAGE_LANGUAGES, LANGUAGE_ENGINES, dataFlowCwes } from "@/lib/publicCoverage";
 import { DATA_FLOW_LANGUAGES } from "@/lib/ruleLanguages";
 
@@ -13,6 +13,15 @@ describe("benchmark report", () => {
   it("names a commit and a measurement date", () => {
     expect(R.engineCommit).toMatch(/^[0-9a-f]{7,40}$/);
     expect(Number.isNaN(Date.parse(R.generatedAt))).toBe(false);
+  });
+
+  it("a corpus re-measured on another engine names it, and the report lists every engine its figures come from", () => {
+    for (const c of R.corpora) if (c.engineCommit !== undefined) expect(c.engineCommit).toMatch(/^[0-9a-f]{7,40}\+?$/);
+    const all = engineCommits(R);
+    expect(all[0]).toBe(R.engineCommit);
+    expect(new Set(all).size).toBe(all.length);
+    for (const c of R.corpora) expect(all).toContain(c.engineCommit ?? R.engineCommit);
+    expect(engineCommits({ ...R, corpora: R.corpora.map(c => ({ ...c, engineCommit: undefined })) })).toEqual([R.engineCommit]);
   });
 
   it("every category count is a non-negative whole number and every category has cases", () => {

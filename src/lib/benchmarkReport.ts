@@ -22,6 +22,14 @@ export interface CorpusResult {
   files: number | null;
   wallMs: number | null;
   categories: CategoryResult[];
+  /** Set when this corpus was re-measured on a different engine than the report's engineCommit ("b4505ab+" = that
+   * commit plus uncommitted changes of the same day). */
+  engineCommit?: string;
+}
+
+/** Every engine the report's figures come from: the report's own commit, then any corpus re-measured on another. */
+export function engineCommits(r: BenchmarkReport): string[] {
+  return [...new Set([r.engineCommit, ...r.corpora.map(c => c.engineCommit).filter((e): e is string => !!e)])];
 }
 export interface JuiceResult {
   name: string; url: string; version: string; runAt: string; files: number | null; wallMs: number | null;
