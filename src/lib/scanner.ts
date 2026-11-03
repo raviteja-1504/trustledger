@@ -62,7 +62,7 @@ import {
 import type { ParamShape as PyParamShape } from "./astTaintPython";
 import type { Node as PySyntaxNode } from "web-tree-sitter";
 import type { SuppressedSink } from "./taint/taintCore";
-import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods, computeJavaPassThroughMethods, type PassThroughMethods } from "./astTaintJava";
+import { parseJavaSource, scanAstTaintJava, astTaintJavaSeverity, astTaintJavaLabel, findEnclosingFunctionNameJava, computeJavaMethodSinkFacts, computeJavaSourceMethods, computeJavaPassThroughMethods, computeJavaConstantMethods, type PassThroughMethods } from "./astTaintJava";
 import type { CstNode as JavaCstNode } from "java-parser";
 import {
   parseGoSourceSync, isGoParserReady, scanAstTaintGo, computeGoFuncSinkFacts,
@@ -7581,8 +7581,9 @@ function findAstTaintJavaFindings(
   calledElsewhere?: ReadonlySet<string>,
   sourceMethods?: ReadonlyMap<string, number>,
   passMethods?: PassThroughMethods,
+  constantMethods?: ReadonlySet<string>,
 ): ScanIndicator[] {
-  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere, sourceMethods, passMethods }).map(f => ({
+  return scanAstTaintJava(content, filePath, cst, suppressed, { entryPoints: true, crossFileFacts, calledElsewhere, sourceMethods, passMethods, constantMethods }).map(f => ({
     id: f.id, label: astTaintJavaLabel(f.id), severity: f.severityOverride ?? astTaintJavaSeverity(f.id),
     line: f.line,
     detail: f.entryPointSeeded
@@ -7755,7 +7756,7 @@ export function analyzeFile(
   storedProvenance?: StoredProvenanceIO,
   // Cross-file service-layer facts for Java (see astTaintJava.ts computeJavaMethodSinkFacts), computed by
   // runScan() over the whole batch, plus the CST it already parsed for this file.
-  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number>; passMethods?: PassThroughMethods },
+  crossFileJava?: { cst?: JavaCstNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; calledElsewhere?: ReadonlySet<string>; sourceMethods?: ReadonlyMap<string, number>; passMethods?: PassThroughMethods; constantMethods?: ReadonlySet<string> },
   // Same, for C# (see astTaintCSharp.ts computeCSharpMethodSinkFacts).
   crossFileCSharp?: { tree?: CSharpSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]>; callerArgs?: ReadonlyMap<string, ReadonlyMap<number, number>> },
   // Same, for Go packages (see astTaintGo.ts computeGoFuncSinkFacts).
@@ -7915,7 +7916,7 @@ export function analyzeFile(
   const astIndicators: ScanIndicator[] = [
     ...(tsSourceFile ? findAstTaintFindings(content, file_path, tsSourceFile, crossFilePropagating, suppressedSinks, crossFileSourcesTs, storedProvenance) : []),
     ...(pyTree ? findAstTaintPythonFindings(content, file_path, pyTree, suppressedSinks, crossFileShapesPy, crossFileSinksPy, storedProvenance, crossFilePySources, crossFilePyPassMethods) : []),
-    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods, crossFileJava?.passMethods) : []),
+    ...(javaCst ? findAstTaintJavaFindings(content, file_path, javaCst, suppressedSinks, crossFileJava?.facts, crossFileJava?.calledElsewhere, crossFileJava?.sourceMethods, crossFileJava?.passMethods, crossFileJava?.constantMethods) : []),
     ...(goTree ? findAstTaintGoFindings(content, file_path, goTree, lines, suppressedSinks, crossFileGo?.facts) : []),
     ...(csTree ? findAstTaintCSharpFindings(content, file_path, csTree, suppressedSinks, crossFileCSharp?.facts, crossFileCSharp?.callerArgs) : []),
     ...(phpTree ? findAstTaintPHPFindings(content, file_path, phpTree, suppressedSinks, crossFilePhp?.facts) : []),
@@ -8782,6 +8783,34 @@ export function collectPassMethodsPy(
   return out;
 }
 
+/**
+ * Java: other classes' methods that return only literals (computeJavaConstantMethods), for a class declared in exactly
+ * one file of the batch -- a second declaration (or a subclass overriding it) could return something else.
+ */
+function collectJavaConstantMethods(
+  csts: ReadonlyMap<string, JavaCstNode>, files: readonly { path: string; content: string }[],
+): Set<string> {
+  const out = new Set<string>();
+  if (csts.size < 2) return out;
+  const contentOf = new Map(files.map(f => [f.path, f.content]));
+  const declaringFiles = new Map<string, number>();
+  const extended = new Set<string>();
+  for (const path of csts.keys()) {
+    const content = contentOf.get(path)!;
+    for (const name of new Set([...content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]))) {
+      declaringFiles.set(name, (declaringFiles.get(name) ?? 0) + 1);
+    }
+    for (const m of content.matchAll(/\bextends\s+([\w.]+)/g)) extended.add(m[1].split(".").pop()!);
+  }
+  for (const [path, cst] of csts) {
+    for (const key of computeJavaConstantMethods(contentOf.get(path)!, cst)) {
+      const cls = key.slice(0, key.indexOf("."));
+      if (declaringFiles.get(cls) === 1 && !extended.has(cls)) out.add(key);
+    }
+  }
+  return out;
+}
+
 function collectJavaPassThroughMethods(
   csts: ReadonlyMap<string, JavaCstNode>, files: readonly { path: string; content: string }[],
 ): Map<string, Array<[number, number]>> {
@@ -9295,10 +9324,12 @@ export function runScan(input: ScanInput): ScanOutput {
   const javaCalledElsewhere = javaMethodsCalledFromOtherFiles(allFiles.filter(f => javaCsts.has(f.path)));
   const javaSourceMethods = convergeJavaSourceMethods(javaCsts, allFiles);
   const javaPassMethods = collectJavaPassThroughMethods(javaCsts, allFiles);
-  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0 || javaSourceMethods.size > 0 || javaPassMethods.size > 0
+  const javaConstantMethods = collectJavaConstantMethods(javaCsts, allFiles);
+  const javaFactsDigest = javaFacts.size > 0 || javaCalledElsewhere.size > 0 || javaSourceMethods.size > 0 || javaPassMethods.size > 0 || javaConstantMethods.size > 0
     ? factsDigest(javaFacts) + ":" + crypto.createHash("sha256").update([...javaCalledElsewhere].sort().join(",")).digest("hex")
       + ":src:" + sha256Hex(JSON.stringify([...javaSourceMethods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))))
       + ":pass:" + sha256Hex(JSON.stringify([...javaPassMethods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))))
+      + ":const:" + sha256Hex([...javaConstantMethods].sort().join(","))
     : "";
 
   // Same for C# (ASP.NET controllers -> injected services -> repositories).
@@ -9416,7 +9447,7 @@ export function runScan(input: ScanInput): ScanOutput {
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
           crossFileReachableByFile.get(f.path), pyShapesOnly.get(f.path), pySourceFiles.get(f.path), jsSourceFiles,
           pySinksByFile.get(f.path), storedProvenanceByFile.get(f.path),
-          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods, passMethods: javaPassMethods } : undefined,
+          javaCsts.has(f.path) ? { cst: javaCsts.get(f.path), facts: javaFacts, calledElsewhere: javaCalledElsewhere, sourceMethods: javaSourceMethods, passMethods: javaPassMethods, constantMethods: javaConstantMethods } : undefined,
           csTrees.has(f.path) ? { tree: csTrees.get(f.path), facts: csFacts, callerArgs: csCallerArgs } : undefined,
           goTrees.has(f.path) ? { tree: goTrees.get(f.path), facts: goFacts } : undefined,
           phpTrees.has(f.path) ? { tree: phpTrees.get(f.path), facts: phpIncoming.get(f.path) ?? new Map() } : undefined,

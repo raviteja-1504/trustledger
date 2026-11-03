@@ -571,6 +571,8 @@ interface EngineCtx {
   /** `Class.method` / `Interface.method` of the batch -> [argument index, classes surviving to the return] -- see
    * computeJavaPassThroughMethods. An interface's entry is the union over its implementations: any of them may run. */
   passMethods?: PassThroughMethods;
+  /** `Class.method` of the batch that returns only literals (see computeJavaConstantMethods). */
+  constantMethods?: ReadonlySet<string>;
 }
 
 export type PassThroughMethods = ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>;
@@ -668,7 +670,7 @@ function tokensText(node: CstNode): string {
   return out;
 }
 
-const STRINGY_PARAM_TYPE_RE = /^(?:String|CharSequence|StringBuilder|StringBuffer|String\[\]|List<String>|Set<String>|Collection<String>|Map<String,(?:String|Object|\?)>|byte\[\]|char\[\]|InputStream|Reader|Object\[\])$/;
+const STRINGY_PARAM_TYPE_RE =/^(?:String|CharSequence|StringBuilder|StringBuffer|String\[\]|List<String>|Set<String>|Collection<String>|Map<String,(?:String|Object|\?)>|byte\[\]|char\[\]|InputStream|Reader|Object\[\])$/;
 const NON_ENTRY_METHOD_RE = /^(?:main|equals|hashCode|toString|compareTo|run|call|get\w*|set\w*|is\w*|close|clone|finalize|apply|accept|test)$/;
 
 // Static/utility calls whose RESULT carries the taint of their arguments (string, path, URL, collection
@@ -1159,6 +1161,14 @@ function walkPrimaryChain(
           // `buf.write(tainted)`: what a local object is given, it may hand back later
           if (anyArgMask && rootVar && calls === 0 && ctx.localNames?.has(rootVar)) env.set(rootVar, (env.get(rootVar) ?? 0) | anyArgMask);
         }
+      }
+
+      // another class's method that returns only literals (`scr.getTheValue("x")` -> "bar"): a constant, whatever
+      // its receiver was built from -- in the proof pass too
+      if (ctx.constantMethods?.size) {
+        const recv = receiverOf();
+        const owner = (calls === 0 ? isNewExprOf : undefined) ?? (recv ? ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined) : undefined);
+        if (owner && ctx.constantMethods.has(`${owner.replace(/<.*$/, "").split(".").pop()}.${tail}`)) chainTaint = 0;
       }
 
       // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
@@ -3107,6 +3117,8 @@ export interface JavaScanOptions {
   sourceMethods?: ReadonlyMap<string, number>;
   /** `Class.method` / `Interface.method` -> arguments its return value carries (see computeJavaPassThroughMethods). */
   passMethods?: PassThroughMethods;
+  /** `Class.method` that returns only literals (see computeJavaConstantMethods). */
+  constantMethods?: ReadonlySet<string>;
 }
 
 /**
@@ -3171,6 +3183,28 @@ export function computeJavaPassThroughMethods(content: string, filePath: string,
   return out;
 }
 
+/**
+ * Cross-file CONSTANTS (Java): methods that return nothing but literals (`getTheValue(p) { return "bar"; }`), keyed
+ * `Class.method`. Only for a file declaring a single class (a nested class could own a same-named method), and scanner.ts
+ * keeps a key only when the class is declared once in the batch. A call of one is a constant -- in the proof pass too,
+ * where a receiver built from the request would otherwise make every method of it suspect.
+ */
+export function computeJavaConstantMethods(content: string, cst: CstNode): string[] {
+  const classes = [...content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]);
+  if (classes.length !== 1) return [];
+  const out: string[] = [];
+  try {
+    for (const [name, method] of collectLocalMethods(cst)) {
+      if (!method.body) continue;
+      const rets = findAllNodes(method.body, "returnStatement").map(r => tokensText(r));
+      if (rets.length > 0 && rets.every(r => /^return\s*(?:"(?:[^"\\]|\\.)*"|-?\d+|null|true|false)\s*;$/.test(r))) out.push(`${classes[0]}.${name}`);
+    }
+  } catch (err) {
+    console.error("[astTaintJava] threw computing constant methods:", err);
+  }
+  return out;
+}
+
 export function scanAstTaintJava(
   content: string, filePath: string, cst: CstNode,
   // Sinks whose argument was tainted for the sink's class but positively
@@ -3178,9 +3212,9 @@ export function scanAstTaintJava(
   suppressedOut?: SuppressedSink[],
   opts?: JavaScanOptions,
 ): AstTaintJavaFinding[] {
-  const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts, undefined, opts?.sourceMethods, opts?.passMethods);
+  const strict = runJavaScan(content, filePath, cst, suppressedOut, false, opts?.crossFileFacts, undefined, opts?.sourceMethods, opts?.passMethods, opts?.constantMethods);
   if (!opts?.entryPoints) return strict;
-  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts, opts?.calledElsewhere, opts?.sourceMethods, opts?.passMethods);
+  const relaxed = runJavaScan(content, filePath, cst, suppressedOut, true, opts?.crossFileFacts, opts?.calledElsewhere, opts?.sourceMethods, opts?.passMethods, opts?.constantMethods);
   const have = new Set(strict.map(f => `${f.id}:${f.line}`));
   return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
 }
@@ -3242,6 +3276,9 @@ function proveSinksSafeJava(ctx: EngineCtx, localMethods: Map<string, LocalMetho
 function makeJavaCtx(
   content: string, filePath: string, cst: CstNode, suppressedOut: SuppressedSink[] | undefined,
   crossFileFacts: ReadonlyMap<string, readonly ParamSinkFact[]> | undefined,
+  // other classes' methods that return request input / what they are given -- known BEFORE the local methods'
+  // summaries are built, or a helper wrapping `thing.doSomething(param)` would be summarised as returning nothing
+  crossFileMethods?: { sourceMethods?: ReadonlyMap<string, number>; passMethods?: PassThroughMethods; constantMethods?: ReadonlySet<string> },
 ): { ctx: EngineCtx; localMethods: Map<string, LocalMethod> } {
   const lines = content.split("\n");
   const localMethods = collectLocalMethods(cst);
@@ -3250,7 +3287,8 @@ function makeJavaCtx(
     varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
     suppressed: suppressedOut,
     sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),
-    crossFileFacts,
+    crossFileFacts, sourceMethods: crossFileMethods?.sourceMethods, passMethods: crossFileMethods?.passMethods,
+    constantMethods: crossFileMethods?.constantMethods,
   };
   // structural HTML escapers, and parameter types (so a `HttpServletRequest r` parameter is recognised as the request)
   for (const [name, m] of localMethods) {
@@ -3271,11 +3309,10 @@ function runJavaScan(
   calledElsewhere?: ReadonlySet<string>,
   sourceMethods?: ReadonlyMap<string, number>,
   passMethods?: PassThroughMethods,
+  constantMethods?: ReadonlySet<string>,
 ): AstTaintJavaFinding[] {
   try {
-    const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, suppressedOut, crossFileFacts);
-    ctx.sourceMethods = sourceMethods;
-    ctx.passMethods = passMethods;
+    const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, suppressedOut, crossFileFacts, { sourceMethods, passMethods, constantMethods });
     const declaredClasses = calledElsewhere?.size ? [...content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)/g)].map(m => m[1]) : [];
     const calledFromAnotherFile = (name: string) => declaredClasses.some(c => calledElsewhere!.has(`${c}.${name}`));
 

@@ -537,6 +537,36 @@ echo "<h1>Hello " . $name . "</h1>";`;
     expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
   });
 
+  it("flags an id read inline from the request ($_GET['id']) reaching a hand-written find* lookup", () => {
+    const content = `<?php
+$record = $db->findRecord($_GET['id']); echo json_encode($record);`;
+    expect(scan(content).filter(f => f.id === "bola-missing-ownership-check").map(f => f.sourceExpr)).toEqual(["$_GET['id']"]);
+  });
+
+  it("an inline read inside a function is a resource id too, even with no id-named parameter", () => {
+    const content = `<?php
+function show() {
+  return Order::find($_REQUEST["order_id"]);
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("not an inline read whose key is no resource id, nor one compared to the session user first", () => {
+    expect(scan(`<?php
+$rows = $db->findRecord($_GET['q']);`).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+    expect(scan(`<?php
+if ($_GET['user_id'] != $_SESSION['user_id']) { exit; }
+$profile = $db->findProfile($_GET['user_id']);`).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
+  it("a hand-written lookup by a bound id param: getOrderById($id)", () => {
+    const content = `<?php
+function show($id) {
+  return $this->repo->getOrderById($id);
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
   it("still flags a function-scoped BOLA case using a camelCase *Id param name (accountId, not just id)", () => {
     const content = `<?php
 function getAccount($accountId) {

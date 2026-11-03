@@ -516,6 +516,41 @@ public class A {
     expect(bola.some(f => f.severityOverride === "medium")).toBe(true);
   });
 
+  it("flags an id read inline from the request (Request.RouteValues[\"id\"]) reaching an async EF lookup", () => {
+    const content = `
+public class A : ControllerBase {
+  [HttpGet("orders/{id}")]
+  public async Task<Order> Get() {
+    return await db.Orders.FindAsync(Request.RouteValues["id"]);
+  }
+}`;
+    expect(scan(content).filter(f => f.id === "bola-missing-ownership-check").map(f => f.sourceExpr)).toEqual(['Request.RouteValues["id"]']);
+  });
+
+  it("flags FindAsync on a bound id like Find", () => {
+    const content = `
+public class A {
+  [HttpGet("{id}")]
+  public async Task<IActionResult> GetUser([FromRoute] string id) {
+    var user = await db.Users.FindAsync(id);
+    return Ok(user);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(true);
+  });
+
+  it("not a request value whose key is no resource id (Request.Query[\"q\"]), nor one outside the request", () => {
+    const content = `
+public class A : ControllerBase {
+  [HttpGet("search")]
+  public async Task<Order> Get() {
+    var a = await db.Orders.FindAsync(Request.Query["q"]);
+    return await db.Orders.FindAsync(options.Values["id"]);
+  }
+}`;
+    expect(scan(content).some(f => f.id === "bola-missing-ownership-check")).toBe(false);
+  });
+
   it("flags GetUser(int id) -- implicit binding, no attribute -- reaching a custom Database.GetUserById(...) lookup", () => {
     const content = `
 public class A {

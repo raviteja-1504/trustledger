@@ -92,6 +92,13 @@ describe("SSRF", () => {
     expect(ids(fetch(`  return BenchmarkResponse.bad_request('no') unless INTERNAL_RANGES.any? { |r| ip.match?(r) }`))).toContain("ssrf");
     expect(ids(fetch(``))).toContain("ssrf");
   });
+  it("every resolved address checked (Resolv.getaddresses / Socket.getaddrinfo) clears it too", () => {
+    const blocked = `  raise 'private ip blocked' if ips.any? { |ip| PRIVATE.any? { |r| r.include?(ip) } }\n  Net::HTTP.get(uri)`;
+    expect(ids(handler(`  uri = URI.parse(req.param('url'))\n  ips = Resolv.getaddresses(uri.host).map { |a| IPAddr.new(a) }\n${blocked}`))).not.toContain("ssrf");
+    expect(ids(handler(`  uri = URI.parse(req.param('url'))\n  ips = Socket.getaddrinfo(uri.host, nil).map { |a| IPAddr.new(a[3]) }\n${blocked}`))).not.toContain("ssrf");
+    // resolved, but nothing refused
+    expect(ids(handler(`  uri = URI.parse(req.param('url'))\n  ips = Resolv.getaddresses(uri.host)\n  Net::HTTP.get(uri)`))).toContain("ssrf");
+  });
 });
 
 describe("log injection into the process's streams and log files", () => {

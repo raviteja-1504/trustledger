@@ -332,6 +332,11 @@ describe("more sinks: maud, subprocess, duct, sea-query", () => {
     expect(has(`use duct::cmd;\n` + axum(`Query(q): Query<Search>`, `    cmd(&q.tool, &["-v"]).run();`), "command-injection")).toBe(true);
     expect(has(`use sea_query::Expr;\n` + axum(`Query(q): Query<Search>`, `    let e = Expr::cust(&format!("name = '{}'", q.name));`), "sql-injection")).toBe(true);
     expect(has(`use sea_orm::Statement;\n` + axum(`Query(q): Query<Search>`, `    let s = Statement::from_sql_and_values(DbBackend::Postgres, &format!("SELECT * FROM t WHERE a = '{}'", q.a), []);`), "sql-injection")).toBe(true);
+    expect(has(axum(`Query(q): Query<Search>`, `    let html = format!("<h1>{}</h1>", q.bio);\n    webview.load_html(&html, None);`), "xss")).toBe(true);
+    expect(has(axum(`Query(q): Query<Search>`, `    let w = WebViewBuilder::new().with_html(format!("<p>{}</p>", q.bio));`), "xss")).toBe(true);
+  });
+  it("a WebView page built from constants is not reported", () => {
+    expect(has(axum(`Query(q): Query<Search>`, `    webview.load_html("<h1>Hello</h1>", None);`), "xss")).toBe(false);
   });
   it("are not reported with constants, escaped markup, or bound values", () => {
     expect(has(`use maud::{html, PreEscaped};\n` + axum(`Query(q): Query<Search>`, `    html! { p { (q.bio) } (PreEscaped("<br>")) }`), "xss")).toBe(false);

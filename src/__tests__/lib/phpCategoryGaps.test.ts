@@ -67,6 +67,28 @@ describe("variable overwrite", () => {
   });
 });
 
+describe("mass assignment over a loop's keys, and a class picked by the request", () => {
+  const allMass = (code: string) => analyzeFile("src/handler.php", code).indicators.filter(i => i.id === "mass-assignment");
+  const loop = (src: string) => fn(`    $data = ${src};\n    $m = new stdClass();\n    foreach ($data as $k => $v) {\n        $m->$k = $v;\n    }`);
+  it("the request's own keys are reported", () => {
+    expect(allMass(loop(`$_POST`)).length).toBeGreaterThan(0);
+    // intersected with a request-derived array: still the request's keys
+    expect(allMass(loop(`array_intersect_key($_POST, $_GET)`)).length).toBeGreaterThan(0);
+  });
+  it("keys the code fixed -- literal keys, or intersected with a literal allow-list -- are not, by either layer", () => {
+    expect(allMass(loop(`['name' => $_POST['name'], 'email' => $_POST['email']]`))).toEqual([]);
+    expect(allMass(loop(`array_intersect_key($_POST, array_flip(['name', 'email']))`))).toEqual([]);
+    expect(allMass(fn(`    $rules = ['name' => 'required', 'email' => 'email'];\n    $data = array_intersect_key($_POST, $rules);\n    $m = new stdClass();\n    foreach ($data as $k => $v) {\n        $m->$k = $v;\n    }`))).toEqual([]);
+  });
+  it("new $class() after an allow-list check is not reported; without one it is", () => {
+    const pick = (check: string) => fn(`    $c = $_GET['handler'];\n${check}    $o = new $c();`);
+    expect(ids(pick(""))).toContain("eval-exec");
+    expect(ids(pick(`    if (!in_array($c, ['PdfHandler', 'CsvHandler'], true)) { return; }\n`))).not.toContain("eval-exec");
+    // a check that doesn't hold on the path to the call
+    expect(ids(pick(`    if (in_array($c, ['PdfHandler', 'CsvHandler'], true)) { log_it($c); }\n`))).toContain("eval-exec");
+  });
+});
+
 describe("type juggling", () => {
   it("input loosely compared with a number, a hash, or strcmp's result; strict comparison is not", () => {
     expect(ids(fn(`    $id = $_GET['id'];\n    if ($id + 0 == 1) { echo "one"; }`))).toContain("type-juggling");

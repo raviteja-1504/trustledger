@@ -245,6 +245,25 @@ describe("BOLA", () => {
   const bola = (annotation: string, body: string, params = `@PathVariable id: Long`) =>
     `@RestController\nclass Orders(private val repo: OrderRepository) {\n  ${annotation}\n  fun handle(${params}): Any {\n${body}\n  }\n}\n`;
 
+  describe("Ktor routes", () => {
+    const ktor = (route: string) => `fun Application.module() {\n  routing {\n${route}\n  }\n}\n`;
+    const bolaOf = (code: string) => scan(code).findings.filter(x => x.id === "bola-missing-ownership-check");
+
+    it("an id read from call.parameters reaching a lookup: medium on a GET, high on a write", () => {
+      expect(bolaOf(ktor(`    get("/o/{id}") {\n      call.respond(orderRepository.findById(call.parameters["id"]))\n    }`)).map(f => f.severityOverride)).toEqual(["medium"]);
+      expect(bolaOf(ktor(`    delete("/o/{id}") {\n      val id = call.parameters["id"]!!.toLong()\n      orderRepository.deleteById(id)\n    }`)).map(f => f.severityOverride)).toEqual(["high"]);
+    });
+
+    it("not a key that is no resource id, nor a lookup by something else", () => {
+      expect(bolaOf(ktor(`    get("/o") {\n      call.respond(orderRepository.findById(call.parameters["q"]))\n    }`))).toEqual([]);
+      expect(bolaOf(ktor(`    get("/o/{id}") {\n      val id = call.parameters["id"]\n      call.respond(orderRepository.findById(principalId))\n    }`))).toEqual([]);
+    });
+
+    it("an owner check on the loaded record against call.principal() suppresses it", () => {
+      expect(bolaOf(ktor(`    get("/o/{id}") {\n      val o = orderRepository.findById(call.parameters["id"])\n      if (o.ownerId != call.principal<UserIdPrincipal>()!!.name) return@get call.respond(HttpStatusCode.Forbidden)\n      call.respond(o)\n    }`))).toEqual([]);
+    });
+  });
+
   it("an unscoped write by a request id is reported", () => {
     const f = scan(bola(`@DeleteMapping("/o/{id}")`, `    repo.deleteById(id)\n    return ""`)).findings.find(x => x.id === "bola-missing-ownership-check");
     expect(f?.severityOverride).toBe("high");

@@ -2235,7 +2235,8 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
 
 // ── BOLA: sink shapes, ownership-comparison detection, per-method emission ──
 
-const BOLA_LOOKUP_METHODS = new Set(["Find", "FirstOrDefault", "SingleOrDefault", "First", "Single", "QueryFirstOrDefault", "QuerySingleOrDefault"]);
+const BOLA_LOOKUP_METHODS = new Set(["Find", "FirstOrDefault", "SingleOrDefault", "First", "Single", "QueryFirstOrDefault", "QuerySingleOrDefault",
+  "FindAsync", "FirstOrDefaultAsync", "SingleOrDefaultAsync", "QueryFirstOrDefaultAsync", "QuerySingleOrDefaultAsync"]);
 const BOLA_WRITE_METHODS = new Set(["Remove", "Delete", "Update"]);
 // Real-world repo/service classes (Database.GetUserById, UserRepo.FindById,
 // ...) vary far more than EF/Dapper's fixed vocabulary above -- same
@@ -2264,7 +2265,19 @@ function checkBolaSinkCandidate(
   if (!isKnownLookup && !isNamedLookup) return;
   const arg0 = args[0];
   const idNames = new Set(findAllNodes(arg0, "identifier").map(n => n.text).filter(id => resourceIdParamNames.has(id)));
+  // an id read inline from the request rather than bound to a parameter: `Find(Request.RouteValues["id"])`
+  for (const read of inlineRequestIdReads(arg0)) idNames.add(read);
   if (idNames.size > 0) candidates.push({ node, sourceExpr: arg0.text, sinkExpr: text, idNames });
+}
+
+/** `Request.RouteValues["id"]` / `Request.Query["orderId"]` (also via HttpContext) inside `n`: the request picks
+ * the record by a resource-id-named key. */
+function inlineRequestIdReads(n: SyntaxNode): string[] {
+  return findAllNodes(n, "element_access_expression").filter(e => {
+    const recv = e.childForFieldName("expression") ?? e.namedChildren[0];
+    const key = /^\[\s*"(\w+)"\s*\]$/.exec(e.childForFieldName("subscript")?.text ?? e.text.slice(recv?.text.length ?? 0).trim());
+    return !!recv && /^(?:HttpContext\.)?Request\.(?:RouteValues|Query)$/.test(recv.text) && !!key && RESOURCE_ID_NAME_RE.test(key[1]);
+  }).map(e => e.text);
 }
 
 /** `new ClassName(id)` -- reuses argReferencesResourceId-equivalent logic
@@ -2416,7 +2429,7 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
 function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (!method.body) return;
   if (!method.authMeta.isEndpoint) return;
-  if (method.resourceIdParamNames.size === 0) return;
+  if (method.resourceIdParamNames.size === 0 && inlineRequestIdReads(method.body).length === 0) return;
 
   const candidates: BolaSinkCandidate[] = [];
   for (const inv of findAllNodes(method.body, "invocation_expression")) {

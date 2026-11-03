@@ -2160,6 +2160,59 @@ function collectBola(fn: LocalFn, ctx: EngineCtx) {
   }
 }
 
+const KTOR_ROUTE_VERBS = new Set(["get", "post", "put", "patch", "delete"]);
+
+/** `call.parameters["id"]` / `call.request.queryParameters["orderId"]` in `n`: the request picks the record. */
+function ktorIdReads(n: SyntaxNode): SyntaxNode[] {
+  return findAllNodes(n, "indexing_expression").filter(e => {
+    const base = named(e)[0];
+    const key = stringValue(findAllNodes(childOfType(e, "indexing_suffix") ?? e, "string_literal")[0]);
+    return !!base && /^call\.(?:parameters|request\.queryParameters)$/.test(base.text) && !!key && RESOURCE_ID_NAME_RE.test(key);
+  });
+}
+
+/**
+ * Ktor routes (`get("/orders/{id}") { call.respond(repo.findById(call.parameters["id"])) }`): the handler is a trailing
+ * lambda, not an annotated function, and the id is read from `call` rather than bound to a parameter -- the same
+ * lookup/write vocabulary and ownership evidence as collectBola, with a GET's unscoped read at medium.
+ */
+function collectBolaKtor(ctx: EngineCtx) {
+  for (const route of findAllNodes(ctx.root, "call_expression")) {
+    const { name, recv } = callParts(route);
+    const body = trailingLambda(route);
+    if (recv || !KTOR_ROUTE_VERBS.has(name) || !body || ktorIdReads(body).length === 0) continue;
+    // locals holding the id: `val id = call.parameters["id"]`
+    const ids = new Set<string>();
+    for (const p of findAllNodes(body, "property_declaration")) {
+      const nm = childOfType(childOfType(p, "variable_declaration"), "simple_identifier")?.text;
+      const v = propertyValue(p);
+      if (nm && v && ktorIdReads(v).length > 0) ids.add(nm);
+    }
+    const principals = new Set<string>();
+    for (const call of findAllNodes(body, "call_expression")) {
+      const c = callParts(call);
+      if (!c.recv || !(BOLA_LOOKUP.has(c.name) || BOLA_WRITE.has(c.name))) continue;
+      const a = positionalArgs(call)[0];
+      if (!a || !(ktorIdReads(a).length > 0 || idsIn(a, ids))) continue;
+      let record: SyntaxNode | null = null;
+      if (BOLA_LOOKUP.has(c.name)) {
+        for (let p = call.parent; p && p.id !== body.id; p = p.parent) {
+          if (p.type === "property_declaration") { record = childOfType(childOfType(p, "variable_declaration"), "simple_identifier"); break; }
+        }
+      }
+      const ev = new Set<AuthzKind>();
+      const dom = dominatingEvidence(call, body, ids, principals, record, call.endIndex, Number.MAX_SAFE_INTEGER);
+      if (dom) ev.add(dom);
+      const verdict = authzVerdict(ev);
+      if (verdict === "proven") continue;
+      const sinkExpr = `${calleeText(c.recv) ?? c.recv.text}.${c.name}`;
+      emit(ctx, "bola-missing-ownership-check", call, a.text, sinkExpr,
+        `Resource identifier '${a.text}' from the request reaches ${sinkExpr}(...) in a Ktor ${name.toUpperCase()} route with no ownership check — scope the lookup to the caller or compare the record's owner to call.principal()`,
+        verdict === "role-only" || name === "get" ? "medium" : "high");
+    }
+  }
+}
+
 // ── Entry points ──────────────────────────────────────────────────────────────────────────────────────────
 
 function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
@@ -2239,6 +2292,7 @@ function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintKotlinFindin
     }
   }
   walkAll(true);
+  collectBolaKtor(ctx);
   for (let round = 0; round < FIXED_POINT_CAP && ctx.stickyDirty; round++) {
     ctx.stickyDirty = false;
     walkAll(false);

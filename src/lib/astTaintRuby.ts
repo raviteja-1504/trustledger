@@ -819,7 +819,7 @@ function isLiteralCollection(n: SyntaxNode, root: SyntaxNode): boolean {
 }
 
 const PRIVATE_ADDRESS_EVIDENCE_RE = /private\?|loopback\?|link_local\?|\b10\b|192\.168|\b172\b|\b127\b|169\.254|PRIVATE|INTERNAL|RESERVED|BLOCKED/;
-const RESOLVES_ADDRESS_RE = /\bResolv\.getaddress\b|\bIPSocket\.getaddress\b|\bAddrinfo\.(?:getaddrinfo|ip|tcp)\b/;
+const RESOLVES_ADDRESS_RE = /\bResolv\.getaddress(?:es)?\b|\bIPSocket\.getaddress\b|\b(?:Addrinfo|Socket)\.getaddrinfo\b|\bAddrinfo\.(?:ip|tcp)\b/;
 
 /** The host a resolved address came from: `ip = Resolv.getaddress(uri.host)` (also wrapped, `IPAddr.new(...)`, or one
  * or two locals away, `parts = ip.split('.')`) -> the names the parsed host stands for ([uri, url]). */

@@ -283,6 +283,7 @@
   "hard.php:74 sql-injection <- \"SELECT * FROM invoices WHERE id = '\" . $id . \"'\"",
   "hard.php:78 bola-missing-ownership-check <- \"SELECT * FROM users WHERE id = '\" . $id . \"'\"",
   "hard.php:78 sql-injection <- \"SELECT * FROM users WHERE id = '\" . $id . \"'\"",
+  "hard.php:79 bola-missing-ownership-check <- $_GET['user_id']",
   "hard.php:82 bola-missing-ownership-check <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" . $id . \"'\"",
   "hard.php:82 sql-injection <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" . $id . \"'\"",
   "hard.php:86 ssti <- $t",
@@ -640,12 +641,15 @@
   "api/c/user.go:3 path-traversal <- r.URL.Query().Get(\"f\")"
  ],
  "cross-file/php/class method from an included file": [
+  "index.php:4 bola-missing-ownership-check <- $_GET['id']",
   "index.php:4 sql-injection <- $_GET['id']"
  ],
  "cross-file/php/static method from an included file": [
   "index.php:3 sql-injection <- $_GET['id']"
  ],
- "cross-file/php/negative: a user class's find() is not a MongoDB find()": [],
+ "cross-file/php/negative: a user class's find() is not a MongoDB find()": [
+  "index.php:4 bola-missing-ownership-check <- $_GET['id']"
+ ],
  "cross-file/php/wrong-class sanitiser in the caller (htmlspecialchars before SQL)": [
   "index.php:3 sql-injection <- htmlspecialchars($_GET['id'])"
  ],

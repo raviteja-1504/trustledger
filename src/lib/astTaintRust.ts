@@ -1790,6 +1790,8 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   if (!recv && path && /(?:^|::)PreEscaped$/.test(path) && args[0]) fireOn(ctx, "xss", node, args[0], mask(args[0], env), "maud::PreEscaped");
+  // a desktop WebView (wry / tauri) rendering a page built from input: `webview.load_html(&html)`, `WebViewBuilder::new().with_html(html)`
+  if (recv && /^(?:load_html|with_html|set_html)$/.test(name) && args[0]) fireOn(ctx, "xss", node, args[0], mask(args[0], env), `${name} (WebView)`);
 
   // ── More SQL builders: sea-query custom expressions, sea-orm raw statements ──
   if (full && /(?:^|::)(?:Expr|SimpleExpr)::(?:cust|cust_with_values|cust_with_exprs|Custom)$/.test(full) && args[0]) checkSql(ctx, node, args[0], env, mask, two);

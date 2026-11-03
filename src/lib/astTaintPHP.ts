@@ -1249,7 +1249,8 @@ function checkDynamicCallSink(node: SyntaxNode, fnNode: SyntaxNode, ctx: EngineC
   const varName = variableBareName(fnNode);
   if (!varName) return;
   const m = taintMask(fnNode, env);
-  if (!(m & ALL)) return;
+  // CONTROL alone (`in_array($c, ['Pdf', 'Csv'], true)` held) only picks WHICH allowed name runs
+  if (!(m & ALL & ~SinkClass.CONTROL)) return;
   if (!isEverAssignedFromSourcePHP(enclosingFunctionBodyPHP(node), varName)) return;
   emit(ctx, "eval-exec", node, fnNode.text, "dynamic function call");
 }
@@ -1312,6 +1313,25 @@ function literalArrayPHP(n: SyntaxNode, opts: { keys?: boolean; stringsOnly?: bo
     if (opts.keys) return parts.length === 2 && okLit(parts[0]);
     return parts.length === 1 && okLit(parts[0]);
   });
+}
+
+/** An array whose KEYS the code fixed, whatever its values: `['name' => $_POST['name']]`, or
+ * `array_intersect_key($_POST, $rules)` / `array_intersect_key($_POST, array_flip(['name', 'email']))` --
+ * directly or through the variable it was last assigned to. */
+function keysFixedPHP(n: SyntaxNode, root: SyntaxNode | undefined, depth = 0): boolean {
+  if (isLiteralArrayRefPHP(n, root, { keys: true })) return true;
+  if (n.type === "function_call_expression" && n.childForFieldName("function")?.text === "array_intersect_key") {
+    const allowKeys = (a: SyntaxNode) => isLiteralArrayRefPHP(a, root, { keys: true }) ||
+      (a.type === "function_call_expression" && a.childForFieldName("function")?.text === "array_flip" &&
+       !!argListOfPHP(a)[0] && isLiteralArrayRefPHP(argListOfPHP(a)[0], root, {}));
+    return argListOfPHP(n).slice(1).some(allowKeys);
+  }
+  if (n.type === "variable_name" && depth < 2) {
+    const name = variableBareName(n);
+    const def = name ? lastAssignmentPHP(name, n) : null;
+    return !!def && keysFixedPHP(def, root, depth + 1);
+  }
+  return false;
 }
 
 /** A literal array node, or a `$var` / CONSTANT EVERY binding of which, file-wide, is one. */
@@ -1812,6 +1832,12 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         if (subject) walk(subject, env);
         const rmask = subject ? taintMask(subject, env) : 0;
         if (target) bindTargets(target, rmask, env);
+        // `foreach ($fixedKeys as $k => $v)`: the key is one the code chose, only the value is the request's
+        const keyVar = target?.type === "pair" && target.namedChildren[0]?.type === "variable_name" ? variableBareName(target.namedChildren[0]) : null;
+        if (keyVar && subject && keysFixedPHP(subject, root)) {
+          env.set(keyVar, 0);
+          ctx.suppressed?.push({ id: "mass-assignment", line: lineOf(node) });   // the line-pattern's `foreach ... ->$k` guess
+        }
         // `foreach ($s as $k => $v) { $t[$k] = $v; }` -- every entry of a tainted array is copied
         // into another one wholesale (an attacker can set keys the API never meant to expose).
         if ((rmask & ALL) && body) {
@@ -2180,6 +2206,18 @@ function walkForDeclarationsAndSinks(node: SyntaxNode, env: Env, ctx: EngineCtx)
 // it into this generic "check args[0]" set would silently miss every real
 // `->where('id', $id)` call.
 const BOLA_LOOKUP_TAILS = new Set(["find", "findOrFail", "first", "get"]);
+// Hand-written repository/DAO methods (`$db->findRecord($id)`, `$repo->getOrderById($id)`) -- a name
+// convention, since no fixed list covers custom data-access classes (same reasoning as C#'s BOLA_LOOKUP_NAME_RE).
+const BOLA_LOOKUP_NAME_RE = /^(?:(?:find|fetch|load)[A-Z_]\w*|get\w*By(?:Id|Pk))$/;
+// `$_GET['id']` / `$_REQUEST["order_id"]` read inline: the request picks the record directly.
+const INLINE_ID_READ_RE = /^\$_(?:GET|POST|REQUEST)\s*\[\s*['"](\w+)['"]\s*\]$/;
+
+function inlineRequestIdReadsPHP(n: SyntaxNode): string[] {
+  return findAllNodes(n, "subscript_expression").map(s => s.text).filter(t => {
+    const key = INLINE_ID_READ_RE.exec(t)?.[1];
+    return !!key && RESOURCE_ID_PARAM_RE.test(key);
+  });
+}
 // Matched against a node's raw .text, which for a PHP superglobal/variable
 // INCLUDES the $ sigil (e.g. "$_SESSION['user_id']", not "_SESSION[...]")
 // -- confirmed directly (a test using this regex without the optional `\$`
@@ -2271,7 +2309,8 @@ function isBolaRecordOwnerExprPHP(n: SyntaxNode, ctx: BolaCtxPHP): boolean {
  * column of the record that id loaded (`$order->user_id != Auth::id()`). */
 function isBolaOwnershipComparisonPHP(left: SyntaxNode, right: SyntaxNode, ctx: BolaCtxPHP): boolean {
   const isRes = (n: SyntaxNode) =>
-    (!ctx.recordOnly && variableNamesIn(unwrapBolaCoercionPHP(n)).some(id => ctx.idNames.has(id))) || isBolaRecordOwnerExprPHP(n, ctx);
+    (!ctx.recordOnly && (variableNamesIn(unwrapBolaCoercionPHP(n)).some(id => ctx.idNames.has(id)) ||
+      inlineRequestIdReadsPHP(unwrapBolaCoercionPHP(n)).some(r => ctx.idNames.has(r)))) || isBolaRecordOwnerExprPHP(n, ctx);
   return (isRes(left) && isBolaPrincipalExprPHP(right, ctx)) || (isBolaPrincipalExprPHP(left, ctx) && isRes(right));
 }
 
@@ -2568,11 +2607,14 @@ function collectBolaFindings(
   bodyNodes: SyntaxNode[], resourceIdParamNames: Set<string>, authMeta: FuncAuthMeta, ctx: EngineCtx,
 ) {
   if (bodyNodes.length === 0) return;
-  if (!authMeta.hasResourceIdParam) return;
+  if (!authMeta.hasResourceIdParam && !bodyNodes.some(b => inlineRequestIdReadsPHP(b).length > 0)) return;
 
   const candidates: BolaSinkCandidate[] = [];
-  const idsIn = (n: SyntaxNode | null | undefined): Set<string> =>
+  const paramIdsIn = (n: SyntaxNode | null | undefined): Set<string> =>
     new Set(variableNamesIn(n).filter(id => resourceIdParamNames.has(id)));
+  // an inline `$_GET['id']` counts only as the lookup's own argument, not one hop back through `$sql = ...`
+  const idsIn = (n: SyntaxNode | null | undefined): Set<string> =>
+    new Set([...paramIdsIn(n), ...(n ? inlineRequestIdReadsPHP(n) : [])]);
 
   const memberAndScopedCalls = bodyNodes.flatMap(b =>
     [...findAllNodes(b, "member_call_expression"), ...findAllNodes(b, "scoped_call_expression")]);
@@ -2604,14 +2646,14 @@ function collectBolaFindings(
       if (idNames.size === 0 && directNames.length === 1) {
         const rhs = resolveRecentAssignmentRHS(bodyNodes, directNames[0], shape);
         if (rhs) {
-          const rhsIds = idsIn(rhs);
+          const rhsIds = paramIdsIn(rhs);
           if (rhsIds.size > 0) { idNames = rhsIds; sourceExprText = rhs.text; }
         }
       }
       if (idNames.size > 0) candidates.push({ node: shape, sourceExpr: sourceExprText, sinkExpr: calleeTextPHP(shape) ?? methodName, idNames });
       continue;
     }
-    if (!BOLA_LOOKUP_TAILS.has(methodName) || args.length === 0) continue;
+    if (!(BOLA_LOOKUP_TAILS.has(methodName) || BOLA_LOOKUP_NAME_RE.test(methodName)) || args.length === 0) continue;
     const idNames = idsIn(args[0]);
     if (idNames.size > 0) {
       candidates.push({ node: shape, sourceExpr: args[0].text, sinkExpr: calleeTextPHP(shape) ?? methodName, idNames });
