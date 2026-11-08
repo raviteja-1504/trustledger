@@ -28,7 +28,7 @@ export interface CatalogRule {
   detection: RuleDetection;
   /** Languages (data-flow rules) or file formats (configuration rules) it covers. */
   appliesTo: string[];
-  fix: { title: string; description: string; code_before?: string; code_after?: string } | null;
+  fix: { title: string; description: string; code_before?: string; code_after?: string; effort?: "low" | "medium" | "high" } | null;
 }
 
 const DOMAIN_FORMATS: Record<AppsecDomain, string[]> = {
@@ -72,7 +72,7 @@ export function buildRuleCatalog(): CatalogRule[] {
     rules.push({
       id, title: meta.title, description: meta.description, cwe: meta.cwe ?? null, severity, detection,
       appliesTo: langs.length ? langs : appsec ? DOMAIN_FORMATS[appsec.domain] : legacy ?? [],
-      fix: fixRaw ? { title: fixRaw.title, description: fixRaw.description, code_before: fixRaw.code_before, code_after: fixRaw.code_after } : null,
+      fix: fixRaw ? { title: fixRaw.title, description: fixRaw.description, code_before: fixRaw.code_before, code_after: fixRaw.code_after, effort: fixRaw.effort } : null,
     });
   }
   const DET_ORDER: Record<RuleDetection, number> = { "data-flow": 0, configuration: 1, pattern: 2 };

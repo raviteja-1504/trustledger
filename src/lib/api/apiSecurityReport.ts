@@ -10,43 +10,57 @@ import { APPSEC_RULES } from "../appsecRules";
 import { extractEndpoints, findEndpointMissingAuth, type ApiEndpoint } from "./apiInventory";
 import { scanOpenApiSpec, isOpenApiDoc, specOperations } from "./openapiSpec";
 import { parseConfigDocuments } from "../iac/configTree";
+import { CAPS } from "@/lib/limits";
+import { endpointKey, findingKey, type Resolution } from "./apiResolution";
 
 export interface ReportScan { repo: string; scan_id: string; scanned_at?: string; files: Array<{ file_path: string; content?: string | null }> }
 
-export interface InventoryEndpoint extends ApiEndpoint { repo: string; scan_id: string; source: "code" | "spec"; flagged: boolean }
+export interface InventoryEndpoint extends ApiEndpoint {
+  repo: string; scan_id: string; source: "code" | "spec"; flagged: boolean;
+  /** Stable across scans (repo + method + normalised path): what a resolution is stored under. */
+  key: string;
+  /** A reviewer's decision on it (see apiResolution.ts); attached when the report is served. */
+  resolution?: Resolution;
+}
 
 export interface ApiSecurityFinding {
   id: string; title: string; severity: ScanIndicator["severity"]; cwe: string;
   repo: string; scan_id: string; file: string; line: number; detail: string; fix: string;
+  /** The endpoint's key for a missing-auth finding (so resolving either settles both), else derived from the finding. */
+  key: string;
+  resolution?: Resolution;
 }
 
 /** One repository's part of the report: which scan it comes from, and its counts (over ALL its endpoints). */
 export interface ApiRepoSummary {
   repo: string; scan_id: string; scanned_at: string | null;
   endpoints: number; authRequired: number; explicitlyPublic: number; noAuthVisible: number; flagged: number; specs: number; findings: number;
+  /** Endpoints with a reviewer's resolution (set when served; see apiResolution.ts). `flagged` and `findings` then count only the unresolved. */
+  resolved?: number;
 }
 
 export interface ApiSecurityReport {
   endpoints: InventoryEndpoint[];
   findings: ApiSecurityFinding[];
-  counts: { endpoints: number; authRequired: number; explicitlyPublic: number; noAuthVisible: number; flagged: number; specs: number; findings: number };
+  counts: { endpoints: number; authRequired: number; explicitlyPublic: number; noAuthVisible: number; flagged: number; specs: number; findings: number; resolvedEndpoints?: number; resolvedFindings?: number };
   /** Per repository, so a repository filter can show exact counts even when the endpoint list is capped. */
   repos: ApiRepoSummary[];
   /** True when more endpoints were found than the list carries (MAX_ENDPOINTS); counts are always complete. */
   truncated: boolean;
 }
 
-const MAX_ENDPOINTS = 2000;
+const MAX_ENDPOINTS = CAPS.apiSecurityEndpoints.value;
 const SOURCE_RE = /\.(?:[cm]?[jt]sx?|py|java|kt|cs|go|php)$/i;
 const SPEC_RE = /\.(?:ya?ml|json)$/i;
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
-function toFinding(i: ScanIndicator, repo: string, scan_id: string, file: string): ApiSecurityFinding {
+function toFinding(i: ScanIndicator, repo: string, scan_id: string, file: string, endpointKeyByLine?: ReadonlyMap<number, string>): ApiSecurityFinding {
   const rule = APPSEC_RULES[i.id];
-  return {
+  const base = {
     id: i.id, title: rule?.title ?? i.label, severity: i.severity, cwe: rule?.cwe ?? i.cwe ?? "",
     repo, scan_id, file, line: i.line ?? 1, detail: i.detail ?? "", fix: rule?.fix.description ?? "",
   };
+  return { ...base, key: endpointKeyByLine?.get(base.line) ?? findingKey(base) };
 }
 
 export function buildApiSecurityReport(scans: readonly ReportScan[]): ApiSecurityReport {
@@ -61,10 +75,13 @@ export function buildApiSecurityReport(scans: readonly ReportScan[]): ApiSecurit
       if (SOURCE_RE.test(f.file_path)) {
         const flagged = findEndpointMissingAuth(f.file_path, content);
         const flaggedLines = new Set(flagged.map(x => x.line));
+        const keyByLine = new Map<number, string>();
         for (const e of extractEndpoints(f.file_path, content)) {
-          endpoints.push({ ...e, repo: scan.repo, scan_id: scan.scan_id, source: "code", flagged: flaggedLines.has(e.line) });
+          const key = endpointKey(scan.repo, e.method, e.path);
+          keyByLine.set(e.line, key);
+          endpoints.push({ ...e, repo: scan.repo, scan_id: scan.scan_id, source: "code", flagged: flaggedLines.has(e.line), key });
         }
-        for (const i of flagged) findings.push(toFinding(i, scan.repo, scan.scan_id, f.file_path));
+        for (const i of flagged) findings.push(toFinding(i, scan.repo, scan.scan_id, f.file_path, keyByLine));
       } else if (SPEC_RE.test(f.file_path) && /\b(?:openapi|swagger)\b/.test(content.slice(0, 4000))) {
         const docs = parseConfigDocuments(content).filter(isOpenApiDoc);
         if (!docs.length) continue;
@@ -72,17 +89,20 @@ export function buildApiSecurityReport(scans: readonly ReportScan[]): ApiSecurit
         specsByRepo.set(scan.repo, (specsByRepo.get(scan.repo) ?? 0) + 1);
         const specFindings = scanOpenApiSpec(content);
         const flaggedLines = new Set(specFindings.filter(x => x.id === "api-spec-unauthenticated-operation").map(x => x.line));
+        const specKeyByLine = new Map<number, string>();
         for (const doc of docs) {
           for (const op of specOperations(doc)) {
+            const key = endpointKey(scan.repo, op.method, op.path);
+            specKeyByLine.set(op.line, key);
             endpoints.push({
-              method: op.method, path: op.path, file: f.file_path, line: op.line, framework: "openapi", repo: scan.repo, scan_id: scan.scan_id, source: "spec",
+              method: op.method, path: op.path, file: f.file_path, line: op.line, framework: "openapi", repo: scan.repo, scan_id: scan.scan_id, source: "spec", key,
               auth: op.secured ? "required" : op.explicitPublic ? "public" : "none",
               authEvidence: op.secured ? "security requirement" : op.explicitPublic ? "security: []" : undefined,
               flagged: flaggedLines.has(op.line),
             });
           }
         }
-        for (const i of specFindings) findings.push(toFinding(i, scan.repo, scan.scan_id, f.file_path));
+        for (const i of specFindings) findings.push(toFinding(i, scan.repo, scan.scan_id, f.file_path, i.id === "api-spec-unauthenticated-operation" ? specKeyByLine : undefined));
       }
     }
   }

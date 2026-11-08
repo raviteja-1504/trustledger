@@ -1,13 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
+import { planLimits } from "@/lib/limits";
 
-const PLAN_LIMITS: Record<string, { scans: number; attestations: number; repos: number; members: number; reports: number; price: number }> = {
-  trial:      { scans:    100, attestations:   500, repos:  3, members:  3, reports:  5,  price:    0 },
-  starter:    { scans:  1_000, attestations: 5_000, repos: 10, members:  5, reports: 12,  price:  299 },
-  growth:     { scans: 10_000, attestations:50_000, repos: 50, members: 20, reports: 60,  price:  999 },
-  enterprise: { scans:     -1, attestations:    -1, repos: -1, members: -1, reports: -1,  price:    0 }, // unlimited
-};
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -46,7 +41,7 @@ export async function GET(req: NextRequest) {
     db.from("attestations").select("*", { count:"exact", head:true }).eq("org_id", org_id),
   ]);
 
-  const limits = PLAN_LIMITS[org.plan] ?? PLAN_LIMITS.trial;
+  const limits = planLimits(org.plan);
 
   return NextResponse.json({
     org:    { name: org.name, plan: org.plan, member_since: org.created_at },

@@ -14,6 +14,7 @@ import { describeHealth, GAP_REASON_TEXT, languageName, type ScanHealth, type Sc
 import type { LifecycleSummary, FixedFinding } from "@/lib/findingLifecycle";
 import Tip from "@/components/Tip";
 import { ACTION_TIP } from "@/lib/prTooltips";
+import { CAPS } from "@/lib/limits";
 
 interface Props {
   scanId: string;
@@ -246,6 +247,9 @@ export default function ScanStatusPanel({
                 Accept all {openCount} open items
                 {securityOpen != null && otherOpen != null ? ` (${securityOpen} security finding${securityOpen === 1 ? "" : "s"} and ${otherOpen} other signal${otherOpen === 1 ? "" : "s"})` : ""}?
               </span>
+              {openCount > CAPS.baselineFindings.value && (
+                <span role="note" className="text-[11px] text-amber-300">{CAPS.baselineFindings.effect} {CAPS.baselineFindings.advice}</span>
+              )}
               <Tip tip={ACTION_TIP.acceptBaseline}>
                 <button onClick={baseline} disabled={busy !== null} className="text-[11px] font-bold text-violet-100 bg-violet-500/30 hover:bg-violet-500/40 border border-violet-400/40 rounded-lg px-2.5 py-1">Accept as baseline</button>
               </Tip>

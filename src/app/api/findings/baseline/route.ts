@@ -16,8 +16,9 @@ import { validateBody, FindingBaselineSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { allRows } from "@/lib/allRows";
+import { CAPS } from "@/lib/limits";
 
-const MAX_BASELINE = 5000;
+const MAX_BASELINE = CAPS.baselineFindings.value;
 
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);

@@ -37,7 +37,7 @@ jest.mock("@/lib/useRealData", () => ({
   }),
 }));
 
-import ViolationsPage from "@/app/violations/page";
+import ViolationsPage from "@/components/threats/ViolationsView";
 import { invalidateServerStatuses } from "@/lib/violationStatuses";
 
 const patches = () => calls.filter(c => c.init?.method === "PATCH").map(c => JSON.parse(c.init!.body!));

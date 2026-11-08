@@ -122,6 +122,26 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ risk: data });
 }
 
+const STATUSES = new Set(["open", "mitigating", "accepted", "closed"]);
+const TREATMENTS = new Set(["mitigate", "accept", "transfer", "avoid"]);
+const scoreOk = (v: unknown) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 5;
+
+/** Only workflow fields a person may set, with valid values; null when anything else (or something invalid) is sent. */
+function cleanPatch(p: Record<string, unknown>): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "status") { if (!STATUSES.has(v as string)) return null; out.status = v; }
+    else if (k === "treatment") { if (!TREATMENTS.has(v as string)) return null; out.treatment = v; }
+    else if (k === "owner_email") { if (v !== null && (typeof v !== "string" || v.length > 320)) return null; out.owner_email = v || null; }
+    else if (k === "due_date") { if (v !== null && !(typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v))) return null; out.due_date = v; }
+    else if (k === "mitigation") { if (typeof v !== "string" || v.length > 4000) return null; out.mitigation = v; }
+    else if (k === "residual_likelihood" || k === "residual_impact") { if (v !== null && !scoreOk(v)) return null; out[k] = v; }
+    else if (k === "notes") { if (!Array.isArray(v) || v.length > 200 || v.some(n => typeof n !== "string" || n.length > 2000)) return null; out.notes = v; }
+    else return null;                                              // an unknown column (like "owner") must not reach the table
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 export async function PATCH(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
@@ -142,12 +162,14 @@ export async function PATCH(req: NextRequest) {
     };
   };
 
-  if (!body.external_id || !body.patch) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  if (!body.external_id || !body.patch || typeof body.patch !== "object") return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  const patch = cleanPatch(body.patch);
+  if (!patch) return NextResponse.json({ error: "invalid_patch" }, { status: 400 });
 
   const db = createServiceClient();
   const { data, error } = await db
     .from("risk_register")
-    .update({ ...body.patch, updated_at: new Date().toISOString(), updated_by: auth.user_id ?? null })
+    .update({ ...patch, updated_at: new Date().toISOString(), updated_by: auth.user_id ?? null })
     .eq("org_id", auth.org_id)
     .eq("external_id", body.external_id)
     .select(SELECT_COLS)
@@ -159,7 +181,7 @@ export async function PATCH(req: NextRequest) {
     org_id: auth.org_id!, event_type: "risk_updated",
     actor_id: auth.user_id ?? null, actor_email: auth.actor_email ?? null,
     resource_type: "risk_register", resource_id: body.external_id,
-    payload: { action: "updated", title: data.title, patch: body.patch },
+    payload: { action: "updated", title: data.title, patch },
   });
 
   return NextResponse.json({ risk: data });

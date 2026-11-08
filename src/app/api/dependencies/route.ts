@@ -25,11 +25,12 @@ import { deriveFindings, type ScanForDeps, type DepFinding } from "@/lib/depende
 import { collectManifestPackages, type ManifestPackage } from "@/lib/manifestPackages";
 import { fetchContentByHash } from "@/lib/contentByHash";
 import { versionedKey } from "@/lib/orgDataVersion";
+import { CAPS } from "@/lib/limits";
 
 interface DependencyResult { findings: DepFinding[]; manifestPackages: ManifestPackage[] }
 
 const PAGE = 1000;          // the project's PostgREST max_rows
-const MAX_ROWS = 50_000;
+const MAX_ROWS = CAPS.bulkRows.value;
 const IN_CHUNK = 200;
 
 async function allRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>): Promise<T[]> {

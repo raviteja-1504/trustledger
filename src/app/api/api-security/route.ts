@@ -13,6 +13,9 @@ import { cached, cacheKeys, TTL } from "@/lib/cache";
 import { fetchContentByHash } from "@/lib/contentByHash";
 import { orgDataVersion, versionedKey } from "@/lib/orgDataVersion";
 import { buildApiSecurityReport, type ApiSecurityReport, type ReportScan } from "@/lib/api/apiSecurityReport";
+import { CAPS } from "@/lib/limits";
+import { API_RULE_IDS, applyResolutions, resolutionsByRepo } from "@/lib/api/apiResolution";
+import { loadApiResolutions } from "@/lib/findingTriageStore";
 
 export const maxDuration = 60;
 
@@ -25,14 +28,16 @@ export async function GET(req: NextRequest) {
     const report = version == null
       ? await computeReport(org_id)
       : await cached(versionedKey(cacheKeys.apiSecurity(org_id), version), TTL.DEPENDENCIES, () => computeReport(org_id));
-    return NextResponse.json(report, { headers: { "Cache-Control": "private, no-store" } });
+    // Resolutions are decisions, not scan data: read fresh and laid over the (cached) report, so one takes effect at once.
+    const stored = await loadApiResolutions(createServiceClient(), org_id, API_RULE_IDS);
+    return NextResponse.json(applyResolutions(report, resolutionsByRepo(stored)), { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
     return safeError(err, { code: "api_security_fetch_failed", message: "We couldn't load the API security report right now. Please try again." });
   }
 }
 
 const PAGE = 1000;          // the project's PostgREST max_rows
-const MAX_ROWS = 50_000;
+const MAX_ROWS = CAPS.bulkRows.value;
 const IN_CHUNK = 200;
 type Page<T> = PromiseLike<{ data: T[] | null; error: unknown }>;
 

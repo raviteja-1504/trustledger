@@ -119,3 +119,11 @@ it("demo mode offers paste mode only, on sample repositories", async () => {
   expect(screen.getByRole("tab", { name: "Paste code" })).toHaveAttribute("aria-selected", "true");
   expect(authedFetch).not.toHaveBeenCalled();
 });
+
+it("tells users the limits before they hit them: scans per minute, rescan, and file size", async () => {
+  render(<NewScanPanel open onClose={() => {}} />);
+  const note = await screen.findByTestId("scan-limits");
+  expect(note).toHaveTextContent("60 scan submissions per organisation per minute");
+  expect(note).toHaveTextContent("1 rescan of the same pull request per minute");
+  expect(note).toHaveTextContent("files over 1 MB are skipped");
+});

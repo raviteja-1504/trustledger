@@ -1,3 +1,4 @@
+import { rateText } from "./limits";
 /**
  * The PR page's tooltip wording, in one place. Each says what the thing IS and what it means for the reviewer,
  * in the page's own terms (see lib/scanCounts.ts for the counts, lib/findingLifecycle.ts for the statuses).
@@ -31,7 +32,7 @@ export const COUNT_TIP = {
 } as const;
 
 export const ACTION_TIP = {
-  rescan: "Scan the PR's latest commit again with the current scanner and your triage decisions. It creates a new scan; this page stays as it is and links to the new one when it finishes.",
+  rescan: "Scan the PR's latest commit again with the current scanner and your triage decisions. It creates a new scan; this page stays as it is and links to the new one when it finishes. Limit: " + rateText("rescan") + ".",
   rescanNow: "Apply your saved triage decisions: scan the PR again. The merge check and file risk ratings update from the new scan.",
   copySummary: "Copy a markdown summary of this scan to paste into the pull request.",
   trustRecord: "Download a signed JSON record of this scan: its findings, triage decisions, attestations and the merge-gate outcome.",

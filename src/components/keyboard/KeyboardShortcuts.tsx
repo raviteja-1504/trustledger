@@ -71,8 +71,8 @@ export function useKeyboardShortcuts() {
       gBuf.current = "";
       if (gTimer.current) clearTimeout(gTimer.current);
       const nav: Record<string, string> = {
-        d: "/dashboard", v: "/violations", a: "/alerts",
-        i: "/incidents", r: "/reports",    s: "/settings",
+        d: "/dashboard", v: "/threats?tab=violations", a: "/threats?tab=alerts",
+        i: "/threats?tab=incidents", r: "/reports",    s: "/settings",
         c: "/compliance",t: "/trust-score",l: "/audit",
         k: "/risks",     b: "/billing",
       };

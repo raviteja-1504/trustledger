@@ -8,6 +8,8 @@ import { useRole } from "@/lib/roles";
 import { useAuth } from "@/lib/auth";
 import { ROLE_LABELS, ROLE_COLORS, ROLE_DESCRIPTIONS, type UserRole } from "@/lib/roles";
 import { BUILTIN_PERMISSIONS, PERMISSION_KEYS, PERMISSION_LABELS } from "@/lib/permissions";
+import { LimitMeter } from "@/components/Limits";
+import { usePlanLimits } from "@/lib/usePlanLimits";
 
 interface CustomRole { id: string; name: string }
 
@@ -42,6 +44,7 @@ export default function TeamPage() {
   const { permissions } = useRole();
   const { profile } = useAuth();
   const isAdmin = permissions.canManageUsers;
+  const plan = usePlanLimits(isAdmin);
 
   const [members,    setMembers]    = useState<Member[]>([]);
   const [loading,    setLoading]    = useState(true);
@@ -183,6 +186,9 @@ export default function TeamPage() {
         </div>
 
         {/* Invite form — admins only */}
+        {isAdmin && plan && (
+          <div className="animate-fade-up section-card p-5"><LimitMeter label="Team seats" noun="members" used={Math.max(members.length, plan.usage.members)} limit={plan.limits.members} /></div>
+        )}
         {isAdmin && (
           <form onSubmit={invite} className="animate-fade-up section-card p-5 space-y-4">
             <div>

@@ -5,6 +5,7 @@
  */
 import type { createServiceClient } from "./supabase";
 import type { TriageDecision, TriageStatus } from "./findingLifecycle";
+import type { StoredResolution } from "./api/apiResolution";
 
 type Db = ReturnType<typeof createServiceClient>;
 
@@ -22,4 +23,21 @@ export async function loadTriage(db: Db, orgId: string, repoFullName: string): P
     }
   } catch { /* best-effort */ }
   return out;
+}
+
+/**
+ * Every API-security resolution of an org (see lib/api/apiResolution.ts), across its repositories: one query, kept
+ * out of the report's cache because a resolution is a decision, not a scan. Best-effort like loadTriage.
+ */
+export async function loadApiResolutions(db: Db, orgId: string, ruleIds: readonly string[]): Promise<StoredResolution[]> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (db.from("finding_triage" as any) as any)
+      .select("repo_full_name, fingerprint, rule_id, status, reason, expires_at, set_by_email, set_at")
+      .eq("org_id", orgId)
+      .in("rule_id", [...ruleIds]);
+    if (error || !Array.isArray(data)) return [];
+    return (data as Array<{ repo_full_name: string; fingerprint: string; rule_id: string; status: TriageStatus; reason: string | null; expires_at: string | null; set_by_email: string | null; set_at: string }>)
+      .map(r => ({ repo: r.repo_full_name, fingerprint: r.fingerprint, rule_id: r.rule_id, status: r.status, reason: r.reason, expires_at: r.expires_at, set_by_email: r.set_by_email, set_at: r.set_at }));
+  } catch { return []; }
 }

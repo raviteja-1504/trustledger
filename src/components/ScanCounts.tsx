@@ -12,6 +12,7 @@ import type { FixedFinding } from "@/lib/findingLifecycle";
 import Tip from "@/components/Tip";
 import InfoTooltip from "@/components/InfoTooltip";
 import { COUNT_TIP, SEVERITY_TIP } from "@/lib/prTooltips";
+import { CAPS } from "@/lib/limits";
 
 /** A term with a dotted underline that explains itself on hover or keyboard focus. */
 function Term({ tip, children }: { tip: string; children: React.ReactNode }) {
@@ -209,6 +210,7 @@ export default function ScanCountsSummary({ counts, previousScan, commitSha, new
           {fixed.length > 0 && (
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 mb-1">Fixed: in the previous scan, gone now ({fixed.length}{changes.fixedIsLowerBound ? "+" : ""})</p>
+              {fixed.length >= CAPS.fixedFindingsListed.value && <p className="text-[10px] text-slate-400 mb-1">{CAPS.fixedFindingsListed.effect} {CAPS.fixedFindingsListed.advice}</p>}
               <ul className="space-y-1 max-h-56 overflow-auto">
                 {fixed.map(f => (
                   <li key={f.fingerprint} className="text-[11px] flex gap-2 min-w-0">

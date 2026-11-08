@@ -29,10 +29,11 @@ import { logger } from "@/lib/logger";
 import { blocksMerge, loadGate } from "@/lib/mergeGate";
 import { reportServerError } from "@/lib/serverErrors";
 import { coverageFailure, scanCoverage } from "@/lib/scanCoverage";
+import { CAPS } from "@/lib/limits";
 
 // Day windows the dashboard UI requests (src/app/dashboard/page.tsx DAYS_OPTIONS)
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
-const MAX_FILES_READ = 50;
+const MAX_FILES_READ = CAPS.providerFilesRead.value;
 
 async function getGitLabToken(db: ReturnType<typeof createServiceClient>, orgId: string): Promise<string | null> {
   const { data } = await db

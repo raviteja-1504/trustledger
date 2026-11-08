@@ -141,13 +141,6 @@ function VulnIcon() {
   );
 }
 
-function ThreatIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-    </svg>
-  );
-}
 function IncidentIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -191,10 +184,7 @@ const ALL_LINKS: Array<{
   { href: "/analytics",       label: "Analytics",       icon: AnalyticsIcon,   permission: null,  roles: ["admin","security_reviewer"] },
   { href: "/trust-score",     label: "TrustScore™",     icon: PostureIcon,     permission: null,  roles: ["admin","security_reviewer"] },
   // Threats
-  { href: "/violations",      label: "Violations",      icon: ViolationsIcon,  permission: null                         },
-  { href: "/alerts",          label: "Alerts",          icon: BellAlertIcon,   permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/incidents",       label: "Incidents",       icon: IncidentIcon,    permission: null,  roles: ["admin","security_reviewer"] },
-  { href: "/threat-intel",    label: "Threat Intel",    icon: ThreatIcon,      permission: null,  roles: ["admin","security_reviewer"] },
+  { href: "/threats",         label: "Threats",         icon: ViolationsIcon,  permission: null                         },
   // Code Risk
   { href: "/scans",           label: "Scan History",    icon: ScansNavIcon,    permission: null                         },
   { href: "/secrets",         label: "Secrets",         icon: SecretsIcon,     permission: null,  roles: ["admin","security_reviewer"] },
@@ -447,29 +437,24 @@ export default function Sidebar() {
   }
 
   const BADGE_COUNT: Record<string, number> = {
-    "/violations":   openViolations,
-    "/alerts":       firingAlerts,
+    "/threats":      openViolations + firingAlerts + activeIncidents,
     "/secrets":      openSecrets,
     "/reports":      pendingCount,
-    "/incidents":    activeIncidents,
     "/dependencies": vulnDeps,
   };
 
   const BADGE_STYLE: Record<string, { accent: string; pulse: boolean }> = {
-    "/violations":   { accent: "#f87171", pulse: false },
-    "/alerts":       { accent: "#fb923c", pulse: true  },
+    "/threats":      { accent: activeIncidents > 0 ? "#e11d48" : "#f87171", pulse: activeIncidents > 0 || firingAlerts > 0 },
     "/secrets":      { accent: "#a78bfa", pulse: false },
     "/reports":      { accent: "#fbbf24", pulse: false },
-    "/incidents":    { accent: "#e11d48", pulse: true  },
     "/dependencies": { accent: "#38bdf8", pulse: false },
   };
 
   const BADGE: Record<string, JSX.Element> = {
-    "/violations":   badge(openViolations,  "#f87171"),
-    "/alerts":       badge(firingAlerts,    "#fb923c", true),
+    // One badge for the three stages: open violations, firing alerts and open incidents.
+    "/threats":      badge(openViolations + firingAlerts + activeIncidents, activeIncidents > 0 ? "#e11d48" : "#f87171", activeIncidents > 0 || firingAlerts > 0),
     "/secrets":      badge(openSecrets,     "#a78bfa"),
     "/reports":      badge(pendingCount,    "#fbbf24"),
-    "/incidents":    badge(activeIncidents, "#e11d48", true),
     "/dependencies": badge(vulnDeps,        "#38bdf8"),
   };
 
@@ -508,7 +493,7 @@ export default function Sidebar() {
         style={{ scrollbarWidth:"thin", scrollbarColor:"rgba(99,102,241,0.3) transparent" }}>
         {[
           { label:"Overview",    hrefs:["/dashboard","/analytics","/trust-score"] },
-          { label:"Threats",     hrefs:["/violations","/alerts","/incidents","/threat-intel"] },
+          { label:"Threats",     hrefs:["/threats"] },
           { label:"Code Risk",   hrefs:["/scans","/secrets","/dependencies","/api-security"] },
           { label:"Compliance",  hrefs:["/compliance","/sla","/risk-register"] },
           { label:"Audit",       hrefs:["/audit","/reports","/rules"] },

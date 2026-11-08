@@ -129,3 +129,10 @@ describe("Reports page", () => {
     expect(document.body.textContent).not.toMatch(/payments-api|fraud-detection|card_validator/);
   });
 });
+
+describe("limits", () => {
+  it("the Generate button says how many reports an organisation can generate per hour", async () => {
+    render(<ReportsPage />);
+    expect(await screen.findByTestId("report-limit", {}, { timeout: 10_000 })).toHaveTextContent("Limit: 20 generated reports per organisation per hour.");
+  });
+});

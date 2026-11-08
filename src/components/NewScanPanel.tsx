@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
+import { CAPS, rateText } from "@/lib/limits";
 
 /**
  * New Scan panel (dashboard).
@@ -632,6 +633,9 @@ export default function NewScanPanel({ open, onClose }: Props) {
                 </button>
               </div>
             </div>
+            <p className="mt-2 text-[11px] text-gray-400" data-testid="scan-limits">
+              Limits: {rateText("scan")}; {rateText("rescan")}; files over {CAPS.maxFileBytes.value / (1024 * 1024)} MB are skipped.
+            </p>
           </div>
         )}
       </div>

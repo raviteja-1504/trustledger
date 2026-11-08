@@ -1,834 +1,578 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
-import InfoTooltip from "@/components/InfoTooltip";
+/**
+ * Risk Register (ISO 31000 style): the risks derived from your latest scans, plus the ones you add, with owners, due
+ * dates, treatment and notes.
+ *
+ * One request (GET /api/risk-register) returns the whole register, derived on the server from the real attestation
+ * data, so it matches the PR pages and the merge check; the page used to chain a cached dashboard payload, one scan
+ * fetch per repository and a sync call, which was slow and could disagree with what had been attested.
+ */
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import AuthGuard from "@/components/AuthGuard";
-import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
+import InfoTooltip from "@/components/InfoTooltip";
 import PageSkeleton from "@/components/PageSkeleton";
+import { CapNotice, LimitMeter } from "@/components/Limits";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useRole } from "@/lib/roles";
 import { useToastHelpers } from "@/lib/toast";
-import type { DashboardData, ScanResult } from "@/types";
+import { CAPS, limitStatus } from "@/lib/limits";
 import { patchDataWithAttestations } from "@/lib/trustScore";
-import { loadStatuses } from "@/lib/violationStatuses";
-import {
-  deriveRisks, mergeRisks, rowsToStore,
-  type ManualRisk, type PersistedRisk, type PersistStore, type RiskCategory, type RiskItem, type RiskRow, type RiskStatus, type TreatmentType,
-} from "@/lib/riskRegister";
+import { deriveRisks, mergeRisks, riskPatchToDb, type PersistedRisk, type RiskCategory, type RiskItem, type RiskStatus, type TreatmentType } from "@/lib/riskRegister";
+import { computeInsights, daysUntil, inherent, levelOf, residual, type FocusItem, type RiskLevel } from "@/lib/riskInsights";
 
-const ORG = process.env.NEXT_PUBLIC_ORG ?? "acme";
-
-// Types, derivation and the merge of derived risks with recorded decisions: lib/riskRegister.ts.
-
-// ── Persistence (demo mode only; real orgs use /api/risk-register/state) ──────
-
-const RISK_KEY = "tl_risk_register";
-
-// Real, server-backed via /api/risk-register/state (and synced from live
-// derivation via /api/risk-register/sync) -- was previously localStorage-
-// only, invisible to other reviewers and lost on a new device. The
-// seed-only fallback below applies solely when there's no real org to
-// persist against (offline demo mode).
-
-function loadSeedStore(): PersistStore {
-  try {
-    const raw = JSON.parse(localStorage.getItem(RISK_KEY) ?? "null");
-    if (!raw) return { overrides:{}, manuals:[] };
-    // dev-seed writes a plain array — treat it as the manuals list
-    if (Array.isArray(raw)) return { overrides:{}, manuals: raw as ManualRisk[] };
-    return { overrides: raw.overrides ?? {}, manuals: Array.isArray(raw.manuals) ? raw.manuals : [] };
-  } catch { return { overrides:{}, manuals:[] }; }
-}
-function saveSeedStore(s: PersistStore) { localStorage.setItem(RISK_KEY, JSON.stringify(s)); }
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function toNum(v: unknown): number {
-  if (typeof v === "number") return Math.min(5, Math.max(1, v));
-  const map: Record<string,number> = { LOW:1, MEDIUM:3, HIGH:4, CRITICAL:5 };
-  return map[String(v).toUpperCase()] ?? 3;
-}
-function riskScore(r: RiskItem) { return toNum(r.likelihood) * toNum(r.impact); }
-function residualScore(r: RiskItem) {
-  if (r.residual_likelihood && r.residual_impact) return r.residual_likelihood * r.residual_impact;
-  return null;
+interface Basis { repos: number; highCriticalFiles: number; attestedFiles: number; closedWithoutAttestation: number; waitingFiles: number; latestScanAt: string | null }
+interface Register {
+  risks: RiskItem[];
+  basis: Basis | null;
+  sync: { inserted: number; updated: number; reopened: number; closed: number } | null;
+  syncError: string | null;
+  capped: { shown: number; total: number } | null;
+  canEdit: boolean;
+  generatedAt: string;
 }
 
-function riskLevel(score: number): { label:string; bg:string; text:string; border:string } {
-  if (score >= 20) return { label:"CRITICAL", bg:"#ede9fe", text:"#5b21b6", border:"#c4b5fd" };
-  if (score >= 12) return { label:"HIGH",     bg:"#ffedd5", text:"#7c2d12", border:"#fed7aa" };
-  if (score >=  6) return { label:"MEDIUM",   bg:"#fef3c7", text:"#78350f", border:"#fde68a" };
-  return               { label:"LOW",      bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0" };
-}
+// ── Look ─────────────────────────────────────────────────────────────────────
 
-const STATUS_STYLE: Record<RiskStatus, { bg:string; text:string; border:string; label:string }> = {
-  open:       { bg:"#fef2f2", text:"#be123c", border:"#fecdd3", label:"Open"       },
-  mitigating: { bg:"#fffbeb", text:"#b45309", border:"#fde68a", label:"Mitigating" },
-  accepted:   { bg:"#f0f9ff", text:"#0369a1", border:"#bae6fd", label:"Accepted"   },
-  closed:     { bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0", label:"Closed"     },
+const LEVEL: Record<RiskLevel, { bg: string; text: string; border: string }> = {
+  CRITICAL: { bg: "#ede9fe", text: "#5b21b6", border: "#c4b5fd" },
+  HIGH:     { bg: "#ffedd5", text: "#7c2d12", border: "#fed7aa" },
+  MEDIUM:   { bg: "#fef3c7", text: "#78350f", border: "#fde68a" },
+  LOW:      { bg: "#f0fdf4", text: "#15803d", border: "#bbf7d0" },
 };
-
-const TREATMENT_STYLE: Record<TreatmentType, { label:string; color:string }> = {
-  mitigate: { label:"Mitigate", color:"#6366f1" },
-  accept:   { label:"Accept",   color:"#0369a1" },
-  transfer: { label:"Transfer", color:"#b45309" },
-  avoid:    { label:"Avoid",    color:"#be123c" },
+const STATUS: Record<RiskStatus, { bg: string; text: string; border: string; label: string }> = {
+  open:       { bg: "#fef2f2", text: "#be123c", border: "#fecdd3", label: "Open" },
+  mitigating: { bg: "#fffbeb", text: "#b45309", border: "#fde68a", label: "Mitigating" },
+  accepted:   { bg: "#f0f9ff", text: "#0369a1", border: "#bae6fd", label: "Accepted" },
+  closed:     { bg: "#f0fdf4", text: "#15803d", border: "#bbf7d0", label: "Closed" },
 };
-
-const CAT_LABELS: Record<RiskCategory, string> = {
-  "ai-code":"AI Code", "supply-chain":"Supply Chain", "secrets":"Credentials",
-  "compliance":"Compliance", "access":"Access Control", "infrastructure":"Infrastructure",
+const TREATMENT: Record<TreatmentType, string> = { mitigate: "Mitigate", accept: "Accept", transfer: "Transfer", avoid: "Avoid" };
+const CATEGORY: Record<RiskCategory, string> = {
+  "ai-code": "AI Code", "supply-chain": "Supply Chain", secrets: "Credentials", compliance: "Compliance", access: "Access Control", infrastructure: "Infrastructure",
 };
+const ownerLabel = (o: string) => (o === "unassigned" ? "Unassigned" : o.split("@")[0]);
+const shortRepo = (r: string) => r.split("/").pop() ?? r;
 
-function ownerLabel(o: string) { return o === "unassigned" ? "Unassigned" : o.split("@")[0]; }
-
-function fmtDate(iso?: string) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return `${d.getDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()]} ${d.getFullYear()}`;
+function ago(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return "never";
+  const s = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  return s < 10 ? "just now" : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 }
-function daysLeft(iso?: string) {
-  if (!iso) return null;
-  return Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000);
-}
+const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+/** A CSV cell: quoted, quotes doubled, and a leading = + - @ neutralised so a spreadsheet can't run it as a formula. */
+const csvCell = (v: unknown) => { const s = String(v ?? ""); return `"${(/^[=+\-@\t\r]/.test(s) ? `'${s}` : s).replace(/"/g, '""')}"`; };
 
-// ── Interactive Heat Map ───────────────────────────────────────────────────────
+// ── Pieces ───────────────────────────────────────────────────────────────────
 
-function HeatMap({ risks, onFilter }: { risks: RiskItem[]; onFilter: (l:number,i:number)=>void }) {
-  const cell = (l: number, i: number) => {
-    const score   = l * i;
-    const inCell  = risks.filter(r => r.likelihood===l && r.impact===i && r.status!=="closed");
-    const { bg, text } = riskLevel(score);
-    return (
-      <button key={`${l}-${i}`}
-        className="flex items-center justify-center rounded-lg text-[11px] font-black aspect-square transition-all hover:scale-105 hover:ring-2 hover:ring-offset-1 hover:ring-gray-400 active:scale-95"
-        style={{ background:inCell.length?bg:"#f1f5f9", color:inCell.length?text:"#94a3b8" }}
-        onClick={() => inCell.length && onFilter(l,i)}
-        title={inCell.length ? `${inCell.length} risk${inCell.length>1?"s":""} — click to filter` : "No risks"}>
-        {inCell.length > 0 ? inCell.length : ""}
-      </button>
-    );
-  };
-
+function Tile({ label, value, sub, tone, info }: { label: string; value: string | number; sub?: string; tone: string; info: { title: string; description: string; formula?: string } }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-1">
-        <div className="flex flex-col items-center justify-between h-full shrink-0">
-          {[5,4,3,2,1].map(l => (
-            <span key={l} className="text-[8px] text-gray-400 font-bold w-4 text-right leading-none py-1">{l}</span>
-          ))}
-        </div>
-        <div className="flex-1 space-y-1">
-          <div className="grid grid-cols-5 gap-1">
-            {[5,4,3,2,1].flatMap(l => [1,2,3,4,5].map(i => cell(l, i)))}
-          </div>
-          <div className="grid grid-cols-5 gap-1 mt-1">
-            {[1,2,3,4,5].map(i => (
-              <span key={i} className="text-[8px] text-gray-400 font-bold text-center">{i}</span>
-            ))}
-          </div>
-        </div>
+    <div className="rounded-2xl border p-4" style={{ background: tone + "10", borderColor: tone + "30" }}>
+      <p className="text-2xl font-black tabular-nums" style={{ color: tone }}>{value}</p>
+      <div className="mt-1 flex items-center gap-1.5">
+        <p className="text-xs font-semibold text-gray-600">{label}</p>
+        <InfoTooltip title={info.title} description={info.description} formula={info.formula} position="top" />
       </div>
-      <div className="flex items-center justify-between text-[8px] text-gray-400 pl-5">
-        <span className="font-semibold uppercase tracking-wider">← Impact →</span>
-        <div className="flex items-center gap-2">
-          {[{l:"LOW",bg:"#f0fdf4",t:"#15803d"},{l:"MED",bg:"#fef3c7",t:"#78350f"},{l:"HIGH",bg:"#ffedd5",t:"#7c2d12"},{l:"CRIT",bg:"#ede9fe",t:"#5b21b6"}].map(x=>(
-            <span key={x.l} className="flex items-center gap-0.5">
-              <span className="w-2 h-2 rounded-sm" style={{ background:x.bg,border:`1px solid ${x.t}30` }}/>
-              <span style={{ color:x.t }} className="font-bold">{x.l}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-      <p className="text-[9px] text-gray-400 pl-5">Click a cell to filter by that L×I coordinate</p>
+      {sub && <p className="mt-0.5 text-[11px] text-gray-500">{sub}</p>}
     </div>
   );
 }
 
-// ── Add Risk Form ──────────────────────────────────────────────────────────────
-
-interface NewRisk {
-  title: string; description: string; category: RiskCategory;
-  likelihood: number; impact: number; owner: string;
-  due_date: string; mitigation: string; treatment: TreatmentType;
-  related_cve: string; related_link: string;
+function HeatMap({ risks, selected, onPick }: { risks: RiskItem[]; selected: [number, number] | null; onPick: (l: number, i: number) => void }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1">
+        <div className="flex h-full shrink-0 flex-col items-center justify-between">
+          {[5, 4, 3, 2, 1].map(l => <span key={l} className="w-4 py-1 text-right text-[8px] font-bold leading-none text-gray-400">{l}</span>)}
+        </div>
+        <div className="flex-1 space-y-1">
+          <div className="grid grid-cols-5 gap-1">
+            {[5, 4, 3, 2, 1].flatMap(l => [1, 2, 3, 4, 5].map(i => {
+              const n = risks.filter(r => r.status !== "closed" && r.likelihood === l && r.impact === i).length;
+              const c = LEVEL[levelOf(l * i)];
+              const on = selected?.[0] === l && selected?.[1] === i;
+              return (
+                <button key={`${l}-${i}`} disabled={n === 0} onClick={() => onPick(l, i)} aria-pressed={on}
+                  aria-label={`Likelihood ${l}, impact ${i}: ${n} active risk${n === 1 ? "" : "s"}`}
+                  className={`flex aspect-square items-center justify-center rounded-lg text-[11px] font-black transition-all ${n ? "hover:scale-105" : "cursor-default"} ${on ? "ring-2 ring-indigo-500 ring-offset-1" : ""}`}
+                  style={{ background: n ? c.bg : "#f1f5f9", color: n ? c.text : "#94a3b8" }}>
+                  {n || ""}
+                </button>
+              );
+            }))}
+          </div>
+          <div className="grid grid-cols-5 gap-1">
+            {[1, 2, 3, 4, 5].map(i => <span key={i} className="text-center text-[8px] font-bold text-gray-400">{i}</span>)}
+          </div>
+        </div>
+      </div>
+      <p className="pl-5 text-[9px] text-gray-400">Impact → across, Likelihood ↑ up. Click a cell to filter the list.</p>
+    </div>
+  );
 }
 
-const BLANK: NewRisk = {
-  title:"", description:"", category:"ai-code", likelihood:3, impact:3,
-  owner:"unassigned", due_date:"", mitigation:"", treatment:"mitigate",
-  related_cve:"", related_link:"",
-};
+function ExposureBars({ title, rows, label, onPick }: { title: string; rows: Array<{ key: string; active: number; critical: number; score: number }>; label: (k: string) => string; onPick: (k: string) => void }) {
+  const max = Math.max(1, ...rows.map(r => r.score));
+  return (
+    <div>
+      <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-gray-400">{title}</p>
+      {rows.length === 0 ? <p className="text-xs text-gray-400">Nothing active.</p> : (
+        <ul className="space-y-1.5">
+          {rows.map(r => (
+            <li key={r.key}>
+              <button onClick={() => onPick(r.key)} className="group w-full text-left" title={`Filter to ${label(r.key)}`}>
+                <div className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="truncate font-semibold text-gray-700 group-hover:text-indigo-700">{label(r.key)}</span>
+                  <span className="shrink-0 tabular-nums text-gray-500">{plural(r.active, "risk")}{r.critical > 0 && <span className="font-bold text-violet-700"> · {r.critical} critical</span>}</span>
+                </div>
+                <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.max(4, (r.score / max) * 100)}%` }} /></div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
-// ── Page ───────────────────────────────────────────────────────────────────────
+function FocusList({ items, onOpen }: { items: FocusItem[]; onOpen: (id: string) => void }) {
+  return (
+    <section aria-label="Act on first" className="section-card p-5">
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="text-sm font-black text-gray-900">Act on first</h2>
+        <InfoTooltip title="Act on first" description="Active risks ranked by what is late, how severe they are and whether anyone owns them. Overdue risks lead, then critical and high ones, then those due within a week." position="right" size="sm" />
+      </div>
+      {items.length === 0 ? <p className="text-sm text-gray-500">Nothing urgent: no overdue, critical or unowned risks.</p> : (
+        <ol className="space-y-2">
+          {items.map(f => {
+            const c = LEVEL[f.level];
+            return (
+              <li key={f.id}>
+                <button onClick={() => onOpen(f.id)} className="flex w-full items-start gap-3 rounded-xl border border-gray-100 p-3 text-left transition-colors hover:bg-gray-50">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border text-sm font-black" style={{ background: c.bg, color: c.text, borderColor: c.border }}>{f.score}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-bold text-gray-900">{f.title}</span>
+                    <span className="mt-0.5 flex flex-wrap gap-1.5">
+                      {f.reasons.map(r => <span key={r} className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${r.startsWith("Overdue") ? "bg-rose-50 text-rose-700" : r === "Nobody owns it" ? "bg-amber-50 text-amber-700" : "bg-gray-100 text-gray-600"}`}>{r}</span>)}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
 
+interface NewRisk { title: string; description: string; category: RiskCategory; likelihood: number; impact: number; owner: string; due_date: string; mitigation: string; treatment: TreatmentType; related_cve: string }
+const BLANK: NewRisk = { title: "", description: "", category: "ai-code", likelihood: 3, impact: 3, owner: "unassigned", due_date: "", mitigation: "", treatment: "mitigate", related_cve: "" };
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+type StatusFilter = "active" | RiskStatus | "all";
 
 export default function RiskRegisterPage() {
-    const tz = useTimezone();
   const { profile } = useAuth();
   const { permissions } = useRole();
   const { error: toastError } = useToastHelpers();
-  const [store,        setStore]        = useState<PersistStore>({ overrides:{}, manuals:[] });
-  const [derivedRisks, setDerivedRisks] = useState<RiskItem[]>([]);
-  const [owners,       setOwners]       = useState<string[]>([]);
-  const [loading,      setLoading]      = useState(true);
-  const [refreshing,   setRefreshing]   = useState(false);
-  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
-  const [filterStatus, setFilterStatus] = useState<RiskStatus | "all">("all");
-  const [filterCat,    setFilterCat]    = useState<RiskCategory | "all">("all");
-  const [filterOwner,  setFilterOwner]  = useState("all");
-  const [filterRepo,   setFilterRepo]   = useState("all");
-  const [heatFilter,   setHeatFilter]   = useState<[number,number]|null>(null);
-  const [search,       setSearch]       = useState("");
-  const [sortBy,       setSortBy]       = useState<"score" | "due">("score");
-  const [expanded,     setExpanded]     = useState<string | null>(null);
-  const [showAddForm,  setShowAddForm]  = useState(false);
-  const [newRisk,      setNewRisk]      = useState<NewRisk>(BLANK);
-  const [noteInput,    setNoteInput]    = useState<Record<string,string>>({});
+  const orgId = profile?.org_id;
 
-  const loadStoreFromServer = useCallback(() => {
-    if (isSeedMode() && !profile?.org_id) { setStore(loadSeedStore()); return; }
-    if (!profile?.org_id) return;
-    authedFetch<{ risks: RiskRow[] }>("/api/risk-register/state")
-      .then(res => setStore(rowsToStore(res.risks ?? [])))
-      .catch(() => { /* keep whatever's already loaded -- page still works on derived data alone */ });
-  }, [profile?.org_id]);
+  const [reg, setReg] = useState<Register | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [owners, setOwners] = useState<string[]>([]);
+  const [status, setStatus] = useState<StatusFilter>("active");
+  const [category, setCategory] = useState<RiskCategory | "all">("all");
+  const [owner, setOwner] = useState("all");
+  const [repo, setRepo] = useState("all");
+  const [cell, setCell] = useState<[number, number] | null>(null);
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState<"score" | "due">("score");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newRisk, setNewRisk] = useState<NewRisk>(BLANK);
+  const [noteInput, setNoteInput] = useState<Record<string, string>>({});
+  const loadedAt = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { loadStoreFromServer(); }, [loadStoreFromServer]);
-
-  const fetchData = useCallback(async (spinner = false) => {
+  const load = useCallback(async (spinner = false) => {
     if (spinner) setRefreshing(true);
-    const seed = readSeed();
-    const [data, settings] = await Promise.all([
-      seed ?? api.dashboard(ORG, 90).catch(() => null),
-      api.settings().catch(() => null),
-    ]);
-    const memberEmails = (settings?.members ?? []).map(m => m.email).filter(Boolean);
-    setOwners(memberEmails);
-    if (data) {
-      const scanPromises = data.repos.filter(r=>r.latest_scan_id).map(r=>api.getScan(r.latest_scan_id).catch(()=>null));
-      const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s!==null);
-      // Server statuses (resolved on any device) plus this tab's just-made sign-offs; demo data keeps its own.
-      const derived = deriveRisks(patchDataWithAttestations(data, seed ? undefined : await loadStatuses()), scans);
-      setDerivedRisks(derived);
-      setLastRefreshed(new Date());
-
-      // Record the derived risks in the database (title, category, likelihood/impact, repo, CWE, link) without
-      // touching any human-set workflow field -- see /api/risk-register/sync -- then reload the stored state, so
-      // a first-seen risk gets its row (status / owner changes need one) and a reappearing one is reopened.
-      // An empty batch is sent too: it closes risks that are no longer derived. Skipped in offline demo mode.
-      if (!(isSeedMode() && !profile?.org_id) && profile?.org_id && permissions.canTriage) {
-        authedFetch("/api/risk-register/sync", {
-          method: "POST",
-          body: JSON.stringify({
-            risks: derived.map(r => ({
-              id: r.id, title: r.title, description: r.description, category: r.category,
-              likelihood: r.likelihood, impact: r.impact, repo: r.repo,
-              related_cve: r.related_cve, related_cwe: r.related_cwe, related_link: r.related_link,
-            })),
-          }),
-        }).then(() => loadStoreFromServer(), () => { /* best-effort -- page still works from derived + last-known store */ });
-      }
+    try {
+      if (isSeedMode() && !orgId) {
+        const seed = readSeed();
+        const derived = seed ? deriveRisks(patchDataWithAttestations(seed), []) : [];
+        setReg(prev => ({ risks: mergeRisks(derived, { overrides: {}, manuals: prev?.risks.filter(r => !r.auto_derived).map(r => ({ ...r, _manual: true as const })) ?? [] }), basis: null, sync: null, syncError: null, capped: null, canEdit: true, generatedAt: new Date().toISOString() }));
+        setLoadError(null);
+      } else if (orgId) {
+        setReg(await authedFetch<Register>("/api/risk-register"));
+        setLoadError(null);
+      } else return;
+      loadedAt.current = Date.now();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "We couldn't load the risk register.");
+    } finally {
+      setLoading(false);
+      if (spinner) setRefreshing(false);
     }
-    setLoading(false); if (spinner) setRefreshing(false);
-  }, [profile?.org_id, permissions.canTriage, loadStoreFromServer]);
+  }, [orgId]);
 
-  // No auto-poll interval: fetchData fans out to one scan fetch per repo with
-  // no cap, the heaviest per-tick cost of any page in the app. The Refresh
-  // button above covers on-demand updates; focus still re-syncs.
+  useEffect(() => { void load(); }, [load]);
   useEffect(() => {
-    fetchData();
-    const onFocus = () => fetchData();
+    const onFocus = () => { if (Date.now() - loadedAt.current > 60_000) void load(); };   // not on every focus: the register is already live
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load]);
+  useEffect(() => {
+    let live = true;
+    api.settings().then(s => { if (live) setOwners((s?.members ?? []).map(m => m.email).filter(Boolean)); }).catch(() => undefined);
+    return () => { live = false; };
   }, []);
 
-  // Merge derived + manual, apply overrides
-  const allRisks = useMemo<RiskItem[]>(() => mergeRisks(derivedRisks, store), [derivedRisks, store]);
+  const risks = useMemo(() => reg?.risks ?? [], [reg]);
+  const canEdit = reg ? reg.canEdit : permissions.canTriage;
+  const ins = useMemo(() => computeInsights(risks), [risks]);
+  const ownerChoices = useMemo(() => [...new Set(["unassigned", ...owners, ...risks.map(r => r.owner)])], [owners, risks]);
+  const repos = useMemo(() => [...new Set(risks.map(r => r.repo).filter((r): r is string => !!r))].sort(), [risks]);
 
-  async function updateOverride(id: string, patch: Partial<PersistedRisk>) {
-    const prevStore = store;
-    const next = { ...store, overrides: { ...store.overrides, [id]: { ...store.overrides[id], ...patch } } };
-    setStore(next);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = risks.filter(r =>
+      (status === "all" || (status === "active" ? r.status !== "closed" : r.status === status))
+      && (category === "all" || r.category === category)
+      && (owner === "all" || r.owner === owner)
+      && (repo === "all" || r.repo === repo)
+      && (!cell || (r.likelihood === cell[0] && r.impact === cell[1]))
+      && (!q || [r.title, r.description, r.id, r.related_cve ?? "", r.related_cwe ?? "", r.repo ?? ""].join(" ").toLowerCase().includes(q)));
+    const now = new Date();
+    return list.sort((a, b) => {
+      if (sortBy === "due") {
+        const da = daysUntil(a.due_date, now), db = daysUntil(b.due_date, now);
+        if (da == null && db == null) return inherent(b) - inherent(a);
+        if (da == null) return 1;
+        if (db == null) return -1;
+        return da - db;
+      }
+      return inherent(b) - inherent(a) || a.id.localeCompare(b.id);
+    });
+  }, [risks, status, category, owner, repo, cell, search, sortBy]);
 
-    if (isSeedMode() && !profile?.org_id) { saveSeedStore(next); return; }
+  const filtersOn = status !== "active" || category !== "all" || owner !== "all" || repo !== "all" || cell != null || search !== "";
+  const clearFilters = () => { setStatus("active"); setCategory("all"); setOwner("all"); setRepo("all"); setCell(null); setSearch(""); };
 
+  /** Change a risk: shown at once, saved, and put back with a message if it can't be saved. */
+  async function edit(id: string, patch: Partial<PersistedRisk>) {
+    const before = reg;
+    setReg(r => (r ? { ...r, risks: r.risks.map(x => (x.id === id ? { ...x, ...(patch as Partial<RiskItem>) } : x)) } : r));
+    if (isSeedMode() && !orgId) return;
     try {
-      await authedFetch("/api/risk-register/state", {
-        method: "PATCH",
-        body: JSON.stringify({ external_id: id, patch }),
-      });
+      await authedFetch("/api/risk-register/state", { method: "PATCH", body: JSON.stringify({ external_id: id, patch: riskPatchToDb(patch) }) });
     } catch (err) {
-      setStore(prevStore);
+      setReg(before);
       toastError("Couldn't update risk", err instanceof Error ? err.message : undefined);
     }
   }
 
-  function addNote(id: string) {
-    const text = noteInput[id]?.trim();
+  function addNote(r: RiskItem) {
+    const text = noteInput[r.id]?.trim();
     if (!text) return;
-    const r = allRisks.find(x=>x.id===id);
-    const existing = store.overrides[id]?.notes ?? r?.notes ?? [];
-    const date = new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});
-    updateOverride(id, { notes:[...existing, `${date}: ${text}`] });
-    setNoteInput(p=>({...p,[id]:""}));
+    const date = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    void edit(r.id, { notes: [...r.notes, `${date}: ${text}`] });
+    setNoteInput(p => ({ ...p, [r.id]: "" }));
   }
 
-  async function addManualRisk() {
+  async function addManual() {
     if (!newRisk.title.trim()) return;
     const id = `MR-${Date.now()}`;
-    const item: ManualRisk = {
-      _manual:true, id, auto_derived:false,
-      title:       newRisk.title.trim(),
-      description: newRisk.description.trim(),
-      category:    newRisk.category,
-      likelihood:  newRisk.likelihood as 1|2|3|4|5,
-      impact:      newRisk.impact as 1|2|3|4|5,
-      status:      "open",
-      treatment:   newRisk.treatment,
-      owner:       newRisk.owner,
-      due_date:    newRisk.due_date || undefined,
-      mitigation:  newRisk.mitigation.trim(),
-      related_cve: newRisk.related_cve.trim() || undefined,
-      related_link:newRisk.related_link.trim() || undefined,
-      identified_at:new Date().toISOString().split("T")[0],
-      notes:[],
+    const item: RiskItem = {
+      id, auto_derived: false, title: newRisk.title.trim(), description: newRisk.description.trim(), category: newRisk.category,
+      likelihood: newRisk.likelihood as RiskItem["likelihood"], impact: newRisk.impact as RiskItem["impact"], status: "open", treatment: newRisk.treatment,
+      owner: newRisk.owner, due_date: newRisk.due_date || undefined, mitigation: newRisk.mitigation.trim(), related_cve: newRisk.related_cve.trim() || undefined,
+      identified_at: new Date().toISOString().split("T")[0], notes: [],
     };
-
-    if (isSeedMode() && !profile?.org_id) {
-      const next = { ...store, manuals:[...store.manuals, item] };
-      setStore(next); saveSeedStore(next);
-      setNewRisk(BLANK); setShowAddForm(false);
-      return;
+    if (!(isSeedMode() && !orgId)) {
+      try {
+        await authedFetch("/api/risk-register/state", { method: "POST", body: JSON.stringify({
+          external_id: id, title: item.title, description: item.description, category: item.category, likelihood: item.likelihood, impact: item.impact,
+          treatment: item.treatment, owner_email: item.owner === "unassigned" ? undefined : item.owner, due_date: item.due_date, mitigation: item.mitigation, related_cve: item.related_cve,
+        }) });
+      } catch (err) { toastError("Couldn't add risk", err instanceof Error ? err.message : undefined); return; }
     }
-
-    try {
-      await authedFetch("/api/risk-register/state", {
-        method: "POST",
-        body: JSON.stringify({
-          external_id: id, title: item.title, description: item.description, category: item.category,
-          likelihood: item.likelihood, impact: item.impact, treatment: item.treatment,
-          owner_email: item.owner, due_date: item.due_date, mitigation: item.mitigation,
-          related_cve: item.related_cve, related_link: item.related_link,
-        }),
-      });
-      setStore(prev => ({ ...prev, manuals:[...prev.manuals, item] }));
-      setNewRisk(BLANK);
-      setShowAddForm(false);
-    } catch (err) {
-      toastError("Couldn't add risk", err instanceof Error ? err.message : undefined);
-    }
+    setReg(r => (r ? { ...r, risks: [item, ...r.risks] } : r));
+    setNewRisk(BLANK); setShowAdd(false);
   }
 
   async function deleteManual(id: string) {
-    const prevStore = store;
-    const next = { ...store, manuals: store.manuals.filter(m=>m.id!==id) };
-    setStore(next);
-
-    if (isSeedMode() && !profile?.org_id) { saveSeedStore(next); return; }
-
-    try {
-      await authedFetch("/api/risk-register/state", { method: "DELETE", body: JSON.stringify({ external_id: id }) });
-    } catch (err) {
-      setStore(prevStore);
-      toastError("Couldn't remove risk", err instanceof Error ? err.message : undefined);
-    }
+    const before = reg;
+    setReg(r => (r ? { ...r, risks: r.risks.filter(x => x.id !== id) } : r));
+    if (isSeedMode() && !orgId) return;
+    try { await authedFetch("/api/risk-register/state", { method: "DELETE", body: JSON.stringify({ external_id: id }) }); }
+    catch (err) { setReg(before); toastError("Couldn't remove risk", err instanceof Error ? err.message : undefined); }
   }
 
-  const repos = useMemo(() => Array.from(new Set(allRisks.filter(r => r.repo).map(r => r.repo as string))), [allRisks]);
-
-  const filtered = useMemo(() => {
-    const list = allRisks.filter(r => {
-      if (filterStatus !== "all" && r.status   !== filterStatus) return false;
-      if (filterCat    !== "all" && r.category !== filterCat)    return false;
-      if (filterOwner  !== "all" && r.owner    !== filterOwner)  return false;
-      if (filterRepo   !== "all" && r.repo     !== filterRepo)   return false;
-      if (heatFilter   !== null  && !(r.likelihood===heatFilter[0] && r.impact===heatFilter[1])) return false;
-      if (search) { const q=search.toLowerCase(); if (![r.title,r.description,r.id,r.related_cve??"",r.related_cwe??""].join(" ").toLowerCase().includes(q)) return false; }
-      return true;
-    });
-    if (sortBy === "score") return list.sort((a,b) => riskScore(b) - riskScore(a));
-    return [...list].sort((a,b) => {
-      const da = daysLeft(a.due_date), db = daysLeft(b.due_date);
-      if (da===null && db===null) return riskScore(b) - riskScore(a);
-      if (da===null) return 1;
-      if (db===null) return -1;
-      return da - db;
-    });
-  }, [allRisks, filterStatus, filterCat, filterOwner, filterRepo, heatFilter, search, sortBy]);
-
-  const openRisks  = allRisks.filter(r=>r.status==="open").length;
-  const overdueRisks = allRisks.filter(r=>r.status!=="closed" && (daysLeft(r.due_date)??Infinity)<0).length;
-  const dueSoonRisks = allRisks.filter(r=>{ const d=daysLeft(r.due_date); return r.status!=="closed" && d!==null && d>=0 && d<=7; }).length;
-  const critRisks  = allRisks.filter(r=>riskScore(r)>=20&&r.status!=="closed").length;
-  const avgInherent= allRisks.filter(r=>r.status!=="closed").length>0
-    ? (allRisks.filter(r=>r.status!=="closed").reduce((s,r)=>s+riskScore(r),0)/allRisks.filter(r=>r.status!=="closed").length).toFixed(1)
-    : "0";
-  const avgResidual= allRisks.filter(r=>r.status!=="closed"&&r.residual_likelihood&&r.residual_impact).length>0
-    ? (allRisks.filter(r=>r.status!=="closed"&&r.residual_likelihood&&r.residual_impact).reduce((s,r)=>s+(r.residual_likelihood!*r.residual_impact!),0)/allRisks.filter(r=>r.status!=="closed"&&r.residual_likelihood&&r.residual_impact).length).toFixed(1)
-    : "—";
+  function openRisk(id: string) {
+    setStatus("all"); setExpanded(id);
+    setTimeout(() => document.getElementById(`risk-${id}`)?.scrollIntoView?.({ behavior: "smooth", block: "center" }), 50);
+  }
 
   function exportCSV() {
-    const rows = [
-      ["ID","Title","Category","Likelihood","Impact","Score","Level","Residual Score","Status","Treatment","Owner","Due","CVE","CWE","Identified"],
-      ...filtered.map(r=>[r.id,r.title,CAT_LABELS[r.category],r.likelihood,r.impact,riskScore(r),riskLevel(riskScore(r)).label,residualScore(r)??"—",r.status,r.treatment,r.owner,r.due_date??"",r.related_cve??"",r.related_cwe??"",r.identified_at]),
-    ];
-    const blob=new Blob([rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n")],{type:"text/csv"});
-    Object.assign(document.createElement("a"),{href:URL.createObjectURL(blob),download:"risk-register.csv"}).click();
+    const head = ["ID", "Title", "Repository", "Category", "Likelihood", "Impact", "Score", "Level", "Residual score", "Status", "Treatment", "Owner", "Due", "CVE", "CWE", "Identified", "Source"];
+    const rows = filtered.map(r => [r.id, r.title, r.repo ?? "", CATEGORY[r.category] ?? r.category, r.likelihood, r.impact, inherent(r), levelOf(inherent(r)), residual(r) ?? "", r.status, r.treatment, r.owner, r.due_date ?? "", r.related_cve ?? "", r.related_cwe ?? "", r.identified_at, r.auto_derived ? "Derived from scans" : "Added manually"]);
+    const blob = new Blob([[head, ...rows].map(r => r.map(csvCell).join(",")).join("\n")], { type: "text/csv" });
+    Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "risk-register.csv" }).click();
   }
 
-  const refreshAgo = lastRefreshed ? (() => { const s=Math.floor((Date.now()-lastRefreshed.getTime())/1000); return s<10?"just now":s<60?`${s}s ago`:`${Math.floor(s/60)}m ago`; })() : "";
+  const basis = reg?.basis;
+  const meter = limitStatus(risks.length, CAPS.riskRegisterSync.value);
+  const sync = reg?.sync;
+  const syncParts = sync ? [sync.inserted && `${sync.inserted} new`, sync.closed && `${sync.closed} closed because their files are now attested or fixed`, sync.reopened && `${sync.reopened} reopened`].filter(Boolean) : [];
 
   return (
     <AuthGuard>
       <PageSkeleton loading={loading} label="risks" rows={5} cards={4}>
-      <div className="max-w-7xl mx-auto space-y-5 pb-10">
+        <div className="mx-auto max-w-7xl space-y-5 pb-10">
 
-        {/* Header */}
-        <div className="animate-fade-up flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <div className="flex items-center gap-2.5 mb-1">
-              <div className="w-8 h-8 rounded-xl flex items-center justify-center"
-                style={{ background:"rgba(239,68,68,0.1)", border:"1px solid rgba(239,68,68,0.2)" }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                  <line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
+          {/* Header */}
+          <div className="animate-fade-up flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="mb-1 flex items-center gap-2.5">
+                <h1 className="text-xl font-black tracking-tight text-gray-900">Risk Register</h1>
+                {ins.open > 0 && <span className="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-black text-white">{ins.open} open</span>}
               </div>
-              <h1 className="text-xl font-black text-gray-900 tracking-tight">Risk Register</h1>
-              {openRisks>0&&<span className="text-xs font-black text-white bg-rose-500 px-2 py-0.5 rounded-full">{openRisks} open</span>}
+              <p className="text-sm text-gray-400">ISO 31000 risk log. Derived from your latest scans and attestations, plus risks you add.</p>
             </div>
-            <p className="text-sm text-gray-400">
-              Formal ISO 31000 risk log — derived from live scan data + manually entered · auto-refreshes every 30 s
-            </p>
-          </div>
-          <div className="flex flex-col items-end gap-0.5">
             <div className="flex items-center gap-2">
-              {permissions.canTriage && (
-                <button onClick={() => setShowAddForm(v=>!v)}
-                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl border transition-all shadow-sm ${showAddForm?"text-indigo-800 bg-indigo-100 border-indigo-300":"text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100"}`}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                  Add Risk
-                </button>
+              {canEdit && (
+                <button onClick={() => setShowAdd(v => !v)} aria-expanded={showAdd}
+                  className={`rounded-xl border px-3 py-2 text-xs font-bold shadow-sm transition-all ${showAdd ? "border-indigo-300 bg-indigo-100 text-indigo-800" : "border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"}`}>+ Add Risk</button>
               )}
-              <button onClick={exportCSV}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Export
-              </button>
-              <button onClick={() => fetchData(true)} disabled={refreshing}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm">
-                <svg className={refreshing?"animate-spin":""} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                Refresh
+              <button onClick={exportCSV} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 shadow-sm hover:bg-gray-50">Export</button>
+              <button onClick={() => void load(true)} disabled={refreshing} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 shadow-sm hover:bg-gray-50 disabled:opacity-50">
+                {refreshing ? "Refreshing…" : "Refresh"}
               </button>
             </div>
-            {refreshAgo&&<span className="text-[9px] text-gray-400">Updated {refreshAgo}</span>}
           </div>
-        </div>
 
-        {/* Add Risk form */}
-        {showAddForm && (
-          <div className="animate-fade-up section-card p-5 space-y-4">
-            <p className="text-sm font-bold text-gray-900">Add Manual Risk</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="sm:col-span-2">
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Title *</label>
-                <input value={newRisk.title} onChange={e=>setNewRisk(p=>({...p,title:e.target.value}))}
-                  placeholder="Brief risk title"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-              </div>
-              <div className="sm:col-span-2">
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Description</label>
-                <textarea value={newRisk.description} onChange={e=>setNewRisk(p=>({...p,description:e.target.value}))}
-                  placeholder="Risk description and context"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none" rows={2} />
-              </div>
-              {[
-                { label:"Category", field:"category", options:Object.entries(CAT_LABELS).map(([k,v])=>({value:k,label:v})) },
-                { label:"Treatment (ISO 31000)", field:"treatment", options:[{value:"mitigate",label:"Mitigate"},{value:"accept",label:"Accept"},{value:"transfer",label:"Transfer"},{value:"avoid",label:"Avoid"}] },
-                { label:"Owner", field:"owner", options:(owners.length?owners:["unassigned"]).map(o=>({value:o,label:ownerLabel(o)})) },
-              ].map(f=>(
-                <div key={f.field}>
-                  <label className="block text-[10px] font-semibold text-gray-500 mb-1">{f.label}</label>
-                  <select value={String((newRisk as unknown as Record<string,string>)[f.field])} onChange={e=>setNewRisk(p=>({...p,[f.field]:e.target.value}))}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none">
-                    {f.options.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </div>
-              ))}
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Due Date</label>
-                <input type="date" value={newRisk.due_date} onChange={e=>setNewRisk(p=>({...p,due_date:e.target.value}))}
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Likelihood (1–5)</label>
-                <input type="range" min={1} max={5} value={newRisk.likelihood} onChange={e=>setNewRisk(p=>({...p,likelihood:Number(e.target.value)}))}
-                  className="w-full" />
-                <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
-                  <span>Rare (1)</span><span className="font-bold text-gray-700">{newRisk.likelihood}</span><span>Certain (5)</span>
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Impact (1–5)</label>
-                <input type="range" min={1} max={5} value={newRisk.impact} onChange={e=>setNewRisk(p=>({...p,impact:Number(e.target.value)}))}
-                  className="w-full" />
-                <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
-                  <span>Minor (1)</span><span className="font-bold text-gray-700">{newRisk.impact}</span><span>Critical (5)</span>
-                </div>
-              </div>
-              <div className="sm:col-span-2">
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Mitigation Plan</label>
-                <textarea value={newRisk.mitigation} onChange={e=>setNewRisk(p=>({...p,mitigation:e.target.value}))}
-                  placeholder="Describe the mitigation plan or acceptance rationale"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none" rows={2} />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-gray-500 mb-1">Related CVE (optional)</label>
-                <input value={newRisk.related_cve} onChange={e=>setNewRisk(p=>({...p,related_cve:e.target.value}))}
-                  placeholder="CVE-2023-XXXXX"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 focus:outline-none" />
-              </div>
+          {/* Where this comes from: so the register can be checked against the attestation data */}
+          {loadError && (
+            <div role="alert" className="flex items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+              <span className="flex-1">{loadError}{reg ? " Showing the last loaded register." : ""}</span>
+              <button onClick={() => void load(true)} className="font-bold underline">Try again</button>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1 text-xs text-gray-500 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200">
-                <span>Score:</span>
-                <span className="font-black ml-1" style={{ color:riskLevel(newRisk.likelihood*newRisk.impact).text }}>
-                  {newRisk.likelihood*newRisk.impact} — {riskLevel(newRisk.likelihood*newRisk.impact).label}
-                </span>
-              </div>
-              <button onClick={addManualRisk} disabled={!newRisk.title.trim()}
-                className="px-4 py-2 text-sm font-bold text-white rounded-xl disabled:opacity-40 transition-colors"
-                style={{ background:"linear-gradient(135deg,#6366f1,#7c3aed)" }}>
-                Add to Register
-              </button>
-              <button onClick={() => { setShowAddForm(false); setNewRisk(BLANK); }}
-                className="px-4 py-2 text-sm font-semibold text-gray-500 hover:text-gray-700 rounded-xl transition-colors">
-                Cancel
-              </button>
+          )}
+          {basis && (
+            <div className="animate-fade-up rounded-xl border border-gray-200 bg-white px-4 py-3 text-xs leading-relaxed text-gray-600" data-testid="register-basis">
+              <p>
+                <strong className="text-gray-800">Live from your scans.</strong> {plural(basis.repos, "repository", "repositories")}, latest scan {ago(basis.latestScanAt)}.{" "}
+                Of {plural(basis.highCriticalFiles, "high/critical file")}: <strong>{basis.attestedFiles} attested</strong>
+                {basis.closedWithoutAttestation > 0 && <>, {basis.closedWithoutAttestation} closed without a sign-off</>}, <strong>{basis.waitingFiles} waiting</strong>.{" "}
+                Attesting a file closes its risk the next time this page loads.
+              </p>
+              {syncParts.length > 0 && <p className="mt-1 text-gray-500">Register updated: {syncParts.join(", ")}.</p>}
             </div>
-          </div>
-        )}
+          )}
+          {reg?.syncError && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">{reg.syncError}</div>}
+          {reg && !reg.canEdit && <div role="status" className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-xs text-gray-600">You can view the register. Changing risks needs the security reviewer role or above.</div>}
+          {reg?.capped && <CapNotice cap="riskRegisterSync" shown={reg.capped.shown} total={reg.capped.total} noun="risks" />}
+          {meter.level !== "ok" && meter.level !== "unlimited" && !reg?.capped && (
+            <div className="rounded-xl border border-gray-200 bg-white px-4 py-3"><LimitMeter label="Risks in the register" noun="risks" used={risks.length} limit={CAPS.riskRegisterSync.value} upgradeHref={null} compact /></div>
+          )}
 
-        {/* Summary + Heat Map */}
-        <div className="animate-fade-up grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-5">
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-              {[
-                { label:"Open Risks",   value:openRisks,   color:"#ef4444", bg:"#fef2f2", info:{ title:"Open Risks",      description:"Risks in 'Open' status — identified but not yet being actively mitigated or accepted. Open risks are the primary action list." } },
-                { label:"Overdue",      value:overdueRisks,color:"#be123c", bg:"#fff1f2", info:{ title:"Overdue Risks",    description:"Non-closed risks whose due date has passed. These need immediate owner follow-up." } },
-                { label:"Critical",     value:critRisks,   color:"#7c3aed", bg:"#ede9fe", info:{ title:"Critical Risks",   description:"Risks with inherent score ≥ 20 (Likelihood × Impact) that are not yet closed. Critical = L×I ≥ 20. Requires immediate executive attention." } },
-                { label:"Avg Inherent", value:avgInherent, color:"#f97316", bg:"#fff7ed", info:{ title:"Avg Inherent Risk", description:"Average inherent risk score before any mitigation controls are applied, across all non-closed risks.", formula:"sum(Likelihood × Impact) ÷ non_closed_risks" } },
-                { label:"Avg Residual", value:avgResidual, color:"#10b981", bg:"#f0fdf4", info:{ title:"Avg Residual Risk", description:"Average residual risk score after mitigation controls are applied. Residual should be lower than inherent. Only shown for risks with residual values set.", formula:"sum(Residual_L × Residual_I) ÷ risks_with_residual" } },
-              ].map(s=>(
-                <div key={s.label} className="rounded-2xl p-4 border" style={{ background:s.bg, borderColor:s.color+"30" }}>
-                  <p className="text-2xl font-black tabular-nums" style={{ color:s.color }}>{s.value}</p>
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <p className="text-xs font-semibold text-gray-500">{s.label}</p>
-                    <InfoTooltip title={s.info.title} description={s.info.description} formula={s.info.formula} position="top" />
-                  </div>
-                </div>
-              ))}
-            </div>
-            {heatFilter && (
-              <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2.5">
-                <span className="text-xs font-bold text-indigo-700">Filtering: L={heatFilter[0]} × I={heatFilter[1]} (score {heatFilter[0]*heatFilter[1]})</span>
-                <button onClick={()=>setHeatFilter(null)} className="ml-auto text-xs font-bold text-indigo-600 hover:text-indigo-800">Clear ✕</button>
+          {/* Add risk */}
+          {showAdd && canEdit && (
+            <div className="animate-fade-up section-card space-y-4 p-5">
+              <p className="text-sm font-bold text-gray-900">Add Manual Risk</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="sm:col-span-2 text-[10px] font-semibold text-gray-500">Title *
+                  <input value={newRisk.title} onChange={e => setNewRisk(p => ({ ...p, title: e.target.value }))} placeholder="Brief risk title" className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400" /></label>
+                <label className="sm:col-span-2 text-[10px] font-semibold text-gray-500">Description
+                  <textarea value={newRisk.description} onChange={e => setNewRisk(p => ({ ...p, description: e.target.value }))} rows={2} className="mt-1 w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400" /></label>
+                <label className="text-[10px] font-semibold text-gray-500">Category
+                  <select value={newRisk.category} onChange={e => setNewRisk(p => ({ ...p, category: e.target.value as RiskCategory }))} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700">
+                    {(Object.keys(CATEGORY) as RiskCategory[]).map(c => <option key={c} value={c}>{CATEGORY[c]}</option>)}</select></label>
+                <label className="text-[10px] font-semibold text-gray-500">Treatment (ISO 31000)
+                  <select value={newRisk.treatment} onChange={e => setNewRisk(p => ({ ...p, treatment: e.target.value as TreatmentType }))} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700">
+                    {(Object.keys(TREATMENT) as TreatmentType[]).map(t => <option key={t} value={t}>{TREATMENT[t]}</option>)}</select></label>
+                <label className="text-[10px] font-semibold text-gray-500">Owner
+                  <select value={newRisk.owner} onChange={e => setNewRisk(p => ({ ...p, owner: e.target.value }))} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700">
+                    {ownerChoices.map(o => <option key={o} value={o}>{ownerLabel(o)}</option>)}</select></label>
+                <label className="text-[10px] font-semibold text-gray-500">Due date
+                  <input type="date" value={newRisk.due_date} onChange={e => setNewRisk(p => ({ ...p, due_date: e.target.value }))} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700" /></label>
+                <label className="text-[10px] font-semibold text-gray-500">Likelihood (1–5)
+                  <input type="range" min={1} max={5} value={newRisk.likelihood} onChange={e => setNewRisk(p => ({ ...p, likelihood: Number(e.target.value) }))} className="w-full" />
+                  <span className="flex justify-between text-[9px] text-gray-400"><span>Rare</span><span className="font-bold text-gray-700">{newRisk.likelihood}</span><span>Certain</span></span></label>
+                <label className="text-[10px] font-semibold text-gray-500">Impact (1–5)
+                  <input type="range" min={1} max={5} value={newRisk.impact} onChange={e => setNewRisk(p => ({ ...p, impact: Number(e.target.value) }))} className="w-full" />
+                  <span className="flex justify-between text-[9px] text-gray-400"><span>Minor</span><span className="font-bold text-gray-700">{newRisk.impact}</span><span>Critical</span></span></label>
+                <label className="sm:col-span-2 text-[10px] font-semibold text-gray-500">Mitigation plan
+                  <textarea value={newRisk.mitigation} onChange={e => setNewRisk(p => ({ ...p, mitigation: e.target.value }))} rows={2} placeholder="The plan, or why the risk is accepted" className="mt-1 w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400" /></label>
+                <label className="text-[10px] font-semibold text-gray-500">Related CVE (optional)
+                  <input value={newRisk.related_cve} onChange={e => setNewRisk(p => ({ ...p, related_cve: e.target.value }))} placeholder="CVE-2023-XXXXX" className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-700" /></label>
               </div>
-            )}
-          </div>
-          <div className="section-card p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-1.5">
-                <p className="text-[9px] font-black uppercase tracking-widest text-gray-400">Risk Heat Map</p>
-                <InfoTooltip title="Risk Heat Map" description="Each cell shows how many open risks fall at that Likelihood × Impact coordinate. Click a cell to filter the list to those risks. Color = severity: green=LOW, amber=MEDIUM, orange=HIGH, violet=CRITICAL." formula={"Score = Likelihood × Impact\nLOW < 6  ·  MEDIUM 6–11\nHIGH 12–19  ·  CRITICAL ≥ 20"} position="right" size="sm" />
+              <div className="flex items-center gap-2">
+                <span className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-500">Score: <strong style={{ color: LEVEL[levelOf(newRisk.likelihood * newRisk.impact)].text }}>{newRisk.likelihood * newRisk.impact} · {levelOf(newRisk.likelihood * newRisk.impact)}</strong></span>
+                <button onClick={() => void addManual()} disabled={!newRisk.title.trim()} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40">Add to Register</button>
+                <button onClick={() => { setShowAdd(false); setNewRisk(BLANK); }} className="px-4 py-2 text-sm font-semibold text-gray-500 hover:text-gray-700">Cancel</button>
               </div>
-              <span className="text-[9px] text-gray-400">Y = Likelihood</span>
             </div>
-            <HeatMap risks={allRisks} onFilter={(l,i)=>setHeatFilter([l,i])} />
-          </div>
-        </div>
+          )}
 
-        {/* Filters */}
-        <div className="animate-fade-up flex flex-wrap items-center gap-2">
-          <div className="flex items-center rounded-xl border border-gray-200 bg-white overflow-hidden">
-            <svg className="ml-3 text-gray-400 shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search risks, CVEs…"
-              className="px-3 py-2 text-xs text-gray-700 bg-transparent outline-none w-44" />
-            {search&&<button onClick={()=>setSearch("")} className="pr-2 text-gray-400 hover:text-gray-600 text-xs">✕</button>}
+          {/* Numbers that matter */}
+          <div className="animate-fade-up grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6" role="region" aria-label="Register summary">
+            <Tile label="Open Risks" value={ins.open} sub={ins.mitigating ? `${ins.mitigating} mitigating` : undefined} tone="#ef4444" info={{ title: "Open Risks", description: "Risks identified but not yet being mitigated, accepted or closed. This is the action list." }} />
+            <Tile label="Critical" value={ins.critical} sub={ins.high ? `${ins.high} high` : undefined} tone="#7c3aed" info={{ title: "Critical risks", description: "Active risks scoring 20 or more (Likelihood × Impact). High is 12 to 19.", formula: "Score = Likelihood × Impact" }} />
+            <Tile label="Overdue" value={ins.overdue} sub={ins.dueSoon ? `${ins.dueSoon} due within 7 days` : undefined} tone="#be123c" info={{ title: "Overdue", description: "Active risks whose due date has passed. Each needs its owner to act, or the due date to be moved on purpose." }} />
+            <Tile label="Unassigned" value={ins.unassigned} sub={ins.highWithoutDueDate ? `${ins.highWithoutDueDate} high+ with no due date` : undefined} tone="#d97706" info={{ title: "Unassigned", description: "Active risks nobody owns. Derived risks start unassigned: owners and due dates are decisions, never guessed." }} />
+            <Tile label="Avg inherent" value={ins.avgInherent ?? "—"} sub={ins.avgAgeDays != null ? `avg age ${Math.round(ins.avgAgeDays)}d` : undefined} tone="#f97316" info={{ title: "Average inherent risk", description: "Average score before controls, across active risks.", formula: "sum(Likelihood × Impact) ÷ active risks" }} />
+            <Tile label="Avg residual" value={ins.avgResidual ?? "—"} sub={ins.reductionPct != null ? `${ins.reductionPct}% lower than inherent` : "none recorded"} tone="#10b981" info={{ title: "Average residual risk", description: "Average score after controls, over active risks that have a residual score recorded. Set it on a risk once its mitigation is in place." }} />
           </div>
-          <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-xl">
-            {(["all","open","mitigating","accepted","closed"] as const).map(s=>{
-              const count=s==="all"?allRisks.length:allRisks.filter(r=>r.status===s).length;
-              return (
-                <button key={s} onClick={()=>setFilterStatus(s)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${filterStatus===s?"bg-white text-gray-900 shadow-sm":"text-gray-500 hover:text-gray-700"}`}>
-                  {s==="all"?"All":STATUS_STYLE[s].label}
-                  <span className={`text-[9px] font-black px-1 py-0.5 rounded-full ${filterStatus===s?"bg-gray-200 text-gray-700":"bg-gray-200/70 text-gray-500"}`}>{count}</span>
-                </button>
-              );
-            })}
+          {ins.acceptedUnexplained > 0 && (
+            <p className="text-xs text-amber-800" role="note">⚠ {plural(ins.acceptedUnexplained, "accepted risk")} {ins.acceptedUnexplained === 1 ? "has" : "have"} no note saying why. Accepting a risk should leave a reason.</p>
+          )}
+
+          {/* What to do, and where the exposure is */}
+          <div className="animate-fade-up grid grid-cols-1 gap-5 lg:grid-cols-[1.4fr_1fr]">
+            <FocusList items={ins.focus} onOpen={openRisk} />
+            <div className="section-card space-y-5 p-5">
+              <div>
+                <div className="mb-2 flex items-center gap-1.5">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Risk Heat Map</p>
+                  <InfoTooltip title="Risk Heat Map" description="Each cell counts the active risks at that Likelihood × Impact. Click one to filter the list. Green is low, amber medium, orange high, violet critical." formula={"LOW < 6 · MEDIUM 6–11\nHIGH 12–19 · CRITICAL ≥ 20"} position="right" size="sm" />
+                </div>
+                <HeatMap risks={risks} selected={cell} onPick={(l, i) => { setCell(c => (c?.[0] === l && c?.[1] === i ? null : [l, i])); listRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }); }} />
+              </div>
+            </div>
           </div>
-          <select value={filterCat} onChange={e=>setFilterCat(e.target.value as RiskCategory|"all")}
-            className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
-            <option value="all">All Categories</option>
-            {(Object.keys(CAT_LABELS) as RiskCategory[]).map(c=><option key={c} value={c}>{CAT_LABELS[c]}</option>)}
-          </select>
-          <select value={filterOwner} onChange={e=>setFilterOwner(e.target.value)}
-            className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
-            <option value="all">All Owners</option>
-            {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
-          </select>
-          {repos.length > 1 && (
-            <select value={filterRepo} onChange={e=>setFilterRepo(e.target.value)}
-              className="text-xs font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl px-3 py-2 focus:outline-none">
-              <option value="all">All Repos</option>
-              {repos.map(r=><option key={r} value={r}>{r.split("/").pop()}</option>)}
+          <div className="animate-fade-up section-card grid grid-cols-1 gap-6 p-5 md:grid-cols-2">
+            <ExposureBars title="Exposure by repository" rows={ins.byRepo} label={shortRepo} onPick={k => setRepo(k)} />
+            <ExposureBars title="Exposure by category" rows={ins.byCategory} label={k => CATEGORY[k as RiskCategory] ?? k} onPick={k => setCategory(k as RiskCategory)} />
+          </div>
+
+          {/* Filters */}
+          <div ref={listRef} className="animate-fade-up flex flex-wrap items-center gap-2" role="search" aria-label="Filters">
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search risks, repos, CVEs…" aria-label="Search risks" className="w-52 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 outline-none" />
+            <div className="flex items-center gap-0.5 rounded-xl bg-gray-100 p-0.5">
+              {(["active", "open", "mitigating", "accepted", "closed", "all"] as const).map(s => {
+                const n = s === "all" ? risks.length : s === "active" ? ins.active : risks.filter(r => r.status === s).length;
+                return (
+                  <button key={s} onClick={() => setStatus(s)} aria-pressed={status === s}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold ${status === s ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}>
+                    {s === "all" ? "All" : s === "active" ? "Active" : STATUS[s].label}
+                    <span className="rounded-full bg-gray-200/80 px-1 py-0.5 text-[9px] font-black text-gray-600">{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <select value={category} onChange={e => setCategory(e.target.value as RiskCategory | "all")} aria-label="Category" className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+              <option value="all">All categories</option>{(Object.keys(CATEGORY) as RiskCategory[]).map(c => <option key={c} value={c}>{CATEGORY[c]}</option>)}
             </select>
-          )}
-          <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-xl">
-            {(["score","due"] as const).map(s=>(
-              <button key={s} onClick={()=>setSortBy(s)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${sortBy===s?"bg-white text-gray-900 shadow-sm":"text-gray-500 hover:text-gray-700"}`}>
-                {s==="score"?"Sort: Risk Score":"Sort: Due Date"}
-              </button>
-            ))}
-          </div>
-          {(search||filterStatus!=="all"||filterCat!=="all"||filterOwner!=="all"||filterRepo!=="all"||heatFilter)&&(
-            <button onClick={()=>{setSearch("");setFilterStatus("all");setFilterCat("all");setFilterOwner("all");setFilterRepo("all");setHeatFilter(null);}}
-              className="text-xs font-bold text-rose-600 hover:text-rose-800 px-2 py-1 rounded-lg hover:bg-rose-50 transition-colors">
-              Clear all
-            </button>
-          )}
-          <span className="text-xs text-gray-400 ml-auto">{filtered.length} risk{filtered.length!==1?"s":""}</span>
-        </div>
-
-        {/* Overdue / due-soon banner */}
-        {(overdueRisks>0||dueSoonRisks>0)&&(
-          <div className="animate-fade-up flex items-center gap-3 flex-wrap text-[11px] font-semibold px-1">
-            <span className="text-gray-500">Risk treatment urgency —</span>
-            {overdueRisks>0&&<span className="text-rose-600">{overdueRisks} risk{overdueRisks!==1?"s":""} overdue</span>}
-            {dueSoonRisks>0&&<span className="text-amber-600">{dueSoonRisks} due within 7 days</span>}
-            {sortBy!=="due"&&(
-              <button onClick={()=>setSortBy("due")} className="ml-auto text-xs font-bold text-indigo-600 hover:text-indigo-800">
-                Sort by due date →
-              </button>
+            <select value={owner} onChange={e => setOwner(e.target.value)} aria-label="Owner" className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+              <option value="all">All owners</option>{ownerChoices.map(o => <option key={o} value={o}>{ownerLabel(o)}</option>)}
+            </select>
+            {repos.length > 1 && (
+              <select value={repo} onChange={e => setRepo(e.target.value)} aria-label="Repository" className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+                <option value="all">All repositories</option>{repos.map(r => <option key={r} value={r}>{shortRepo(r)}</option>)}
+              </select>
             )}
+            <select value={sortBy} onChange={e => setSortBy(e.target.value as "score" | "due")} aria-label="Sort" className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+              <option value="score">Sort: risk score</option><option value="due">Sort: due date</option>
+            </select>
+            {filtersOn && <button onClick={clearFilters} className="rounded-lg px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50">Clear filters</button>}
+            <span className="ml-auto text-xs text-gray-400">{plural(filtered.length, "risk")}{cell ? ` at L${cell[0]} × I${cell[1]}` : ""}</span>
           </div>
-        )}
 
-        {/* Risk list */}
-        <div className="animate-fade-up space-y-2.5">
-          {filtered.length===0 ? (
-            <div className="section-card py-14 text-center">
-              <p className="text-sm font-bold text-gray-600">No risks match this filter</p>
-            </div>
-          ) : filtered.map(r => {
-            const score  = riskScore(r);
-            const level  = riskLevel(score);
-            const resS   = residualScore(r);
-            const resLev = resS ? riskLevel(resS) : null;
-            const stat   = STATUS_STYLE[r.status]   ?? STATUS_STYLE.open;
-            const treat  = TREATMENT_STYLE[r.treatment] ?? TREATMENT_STYLE.mitigate;
-            const open   = expanded === r.id;
-            const dl     = daysLeft(r.due_date);
-            const notes  = store.overrides[r.id]?.notes ?? r.notes;
-            return (
-              <div key={r.id} className="section-card overflow-hidden border-l-4 transition-all hover:shadow-md"
-                style={{ borderLeftColor: level.text }}>
-                <div className="flex items-start gap-4 px-5 py-4 cursor-pointer"
-                  onClick={()=>setExpanded(open?null:r.id)}>
-                  {/* Score */}
-                  <div className="shrink-0 flex flex-col items-center gap-1.5">
-                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-lg font-black border"
-                      style={{ background:level.bg, color:level.text, borderColor:level.border }}>
-                      {score}
-                    </div>
-                    {resS && (
-                      <div className="flex items-center gap-1">
-                        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke={resS<score?"#10b981":"#ef4444"} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                          {resS<score?<polyline points="18 15 12 9 6 15"/>:<polyline points="6 9 12 15 18 9"/>}
-                        </svg>
-                        <span className="text-[9px] font-black" style={{ color:resLev?.text }}>{resS}</span>
-                      </div>
-                    )}
-                    <span className="text-[8px] font-black uppercase tracking-wider" style={{ color:level.text }}>{level.label}</span>
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                      <span className="text-[10px] font-black font-mono text-gray-400 bg-gray-100 px-2 py-0.5 rounded">{r.id}</span>
-                      <span className="text-[10px] font-semibold text-gray-500 bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{CAT_LABELS[r.category] ?? r.category}</span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
-                        style={{ background:stat.bg, color:stat.text, borderColor:stat.border }}>{stat.label}</span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded" style={{ color:treat.color, background:treat.color+"15" }}>{treat.label}</span>
-                      {r.auto_derived && <span className="text-[8px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">AUTO</span>}
-                      {notes.length>0&&<span className="text-[9px] text-gray-400">💬 {notes.length}</span>}
-                    </div>
-                    <p className="text-sm font-bold text-gray-900">{r.title}</p>
-                    {!open&&<p className="text-xs text-gray-500 mt-0.5 truncate">{r.description}</p>}
-                    <div className="flex items-center gap-3 mt-1.5 flex-wrap text-[10px]">
-                      <span className="text-gray-500 flex items-center gap-1">
-                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                        {ownerLabel(r.owner)}
+          {/* Risks */}
+          <div className="animate-fade-up space-y-2.5">
+            {filtered.length === 0 ? (
+              <div className="section-card py-14 text-center">
+                <p className="text-sm font-bold text-gray-600">No risks match this filter</p>
+                {risks.length === 0 && basis && <p className="mt-1 text-xs text-gray-400">Every high/critical file is attested and no risk patterns were found. Nothing to track.</p>}
+              </div>
+            ) : filtered.map(r => {
+              const score = inherent(r), lv = levelOf(score), c = LEVEL[lv], res = residual(r), st = STATUS[r.status] ?? STATUS.open;
+              const open = expanded === r.id;
+              const d = daysUntil(r.due_date, new Date());
+              return (
+                <div key={r.id} id={`risk-${r.id}`} className="section-card overflow-hidden border-l-4" style={{ borderLeftColor: c.text, opacity: r.status === "closed" ? 0.75 : 1 }}>
+                  <button className="flex w-full items-start gap-4 px-5 py-4 text-left" aria-expanded={open} onClick={() => setExpanded(open ? null : r.id)}>
+                    <span className="flex shrink-0 flex-col items-center gap-1">
+                      <span className="flex h-12 w-12 items-center justify-center rounded-xl border text-lg font-black" style={{ background: c.bg, color: c.text, borderColor: c.border }}>{score}</span>
+                      <span className="text-[8px] font-black uppercase tracking-wider" style={{ color: c.text }}>{lv}</span>
+                      {res != null && <span className="text-[9px] font-bold text-emerald-700">→ {res}</span>}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="mb-1 flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-gray-100 px-2 py-0.5 font-mono text-[10px] font-black text-gray-400">{r.id}</span>
+                        <span className="rounded-full border px-2 py-0.5 text-[10px] font-bold" style={{ background: st.bg, color: st.text, borderColor: st.border }}>{st.label}</span>
+                        <span className="rounded border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-semibold text-gray-500">{CATEGORY[r.category] ?? r.category}</span>
+                        {r.auto_derived && <span className="rounded border border-indigo-100 bg-indigo-50 px-1.5 py-0.5 text-[8px] font-bold text-indigo-600">AUTO</span>}
+                        {r.notes.length > 0 && <span className="text-[10px] text-gray-400">💬 {r.notes.length}</span>}
                       </span>
-                      {dl!==null&&r.status!=="closed"&&(
-                        <span className={`font-bold ${dl<0?"text-rose-600":dl<=3?"text-orange-600":"text-gray-400"}`}>
-                          {dl<0?`${Math.abs(dl)}d overdue`:dl===0?"Due today":`Due in ${dl}d`}
-                        </span>
-                      )}
-                      {r.related_cve&&<span className="font-mono text-indigo-600">{r.related_cve}</span>}
-                      {r.related_cwe&&<span className="font-mono text-violet-600">{r.related_cwe.split(" — ")[0]}</span>}
-                      <span className="text-gray-400">L={r.likelihood} × I={r.impact}</span>
-                    </div>
-                  </div>
+                      <span className="block text-sm font-bold text-gray-900">{r.title}</span>
+                      {!open && <span className="mt-0.5 block truncate text-xs text-gray-500">{r.description}</span>}
+                      <span className="mt-1.5 flex flex-wrap items-center gap-3 text-[10px] text-gray-500">
+                        <span>{ownerLabel(r.owner)}</span>
+                        {r.repo && <span className="font-mono">{shortRepo(r.repo)}</span>}
+                        {d != null && r.status !== "closed" && <span className={`font-bold ${d < 0 ? "text-rose-600" : d <= 3 ? "text-orange-600" : "text-gray-400"}`}>{d < 0 ? `${-d}d overdue` : d === 0 ? "Due today" : `Due in ${d}d`}</span>}
+                        {r.related_cwe && <span className="font-mono text-violet-600">{r.related_cwe.split(" — ")[0]}</span>}
+                        <span className="text-gray-400">L{r.likelihood} × I{r.impact}</span>
+                      </span>
+                    </span>
+                    <span aria-hidden className="shrink-0 text-gray-300">{open ? "▲" : "▼"}</span>
+                  </button>
 
-                  <svg className="shrink-0 text-gray-300" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                    style={{ transform:open?"rotate(180deg)":"none", transition:"transform 0.2s" }}>
-                    <polyline points="6 9 12 15 18 9"/>
-                  </svg>
-                </div>
-
-                {/* Expanded */}
-                {open&&(
-                  <div className="border-t border-gray-100 px-5 py-5 space-y-4" style={{ background:"rgba(248,250,252,0.8)" }}>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1.5">Risk Description</p>
-                        <p className="text-xs text-gray-600 leading-relaxed">{r.description}</p>
+                  {open && (
+                    <div className="space-y-4 border-t border-gray-100 bg-slate-50/80 px-5 py-5">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div><p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-gray-400">Description</p><p className="text-xs leading-relaxed text-gray-600">{r.description || "—"}</p></div>
+                        <div><p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-gray-400">Mitigation plan</p><p className="text-xs leading-relaxed text-gray-600">{r.mitigation || "—"}</p></div>
                       </div>
-                      <div>
-                        <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1.5">Mitigation Plan</p>
-                        <p className="text-xs text-gray-600 leading-relaxed">{r.mitigation}</p>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                        {([
+                          ["Status", <select key="s" aria-label="Status" value={r.status} disabled={!canEdit} onChange={e => void edit(r.id, { status: e.target.value as RiskStatus })} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60">{(Object.keys(STATUS) as RiskStatus[]).map(s => <option key={s} value={s}>{STATUS[s].label}</option>)}</select>],
+                          ["Treatment", <select key="t" aria-label="Treatment" value={r.treatment} disabled={!canEdit} onChange={e => void edit(r.id, { treatment: e.target.value as TreatmentType })} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60">{(Object.keys(TREATMENT) as TreatmentType[]).map(t => <option key={t} value={t}>{TREATMENT[t]}</option>)}</select>],
+                          ["Owner", <select key="o" aria-label="Owner" value={r.owner} disabled={!canEdit} onChange={e => void edit(r.id, { owner: e.target.value })} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60">{ownerChoices.map(o => <option key={o} value={o}>{ownerLabel(o)}</option>)}</select>],
+                          ["Due date", <input key="d" aria-label="Due date" type="date" value={r.due_date ?? ""} disabled={!canEdit} onChange={e => void edit(r.id, { due_date: e.target.value })} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60" />],
+                          ["Residual likelihood", <input key="rl" aria-label="Residual likelihood" type="number" min={1} max={5} value={r.residual_likelihood ?? ""} disabled={!canEdit} placeholder="1–5" onChange={e => { const v = Number(e.target.value); if (v >= 1 && v <= 5) void edit(r.id, { residual_likelihood: v as 1 | 2 | 3 | 4 | 5 }); }} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60" />],
+                          ["Residual impact", <input key="ri" aria-label="Residual impact" type="number" min={1} max={5} value={r.residual_impact ?? ""} disabled={!canEdit} placeholder="1–5" onChange={e => { const v = Number(e.target.value); if (v >= 1 && v <= 5) void edit(r.id, { residual_impact: v as 1 | 2 | 3 | 4 | 5 }); }} className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs disabled:opacity-60" />],
+                        ] as Array<[string, React.ReactNode]>).map(([label, control]) => (
+                          <div key={label}><p className="mb-1 text-[9px] font-black uppercase tracking-widest text-gray-400">{label}</p>{control}</div>
+                        ))}
                       </div>
-                    </div>
 
-                    {/* Inherent vs residual */}
-                    {resS&&(
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="rounded-xl px-4 py-3 border" style={{ background:level.bg, borderColor:level.border }}>
-                          <p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{ color:level.text }}>Inherent Risk</p>
-                          <div className="flex items-end gap-2">
-                            <span className="text-2xl font-black" style={{ color:level.text }}>{score}</span>
-                            <span className="text-xs font-bold mb-0.5" style={{ color:level.text }}>{level.label}</span>
-                          </div>
-                          <p className="text-[9px] mt-1" style={{ color:level.text, opacity:0.7 }}>Before mitigation</p>
-                        </div>
-                        {resLev&&(
-                          <div className="rounded-xl px-4 py-3 border" style={{ background:resLev.bg, borderColor:resLev.border }}>
-                            <p className="text-[9px] font-black uppercase tracking-wider mb-1" style={{ color:resLev.text }}>Residual Risk</p>
-                            <div className="flex items-end gap-2">
-                              <span className="text-2xl font-black" style={{ color:resLev.text }}>{resS}</span>
-                              <span className="text-xs font-bold mb-0.5 flex items-center gap-1" style={{ color:resLev.text }}>
-                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
-                                {resLev.label}
-                              </span>
-                            </div>
-                            <p className="text-[9px] mt-1" style={{ color:resLev.text, opacity:0.7 }}>After mitigation</p>
+                      <div>
+                        <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Notes</p>
+                        {r.notes.length > 0 && <div className="mb-2 space-y-1.5">{r.notes.map((n, i) => <div key={i} className="rounded-lg border border-gray-100 bg-white px-3 py-2 text-[11px] text-gray-600">{n}</div>)}</div>}
+                        {canEdit && (
+                          <div className="flex gap-2">
+                            <input value={noteInput[r.id] ?? ""} onChange={e => setNoteInput(p => ({ ...p, [r.id]: e.target.value }))} onKeyDown={e => { if (e.key === "Enter") addNote(r); }}
+                              aria-label="Add a note" placeholder="Add a note (Enter to save)…" className="flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                            <button onClick={() => addNote(r)} className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100">Save</button>
                           </div>
                         )}
                       </div>
-                    )}
 
-                    {/* Controls */}
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Status</p>
-                        <select value={r.status} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{status:e.target.value as RiskStatus})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed">
-                          {(["open","mitigating","accepted","closed"] as const).map(s=><option key={s} value={s}>{STATUS_STYLE[s].label}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Treatment</p>
-                        <select value={r.treatment} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{treatment:e.target.value as TreatmentType})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
-                          {(["mitigate","accept","transfer","avoid"] as const).map(t=><option key={t} value={t}>{TREATMENT_STYLE[t].label}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Owner</p>
-                        <select value={r.owner} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{owner:e.target.value})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed">
-                          {(owners.length?owners:["unassigned"]).map(o=><option key={o} value={o}>{ownerLabel(o)}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Due Date</p>
-                        <input type="date" value={r.due_date??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{due_date:e.target.value})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" />
-                      </div>
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual L</p>
-                        <input type="number" min={1} max={5} value={r.residual_likelihood??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{residual_likelihood:Number(e.target.value) as 1|2|3|4|5})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
-                      </div>
-                      <div>
-                        <p className="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Residual I</p>
-                        <input type="number" min={1} max={5} value={r.residual_impact??""} disabled={!permissions.canTriage} onChange={e=>updateOverride(r.id,{residual_impact:Number(e.target.value) as 1|2|3|4|5})}
-                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed" placeholder="1–5" />
+                      <div className="flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+                        {r.related_link && <Link href={r.related_link} className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-[10px] font-bold text-gray-700 hover:bg-gray-50">View evidence ↗</Link>}
+                        {r.related_cwe && <a href={`https://cwe.mitre.org/data/definitions/${r.related_cwe.split(" — ")[0].replace("CWE-", "")}.html`} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-violet-100 bg-violet-50 px-2.5 py-1 text-[10px] font-bold text-violet-700">{r.related_cwe} ↗</a>}
+                        {r.related_cve && <span className="font-mono text-[10px] text-indigo-600">{r.related_cve}</span>}
+                        <span className="ml-auto text-[10px] text-gray-400">Identified {r.identified_at}</span>
+                        {!r.auto_derived && canEdit && (
+                          <button onClick={() => { if (confirm("Delete this risk?")) void deleteManual(r.id); }} className="rounded-lg px-2.5 py-1 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Delete</button>
+                        )}
                       </div>
                     </div>
-
-                    {/* Notes */}
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2">Notes</p>
-                      {notes.length>0&&(
-                        <div className="space-y-1.5 mb-2">
-                          {notes.map((n,i)=>(
-                            <div key={i} className="text-[11px] text-gray-600 bg-white rounded-lg px-3 py-2 border border-gray-100">{n}</div>
-                          ))}
-                        </div>
-                      )}
-                      {permissions.canTriage && (
-                        <div className="flex gap-2">
-                          <input value={noteInput[r.id]??""} onChange={e=>setNoteInput(p=>({...p,[r.id]:e.target.value}))}
-                            onKeyDown={e=>{if(e.key==="Enter")addNote(r.id);}}
-                            placeholder="Add a note (Enter to save)…"
-                            className="flex-1 text-xs border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-white" />
-                          <button onClick={()=>addNote(r.id)}
-                            className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-lg hover:bg-indigo-100 transition-colors">
-                            Save
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Links + delete */}
-                    <div className="flex items-center gap-3 flex-wrap pt-1 border-t border-gray-100">
-                      {r.related_cve&&<Link href="/violations" className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg hover:bg-indigo-100">{r.related_cve} ↗</Link>}
-                      {r.related_cwe&&(() => {
-                        const num = r.related_cwe!.split(" — ")[0].replace("CWE-", "");
-                        return (
-                          <a href={`https://cwe.mitre.org/data/definitions/${num}.html`} target="_blank" rel="noopener noreferrer"
-                            className="text-[10px] font-bold text-violet-600 bg-violet-50 border border-violet-100 px-2.5 py-1 rounded-lg hover:bg-violet-100">
-                            {r.related_cwe} ↗
-                          </a>
-                        );
-                      })()}
-                      {r.related_link&&<Link href={r.related_link} className="text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-lg hover:bg-gray-100">View Evidence ↗</Link>}
-                      <span className="text-[9px] text-gray-400 ml-auto">Identified {fmtDate(r.identified_at)}</span>
-                      {!r.auto_derived&&permissions.canTriage&&(
-                        <button onClick={()=>{if(confirm("Delete this risk?"))deleteManual(r.id);}}
-                          className="text-[10px] font-bold text-rose-600 hover:text-rose-800 px-2.5 py-1 rounded-lg hover:bg-rose-50 transition-colors">
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
-
-      </div>
       </PageSkeleton>
     </AuthGuard>
   );

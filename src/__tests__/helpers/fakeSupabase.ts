@@ -119,6 +119,8 @@ export function fakeSupabase(tables: Record<string, Row[]>, opts: { maxRows?: nu
   const from = (table: string) => new FakeQuery((tables[table] ??= []), writes, table, opts.maxRows ?? null);
   return {
     writes,
+    /** The live rows, for tests that need to read or change data between requests. */
+    tables,
     client: {
       from,
       rpc: async (fn: string, args: Record<string, unknown>) => ({ data: opts.rpc?.[fn] ? opts.rpc[fn](args) : [], error: null }),

@@ -6,6 +6,7 @@ import { deliverAlert } from "@/lib/alertDelivery";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "@/lib/incidentPlaybooks";
 import { syncAutoIncidents } from "@/lib/autoIncidents";
 import { latestScanPerFile, fileKey, type ScanRef } from "@/lib/incidentLinks";
+import { CAPS } from "@/lib/limits";
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -83,7 +84,7 @@ async function withPullRequests(db: ReturnType<typeof createServiceClient>, org_
 }
 
 const OPEN_STATUSES = ["active", "contained"];
-const MAX_INCIDENTS = 1000;
+const MAX_INCIDENTS = CAPS.incidents.value;
 const RECENT_CLOSED_INCIDENTS = 200;
 
 export async function POST(req: NextRequest) {

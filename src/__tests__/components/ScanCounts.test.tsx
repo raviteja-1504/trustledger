@@ -17,6 +17,23 @@ const counts = (over: Partial<ScanCounts> = {}): ScanCounts => ({
 const card = (id: string) => within(screen.getByTestId(id));
 const newOne = (over: Partial<ChangedFinding> = {}): ChangedFinding => ({ file: "src/a.ts", line: 4, id: "sqli", label: "SQL Injection", severity: "critical", status: "new", ...over });
 
+const fixedItem = (n: number) => ({ id: "xss", fingerprint: `fp${n}`, label: "XSS", file_path: `f${n}.ts`, line: n });
+
+describe("ScanCountsSummary: the fixed list is capped, and says so", () => {
+  const cc = counts({ changes: { new: 0, existing: 0, reopened: 0, accepted: 0, falsePositive: 0, fixed: 140, fixedIsLowerBound: false } });
+  it("at the cap, a note says the list is cut and the count is exact", () => {
+    render(<ScanCountsSummary counts={cc} newFindings={[]} fixed={Array.from({ length: 100 }, (_, i) => fixedItem(i))} previousScan={{ commit_sha: "abc1234", created_at: "2026-11-01T00:00:00Z" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /see what changed/i }));
+    expect(screen.getByText(/The list of fixed findings shows the first 100. The count is exact; the list is capped./)).toBeInTheDocument();
+  });
+  it("under the cap there is no note", () => {
+    render(<ScanCountsSummary counts={cc} newFindings={[]} fixed={Array.from({ length: 3 }, (_, i) => fixedItem(i))} previousScan={{ commit_sha: "abc1234", created_at: "2026-11-01T00:00:00Z" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /see what changed/i }));
+    expect(screen.getByText("f1.ts", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText(/is capped/)).toBeNull();
+  });
+});
+
 describe("ScanCountsSummary: each number says what it counts", () => {
   it("files, findings and changes are three cards with their own units", () => {
     render(<ScanCountsSummary counts={counts()} newFindings={[]} fixed={[]} />);

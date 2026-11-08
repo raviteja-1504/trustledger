@@ -10,7 +10,7 @@ jest.mock("@/lib/realtime", () => ({ useScansRealtime: () => {} }));
 let findings: unknown[] = [];
 jest.mock("@/lib/useRealData", () => ({ isSeedMode: () => false, authedFetch: jest.fn(async () => ({ findings })) }));
 
-import ThreatIntelPage from "@/app/threat-intel/page";
+import ThreatIntelPage from "@/components/ThreatIntelView";
 
 const base = { file_path: "package.json", scan_id: "s1", ecosystem: "npm", fix: "Upgrade", exploit_public: false };
 

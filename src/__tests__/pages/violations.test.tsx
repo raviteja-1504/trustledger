@@ -10,7 +10,7 @@ jest.mock("@/lib/toast", () => ({
   ToastProvider:   ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-import ViolationsPage from "@/app/violations/page";
+import ViolationsPage from "@/components/threats/ViolationsView";
 
 describe("ViolationsPage", () => {
   it("renders without crashing", () => {

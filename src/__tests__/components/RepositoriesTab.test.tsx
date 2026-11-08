@@ -86,3 +86,33 @@ it("non-admins see the list read-only", async () => {
   expect(screen.queryByRole("button", { name: "Import from GitHub" })).not.toBeInTheDocument();
   expect(screen.getByText("Only admins can import or switch repositories.")).toBeInTheDocument();
 });
+
+describe("plan limit", () => {
+  const withPlan = (repos_active: number, limit: number) => {
+    const base = authedFetch.getMockImplementation()!;
+    authedFetch.mockImplementation(async (path: string, init?: RequestInit) => path === "/api/billing"
+      ? { limits: { repos: limit, members: 5, scans: 1, attestations: 1, reports: 1 }, usage: { repos_active, members: 1, scans_this_month: 0, attestations_this_month: 0, reports_this_month: 0 } }
+      : base(path, init));
+  };
+  it("shows the repositories the plan allows, and warns before the limit", async () => {
+    withPlan(9, 10);
+    render(<RepositoriesTab />);
+    expect(await screen.findByRole("progressbar", { name: "Active repositories on your plan" })).toHaveAttribute("aria-valuetext", "9 of 10");
+    expect(screen.getByText(/1 of 10 repositories left on your plan/)).toBeInTheDocument();
+  });
+  it("says so when the plan is full", async () => {
+    withPlan(10, 10);
+    render(<RepositoriesTab />);
+    expect(await screen.findByText(/At the limit: all 10 repositories on your plan are used/)).toBeInTheDocument();
+  });
+  it("works without it: no meter if the plan can't be loaded, and non-admins don't ask", async () => {
+    render(<RepositoriesTab />);
+    await screen.findByText("On @raviteja-1504");
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    role = "developer";
+    authedFetch.mockClear();
+    render(<RepositoriesTab />);
+    await screen.findAllByText("On @raviteja-1504");
+    expect(authedFetch.mock.calls.some(c => c[0] === "/api/billing")).toBe(false);
+  });
+});

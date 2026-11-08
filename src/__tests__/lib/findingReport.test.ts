@@ -53,7 +53,7 @@ describe("collectFindingReports", () => {
 
 describe("check-run annotations", () => {
   const annotations = buildCheckAnnotations(files, { reviewUrl: "https://app.example/pr/1" });
-  const sql = annotations.find(a => a.title.startsWith("SQL Injection") && a.message.includes("Input → sink"))!;
+  const sql = annotations.find(a => a.title.startsWith("SQL Injection"))!;
 
   it("annotate the flagged line with name, CWE and severity", () => {
     expect(sql).toBeDefined();
@@ -64,14 +64,12 @@ describe("check-run annotations", () => {
     expect(sql.title).toBe("SQL Injection (CWE-89) · CRITICAL");
   });
 
-  it("explain the flow from the real input to the sink, and give the fix", () => {
-    expect(sql.message).toContain("req.query.name");
-    expect(sql.message).toContain("`req.query.name` → 1 step → `db.query(sql)`");
+  it("are short: a sentence, the fix and a link, with no source-to-sink flow or data-flow details", () => {
     expect(sql.message).toMatch(/Fix: Use parameterised queries/);
     expect(sql.message).toContain("https://app.example/pr/1");
-    expect(sql.raw_details).toContain("Data flow:");
-    expect(sql.raw_details).toContain("L2 Input: req.query.name");
-    expect(sql.raw_details).toContain("Why this was flagged:");
+    expect(sql.message).not.toContain("Input → sink");
+    expect(sql.message).not.toContain("→ 1 step →");
+    expect(sql).not.toHaveProperty("raw_details");
   });
 
   it("stay within GitHub's per-update limit, keeping the most severe", () => {
@@ -97,10 +95,12 @@ describe("PR comment", () => {
     findings: collectFindingReports(files),
   });
 
-  it("lists each security finding with its location and plain-language explanation", () => {
-    expect(comment).toContain("**Security findings**");
-    expect(comment).toContain(`**SQL Injection (CWE-89)** in \`${PATH}:4\``);
-    expect(comment).toContain("Untrusted input `req.query.name` (URL query parameter)");
+  it("lists the Critical and High files as a table with what is wrong in each, and no data-flow detail", () => {
+    expect(comment).toContain("| File | Risk | Findings | Top issues | Reachable | AI | Status |");
+    expect(comment).toContain("| `routes/users.ts` | 🔴 CRITICAL | 2 critical | SQL Injection (L4), Cross-Site Scripting (L5) |");
+    expect(comment).not.toContain("**Security findings**");
+    expect(comment).not.toContain("<sub>");
+    expect(comment).not.toContain("Untrusted input");
   });
 
   it("names XSS in the file list (the old hand-picked label table silently omitted it)", () => {
@@ -109,7 +109,7 @@ describe("PR comment", () => {
       files: [{ file_path: PATH, risk_score: "HIGH", ai_percentage: 0, risk_indicators: ["xss", "doc-coverage"], attested: false }],
       appUrl: "https://app.example",
     });
-    expect(fileListOnly).toMatch(/- ⏳ `routes\/users\.ts` — .* · Cross-Site Scripting/);
+    expect(fileListOnly).toContain("| `routes/users.ts` | 🟠 HIGH | — | Cross-Site Scripting");
   });
 });
 
@@ -119,6 +119,29 @@ describe("check summary", () => {
       files: [{ file_path: PATH, risk_score: "CRITICAL", risk_indicators: ["sql-injection", "xss"] }] });
     expect(summary).toContain("SQL Injection, Cross-Site Scripting");
     expect(summary).not.toContain("sql-injection");
+  });
+
+  it("lists Critical and High files as one table with issues, AI share and status, and no flow detail", () => {
+    const { summary } = buildCheckSummary({ overall_risk: "CRITICAL", total_ai_percentage: 0.4, files: [
+      { file_path: "src/routes/users.ts", risk_score: "HIGH", risk_indicators: ["xss"], ai_percentage: 0.5, attested: true },
+      { file_path: "src/db/query.ts", risk_score: "CRITICAL", risk_indicators: ["sql-injection"], ai_percentage: 0.8, attested: false },
+      { file_path: "src/ok.ts", risk_score: "LOW", risk_indicators: [] },
+    ] });
+    expect(summary).toContain("| File | Risk | Issues | AI | Status |");
+    const rows = summary.split("\n").filter(l => l.startsWith("| `"));
+    expect(rows).toEqual([
+      "| `db/query.ts` | 🔴 CRITICAL | SQL Injection | 80% | ⏳ to attest |",      // Critical first
+      "| `routes/users.ts` | 🟠 HIGH | Cross-Site Scripting | 50% | ✅ attested |",
+    ]);
+    expect(summary).not.toMatch(/→|Input|sink/);
+  });
+
+  it("caps the table and says how many more there are; pipes in names cannot break a row", () => {
+    const files = Array.from({ length: 20 }, (_, i) => ({ file_path: `a|b${i}.ts`, risk_score: "HIGH", risk_indicators: ["xss"] }));
+    const { summary } = buildCheckSummary({ overall_risk: "HIGH", total_ai_percentage: 0, files });
+    expect(summary.split("\n").filter(l => l.startsWith("| `"))).toHaveLength(15);
+    expect(summary).toContain("…and 5 more");
+    expect(summary).toContain("a\\|b0.ts");
   });
 
   it("follows the org's merge gate: HIGH files are listed but don't block while \"Block HIGH\" is off", () => {
@@ -132,7 +155,7 @@ describe("check summary", () => {
     const noHigh = buildCheckSummary(scan, { block_on_critical: true, block_on_high: false });
     expect(noHigh).toMatchObject({ conclusion: "action_required", title: expect.stringContaining("1 file(s) require attestation") });
     expect(noHigh.summary).toContain("Attest all CRITICAL files");
-    expect(noHigh.summary).toContain("HIGH Risk Files (review recommended; your policy doesn't block on them)");
+    expect(noHigh.summary).toContain("HIGH is review-recommended; your policy doesn't block on it");
     // only HIGH files and HIGH not blocking: the check passes
     const highOnly = { ...scan, files: [scan.files[0]] };
     expect(buildCheckSummary(highOnly, { block_on_critical: true, block_on_high: false }).conclusion).toBe("success");

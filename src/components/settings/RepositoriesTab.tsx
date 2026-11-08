@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authedFetch } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
+import { LimitMeter } from "@/components/Limits";
+import { usePlanLimits } from "@/lib/usePlanLimits";
 
 interface Repo { id: string; repo_full_name: string; default_branch: string | null; is_active: boolean; created_at: string }
 interface GitHubStatus { installed: boolean; accounts: string[]; install_url: string | null }
@@ -38,6 +40,7 @@ function Card({ title, subtitle, action, children }: { title: string; subtitle?:
 export default function RepositoriesTab() {
   const { profile } = useAuth();
   const isAdmin = profile?.role === "admin";
+  const plan = usePlanLimits(isAdmin);
   const [repos,   setRepos]   = useState<Repo[] | null>(null);
   const [github,  setGithub]  = useState<GitHubStatus | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -145,6 +148,7 @@ export default function RepositoriesTab() {
           </div>
         ) : (
           <>
+            {plan && <LimitMeter label="Active repositories on your plan" noun="repositories" used={Math.max(activeCount, plan.usage.repos_active)} limit={plan.limits.repos} compact />}
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-gray-500"><span className="font-bold text-gray-800">{activeCount}</span> of {repos.length} switched on</p>
               {repos.length > 6 && (

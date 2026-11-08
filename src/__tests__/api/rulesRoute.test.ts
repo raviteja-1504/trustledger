@@ -61,6 +61,55 @@ describe("GET /api/rules", () => {
     expect((await get()).body.usage).toEqual({});
   });
 
+  it("usage compares each repository's latest scan with its previous one: new and fixed files", async () => {
+    // o/api: previous a1 had old.py firing; latest a2 has db.py firing and old.py no longer firing -> 1 new, 1 fixed.
+    // A file that simply wasn't rescanned is not "fixed". o/web has one scan: nothing claimed.
+    seed({ files: [file("a1", "old.py", ["sql-injection"]), file("a1", "gone.py", ["sql-injection"]), file("a2", "db.py", ["sql-injection"]), file("a2", "old.py", []), file("w1", "q.ts", ["sql-injection"]), file("a2", "run.py", ["eval-exec"])] });
+    const { body } = await get();
+    expect(body.usage!["sql-injection"]).toMatchObject({ files: 2, new: 1, fixed: 1, compared: true });
+    expect(body.usage!["eval-exec"]).toMatchObject({ new: 1, fixed: 0 });
+  });
+
+  describe("?rule=<id>: every file the rule fires on", () => {
+    type Loc = { locations: { repo: string; file_path: string; scan_id: string }[]; total: number; truncated: boolean; scope: string };
+    const loc = async (q: string) => { const r = await get(q); return { res: r.res, body: r.body as unknown as Loc & { error?: string } }; };
+
+    it("lists them from the latest scans of active repos, sorted, with the scan to open", async () => {
+      const { res, body } = await loc("?rule=sql-injection");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(body.locations).toEqual([
+        { repo: "o/api", file_path: "db.py", scan_id: "a2" },
+        { repo: "o/web", file_path: "q.ts", scan_id: "w1" },
+      ]);
+      expect(body).toMatchObject({ total: 2, truncated: false, scope: "org" });
+    });
+
+    it("can be narrowed to one repository", async () => {
+      expect((await loc("?rule=sql-injection&repo=o%2Fweb")).body.locations.map(l => l.file_path)).toEqual(["q.ts"]);
+    });
+
+    it("an unknown rule is a 404, not an empty list", async () => {
+      const { res, body } = await loc("?rule=nope");
+      expect(res.status).toBe(404);
+      expect(body.error).toBe("unknown_rule");
+    });
+
+    it("developers only see files from their own pull requests", async () => {
+      auth = { org_id: "org-1", role: "developer", user_id: "u-dev" };
+      const { body } = await loc("?rule=sql-injection");
+      expect(body.scope).toBe("own");
+      expect(body.locations.map(l => l.file_path)).toEqual(["old.py", "q.ts"]);          // dev1's latest api scan is a1
+    });
+
+    it("past the cap it says so, with the real total", async () => {
+      const many = Array.from({ length: 2300 }, (_, i) => file("a2", `f${String(i).padStart(4, "0")}.py`, ["sql-injection"]));
+      seed({ files: many }, { maxRows: 1000 });
+      const { body } = await loc("?rule=sql-injection");
+      expect(body.locations).toHaveLength(2000);
+      expect(body).toMatchObject({ total: 2300, truncated: true });
+    });
+  });
+
   it("reads past the 1000-row cap", async () => {
     const files = Array.from({ length: 2500 }, (_, i) => file("a2", `f${i}.py`, ["sql-injection"]));
     // o/web's only scan is older than 1500 newer o/api scans: an unpaged scans read (newest first) never reaches it.

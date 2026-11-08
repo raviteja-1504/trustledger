@@ -23,9 +23,10 @@ import { verifyApiKey, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
 import { validateBody, ViolationOverrideSchema } from "@/lib/validation";
 import { safeError } from "@/lib/errors";
+import { CAPS } from "@/lib/limits";
 
 const PAGE = 1000;
-const MAX_ROWS = 20_000;
+const MAX_ROWS = CAPS.tableRows.value;
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);

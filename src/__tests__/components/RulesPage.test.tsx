@@ -60,8 +60,8 @@ describe("Rule catalog page", () => {
     fireEvent.click(screen.getByLabelText("Only rules firing in my code"));
     expect(rows()).toHaveLength(1);
     fireEvent.click(screen.getByText("Hardcoded Secret"));
-    expect(screen.getByRole("link", { name: /config\.ts/ })).toHaveAttribute("href", "/pr/s1");
-    expect(screen.getByText("and 1 more")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /config\.ts/ })).toHaveAttribute("href", "/pr/s1?file=src%2Fconfig.ts");
+    expect(screen.getByRole("button", { name: "Show all 3 files →" })).toBeInTheDocument();      // the first two are listed; the rest on request
 
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(rows()).toHaveLength(3);
@@ -94,7 +94,7 @@ describe("Rule catalog page", () => {
     mockFetch.mockImplementation(async (url: string) => { if (url.includes("usage=1")) throw new Error("down"); return { rules }; });
     render(<RulesPage />);
     expect(await screen.findByText("SQL Injection")).toBeInTheDocument();
-    expect(screen.getByText("Couldn't count")).toBeInTheDocument();
+    expect(screen.getAllByText("Couldn't count").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Only rules firing in my code")).toBeDisabled();
   });
 });

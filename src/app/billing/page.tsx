@@ -9,6 +9,8 @@ import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { useAuth } from "@/lib/auth";
 import { useToastHelpers } from "@/lib/toast";
 import { contactEmail } from "@/lib/contacts";
+import { LimitMeter } from "@/components/Limits";
+import { RATE_CAPS, rateText } from "@/lib/limits";
 
 interface UsageData {
   org:    { name: string; plan: string; member_since: string };
@@ -37,36 +39,6 @@ const PLAN_COLOR: Record<string, { bg: string; text: string; border: string }> =
   growth:     { bg:"#f0fdf4", text:"#15803d", border:"#bbf7d0" },
   enterprise: { bg:"#ede9fe", text:"#6d28d9", border:"#ddd6fe" },
 };
-
-function UsageBar({ used, limit, label }: { used: number; limit: number; label: string }) {
-  const pct     = limit < 0 ? 0 : Math.min(100, (used / limit) * 100);
-  const isLimit = limit < 0;
-  const danger  = pct >= 90;
-  const warning = pct >= 70 && !danger;
-
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-xs">
-        <span className="font-semibold text-gray-700">{label}</span>
-        <span className={`font-mono font-bold ${danger ? "text-rose-600" : warning ? "text-amber-600" : "text-gray-600"}`}>
-          {used.toLocaleString()} / {isLimit ? "∞" : limit.toLocaleString()}
-        </span>
-      </div>
-      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all"
-          style={{
-            width:      isLimit ? "0%" : `${pct}%`,
-            background: danger ? "#ef4444" : warning ? "#f59e0b" : "#6366f1",
-          }}
-        />
-      </div>
-      {danger && !isLimit && (
-        <p className="text-[10px] text-rose-600 font-semibold">Approaching limit — consider upgrading</p>
-      )}
-    </div>
-  );
-}
 
 function BillingContent() {
   const { profile } = useAuth();
@@ -210,11 +182,18 @@ function BillingContent() {
           </div>
 
           <div className="space-y-4">
-            <UsageBar used={data.usage.scans_this_month}        limit={data.limits.scans}        label="Scans this month" />
-            <UsageBar used={data.usage.attestations_this_month} limit={data.limits.attestations}  label="Attestations this month" />
-            <UsageBar used={data.usage.repos_active}            limit={data.limits.repos}         label="Active repositories" />
-            <UsageBar used={data.usage.members}                 limit={data.limits.members}       label="Team members" />
-            <UsageBar used={data.usage.reports_this_month}      limit={data.limits.reports}       label="Reports generated" />
+            <LimitMeter label="Scans this month" noun="scans" used={data.usage.scans_this_month} limit={data.limits.scans} />
+            <LimitMeter label="Attestations this month" noun="attestations" used={data.usage.attestations_this_month} limit={data.limits.attestations} />
+            <LimitMeter label="Active repositories" noun="repositories" used={data.usage.repos_active} limit={data.limits.repos} />
+            <LimitMeter label="Team members" noun="members" used={data.usage.members} limit={data.limits.members} />
+            <LimitMeter label="Reports generated" noun="reports" used={data.usage.reports_this_month} limit={data.limits.reports} />
+          </div>
+          <div className="mt-5 border-t border-gray-100 pt-4" aria-label="Rate limits">
+            <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Rate limits (all plans)</p>
+            <ul className="mt-1.5 space-y-0.5 text-xs text-gray-500">
+              {(Object.keys(RATE_CAPS) as Array<keyof typeof RATE_CAPS>).map(k => <li key={k}>{rateText(k)}</li>)}
+            </ul>
+            <p className="mt-1.5 text-[11px] text-gray-400">Past a rate limit the request is refused for a moment and can be retried; nothing is lost.</p>
           </div>
         </div>
 

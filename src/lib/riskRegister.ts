@@ -129,6 +129,22 @@ export function rowsToStore(rows: readonly RiskRow[]): PersistStore {
   return { overrides, manuals };
 }
 
+/**
+ * Derived risks that are no longer derived, kept as history: once the files were attested or fixed the sync closes
+ * the row, and the register should still show it (closed) with its owner, notes and dates instead of dropping it.
+ * Only rows already closed are kept: an open one that is not derived is waiting for the next sync to close it.
+ */
+export function closedHistory(rows: readonly RiskRow[], derivedIds: ReadonlySet<string>): RiskItem[] {
+  return rows.filter(r => r.auto_derived && r.external_id && !derivedIds.has(r.external_id) && r.status === "closed").map(r => ({
+    id: r.external_id!, auto_derived: true as const, title: r.title, description: r.description ?? "",
+    category: r.category as RiskCategory, likelihood: r.likelihood as Score, impact: r.impact as Score,
+    residual_likelihood: opt(r.residual_likelihood) as Score | undefined, residual_impact: opt(r.residual_impact) as Score | undefined,
+    status: "closed" as const, treatment: r.treatment as TreatmentType, owner: r.owner_email || "unassigned", due_date: opt(r.due_date),
+    mitigation: r.mitigation ?? "", related_cve: opt(r.related_cve), related_cwe: opt(r.related_cwe), related_link: opt(r.related_link),
+    identified_at: day(r.created_at), notes: Array.isArray(r.notes) ? r.notes : [], repo: opt(r.repo),
+  }));
+}
+
 /** Derived and manual risks with what people recorded applied. A field nobody set keeps the derived value -- an
  *  empty recorded field never blanks it (an unset owner stays "unassigned", not undefined). Highest score first. */
 export function mergeRisks(derived: readonly RiskItem[], store: PersistStore): RiskItem[] {
@@ -170,16 +186,35 @@ const names = (files: ReadonlyArray<{ file_path: string }>) => {
   return n.length > 5 ? `${n.slice(0, 5).join(", ")} and ${n.length - 5} more` : n.join(", ");
 };
 
-/**
- * Risks from the latest scan of each repository. `data` should already have sign-offs applied (violation statuses),
- * `scans` are those latest scans. Every derived risk starts open, unassigned and without a due date.
- */
+/** What risks are derived from: facts only, so it can come from the live database or from a dashboard payload. */
+export interface RiskInput {
+  /** HIGH / CRITICAL files in each repository's latest scan that are neither attested nor closed. */
+  waiting: ReadonlyArray<{ repo: string; file_path: string; risk_score: string; ai_pct: number }>;
+  /** Every active repository, with the share of its HIGH / CRITICAL files that are attested. */
+  repos: ReadonlyArray<{ repo: string; attestation_rate: number; high_crit_count?: number }>;
+  /** Files of the latest scans with their indicators, for the risk patterns (secrets, eval, SQL injection, JWT). */
+  patternFiles: ReadonlyArray<{ repo: string; file_path: string; risk_indicators: readonly string[] | null | undefined }>;
+}
+
+/** Risks from a dashboard payload and the latest scan of each repository (the offline demo path). */
 export function deriveRisks(data: DashboardData, scans: readonly ScanResult[], today = new Date().toISOString()): RiskItem[] {
+  return deriveRisksFrom({
+    waiting: data.top_risk_files.filter(f => !f.attested && !f.resolved && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH")),
+    repos: data.repos,
+    patternFiles: scans.flatMap(s => s.files.map(f => ({ repo: s.repo, file_path: f.file_path, risk_indicators: f.risk_indicators }))),
+  }, today);
+}
+
+/**
+ * Risks from the latest scan of each repository. Every derived risk starts open, unassigned and without a due date.
+ */
+export function deriveRisksFrom(input: RiskInput, today = new Date().toISOString()): RiskItem[] {
   const now = day(today);
   const risks: RiskItem[] = [];
   const repoSlug = (r: string) => r.replace(/[^a-zA-Z0-9]/g, "-");
   const base = { auto_derived: true as const, status: "open" as const, treatment: "mitigate" as const, owner: "unassigned", identified_at: now, notes: [] as string[] };
-  const waiting = data.top_risk_files.filter(f => !f.attested && !f.resolved && (f.risk_score === "CRITICAL" || f.risk_score === "HIGH"));
+  const waiting = input.waiting;
+  const data = { repos: input.repos };
 
   // Unsigned CRITICAL / HIGH files, one risk per repository per level.
   for (const [level, likelihood, impact] of [["CRITICAL", 5, 5], ["HIGH", 4, 4]] as const) {
@@ -216,9 +251,9 @@ export function deriveRisks(data: DashboardData, scans: readonly ScanResult[], t
       desc: "accept the insecure 'none' JWT algorithm, so tokens can be forged.",
       mitigation: "Pin the accepted algorithms (e.g. only RS256 or HS256) when verifying tokens." },
   ];
-  groupByRepo(scans, s => s.repo).forEach((repoScans, repo) => {
+  groupByRepo(input.patternFiles, f => f.repo).forEach((repoFiles, repo) => {
     for (const p of PATTERNS) {
-      const files = repoScans.flatMap(s => s.files.filter(f => (f.risk_indicators ?? []).includes(p.indicator)));
+      const files = repoFiles.filter(f => (f.risk_indicators ?? []).includes(p.indicator));
       if (files.length === 0) continue;
       risks.push({
         ...base, id: `DR-${p.id}-${repoSlug(repo)}`, category: p.category, likelihood: p.likelihood as Score, impact: p.impact as Score, repo,
@@ -255,4 +290,19 @@ export function deriveRisks(data: DashboardData, scans: readonly ScanResult[], t
   // One risk per id, even if the inputs repeat a repository under two spellings that slug the same.
   const seen = new Set<string>();
   return risks.filter(r => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
+/**
+ * A change made on the page, as the columns the database stores. The page speaks in `owner` ("unassigned" or an
+ * email); the table has `owner_email`. Sending `owner` made every owner change fail, so owners could never be set.
+ */
+export function riskPatchToDb(patch: Partial<PersistedRisk>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === "owner") out.owner_email = v === "unassigned" || v === "" ? null : v;
+    else if (k === "due_date") out.due_date = v || null;
+    else if (k === "identified_at") continue;                     // never written: it is the row's created_at
+    else out[k] = v;
+  }
+  return out;
 }

@@ -112,6 +112,7 @@ describe("ScanStatusPanel", () => {
       render(<ScanStatusPanel {...base} lifecycle={lifecycle} summaryMarkdown="x"
         telemetry={{ engine_version: "6.5", total_ms: 4000, cross_file_ms: 1000, per_file_ms: 2500, post_ms: 500, files_analyzed: 3, files_reused: 0, slowest: [] }} />);
       expect(tipOf("Rescan")).toMatch(/Scan the PR's latest commit again/);
+      expect(tipOf("Rescan")).toMatch(/Limit: 1 rescan of the same pull request per minute/);
       expect(tipOf("Copy summary")).toMatch(/markdown summary/);
       expect(tipOf("Trust Record")).toMatch(/signed JSON record/);
       expect(tipOf("Baseline")).toMatch(/Accept every current finding/);
@@ -137,6 +138,20 @@ describe("ScanStatusPanel", () => {
     render(<ScanStatusPanel {...base} lifecycle={lifecycle} securityOpen={160} />);
     fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
     expect(screen.getByText(/Accept all 643 open items \(160 security findings and 483 other signals\)\?/)).toBeInTheDocument();
+  });
+
+  it("past 5,000 open items the baseline confirmation says only that many are accepted per run", () => {
+    const lifecycle = { summary: { new: 6000, existing: 100, reopened: 0, accepted: 0, false_positive: 0, fixed: 0 }, fixed: [], has_previous_scan: true };
+    render(<ScanStatusPanel {...base} lifecycle={lifecycle} securityOpen={900} />);
+    fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+    expect(screen.getByRole("note")).toHaveTextContent("Baseline accepts at most 5,000 findings in one go. Run Baseline again to accept the rest.");
+  });
+
+  it("under the cap there is no cap note", () => {
+    const lifecycle = { summary: { new: 10, existing: 5, reopened: 0, accepted: 0, false_positive: 0, fixed: 0 }, fixed: [], has_previous_scan: true };
+    render(<ScanStatusPanel {...base} lifecycle={lifecycle} securityOpen={9} />);
+    fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+    expect(screen.queryByRole("note")).toBeNull();
   });
 
   it("copies the summary; if the clipboard is blocked, shows it to copy by hand", async () => {

@@ -12,6 +12,7 @@ import { findingMeta } from "./findingCatalog";
 import { DEFAULT_GATE, blockingRisks, blocksMerge, type GateSettings } from "./mergeGate";
 import { readTarGz } from "./tarArchive";
 import type { RawClassicProtection, RawProtection, RawRulesetRule } from "./branchProtection";
+import { CAPS } from "@/lib/limits";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -137,7 +138,7 @@ export const ARCHIVE_MIN_FILES = 100;
 const ARCHIVE_MAX_DOWNLOAD_BYTES = 150 * 1024 * 1024;
 const ARCHIVE_MAX_UNPACKED_BYTES = 600 * 1024 * 1024;
 // The contents API returns no content for files over 1 MB; the archive path leaves them out too.
-const MAX_FILE_BYTES = 1024 * 1024;
+const MAX_FILE_BYTES = CAPS.maxFileBytes.value;
 
 async function readCapped(res: Response, max: number): Promise<Buffer | null> {
   const declared = Number(res.headers.get("content-length") ?? 0);
@@ -418,11 +419,14 @@ function findingTitles(ids: readonly string[]): string {
   return [...metas.filter(m => m.cwe), ...metas.filter(m => !m.cwe)].map(m => m.title).join(", ");
 }
 
+const CHECK_TABLE_ROWS = 15;
+const tableCell = (t: string) => t.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+
 /** Build a human-readable check-run summary from scan results. */
 export function buildCheckSummary(scan: {
   overall_risk: string;
   total_ai_percentage: number;
-  files: Array<{ file_path: string; risk_score: string; risk_indicators: string[] }>;
+  files: Array<{ file_path: string; risk_score: string; risk_indicators: string[]; ai_percentage?: number; attested?: boolean }>;
 }, gate: GateSettings = DEFAULT_GATE): { title: string; summary: string; conclusion: CheckConclusion } {
   const critFiles = scan.files.filter(f => f.risk_score === "CRITICAL");
   const highFiles = scan.files.filter(f => f.risk_score === "HIGH");
@@ -442,14 +446,23 @@ export function buildCheckSummary(scan: {
     "",
   ];
 
-  if (critFiles.length > 0) {
-    lines.push("### 🔴 CRITICAL Files");
-    critFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${findingTitles(f.risk_indicators)}`));
-    lines.push("");
-  }
-  if (highFiles.length > 0) {
-    lines.push(gate.block_on_high ? "### 🟠 HIGH Risk Files" : "### 🟠 HIGH Risk Files (review recommended; your policy doesn't block on them)");
-    highFiles.forEach(f => lines.push(`- \`${f.file_path}\` — ${findingTitles(f.risk_indicators)}`));
+  // Critical and High files as one table: what is wrong in each, how much is AI-written, whether it is signed off.
+  // The source-to-sink detail stays on TrustLedger's review page.
+  const listed = [...critFiles, ...highFiles];
+  if (listed.length > 0) {
+    lines.push(gate.block_on_high || highFiles.length === 0
+      ? `### Critical and High files (${listed.length})`
+      : `### Critical and High files (${listed.length}) — HIGH is review-recommended; your policy doesn't block on it`);
+    lines.push("", "| File | Risk | Issues | AI | Status |", "|---|---|---|---|---|");
+    for (const f of listed.slice(0, CHECK_TABLE_ROWS)) {
+      const names = findingTitles(f.risk_indicators).split(", ").filter(Boolean);
+      const issues = names.slice(0, 2).join(", ") + (names.length > 2 ? ` +${names.length - 2} more` : "") || "—";
+      const status = f.attested === undefined ? "—" : f.attested ? "✅ attested" : "⏳ to attest";
+      const ai = f.ai_percentage === undefined ? "—" : `${Math.round(f.ai_percentage * 100)}%`;
+      const short = f.file_path.split("/").slice(-2).join("/");
+      lines.push(`| \`${tableCell(short)}\` | ${f.risk_score === "CRITICAL" ? "🔴" : "🟠"} ${f.risk_score} | ${tableCell(issues)} | ${ai} | ${status} |`);
+    }
+    if (listed.length > CHECK_TABLE_ROWS) lines.push("", `_…and ${listed.length - CHECK_TABLE_ROWS} more. The full list is in TrustLedger._`);
     lines.push("");
   }
 

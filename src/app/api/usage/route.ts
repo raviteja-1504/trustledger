@@ -11,25 +11,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
 import { cached, TTL } from "@/lib/cache";
+import { planLimits, limitStatus } from "@/lib/limits";
 
-const PLAN_LIMITS: Record<string, {
-  scans:        number;
-  attestations: number;
-  repos:        number;
-  members:      number;
-  api_calls:    number;
-  storage_mb:   number;
-}> = {
-  trial:      { scans:100,    attestations:500,   repos:3,  members:3,  api_calls:1000,  storage_mb:100   },
-  starter:    { scans:1000,   attestations:5000,  repos:10, members:5,  api_calls:10000, storage_mb:1000  },
-  growth:     { scans:10000,  attestations:50000, repos:50, members:20, api_calls:100000,storage_mb:10000 },
-  enterprise: { scans:-1,     attestations:-1,    repos:-1, members:-1, api_calls:-1,    storage_mb:-1    },
-};
 
-function usagePct(used: number, limit: number): number {
-  if (limit < 0) return 0; // unlimited
-  return Math.min(100, Math.round((used / limit) * 100));
-}
 
 export async function GET(req: NextRequest) {
   const { org_id, error } = await verifyApiKey(req);
@@ -52,7 +36,7 @@ export async function GET(req: NextRequest) {
       .single() as { data: { plan: string } | null };
 
     const plan   = org?.plan ?? "trial";
-    const limits = PLAN_LIMITS[plan] ?? PLAN_LIMITS.trial;
+    const limits = planLimits(plan);
 
     const [
       { count: scansMonth },
@@ -80,10 +64,10 @@ export async function GET(req: NextRequest) {
     };
 
     const percentages = {
-      scans:        usagePct(usage.scans_this_month,        limits.scans),
-      attestations: usagePct(usage.attestations_this_month, limits.attestations),
-      repos:        usagePct(usage.repos_active,             limits.repos),
-      members:      usagePct(usage.members,                  limits.members),
+      scans:        limitStatus(usage.scans_this_month, limits.scans).pct,
+      attestations: limitStatus(usage.attestations_this_month, limits.attestations).pct,
+      repos:        limitStatus(usage.repos_active, limits.repos).pct,
+      members:      limitStatus(usage.members, limits.members).pct,
     };
 
     const warnings = Object.entries(percentages)

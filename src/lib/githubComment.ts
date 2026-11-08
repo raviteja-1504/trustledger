@@ -2,14 +2,47 @@
  * GitHub PR comment builder — shared between webhook route and comment API.
  */
 import { findingMeta } from "./findingCatalog";
-import { inputToSink, partsToText, reportHeading, type FindingReport } from "./findingReport";
+import type { FindingReport } from "./findingReport";
 
 const RISK_EMOJI: Record<string, string> = {
   CRITICAL:"🔴", HIGH:"🟠", MEDIUM:"🟡", LOW:"🟢", UNKNOWN:"⚪",
 };
 
-const SEV_EMOJI: Record<string, string> = { critical: "🔴", high: "🟠", medium: "🟡", low: "🟢", info: "⚪" };
-const MAX_COMMENT_FINDINGS = 5;
+/** Rows of the Critical/High table, and how many issue names a row spells out. */
+export const MAX_FILE_ROWS = 10;
+const MAX_ISSUES_PER_ROW = 2;
+const SEV_WEIGHT: Record<string, number> = { critical: 1000, high: 100, medium: 10, low: 1, info: 0 };
+
+/** A markdown table cell: no pipes or line breaks to break the row. */
+const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+const severityScore = (found: readonly FindingReport[]) => found.reduce((n, r) => n + (SEV_WEIGHT[r.severity] ?? 0), 0);
+
+/** "2 critical · 1 high", most severe first; "—" when the file has none the scanner could name. */
+function countsText(found: readonly FindingReport[]): string {
+  const by = (s: string) => found.filter(r => r.severity === s).length;
+  const parts = (["critical", "high", "medium", "low"] as const).filter(s => by(s) > 0).map(s => `${by(s)} ${s}`);
+  return parts.length ? parts.join(" · ") : "—";
+}
+
+type CommentFile = {
+  file_path: string; risk_score: string; ai_percentage: number; risk_indicators: string[]; attested: boolean;
+  reachable_indicator_labels?: string[];
+};
+
+function fileRow(f: CommentFile, found: readonly FindingReport[]): string {
+  // The issues: the file's most serious findings with their lines, else the security signals it was rated on.
+  const ranked = [...found].sort((a, b) => (SEV_WEIGHT[b.severity] ?? 0) - (SEV_WEIGHT[a.severity] ?? 0) || (a.line ?? 0) - (b.line ?? 0));
+  const names = new Map<string, string>();
+  for (const r of ranked) if (!names.has(r.title)) names.set(r.title, r.line ? `${r.title} (L${r.line})` : r.title);
+  let issues = [...names.values()];
+  if (issues.length === 0) issues = [...new Set(f.risk_indicators.map(i => findingMeta(i)).filter(m => m.cwe).map(m => m.title))];
+  const more = issues.length - MAX_ISSUES_PER_ROW;
+  const issueText = issues.slice(0, MAX_ISSUES_PER_ROW).join(", ") + (more > 0 ? ` +${more} more` : "") || "—";
+  // Only confirmed-reachable findings are called out: "unreachable" and "unknown" are not worth a reviewer's line.
+  const reach = f.reachable_indicator_labels?.length ? `🎯 ${f.reachable_indicator_labels.length}` : "—";
+  const short = f.file_path.split("/").slice(-2).join("/");
+  return `| \`${cell(short)}\` | ${RISK_EMOJI[f.risk_score] ?? ""} ${f.risk_score} | ${countsText(found)} | ${cell(issueText)} | ${reach} | ${Math.round(f.ai_percentage * 100)}% | ${f.attested ? "✅ attested" : "⏳ to attest"} |`;
+}
 
 const LIKELIHOOD_EMOJI: Record<string, string> = {
   "Likely Human":               "🟢",
@@ -48,8 +81,8 @@ export function buildPRCommentDirect(scan: {
   }>;
   appUrl:               string;
   evidence_breakdown?:  EvidenceBreakdown;
-  // Most important security findings across the PR (see findingReport.ts collectFindingReports), already
-  // ordered; the comment shows the first MAX_COMMENT_FINDINGS.
+  // Security findings across the PR (see findingReport.ts collectFindingReports). The comment groups them by file
+  // for the Critical/High table; the detail of each stays in the review page.
   findings?:            FindingReport[];
 }): string {
   const counts   = scan.files.reduce((acc, f) => { acc[f.risk_score] = (acc[f.risk_score]??0)+1; return acc; }, {} as Record<string,number>);
@@ -104,31 +137,24 @@ export function buildPRCommentDirect(scan: {
     lines.push("", "</details>");
   }
 
-  const highRisk = scan.files.filter(f => f.risk_score==="CRITICAL"||f.risk_score==="HIGH").slice(0,8);
-  if (highRisk.length > 0) {
-    lines.push("","**Files requiring attestation:**","");
-    highRisk.forEach(f => {
-      const secInds = f.risk_indicators.map(i => findingMeta(i)).filter(m => m.cwe).slice(0,2).map(m => m.title).join(", ");
-      // Only ever flag confirmed-reachable findings here, never
-      // "unreachable"/"unknown" -- this line is already dense (emoji + risk
-      // level + up to 2 signal names), and a reviewer only needs the
-      // confirmed-dangerous ones called out inline.
-      const reachSuffix = f.reachable_indicator_labels?.length
-        ? ` · 🎯 reachable: ${f.reachable_indicator_labels.slice(0,2).join(", ")}`
-        : "";
-      lines.push(`- ${f.attested?"✅":"⏳"} \`${f.file_path.split("/").slice(-2).join("/")}\` — ${RISK_EMOJI[f.risk_score]} ${f.risk_score}${secInds ? ` · ${secInds}` : ""}${reachSuffix}`);
-    });
-  }
-
-  const findings = scan.findings ?? [];
-  if (findings.length > 0) {
-    lines.push("", `**Security findings** (${findings.length > MAX_COMMENT_FINDINGS ? `top ${MAX_COMMENT_FINDINGS} of ${findings.length}` : findings.length}):`, "");
-    for (const r of findings.slice(0, MAX_COMMENT_FINDINGS)) {
-      const where = `${r.filePath}${r.line ? `:${r.line}` : ""}`;
-      lines.push(`- ${SEV_EMOJI[r.severity] ?? "⚪"} **${reportHeading(r)}** in \`${where}\` — ${partsToText(r.evidence.summary, "markdown")}`);
-      const path = inputToSink(r, "markdown");
-      if (path) lines.push(`  <sub>${path}</sub>`);
-    }
+  // The Critical and High files as one table: what is wrong in each, how much, whether an attacker can reach it,
+  // and whether a reviewer has signed it off. (The data-flow detail lives in the review page, not in the comment.)
+  const findingsByFile = new Map<string, FindingReport[]>();
+  for (const r of scan.findings ?? []) findingsByFile.set(r.filePath, [...(findingsByFile.get(r.filePath) ?? []), r]);
+  const needReview = scan.files
+    .filter(f => f.risk_score === "CRITICAL" || f.risk_score === "HIGH")
+    .map(f => ({ f, found: findingsByFile.get(f.file_path) ?? [] }))
+    // worst rating first, then the file with the most serious findings
+    .sort((a, b) => (a.f.risk_score === b.f.risk_score ? 0 : a.f.risk_score === "CRITICAL" ? -1 : 1)
+      || severityScore(b.found) - severityScore(a.found) || a.f.file_path.localeCompare(b.f.file_path));
+  if (needReview.length > 0) {
+    const shown = needReview.slice(0, MAX_FILE_ROWS);
+    const open = needReview.filter(x => !x.f.attested).length;
+    lines.push("", `**Critical and High files** (${needReview.length}${open === 0 ? ", all attested" : `, ${open} to attest`}):`, "",
+      "| File | Risk | Findings | Top issues | Reachable | AI | Status |",
+      "|-|-|-|-|-|-|-|");
+    for (const { f, found } of shown) lines.push(fileRow(f, found));
+    if (needReview.length > shown.length) lines.push("", `_…and ${needReview.length - shown.length} more. The full list is in TrustLedger._`);
   }
 
   lines.push("","---",`**[📋 Review in TrustLedger](${reviewUrl})** · Scan \`${scan.scan_id.slice(0,8)}\``);

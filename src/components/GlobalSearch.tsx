@@ -28,8 +28,8 @@ function makeStaticResults(): SearchResult[] {
   { id:"p-dash",    kind:"page",      title:"Overview Dashboard",        sub:"Org-wide health score and metrics",          href:"/dashboard",      badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-trust",   kind:"page",      title:"Trust Score",               sub:"Governance score, trend, and what to fix",    href:"/trust-score",    badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-comp",    kind:"page",      title:"Compliance Evidence",       sub:"SOC 2 · ISO 27001 · PCI DSS · AI governance",  href:"/compliance",     badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-viol",    kind:"page",      title:"Policy Violations",         sub:"Active violations requiring remediation",     href:"/violations",     badge:"Page",     badgeColor:"#6366f1" },
-  { id:"p-alert",   kind:"page",      title:"Security Alerts",           sub:"Real-time incident management",               href:"/alerts",         badge:"Page",     badgeColor:"#6366f1" },
+  { id:"p-viol",    kind:"page",      title:"Policy Violations",         sub:"Active violations requiring remediation",     href:"/threats?tab=violations",     badge:"Page",     badgeColor:"#6366f1" },
+  { id:"p-alert",   kind:"page",      title:"Security Alerts",           sub:"Real-time incident management",               href:"/threats?tab=alerts",         badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-secrets", kind:"page",      title:"Secret Scanner",            sub:"Hardcoded credential detection",              href:"/secrets",         badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-deps",    kind:"page",      title:"Dependency Scanner",        sub:"AI-introduced package risk",                  href:"/dependencies",   badge:"Page",     badgeColor:"#6366f1" },
   { id:"p-apisec",  kind:"page",      title:"API Security",              sub:"Endpoint inventory · auth coverage · OpenAPI", href:"/api-security",   badge:"Page",     badgeColor:"#6366f1" },
@@ -47,20 +47,20 @@ function makeStaticResults(): SearchResult[] {
   { id:"s-jwt",     kind:"secret",    title:"JWT secret — token_service.py",       sub:"auth-service · PR #341 · CRITICAL", href:"/secrets", badge:"Secret", badgeColor:"#9333ea" },
   { id:"s-db",      kind:"secret",    title:"DB password — connection.py",          sub:"fraud-detection · PR #219 · CRITICAL", href:"/secrets", badge:"Secret", badgeColor:"#9333ea" },
   // Violations
-  { id:"v-cv1",     kind:"violation", title:"CRITICAL file unattested — card_validator.py", sub:"payments-api · Merge blocked · SLA: 24h", href:"/violations", badge:"Violation", badgeColor:"#ef4444" },
-  { id:"v-cv2",     kind:"violation", title:"CRITICAL file unattested — risk_scorer.ts",    sub:"fraud-detection · SLA breach",            href:"/violations", badge:"Violation", badgeColor:"#ef4444" },
-  { id:"v-sla",     kind:"violation", title:"SLA breach — stripe_client.py unattested 50h", sub:"payments-api · HIGH risk",                href:"/violations", badge:"Violation", badgeColor:"#f97316" },
+  { id:"v-cv1",     kind:"violation", title:"CRITICAL file unattested — card_validator.py", sub:"payments-api · Merge blocked · SLA: 24h", href:"/threats?tab=violations", badge:"Violation", badgeColor:"#ef4444" },
+  { id:"v-cv2",     kind:"violation", title:"CRITICAL file unattested — risk_scorer.ts",    sub:"fraud-detection · SLA breach",            href:"/threats?tab=violations", badge:"Violation", badgeColor:"#ef4444" },
+  { id:"v-sla",     kind:"violation", title:"SLA breach — stripe_client.py unattested 50h", sub:"payments-api · HIGH risk",                href:"/threats?tab=violations", badge:"Violation", badgeColor:"#f97316" },
   // CVEs
-  { id:"c-sql",     kind:"cve",       title:"CVE-2023-20052 — SQL Injection",      sub:"CVSS 9.8 · CRITICAL · payments-api, fraud-detection", href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
-  { id:"c-jwt",     kind:"cve",       title:"CVE-2022-21449 — JWT None Algorithm", sub:"CVSS 9.1 · CRITICAL · auth-service",                  href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
-  { id:"c-eval",    kind:"cve",       title:"CVE-2021-44228 — eval/exec RCE",      sub:"CVSS 10.0 · CRITICAL · payments-api, risk-engine",    href:"/threat-intel", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-sql",     kind:"cve",       title:"CVE-2023-20052 — SQL Injection",      sub:"CVSS 9.8 · CRITICAL · payments-api, fraud-detection", href:"/dependencies?view=advisories", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-jwt",     kind:"cve",       title:"CVE-2022-21449 — JWT None Algorithm", sub:"CVSS 9.1 · CRITICAL · auth-service",                  href:"/dependencies?view=advisories", badge:"CVE", badgeColor:"#dc2626" },
+  { id:"c-eval",    kind:"cve",       title:"CVE-2021-44228 — eval/exec RCE",      sub:"CVSS 10.0 · CRITICAL · payments-api, risk-engine",    href:"/dependencies?view=advisories", badge:"CVE", badgeColor:"#dc2626" },
   // PRs
   { id:"pr-482",    kind:"pr",        title:"PR #482 — payments-api",    sub:"CRITICAL risk · 8 files · 91% AI",  href:"/pr/sc_mock_001", badge:"PR", badgeColor:"#10b981" },
   { id:"pr-341",    kind:"pr",        title:"PR #341 — auth-service",    sub:"HIGH risk · 4 files · 68% AI",     href:"/pr/sc_mock_002", badge:"PR", badgeColor:"#10b981" },
   { id:"pr-219",    kind:"pr",        title:"PR #219 — fraud-detection", sub:"CRITICAL risk · 5 files · 83% AI", href:"/pr/sc_mock_003", badge:"PR", badgeColor:"#10b981" },
   // Alerts
-  { id:"al-stripe", kind:"alert",     title:"P1 — Production Stripe key committed",   sub:"Firing · payments-api · Rotate immediately", href:"/alerts", badge:"Alert", badgeColor:"#f97316" },
-  { id:"al-typo",   kind:"alert",     title:"P1 — Typosquatting package detected",    sub:"Firing · fraud-detection · stripe-client",   href:"/alerts", badge:"Alert", badgeColor:"#f97316" },
+  { id:"al-stripe", kind:"alert",     title:"P1 — Production Stripe key committed",   sub:"Firing · payments-api · Rotate immediately", href:"/threats?tab=alerts", badge:"Alert", badgeColor:"#f97316" },
+  { id:"al-typo",   kind:"alert",     title:"P1 — Typosquatting package detected",    sub:"Firing · fraud-detection · stripe-client",   href:"/threats?tab=alerts", badge:"Alert", badgeColor:"#f97316" },
   ];
 }
 const STATIC_RESULTS: SearchResult[] = makeStaticResults();

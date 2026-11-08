@@ -24,6 +24,8 @@ import {
   type CheckResult, type ComplianceFacts, type ControlWriteUp, type EvidenceStatus, type FrameworkDef as EvidenceFramework,
 } from "@/lib/controlEvidence";
 
+import { rateText } from "@/lib/limits";
+
 type EvidenceFrameworkId = EvidenceFramework["id"];
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1483,6 +1485,7 @@ function ReportsContent() {
               {generating ? <Spinner /> : <Download />}
               {generating ? "Signing & generating…" : `Generate Signed ${fw} Report`}
             </button>
+            <p className="text-center text-[10px] text-gray-400" data-testid="report-limit">Limit: {rateText("report")}.</p>
 
             {/* Print preview -- on-screen HTML only, not the signed artifact */}
             <button onClick={printPreview} disabled={dataError}

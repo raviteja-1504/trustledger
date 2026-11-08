@@ -13,6 +13,7 @@ import { filesWithCrossFileContext } from "@/lib/findingCorrelation";
 import { cached, cacheGet, cacheSet, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
 import type { FileIndicator } from "@/types";
+import { CAPS } from "@/lib/limits";
 
 // Hard bound on worst-case execution time. analyzeFile() is fully
 // synchronous (regex/string analysis, no I/O) -- if one file's content
@@ -27,7 +28,7 @@ export const maxDuration = 60;
 // bounded number of files per request -- beyond this, fall back to the
 // snapshot already persisted at scan time rather than growing worst-case
 // latency linearly with scan size (some scans in this org have 1000+ files).
-const MAX_LIVE_REANALYSIS_FILES = 60;
+const MAX_LIVE_REANALYSIS_FILES = CAPS.liveReanalysisFiles.value;
 
 interface ReanalysisResult {
   indicators: FileIndicator[];
@@ -287,7 +288,7 @@ export async function GET(
     : [];
 
   return NextResponse.json({
-    lifecycle: { summary: summarize(statuses, fixed.length), fixed: fixed.slice(0, 100), has_previous_scan: !!history.previous, previous_scan: history.previousScan },
+    lifecycle: { summary: summarize(statuses, fixed.length), fixed: fixed.slice(0, CAPS.fixedFindingsListed.value), has_previous_scan: !!history.previous, previous_scan: history.previousScan },
     health: extra.health,
     telemetry: extra.telemetry,
     current_engine_version: CURRENT_ENGINE_VERSION,
