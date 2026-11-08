@@ -45,6 +45,14 @@ interface Props {
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 const MAX_POLLS = 45;
+
+interface ScanListItem { scan_id: string; pr_number: number; commit_sha?: string; created_at: string }
+/** The newest scan of this pull request made after the one on screen, or null if this is the latest. */
+export function newestNewerScan(scans: readonly ScanListItem[], prNumber: number, scanId: string, scanCreatedAt: string): ScanListItem | null {
+  return scans
+    .filter(x => x.pr_number === prNumber && x.scan_id !== scanId && Date.parse(x.created_at) > Date.parse(scanCreatedAt))
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
+}
 /** The scan time as plain UTC ISO ("...Z"), whichever spelling the database gave ("...+00:00" with microseconds). */
 export function sinceParam(createdAt: string): string {
   const t = Date.parse(createdAt);
@@ -85,6 +93,18 @@ export default function ScanStatusPanel({
   const openCount = s ? s.new + s.existing + s.reopened : 0;
   const otherOpen = securityOpen != null ? Math.max(0, openCount - securityOpen) : null;
 
+  // Is there a newer scan of this PR (a push, or an earlier rescan)? Said on the page itself, with a link, so an old
+  // scan is never mistaken for the current one -- and the link is still there after a reload.
+  const [newerScan, setNewerScan] = useState<ScanListItem | null>(null);
+  useEffect(() => {
+    if (!repo || prNumber == null || !scanCreatedAt) return;
+    let live = true;
+    Promise.resolve(authedFetch<{ scans: ScanListItem[] }>(`/api/scans?repo=${encodeURIComponent(repo)}&since=${encodeURIComponent(sinceParam(scanCreatedAt))}&limit=50`))
+      .then(r => { if (live) setNewerScan(newestNewerScan(r?.scans ?? [], prNumber, scanId, scanCreatedAt)); })
+      .catch(() => { /* no banner: the page works without it */ });
+    return () => { live = false; };
+  }, [repo, prNumber, scanCreatedAt, scanId]);
+
   // After a rescan is queued, look for the scan it produces: a newer scan of this PR than the one on screen.
   useEffect(() => {
     if (rescanState.phase !== "waiting" || !repo || prNumber == null || !scanCreatedAt) return;
@@ -96,9 +116,7 @@ export default function ScanStatusPanel({
       try {
         const r = await authedFetch<{ scans: Array<{ scan_id: string; pr_number: number; commit_sha?: string; created_at: string }> }>(
           `/api/scans?repo=${encodeURIComponent(repo)}&since=${encodeURIComponent(sinceParam(scanCreatedAt))}&limit=20`);
-        const newer = (r.scans ?? [])
-          .filter(x => x.pr_number === prNumber && x.scan_id !== scanId && Date.parse(x.created_at) > Date.parse(scanCreatedAt))
-          .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+        const newer = newestNewerScan(r.scans ?? [], prNumber, scanId, scanCreatedAt);
         if (newer) { if (!cancelled) setRescanState(prev => ({ phase: "done", newScanId: newer.scan_id, headSha: newer.commit_sha ?? (prev.phase === "waiting" ? prev.headSha : undefined) })); return; }
       } catch { /* keep waiting: a failed poll is not a failed rescan */ }
       if (cancelled) return;
@@ -206,6 +224,19 @@ export default function ScanStatusPanel({
               {busy === "rescan" ? "Queuing…" : "Rescan now"}
             </button>
           </Tip>
+        </div>
+      )}
+
+      {newerScan && rescanState.phase !== "done" && (
+        <div role="status" data-testid="newer-scan" className="flex items-center justify-between gap-3 flex-wrap rounded-xl border border-sky-400/30 bg-sky-500/10 px-4 py-2.5">
+          <p className="text-xs text-sky-100 leading-relaxed min-w-0">
+            <strong>This isn&apos;t the latest scan of this pull request.</strong>{" "}
+            A newer one{newerScan.commit_sha ? <> (commit <code className="font-mono">{newerScan.commit_sha.slice(0, 7)}</code>)</> : null} was made {new Date(newerScan.created_at).toLocaleString()}.
+          </p>
+          <a href={`/pr/${newerScan.scan_id}`}
+            className="shrink-0 text-[11px] font-bold text-sky-50 bg-sky-500/30 hover:bg-sky-500/40 border border-sky-400/40 rounded-lg px-2.5 py-1">
+            Open the latest scan →
+          </a>
         </div>
       )}
 

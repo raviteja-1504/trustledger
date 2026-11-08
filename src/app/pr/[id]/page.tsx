@@ -37,8 +37,6 @@ import { useRole, ROLE_LABELS } from "@/lib/roles";
 import { deepLinkAction } from "@/lib/reviewLinks";
 import { buildPrSecuritySummary } from "@/lib/prSecuritySummary";
 import { resolveReviewer } from "@/lib/reviewerIdentity";
-import { CAPS } from "@/lib/limits";
-import { CapNote } from "@/components/Limits";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -1840,13 +1838,6 @@ function PRDetailContent() {
                 onOpenFile={revealFile}
                 onChanged={() => { api.getScan(id).then(setScan).catch(() => {}); }}
               />
-              {/* Limits that shape what this page and the GitHub check show, said where they apply */}
-              {(scan.files.length > CAPS.liveReanalysisFiles.value || (counts?.security.open ?? 0) > CAPS.checkAnnotations.value) && (
-                <div className="mt-3 space-y-1" aria-label="Limits for this scan">
-                  {scan.files.length > CAPS.liveReanalysisFiles.value && <CapNote cap="liveReanalysisFiles" />}
-                  {(counts?.security.open ?? 0) > CAPS.checkAnnotations.value && <CapNote cap="checkAnnotations" />}
-                </div>
-              )}
 
               {/* Attestation progress bar */}
               {highCount > 0 && (

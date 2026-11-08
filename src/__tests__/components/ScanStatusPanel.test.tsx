@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 jest.mock("@/lib/useRealData", () => ({ authedFetch: jest.fn() }));
-import ScanStatusPanel from "@/components/ScanStatusPanel";
+import ScanStatusPanel, { sinceParam, newestNewerScan } from "@/components/ScanStatusPanel";
 import type { ScanHealth } from "@/lib/scanHealth";
 
 const health = (files: string[]): ScanHealth => ({
@@ -12,7 +12,7 @@ const health = (files: string[]): ScanHealth => ({
 jest.setTimeout(30000);
 const base = { scanId: "s1", canTriage: true, onChanged: () => {} };
 
-import { sinceParam } from "@/components/ScanStatusPanel";
+
 
 describe("sinceParam", () => {
   it("is plain UTC ISO", () => {
@@ -197,5 +197,64 @@ describe("ScanStatusPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /4\.0s · 3 analyzed/ }));
     expect(screen.getByText("Per-file analysis")).toBeInTheDocument();
     expect(screen.getByText("big.ts")).toBeInTheDocument();
+  });
+});
+
+describe("link to a newer scan", () => {
+  const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+  const props = { ...base, repo: "o/r", prNumber: 7, commitSha: "aaaaaaa1111", scanCreatedAt: "2026-06-01T10:00:00.5+00:00", summaryMarkdown: "x" };
+  const serve = (scans: unknown[]) => authedFetch.mockImplementation((url: string) => (url.startsWith("/api/scans?") ? Promise.resolve({ scans }) : new Promise(() => {})));
+  beforeEach(() => authedFetch.mockReset());
+
+  it("an older scan says so and links to the newest scan of the same PR, without any click on Rescan", async () => {
+    serve([
+      { scan_id: "s1", pr_number: 7, created_at: "2026-06-01T10:00:00.5+00:00" },                                  // this scan
+      { scan_id: "mid", pr_number: 7, commit_sha: "bbbbbbb2222", created_at: "2026-06-01T11:00:00+00:00" },
+      { scan_id: "latest", pr_number: 7, commit_sha: "ccccccc3333", created_at: "2026-06-01T12:00:00+00:00" },
+      { scan_id: "other-pr", pr_number: 8, created_at: "2026-06-01T13:00:00+00:00" },
+    ]);
+    render(<ScanStatusPanel {...props} />);
+    const banner = await screen.findByTestId("newer-scan");
+    expect(banner).toHaveTextContent("This isn't the latest scan of this pull request");
+    expect(banner).toHaveTextContent("ccccccc");
+    expect(screen.getByRole("link", { name: /open the latest scan/i })).toHaveAttribute("href", "/pr/latest");
+    expect(authedFetch.mock.calls[0][0]).toContain("since=2026-06-01T10%3A00%3A00.500Z");
+  });
+
+  it("the latest scan shows no banner", async () => {
+    serve([{ scan_id: "s1", pr_number: 7, created_at: "2026-06-01T10:00:00.5+00:00" }, { scan_id: "x", pr_number: 8, created_at: "2026-06-01T12:00:00Z" }]);
+    render(<ScanStatusPanel {...props} />);
+    await waitFor(() => expect(authedFetch).toHaveBeenCalled());
+    await new Promise(r => setTimeout(r, 20));
+    expect(screen.queryByTestId("newer-scan")).toBeNull();
+  });
+
+  it("if the lookup fails there is no banner and the panel still works", async () => {
+    authedFetch.mockImplementation(() => Promise.reject(new Error("down")));
+    render(<ScanStatusPanel {...props} />);
+    await waitFor(() => expect(authedFetch).toHaveBeenCalled());
+    await new Promise(r => setTimeout(r, 20));
+    expect(screen.queryByTestId("newer-scan")).toBeNull();
+    expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+  });
+
+  it("without the repo, PR number and time it does not look", () => {
+    render(<ScanStatusPanel {...base} summaryMarkdown="x" />);
+    expect(authedFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("newestNewerScan", () => {
+  const scans = [
+    { scan_id: "a", pr_number: 7, created_at: "2026-06-01T10:00:00Z" },
+    { scan_id: "b", pr_number: 7, created_at: "2026-06-01T11:00:00Z" },
+    { scan_id: "c", pr_number: 7, created_at: "2026-06-01T12:00:00Z" },
+    { scan_id: "d", pr_number: 9, created_at: "2026-06-01T13:00:00Z" },
+  ];
+  it("picks the newest later scan of the same PR", () => {
+    expect(newestNewerScan(scans, 7, "a", "2026-06-01T10:00:00Z")?.scan_id).toBe("c");
+  });
+  it("is null when this scan is the newest", () => {
+    expect(newestNewerScan(scans, 7, "c", "2026-06-01T12:00:00Z")).toBeNull();
   });
 });
