@@ -130,6 +130,8 @@ import { isDockerfilePath } from "./scannableFiles";
 import { findKotlinTaintFindings } from "./kotlinTaint";
 import { findRubyTaintFindings } from "./rubyTaint";
 import { tameLongRuns } from "./scanInputLimits";
+import { summarizeAIAttribution, type AIAttributionSummary } from "./aiAttributionSummary";
+import { buildEvidenceGroups, type AIEvidenceReport } from "./aiEvidenceGroups";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -256,9 +258,11 @@ export interface ProvenanceInfo {
 export interface ExplainedSignal {
   id:           string;
   label:        string;
-  tier:         "CORE" | "SECONDARY" | "STYLE";
+  tier:         "CORE" | "SECONDARY" | "STYLE" | "CONTEXT";
   value:        number;
-  contribution: number;  // estimated fractional share of final AI score
+  /** Share of the final AI score this signal accounts for, among the signals that feed it. 0 for STYLE and CONTEXT
+   *  signals, which are shown for context and do not change the score. */
+  contribution: number;
   detail:       string;
 }
 
@@ -318,6 +322,9 @@ const LANG_MAP: Record<string, string> = {
   tfvars: "terraform",
   bicep: "bicep",   template: "yaml",   // CloudFormation *.template (YAML or JSON; configTree reads either)
 };
+
+/** Config, data, lockfiles and generated files: nobody authors them, so they are left out of AI attribution. */
+export function isNonAuthoredFile(path: string): boolean { return getFileTypeMeta(path).skipAI; }
 
 export function detectLanguage(path: string): string {
   // Dockerfile has no extension at all -- LANG_MAP above is purely
@@ -6144,9 +6151,21 @@ const CORE_SIGNALS = new Set([
   "ngram-fingerprint",    // Characteristic AI token bigrams (return {success:, const result =, etc.)
   "structural-clones",    // 3+ near-identical function bodies within a single file
   "prompt-leakage",       // AI preamble / system-prompt fragments leaked into code
-  "style-drift",          // Sharp AI-signal shift between first and last thirds of file
   "watermark-detection",  // Invisible Unicode watermark characters
+]);
+
+// Findings that are reported but say nothing about WHO wrote the code: a logic bomb or a call to an API that does
+// not exist is just as likely in human code. They used to feed the AI score (backdoor-detection as CORE,
+// hallucinated-api as SECONDARY), so a human-written file with a hardcoded bypass scored as more AI-written. They
+// still fire, still appear in the explanation (with no contribution) and still become security indicators; they just
+// have no say in the AI percentage. Security risk and AI authorship are independent questions.
+export const CONTEXT_SIGNALS: ReadonlySet<string> = new Set([
+  // style-drift was listed as CORE but is computed after the score (it needs the score of each third of the file), so it
+  // never fed the score yet was credited with a share of it in the explanation. It marks MIXED authorship (two parts of
+  // one file that read differently), which is not evidence that either part is AI.
+  "style-drift",          // Sharp AI-signal shift between first and last thirds of file
   "backdoor-detection",   // Logic bombs, exfiltration, hardcoded bypasses
+  "hallucinated-api",     // Calls to non-existent APIs (validateAndSave, Array.isEmpty, etc.)
 ]);
 
 // jsdoc-completeness, zero-debug-artifacts, and import-exhaustiveness were
@@ -6171,7 +6190,6 @@ const SECONDARY_SIGNALS = new Set([
   "error-message-phrasing",   // AI uses "Invalid X", "X is required", "Failed to X" templates
   "identifier-length",        // AI identifier lengths are uniform (no short loop vars like i,n,ok)
   "token-frequency",          // AI-surplus tokens: await/const/interface/Readonly at high density
-  "hallucinated-api",         // Calls to non-existent APIs (validateAndSave, Array.isEmpty, etc.)
   "copy-paste-pattern",       // Verbatim StackOverflow algorithm implementations
   "jsdoc-completeness",   "zero-debug-artifacts", "import-exhaustiveness",
 ]);
@@ -6285,12 +6303,13 @@ interface SignalResult { id: string; value: number; leak: number }
 // Phase 2 (SECONDARY): thirteen moderately discriminating signals amplify the
 //   core probability MULTIPLICATIVELY — secNoisyOr * 0.45 * coreNoisyOr.
 //   This means secondary signals add nothing when core is silent.
-// Phase 3 (STYLE): sixteen "good practice" signals are shown in fired[] for
-//   explainability but do not feed into the score.
+// Phase 3 (STYLE and CONTEXT): "good practice" style signals, and findings that
+//   say nothing about who wrote the code (backdoor, hallucinated API, style
+//   drift), are shown in fired[] for explainability but do not feed the score.
 //
 // Sigmoid inflection raised to 0.55 (vs old 0.45) so that moderate evidence
 // maps below 50%, preventing MEDIUM/HIGH false positives on human code.
-function computeAIPercentage(
+export function computeAIPercentage(
   content: string, lang: string, lineCount: number, priorBias = 0, humanEvidence = 0,
 ): { score: number; fired: SignalResult[]; applicableCount: number } {
   const lines = content.split("\n");
@@ -6379,9 +6398,9 @@ function computeAIPercentage(
   }
   const secNoisyOr = 1 - secProduct;
 
-  // ── Phase 3: Style signals — explainability only ──────────────────────────
+  // ── Phase 3: Style and context signals — explainability only ──────────────
   for (const [id, baseLeak] of SIGNAL_LEAKS) {
-    if (!STYLE_SIGNALS.has(id)) continue;
+    if (!STYLE_SIGNALS.has(id) && !CONTEXT_SIGNALS.has(id)) continue;
     const s = raw[id] ?? 0;
     if (s > 0.02) applicableCount++;
     if (s > 0.05) fired.push({ id, value: s, leak: baseLeak });
@@ -7496,10 +7515,13 @@ export function buildTrustChain(files: FileAnalysis[], scan_id: string): TrustCh
 
 // ── Explainability builder ────────────────────────────────────────────────────
 
-function buildExplainedSignals(fired: SignalResult[], totalScore: number): ExplainedSignal[] {
-  const tierOf = (id: string): "CORE" | "SECONDARY" | "STYLE" =>
-    CORE_SIGNALS.has(id) ? "CORE" : SECONDARY_SIGNALS.has(id) ? "SECONDARY" : "STYLE";
-  const totalLeak = fired.reduce((s, f) => s + f.leak * f.value, 0) || 1;
+export function buildExplainedSignals(fired: SignalResult[], totalScore: number): ExplainedSignal[] {
+  const tierOf = (id: string): "CORE" | "SECONDARY" | "STYLE" | "CONTEXT" =>
+    CORE_SIGNALS.has(id) ? "CORE" : SECONDARY_SIGNALS.has(id) ? "SECONDARY" : CONTEXT_SIGNALS.has(id) ? "CONTEXT" : "STYLE";
+  // Only signals that fed the score can account for it. Style and context signals used to be counted here, so evidence
+  // that never touched the score was credited with part of it.
+  const scoring = (id: string) => CORE_SIGNALS.has(id) || SECONDARY_SIGNALS.has(id);
+  const totalLeak = fired.filter(f => scoring(f.id)).reduce((s, f) => s + f.leak * f.value, 0) || 1;
   return fired
     .filter(f => f.value > 0.05)
     .map(f => ({
@@ -7507,7 +7529,7 @@ function buildExplainedSignals(fired: SignalResult[], totalScore: number): Expla
       label:        SIGNAL_LABELS[f.id] ?? f.id,
       tier:         tierOf(f.id),
       value:        f.value,
-      contribution: Math.round((f.leak * f.value / totalLeak) * totalScore * 100) / 100,
+      contribution: scoring(f.id) ? Math.round((f.leak * f.value / totalLeak) * totalScore * 100) / 100 : 0,
       detail:       SIGNAL_DETAILS[f.id]?.(f.value) ?? `${Math.round(f.value * 100)}%`,
     }))
     .sort((a, b) => b.contribution - a.contribution);
@@ -8582,6 +8604,9 @@ export interface EvidenceBreakdown {
   likelihood:         AILikelihoodBand;
   boosts:             string[]; // human-readable reasons for score boosts
   baseline_deviation?: BaselineDeviation; // developer baseline comparison detail
+  // The evidence grouped by kind, and how much to rely on the percentage (aiEvidenceGroups.ts). Rides in this stored
+  // JSON so a saved scan keeps it without a new column. Reporting only: it does not change `combined`.
+  attribution?:       AIEvidenceReport;
 }
 
 // ── PR Behavior Scoring ──────────────────────────────────────────────────────
@@ -8693,10 +8718,16 @@ export interface ScanOutput {
   // The calibrated probability P(AI | evidence score) with a confidence interval -- or an explicit, reasoned
   // "uncalibrated" (value null). Never a guess: see aiCalibration.ts.
   ai_probability?:      AiProbability;
+  // The share of the code that looks AI-written BY CODE VOLUME, with code that could not be judged (too short) and
+  // code that is not authored source (config, generated) reported separately -- see aiAttributionSummary.ts.
+  ai_attribution?:      AIAttributionSummary;
   semantic_graph:       SemanticGraph | null;
   git_provenance:       GitProvenanceSummary | null;
   ai_tooling:           AIToolingArtifact[];
   evidence_breakdown:   EvidenceBreakdown;  // multi-signal evidence buckets
+  // The same evidence grouped by KIND, each group saying what it cannot show, and how much to rely on the percentage
+  // (confidence is separate from likelihood). Reporting only: it does not change the score. See aiEvidenceGroups.ts.
+  ai_evidence?:         AIEvidenceReport;
   // What this scan could NOT fully analyze, and where its time went (see scanHealth.ts). Optional so
   // hand-built ScanOutputs (api/scans) stay valid.
   health?:              ScanHealth;
@@ -9563,10 +9594,15 @@ export function runScan(input: ScanInput): ScanOutput {
   // analyzeFile (including ones reused from the cache) is left exactly as it was.
   for (const f of files) assignFingerprints(f.indicators, { filePath: f.file_path, fileLevelIds: FILE_LEVEL_INDICATOR_IDS });
 
-  // Weighted AI % (large files dominate)
-  const totalLines = files.reduce((s, f) => s + f.line_count, 0);
-  const avgAI = totalLines === 0 ? 0
-    : files.reduce((s, f) => s + f.ai_percentage * f.line_count, 0) / totalLines;
+  const contentLines = new Map(allFiles.map(f => [f.path, f.content ? f.content.split("\n").length : 0]));
+  // Weighted AI % (large files dominate), over the source that could be judged. It used to be over every line of every
+  // file, so a 5,000-line lockfile or generated file (always 0%) diluted a repository of AI-written source to a fraction
+  // of its real share, and files too short to analyse counted as 0%.
+  const ai_attribution = summarizeAIAttribution(
+    files.map(a => ({ file_path: a.file_path, line_count: a.line_count || (contentLines.get(a.file_path) ?? 0), ai_percentage: a.ai_percentage, scan_quality: a.scan_quality })),
+    p => getFileTypeMeta(p).skipAI,
+  );
+  const avgAI = ai_attribution.estimated_ai_percentage;
 
   // AI distribution (percentiles)
   const scorable = files.filter(f => f.line_count > 20 && !getFileTypeMeta(f.file_path).skipAI);
@@ -9664,9 +9700,9 @@ export function runScan(input: ScanInput): ScanOutput {
 
   const allBoosts: string[] = [...prBehavior.boosts, ...(baselineDev?.reasons ?? [])];
 
-  // Hard boost: >1000 LOC in single commit and <15 min timing
+  // Context: >1000 lines in a single commit is unusual, which is worth saying, but it does not show who wrote them.
   if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) {
-    allBoosts.push(`High-confidence signal: ${prMeta.additions} lines in a single commit`);
+    allBoosts.push(`Unusual: ${prMeta.additions} lines in a single commit (context only, not evidence of AI by itself)`);
   }
 
   const riskOrder: Record<string, number> = { LOW:0, MEDIUM:1, HIGH:2, CRITICAL:3 };
@@ -9736,7 +9772,10 @@ export function runScan(input: ScanInput): ScanOutput {
   // aiAuthoredCommits: commits explicitly referencing AI tools
   if (git_provenance) {
     const aiCommitSignal = Math.min(1, git_provenance.aiAuthoredCommits / Math.max(1, git_provenance.totalCommits));
-    gitEvidence = Math.min(1, git_provenance.overallRiskScore * 0.5 + aiCommitSignal * 0.5);
+    // Only commits that say an AI tool wrote them. overallRiskScore is a provenance-TRUST score (odd history, force
+    // pushes, unsigned commits): a suspicious history is not evidence of AI authorship, and it used to raise this
+    // number. It is still reported in git_provenance, as a separate question.
+    gitEvidence = aiCommitSignal;
     if (git_provenance.aiAuthoredCommits > 0) {
       allBoosts.push(`${git_provenance.aiAuthoredCommits} commit(s) mention AI tool in message`);
     }
@@ -9760,12 +9799,11 @@ export function runScan(input: ScanInput): ScanOutput {
     toolEvidence       * 0.10
   );
 
-  // Hard boosts that override normal weighting
-  let hardBoost = 0;
-  if (prMeta && prMeta.additions > 1000 && prMeta.commits === 1) hardBoost = Math.max(hardBoost, 0.20);
-  if (ai_tooling.length > 0 && codeEvidence > 0.40)              hardBoost = Math.max(hardBoost, 0.15);
-
-  const combinedUnclamped = combinedRaw + hardBoost;
+  // No hard boosts. A large single commit and an AI tool's config file in the repo were each adding a flat 0.15-0.20
+  // on top of the weighted sum, but neither shows that THIS code was AI-written (people paste big commits and
+  // squash; a repo can hold a Cursor config while a person writes the file). Both are still counted at their normal
+  // weights above and reported in `boosts`, as context.
+  const combinedUnclamped = combinedRaw;
   const combined = Number.isFinite(combinedUnclamped) ? Math.min(1, combinedUnclamped) : codeEvidence;
 
   const evidence_breakdown: EvidenceBreakdown = {
@@ -9779,6 +9817,19 @@ export function runScan(input: ScanInput): ScanOutput {
     boosts:             allBoosts,
     baseline_deviation: baselineDev ?? undefined,
   };
+
+  const ai_evidence = buildEvidenceGroups({
+    codeEvidence,
+    analysis: ai_attribution,
+    files: files.map(f => ({ line_count: f.line_count, explained_signals: f.explained_signals, watermarks: f.watermarks })),
+    pr: { applicable: !!prMeta, score: prEvidenceAdjusted, notes: prBehavior.boosts },
+    git: { applicable: !!git_provenance && git_provenance.totalCommits > 0, score: gitEvidence, aiCommits: git_provenance?.aiAuthoredCommits ?? 0, totalCommits: git_provenance?.totalCommits ?? 0 },
+    baseline: { applicable: !!baselineDev, score: baselineEvidence, reasons: baselineDev?.reasons ?? [] },
+    tools: [...new Set(ai_tooling.map(t => t.tool))],
+    toolScore: toolEvidence,
+    mixedAuthorship,
+  });
+  evidence_breakdown.attribution = ai_evidence;
 
 
   // The multi-signal combined score is the primary AI metric. Guarded against NaN: any NaN in the sub-calculations
@@ -9820,6 +9871,7 @@ export function runScan(input: ScanInput): ScanOutput {
     // Guarded against NaN: any NaN in sub-calculations falls back to code-only.
     total_ai_percentage,
     ai_evidence_score:   total_ai_percentage,
+    ai_attribution,
     ai_probability:      toAiProbability(total_ai_percentage, input.calibration === undefined ? DEFAULT_AI_CALIBRATION : input.calibration),
     cross_file_ai_boost:  crossFileBoost,
     mixed_authorship:     mixedAuthorship,
@@ -9840,6 +9892,7 @@ export function runScan(input: ScanInput): ScanOutput {
     git_provenance,
     ai_tooling,
     evidence_breakdown,
+    ai_evidence,
   };
 }
 

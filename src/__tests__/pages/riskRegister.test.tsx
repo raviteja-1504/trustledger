@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within, configure } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const toastError = jest.fn();
@@ -20,6 +20,8 @@ import type { RiskItem } from "@/lib/riskRegister";
 
 const mockFetch = authedFetch as jest.MockedFunction<typeof authedFetch>;
 jest.setTimeout(30000);
+// Under a loaded full-suite run the first render can take longer than the default 1 s wait.
+configure({ asyncUtilTimeout: 10_000 });
 
 const today = new Date();
 const dayStr = (offset: number) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + offset)).toISOString().slice(0, 10);

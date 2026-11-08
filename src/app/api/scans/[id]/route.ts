@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../../_middleware";
-import { analyzeFile, getFixSuggestions, CURRENT_ENGINE_VERSION } from "@/lib/scanner";
+import { analyzeFile, getFixSuggestions, CURRENT_ENGINE_VERSION, isNonAuthoredFile } from "@/lib/scanner";
+import { summarizeAIAttribution } from "@/lib/aiAttributionSummary";
 import { ensureTaintEngines } from "@/lib/engineWarmup";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { findingStatus, fixedSincePrevious, summarize, type FindingStatus, type PrHistory } from "@/lib/findingLifecycle";
@@ -298,6 +299,9 @@ export async function GET(
     commit_sha:          scan.commit_sha,
     overall_risk:        scan.overall_risk,
     total_ai_percentage: scan.total_ai_percentage,
+    // By code volume, from the stored per-file scores (not live-re-analysed, so it matches what was recorded): see
+    // aiAttributionSummary.ts. The confidence bands are not stored, so they stay 0 here.
+    ai_attribution:      summarizeAIAttribution((files ?? []).map(f => ({ file_path: f.file_path, line_count: f.line_count, ai_percentage: f.ai_percentage })), isNonAuthoredFile),
     timestamp:           scan.created_at,
     evidence_breakdown:  scan.evidence_breakdown ?? null,
     ai_tooling:          scan.ai_tooling ?? [],

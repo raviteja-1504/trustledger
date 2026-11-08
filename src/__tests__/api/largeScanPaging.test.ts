@@ -117,6 +117,12 @@ describe(`a ${N}-file scan behind a ${PAGE_SIZE}-row response cap`, () => {
     expect(scan.lifecycle.summary).toMatchObject({ new: 0, existing: N });
   });
 
+  it("the scan reports its AI share by code volume over every file, not just the first 1,000", async () => {
+    const scan = await (await getScan(req(`/api/scans/${SCAN}`), params)).json() as { ai_attribution: { eligible_loc: number; unknown_loc: number; analyzed_loc: number; excluded_loc: number } };
+    // every file here is 20 lines: too short to judge, so all of it is unknown -- and all N files are counted
+    expect(scan.ai_attribution).toMatchObject({ eligible_loc: N * 20, unknown_loc: N * 20, analyzed_loc: 0, excluded_loc: 0 });
+  });
+
   it("the signed Trust Record lists every file, finding and attestation", async () => {
     await attestFirst(1100);
     const { record } = await (await getTrustRecord(req(`/api/scans/${SCAN}/trust-record`), params)).json();

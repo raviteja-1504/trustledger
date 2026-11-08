@@ -81,6 +81,32 @@ describe("PR page: the numbers", () => {
   });
 });
 
+describe("PR page: AI share", () => {
+  it("says the share by code volume and what it rests on, when the scan has it", async () => {
+    scan = { ...scan, ai_attribution: { estimated_ai_percentage: 0.41, estimated_ai_loc: 410, analyzed_loc: 1000, eligible_loc: 1010, unknown_loc: 10, excluded_loc: 5000, analysis_coverage: 0.99, ai_leaning_loc: 0, mixed_loc: 0, human_leaning_loc: 0, high_confidence_loc: 0, medium_confidence_loc: 0, low_confidence_loc: 0 } } as ScanResult;
+    await renderPage();
+    expect(screen.getByText(/41% of the 1,000 source lines analysed look AI-written · 10 lines too short to judge · 5,000 lines of config or generated files left out/)).toBeInTheDocument();
+  });
+  it("says how much to rely on the percentage, why, and what evidence was not available", async () => {
+    scan = { ...scan, evidence_breakdown: { code_evidence: 0.4, pr_evidence: 0, git_evidence: 0, tool_evidence: 0, baseline_evidence: 0, combined: 0.3, likelihood: "Mixed Authorship", boosts: [],
+      attribution: { groups: [], confidence: { level: "medium", reasons: ["96% of the source code could be analysed.", "Only the code's own style supports the number: nothing about its history or author can confirm it."], unavailable: ["git history", "the author's baseline"] } } } } as ScanResult;
+    await renderPage();
+    const line = screen.getByTestId("ai-confidence");
+    expect(line).toHaveTextContent("How much to rely on it: medium.");
+    expect(line).toHaveTextContent("Only the code's own style supports the number");
+    expect(line).toHaveTextContent("Not available for this scan: git history, the author's baseline.");
+  });
+  it("shows nothing about confidence when nothing could be analysed, or for an older scan", async () => {
+    scan = { ...scan, evidence_breakdown: { code_evidence: 0, pr_evidence: 0, git_evidence: 0, tool_evidence: 0, baseline_evidence: 0, combined: 0, likelihood: "Likely Human", boosts: [], attribution: { groups: [], confidence: { level: "none", reasons: ["No source file was long enough to analyse."], unavailable: [] } } } } as ScanResult;
+    await renderPage();
+    expect(screen.queryByTestId("ai-confidence")).toBeNull();
+  });
+  it("falls back to the plain average for a scan without it", async () => {
+    await renderPage();
+    expect(screen.getByText(/30.0% avg AI content/)).toBeInTheDocument();
+  });
+});
+
 describe("PR page: tooltips", () => {
   it("every table column header explains itself", async () => {
     await renderPage();

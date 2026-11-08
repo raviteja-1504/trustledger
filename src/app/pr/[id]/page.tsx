@@ -37,6 +37,7 @@ import { useRole, ROLE_LABELS } from "@/lib/roles";
 import { deepLinkAction } from "@/lib/reviewLinks";
 import { buildPrSecuritySummary } from "@/lib/prSecuritySummary";
 import { resolveReviewer } from "@/lib/reviewerIdentity";
+import { attributionSentence } from "@/lib/aiAttributionSummary";
 
 // ── Signal library ────────────────────────────────────────────────────────────
 
@@ -2103,8 +2104,15 @@ function PRDetailContent() {
                   <span className="ml-1.5 text-gray-400 font-normal text-xs">({filteredFiles.length} shown of {totalFiles})</span>
                 </p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Click any row to expand · {(scan.total_ai_percentage * 100).toFixed(1)}% avg AI content
+                  Click any row to expand · {attributionSentence(scan.ai_attribution) ?? `${(scan.total_ai_percentage * 100).toFixed(1)}% avg AI content`}
                 </p>
+                {scan.evidence_breakdown?.attribution && scan.evidence_breakdown.attribution.confidence.level !== "none" && (
+                  <p className="text-xs text-gray-400 mt-0.5" data-testid="ai-confidence">
+                    <strong className="text-gray-600">How much to rely on it: {scan.evidence_breakdown.attribution.confidence.level}.</strong>{" "}
+                    {scan.evidence_breakdown.attribution.confidence.reasons.join(" ")}
+                    {scan.evidence_breakdown.attribution.confidence.unavailable.length > 0 && ` Not available for this scan: ${scan.evidence_breakdown.attribution.confidence.unavailable.join(", ")}.`}
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
               {flaggedFiles.some(f => f.content) && (

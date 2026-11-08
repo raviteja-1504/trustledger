@@ -101,6 +101,8 @@ export interface EvidenceBreakdown {
   combined:           number;
   likelihood:         "Likely Human" | "Human with Tool Assistance" | "Mixed Authorship" | "Likely AI-Assisted" | "Strong AI Evidence";
   boosts:             string[];
+  // The evidence grouped by kind and how much to rely on the percentage (lib/aiEvidenceGroups.ts).
+  attribution?:       import("../lib/aiEvidenceGroups").AIEvidenceReport;
   baseline_deviation?: {
     score:            number;
     loc_deviation:    number;
@@ -118,6 +120,9 @@ export interface ScanResult {
   files: FileResult[];
   overall_risk: RiskLevel;
   total_ai_percentage: number;
+  // The share of analysed source that looks AI-written by code volume, with what was too short to judge and what was
+  // left out (config, generated). See lib/aiAttributionSummary.ts.
+  ai_attribution?: import("../lib/aiAttributionSummary").AIAttributionSummary;
   file_count?: number;
   attested_count?: number;
   triggered_by?: string;
