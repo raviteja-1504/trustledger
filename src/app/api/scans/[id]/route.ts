@@ -95,12 +95,12 @@ type StoredIndicatorLite = { id: string; label: string; line?: number; fingerpri
  * one, and the few before that. Only `file_path` and `indicators` are read -- never file content. */
 async function loadPrHistory(
   db: ReturnType<typeof createServiceClient>, orgId: string, repo: string, prNumber: number, createdAt: string, scanId: string,
-): Promise<PrHistory & { previousFiles: Array<{ file_path: string; indicators: StoredIndicatorLite[] }> | null }> {
-  const empty = { previous: null, earlier: new Set<string>(), previousFiles: null };
+): Promise<PrHistory & { previousFiles: Array<{ file_path: string; indicators: StoredIndicatorLite[] }> | null; previousScan: { scan_id: string; commit_sha: string; created_at: string } | null }> {
+  const empty = { previous: null, earlier: new Set<string>(), previousFiles: null, previousScan: null };
   try {
     const { data: prior } = await db
       .from("scans")
-      .select("id")
+      .select("id, commit_sha, created_at")
       .eq("org_id", orgId)
       .eq("repo_full_name", repo)
       .eq("pr_number", prNumber)
@@ -127,7 +127,8 @@ async function loadPrHistory(
     const previousFiles = byScan.get(prior[0].id) ?? [];
     const earlier = new Set<string>();
     for (const s of prior.slice(1)) for (const fp of fps(byScan.get(s.id) ?? [])) earlier.add(fp);
-    return { previous: fps(previousFiles), earlier, previousFiles };
+    // Which scan the lifecycle compares with, so the page can say so ("compared with abc1234 from 3 Nov").
+    return { previous: fps(previousFiles), earlier, previousFiles, previousScan: { scan_id: prior[0].id, commit_sha: prior[0].commit_sha, created_at: prior[0].created_at } };
   } catch {
     return empty;
   }
@@ -286,7 +287,7 @@ export async function GET(
     : [];
 
   return NextResponse.json({
-    lifecycle: { summary: summarize(statuses, fixed.length), fixed: fixed.slice(0, 100), has_previous_scan: !!history.previous },
+    lifecycle: { summary: summarize(statuses, fixed.length), fixed: fixed.slice(0, 100), has_previous_scan: !!history.previous, previous_scan: history.previousScan },
     health: extra.health,
     telemetry: extra.telemetry,
     current_engine_version: CURRENT_ENGINE_VERSION,

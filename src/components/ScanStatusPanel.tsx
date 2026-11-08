@@ -1,15 +1,19 @@
 "use client";
 
 /**
- * The PR page's scan status strip: whether the scan was complete (scanHealth.ts), what changed since the
- * previous push (findingLifecycle.ts), how long it took, and the two actions that follow from those --
- * rescan (degraded scan, older engine, or triage decisions to apply) and baseline (accept every current
- * finding so only new ones gate merges).
+ * The PR page's scan status strip: whether the scan was complete (scanHealth.ts), how long it took, and the
+ * actions that follow -- rescan (degraded scan, older engine, or triage decisions to apply) and baseline (accept
+ * every current finding so only new ones gate merges). The counts live in ScanCounts.tsx.
+ *
+ * Rescan queues a NEW scan of the PR's current head: this page keeps showing the scan it was opened on. So the
+ * panel waits for the new scan to exist, says what to expect from it, and links to it.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { authedFetch } from "@/lib/useRealData";
 import { describeHealth, GAP_REASON_TEXT, languageName, type ScanHealth, type ScanTelemetry } from "@/lib/scanHealth";
-import { STATUS_LABEL, type LifecycleSummary, type FixedFinding } from "@/lib/findingLifecycle";
+import type { LifecycleSummary, FixedFinding } from "@/lib/findingLifecycle";
+import Tip from "@/components/Tip";
+import { ACTION_TIP } from "@/lib/prTooltips";
 
 interface Props {
   scanId: string;
@@ -17,8 +21,6 @@ interface Props {
   telemetry?: ScanTelemetry | null;
   currentEngineVersion?: string;
   lifecycle?: { summary: LifecycleSummary; fixed: FixedFinding[]; has_previous_scan: boolean };
-  /** Security findings this PR introduced vs. ones already in the files it touches (prDiff.ts). */
-  delta?: { introduced: number; critical: number; high: number; preexisting: number };
   canTriage: boolean;
   /** Paste-ready markdown summary of this scan (lib/prSecuritySummary.ts). */
   summaryMarkdown?: string;
@@ -27,20 +29,32 @@ interface Props {
   onOpenFile?: (path: string) => void;
   /** Called after a baseline so the page can reload statuses. */
   onChanged: () => void;
+  /** To find the scan a rescan produces: this PR's repo and number, this scan's commit and time. */
+  repo?: string;
+  prNumber?: number;
+  commitSha?: string;
+  scanCreatedAt?: string;
+  /** Open security findings (not under a decision), to say what a baseline would accept. */
+  securityOpen?: number;
+  /** Triage decisions saved on this page since the scan: they apply to the merge check after a rescan. */
+  unappliedDecisions?: number;
+  /** How often to look for the rescan's scan, in ms (tests shorten it). */
+  rescanPollMs?: number;
 }
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+const MAX_POLLS = 45;
 
-const CHIP: Record<keyof LifecycleSummary, string> = {
-  new: "text-sky-200 bg-sky-500/15 border-sky-400/30",
-  reopened: "text-orange-200 bg-orange-500/15 border-orange-400/30",
-  existing: "text-slate-300 bg-white/5 border-white/10",
-  accepted: "text-violet-200 bg-violet-500/15 border-violet-400/30",
-  false_positive: "text-slate-300 bg-slate-500/15 border-slate-400/30",
-  fixed: "text-emerald-200 bg-emerald-500/15 border-emerald-400/30",
-};
+type RescanState =
+  | { phase: "idle" }
+  | { phase: "waiting"; headSha?: string }
+  | { phase: "done"; newScanId: string; headSha?: string }
+  | { phase: "timeout" };
 
-export default function ScanStatusPanel({ scanId, health, telemetry, currentEngineVersion, lifecycle, delta, canTriage, summaryMarkdown, canOpenFile, onOpenFile, onChanged }: Props) {
+export default function ScanStatusPanel({
+  scanId, health, telemetry, currentEngineVersion, lifecycle, canTriage, summaryMarkdown, canOpenFile, onOpenFile, onChanged,
+  repo, prNumber, commitSha, scanCreatedAt, securityOpen, unappliedDecisions = 0, rescanPollMs = 4000,
+}: Props) {
   const [copied, setCopied] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   async function copySummary() {
@@ -56,20 +70,46 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
   const [busy, setBusy] = useState<"rescan" | "baseline" | "record" | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [showGaps, setShowGaps] = useState(false);
-  const [showFixed, setShowFixed] = useState(false);
   const [confirmBaseline, setConfirmBaseline] = useState(false);
   const [showPerf, setShowPerf] = useState(false);
+  const [rescanState, setRescanState] = useState<RescanState>({ phase: "idle" });
 
   const olderEngine = !!health?.engine_version && !!currentEngineVersion && health.engine_version !== currentEngineVersion;
   const s = lifecycle?.summary;
   const openCount = s ? s.new + s.existing + s.reopened : 0;
+  const otherOpen = securityOpen != null ? Math.max(0, openCount - securityOpen) : null;
+
+  // After a rescan is queued, look for the scan it produces: a newer scan of this PR than the one on screen.
+  useEffect(() => {
+    if (rescanState.phase !== "waiting" || !repo || prNumber == null || !scanCreatedAt) return;
+    let cancelled = false;
+    let polls = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      polls++;
+      try {
+        const r = await authedFetch<{ scans: Array<{ scan_id: string; pr_number: number; commit_sha?: string; created_at: string }> }>(
+          `/api/scans?repo=${encodeURIComponent(repo)}&since=${encodeURIComponent(scanCreatedAt)}&limit=20`);
+        const newer = (r.scans ?? [])
+          .filter(x => x.pr_number === prNumber && x.scan_id !== scanId && Date.parse(x.created_at) > Date.parse(scanCreatedAt))
+          .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+        if (newer) { if (!cancelled) setRescanState(prev => ({ phase: "done", newScanId: newer.scan_id, headSha: newer.commit_sha ?? (prev.phase === "waiting" ? prev.headSha : undefined) })); return; }
+      } catch { /* keep waiting: a failed poll is not a failed rescan */ }
+      if (cancelled) return;
+      if (polls >= MAX_POLLS) setRescanState({ phase: "timeout" });
+      else timer = setTimeout(tick, rescanPollMs);
+    };
+    timer = setTimeout(tick, rescanPollMs);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [rescanState.phase, repo, prNumber, scanCreatedAt, scanId, rescanPollMs]);
 
   async function rescan() {
     setBusy("rescan"); setMsg(null);
     try {
-      await authedFetch(`/api/scans/${scanId}/rescan`, { method: "POST" });
-      setMsg({ ok: true, text: "Rescan queued. The new scan appears in Scan History and on the PR's check when it finishes (usually under a minute)." });
+      const r = await authedFetch<{ head_sha?: string }>(`/api/scans/${scanId}/rescan`, { method: "POST" });
+      setRescanState({ phase: "waiting", headSha: r?.head_sha });
     } catch (e) {
+      setRescanState({ phase: "idle" });
       setMsg({ ok: false, text: e instanceof Error && e.message ? e.message : "Couldn't start the rescan." });
     } finally { setBusy(null); }
   }
@@ -101,26 +141,12 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
     } finally { setBusy(null); }
   }
 
-  if (!health && !telemetry && !lifecycle && !delta && !summaryMarkdown) return null;
+  if (!health && !telemetry && !lifecycle && !summaryMarkdown && !unappliedDecisions) return null;
+
+  const sameCommit = rescanState.phase !== "idle" && rescanState.phase !== "timeout" && !!commitSha && !!rescanState.headSha && rescanState.headSha === commitSha;
 
   return (
     <div className="mt-4 space-y-2.5">
-      {delta && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-xs font-bold ${delta.introduced ? "text-rose-200" : "text-emerald-300"}`}>
-            {delta.introduced === 0
-              ? "This PR introduces no security findings"
-              : `This PR introduces ${delta.introduced} security finding${delta.introduced === 1 ? "" : "s"}`}
-          </span>
-          {delta.critical > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full border text-rose-200 bg-rose-500/15 border-rose-400/30">{delta.critical} critical</span>}
-          {delta.high > 0 && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full border text-orange-200 bg-orange-500/15 border-orange-400/30">{delta.high} high</span>}
-          {delta.preexisting > 0 && (
-            <span className="text-[11px] text-slate-400" title="Findings on lines this PR didn't change, in files it touches">
-              · {delta.preexisting} already in the files it touches
-            </span>
-          )}
-        </div>
-      )}
       {health && health.status !== "complete" && (
         <div className={`rounded-xl border px-4 py-2.5 ${health.status === "degraded" ? "border-amber-700/50 bg-amber-950/40" : "border-slate-700/60 bg-slate-800/40"}`}>
           <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -139,9 +165,11 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
               {health.status === "degraded" && " A rescan normally fixes this."}
             </p>
             {health.gaps.length > 0 && (
-              <button onClick={() => setShowGaps(v => !v)} className="shrink-0 text-[11px] font-semibold text-slate-300 hover:text-white underline underline-offset-2">
-                {showGaps ? "Hide files" : "Which files?"}
-              </button>
+              <Tip tip={ACTION_TIP.whichFiles}>
+                <button onClick={() => setShowGaps(v => !v)} className="shrink-0 text-[11px] font-semibold text-slate-300 hover:text-white underline underline-offset-2">
+                  {showGaps ? "Hide files" : "Which files?"}
+                </button>
+              </Tip>
             )}
           </div>
           {showGaps && (
@@ -160,74 +188,103 @@ export default function ScanStatusPanel({ scanId, health, telemetry, currentEngi
         </div>
       )}
 
+      {unappliedDecisions > 0 && rescanState.phase === "idle" && (
+        <div role="status" className="flex items-center justify-between gap-3 flex-wrap rounded-xl border border-violet-400/30 bg-violet-500/10 px-4 py-2.5">
+          <p className="text-xs text-violet-100 leading-relaxed">
+            <strong>{unappliedDecisions} triage decision{unappliedDecisions === 1 ? "" : "s"} saved.</strong>{" "}
+            They are recorded now, but this scan&apos;s risk ratings and the merge check only change after a rescan.
+          </p>
+          <Tip tip={ACTION_TIP.rescanNow}>
+            <button onClick={rescan} disabled={busy !== null}
+              className="shrink-0 text-[11px] font-bold text-violet-50 bg-violet-500/30 hover:bg-violet-500/40 border border-violet-400/40 rounded-lg px-2.5 py-1 disabled:opacity-50">
+              {busy === "rescan" ? "Queuing…" : "Rescan now"}
+            </button>
+          </Tip>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 flex-wrap">
-        {s && (
-          <>
-            <span className="text-[11px] text-slate-400 font-medium mr-0.5">{lifecycle?.has_previous_scan ? "Since the last push:" : "Findings:"}</span>
-            {(["new", "reopened", "existing", "accepted", "false_positive"] as const).filter(k => s[k] > 0).map(k => (
-              <span key={k} className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${CHIP[k]}`}>{s[k]} {STATUS_LABEL[k].toLowerCase()}</span>
-            ))}
-            {s.fixed > 0 && (
-              <button onClick={() => setShowFixed(v => !v)} className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${CHIP.fixed}`}>
-                {s.fixed} fixed {showFixed ? "▴" : "▾"}
-              </button>
-            )}
-            {openCount === 0 && s.fixed === 0 && s.accepted + s.false_positive === 0 && <span className="text-[11px] text-slate-500">none</span>}
-          </>
-        )}
         <span className="flex-1" />
         {telemetry && (
-          <button onClick={() => setShowPerf(v => !v)} className="text-[11px] text-slate-400 hover:text-slate-200 tabular-nums" aria-expanded={showPerf}>
-            {fmtMs(telemetry.total_ms)} · {telemetry.files_analyzed} analyzed{telemetry.files_reused ? ` · ${telemetry.files_reused} reused` : ""} {showPerf ? "▴" : "▾"}
-          </button>
+          <Tip tip={ACTION_TIP.timing}>
+            <button onClick={() => setShowPerf(v => !v)} className="text-[11px] text-slate-400 hover:text-slate-200 tabular-nums" aria-expanded={showPerf}>
+              {fmtMs(telemetry.total_ms)} · {telemetry.files_analyzed} analyzed{telemetry.files_reused ? ` · ${telemetry.files_reused} reused` : ""} {showPerf ? "▴" : "▾"}
+            </button>
+          </Tip>
         )}
         {olderEngine && (
-          <span className="text-[11px] font-semibold text-amber-200 bg-amber-500/10 border border-amber-400/30 px-2 py-0.5 rounded-full" title={`Scanned with engine ${health?.engine_version}; the current engine is ${currentEngineVersion}.`}>
-            Older engine
-          </span>
+          <Tip tip={`${ACTION_TIP.olderEngine} (This scan: engine ${health?.engine_version}; current: ${currentEngineVersion}.)`}>
+            <span tabIndex={0} className="cursor-help text-[11px] font-semibold text-amber-200 bg-amber-500/10 border border-amber-400/30 px-2 py-0.5 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+              Older engine
+            </span>
+          </Tip>
         )}
-        <button onClick={rescan} disabled={busy !== null}
-          className="text-[11px] font-bold text-indigo-100 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors">
-          {busy === "rescan" ? "Queuing…" : "Rescan"}
-        </button>
-        {summaryMarkdown && (
-          <button onClick={copySummary}
-            className="text-[11px] font-bold text-slate-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2.5 py-1 transition-colors"
-            title="Copy a markdown security summary to paste into the pull request">
-            {copied ? "Copied ✓" : "Copy summary"}
+        <Tip tip={ACTION_TIP.rescan}>
+          <button onClick={rescan} disabled={busy !== null || rescanState.phase === "waiting"}
+            className="text-[11px] font-bold text-indigo-100 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors">
+            {busy === "rescan" ? "Queuing…" : rescanState.phase === "waiting" ? "Rescanning…" : "Rescan"}
           </button>
+        </Tip>
+        {summaryMarkdown && (
+          <Tip tip={ACTION_TIP.copySummary}>
+            <button onClick={copySummary}
+              className="text-[11px] font-bold text-slate-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2.5 py-1 transition-colors">
+              {copied ? "Copied ✓" : "Copy summary"}
+            </button>
+          </Tip>
         )}
-        <button onClick={downloadTrustRecord} disabled={busy !== null}
-          className="text-[11px] font-bold text-emerald-100 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors"
-          title="A signed JSON record of this scan: findings, decisions, attestations and the merge-gate outcome.">
-          {busy === "record" ? "Building…" : "Trust Record"}
-        </button>
+        <Tip tip={ACTION_TIP.trustRecord}>
+          <button onClick={downloadTrustRecord} disabled={busy !== null}
+            className="text-[11px] font-bold text-emerald-100 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors">
+            {busy === "record" ? "Building…" : "Trust Record"}
+          </button>
+        </Tip>
         {canTriage && openCount > 0 && (
           confirmBaseline ? (
-            <span className="flex items-center gap-1.5">
-              <span className="text-[11px] text-slate-300">Accept all {openCount} open findings?</span>
-              <button onClick={baseline} disabled={busy !== null} className="text-[11px] font-bold text-violet-100 bg-violet-500/30 hover:bg-violet-500/40 border border-violet-400/40 rounded-lg px-2.5 py-1">Accept as baseline</button>
+            <span className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[11px] text-slate-300">
+                Accept all {openCount} open items
+                {securityOpen != null && otherOpen != null ? ` (${securityOpen} security finding${securityOpen === 1 ? "" : "s"} and ${otherOpen} other signal${otherOpen === 1 ? "" : "s"})` : ""}?
+              </span>
+              <Tip tip={ACTION_TIP.acceptBaseline}>
+                <button onClick={baseline} disabled={busy !== null} className="text-[11px] font-bold text-violet-100 bg-violet-500/30 hover:bg-violet-500/40 border border-violet-400/40 rounded-lg px-2.5 py-1">Accept as baseline</button>
+              </Tip>
               <button onClick={() => setConfirmBaseline(false)} className="text-[11px] text-slate-400 hover:text-slate-200 px-1">Cancel</button>
             </span>
           ) : (
-            <button onClick={() => setConfirmBaseline(true)} disabled={busy !== null}
-              className="text-[11px] font-bold text-slate-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors"
-              title="Accept every current finding in this PR, so only new findings block merges from now on.">
-              {busy === "baseline" ? "Saving…" : "Baseline"}
-            </button>
+            <Tip tip={ACTION_TIP.baseline}>
+              <button onClick={() => setConfirmBaseline(true)} disabled={busy !== null}
+                className="text-[11px] font-bold text-slate-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg px-2.5 py-1 disabled:opacity-50 transition-colors">
+                {busy === "baseline" ? "Saving…" : "Baseline"}
+              </button>
+            </Tip>
           )
         )}
       </div>
 
-      {showFixed && lifecycle && lifecycle.fixed.length > 0 && (
-        <ul className="rounded-xl border border-emerald-800/40 bg-emerald-950/30 px-4 py-2.5 space-y-1 max-h-48 overflow-auto">
-          {lifecycle.fixed.map(f => (
-            <li key={f.fingerprint} className="text-[11px] flex gap-2 min-w-0">
-              <span className="text-emerald-300 font-semibold shrink-0">✓ {f.label}</span>
-              <code className="font-mono text-slate-400 truncate">{f.file_path}{f.line ? `:${f.line}` : ""}</code>
-            </li>
-          ))}
-        </ul>
+      {/* ── Rescan progress / result ───────────────────────────── */}
+      {rescanState.phase === "waiting" && (
+        <div role="status" className="rounded-xl border border-indigo-400/30 bg-indigo-500/10 px-4 py-2.5 text-xs text-indigo-100 leading-relaxed">
+          <strong>Rescanning{rescanState.headSha ? <> commit <code className="font-mono">{rescanState.headSha.slice(0, 7)}</code></> : null}…</strong>{" "}
+          This page stays as it is. The result is a new scan that opens separately when it finishes, usually in under a minute.
+        </div>
+      )}
+      {rescanState.phase === "done" && (
+        <div role="status" className="flex items-center justify-between gap-3 flex-wrap rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2.5">
+          <p className="text-xs text-emerald-100 leading-relaxed min-w-0">
+            <strong>Rescan finished.</strong> The new scan compares itself with this one: its “new” findings appeared since, its “fixed” ones are gone.
+            {sameCommit ? " It is the same commit, so differences come from the scanner or your triage decisions, not new code." : " The PR has newer commits than this scan, so code changes show up too."}
+          </p>
+          <a href={`/pr/${rescanState.newScanId}`}
+            className="shrink-0 text-[11px] font-bold text-emerald-50 bg-emerald-500/30 hover:bg-emerald-500/40 border border-emerald-400/40 rounded-lg px-2.5 py-1">
+            Open the new results →
+          </a>
+        </div>
+      )}
+      {rescanState.phase === "timeout" && (
+        <div role="status" className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-100 leading-relaxed">
+          The rescan is taking longer than usual. It may still finish: check Scan History, or reload this page in a minute.
+        </div>
       )}
 
       {showPerf && telemetry && (

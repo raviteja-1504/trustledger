@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FileIndicator, FixSuggestion } from "@/types";
 import { buildFindingEvidence, type CheckTone, type FlowStep, type Part } from "@/lib/findingEvidence";
 import type { CrossFileMark } from "@/lib/dataFlowEvidence";
@@ -309,7 +309,7 @@ function FixBlock({ fix, language }: { fix: FixSuggestion; language?: string }) 
 }
 
 /** The inline explanation rendered directly under a flagged line. */
-export function InlineSecurityFinding({ ind, filePath, language, meta, fix, siblings, defaultOpen, onJump, nav }: {
+export function InlineSecurityFinding({ ind, filePath, language, meta, fix, siblings, defaultOpen, focusSeq, onJump, nav }: {
   ind: FileIndicator;
   filePath: string;
   language?: string;
@@ -317,10 +317,13 @@ export function InlineSecurityFinding({ ind, filePath, language, meta, fix, sibl
   fix?: FixSuggestion;
   siblings: readonly FileIndicator[];
   defaultOpen?: boolean;
+  /** Changes each time a reviewer steps to this finding: its evidence (the data flow) opens, even if it was closed. */
+  focusSeq?: number;
   onJump?: (line: number) => void;
   nav?: FileNavigation;
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
+  useEffect(() => { if (focusSeq != null) setOpen(true); }, [focusSeq]);
   const [fixOpen, setFixOpen] = useState(false);
   const [triageOpen, setTriageOpen] = useState(false);
   const showTriage = useCanShowTriage(ind);

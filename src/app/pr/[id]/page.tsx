@@ -26,7 +26,12 @@ import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_L
 import InfoTooltip from "@/components/InfoTooltip";
 import { findingMeta } from "@/lib/findingCatalog";
 import ScanStatusPanel from "@/components/ScanStatusPanel";
-import { FindingTriageContext, type FindingTriageContextValue } from "@/components/FindingTriage";
+import ScanCountsSummary from "@/components/ScanCounts";
+import FlaggedFilesReview from "@/components/FlaggedFilesReview";
+import Tip from "@/components/Tip";
+import { ACTION_TIP, COLUMN_TIP, EVIDENCE_TIP, FILTER_TIP, OVERALL_TIP, RISK_TIP, STATUS_TIP } from "@/lib/prTooltips";
+import { computeScanCounts, listNewFindings } from "@/lib/scanCounts";
+import { FindingTriageContext, TriageDecisionsList, type FindingTriageContextValue } from "@/components/FindingTriage";
 import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
 import { useRole, ROLE_LABELS } from "@/lib/roles";
 import { deepLinkAction } from "@/lib/reviewLinks";
@@ -593,7 +598,7 @@ function fileNav(shownFiles: readonly FileResult[]): FileNavigation {
   };
 }
 
-function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAttest, nav, crossFileMarks: marks }: {
+function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAttest, nav, crossFileMarks: marks, flagged, onGoToFile, onOpenReview }: {
   file: FileResult;
   /** Whether the viewer's role may sign off this file's risk level. */
   canAttest: boolean;
@@ -602,6 +607,10 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
   onRequestAttest: (f: FileResult) => void;
   nav?: FileNavigation;
   crossFileMarks?: CrossFileMark[];
+  /** Where this file sits among the PR's files with findings, and its neighbours -- to step file to file. */
+  flagged?: { index: number; total: number; prev?: string; next?: string };
+  onGoToFile?: (path: string) => void;
+  onOpenReview?: (path: string) => void;
 }) {
   const [attested,  setAttested]  = useState(file.attested);
   const [expanded,  setExpanded]  = useState(false);
@@ -670,20 +679,24 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
 
         {/* AI % */}
         <td className="px-4 py-3.5 min-w-[120px]">
-          <ProgressBar value={file.ai_percentage} mode="ai" />
+          <Tip tip={STATUS_TIP.aiContent} className="flex w-full"><div className="w-full"><ProgressBar value={file.ai_percentage} mode="ai" /></div></Tip>
         </td>
 
         {/* Risk */}
         <td className="px-3 py-3.5">
-          <RiskBadge level={file.risk_score} />
+          <Tip tip={RISK_TIP[file.risk_score] ?? RISK_TIP.UNKNOWN} title={file.risk_score}>
+            <span tabIndex={0} className="cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded-full"><RiskBadge level={file.risk_score} /></span>
+          </Tip>
         </td>
 
         {/* Signals */}
         <td className="px-3 py-3.5 hidden md:table-cell">
           {file.risk_indicators.length > 0 ? (
-            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full ring-1 ring-indigo-100">
-              {file.risk_indicators.length} signal{file.risk_indicators.length !== 1 ? "s" : ""}
-            </span>
+            <Tip tip={STATUS_TIP.signals}>
+              <span tabIndex={0} className="cursor-help inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full ring-1 ring-indigo-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+                {file.risk_indicators.length} signal{file.risk_indicators.length !== 1 ? "s" : ""}
+              </span>
+            </Tip>
           ) : (
             <span className="text-gray-300 text-xs">—</span>
           )}
@@ -692,31 +705,39 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
         {/* Status */}
         <td className="px-3 py-3.5">
           {attested ? (
-            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200">
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-              Verified
-            </span>
+            <Tip tip={STATUS_TIP.verified}>
+              <span tabIndex={0} className="cursor-help inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full ring-1 ring-emerald-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                Verified
+              </span>
+            </Tip>
           ) : isHigh ? (
-            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-full ring-1 ring-rose-200">
-              Pending
-            </span>
+            <Tip tip={STATUS_TIP.pending}>
+              <span tabIndex={0} className="cursor-help inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-full ring-1 ring-rose-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
+                Pending
+              </span>
+            </Tip>
           ) : (
-            <span className="text-gray-300 text-xs font-medium">OK</span>
+            <Tip tip={STATUS_TIP.ok}><span tabIndex={0} className="cursor-help text-gray-300 text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded">OK</span></Tip>
           )}
         </td>
 
         {/* Attest action */}
         <td className="px-3 py-3.5 pr-5 text-right" onClick={e => e.stopPropagation()}>
           {needsAttest && (
-            <button
-              onClick={e => { e.stopPropagation(); onRequestAttest(file); }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all active:scale-95 shadow-sm bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-md"
-            >
-              <ShieldIcon size={12} /> Attest
-            </button>
+            <Tip tip={ACTION_TIP.attest}>
+              <button
+                onClick={e => { e.stopPropagation(); onRequestAttest(file); }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all active:scale-95 shadow-sm bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-md"
+              >
+                <ShieldIcon size={12} /> Attest
+              </button>
+            </Tip>
           )}
           {pendingAttest && !canAttest && (
-            <span className="text-[11px] font-semibold text-gray-400" title={`Your role can't sign off ${file.risk_score} files`}>Needs reviewer</span>
+            <Tip tip={`${ACTION_TIP.needsReviewer} (${file.risk_score} files.)`}>
+              <span tabIndex={0} className="cursor-help text-[11px] font-semibold text-gray-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded">Needs reviewer</span>
+            </Tip>
           )}
         </td>
       </tr>
@@ -725,7 +746,37 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
       {expanded && (
         <tr className="bg-slate-50/80">
           <td colSpan={7} className="px-5 py-4 pl-11 border-b border-gray-100">
-            <div className="space-y-4 max-w-3xl">
+            <div className="space-y-4">
+
+              {/* Move through the PR's flagged files, or open this one full screen */}
+              {(flagged || onOpenReview) && (
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-indigo-100 bg-white px-3 py-2">
+                  {flagged && (
+                    <>
+                      <span className="text-[11px] font-semibold text-gray-600" data-testid="flagged-position">Flagged file {flagged.index + 1} of {flagged.total}</span>
+                      <Tip tip={ACTION_TIP.prevFile}>
+                        <button type="button" disabled={!flagged.prev} aria-label="Previous flagged file"
+                          onClick={() => { if (flagged.prev) { setExpanded(false); onGoToFile?.(flagged.prev); } }}
+                          className="rounded-lg bg-gray-100 px-2.5 py-1 text-[11px] font-semibold text-gray-700 hover:bg-gray-200 disabled:opacity-40">‹ Previous file</button>
+                      </Tip>
+                      <Tip tip={ACTION_TIP.nextFile}>
+                        <button type="button" disabled={!flagged.next} aria-label="Next flagged file"
+                          onClick={() => { if (flagged.next) { setExpanded(false); onGoToFile?.(flagged.next); } }}
+                          className="rounded-lg bg-gray-100 px-2.5 py-1 text-[11px] font-semibold text-gray-700 hover:bg-gray-200 disabled:opacity-40">Next file ›</button>
+                      </Tip>
+                    </>
+                  )}
+                  <span className="flex-1" />
+                  {onOpenReview && file.content && (
+                    <Tip tip={ACTION_TIP.openReview}>
+                      <button type="button" onClick={() => onOpenReview(file.file_path)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-indigo-700">
+                        ⤢ Open full-screen review
+                      </button>
+                    </Tip>
+                  )}
+                </div>
+              )}
 
               {/* Full path */}
               <div>
@@ -905,7 +956,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
                     riskIndicators={file.risk_indicators}
                     fixes={file.fix_suggestions}
                     describe={describeSignal}
-                    maxHeight="640px"
+                    maxHeight="min(82vh, 960px)"
                     nav={nav}
                     jumpRequest={jumpRequest}
                     crossFileMarks={marks}
@@ -1043,10 +1094,13 @@ function PRDetailContent() {
   const [attestError, setAttestError] = useState<string | null>(null);
 
   // Triage decisions update this page's copy of the scan at once; merge gating picks them up on the next scan.
+  // `unappliedDecisions` counts the ones saved here since then, so the page can offer the rescan that applies them.
+  const [unappliedDecisions, setUnappliedDecisions] = useState(0);
+  useEffect(() => { setUnappliedDecisions(0); }, [scan?.scan_id]);
   const triageContext = useMemo<FindingTriageContextValue | null>(() => scan ? {
     repo: scan.repo,
     canTriage,
-    onDecision: (fingerprint, decision) => setScan(s => s ? {
+    onDecision: (fingerprint, decision) => { setUnappliedDecisions(n => n + 1); setScan(s => s ? {
       ...s,
       files: s.files.map(f => ({
         ...f,
@@ -1056,20 +1110,8 @@ function PRDetailContent() {
           lifecycle_status: decision ? decision.status : "reopened",
         }),
       })),
-    } : s),
+    } : s); },
   } : null, [scan, canTriage]);
-
-  // Security delta: what this PR introduces vs. what was already in the files it touches (prDiff.ts).
-  const delta = useMemo(() => {
-    if (!scan) return undefined;
-    // Security findings carry a CWE (AI-provenance signals don't).
-    const sec = scan.files.flatMap(f => (f.indicators ?? []).filter(i => !!(i.cwe ?? findingMeta(i.id, i.label).cwe)));
-    const known = sec.filter(i => i.introduced != null);
-    if (known.length === 0) return undefined;
-    const introduced = known.filter(i => i.introduced);
-    const sev = (s: string) => introduced.filter(i => i.severity === s).length;
-    return { introduced: introduced.length, critical: sev("critical"), high: sev("high"), preexisting: known.length - introduced.length };
-  }, [scan]);
 
   // Lifecycle counts from the findings as they are now (so a decision shows immediately).
   const liveLifecycle = useMemo(() => {
@@ -1108,6 +1150,14 @@ function PRDetailContent() {
       return new Set(paths);
     } catch { return new Set<string>(); }
   });
+  // The page's numbers, each in its own unit (lib/scanCounts.ts). A security finding is one with a CWE;
+  // AI-provenance and hygiene signals are reported apart and never added into the finding counts.
+  const isSecurityInd = (i: { id: string; label?: string; cwe?: string }) => !!(i.cwe ?? findingMeta(i.id, i.label).cwe);
+  const counts = useMemo(() => scan ? computeScanCounts(scan.files, {
+    isSecurity: isSecurityInd,
+    attestedPaths: attestedSet,
+    lifecycle: scan.lifecycle ? { hasPreviousScan: scan.lifecycle.has_previous_scan, fixed: scan.lifecycle.fixed, fixedTotal: scan.lifecycle.summary.fixed } : undefined,
+  }) : undefined, [scan, attestedSet]);
   // Defaults to "high" (CRITICAL + HIGH only) rather than "all" -- MEDIUM/LOW
   // files mixed in at equal visual weight buried what actually needs review.
   // The full file list (including MEDIUM/LOW) is still one click away.
@@ -1116,6 +1166,8 @@ function PRDetailContent() {
   const [reviewerGithub, setReviewerGithub] = useState("");
   const [attestingAll, setAttestingAll]     = useState(false);
   const [attestTarget, setAttestTarget]     = useState<FileResult | null>(null);
+  /** The file the full-screen review opened on (null: closed). */
+  const [reviewFile, setReviewFile]         = useState<string | null>(null);
   const [policy,   setPolicy]   = useState<OrgPolicy | null>(null);
   const [syncingCheck, setSyncingCheck] = useState(false);
   const [syncResult, setSyncResult] = useState<{ ok: boolean; msg: string; canForce?: boolean } | null>(null);
@@ -1646,19 +1698,27 @@ function PRDetailContent() {
     })
     .sort((a, b) => riskOrder(b.risk_score) - riskOrder(a.risk_score));
 
+  // The files with security findings, worst first -- the order the previous/next buttons and the full-screen review
+  // walk, whatever the table's filter currently shows. A signed-off file stays in the list (marked), so the walk
+  // covers the whole PR.
+  const flaggedFiles = allFiles
+    .filter(f => (f.indicators ?? []).some(isSecurityInd))
+    .map(f => ({ ...f, attested: f.attested || attestedSet.has(f.file_path) }))
+    .sort((a, b) => riskOrder(b.risk_score) - riskOrder(a.risk_score) || a.file_path.localeCompare(b.file_path));
+
   // Open a file's row from elsewhere on the page (the scan-health list): widen the filter first if the file is
   // hidden by it, then let the row mount before asking it to open.
-  function revealFile(path: string) {
+  function revealFile(path: string, line?: number) {
     const visible = filteredFiles.some(f => f.file_path === path);
     if (!visible) setRiskFilter("all");
-    setTimeout(() => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file: path } })), visible ? 0 : 80);
+    setTimeout(() => window.dispatchEvent(new CustomEvent(OPEN_FILE_EVENT, { detail: { file: path, line } })), visible ? 0 : 80);
   }
   const openableGapFiles = new Set(allFiles.map(f => f.file_path));
 
   return (
     <AuthGuard>
       <FindingTriageContext.Provider value={triageContext}>
-      <div className="max-w-5xl mx-auto space-y-4 pb-10">
+      <div className="max-w-6xl mx-auto space-y-4 pb-10">
 
         {/* ── Hero header ────────────────────────────────────────────────── */}
         {scan && (
@@ -1705,26 +1765,32 @@ function PRDetailContent() {
                     PR #{scan.pr_number} · Scan Detail
                   </h1>
                   <div className="flex items-center gap-2.5 mt-2 flex-wrap">
-                    <span className="font-mono text-xs text-slate-400 bg-slate-800/70 px-2.5 py-1 rounded-lg">{scan.commit_sha.slice(0, 8)}</span>
-                    <RiskBadge level={scan.overall_risk} />
+                    <Tip tip={OVERALL_TIP.commit}>
+                      <span tabIndex={0} className="cursor-help font-mono text-xs text-slate-400 bg-slate-800/70 px-2.5 py-1 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">{scan.commit_sha.slice(0, 8)}</span>
+                    </Tip>
+                    <Tip tip={OVERALL_TIP.risk} title={`Overall: ${scan.overall_risk}`}>
+                      <span tabIndex={0} className="cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded-full"><RiskBadge level={scan.overall_risk} /></span>
+                    </Tip>
                     <span className="text-xs text-slate-400">{formatDateTime(scan.timestamp, tz)}</span>
                   </div>
                 </div>
 
-                {/* Quick stat pills */}
-                <div className="flex items-stretch gap-2 shrink-0">
-                  {[
-                    { label: "Files",      value: totalFiles,   accent: "text-slate-200" },
-                    { label: "High Risk",  value: highCount,    accent: highCount > 0 ? "text-orange-300" : "text-slate-400" },
-                    { label: "Attested",   value: `${highAttested}/${highCount}`, accent: allClear ? "text-emerald-300" : "text-amber-300" },
-                  ].map(s => (
-                    <div key={s.label} className="bg-white/5 rounded-xl px-3.5 py-2.5 text-center min-w-[58px] border border-white/5">
-                      <p className={`text-xl font-black leading-none tabular-nums ${s.accent}`}>{s.value}</p>
-                      <p className="text-[10px] text-slate-500 font-medium mt-1 whitespace-nowrap">{s.label}</p>
-                    </div>
-                  ))}
-                </div>
               </div>
+
+              {/* The numbers, each named by its unit: files, security findings, and what changed since the previous scan */}
+              {counts && (
+                <ScanCountsSummary
+                  counts={counts}
+                  previousScan={scan.lifecycle?.previous_scan}
+                  commitSha={scan.commit_sha}
+                  newFindings={listNewFindings(scan.files, isSecurityInd, i => findingMeta(i.id, i.label).title)}
+                  fixed={(scan.lifecycle?.fixed ?? []).filter(f => isSecurityInd({ id: f.id, label: f.label }))}
+                  canOpenFile={path => openableGapFiles.has(path)}
+                  onOpenFile={revealFile}
+                  formatWhen={iso => formatDateTime(iso, tz)}
+                  decisions={<TriageDecisionsList files={scan.files} labelOf={i => findingMeta(i.id, i.label).title} canOpenFile={path => openableGapFiles.has(path)} onOpenFile={revealFile} />}
+                />
+              )}
 
               {/* GitHub sync failure banner — shown when attestation's automatic
                   check-run flip-to-success failed after a retry (see
@@ -1757,7 +1823,12 @@ function PRDetailContent() {
                 telemetry={scan.telemetry}
                 currentEngineVersion={scan.current_engine_version}
                 lifecycle={liveLifecycle}
-                delta={delta}
+                repo={scan.repo}
+                prNumber={scan.pr_number}
+                commitSha={scan.commit_sha}
+                scanCreatedAt={scan.timestamp}
+                securityOpen={counts?.security.open}
+                unappliedDecisions={unappliedDecisions}
                 canTriage={canTriage}
                 summaryMarkdown={buildPrSecuritySummary(scan, {
                   lifecycle: liveLifecycle?.summary,
@@ -1772,9 +1843,11 @@ function PRDetailContent() {
               {highCount > 0 && (
                 <div className="mt-5">
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-slate-400 font-medium">
-                      {allClear ? "All high-risk files attested ✓" : `${unattested} file${unattested !== 1 ? "s" : ""} pending attestation`}
-                    </span>
+                    <Tip tip={OVERALL_TIP.progress}>
+                      <span tabIndex={0} className="cursor-help text-xs text-slate-400 font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded">
+                        {allClear ? "All high-risk files attested ✓" : `${unattested} file${unattested !== 1 ? "s" : ""} pending attestation`}
+                      </span>
+                    </Tip>
                     <span className={`text-xs font-black tabular-nums ${allClear ? "text-emerald-400" : "text-amber-400"}`}>
                       {highAttested} / {highCount}
                     </span>
@@ -1826,7 +1899,7 @@ function PRDetailContent() {
                 return (
                   <div key={key}>
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] font-semibold text-gray-600">{label}</span>
+                      <Tip tip={EVIDENCE_TIP[key]}><span tabIndex={0} className="cursor-help text-[10px] font-semibold text-gray-600 underline decoration-dotted decoration-gray-300 underline-offset-2 focus:outline-none focus-visible:decoration-solid">{label}</span></Tip>
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] text-gray-400">{weight}</span>
                         <span className="text-[11px] font-bold tabular-nums" style={{ color }}>{Math.round(val * 100)}%</span>
@@ -2033,14 +2106,23 @@ function PRDetailContent() {
                   Click any row to expand · {(scan.total_ai_percentage * 100).toFixed(1)}% avg AI content
                 </p>
               </div>
-              <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg self-start sm:self-auto">
+              <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              {flaggedFiles.some(f => f.content) && (
+                <Tip tip={ACTION_TIP.reviewFlagged}>
+                <button type="button" onClick={() => setReviewFile((flaggedFiles.find(f => f.content) ?? flaggedFiles[0]).file_path)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-700 shadow-sm">
+                  ⤢ Review flagged files <span className="rounded-full bg-white/20 px-1.5 tabular-nums">{flaggedFiles.length}</span>
+                </button>
+                </Tip>
+              )}
+              <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
                 {([
                   ["high",       "Critical & High", null],
                   ["unattested", "Needs Attest",     unattested],
                   ["all",        "All Files",        null],
                 ] as const).map(([v, label, count]) => (
+                  <Tip key={v} tip={FILTER_TIP[v]}>
                   <button
-                    key={v}
                     onClick={() => setRiskFilter(v)}
                     className={`flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
                       riskFilter === v ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
@@ -2051,7 +2133,9 @@ function PRDetailContent() {
                       <span className="text-[10px] bg-rose-100 text-rose-700 rounded-full px-1.5 font-bold">{count}</span>
                     )}
                   </button>
+                  </Tip>
                 ))}
+              </div>
               </div>
             </div>
 
@@ -2072,7 +2156,7 @@ function PRDetailContent() {
                   <tr className="border-b border-gray-100 bg-gray-50/60">
                     {["File", "Lang", "AI Content", "Risk", "Signals", "Status", "Action"].map(h => (
                       <th key={h} className="px-4 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-5 last:pr-5 last:text-right">
-                        {h}
+                        <Tip tip={COLUMN_TIP[h]}><span tabIndex={0} className="cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded">{h}</span></Tip>
                       </th>
                     ))}
                   </tr>
@@ -2088,6 +2172,12 @@ function PRDetailContent() {
                       canAttest={canAttestRisk(f.risk_score)}
                       nav={fileNav(filteredFiles)}
                       crossFileMarks={flowMarks.get(f.file_path)}
+                      flagged={(() => {
+                        const i = flaggedFiles.findIndex(x => x.file_path === f.file_path);
+                        return i < 0 ? undefined : { index: i, total: flaggedFiles.length, prev: flaggedFiles[i - 1]?.file_path, next: flaggedFiles[i + 1]?.file_path };
+                      })()}
+                      onGoToFile={revealFile}
+                      onOpenReview={setReviewFile}
                     />
                   ))}
                 </tbody>
@@ -2133,6 +2223,20 @@ function PRDetailContent() {
         )}
 
       </div>
+
+      {/* ── Full-screen review of the flagged files ───────────────────────── */}
+      {reviewFile && (
+        <FlaggedFilesReview
+          files={flaggedFiles}
+          initialFile={reviewFile}
+          describe={describeSignal}
+          isSecurity={isSecurityInd}
+          nav={fileNav(flaggedFiles)}
+          onClose={() => setReviewFile(null)}
+          canAttest={f => canAttestRisk(f.risk_score)}
+          onRequestAttest={f => { setReviewFile(null); setAttestTarget(f); }}
+        />
+      )}
 
       {/* ── Attest review modal ───────────────────────────────────────────── */}
       {attestTarget && canAttestRisk(attestTarget.risk_score) && (

@@ -165,6 +165,8 @@ export default function InfoTooltip({
         onClick={() => (open ? hide() : show())}
         onMouseEnter={show}
         onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
         className={`${btnSize} rounded-full flex items-center justify-center font-black transition-all`}
         style={{
           background: open ? "rgba(99,102,241,0.18)" : "rgba(100,116,139,0.15)",

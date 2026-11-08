@@ -31,11 +31,112 @@ describe("ScanStatusPanel", () => {
     expect(screen.getByText("b.py")).toBeInTheDocument();
   });
 
-  it("the security delta line", () => {
-    render(<ScanStatusPanel {...base} delta={{ introduced: 2, critical: 1, high: 0, preexisting: 3 }} />);
-    expect(screen.getByText("This PR introduces 2 security findings")).toBeInTheDocument();
-    expect(screen.getByText("1 critical")).toBeInTheDocument();
-    expect(screen.getByText(/3 already in the files it touches/)).toBeInTheDocument();
+  describe("rescan", () => {
+    const rescanProps = { ...base, repo: "o/r", prNumber: 7, commitSha: "aaaaaaa1111", scanCreatedAt: "2026-06-01T10:00:00Z", rescanPollMs: 10, summaryMarkdown: "x" };
+    const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+    beforeEach(() => authedFetch.mockReset());
+
+    it("explains what Rescan does, then says it is waiting and that this page stays as it is", async () => {
+      authedFetch.mockImplementation((url: string) => url.includes("/rescan") ? Promise.resolve({ head_sha: "aaaaaaa1111" }) : new Promise(() => {}));
+      render(<ScanStatusPanel {...rescanProps} />);
+      fireEvent.focus(screen.getByRole("button", { name: "Rescan" }));
+      expect(screen.getByRole("tooltip")).toHaveTextContent(/creates a new scan; this page stays as it is/i);
+      fireEvent.blur(screen.getByRole("button", { name: "Rescan" }));
+      fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+      expect(await screen.findByText(/This page stays as it is/)).toBeInTheDocument();
+      expect(screen.getByText(/aaaaaaa/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Rescanning…" })).toBeDisabled();
+    });
+
+    it("when the new scan appears it links to it, and says a same-commit rescan has no new code", async () => {
+      authedFetch.mockImplementation((url: string) => url.includes("/rescan")
+        ? Promise.resolve({ head_sha: "aaaaaaa1111" })
+        : Promise.resolve({ scans: [
+            { scan_id: "s1", pr_number: 7, created_at: "2026-06-01T10:00:00Z" },        // the scan on screen
+            { scan_id: "other-pr", pr_number: 8, created_at: "2026-06-01T10:05:00Z" },  // another PR
+            { scan_id: "new1", pr_number: 7, commit_sha: "aaaaaaa1111", created_at: "2026-06-01T10:02:00Z" },
+          ] }));
+      render(<ScanStatusPanel {...rescanProps} />);
+      fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+      const link = await screen.findByRole("link", { name: /open the new results/i });
+      expect(link).toHaveAttribute("href", "/pr/new1");
+      expect(screen.getByText(/same commit, so differences come from the scanner or your triage decisions/i)).toBeInTheDocument();
+    });
+
+    it("a different commit says code changes show up too", async () => {
+      authedFetch.mockImplementation((url: string) => url.includes("/rescan")
+        ? Promise.resolve({ head_sha: "bbbbbbb2222" })
+        : Promise.resolve({ scans: [{ scan_id: "new2", pr_number: 7, commit_sha: "bbbbbbb2222", created_at: "2026-06-01T10:03:00Z" }] }));
+      render(<ScanStatusPanel {...rescanProps} />);
+      fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+      expect(await screen.findByText(/newer commits than this scan, so code changes show up too/i)).toBeInTheDocument();
+    });
+
+    it("a rescan the server refuses shows its reason and does not wait", async () => {
+      authedFetch.mockRejectedValue(new Error("This PR was scanned less than a minute ago. Try again shortly."));
+      render(<ScanStatusPanel {...rescanProps} />);
+      fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+      expect(await screen.findByText(/scanned less than a minute ago/)).toBeInTheDocument();
+      expect(screen.queryByText(/This page stays as it is/)).toBeNull();
+      expect(screen.getByRole("button", { name: "Rescan" })).toBeEnabled();
+    });
+  });
+
+  describe("triage decisions waiting for a rescan", () => {
+    const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+    beforeEach(() => authedFetch.mockReset());
+    it("says saved decisions apply only after a rescan, and offers one", async () => {
+      authedFetch.mockResolvedValue({ head_sha: "x" });
+      render(<ScanStatusPanel {...base} unappliedDecisions={2} />);
+      expect(screen.getByText(/2 triage decisions saved/)).toBeInTheDocument();
+      expect(screen.getByText(/only change after a rescan/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Rescan now" }));
+      await waitFor(() => expect(authedFetch).toHaveBeenCalledWith("/api/scans/s1/rescan", { method: "POST" }));
+    });
+    it("shows nothing when no decision is waiting", () => {
+      render(<ScanStatusPanel {...base} unappliedDecisions={0} summaryMarkdown="x" />);
+      expect(screen.queryByText(/triage decision/)).toBeNull();
+    });
+  });
+
+  describe("tooltips", () => {
+    const tipOf = (name: string | RegExp) => {
+      const el = screen.getByRole("button", { name });
+      fireEvent.focus(el);
+      const text = screen.getByRole("tooltip").textContent ?? "";
+      fireEvent.blur(el);
+      return text;
+    };
+    it("every action button says what it does", () => {
+      const lifecycle = { summary: { new: 1, existing: 0, reopened: 0, accepted: 0, false_positive: 0, fixed: 0 }, fixed: [], has_previous_scan: true };
+      render(<ScanStatusPanel {...base} lifecycle={lifecycle} summaryMarkdown="x"
+        telemetry={{ engine_version: "6.5", total_ms: 4000, cross_file_ms: 1000, per_file_ms: 2500, post_ms: 500, files_analyzed: 3, files_reused: 0, slowest: [] }} />);
+      expect(tipOf("Rescan")).toMatch(/Scan the PR's latest commit again/);
+      expect(tipOf("Copy summary")).toMatch(/markdown summary/);
+      expect(tipOf("Trust Record")).toMatch(/signed JSON record/);
+      expect(tipOf("Baseline")).toMatch(/Accept every current finding/);
+      expect(tipOf(/4\.0s/)).toMatch(/how long the scan took/i);
+      fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+      expect(tipOf("Accept as baseline")).toMatch(/accepted risk/);
+    });
+    it("'Older engine' names both versions", () => {
+      const health = { status: "complete", engine_version: "6.0", gap_counts: {}, engines_unavailable: [], gaps: [] } as unknown as ScanHealth;
+      render(<ScanStatusPanel {...base} health={health} currentEngineVersion="6.5" summaryMarkdown="x" />);
+      const pill = screen.getByText("Older engine");
+      fireEvent.focus(pill);
+      expect(screen.getByRole("tooltip")).toHaveTextContent(/This scan: engine 6\.0; current: 6\.5/);
+    });
+    it("'Which files?' explains itself", () => {
+      render(<ScanStatusPanel {...base} health={health(["a.py", "b.py"])} />);
+      expect(tipOf("Which files?")).toMatch(/could only partly analyse/);
+    });
+  });
+
+  it("the baseline confirmation says what it will accept: security findings and other signals", () => {
+    const lifecycle = { summary: { new: 600, existing: 43, reopened: 0, accepted: 0, false_positive: 0, fixed: 0 }, fixed: [], has_previous_scan: true };
+    render(<ScanStatusPanel {...base} lifecycle={lifecycle} securityOpen={160} />);
+    fireEvent.click(screen.getByRole("button", { name: "Baseline" }));
+    expect(screen.getByText(/Accept all 643 open items \(160 security findings and 483 other signals\)\?/)).toBeInTheDocument();
   });
 
   it("copies the summary; if the clipboard is blocked, shows it to copy by hand", async () => {

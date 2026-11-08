@@ -134,7 +134,7 @@ export interface ScanResult {
   // The engine the server runs now -- a scan whose health.engine_version differs can be rescanned.
   current_engine_version?: string;
   // Finding lifecycle for this PR (lib/findingLifecycle.ts).
-  lifecycle?: { summary: LifecycleSummary; fixed: FixedFinding[]; has_previous_scan: boolean };
+  lifecycle?: { summary: LifecycleSummary; fixed: FixedFinding[]; has_previous_scan: boolean; previous_scan?: { scan_id: string; commit_sha: string; created_at: string } | null };
 }
 
 // ── Attestation ───────────────────────────────────────────────────────────────

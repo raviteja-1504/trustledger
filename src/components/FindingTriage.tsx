@@ -145,6 +145,69 @@ export function FindingTriagePanel({ ind, filePath }: { ind: FileIndicator; file
   );
 }
 
+interface DecisionFile { file_path: string; indicators?: readonly FileIndicator[] | null }
+
+/**
+ * Every finding of this scan that is under an active triage decision: what was decided, why, by whom and until
+ * when, with a way back (Reopen). This is where a decision is visible after it is saved, beside the status chip
+ * on the finding itself. Decisions are stored per repo and follow the finding across pushes (fingerprint).
+ */
+export function TriageDecisionsList({ files, labelOf, canOpenFile, onOpenFile }: {
+  files: readonly DecisionFile[];
+  labelOf?: (ind: FileIndicator) => string;
+  canOpenFile?: (path: string) => boolean;
+  onOpenFile?: (path: string, line?: number) => void;
+}) {
+  const ctx = useContext(FindingTriageContext);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const rows = files.flatMap(f => (f.indicators ?? [])
+    .filter(i => !!i.fingerprint && isActive(i.triage))
+    .map(i => ({ file: f.file_path, ind: i, decision: i.triage! })));
+  if (!ctx || rows.length === 0) return null;
+
+  async function reopen(fingerprint: string) {
+    setBusy(fingerprint); setErr(null);
+    try {
+      await authedFetch("/api/findings/triage", { method: "DELETE", body: JSON.stringify({ repo: ctx!.repo, fingerprint }) });
+      ctx!.onDecision(fingerprint, null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't reopen the finding.");
+    } finally { setBusy(null); }
+  }
+
+  return (
+    <div className="rounded-xl border border-violet-400/20 bg-violet-950/20 px-4 py-3 space-y-2" data-testid="triage-decisions">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-violet-300">Triage decisions on this scan ({rows.length})</p>
+      <p className="text-[11px] text-slate-400">These findings stay visible but don&apos;t block merges. A decision applies to the merge check from the next scan.</p>
+      <ul className="space-y-2 max-h-72 overflow-auto">
+        {rows.map(({ file, ind, decision }) => (
+          <li key={ind.fingerprint} className="text-[11px] flex flex-wrap items-start gap-x-3 gap-y-1">
+            <span className={`${CHIP} ${STATUS_STYLE[decision.status]}`}>{STATUS_LABEL[decision.status]}</span>
+            <span className="min-w-0 flex-1">
+              <span className="font-semibold text-slate-100">{labelOf ? labelOf(ind) : ind.label ?? ind.id}</span>{" "}
+              {onOpenFile && canOpenFile?.(file)
+                ? <button type="button" onClick={() => onOpenFile(file, ind.line)} className="font-mono text-sky-300 hover:underline">{file}{ind.line ? `:${ind.line}` : ""}</button>
+                : <code className="font-mono text-slate-400">{file}{ind.line ? `:${ind.line}` : ""}</code>}
+              {decision.reason && <span className="block italic text-slate-400">“{decision.reason}”</span>}
+              <span className="block text-slate-500">
+                {decision.set_by_email ? `by ${decision.set_by_email}, ` : ""}{fmtDate(decision.set_at)}{decision.expires_at ? `, until ${fmtDate(decision.expires_at)}` : ", no expiry"}
+              </span>
+            </span>
+            {ctx.canTriage && (
+              <button type="button" onClick={() => reopen(ind.fingerprint!)} disabled={busy !== null}
+                className="shrink-0 font-bold text-orange-100 bg-orange-500/20 hover:bg-orange-500/30 ring-1 ring-orange-400/30 rounded-lg px-2 py-0.5 disabled:opacity-50">
+                {busy === ind.fingerprint ? "Reopening…" : "Reopen"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {err && <p className="text-[11px] text-rose-300">{err}</p>}
+    </div>
+  );
+}
+
 /** Whether a Triage toggle should appear at all (inside the provider, on a fingerprinted finding). */
 export function useCanShowTriage(ind: FileIndicator): boolean {
   const ctx = useContext(FindingTriageContext);
