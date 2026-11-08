@@ -131,7 +131,7 @@ describe("rule catalog", () => {
     expect(byId.get("sql-injection")!.appliesTo).toEqual(["JavaScript/TypeScript", "Python", "Java", "Go", "C#", "PHP", "Ruby", "Kotlin", "Rust", "C/C++"]);
     expect(byId.get("use-after-free")).toMatchObject({ detection: "data-flow", cwe: "CWE-416" });
     expect(byId.get("use-after-free")!.appliesTo).toEqual(["C/C++"]);
-    expect(byId.get("xxe")!.appliesTo).toEqual(["Python", "Java"]);
+    expect(byId.get("xxe")!.appliesTo).toEqual(["Python", "Java", "C/C++"]);
     expect(byId.get("prototype-pollution")!.appliesTo).toEqual(["JavaScript/TypeScript"]);
     expect(byId.get("cloud-open-admin-port")).toMatchObject({ detection: "configuration", severity: "high" });
     expect(byId.get("cloud-open-admin-port")!.appliesTo).toContain("Terraform");

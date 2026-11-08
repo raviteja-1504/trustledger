@@ -71,6 +71,7 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "timing-attack":               { id: "CWE-208",  title: "Observable Timing Discrepancy" },
   "header-injection":            { id: "CWE-113",  title: "CRLF Injection in HTTP Headers" },
   "log-injection":               { id: "CWE-117",  title: "Improper Output Neutralization for Logs" },
+  "type-confusion":              { id: "CWE-1287", title: "Improper Validation of Specified Type of Input" },
   "format-string":               { id: "CWE-134",  title: "Use of Externally-Controlled Format String" },
   "directory-listing":           { id: "CWE-548",  title: "Exposure of Information Through Directory Listing" },
   "unsafe-reflection":           { id: "CWE-470",  title: "Use of Externally-Controlled Input to Select Classes or Code" },

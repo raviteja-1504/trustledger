@@ -413,6 +413,18 @@ export interface ImportEdgePy {
  * write the full "pkg.mod.foo()" chain -- a 3+-level dotted chain this file's existing
  * calleeTextPy-based resolution doesn't reliably walk for cross-file purposes either).
  */
+/**
+ * Local names that may be a MODULE whose functions are called as `name.fn(...)`: the explicit namespace imports, plus a
+ * lowercase name imported with `from pkg import name` (`from pygmy.utilities import export` -- a submodule when
+ * pkg/export.py exists; the scanner's import graph makes that call, this side only has the names). A capitalised name is
+ * a class and keeps going through the qualified `Class.method` resolution.
+ */
+function namespaceLocalsPy(root: SyntaxNode): string[] {
+  return collectImportEdgesPy(root)
+    .filter(e => e.namespace || (e.importedName !== "*" && /^[a-z_][a-z0-9_]*$/.test(e.importedName) && e.localName === e.importedName))
+    .map(e => e.localName);
+}
+
 export function collectImportEdgesPy(root: SyntaxNode): ImportEdgePy[] {
   const out: ImportEdgePy[] = [];
   const visit = (node: SyntaxNode) => {
@@ -545,7 +557,7 @@ export function computeExportSinkSummaryPy(
     if (!root) return summary;
     const localFns = collectLocalFunctionsPy(root);
     const propagating = buildPropagatingMapPy(localFns, root, incomingShapes);
-    const namespaceLocals = new Set(collectImportEdgesPy(root).filter(e => e.namespace).map(e => e.localName));
+    const namespaceLocals = new Set(namespaceLocalsPy(root));
     // Class methods get their own entries (localFns keeps one entry per bare name, file-wide) so each class's
     // methods are summarised on their own; see qualifiedCallKeysPy for the call-site half.
     const methods = classMethodsPy(root);
@@ -651,7 +663,7 @@ const PY_LOG_METHODS = new Set(["debug", "info", "warning", "warn", "error", "cr
 const PY_LOGGER_RECEIVER_RE = /^(?:logging|(?:self\.|app\.|current_app\.)?_?(?:\w*_)?(?:logger|log|LOGGER|LOG))$/;
 const XSS_RESPONSES_PY = new Set(["Response", "flask.Response", "make_response", "flask.make_response", "HttpResponse", "HTMLResponse", "Markup", "markupsafe.Markup", "mark_safe"]);
 const PATH_FUNCS_PY = new Set([
-  "send_file", "os.remove", "os.unlink", "os.rename", "os.listdir", "os.rmdir", "os.makedirs", "os.mkdir", "os.chmod",
+  "send_file", "FileResponse", "os.remove", "os.unlink", "os.rename", "os.listdir", "os.rmdir", "os.makedirs", "os.mkdir", "os.chmod",
   "shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", "shutil.rmtree", "shutil.copytree",
   // open() under another name: codecs.open / io.open / the low-level os.open
   "codecs.open", "io.open", "os.open",
@@ -803,7 +815,7 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
   if ((text === "pathlib.Path" || text === "pathlib.PurePath" || ((text === "Path" || text === "PurePath") && resolvedModule === "pathlib")) && first) {
     return { id: "path-traversal", sinkExpr: text, args: positional };
   }
-  if (text === "open" || PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file"))) {
+  if (text === "open" || PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file" || tail === "FileResponse"))) {
     // The path(s) only -- not the mode, permissions, mimetype or flags. rename/copy/move take two paths.
     const paths = TWO_PATH_FUNCS_PY.has(tail) ? positional.slice(0, 2) : positional.slice(0, 1);
     const kw = keywordArgPy(args, ["file", "path", "src", "dst", "filename_or_fp", "path_or_file"]);
@@ -819,7 +831,14 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
   if (tail === "execute" || tail === "executemany" || (parts.length > 1 && tail === "raw")) {
     // Only the SQL TEXT is injectable: `execute(sql, (x,))` / `raw(sql, [x])` send the second argument as bound
     // parameters, never as SQL.
-    const sql = positional[0] ?? keywordArgPy(args, ["sql", "query", "operation", "raw_query"]);
+    let sql = positional[0] ?? keywordArgPy(args, ["sql", "query", "operation", "raw_query"]);
+    // `session.execute(text(f"..."))`: SQLAlchemy's text() / literal_column() and Django's RawSQL() only wrap the SQL
+    // string -- the string is what is injectable (their bind parameters are separate, later arguments)
+    if (sql?.type === "call") {
+      const wrapper = sql.childForFieldName("function");
+      const wrapped = /^(?:(?:\w+\.)*(?:text|literal_column)|(?:\w+\.)*RawSQL)$/.test(wrapper?.text ?? "") ? argListOf(sql).find(a => a.type !== "keyword_argument") : undefined;
+      if (wrapped) sql = wrapped;
+    }
     return sql ? { id: "sql-injection", sinkExpr: text, args: [sql] } : null;
   }
   if (parts.length > 1 && tail === "extra") {
@@ -1083,6 +1102,11 @@ function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
     scopeInfo: scope => {
       const name = scope.type === "function_definition" ? scope.childForFieldName("name")?.text : undefined;
       return name ? { name, params: params(scope), line: lineOf(scope) } : null;
+    },
+    paramLine: (scope, name) => {
+      const p = (scope.childForFieldName("parameters")?.namedChildren ?? []).find(c => !!c &&
+        (c.type === "identifier" ? c.text : (c.childForFieldName("name") ?? c.namedChildren.find(k => k?.type === "identifier"))?.text) === name);
+      return p ? lineOf(p) : null;
     },
     functionInfo: name => {
       // a class of this file: constructing it "returns" what its __init__ keeps in fields (`self.metadata = {...}`)
@@ -2031,7 +2055,8 @@ function createWalkerPy(h: WalkHooksPy) {
     const django = hasRequestParam(fn);
     const fenv = cloneEnv(env);
     const seeded = isFastApiHandler(fn);
-    for (const prm of paramNamesOf(fn)) fenv.set(prm, seeded ? ALL : 0);
+    const webargs = new Set(webargsParams(fn));
+    for (const prm of paramNamesOf(fn)) fenv.set(prm, seeded || webargs.has(prm) ? ALL : 0);
     for (const [field, mask] of decoratorSelfFields(fn, maskFor(django))) fenv.set(`self.${field}`, mask);
     walk(body, fenv, django);
   };
@@ -3081,7 +3106,7 @@ function bolaOwnershipDominatesPy(sink: SyntaxNode, ctx: BolaCtxPy, scope: Synta
 /** Every parameter name (module-level function or class method) matching the resource-id
  * convention -- no isEndpoint gate, matching astTaintPHP.ts's own identical reasoning (Python has
  * no annotation system as rigid as Spring/ASP.NET to gate on). */
-function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTaintPyFinding[], seen: Set<string>): void {
+function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTaintPyFinding[], seen: Set<string>, filePath: string): void {
   for (const [name, fn] of localFns) {
     if (!fn.body) continue;
     const idNames = new Set(fn.paramShapes.filter(s => BOLA_RESOURCE_ID_RE_PY.test(s.name)).map(s => s.name));
@@ -3117,8 +3142,29 @@ function collectBolaFindingsPy(localFns: Map<string, LocalFn>, findings: AstTain
       if (seen.has(key)) continue;
       seen.add(key);
       const roleOnly = verdict === "role-only";
+      // the id parameter -> the lookup it keys -> the first use of the record the lookup returned
+      const def = fn.body.parent;
+      const paramNode = def?.childForFieldName("parameters")?.namedChildren.find(p => !!p && paramNameOf(p) === c.sourceExpr);
+      const trace: TraceStep[] = [];
+      if (paramNode) trace.push({ file: filePath, line: paramNode.startPosition.row + 1, kind: "source", label: c.sourceExpr, snippet: c.sourceExpr });
+      trace.push({ file: filePath, line, kind: "call", label: `${c.sinkExpr}(…) looks the object up by it`, snippet: c.node.text.replace(/\s+/g, " ").slice(0, 100) });
+      let use: SyntaxNode | null = null;
+      if (recordVar) {
+        const visitUse = (n: SyntaxNode) => {
+          if (use) return;
+          if (n.type === "call" && n.startPosition.row + 1 > line) {
+            const f = n.childForFieldName("function");
+            if (f?.type === "attribute" && f.childForFieldName("object")?.text === recordVar) { use = n; return; }
+          }
+          for (const k of n.namedChildren) if (k) visitUse(k);
+        };
+        visitUse(fn.body);
+      }
+      const useNode = use as SyntaxNode | null;
+      if (useNode) trace.push({ file: filePath, line: useNode.startPosition.row + 1, kind: "sink", label: `${recordVar}.${useNode.childForFieldName("function")?.childForFieldName("attribute")?.text ?? ""}(…)`, snippet: useNode.text.replace(/\s+/g, " ").slice(0, 100) });
+      else trace.push({ file: filePath, line, kind: "sink", label: c.sinkExpr, snippet: c.sinkExpr });
       findings.push({
-        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr,
+        id: "bola-missing-ownership-check", line, sourceExpr: c.sourceExpr, sinkExpr: c.sinkExpr, trace,
         severityOverride: roleOnly ? "medium" : baseSeverity,
         detail: roleOnly
           ? `Resource identifier '${c.sourceExpr}' reaches ${c.sinkExpr}(...) behind a role/permission check (${evidence.get("role")}), but nothing establishes that the caller owns THIS object — a role limits who can reach the view, not which objects they may read or change`
@@ -3208,7 +3254,11 @@ function classMethodsPy(root: SyntaxNode): Array<{ cls: string; name: string; fn
       const name = def.childForFieldName("name")?.text;
       const fnBody = def.childForFieldName("body");
       if (!name || !fnBody || name.startsWith("__")) continue;
-      out.push({ cls: clsName, name, fn: { paramShapes: paramShapesOfPy(def), body: fnBody }, bound: !decorators.some(d => /^@staticmethod\b/.test(d)) });
+      const shapes = paramShapesOfPy(def);
+      // bound = takes the instance/class first. A method with no `self`/`cls` (called on the class, `Frontend.test_connection(url)`)
+      // binds its arguments from the first parameter, like a @staticmethod
+      const bound = !decorators.some(d => /^@staticmethod\b/.test(d)) && (shapes[0]?.name === "self" || shapes[0]?.name === "cls");
+      out.push({ cls: clsName, name, fn: { paramShapes: shapes, body: fnBody }, bound });
     }
   }
   return out;
@@ -3429,6 +3479,36 @@ const LABEL: Record<AstTaintPyId, string> = {
   "xxe": "XML External Entity (XXE)", "trust-boundary": "Trust Boundary Violation", "log-injection": "Log Injection",
 };
 
+/**
+ * webargs (`@use_kwargs({'q': fields.Str()})`, `@use_args(schema)`, `@parser.use_kwargs(...)`) parses the request and
+ * passes the values in as the view's keyword arguments. The parameters bound that way: every field named in a dict
+ * literal schema, or -- with a schema object whose fields aren't visible here -- every parameter; a `**kwargs`
+ * receives them all either way.
+ */
+function webargsParams(fn: SyntaxNode): string[] {
+  const parent = fn.parent;
+  if (!parent || parent.type !== "decorated_definition") return [];
+  const deco = parent.namedChildren.filter(c => c?.type === "decorator" && /^@\s*(?:\w+\.)*use_(?:kwargs|args)\s*\(/.test(c.text)) as SyntaxNode[];
+  if (deco.length === 0) return [];
+  const shapes = paramShapesOfPy(fn);
+  const bound = new Set<string>();
+  for (const d of deco) {
+    const arg = d.text.replace(/^@\s*(?:\w+\.)*use_(?:kwargs|args)\s*\(\s*/, "");
+    // (a field the schema types as a number / bool / uuid / date cannot carry an injection payload)
+    const keys = arg.startsWith("{")
+      ? [...arg.matchAll(/['"](\w+)['"]\s*:\s*((?:\w+\.)*\w+)/g)].filter(m => !/(?:^|\.)(?:Int|Integer|Float|Decimal|Number|Bool|Boolean|UUID|Date|DateTime|Time|TimeDelta)$/.test(m[2])).map(m => m[1])
+      : [];
+    // (no dict-literal schema: a schema object -- every parameter; a dict of only typed fields -- none)
+    if (!arg.startsWith("{")) shapes.forEach(s => bound.add(s.name));
+    else {
+      keys.forEach(k => bound.add(k));
+      // a `**kwargs` collects the schema's fields: request text unless every field is typed
+      if (keys.length > 0) for (const s of shapes) if (s.isRest) bound.add(s.name);
+    }
+  }
+  return shapes.map(s => s.name).filter(n => bound.has(n));
+}
+
 function isFastApiHandler(fn: SyntaxNode): boolean {
   const parent = fn.parent;
   if (!parent || parent.type !== "decorated_definition") return false;
@@ -3618,7 +3698,7 @@ export function scanAstTaintPython(
     // real sink location in the trace. Strict resolution: a bare identifier or `ns.f()` of a namespace import
     // only, so `client.query(x)` is never mistaken for an imported `query`.
     const sinkNamespaces = new Set(
-      crossFileSinks && crossFileSinks.size > 0 ? collectImportEdgesPy(root).filter(e => e.namespace).map(e => e.localName) : [],
+      crossFileSinks && crossFileSinks.size > 0 ? namespaceLocalsPy(root) : [],
     );
     const resolveSinkCallee = makeSinkCalleeResolverPy(sinkNamespaces);
     const emitCrossFileSink = (node: SyntaxNode, arg: SyntaxNode, name: string, fromModule: string, fact: ParamSinkFact) => {
@@ -3887,6 +3967,23 @@ export function scanAstTaintPython(
           }
         }
       }
+      // WTForms `form.populate_obj(model)` in a request handler: a Flask-WTF form binds request.form by itself, and
+      // populate_obj copies every submitted field onto the model (role, is_admin... if the form declares them)
+      if (n.type === "call") {
+        const fnN = n.childForFieldName("function");
+        const ap = fnN?.type === "attribute" ? attributeParts(fnN) : null;
+        const target = n.childForFieldName("arguments")?.namedChildren.find(c => !!c && c.type !== "keyword_argument");
+        const formRhs = ap?.attribute === "populate_obj" && ap.object?.type === "identifier" ? lastAssigned.get(ap.object.text) : undefined;
+        const formClass = formRhs?.type === "call" ? formRhs.childForFieldName("function")?.text ?? "" : "";
+        let handler: SyntaxNode | null = n.parent;
+        while (handler && handler.type !== "function_definition") handler = handler.parent;
+        const routed = handler?.parent?.type === "decorated_definition"
+          && /\.(?:route|get|post|put|patch)\s*\(/.test(handler.parent.namedChildren.filter(c => c?.type === "decorator").map(c => c!.text).join("\n"));
+        if (target && /Form$/.test(formClass) && routed) {
+          emit("mass-assignment", n, target.text, "form.populate_obj",
+            `${formClass} binds the submitted request form and populate_obj copies every field it declares onto '${target.text}' — the client sets any of them; assign the editable fields explicitly`);
+        }
+      }
       if (n.type === "comparison_operator") {
         const [l, r] = n.namedChildren;
         const opText = l && r ? n.text.slice(l.endIndex - n.startIndex, r.startIndex - n.startIndex).trim() : "";
@@ -3963,7 +4060,7 @@ export function scanAstTaintPython(
       }
     }
 
-    collectBolaFindingsPy(localFns, findings, seen);
+    collectBolaFindingsPy(localFns, findings, seen, filePath);
 
     // Second pass, bounded worklist (see astTaint.ts's identical structure
     // for the full rationale): re-walking a seeded function can itself seed

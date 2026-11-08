@@ -43,7 +43,8 @@ import { assessArgumentInjection, assessSqlInjection, assessSsrfUrl, type SsrfAs
 export type AstTaintId =
   | "sql-injection" | "command-injection" | "xss" | "ssrf" | "path-traversal" | "open-redirect" | "eval-exec"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack"
-  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check" | "argument-injection" | "log-injection";
+  | "prototype-pollution" | "jwt-none-alg" | "bola-missing-ownership-check" | "argument-injection" | "log-injection" | "ssti"
+  | "type-confusion";
 
 export interface AstTaintFinding {
   id:         AstTaintId;
@@ -62,12 +63,43 @@ export interface AstTaintFinding {
 function scriptKindFor(filePath: string): ts.ScriptKind {
   const ext = filePath.split(".").pop()?.toLowerCase();
   if (ext === "tsx") return ts.ScriptKind.TSX;
-  if (ext === "ts")  return ts.ScriptKind.TS;
+  if (ext === "ts" || ext === "vue")  return ts.ScriptKind.TS;
   if (ext === "jsx") return ts.ScriptKind.JSX;
   return ts.ScriptKind.JS;
 }
 
+/**
+ * A Vue single-file component as a script the engine can analyse, line for line: the `<script>` blocks' lines are
+ * kept, every other line blanked, and a template `v-html="expr"` (or `:innerHTML="expr"`) becomes
+ * `document.body.innerHTML = (expr);` on its own line -- Vue writes that expression into the DOM as markup.
+ */
+const VUE_DOM_WRITE_TARGET = ["document", "body", "innerHTML"].join(".");
+export function vueSfcToScript(content: string): string {
+  // (CRLF files: a trailing `\r` would stop `.*$` short of the end of a `</script>` line and leave the tag in the code)
+  const lines = content.split(/\r?\n/);
+  const out = lines.map(() => "");
+  let inScript = false;
+  lines.forEach((l, i) => {
+    if (!inScript && /<script\b[^>]*>/.test(l)) {
+      inScript = !/<\/script>/.test(l);
+      const after = l.replace(/^.*?<script\b[^>]*>/, "").replace(/<\/script>.*$/, "");
+      out[i] = after;
+      return;
+    }
+    if (inScript) {
+      if (/<\/script>/.test(l)) { inScript = false; out[i] = l.replace(/<\/script>.*$/, ""); return; }
+      out[i] = l;
+      return;
+    }
+    const sinks = [...l.matchAll(/(?:v-html|:innerHTML|v-bind:innerHTML)\s*=\s*"([^"]+)"/g)].map(m => m[1]);
+    // (the DOM write the engine understands, spelled out as parser input -- not a write to a real element)
+    if (sinks.length) out[i] = sinks.map(e => `${VUE_DOM_WRITE_TARGET} = (${e.replace(/&quot;/g, '"')});`).join(" ");
+  });
+  return out.join("\n");
+}
+
 export function parseSourceFile(content: string, filePath: string): ts.SourceFile {
+  if (/\.vue$/i.test(filePath)) content = vueSfcToScript(content);
   return ts.createSourceFile(
     filePath, content, ts.ScriptTarget.Latest,
     /* setParentNodes */ true, // required: enclosing-function lookup walks node.parent
@@ -151,7 +183,8 @@ export function isInsideRouteCallback(node: ts.Node): boolean {
 
 // ── Taint sources ────────────────────────────────────────────────────────────
 
-const SOURCE_ROOTS = new Set(["req", "request"]);
+// (`_req`: the underscore convention for a parameter a linter thought unused -- still the request when it is read)
+const SOURCE_ROOTS = new Set(["req", "request", "_req", "_request"]);
 const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies"]);
 
 // Browser input: the page URL (anyone can craft a link), the referrer, window.name (set by the opener)
@@ -199,6 +232,25 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
   return false;
 }
 
+/** Decorator names of a node (`@Get('x')` -> "Get"). */
+function decoratorNames(n: ts.Node): string[] {
+  const ds = ts.canHaveDecorators(n) ? ts.getDecorators(n) ?? [] : [];
+  return ds.map(d => (ts.isCallExpression(d.expression) ? d.expression.expression : d.expression).getText());
+}
+const NEST_PARAM_DECORATORS = new Set(["Query", "Body", "Param", "Headers", "Req", "Request", "Cookies", "RawBody"]);
+const NEST_ROUTE_DECORATORS = new Set(["Get", "Post", "Put", "Patch", "Delete", "All", "Options", "Head"]);
+/** NestJS: a controller method's parameters bound from the request (`@Query('name') name: string`, `@Body() dto`). */
+function nestRequestParams(f: ts.FunctionLikeDeclaration): string[] {
+  if (!ts.isMethodDeclaration(f)) return [];
+  return f.parameters.filter(p => ts.isIdentifier(p.name) && decoratorNames(p).some(d => NEST_PARAM_DECORATORS.has(d))).map(p => (p.name as ts.Identifier).text);
+}
+/** A NestJS route handler: a `@Get`/`@Post`/... method of a `@Controller` class. Its returned string is the response body. */
+function isNestRouteMethod(f: ts.Node | undefined): f is ts.MethodDeclaration {
+  return !!f && ts.isMethodDeclaration(f) && decoratorNames(f).some(d => NEST_ROUTE_DECORATORS.has(d))
+    && !!f.parent && ts.isClassDeclaration(f.parent) && decoratorNames(f.parent).includes("Controller")
+    && !decoratorNames(f).some(d => d === "Header" || d === "Render" || d === "Redirect");
+}
+
 const RESPONSE_PARAM_NAMES = new Set(["res", "response", "reply"]);
 const REQUEST_TYPE_RE = /^(?:express\.)?(?:Request|FastifyRequest|IncomingMessage|NextApiRequest)\b/;
 
@@ -239,6 +291,8 @@ const FS_SINK_NAMES = new Set([
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
 ]);
 const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare"]);
+const SQLITE_SINK_METHODS = new Set(["exec", "all", "get", "each"]);
+const DB_ACCESSOR_RE = /^(?:get)?(?:db|database|sqlite|pool|conn|connection|knex)$/i;
 
 interface SinkMatch { id: AstTaintId; sinkExpr: string; args: readonly ts.Expression[] }
 
@@ -558,6 +612,75 @@ function inlineRequireModule(callee: ts.Expression): string | null {
   return spec && ts.isStringLiteral(spec) ? spec.text : null;
 }
 
+/** A whole object (a variable or `req.body`, not an object literal naming its fields) written as a row's columns:
+ * Drizzle `db.update(t).set(obj)`, Prisma `prisma.user.update({ data: obj })`. Request data there is mass assignment. */
+function ormWholeObjectWrite(call: ts.CallExpression): SinkMatch | null {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const whole = (e: ts.Expression | undefined): e is ts.Expression => {
+    const u = e && unwrapExpr(e);
+    return !!u && (ts.isIdentifier(u) || ts.isPropertyAccessExpression(u) || ts.isElementAccessExpression(u));
+  };
+  const recv = unwrapExpr(callee.expression);
+  if (callee.name.text === "set" && ts.isCallExpression(recv) && ts.isPropertyAccessExpression(recv.expression)
+      && recv.expression.name.text === "update" && whole(call.arguments[0])) {
+    return { id: "mass-assignment", sinkExpr: "update().set", args: [call.arguments[0]] };
+  }
+  if (/^(?:create|update|upsert|updateMany|createMany)$/.test(callee.name.text) && ts.isPropertyAccessExpression(recv)) {
+    const opts = call.arguments[0] && unwrapExpr(call.arguments[0]);
+    const data = opts && ts.isObjectLiteralExpression(opts) ? opts.properties.find((p): p is ts.PropertyAssignment =>
+      ts.isPropertyAssignment(p) && p.name.getText() === "data") : undefined;
+    if (data && whole(data.initializer)) return { id: "mass-assignment", sinkExpr: `${callee.name.text}({ data })`, args: [data.initializer] };
+  }
+  return null;
+}
+
+/**
+ * A blocklist check by substring membership -- `BAD.some(b => name.includes(b))`, `name.indexOf("<")` -- run on a
+ * value never proved to be a string. Express's query/body parsers turn `?name[]=<script>` into an ARRAY, whose
+ * `.includes` / `.indexOf` compare whole elements, so the check passes while the payload goes through (HTTP
+ * parameter type confusion). The receiver is the sink argument; a `typeof` / `Array.isArray` check of it in the
+ * same function is the type validation that makes it safe.
+ */
+const MEMBERSHIP_METHODS = new Set(["includes", "indexOf", "lastIndexOf"]);
+const BLOCKLIST_CHAR_RE = /[<>"'&/\\;`]|\.\.|script|javascript:/i;
+function blocklistMembershipCheck(call: ts.CallExpression): SinkMatch | null {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return null;
+  const receiverOf = (c: ts.Expression): ts.Identifier | undefined => {
+    const u = unwrapExpr(c);
+    if (!ts.isCallExpression(u) || !ts.isPropertyAccessExpression(u.expression) || !MEMBERSHIP_METHODS.has(u.expression.name.text)) return undefined;
+    const r = unwrapExpr(u.expression.expression);
+    return ts.isIdentifier(r) ? r : undefined;
+  };
+  let recv: ts.Identifier | undefined;
+  // `LIST.some(bad => name.includes(bad))`: the membership test of each blocklist entry
+  if (/^(?:some|every|find|findIndex|filter)$/.test(callee.name.text) && call.arguments[0] && ts.isArrowFunction(call.arguments[0])) {
+    const cb = call.arguments[0];
+    const body = ts.isBlock(cb.body) ? undefined : cb.body;
+    const r = body ? receiverOf(ts.isPrefixUnaryExpression(body) ? body.operand : body) : undefined;
+    const params = cb.parameters.map(p => p.name.getText());
+    if (r && !params.includes(r.text)) recv = r;
+  } else if (MEMBERSHIP_METHODS.has(callee.name.text) && call.arguments[0] && ts.isStringLiteralLike(call.arguments[0])
+      && BLOCKLIST_CHAR_RE.test(call.arguments[0].text)) {
+    const r = unwrapExpr(callee.expression);
+    if (ts.isIdentifier(r)) recv = r;
+  }
+  if (!recv) return null;
+  const fn = enclosingFunction(call);
+  const scope = fn?.body ?? call.getSourceFile();
+  const name = recv.text;
+  let typed = false;
+  const visit = (n: ts.Node) => {
+    if (typed) return;
+    if (ts.isTypeOfExpression(n) && ts.isIdentifier(unwrapExpr(n.expression)) && (unwrapExpr(n.expression) as ts.Identifier).text === name) typed = true;
+    if (ts.isCallExpression(n) && /^(?:Array\.isArray|String)$/.test(n.expression.getText()) && n.arguments[0] && n.arguments[0].getText() === name) typed = true;
+    ts.forEachChild(n, visit);
+  };
+  visit(scope);
+  return typed ? null : { id: "type-confusion", sinkExpr: "blocklist membership check", args: [recv] };
+}
+
 function matchSink(call: ts.CallExpression, importMap: Map<string, string>): SinkMatch | null {
   const callee = call.expression;
   const redos = staticReDoSSink(call);
@@ -573,6 +696,10 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (ts.isPropertyAccessExpression(callee) && callee.name.text === "insertAdjacentHTML" && call.arguments[1]) {
     return { id: "xss", sinkExpr: "insertAdjacentHTML", args: [call.arguments[1]] };
   }
+  const orm = ormWholeObjectWrite(call);
+  if (orm) return orm;
+  const confused = blocklistMembershipCheck(call);
+  if (confused) return confused;
   const domText = calleeText(callee);
   // DOM-based redirect, ahead of the name-based rules below (`window.open` is no file open)
   if (domText && (/^(?:(?:window|document|self|top)\.)?location\.(?:assign|replace)$/.test(domText) || domText === "window.open")) {
@@ -595,6 +722,12 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     return { id: "eval-exec", sinkExpr: text, args: [call.arguments[0]] };
   }
 
+  // a template engine compiling request data as the template SOURCE (`dot.template(t)`, `ejs.render(t, data)`):
+  // the engine turns it into code -- the data argument is rendered, escaped, and is not the sink
+  const engine = (resolvedModule ?? head).toLowerCase();
+  if (parts.length === 2 && call.arguments[0] && (TEMPLATE_COMPILE[engine]?.has(tail) || (engine === "_" || engine === "lodash") && tail === "template")) {
+    return { id: "ssti", sinkExpr: text, args: [call.arguments[0]] };
+  }
   if (CMD_SINK_NAMES.has(tail) && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {
     return { id: "command-injection", sinkExpr: text, args: commandArgs(call, tail) };
   }
@@ -737,6 +870,12 @@ function classHeldClientSink(call: ts.CallExpression): SinkMatch | null {
   const names: string[] = [];
   let cur: ts.Expression = callee.expression;
   while (ts.isPropertyAccessExpression(cur)) { names.unshift(cur.name.text); cur = cur.expression; }
+  // a connection handed out by an accessor -- `db().exec(sql)`, `getDb().all(sql)` (sqlite's exec/all/get/each too)
+  if (names.length === 0 && ts.isCallExpression(cur) && ts.isIdentifier(cur.expression) && DB_ACCESSOR_RE.test(cur.expression.text)
+      && (DB_SINK_METHODS.has(tail) || SQLITE_SINK_METHODS.has(tail))) {
+    const sqlArg = sqlTextArg(call);
+    return sqlArg ? { id: "sql-injection", sinkExpr: `${cur.expression.text}().${tail}`, args: [sqlArg] } : null;
+  }
   if (cur.kind !== ts.SyntaxKind.ThisKeyword || names.length === 0) return null;
   const receiver = `this.${names.join(".")}`;
   const sinkExpr = `${receiver}.${tail}`;
@@ -766,7 +905,17 @@ const PASSTHROUGH_NEW = propagatorNames("js", "constructor-args");
 const ARG_CARRYING_METHODS = propagatorNames("js", "method-args");
 const CALLBACK_RESULT_METHODS = new Set(["then", "map", "flatMap"]);
 /** node:vm entry points that run a code string (the sandbox, when any, is the second argument). */
-const VM_SANDBOX_TAILS = new Set(["runInContext", "runInNewContext", "runInThisContext", "compileFunction"]);
+/** Template engine (module or conventional binding, lower-cased) -> the calls whose first argument is template source. */
+const TEMPLATE_COMPILE: Record<string, Set<string>> = {
+  dot: new Set(["template", "compile"]),
+  ejs: new Set(["render", "compile"]),
+  pug: new Set(["render", "compile"]), jade: new Set(["render", "compile"]),
+  handlebars: new Set(["compile", "precompile"]),
+  nunjucks: new Set(["renderString", "compile"]),
+  mustache: new Set(["render"]),
+  swig: new Set(["render", "compile"]),
+};
+const VM_SANDBOX_TAILS =new Set(["runInContext", "runInNewContext", "runInThisContext", "compileFunction"]);
 /** JS-in-JS evaluators: whatever they're handed is evaluated as code, sandboxed or not. */
 const EVALUATOR_MODULES = new Set(["notevil", "safe-eval", "static-eval", "eval"]);
 /** Methods whose callback's first parameter is the receiver's value (a promise's result, an element); `reduce`'s
@@ -1043,7 +1192,12 @@ function resLocalsKey(path: string | null | undefined): string | null {
   return m ? `res.locals.${m[1]}` : null;
 }
 
-function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO) {
+const LLM_COMPLETION_RE = /\.(?:chat\.completions\.create|completions\.create|responses\.create|messages\.create|generateContent)$/;
+const HTTP_RESPONSE_CALL_RE =/^(?:axios(?:\.(?:get|post|put|patch|delete|request|head))?|fetch|window\.fetch|\$\.(?:get|getJSON|ajax|post)|\w+\.\$http\.(?:get|post))$/;
+/** React state: `const [x, setX] = useState(...)` -- the sticky key a setter call writes and a read of x consults. */
+const STATE_KEY = (name: string) => `state:${name}`;
+
+function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<string, number>, storedProvenance?: StoredProvenanceIO, clientSide = false) {
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
     if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
@@ -1052,6 +1206,8 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       let m = env.get(expr.text) ?? 0;
       const st = sticky?.get(expr.text);
       if (st && !isShadowed(expr)) m |= st;
+      // a React state variable holds what any of its setter calls was given (in an effect, a handler, a callback)
+      m |= sticky?.get(STATE_KEY(expr.text)) ?? 0;
       // a bare object also carries the fields written onto it (`u.hostname = h; u`)
       const prefix = expr.text + ".";
       for (const [k, v] of env) if (v && k.startsWith(prefix)) m |= v;
@@ -1147,6 +1303,16 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     args.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
 
   const callMask = (expr: ts.CallExpression, env: Env): number => {
+    // In browser code, what another server answered (`axios.get(url)`, `fetch(url)`) is outside the page's control:
+    // rendered as markup it is stored / reflected XSS. XSS only -- it is not a query, path or command input.
+    if (clientSide && HTTP_RESPONSE_CALL_RE.test(calleeText(expr.expression) ?? "")) return classOf("xss");
+    // Vue reactivity wrappers hold their argument's value: `computed(() => x)` is x, `ref(x)` / `reactive(o)` are x / o
+    if (clientSide && /^(?:computed|ref|shallowRef|reactive|shallowReactive|readonly|toRef|unref|toValue)$/.test(calleeText(expr.expression) ?? "") && expr.arguments[0]) {
+      return taintMask(expr.arguments[0], env);
+    }
+    // An LLM completion over request-supplied messages answers with whatever those messages steer it to (prompt
+    // injection): `openai.chat.completions.create({ messages })` is as tainted as its arguments
+    if (LLM_COMPLETION_RE.test(calleeText(expr.expression) ?? "")) return argsMask(expr.arguments, env);
     // Stored provenance read: `UserModel.findAll()` etc -- the result is as tainted as anything this
     // batch ever wrote to that model (see taintCore.ts's StoredProvenanceIO docblock).
     if (storedProvenance && ts.isPropertyAccessExpression(expr.expression)) {
@@ -1538,6 +1704,7 @@ function createWalker(h: WalkerHooks) {
       ? h.callbackParamMasks(parent, parent.arguments.indexOf(f as ts.Expression), env) : undefined;
     f.parameters.forEach((prm, i) => { if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, seeds?.[i] ?? 0); });
     for (const [name, mask] of destructuredRequestSources(f)) fenv.set(name, mask);
+    for (const name of nestRequestParams(f)) fenv.set(name, ALL);
     if (ts.isBlock(f.body)) walkNode(f.body, fenv);
     else handleExpr(f.body, fenv);
   };
@@ -1655,7 +1822,13 @@ function createWalker(h: WalkerHooks) {
     }
 
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
-      if (h.descendFunctions) for (const m of node.members) if (isFunctionLike(m)) walkFunction(m, env);
+      if (h.descendFunctions) {
+        for (const m of node.members) {
+          if (isFunctionLike(m)) walkFunction(m, env);
+          // a handler held in a field: `public getUsers: RequestHandler = async (req, res) => { ... }`
+          else if (ts.isPropertyDeclaration(m) && m.initializer && isFunctionLike(m.initializer)) walkFunction(m.initializer, env);
+        }
+      }
       return false;
     }
 
@@ -2289,6 +2462,8 @@ const SEVERITY: Record<AstTaintId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "argument-injection": "high",
   "log-injection": "medium",
+  "ssti": "critical",
+  "type-confusion": "medium",
 };
 const LABEL: Record<AstTaintId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -2300,7 +2475,55 @@ const LABEL: Record<AstTaintId, string> = {
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
   "argument-injection": "Argument Injection",
   "log-injection": "Log Injection",
+  "ssti": "Server-Side Template Injection",
+  "type-confusion": "HTTP Parameter Type Confusion",
 };
+
+/** The function (declaration, expression, arrow, method) a node is in, or undefined at module level. */
+function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | undefined {
+  for (let p = node.parent; p; p = p.parent) if (isFunctionLike(p) && (p as ts.FunctionLikeDeclaration).body) return p as ts.FunctionLikeDeclaration;
+  return undefined;
+}
+
+/** The function's own name: a declaration's, or the variable a function expression / arrow is assigned to. */
+function functionSelfName(fn: ts.FunctionLikeDeclaration): string | undefined {
+  return (fn as ts.FunctionDeclaration).name?.text ?? (ts.isVariableDeclaration(fn.parent) && ts.isIdentifier(fn.parent.name) ? fn.parent.name.text : undefined);
+}
+
+/**
+ * A recursive deep merge with no prototype guard: `for (k in src)` / `Object.keys(src)` that recurses on
+ * `merge(dst[k], src[k])` and assigns `dst[k] = ...`. Returns that assignment, or null.
+ */
+function recursiveMergeAssign(fn: ts.FunctionLikeDeclaration, sf: ts.SourceFile): ts.BinaryExpression | null {
+  const selfName = functionSelfName(fn);
+  if (!selfName || !fn.body || /__proto__|constructor|prototype|hasOwn|Object\.create\(null\)/.test(fn.body.getText(sf))) return null;
+  const keyVars = new Set<string>();
+  let recursive = false;
+  let assign: ts.BinaryExpression | null = null;
+  const scan = (m: ts.Node) => {
+    if (m !== fn.body && isFunctionLike(m) && !ts.isArrowFunction(m)) return;
+    if (ts.isForInStatement(m) || ts.isForOfStatement(m)) {
+      const d = m.initializer;
+      const name = ts.isVariableDeclarationList(d) && ts.isIdentifier(d.declarations[0]?.name) ? d.declarations[0].name.text : undefined;
+      if (name && (ts.isForInStatement(m) || /Object\.(?:keys|entries)\s*\(/.test(m.expression.getText(sf)))) keyVars.add(name);
+    }
+    // Object.keys(src).forEach((k) => ...)
+    if (ts.isCallExpression(m) && ts.isPropertyAccessExpression(m.expression) && m.expression.name.text === "forEach" &&
+        /Object\.keys\s*\(/.test(m.expression.expression.getText(sf))) {
+      const cb = m.arguments[0];
+      const p = cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) ? cb.parameters[0]?.name : undefined;
+      if (p && ts.isIdentifier(p)) keyVars.add(p.text);
+    }
+    if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === selfName &&
+        m.arguments.some(a => ts.isElementAccessExpression(a))) recursive = true;
+    if (!assign && ts.isBinaryExpression(m) && m.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(m.left) &&
+        ts.isIdentifier(m.left.argumentExpression)) assign = m;
+    ts.forEachChild(m, scan);
+  };
+  scan(fn.body);
+  const a = assign as ts.BinaryExpression | null;
+  return recursive && a && keyVars.has(((a.left as ts.ElementAccessExpression).argumentExpression as ts.Identifier).text) ? a : null;
+}
 
 /**
  * Function-level weaknesses that are properties of the code shape, not of a tainted flow:
@@ -2358,34 +2581,9 @@ function structuralChecks(
         }
         // recursive deep merge: `for (k in src)` / `Object.keys(src)` that recurses on `merge(dst[k], src[k])` and
         // assigns `dst[k] = ...` -- a JSON body `{"__proto__": {"isAdmin": true}}` walks into Object.prototype
-        const selfName = (fn as ts.FunctionDeclaration).name?.text ?? (ts.isVariableDeclaration(fn.parent) && ts.isIdentifier(fn.parent.name) ? fn.parent.name.text : undefined);
-        if (selfName) {
-          const keyVars = new Set<string>();
-          let recursive = false;
-          let assign: ts.Node | null = null;
-          const scan = (m: ts.Node) => {
-            if (m !== fn.body && isFunctionLike(m) && !ts.isArrowFunction(m)) return;
-            if (ts.isForInStatement(m) || ts.isForOfStatement(m)) {
-              const d = m.initializer;
-              const name = ts.isVariableDeclarationList(d) && ts.isIdentifier(d.declarations[0]?.name) ? d.declarations[0].name.text : undefined;
-              if (name && (ts.isForInStatement(m) || /Object\.(?:keys|entries)\s*\(/.test(m.expression.getText(sf)))) keyVars.add(name);
-            }
-            // Object.keys(src).forEach((k) => ...)
-            if (ts.isCallExpression(m) && ts.isPropertyAccessExpression(m.expression) && m.expression.name.text === "forEach" &&
-                /Object\.keys\s*\(/.test(m.expression.expression.getText(sf))) {
-              const cb = m.arguments[0];
-              const p = cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) ? cb.parameters[0]?.name : undefined;
-              if (p && ts.isIdentifier(p)) keyVars.add(p.text);
-            }
-            if (ts.isCallExpression(m) && ts.isIdentifier(m.expression) && m.expression.text === selfName &&
-                m.arguments.some(a => ts.isElementAccessExpression(a))) recursive = true;
-            if (!assign && ts.isBinaryExpression(m) && m.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(m.left) &&
-                ts.isIdentifier(m.left.argumentExpression)) assign = m;
-            ts.forEachChild(m, scan);
-          };
-          scan(fn.body!);
-          const a = assign as ts.BinaryExpression | null;
-          if (recursive && a && keyVars.has(((a.left as ts.ElementAccessExpression).argumentExpression as ts.Identifier).text)) {
+        {
+          const a = recursiveMergeAssign(fn, sf);
+          if (a) {
             report("prototype-pollution", a,
               "Recursive merge copies every key of the source object, '__proto__' and 'constructor' included — merging a request body like {\"__proto__\": {\"isAdmin\": true}} pollutes Object.prototype; skip those keys or merge into Object.create(null)",
               "recursive merge");
@@ -2952,7 +3150,23 @@ export function scanAstTaint(
       ts.forEachChild(n, collectAliases);
     };
     collectAliases(sourceFile);
-    const taintMask = makeTaintMask(propagating, sticky, storedProvenance);
+    // browser code: JSX, or a front-end framework imported (see HTTP_RESPONSE_CALL_RE)
+    const clientSide = /\.[jt]sx$/.test(filePath) || /from\s+['"](?:react|react-dom|vue|@angular\/core|svelte|preact)['"]|require\(\s*['"]react['"]\s*\)/.test(content)
+      || (() => { let jsx = false; const v = (n: ts.Node) => { if (jsx) return; if (ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n)) { jsx = true; return; } ts.forEachChild(n, v); }; v(sourceFile); return jsx; })();
+    const taintMask = makeTaintMask(propagating, sticky, storedProvenance, clientSide);
+    // React: setter name -> state variable (`const [desc, setDesc] = useState('')`)
+    const stateSetters = new Map<string, string>();
+    {
+      const v = (n: ts.Node) => {
+        if (ts.isVariableDeclaration(n) && ts.isArrayBindingPattern(n.name) && n.initializer && ts.isCallExpression(n.initializer)
+            && /^(?:React\.)?use(?:State|Reducer)$/.test(n.initializer.expression.getText(sourceFile))) {
+          const [s, set] = n.name.elements;
+          if (s && set && ts.isBindingElement(s) && ts.isBindingElement(set) && ts.isIdentifier(s.name) && ts.isIdentifier(set.name)) stateSetters.set(set.name.text, s.name.text);
+        }
+        ts.forEachChild(n, v);
+      };
+      v(sourceFile);
+    }
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
     // Message-attribution only (Tier 2, "assign then use downstream"): the
@@ -3034,16 +3248,20 @@ export function scanAstTaint(
         const recv = ts.isPropertyAccessExpression(e.expression) ? [e.expression.expression] : [];
         return [...e.arguments, ...recv];
       }
+      // `new URLSearchParams(location.search)`, `new URL(input)`: the constructor's arguments
+      if (ts.isNewExpression(e)) return [...(e.arguments ?? [])];
       return [];
     };
     /** Whether `e` provably leads back to a request source through initializers/operands (bounded). */
     const reachesSource = (e: ts.Expression, depth = 0): boolean => {
-      if (depth > 6) return false;
+      if (depth > 16) return false;
       const u = unwrapExpr(e);
       if (isTaintSourceExpr(u)) return true;
       // read back from memory that holds request data (`res.locals.term`, a module-scope Map)
       if (stickyContainerRead(u)) return true;
       if (ts.isIdentifier(u)) {
+        // a React state variable some setter call was given request/response data
+        if ([...stateSetters.values()].includes(u.text) && ((sticky.get(STATE_KEY(u.text)) ?? 0) & ALL)) return true;
         const init = initializerOf.get(u.text);
         return !!init && init !== e && reachesSource(init, depth + 1);
       }
@@ -3205,7 +3423,10 @@ export function scanAstTaint(
         }
         const text = cur.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100);
         // read back from a module-scope container (`targets.get(k)`): to the write that stored the value there
-        const container = stickyContainerRead(cur);
+        // (a module-scope variable whose own declaration already holds request data -- Vue's
+        // `const msg = ref(query.get('m'))` later reassigned in a handler -- starts at that declaration)
+        const declInit = ts.isIdentifier(cur) ? initializerOf.get(cur.text) : undefined;
+        const container = declInit && reachesSource(declInit) ? undefined : stickyContainerRead(cur);
         const write = container && !containersVisited.has(container) ? containerWriteOf(container) : undefined;
         if (container && write) {
           containersVisited.add(container);
@@ -3218,7 +3439,14 @@ export function scanAstTaint(
           continue;
         }
         if (ts.isIdentifier(cur)) {
-          const fnHere = enclosingFn(cur);
+          let fnHere = enclosingFn(cur);
+          // a callback's captured variable (`bad => name.includes(bad)`): the parameter of the function around it
+          for (let up = fnHere, k = 0; up && k < 4 && !paramNamesOf(up).includes(cur.text)
+              && up.parent && ts.isCallExpression(up.parent) && (ts.isArrowFunction(up) || ts.isFunctionExpression(up)); k++) {
+            const outer = enclosingFn(up);
+            if (outer && paramNamesOf(outer).includes(cur.text)) { fnHere = outer; break; }
+            up = outer;
+          }
           const visitKey = `${fnHere?.pos ?? -1}:${cur.text}`;
           if (visitedIds.has(visitKey)) break; // a re-assignment cycle -- stop rather than loop
           visitedIds.add(visitKey);
@@ -3267,6 +3495,24 @@ export function scanAstTaint(
             cur = callBack.arguments[paramIdx];
             continue;
           }
+          // a React state variable: back to the setter call that stored the value (`setDesc(response.data.desc)`)
+          const setterName = [...stateSetters].find(([, st]) => st === text)?.[0];
+          const setCall = setterName && !entered.has(`state:${text}`) ? (() => {
+            let hit: ts.CallExpression | undefined;
+            const v = (n: ts.Node) => {
+              if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === setterName && n.arguments[0]
+                  && !isLiteralExpr(unwrapExpr(n.arguments[0])) && !isFunctionExpr(n.arguments[0])) hit = n;
+              ts.forEachChild(n, v);
+            };
+            v(sourceFile);
+            return hit;
+          })() : undefined;
+          if (setCall) {
+            entered.add(`state:${text}`);
+            backward.push({ file: filePath, line: lineOf(setCall), kind: "assignment", label: `${text} = (state) ${setCall.getText(sourceFile).replace(/\s+/g, " ").slice(0, 60)}`, snippet: setCall.getText(sourceFile).replace(/\s+/g, " ").slice(0, 100) });
+            cur = setCall.arguments[0];
+            continue;
+          }
           if (!init || paramIdx >= 0) {
             const fnName = fnHere ? fnNameOf(fnHere) : undefined;
             // a parameter of the callee we came down into: back to the argument that call passed
@@ -3305,6 +3551,16 @@ export function scanAstTaint(
           }
           backward.push({ file: filePath, line: lineOf(init), kind: "assignment", label: `${text} = ${sourceLabel(init)}`, snippet: initText });
           cur = init;
+          // `computed(() => { ...; return expr })`: the value is what the callback returns -- continue from there
+          const u = unwrapExpr(init);
+          if (ts.isCallExpression(u) && /^(?:computed|useMemo)$/.test(calleeText(u.expression) ?? "") && u.arguments[0] && isFunctionExpr(u.arguments[0])) {
+            const cb = u.arguments[0] as ts.ArrowFunction | ts.FunctionExpression;
+            const rets: ts.Expression[] = [];
+            if (ts.isBlock(cb.body)) { const v = (n: ts.Node) => { if (n !== cb.body && isFunctionLike(n)) return; if (ts.isReturnStatement(n) && n.expression) rets.push(n.expression); ts.forEachChild(n, v); }; v(cb.body); }
+            else rets.push(cb.body);
+            const ret = rets.reverse().find(r => !isLiteralExpr(unwrapExpr(r)));
+            if (ret) cur = ret;
+          }
           continue;
         }
         if (isTaintSourceExpr(cur)) {
@@ -3450,6 +3706,7 @@ export function scanAstTaint(
       const info = name ? crossFileSinkFacts.get(name) : undefined;
       if (!name || !info) return;
       for (const fact of info.sinks) {
+        if (fact.id === "type-confusion" && clientSide) continue;
         for (const a of argsForFact(call.arguments, fact)) {
           if (isFunctionExpr(a)) continue;
           const m = taintMask(a, env);
@@ -3495,6 +3752,9 @@ export function scanAstTaint(
       }
       const match = matchSink(call, importMap);
       if (!match) return;
+      // browser values (location, referrer, a fetched body) are strings or parsed JSON the page chose -- not the
+      // query/body parser's arrays
+      if (match.id === "type-confusion" && clientSide) return;
       const cls = classOf(match.id);
       let positionCleared: ts.Expression | undefined;
       let cleared = false;
@@ -3630,6 +3890,17 @@ export function scanAstTaint(
 
     // Taint written into module-scope containers/variables survives past the handler that wrote it
     const recordSticky = (node: ts.Node, env: Env) => {
+      // `setDesc(response.data.description)`: the state variable now holds it, wherever it is read
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && stateSetters.has(node.expression.text) && node.arguments[0]) {
+        const a = node.arguments[0];
+        // a functional update `setX(prev => ...)` returns what the callback builds -- not modelled
+        if (!isFunctionExpr(a)) {
+          const m = taintMask(a, env) & ALL;
+          const key = STATE_KEY(stateSetters.get(node.expression.text)!);
+          if (m && ((sticky.get(key) ?? 0) | m) !== (sticky.get(key) ?? 0)) { sticky.set(key, (sticky.get(key) ?? 0) | m); stickyDirty = true; }
+        }
+        return;
+      }
       // `bus.emit("job", payload)`: what each argument of that event carries, for the `bus.on("job", ...)` listener
       const ev = emitterEvent(node, EMIT_METHODS);
       if (ev && ts.isCallExpression(node)) {
@@ -3835,6 +4106,139 @@ export function scanAstTaint(
       if (ts.isNewExpression(n)) checkNewExprForSink(n, env);
       if (ts.isBinaryExpression(n)) { checkAssignmentForXSS(n, env); checkTimingCompare(n, env); recordSticky(n, env); }
       if (ts.isVariableDeclaration(n)) recordModelInstanceVar(n);
+      if (ts.isJsxAttribute(n)) checkDangerousHtml(n, env);
+      if (ts.isBinaryExpression(n)) checkBucketWrite(n, env);
+      if (ts.isCallExpression(n)) checkMergeCall(n, env);
+      if (n.parent && ts.isReturnStatement(n.parent) && n.parent.expression === n) checkNestReturn(n as ts.Expression, env);
+      if (ts.isAsExpression(n)) checkParamTypeAssertion(n);
+    };
+
+    // `req.query.filter as string`: a compile-time assertion only -- the query/body parser hands over an array or
+    // object for `?filter[]=a` / `?filter[k]=v`, and nothing at runtime checks it before it is used as a string
+    const checkParamTypeAssertion = (n: ts.AsExpression) => {
+      if (clientSide || n.type.kind !== ts.SyntaxKind.StringKeyword) return;
+      const e = unwrapExpr(n.expression);
+      const base = ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) ? unwrapExpr(e.expression) : undefined;
+      if (!base || !ts.isPropertyAccessExpression(base) || !/^(?:query|body)$/.test(base.name.text)) return;
+      const root = unwrapExpr(base.expression);
+      if (!ts.isIdentifier(root) || !SOURCE_ROOTS.has(root.text)) return;
+      emit("type-confusion", n, sourceLabel(e), "as string", e,
+        `'${sourceLabel(e)}' is asserted to be a string with \`as string\`, which TypeScript erases — the query/body parser delivers an array or object for \`?x[]=…\` / \`?x[k]=…\`, so check \`typeof ${sourceLabel(e)} === "string"\` before using it`);
+    };
+
+    // NestJS sends a handler's returned string as the body, text/html: request input in it is reflected XSS
+    const checkNestReturn = (e: ts.Expression, env: Env) => {
+      let x = e;
+      while (ts.isParenthesizedExpression(x) || ts.isAwaitExpression(x)) x = x.expression;
+      // `@Redirect()` handler: the returned `{ url }` is where the browser is sent
+      const fn = enclosingFunction(e);
+      if (fn && ts.isMethodDeclaration(fn) && decoratorNames(fn).includes("Redirect") && fn.parent && ts.isClassDeclaration(fn.parent)
+          && decoratorNames(fn.parent).includes("Controller") && ts.isObjectLiteralExpression(x)) {
+        const url = x.properties.find((p): p is ts.PropertyAssignment | ts.ShorthandPropertyAssignment =>
+          (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && p.name.getText(sourceFile) === "url");
+        const v = url ? (ts.isPropertyAssignment(url) ? url.initializer : url.name) : undefined;
+        if (v && taintMask(v, env) & classOf("open-redirect")) emit("open-redirect", e, sourceLabel(v), "NestJS @Redirect() url", v);
+        return;
+      }
+      if (!isNestRouteMethod(fn)) return;
+      // an object or array is serialized as JSON, not markup
+      if (ts.isObjectLiteralExpression(x) || ts.isArrayLiteralExpression(x)) return;
+      const m = taintMask(x, env);
+      if (m & classOf("xss")) emit("xss", e, sourceLabel(x), "NestJS handler return (text/html)", x);
+      else if (wasCleared(m, classOf("xss"))) suppressedOut?.push({ id: "xss", line: lineOf(e) });
+    };
+
+    // A local recursive merge (see recursiveMergeAssign), by name: called with request data, it walks `__proto__`
+    const mergeFns = new Set<string>();
+    {
+      const visitFns = (m: ts.Node) => {
+        if (isFunctionLike(m) && (m as ts.FunctionLikeDeclaration).body && recursiveMergeAssign(m as ts.FunctionLikeDeclaration, sourceFile)) {
+          const nm = functionSelfName(m as ts.FunctionLikeDeclaration);
+          if (nm) mergeFns.add(nm);
+        }
+        ts.forEachChild(m, visitFns);
+      };
+      visitFns(sourceFile);
+    }
+    const checkMergeCall = (call: ts.CallExpression, env: Env) => {
+      if (!ts.isIdentifier(call.expression) || !mergeFns.has(call.expression.text)) return;
+      // the merge's own recursion is not a new entry of request data
+      const encl = enclosingFunction(call);
+      if (encl && functionSelfName(encl) === call.expression.text) return;
+      for (const a of call.arguments) {
+        const m = taintMask(a, env);
+        if (m & classOf("prototype-pollution")) {
+          emit("prototype-pollution", call, sourceLabel(a), `${call.expression.text}() (recursive merge)`, a);
+          return;
+        }
+      }
+    };
+
+    /** The ELEMENT read a write's object comes from: `obj[k]` itself, or a local bound to `obj[k]` / `obj[k] || (obj[k] = {})`. */
+    const bucketRead = (e: ts.Expression): ts.ElementAccessExpression | undefined => {
+      let x: ts.Expression = e;
+      while (ts.isParenthesizedExpression(x)) x = x.expression;
+      if (ts.isElementAccessExpression(x)) return x;
+      if (!ts.isIdentifier(x)) return undefined;
+      const init = localInitializer(x);
+      if (!init) return undefined;
+      let v: ts.Expression = init;
+      while (ts.isParenthesizedExpression(v)) v = v.expression;
+      if (ts.isBinaryExpression(v) && (v.operatorToken.kind === ts.SyntaxKind.BarBarToken || v.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) v = v.left;
+      while (ts.isParenthesizedExpression(v)) v = v.expression;
+      return ts.isElementAccessExpression(v) ? v : undefined;
+    };
+    /** `const b = <init>` in the function enclosing `id` (the last such declaration of that name before it). */
+    const localInitializer = (id: ts.Identifier): ts.Expression | undefined => {
+      const fn = enclosingFunction(id) ?? sourceFile;
+      let found: ts.Expression | undefined;
+      const visitDecl = (m: ts.Node) => {
+        if (m.pos >= id.pos) return;
+        if (ts.isVariableDeclaration(m) && ts.isIdentifier(m.name) && m.name.text === id.text && m.initializer) found = m.initializer;
+        ts.forEachChild(m, visitDecl);
+      };
+      visitDecl(fn);
+      return found;
+    };
+    // `obj[k1][k2] = v` / `b = obj[k1] || (obj[k1] = {}); b[k2] = v` with k1 request-controlled: k1 = "__proto__" makes
+    // the bucket Object.prototype, so the write adds a property every object inherits
+    const checkBucketWrite = (n: ts.BinaryExpression, env: Env) => {
+      if (n.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return;
+      if (!ts.isElementAccessExpression(n.left) && !ts.isPropertyAccessExpression(n.left)) return;
+      const read = bucketRead(n.left.expression);
+      if (!read) return;
+      const encl = enclosingFunction(n);
+      if (encl?.body && /__proto__|constructor|prototype|hasOwn|Object\.create\(null\)|\bnew Map\b/.test(encl.body.getText(sourceFile))) return;
+      const m = taintMask(read.argumentExpression, env);
+      if (m & classOf("prototype-pollution")) {
+        emit("prototype-pollution", read, sourceLabel(read.argumentExpression), `${read.getText(sourceFile).slice(0, 40)} (computed key)`, read.argumentExpression);
+      }
+    };
+
+    // React: `<div dangerouslySetInnerHTML={{ __html: x }} />` writes x into the DOM as markup -- innerHTML by another name
+    const checkDangerousHtml = (attr: ts.JsxAttribute, env: Env) => {
+      // `<a href={link}>` with an attacker-chosen link: a `javascript:` URL runs script when clicked
+      if (/^(?:href|action|formAction)$/.test(attr.name.getText())) {
+        const v = attr.initializer && ts.isJsxExpression(attr.initializer) ? attr.initializer.expression : undefined;
+        if (!v || isLiteralExpr(unwrapExpr(v))) return;
+        // a value built as "<fixed prefix>" + input can't become javascript: (`/users/${id}`, `https://x/${q}`)
+        if (ts.isTemplateExpression(v) && v.head.text.length > 0) return;
+        if (ts.isBinaryExpression(v) && ts.isStringLiteralLike(unwrapExpr(v.left)) && (unwrapExpr(v.left) as ts.StringLiteral).text.length > 0) return;
+        const m = taintMask(v, env);
+        if (m & classOf("xss")) emit("xss", attr, sourceLabel(v), `<… ${attr.name.getText()}={…}> (javascript: URL)`, v);
+        return;
+      }
+      if (attr.name.getText() !== "dangerouslySetInnerHTML") return;
+      const init = attr.initializer && ts.isJsxExpression(attr.initializer) ? attr.initializer.expression : undefined;
+      if (!init) return;
+      // the object literal written in place, or a variable bound to one: its `__html` member is the markup
+      const html = ts.isObjectLiteralExpression(init)
+        ? init.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText() === "__html")?.initializer
+        : init;
+      if (!html) return;
+      const m = taintMask(html, env);
+      if (m & classOf("xss")) emit("xss", attr, sourceLabel(html), "dangerouslySetInnerHTML", html);
+      else if (wasCleared(m, classOf("xss"))) suppressedOut?.push({ id: "xss", line: lineOf(attr) });
     };
 
     // What a callback's parameters receive when it is called back:
@@ -3915,6 +4319,10 @@ export function scanAstTaint(
         if (ts.isVariableStatement(node)) {
           for (const decl of node.declarationList.declarations) {
             if (decl.initializer && ts.isIdentifier(decl.name)) initializerOf.set(decl.name.text, decl.initializer);
+            // `const { messages } = req.body`: each destructured name comes from that same expression
+            else if (decl.initializer && ts.isObjectBindingPattern(decl.name)) {
+              for (const el of decl.name.elements) if (ts.isIdentifier(el.name) && !initializerOf.has(el.name.text)) initializerOf.set(el.name.text, decl.initializer);
+            }
           }
         }
       },

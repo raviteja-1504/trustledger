@@ -235,6 +235,8 @@ const TABLES: Record<SanitizerLang, Table> = {
       atoi: NUMERIC, atol: NUMERIC, atoll: NUMERIC, atof: NUMERIC, strtol: NUMERIC, strtoul: NUMERIC, strtoll: NUMERIC,
       strtoull: NUMERIC, strtod: NUMERIC, strtof: NUMERIC, wcstol: NUMERIC, wcstoul: NUMERIC, _wtoi: NUMERIC,
       stoi: NUMERIC, stol: NUMERIC, stoul: NUMERIC, stoll: NUMERIC, stof: NUMERIC, stod: NUMERIC,
+      // the last path component: no directory, so it can't climb out of the one it is joined to
+      basename: C.PATH, PathFindFileName: C.PATH, PathFindFileNameA: C.PATH, PathFindFileNameW: C.PATH,
     },
     tail: {},
   },

@@ -88,7 +88,7 @@ export const PCI_624_CLASSES: readonly AttackClass[] = [
     limits: "Found where untrusted input reaches a query or command in the code TrustLedger scans; injection through stored data or other services is not traced." },
   { key: "data", title: "Attacks on data and data structures (buffer overflows, manipulating buffers, pointers, input data or shared data)",
     rules: ["buffer-overflow", "integer-overflow", "arithmetic-overflow", "use-after-free", "double-free", "null-dereference", "mismatched-deallocation",
-      "input-validation", "insecure-deserialization", "prototype-pollution", "mass-assignment", "variable-overwrite", "race-condition", "toctou", "path-traversal"],
+      "input-validation", "type-confusion", "insecure-deserialization", "prototype-pollution", "mass-assignment", "variable-overwrite", "race-condition", "toctou", "path-traversal"],
     limits: "Memory-safety rules apply to C and C++; concurrency issues are found only where the race is visible within a file." },
   { key: "crypto", title: "Attacks on cryptography usage (weak or insecure cryptographic implementations, algorithms, cipher suites or modes)",
     rules: ["weak-crypto", "insecure-randomness", "jwt-none-alg", "tls-verification-disabled", "timing-attack", "weak-signing-secret", "hardcoded-secret",

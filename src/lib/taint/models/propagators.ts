@@ -64,7 +64,9 @@ export const PROPAGATOR_MODELS: readonly PropagatorModel[] = [
     "base64.b64decode", "base64.urlsafe_b64decode", "b64decode", "urlsafe_b64decode", "html.unescape",
     ] },
   { id: "py:method-args", lang: "py", kind: "method-args", engineSet: "astTaintPython.PY_ARG_CARRYING_METHODS",
-    names: ["join", "replace", "format", "ljust", "rjust", "center", "removeprefix", "removesuffix"] },
+    // load / loads: a marshmallow / pydantic-style schema parses the payload into a validated dict that still holds
+    // what the client sent (`data = self.schema.load(request.get_json())`)
+    names: ["join", "replace", "format", "ljust", "rjust", "center", "removeprefix", "removesuffix", "load", "loads"] },
   { id: "go:call-args", lang: "go", kind: "call-args", engineSet: "astTaintGo.GO_PASSTHROUGH",
     names: [
     "strings.TrimSpace", "strings.Trim", "strings.TrimLeft", "strings.TrimRight", "strings.TrimPrefix", "strings.TrimSuffix",
@@ -167,7 +169,9 @@ export const PROPAGATOR_MODELS: readonly PropagatorModel[] = [
     "bson::to_document", "Value::from", "STANDARD.decode", "general_purpose::STANDARD.decode",
     ] },
   { id: "cpp:call-args", lang: "cpp", kind: "call-args", engineSet: "astTaintCpp.RETURN_PASSTHROUGH",
-    names: ["strdup", "strndup", "wcsdup", "_strdup", "_wcsdup", "strchr", "strrchr", "strstr", "strtok", "basename", "dirname", "string", "wstring", "c_str", "data", "substr", "str", "to_string"] },
+    names: ["strdup", "strndup", "wcsdup", "_strdup", "_wcsdup", "strchr", "strrchr", "strstr", "strtok", "basename", "dirname", "string", "wstring", "c_str", "data", "substr", "str", "to_string",
+      // the value an object or argument already holds: std::move / std::forward, element and optional accessors
+      "move", "forward", "at", "front", "back", "value", "value_or", "top"] },
   { id: "java:call-args", lang: "java", kind: "call-args", engineSet: "astTaintJava.ARG_CARRYING_TAILS",
     names: [
     "replace", "replaceAll", "replaceFirst", "concat", "join", "valueOf", "copyValueOf", "of", "ofNullable", "asList",

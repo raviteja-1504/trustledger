@@ -80,6 +80,7 @@ export const SINK_ROLE: Record<string, string> = {
   "xpath-injection": "the XPath expression",
   "header-injection": "the response header value",
   "log-injection": "the log message",
+  "type-confusion": "the request parameter whose type is assumed",
   "xxe": "the XML document",
   "format-string": "the format string",
   "buffer-overflow": "the data (or length) copied into the buffer",

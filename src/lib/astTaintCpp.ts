@@ -55,7 +55,7 @@ function nodeRequire(): NodeJS.Require {
 export type AstTaintCppId =
   | "command-injection" | "sql-injection" | "path-traversal" | "format-string" | "buffer-overflow" | "ldap-injection"
   | "ssrf" | "eval-exec" | "integer-overflow" | "use-after-free" | "double-free" | "null-dereference"
-  | "mismatched-deallocation" | "insecure-temp-file";
+  | "mismatched-deallocation" | "insecure-temp-file" | "xxe" | "insecure-deserialization";
 
 export interface AstTaintCppFinding {
   id: AstTaintCppId;
@@ -72,7 +72,7 @@ const SEVERITY: Record<AstTaintCppId, "critical" | "high" | "medium"> = {
   "command-injection": "critical", "sql-injection": "critical", "path-traversal": "high", "format-string": "high",
   "buffer-overflow": "critical", "ldap-injection": "high", "ssrf": "high", "eval-exec": "critical", "integer-overflow": "high",
   "use-after-free": "critical", "double-free": "high", "null-dereference": "medium", "mismatched-deallocation": "medium",
-  "insecure-temp-file": "medium",
+  "insecure-temp-file": "medium", "xxe": "high", "insecure-deserialization": "critical",
 };
 const LABEL: Record<AstTaintCppId, string> = {
   "command-injection": "Command Injection", "sql-injection": "SQL Injection", "path-traversal": "Path Traversal",
@@ -80,6 +80,7 @@ const LABEL: Record<AstTaintCppId, string> = {
   "ssrf": "Server-Side Request Forgery", "eval-exec": "Untrusted Library Load", "integer-overflow": "Uncontrolled Size",
   "use-after-free": "Use After Free", "double-free": "Double Free", "null-dereference": "NULL Dereference",
   "mismatched-deallocation": "Mismatched Deallocation", "insecure-temp-file": "Insecure Temporary File",
+  "xxe": "XML External Entity (XXE)", "insecure-deserialization": "Insecure Deserialization",
 };
 export function astTaintCppSeverity(id: AstTaintCppId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintCppLabel(id: AstTaintCppId): string { return LABEL[id]; }
@@ -215,20 +216,38 @@ function callInfo(call: SyntaxNode): CallInfo {
  * is synchronous from makeCtx to its last walk, so one module-level table is never shared by two files at once.
  */
 let MACROS: ReadonlyMap<string, string> = new Map();
+/** Every definition of each macro, in source order: an #ifdef _WIN32 / #else pair defines one name twice. */
+let MACRO_DEFS: ReadonlyMap<string, readonly string[]> = new Map();
 function collectMacros(root: SyntaxNode): Map<string, string> {
   const out = new Map<string, string>();
+  const all = new Map<string, string[]>();
   for (const d of findAllNodes(root, "preproc_def")) {
     const nm = field(d, "name")?.text, v = field(d, "value")?.text.trim();
-    if (nm && v && !out.has(nm)) out.set(nm, v);
+    if (!nm || !v) continue;
+    if (!out.has(nm)) out.set(nm, v);
+    all.set(nm, [...(all.get(nm) ?? []), v]);
   }
+  MACRO_DEFS = all;
   return out;
 }
 const STRING_MACRO_RE = /^(?:[LuU8]*"(?:[^"\\]|\\.)*"\s*)+$/;
-/** `CreateFileA` / `ldap_search_ext_sW` / `_wfopen` / `EXECL` (#define'd to execl) -> the base API name. */
+const normalizeApi = (n: string) => n.replace(/^(?:_|std::)/, "").replace(/(?<=[a-z_])[AW]$/, "");
+/** APIs some check models (sources, sinks, copies, allocators) -- see baseApi. */
+let KNOWN_APIS: ReadonlySet<string> | null = null;
+const knownApis = (): ReadonlySet<string> => KNOWN_APIS ??= new Set([
+  ...Object.keys(OUT_PARAM_SOURCES), ...RETURN_SOURCES, ...Object.keys(COPY_INTO), ...UNBOUNDED_COPY, ...ALLOCATORS, ...Object.keys(DEREF_ARGS),
+  ...Object.keys(FORMAT_ARG), ...Object.keys(SQL_ARG), ...Object.keys(PATH_ARG), ...Object.keys(LDAP_FILTER_ARG),
+  "system", "wsystem", "popen", "wpopen", "execl", "execlp", "execle", "execv", "execvp", "execve", "CreateProcess", "ShellExecute", "WinExec",
+]);
+/**
+ * `CreateFileA` / `ldap_search_ext_sW` / `_wfopen` / `EXECL` (#define'd to execl) -> the base API name. A macro
+ * defined in several preprocessor arms (`EXECUTE` -> WinExec on Windows, system elsewhere) names the arm's API a check
+ * models -- whichever configuration is built, that call runs.
+ */
 const baseApi = (name: string) => {
-  const m = MACROS.get(name);
-  const real = m && /^[A-Za-z_]\w*$/.test(m) ? m : name;
-  return real.replace(/^(?:_|std::)/, "").replace(/(?<=[a-z_])[AW]$/, "");
+  const defs = (MACRO_DEFS.get(name) ?? []).filter(d => /^[A-Za-z_]\w*$/.test(d));
+  const real = defs.find(d => knownApis().has(normalizeApi(d))) ?? defs[0] ?? name;
+  return normalizeApi(real);
 };
 
 function stringValue(n: SyntaxNode | null | undefined): string | null {
@@ -248,14 +267,33 @@ type Env = TaintEnv;
 
 /** `out`: a parameter the caller's object is reached through -- a C++ reference (`char *&data`), or a pointer the
  * function never re-points (`char *buf`, `char **p`) so its writes land in the caller's buffer. */
-interface LocalFn { name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number; out?: "ref" | "ptr" }>; isStatic: boolean }
+interface LocalFn {
+  name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number; out?: "ref" | "ptr" }>; isStatic: boolean;
+  /** the class a member function belongs to: its class body, or the `T::` of an out-of-line definition; null when free */
+  cls: string | null;
+  /** identity: `Class::name` for a member function, the name for a free one (see resolveLocalFns) */
+  id: string;
+}
 
 interface EngineCtx {
   filePath: string;
   content: string;
   lines: string[];
   root: SyntaxNode;
+  /** same-file functions by identity (LocalFn.id) */
   fns: Map<string, LocalFn>;
+  /** bare name -> every same-file function of that name (see resolveLocalFns) */
+  byName: Map<string, LocalFn[]>;
+  /** local variables holding a lambda (`auto run = [&](...) { ... };`), per walk -- walked where they run */
+  lambdas: Map<string, SyntaxNode>;
+  /** lambdas being walked right now (a lambda that calls itself, or two that call each other, stop there) */
+  lambdaStack?: Set<number>;
+  /** unique_ptr variable -> raw pointers taken from it with .get(), per walk */
+  borrows: Map<string, Set<string>>;
+  /** container variable -> iterators / data() pointers taken from it, per walk (invalidated by a reallocating call) */
+  views: Map<string, Set<string>>;
+  /** class -> its direct base classes (`class Bad : public Base`) */
+  bases: Map<string, string[]>;
   /** fn -> (param index -> classes surviving to the return value) */
   propagating: Map<string, Map<number, number>>;
   /** fn -> classes its return carries regardless of arguments (it reads input itself) */
@@ -390,7 +428,9 @@ const OUT_PARAM_SOURCES: Record<string, number> = {
   scanf: -1, wscanf: -1, fscanf: -2, fwscanf: -2, sscanf: -3, swscanf: -3, scanf_s: -1, fscanf_s: -2,
   getcwd: -9, // not a source: placeholder so the trace resolver doesn't treat it as one (see isSource below)
 };
-const RETURN_SOURCES = new Set(["getenv", "wgetenv","secure_getenv", "GetCommandLine", "readline"]);
+const RETURN_SOURCES = new Set(["getenv", "wgetenv","secure_getenv", "GetCommandLine", "readline",
+  // an archive member's name is whatever its author wrote ("../../etc/cron.d/x"): libarchive, libzip
+  "archive_entry_pathname", "archive_entry_pathname_w", "archive_entry_pathname_utf8", "zip_get_name"]);
 /** Copies: destination argument index 0 takes the taint of the listed source arguments. */
 const COPY_INTO: Record<string, number[]> = {
   strcpy: [1], strncpy: [1], strcat: [1], strncat: [1], wcscpy: [1], wcsncpy: [1], wcscat: [1], wcsncat: [1],
@@ -450,7 +490,10 @@ function mask(e: SyntaxNode | null, env: Env, ctx: EngineCtx): number {
     case "subscript_expression": return mask(field(e, "argument"), env, ctx);
     case "field_expression": {
       const k = rootName(e);
-      return (k ? env.get(k) ?? 0 : 0) | mask(field(e, "argument"), env, ctx);
+      const arg = field(e, "argument");
+      // `u.role`: its own field write (if any) and u's own value -- not what another field of u was given
+      if (arg?.type === "identifier") return (k ? env.get(k) ?? 0 : 0) | groupMask(arg.text, env, ctx, true);
+      return (k ? env.get(k) ?? 0 : 0) | mask(arg, env, ctx);
     }
     case "conditional_expression": return mask(field(e, "consequence"), env, ctx) | mask(field(e, "alternative"), env, ctx);
     case "binary_expression": {
@@ -469,25 +512,20 @@ function mask(e: SyntaxNode | null, env: Env, ctx: EngineCtx): number {
   }
 }
 
-function groupMask(name: string, env: Env, ctx: EngineCtx): number {
+/** `u.*`: what was written into any field of u (see taintBuffer) -- part of u as a whole, not of its other fields. */
+const FIELDS_KEY = (name: string) => `${name}.*`;
+
+/** A variable's value, with its alias group; `ownOnly` leaves out what its fields were given (a field read). */
+function groupMask(name: string, env: Env, ctx: EngineCtx, ownOnly = false): number {
   if (!env.has(name) && ctx.globalNames.has(name)) return ctx.globalTaint.get(name) ?? 0;
+  const fields = ownOnly ? 0 : env.get(FIELDS_KEY(name)) ?? 0;
   const g = ctx.aliases.get(name);
-  if (!g) return env.get(name) ?? 0;
+  if (!g) return (env.get(name) ?? 0) | fields;
   let m = 0;
   for (const [n, gid] of ctx.aliases) if (gid === g) m |= env.get(n) ?? 0;
-  return m | (env.get(name) ?? 0);
+  return m | (env.get(name) ?? 0) | fields;
 }
 
-/** The function of this file a call runs: a free call, or `p.name()` / `p->name()` on a member function defined here
- * (in a class body, or out of line as `T::name`). */
-function localCallee(target: string, recv: SyntaxNode | null, ctx: EngineCtx): LocalFn | undefined {
-  const local = ctx.fns.get(target);
-  if (!local || !recv) return local;
-  const member = local.decl.parent?.type === "field_declaration_list" || /::/.test(field(local.decl, "declarator")?.text ?? "");
-  // only a name defined once in the file: `base->action(data)` with a bad and several good `action` overrides could
-  // run any of them, and ctx.fns holds just one
-  return member && definitionCount(ctx.root, target) === 1 ? local : undefined;
-}
 const definitionCounts = new WeakMap<SyntaxNode, Map<string, number>>();
 function definitionCount(root: SyntaxNode, name: string): number {
   let counts = definitionCounts.get(root);
@@ -508,13 +546,17 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
   if (clears !== null) return applySanitizer(mask(args[0] ?? null, env, ctx), clears);
   if (RETURN_PASSTHROUGH.has(api)) return recv ? mask(recv, env, ctx) : mask(args[0] ?? null, env, ctx);
   if (recv && /^(?:append|insert|replace|assign|operator\+=)$/.test(api)) return mask(recv, env, ctx) | args.reduce((m, a) => m | mask(a, env, ctx), 0);
-  // a local function: what its return carries from these arguments, plus what it reads itself
+  // a local function: what its return carries from these arguments, plus what it reads itself (of every function
+  // the call may run -- see resolveLocalFns)
   const target = ctx.fnAlias.get(name) ?? name;
-  const fn = localCallee(target, recv, ctx);
-  if (fn) {
-    let m = ctx.intrinsic.get(target) ?? 0;
-    const prop = ctx.propagating.get(target);
-    if (prop) for (const [i, surviving] of prop) m |= mask(args[i] ?? null, env, ctx) & surviving;
+  const fns = resolveLocalFns(call, target, recv, ctx);
+  if (fns.length) {
+    let m = 0;
+    for (const fn of fns) {
+      m |= ctx.intrinsic.get(fn.id) ?? 0;
+      const prop = ctx.propagating.get(fn.id);
+      if (prop) for (const [i, surviving] of prop) m |= mask(args[i] ?? null, env, ctx) & surviving;
+    }
     return m;
   }
   return 0;
@@ -566,7 +608,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     const base = name.split(".")[0];
     const g = ctx.aliases.get(base);
     env.set(name, (env.get(name) ?? 0) | value);
-    if (name !== base) env.set(base, (env.get(base) ?? 0) | value);
+    // `u.name = x`: that field, and the object as a whole (`u.*`, read with u) -- not u's other fields
+    if (name !== base) env.set(FIELDS_KEY(base), (env.get(FIELDS_KEY(base)) ?? 0) | value);
     if (g) for (const [n, gid] of ctx.aliases) if (gid === g) env.set(n, (env.get(n) ?? 0) | value);
     for (const p of refPeers(base, ctx)) env.set(p, (env.get(p) ?? 0) | value);
   };
@@ -634,6 +677,37 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   };
   const resetMemory = (name: string, env: Env) => {
     env.delete(KIND_KEY("freed", name)); env.delete(KIND_KEY("alloc", name)); env.delete(KIND_KEY("unchecked", name)); env.delete(KIND_KEY("tmpname", name));
+    env.delete(KIND_KEY("invalid", name)); env.delete(KIND_KEY("moved", name));
+  };
+  /**
+   * What a new value of `nm` says about other memory: `q = realloc(p, n)` frees p (when the result lands elsewhere);
+   * `it = v.begin()` / `p = v.data()` borrow v's storage (a reallocating call invalidates them); `b = std::move(up)`
+   * leaves the unique_ptr up empty.
+   */
+  const noteMemoryEffects = (nm: string, v: SyntaxNode | null, at: SyntaxNode, env: Env) => {
+    const old = reallocSource(v);
+    if (old && old !== nm) env.set(KIND_KEY("freed", old), 1);
+    if (v?.type === "call_expression") {
+      const ci = callInfo(v);
+      if (ci.recv?.type === "identifier" && VIEW_METHODS_RE.test(ci.name) && isReallocatingContainer(ci.recv.text, at)) {
+        ctx.views.set(ci.recv.text, new Set([...(ctx.views.get(ci.recv.text) ?? []), nm]));
+      }
+      if (/^(?:std::)?move$/.test(ci.name) && ci.args[0]?.type === "identifier" && isUniquePtr(ci.args[0].text, at)) env.set(KIND_KEY("moved", ci.args[0].text), 1);
+    }
+  };
+  /** A reallocating call on container `c` (push_back, insert, clear, ...): its iterators and data() pointers dangle. */
+  const invalidateViews = (c: string, env: Env) => {
+    for (const v of ctx.views.get(c) ?? []) env.set(KIND_KEY("invalid", v), 1);
+    ctx.views.delete(c);
+  };
+  /** A function of this file run as a callback with these argument masks (`std::thread t(run, x)`): walked with them. */
+  const seedCallbackFn = (fnName: string, masks: number[]) => {
+    const fns = (ctx.byName.get(fnName) ?? []).filter(f => !f.cls);
+    if (fns.length !== 1) return;
+    const f = fns[0];
+    let seeded = ctx.seeded.get(f.id);
+    masks.forEach((am, i) => { if ((am & ALL) && f.params[i]) { seeded ??= new Map(); seeded.set(i, (seeded.get(i) ?? 0) | am); } });
+    if (seeded) ctx.seeded.set(f.id, seeded);
   };
   const recordAlloc = (name: string, value: SyntaxNode | null, env: Env) => {
     resetMemory(name, env);
@@ -676,12 +750,26 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       emit(ctx, "mismatched-deallocation", at, name, how, `'${name}' was allocated with ${made} but released with ${how} — undefined behaviour (heap corruption, destructors not run)`);
     }
     env.set(KIND_KEY("freed", name), 1);
+    // a pointer copied from it (`char *alias = ptr;`) names the same memory: freed too
+    const g = ctx.aliases.get(name);
+    if (g) for (const [n, gid] of ctx.aliases) if (gid === g && n !== name) env.set(KIND_KEY("freed", n), 1);
+  };
+  /** Raw pointers borrowed from a unique_ptr (`int *raw = up.get();`): up's reset / reassignment frees what they name. */
+  const releaseBorrows = (owner: string, env: Env) => {
+    for (const raw of ctx.borrows.get(owner) ?? []) env.set(KIND_KEY("freed", raw), 1);
+    ctx.borrows.delete(owner);
   };
   /** A read or write through `name` (deref, index, member access, passing it on). */
   const touchVar = (name: string, at: SyntaxNode, env: Env, deref: boolean) => {
     if (opts.quiet || loopRepeat > 0) return;
     if (env.get(KIND_KEY("freed", name))) {
       emit(ctx, "use-after-free", at, name, at.text.slice(0, 40), `'${name}' is used after it was freed on this path — the memory may already belong to another allocation`);
+    } else if (deref && env.get(KIND_KEY("invalid", name))) {
+      emit(ctx, "use-after-free", at, name, at.text.slice(0, 40), `'${name}' points into a container's storage that was reallocated since (push_back / insert / clear / ...) — the iterator or pointer dangles; take it again after the change`);
+    }
+    if (deref && env.get(KIND_KEY("moved", name))) {
+      emit(ctx, "null-dereference", at, name, at.text.slice(0, 40), `'${name}' is dereferenced after std::move handed its object to another owner — it is empty (null) now`);
+      env.delete(KIND_KEY("moved", name));
     }
     if (deref && env.get(KIND_KEY("unchecked", name))) {
       emit(ctx, "null-dereference", at, name, at.text.slice(0, 40), `'${name}' comes from an allocator that returns NULL on failure and is dereferenced without a NULL check`);
@@ -747,7 +835,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         `Attacker-controlled '${args[fi].text.slice(0, 60)}' is used as the format string of ${api} — %n writes memory and %s/%x read the stack; pass it as an argument ("%s", value)`);
     }
     // command execution
-    if (/^(?:system|wsystem|popen|wpopen)$/.test(api) && args[0]) fireOn(ctx, "command-injection", call, args[0], argM[0] ?? 0, api);
+    // WinExec(cmdLine, show) runs a command line, like system()
+    if (/^(?:system|wsystem|popen|wpopen|WinExec)$/.test(api) && args[0]) fireOn(ctx, "command-injection", call, args[0], argM[0] ?? 0, api);
     // exec*(path, ...) / spawn*(mode, path, ...): a tainted program, or tainted text after a shell's -c / /c
     const progIdx = /^w?exec(?:l|lp|le|v|vp|ve|vpe)$/.test(api) ? 0 : /^w?spawn(?:l|lp|le|v|vp|ve|vpe)$/.test(api) ? 1 : -1;
     if (progIdx >= 0 && args[progIdx]) {
@@ -777,6 +866,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     }
     // loading a library the caller names
     if (/^(?:dlopen|LoadLibrary|LoadLibraryEx)$/.test(api) && args[0]) fireOn(ctx, "eval-exec", call, args[0], argM[0] ?? 0, name);
+    // libxml2 told to substitute entities / load the DTD: an external entity in the document reads local files or
+    // fetches URLs (XXE) -- whatever the document's origin, the parser configuration is the defect
+    if (!opts.quiet && ((/^xml(?:Read(?:Memory|File|Doc|Fd|IO)|CtxtRead(?:Memory|File|Doc|Fd|IO)|CtxtUseOptions)$/.test(api)
+        && args.some(a => /\bXML_PARSE_(?:NOENT|DTDLOAD)\b/.test(a.text))) || (api === "xmlSubstituteEntitiesDefault" && args[0]?.text === "1"))) {
+      emit(ctx, "xxe", call, name, name, `${name}(...) enables entity substitution / DTD loading (the NOENT / DTDLOAD parse options) — an external entity in the document can read local files or reach internal URLs; drop those options (libxml2 ≥ 2.9 leaves them off by default)`);
+    }
     // a generated temp name opened non-exclusively: another process can create (or symlink) it between the two calls
     const tmpArg = args[0] && rootName(args[0]);
     if (tmpArg && env.get(KIND_KEY("tmpname", tmpArg)) && /^(?:open|wopen|creat|wcreat|fopen|wfopen|CreateFile)$/.test(api)) {
@@ -789,9 +884,11 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     }
     // a local function called with tainted arguments: walk it with those (same file); a call through a local
     // function pointer goes to the function it was initialised with
-    const target = ctx.fnAlias.get(name) ?? name;
-    const fn = localCallee(target, recv, ctx);
-    if (fn) {
+    const resolved = resolveLocalFns(call, ctx.fnAlias.get(name) ?? name, recv, ctx);
+    // one function -- or several member functions of one class hierarchy (any override may run: each is walked)
+    const targets = resolved.length === 1 || (resolved.length > 1 && resolved.every(f => !!f.cls)) ? resolved : [];
+    for (const fn of targets) {
+      const target = fn.id;
       let seeded = ctx.seeded.get(target);
       for (const [i, am] of argM.entries()) {
         if (!(am & ALL) || !fn.params[i]) continue;
@@ -817,7 +914,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       }
     }
     // a function in another file of the batch whose parameter reaches a sink there
-    const facts = !recv && !fn ? ctx.crossFileFacts?.get(target) : undefined;
+    const facts = !recv && targets.length === 0 ? ctx.crossFileFacts?.get(ctx.fnAlias.get(name) ?? name) : undefined;
     if (facts) {
       for (const fact of facts) {
         const a = args[fact.index];
@@ -928,15 +1025,21 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const op = operatorOf(e);
         const rm = m(r, env);
         if (l?.type === "identifier") {
+          // `up = nullptr;` / `up = std::make_unique<T>(...)`: up's old object is destroyed
+          if (op === "=" && ctx.borrows.has(nm)) releaseBorrows(nm, env);
           setVar(nm, rm, env, op !== "=");
-          if (ctx.globalNames.has(nm) && !ctx.speculative && rm) ctx.globalTaint.set(nm, (ctx.globalTaint.get(nm) ?? 0) | rm);
+          // a global written here: what it holds when the function returns is what other functions read (see
+          // flushGlobals) -- `g = input; g = "ls";` leaves it clean
+          if (ctx.globalNames.has(nm) && !ctx.speculative) globalWrites.add(nm);
           if (op === "=") {
             // a new value: the old buffer's size and contents no longer describe it
             ctx.capacity.delete(nm);
             if (!ctx.aliases.has(nm)) ctx.strLen.delete(nm);
             ctx.aliases.delete(nm);
+            if (ctx.views.has(nm)) invalidateViews(nm, env);   // the container now holds other storage
             recordAlloc(nm, r, env);
             copyMemory(nm, r, env);
+            noteMemoryEffects(nm, r, e, env);
             const rn = r?.type === "identifier" ? r.text : null;
             if (rn && (ctx.capacity.has(rn) || ctx.aliases.has(rn))) alias(nm, rn);
           }
@@ -960,10 +1063,45 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const fnNode = field(e, "function");
         if (fnNode?.type === "field_expression") walkExpr(field(fnNode, "argument"), env);
         const { name, recv, args } = callInfo(e);
+        // a lambda runs here: called through its variable (`run(x)`), invoked in place (`[&]{ ... }()`), or handed to
+        // the call as a callback (`std::for_each(b, e, [](auto& s) { ... })`, `std::thread t(f)`) -- its parameters
+        // then get what the call's other arguments carry (the container behind the iterators)
+        // up.reset() / up.reset(other): the object up held is destroyed -- pointers borrowed from it now dangle
+        if (recv?.type === "identifier" && name === "reset" && ctx.borrows.has(recv.text)) releaseBorrows(recv.text, env);
+        // v.push_back(x) / v.clear() / ...: v may move its storage -- its iterators and data() pointers dangle
+        if (recv?.type === "identifier" && INVALIDATING_RE.test(name) && ctx.views.has(recv.text)) invalidateViews(recv.text, env);
+        // std::thread(run, x) / std::async(run, x) / std::async(std::launch::async, run, x): run is called with x
+        if (!recv && /^(?:std::)?(?:thread|jthread|async)$/.test(name)) {
+          const fi = args.findIndex(a => a.type === "identifier" && (ctx.byName.get(a.text) ?? []).some(f => !f.cls));
+          if (fi >= 0) seedCallbackFn(args[fi].text, args.slice(fi + 1).map(a => m(a, env)));
+        }
+        // a container a value is stored into holds it: v.push_back(x) / q.push(x) / s.insert(x) / m.emplace(k, x)
+        if (recv && /^(?:push_back|emplace_back|push_front|emplace_front|push|emplace|insert|insert_or_assign|try_emplace)$/.test(name)) {
+          const nm = rootName(recv);
+          const v = args.reduce((acc, a) => acc | m(a, env), 0);
+          if (nm && v) taintBuffer(nm, v, env);
+        }
+        // std::swap(a, b): each now holds the other's value
+        if (!recv && /^(?:std::)?swap$/.test(name.replace(/^::/, "")) && args.length === 2 && args.every(a => a.type === "identifier")) {
+          const [a, b] = [args[0].text, args[1].text];
+          const ma = env.get(a) ?? 0, mb = env.get(b) ?? 0;
+          setVar(a, mb, env, false); setVar(b, ma, env, false);
+        }
+        const lam = fnNode?.type === "lambda_expression" ? fnNode : fnNode?.type === "identifier" ? ctx.lambdas.get(fnNode.text) : undefined;
+        if (lam) walkLambda(lam, args.map(a => m(a, env)), env);
+        for (const [i, a] of args.entries()) {
+          const cb = a.type === "lambda_expression" ? a : a.type === "identifier" ? ctx.lambdas.get(a.text) : undefined;
+          if (!cb) continue;
+          const carried = args.reduce((acc, o, j) => (j === i ? acc : acc | m(o, env) | baseVarMask(o, env)), recv ? m(recv, env) : 0);
+          walkLambda(cb, [carried], env, true);
+        }
         const api = baseApi(name);
         // free releases; a local function that frees its parameter releases that argument; everything else that
         // takes the pointer uses it
-        const frees = !recv ? ctx.freesParam.get(ctx.fnAlias.get(name) ?? name) : undefined;
+        // (the one same-file function the call runs, by identity -- see resolveLocalFns)
+        const own = resolveLocalFns(e, ctx.fnAlias.get(name) ?? name, recv, ctx);
+        const ownId = own.length === 1 ? own[0].id : undefined;
+        const frees = ownId ? ctx.freesParam.get(ownId) : undefined;
         if (/^(?:free|cfree|kfree|g_free)$/.test(api) && args[0]) { const nm = rootName(args[0]); if (nm && args[0].type === "identifier") freeVar(nm, e, "free", env); }
         else for (const [i, a] of args.entries()) {
           const nm = a.type === "identifier" ? a.text : null;
@@ -976,7 +1114,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         checkCall(e, env);
         // a local function that fills an out-parameter (`badSource(data)` with `char *&data`, `fill(buf)`): the
         // caller's argument now holds what the function stored there
-        const fill = !recv ? ctx.fills.get(ctx.fnAlias.get(name) ?? name) : undefined;
+        const fill = ownId ? ctx.fills.get(ownId) : undefined;
         if (fill) for (const [i, sources] of fill) {
           const nm = rootName(args[i] ?? null);
           if (!nm) continue;
@@ -1019,7 +1157,15 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const l = field(e, "left");
         if (operatorOf(e) === ">>" && l && /(?:^|::)(?:cin|wcin)$|^(?:in|is|stream|file|ifs|input)$/.test(l.text.split(" >>")[0])) {
           const nm = rootName(field(e, "right")); if (nm) taintBuffer(nm, ALL, env);
+          return;
         }
+        // a string stream: `ss << x` puts x in it (the stream variable, or the left end of a `ss << a << b` chain);
+        // `ss >> y` reads what it holds into y
+        let head: SyntaxNode | null = l;
+        while (head?.type === "binary_expression" && /^(?:<<|>>)$/.test(operatorOf(head))) head = field(head, "left");
+        const stream = head?.type === "identifier" && /stringstream$/.test(declaredClassOf(head.text, e) ?? "") ? head.text : null;
+        if (stream && operatorOf(e) === "<<") { const v = m(field(e, "right"), env); if (v) taintBuffer(stream, v, env); }
+        if (stream && operatorOf(e) === ">>") { const nm = rootName(field(e, "right")); const v = groupMask(stream, env, ctx); if (nm && v) taintBuffer(nm, v, env); }
         return;
       }
       default:
@@ -1050,6 +1196,11 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
           const am = argNames.reduce((acc, a) => acc | groupMask(a!, env, ctx), 0);
           env.set(nm, am);
           if (/(?:^|::)(?:i|o)?fstream$/.test(typeText) && !opts.quiet) fireOn(ctx, "path-traversal", d, ps[0], groupMask(argNames[0]!, env, ctx), typeText);
+          // `boost::archive::text_iarchive ia(is);` (parsed the same way) over a stream holding request data
+          if (INPUT_ARCHIVE_RE.test(typeText.replace(/<.*$/, "")) && (am & ALL) && !opts.quiet) {
+            emit(ctx, "insecure-deserialization", d, argNames[0]!, typeText,
+              `'${argNames[0]}' holds request data and is read through ${typeText} — deserializing untrusted bytes can construct arbitrary registered types; parse a plain format (JSON with a schema) instead`);
+          }
         }
         continue;
       }
@@ -1063,18 +1214,83 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (arr && v) setLen(nm, strLenOfName(v));
       walkExpr(v, env);
       env.set(nm, m(v, env));
+      if (v?.type === "lambda_expression") ctx.lambdas.set(nm, v);
+      // `int *raw = up.get();` with up a unique_ptr: raw lives only as long as up holds its object
+      if (v?.type === "call_expression" && callInfo(v).name === "get" && callInfo(v).recv?.type === "identifier" && isUniquePtr(callInfo(v).recv!.text, d)) {
+        const owner = callInfo(v).recv!.text;
+        ctx.borrows.set(owner, new Set([...(ctx.borrows.get(owner) ?? []), nm]));
+      }
       // `char *&dataRef = data;`: a reference names that variable from now on, whatever it is later assigned
       if (v?.type === "identifier" && target && (target.type === "reference_declarator" || findAllNodes(target, "reference_declarator").length)) {
         ctx.refs.set(nm, ctx.refs.get(v.text) ?? v.text);
       }
       recordAlloc(nm, v, env);
       copyMemory(nm, v, env);
+      noteMemoryEffects(nm, v, d, env);
       const vn = v?.type === "identifier" ? v.text : null;
       if (vn && (ctx.capacity.has(vn) || ctx.aliases.has(vn) || /\*/.test(target?.text ?? ""))) alias(nm, vn);
+      if (v?.type === "argument_list") {
+        const cargs = named(v);
+        // `std::thread t([&] { ... })` / `std::thread t(run, x)`: the callable runs with the other arguments
+        for (const [i, a] of cargs.entries()) {
+          const cb = a.type === "lambda_expression" ? a : a.type === "identifier" ? ctx.lambdas.get(a.text) : undefined;
+          if (cb) walkLambda(cb, [cargs.reduce((acc, o, j) => (j === i ? acc : acc | m(o, env)), 0)], env, true);
+        }
+        if (/(?:^|::)j?thread$/.test(typeText) && cargs[0]?.type === "identifier") seedCallbackFn(cargs[0].text, cargs.slice(1).map(a => m(a, env)));
+        // `boost::archive::text_iarchive ia(is)` over a stream holding request data: reading objects from it runs
+        // the archive's type machinery on attacker-chosen bytes
+        if (INPUT_ARCHIVE_RE.test(typeText.replace(/<.*$/, "")) && cargs[0] && !opts.quiet) {
+          const sm = m(cargs[0], env);
+          if (sm & ALL) emit(ctx, "insecure-deserialization", d, cargs[0].text, typeText,
+            `'${cargs[0].text}' holds request data and is read through ${typeText} — deserializing untrusted bytes can construct arbitrary registered types; parse a plain format (JSON with a schema) instead`);
+        }
+      }
       // std::ifstream f(path) / std::fstream f(path, mode)
       if (v?.type === "argument_list" && /(?:^|::)(?:i|o)?fstream$/.test(typeText) && named(v)[0] && !opts.quiet) {
         fireOn(ctx, "path-traversal", d, named(v)[0], m(named(v)[0], env), typeText);
       }
+    }
+  };
+
+  /** Globals this walk assigned, and the merge of what each holds where the function leaves (each return, the end). */
+  const globalWrites = new Set<string>();
+  const flushGlobals = (env: Env) => {
+    for (const nm of globalWrites) {
+      const v = (env.get(nm) ?? 0) & ALL;
+      if (v) ctx.globalTaint.set(nm, (ctx.globalTaint.get(nm) ?? 0) | v);
+    }
+  };
+
+  /** `v.begin()` / `v.cbegin()` / `v.data()`: what the container they come from holds. */
+  const baseVarMask = (a: SyntaxNode, env: Env): number => {
+    const fn = a.type === "call_expression" ? field(a, "function") : null;
+    const base = fn?.type === "field_expression" ? rootName(field(fn, "argument")) : null;
+    return base ? groupMask(base, env, ctx) : 0;
+  };
+  /**
+   * Walk a lambda's body where it runs, in a copy of the environment there (captures by reference or by value both
+   * see the values the caller holds), its parameters bound to `paramMasks` by position -- or, for a callback, every
+   * parameter to `paramMasks[0]`. Not where it is merely written: a lambda that is never run reaches no sink.
+   */
+  const walkLambda = (lam: SyntaxNode, paramMasks: number[], env: Env, sameForAll = false) => {
+    ctx.lambdaStack ??= new Set();
+    if (ctx.lambdaStack.has(lam.id) || ctx.lambdaStack.size > 3) return;
+    ctx.lambdaStack.add(lam.id);
+    try {
+      const inner: Env = new Map(env);
+      // init captures: `[c = std::string(getenv("X"))]` / `[&r = buf]` bind c to that expression's value
+      for (const cap of named(named(lam).find(k => k.type === "lambda_capture_specifier") ?? null)) {
+        const l = field(cap, "left") ?? (cap.type === "lambda_capture_initializer" ? named(cap)[0] : null);
+        const r = field(cap, "right") ?? (cap.type === "lambda_capture_initializer" ? named(cap)[named(cap).length - 1] : null);
+        const nm = l ? rootName(l) ?? l.text.replace(/^&/, "") : null;
+        if (nm && r && l !== r) inner.set(nm, m(r, env));
+      }
+      const decl = field(lam, "declarator");
+      const params = named(decl ? field(decl, "parameters") : null).filter(p => /parameter_declaration/.test(p.type));
+      params.forEach((p, i) => { const nm = declaredName(field(p, "declarator")); if (nm) inner.set(nm, (sameForAll ? paramMasks[0] : paramMasks[i]) ?? 0); });
+      walk(field(lam, "body"), inner);
+    } finally {
+      ctx.lambdaStack.delete(lam.id);
     }
   };
 
@@ -1091,6 +1307,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         walkExpr(v, env);
         if (v?.type === "identifier") touchVar(v.text, v, env, false);
         opts.onReturn?.(v, env);
+        flushGlobals(env);
         return true;
       }
       case "throw_statement": for (const c of named(node)) walkExpr(c, env); return true;
@@ -1156,7 +1373,13 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     for (const n of nodes) if (walk(n, env)) return true;
     return false;
   };
-  return { walk, checkCall };
+  /** Walk a function body; the globals it assigned keep what they hold where it ends. */
+  const walkBody = (body: SyntaxNode | null, env: Env): boolean => {
+    const t = walk(body, env);
+    if (!t) flushGlobals(env);
+    return t;
+  };
+  return { walk: walkBody, checkCall };
 }
 
 // ── Functions, summaries and entry points ──────────────────────────────────────────────────────────────────
@@ -1171,11 +1394,80 @@ function collectFns(root: SyntaxNode): LocalFn[] {
         const name = declaredName(field(p, "declarator")) ?? "";
         return { name, index, out: name ? outKind(field(p, "declarator"), name, body) : undefined };
       });
+    const name = functionName(f) ?? "";
+    const cls = memberClassOf(f, d);
     return {
-      name: functionName(f) ?? "", decl: f, body: field(f, "body"), params,
+      name, decl: f, body: field(f, "body"), params, cls, id: cls ? `${cls}::${name}` : name,
       isStatic: named(f).some(c => c.type === "storage_class_specifier" && c.text === "static"),
     };
   }).filter(f => !!f.name);
+}
+
+/** `class P { std::string t(...) { ... } }` -> "P"; `std::string P::t(...) { ... }` -> "P"; a free function -> null. */
+function memberClassOf(fn: SyntaxNode, declarator: SyntaxNode | null): string | null {
+  const nm = declarator ? field(declarator, "declarator") : null;
+  if (nm?.type === "qualified_identifier") {
+    const scope = field(nm, "scope")?.text.replace(/<.*$/, "").split("::").pop();
+    if (scope && /^[A-Z_a-z]\w*$/.test(scope)) return scope;
+  }
+  for (let p = fn.parent; p; p = p.parent) {
+    if (p.type === "class_specifier" || p.type === "struct_specifier") return field(p, "name")?.text ?? null;
+    if (p.type === "function_definition") break;
+  }
+  return null;
+}
+
+/** The declared class of variable `name` where `site` is: a parameter or a local declared `T x` / `T* x` / `T& x`. */
+function declaredClassOf(name: string, site: SyntaxNode): string | null {
+  for (let cur: SyntaxNode | null = site; cur; cur = cur.parent) {
+    if (cur.type !== "function_definition" && cur.type !== "lambda_expression") continue;
+    for (const d of [...findAllNodes(cur, "parameter_declaration"), ...findAllNodes(cur, "declaration")]) {
+      const declarators = d.type === "parameter_declaration" ? [field(d, "declarator")] : named(d).filter(c => c !== field(d, "type"));
+      if (!declarators.some(x => x && declaredName(x.type === "init_declarator" ? field(x, "declarator") : x) === name)) continue;
+      const t = field(d, "type")?.text.replace(/^(?:const|struct|class)\s+/, "").replace(/<.*$/, "").split("::").pop();
+      if (t && /^[A-Za-z_]\w*$/.test(t)) return t;
+    }
+    if (cur.type === "function_definition") break;
+  }
+  return null;
+}
+
+/**
+ * The same-file function(s) a call runs, by identity: `T::f(...)` T's; `this->m()` / an implicit member call the
+ * enclosing class's; `x.m()` / `x->m()` the class x is declared as (a parameter or local); a free call the free
+ * function. A receiver of unknown class: only a member name defined once in the file (any of several overrides could
+ * run, so none is assumed). Two classes' same-named methods never stand in for each other.
+ */
+function resolveLocalFns(call: SyntaxNode, name: string, recv: SyntaxNode | null, ctx: EngineCtx): LocalFn[] {
+  const cands = ctx.byName.get(name) ?? [];
+  if (cands.length === 0) return [];
+  const ofClass = (c: string) => cands.filter(f => f.cls === c);
+  const fnNode = field(call, "function");
+  if (!recv && fnNode?.type === "qualified_identifier") {
+    const scope = field(fnNode, "scope")?.text.replace(/<.*$/, "").split("::").pop() ?? "";
+    const own = ofClass(scope);
+    return own.length ? own : cands.filter(f => !f.cls);
+  }
+  if (!recv) {
+    const free = cands.filter(f => !f.cls);
+    if (free.length) return free;
+    return ctx.current?.cls ? ofClass(ctx.current.cls) : [];
+  }
+  const r = recv.type === "pointer_expression" ? field(recv, "argument") : recv;
+  const cls = r?.type === "this" ? ctx.current?.cls ?? null : r?.type === "identifier" ? declaredClassOf(r.text, call) : null;
+  if (cls) return viaHierarchy(cls, cands, ctx);
+  const members = cands.filter(f => !!f.cls);
+  return members.length === 1 && definitionCount(ctx.root, name) === 1 ? members : [];
+}
+
+/**
+ * A member call on a `cls` object: cls's own method, else the nearest base class's (inherited) -- and every override
+ * in a class deriving from cls, since a `Base *` may point at any of them (virtual dispatch).
+ */
+function viaHierarchy(cls: string, cands: LocalFn[], ctx: EngineCtx): LocalFn[] {
+  const own = ancestorsOf(cls, ctx).map(c => cands.filter(f => f.cls === c)).find(fs => fs.length) ?? [];
+  const overrides = descendantsOf(cls, ctx).flatMap(c => cands.filter(f => f.cls === c));
+  return [...new Set([...own, ...overrides])];
 }
 
 /** A reference parameter, or a pointer one the body never re-points (`p = ...` would leave the caller's buffer). */
@@ -1238,7 +1530,62 @@ function collectGlobals(root: SyntaxNode): Set<string> {
   return out;
 }
 
-function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); ctx.refs = new Map(); }
+function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); ctx.refs = new Map(); ctx.lambdas = new Map(); ctx.borrows = new Map(); ctx.views = new Map(); }
+
+/** `class Bad : public Base, private Mixin { ... }` -> Bad: [Base, Mixin]. */
+function collectBases(root: SyntaxNode): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const c of [...findAllNodes(root, "class_specifier"), ...findAllNodes(root, "struct_specifier")]) {
+    const name = field(c, "name")?.text;
+    const clause = named(c).find(k => k.type === "base_class_clause");
+    if (!name || !clause) continue;
+    const bases = findAllNodes(clause, "type_identifier").map(t => t.text).concat(findAllNodes(clause, "qualified_identifier").map(q => q.text.split("::").pop()!));
+    if (bases.length) out.set(name, [...new Set(bases)]);
+  }
+  return out;
+}
+/** A class and every class above it (its bases, theirs, ...). */
+function ancestorsOf(cls: string, ctx: EngineCtx, seen = new Set<string>()): string[] {
+  if (seen.has(cls)) return [];
+  seen.add(cls);
+  return [cls, ...(ctx.bases.get(cls) ?? []).flatMap(b => ancestorsOf(b, ctx, seen))];
+}
+/** Every class of the file deriving (directly or not) from `cls`. */
+function descendantsOf(cls: string, ctx: EngineCtx): string[] {
+  return [...ctx.bases.keys()].filter(c => c !== cls && ancestorsOf(c, ctx).includes(cls));
+}
+
+/** The declaration (parameter or local) of `name` in the function `site` is in, or null. */
+function declarationOf(name: string, site: SyntaxNode): SyntaxNode | null {
+  for (let cur: SyntaxNode | null = site; cur; cur = cur.parent) {
+    if (cur.type !== "function_definition" && cur.type !== "lambda_expression") continue;
+    for (const d of [...findAllNodes(cur, "parameter_declaration"), ...findAllNodes(cur, "declaration")]) {
+      const ds = d.type === "parameter_declaration" ? [field(d, "declarator")] : named(d).filter(c => c !== field(d, "type"));
+      if (ds.some(x => x && declaredName(x.type === "init_declarator" ? field(x, "declarator") : x) === name)) return d;
+    }
+    return null;
+  }
+  return null;
+}
+/** Is `name` a std::unique_ptr where `site` is -- declared as one, or initialised from make_unique? */
+function isUniquePtr(name: string, site: SyntaxNode): boolean {
+  return /\bunique_ptr\b|\bmake_unique\b/.test(declarationOf(name, site)?.text ?? "");
+}
+/** Is `name` a container whose growth reallocates its storage (vector, string, deque)? */
+function isReallocatingContainer(name: string, site: SyntaxNode): boolean {
+  return /\b(?:vector|deque|basic_string|w?string|u16string|u32string)\b/.test(field(declarationOf(name, site), "type")?.text ?? "");
+}
+/** `(char *)realloc(p, n)` -> p (an identifier), else null. */
+function reallocSource(v: SyntaxNode | null): string | null {
+  let g = v;
+  while (g && (g.type === "cast_expression" || g.type === "parenthesized_expression")) g = g.type === "cast_expression" ? field(g, "value") : named(g)[0] ?? null;
+  if (g?.type !== "call_expression" || !/^(?:realloc|reallocarray|_recalloc)$/.test(baseApi(callInfo(g).name))) return null;
+  const p = callInfo(g).args[0];
+  return p?.type === "identifier" ? p.text : null;
+}
+const VIEW_METHODS_RE = /^(?:begin|end|cbegin|cend|rbegin|rend|data|c_str)$/;
+const INVALIDATING_RE = /^(?:push_back|emplace_back|push_front|emplace_front|insert|emplace|resize|reserve|clear|erase|shrink_to_fit|assign|append|pop_back|swap)$/;
+const INPUT_ARCHIVE_RE = /(?:^|::)(?:text|binary|xml|polymorphic_text|polymorphic_binary|polymorphic_xml)_iarchive$|(?:^|::)(?:Binary|PortableBinary|JSON|XML)InputArchive$/;
 
 /** What `fn` returns with parameter `seedIndex` tainted (null: none); `outs` collects what it leaves in each
  * out-parameter other than the seeded one, at every return and at the end of the body. */
@@ -1310,13 +1657,19 @@ function buildSummaries(ctx: EngineCtx) {
 function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
   MACROS = collectMacros(root);
+  // every function under its own identity (two classes' `process` are two summaries and two bodies)
   const fns = new Map<string, LocalFn>();
-  for (const f of collectFns(root)) if (!fns.has(f.name)) fns.set(f.name, f);
+  const byName = new Map<string, LocalFn[]>();
+  for (const f of collectFns(root)) {
+    if (fns.has(f.id)) continue;
+    fns.set(f.id, f);
+    byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
+  }
   const ctx: EngineCtx = {
-    filePath, content, lines: content.split("\n"), root, fns, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
+    filePath, content, lines: content.split("\n"), root, fns, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
     suppressed, findings: [], seen: new Set(), crossFileFacts, aliases: new Map(), capacity: new Map(), strLen: new Map(), fnAlias: new Map(), freesParam: collectFreesParam(fns), seededMem: new Map(),
     globalNames: collectGlobals(root), globalTaint: new Map(), speculative: false, current: null,
-    refs: new Map(), fills: new Map(),
+    refs: new Map(), fills: new Map(), lambdas: new Map(), borrows: new Map(), views: new Map(), bases: collectBases(root),
   };
   buildSummaries(ctx);
   return ctx;
@@ -1337,17 +1690,24 @@ const STRINGY_PARAM_RE = /\bchar\s*\*|\bwchar_t\s*\*|std::(?:w?string|string_vie
 
 function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintCppFinding[] {
   const called = new Set(findAllNodes(ctx.root, "call_expression").map(c => callInfo(c).name));
-  for (const [, f] of ctx.fns) {
-    if (!f.body) continue;
-    ctx.current = f;
-    freshWalkState(ctx);
-    const isEntry = withEntryPoints && !f.isStatic && !called.has(f.name) && !/^(?:main|wmain|_tmain|WinMain|wWinMain)$/.test(f.name)
-      && STRINGY_PARAM_RE.test(field(f.decl, "declarator")?.text ?? "");
-    ctx.speculative = isEntry;
-    createWalker(ctx, {}).walk(f.body, entryEnv(f, isEntry));
-    ctx.speculative = false;
+  const globalsSig = () => [...ctx.globalTaint].map(([k, v]) => `${k}=${v}`).sort().join(",");
+  // a global that only a seeded walk writes (`set(getenv("X"))` with `void set(std::string v) { g = v; }`) is read by
+  // functions walked before it: walk them again once the globals stop growing
+  for (let round = 0; round < 3; round++) {
+    const before = globalsSig();
+    for (const [, f] of ctx.fns) {
+      if (!f.body) continue;
+      ctx.current = f;
+      freshWalkState(ctx);
+      const isEntry = withEntryPoints && !f.isStatic && !called.has(f.name) && !/^(?:main|wmain|_tmain|WinMain|wWinMain)$/.test(f.name)
+        && STRINGY_PARAM_RE.test(field(f.decl, "declarator")?.text ?? "");
+      ctx.speculative = isEntry;
+      createWalker(ctx, {}).walk(f.body, entryEnv(f, isEntry));
+      ctx.speculative = false;
+    }
+    drainSeeded(ctx);
+    if (globalsSig() === before) break;
   }
-  drainSeeded(ctx);
   ctx.current = null;
   return ctx.findings;
 }

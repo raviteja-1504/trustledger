@@ -195,6 +195,11 @@ const VULN_PROFILES: Record<string, CVSSVector & { cwe?: string }> = {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
     C:0, I:0.22, A:0, cwe:"CWE-117",
   },
+  // A check that can be walked around: whatever it was guarding (a blocklist for markup, paths...) no longer holds.
+  "type-confusion": {
+    AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"UNCHANGED",
+    C:0.22, I:0.22, A:0, cwe:"CWE-1287",
+  },
   "nosql-injection": {
     AV:"NETWORK", AC:"LOW", PR:"NONE", UI:"NONE", S:"CHANGED",
     C:0.56, I:0.56, A:0, cwe:"CWE-943",
@@ -508,7 +513,7 @@ const INPUT_DRIVEN = new Set([
   "ssrf", "open-redirect", "header-injection", "log-injection", "ldap-injection", "xpath-injection", "graphql-injection",
   "ssti", "xxe", "unsafe-reflection", "file-inclusion", "insecure-deserialization", "prototype-pollution", "redos",
   "mass-assignment", "variable-overwrite", "trust-boundary", "format-string", "buffer-overflow", "integer-overflow",
-  "arithmetic-overflow", "input-validation", "insecure-file-upload", "resource-exhaustion",
+  "arithmetic-overflow", "input-validation", "type-confusion", "insecure-file-upload", "resource-exhaustion",
 ]);
 
 /** What the finding's own data-flow trace proves about how input reaches it. */

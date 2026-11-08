@@ -84,6 +84,7 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "ldap-injection":           { title: "LDAP Injection",                 description: "LDAP filter built from unescaped input.", cwe: "CWE-90" },
   "xpath-injection":          { title: "XPath Injection",                description: "XPath expression built from unvalidated input.", cwe: "CWE-643" },
   "header-injection":         { title: "HTTP Header Injection",          description: "Request-controlled value written into a response header without CR/LF stripping.", cwe: "CWE-113" },
+  "type-confusion":           { title: "HTTP Parameter Type Confusion",  description: "A query or body value is assumed to be a string, but the parser delivers an array or object for `?x[]=…` / `?x[k]=…`, so a substring blocklist or string method compares the wrong thing.", cwe: "CWE-1287" },
   "log-injection":            { title: "Log Injection",                  description: "Request-controlled value written to the log without CR/LF stripping, so a line break forges a separate log entry.", cwe: "CWE-117" },
   "unsafe-reflection":        { title: "Unsafe Reflection",              description: "Request input chooses which method, class or constant runs (send, const_get, constantize, Class.forName).", cwe: "CWE-470" },
   "variable-overwrite":       { title: "Variable Overwrite",             description: "Request data names the variables being set (PHP extract() / $$name) — any variable in scope, such as an authorisation flag, can be overwritten.", cwe: "CWE-621" },

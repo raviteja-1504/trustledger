@@ -62,6 +62,7 @@ const ID_TO_CLASS: Record<string, number> = {
   "idor": SinkClass.CONTROL,
   "bola-missing-ownership-check": SinkClass.CONTROL,
   "argument-injection": SinkClass.CONTROL,
+  "type-confusion": SinkClass.CONTROL,
 };
 
 /** Sink class for a finding id. Unknown ids (e.g. authorization findings,
@@ -523,6 +524,9 @@ export interface TraceResolver<N> {
   /** Interprocedural (optional, all three together): the function a scope node is -- its name, parameter names and
    * declaration line -- or null for a non-function scope. */
   scopeInfo?(scope: N): { name: string; params: string[]; line: number } | null;
+  /** The line parameter `name` of function scope `scope` is declared on (a parameter list over several lines).
+   * Optional: the function's own line stands in. */
+  paramLine?(scope: N, name: string): number | null;
   /** A function of this file by name: its body scope, parameters, declaration line and every `return` expression. */
   functionInfo?(name: string): { scope: N; params: string[]; line: number; returns: Array<{ text: string; position: number; line: number }> } | null;
   /** Every call of the named local function in this file: the scope it is in, where, and its source text. */
@@ -695,7 +699,11 @@ export function buildBackwardTraceGeneric<N>(
         }
         // a bare name that is a function of this file: a call written without parentheses (Ruby's `name = user_input`)
         if (inter && !p && !entered.has(curText) && resolver.functionInfo!(curText)) { curText = `${curText}()`; visited.delete(visitKey); continue; }
-        backward.push({ file: filePath, line: curLine, kind: "source", label: curText, snippet: curText });
+        // a parameter of the function it is in (a handler's `hostname: Query(...)`, an entry point's argument): the
+        // value enters where the parameter is declared, not where it is first used
+        const own = scope ? resolver.scopeInfo?.(scope) : null;
+        const declLine = own?.params.includes(curText) ? resolver.paramLine?.(scope!, curText) ?? own.line : undefined;
+        backward.push({ file: filePath, line: declLine ?? curLine, kind: "source", label: curText, snippet: curText });
         break;
       }
       const best = candidates.reduce((a, b) => (b.position > a.position ? b : a));

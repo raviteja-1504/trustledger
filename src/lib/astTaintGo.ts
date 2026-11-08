@@ -2725,6 +2725,8 @@ export function scanAstTaintGo(
 
     // `pkg.Func` / `pkg.Type.Method` summary key for a call into another package, if the callee resolves.
     const crossPackageKey = (fn: SyntaxNode): string | null => {
+      // a bare call of a function this file doesn't define: another file of the same package (directory)
+      if (fn.type === "identifier") return localFns.has(fn.text) ? null : samePackageKeyGo(filePath, fn.text);
       const field = fn.childForFieldName("field")?.text;
       const operand = fn.childForFieldName("operand");
       if (!field || !operand) return null;
@@ -2783,7 +2785,7 @@ export function scanAstTaintGo(
     const onCall = (node: SyntaxNode, env: Env, taintMask: TaintMaskFnGo) => {
       const fn = node.childForFieldName("function");
       const args = argListOfGo(node);
-      if (crossFileFacts && crossFileFacts.size > 0 && fn?.type === "selector_expression") checkCrossPackageCall(node, fn, args, env, taintMask);
+      if (crossFileFacts && crossFileFacts.size > 0 && (fn?.type === "selector_expression" || fn?.type === "identifier")) checkCrossPackageCall(node, fn, args, env, taintMask);
 
       // session.Set("role", role) / sessionManager.Put(ctx, "role", role): request data stored as trusted state
       if (fn?.type === "selector_expression" && /^(?:Set|Put)$/.test(fn.childForFieldName("field")?.text ?? "")
@@ -3285,14 +3287,22 @@ export function computeGoFuncSinkFacts(
   const out = new Map<string, ParamSinkFact[]>();
   try {
     const pkg = root.namedChildren.find(c => c?.type === "package_clause")?.namedChildren.find(c => c?.type === "package_identifier")?.text;
-    if (!pkg || pkg === "main") return out;
-    const decls: Array<{ decl: SyntaxNode; key: string; shapes: ParamShape[] }> = [];
+    if (!pkg) return out;
+    const decls: Array<{ decl: SyntaxNode; key: string; alsoKey?: string; shapes: ParamShape[] }> = [];
     for (const decl of root.namedChildren) {
       if (!decl || (decl.type !== "function_declaration" && decl.type !== "method_declaration")) continue;
       const name = decl.childForFieldName("name")?.text;
-      if (!name || !/^[A-Z]/.test(name) || !decl.childForFieldName("body")) continue;
+      if (!name || !decl.childForFieldName("body")) continue;
       const shapes = paramShapesOfGo(decl);
       if (shapes.length === 0) continue;
+      // a plain function is also called by bare name from the other files of its package (= its directory), exported
+      // or not, `main` included: `runHostnameDiagnostic(host)` in controller.go, defined in diagnostics.go
+      const samePkg = decl.type === "function_declaration" ? samePackageKeyGo(filePath, name) : undefined;
+      const exported = /^[A-Z]/.test(name) && pkg !== "main";
+      if (!exported) {
+        if (samePkg) decls.push({ decl, key: samePkg, shapes });
+        continue;
+      }
       let owner = pkg;
       if (decl.type === "method_declaration") {
         const recvType = decl.childForFieldName("receiver")?.namedChildren[0]?.childForFieldName("type")?.text ?? "";
@@ -3300,7 +3310,7 @@ export function computeGoFuncSinkFacts(
         if (!t) continue;
         owner = `${pkg}.${t}`;
       }
-      decls.push({ decl, key: `${owner}.${name}`, shapes });
+      decls.push({ decl, key: `${owner}.${name}`, alsoKey: samePkg, shapes });
     }
     if (decls.length === 0) return out;
     const seedRuns = decls.flatMap(d => [{ decl: d.decl, index: -1 }, ...d.shapes.map(s => ({ decl: d.decl, index: s.index }))]);
@@ -3331,14 +3341,23 @@ export function computeGoFuncSinkFacts(
         }
       }
       if (facts.length === 0) continue;
-      const list = out.get(d.key) ?? [];
-      mergeSinkFacts(list, facts);
-      out.set(d.key, list);
+      for (const key of [d.key, d.alsoKey]) {
+        if (!key) continue;
+        const list = out.get(key) ?? [];
+        mergeSinkFacts(list, facts);
+        out.set(key, list);
+      }
     }
   } catch (err) {
     console.error(`[astTaintGo] threw computing function sink facts for ${filePath}:`, err);
   }
   return out;
+}
+
+/** A function's same-package summary key: Go's package is its directory, so `@<dir>/<name>` (see crossPackageKey). */
+function samePackageKeyGo(filePath: string, name: string): string {
+  const dir = filePath.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+  return `@${dir}/${name}`;
 }
 
 export function astTaintGoSeverity(id: AstTaintGoId): "critical" | "high" | "medium" {

@@ -6862,6 +6862,13 @@ const FIX_MAP: Record<string, Omit<FixSuggestion, "vuln_id">> = {
     code_after:  "go func() { mu.Lock(); counts[key]++; mu.Unlock() }()",
     cwe: "CWE-362", effort: "low",
   },
+  "type-confusion": {
+    title: "Check the type of a request parameter before using it as a string",
+    description: "Express's query/body parsers return an array or object for `?x[]=…`; a `typeof x === \"string\"` check (or schema validation) first makes the blocklist or string method mean what it says.",
+    code_before: "if (BAD.some(b => name.includes(b))) return res.sendStatus(400);",
+    code_after:  "if (typeof name !== \"string\" || BAD.some(b => name.includes(b))) return res.sendStatus(400);",
+    cwe: "CWE-1287", effort: "low",
+  },
   "input-validation": {
     title: "Check an index against the bounds first",
     description: "Reject an attacker-chosen index outside 0 <= i < len(items) before using it.",
@@ -7516,7 +7523,8 @@ function buildExplainedSignals(fired: SignalResult[], totalScore: number): Expla
 const AST_TAINT_LINE_CAP = 5000;
 function shouldAstParse(content: string, filePath: string): boolean {
   const lang = detectLanguage(filePath);
-  if (lang !== "javascript" && lang !== "typescript") return false;
+  // a Vue single-file component: its <script> and template sinks (see astTaint.ts vueSfcToScript)
+  if (lang !== "javascript" && lang !== "typescript" && !/\.vue$/i.test(filePath)) return false;
   const lineCount = content.split("\n").length;
   if (lineCount > AST_TAINT_LINE_CAP) return false;
   const fileMeta = getFileTypeMeta(filePath);
@@ -9163,7 +9171,19 @@ export function runScan(input: ScanInput): ScanOutput {
     const root = parsePythonSourceSync(f.content, f.path);
     if (!root) continue;
     pySourceFiles.set(f.path, root);
-    const pyImports = collectImportEdgesPy(root).map(e => ({
+    const pyImports = collectImportEdgesPy(root).map(e0 => {
+      // `from pygmy.utilities import export` (absolute): `export` is a SUBMODULE when pygmy/utilities/export.py exists and
+      // pygmy/utilities is a bare package (no module file of its own that could define the name) -- the same shape as
+      // `from . import export`, which the collector already marks as a namespace import
+      if (!e0.namespace && e0.importedName !== "*") {
+        const sub = resolvePythonImportPath(f.path, e0.dots, `${e0.dotted}.${e0.importedName}`, allScanPaths);
+        const pkg = resolvePythonImportPath(f.path, e0.dots, e0.dotted, allScanPaths);
+        if (sub && (!pkg || /(?:^|[\\/])__init__\.py$/.test(pkg)) && !/(?:^|[\\/])__init__\.py$/.test(sub)) {
+          return { ...e0, importedName: "*", dotted: `${e0.dotted}.${e0.importedName}`, namespace: true };
+        }
+      }
+      return e0;
+    }).map(e => ({
       localName: e.localName, importedName: e.importedName,
       // Encodes dots+dotted into one specifier string purely so resolvePath below (a single
       // (from,spec)=>path callback shared with the JS/TS graph) can recover both -- never shown to
