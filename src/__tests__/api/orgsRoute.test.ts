@@ -22,26 +22,32 @@ const NOW = Date.now();
 const ago = (days: number) => new Date(NOW - days * 86_400_000).toISOString();
 const ahead = (days: number) => new Date(NOW + days * 86_400_000).toISOString();
 const orgRow = (id: string, name: string, over = {}) => ({ id, slug: id, name, github_org: null, plan: "growth", created_at: ago(100), ...over });
-const scan = (org_id: string, days: number, risk = "LOW", ai = 0.2) => ({ id: `${org_id}-${days}-${Math.random()}`, org_id, created_at: ago(days), overall_risk: risk, total_ai_percentage: ai });
-const vio = (org_id: string, status: string, risk: string, sla: string | null = null) => ({ id: Math.random().toString(), org_id, status, risk_score: risk, sla_deadline: sla });
+const scan = (org_id: string, days: number, repo: string, id: string, risk = "LOW", ai = 0.2) => ({ id, org_id, repo_full_name: repo, created_at: ago(days), overall_risk: risk, total_ai_percentage: ai });
+const vio = (org_id: string, scan_id: string, status: string, risk: string, sla: string | null = null) => ({ id: Math.random().toString(), org_id, scan_id, status, risk_score: risk, sla_deadline: sla });
 
 beforeEach(() => {
   role = "admin";
   db = fakeSupabase({
     organizations: [orgRow("org-a", "Acme"), orgRow("org-b", "Beta", { created_at: ago(5), plan: "starter" })],
     org_members: [{ org_id: "org-a", user_id: "u1", role: "admin" }, { org_id: "org-a", user_id: "u2", role: "developer" }, { org_id: "org-b", user_id: "u9", role: "admin" }],
-    repositories: [{ org_id: "org-a", is_active: true }, { org_id: "org-a", is_active: true }, { org_id: "org-a", is_active: false }, { org_id: "org-b", is_active: true }],
-    scans: [
-      scan("org-a", 1, "HIGH", 0.5), scan("org-a", 3), scan("org-a", 10),          // 3 in the last 30 days
-      scan("org-a", 40), scan("org-a", 45),                                        // 2 in the 30 before
-      scan("org-b", 2, "CRITICAL", 0.9),
+    repositories: [
+      { org_id: "org-a", repo_full_name: "a/api", is_active: true }, { org_id: "org-a", repo_full_name: "a/web", is_active: true },
+      { org_id: "org-a", repo_full_name: "a/off", is_active: false }, { org_id: "org-b", repo_full_name: "b/api", is_active: true },
     ],
+    scans: [
+      scan("org-a", 1, "a/api", "a-api-new", "HIGH", 0.5), scan("org-a", 3, "a/web", "a-web"), scan("org-a", 10, "a/api", "a-api-old"),   // 3 in the last 30 days
+      scan("org-a", 40, "a/api", "a-api-40"), scan("org-a", 45, "a/off", "a-off"),                                                       // 2 in the 30 before
+      scan("org-b", 2, "b/api", "b-1", "CRITICAL", 0.9),
+    ],
+    // Only violations on the LATEST scan of each ACTIVE repository are live: the rescan after a-api-old replaced them.
     violations: [
-      vio("org-a", "open", "CRITICAL", ago(2)),        // critical, overdue
-      vio("org-a", "in_review", "HIGH", ahead(3)),     // open, not overdue
-      vio("org-a", "open", "CRITICAL", ahead(1)),      // critical, not overdue
-      vio("org-a", "resolved", "CRITICAL", ago(9)),    // resolved: counts for nothing
-      vio("org-b", "open", "HIGH", null),
+      vio("org-a", "a-api-new", "open", "CRITICAL", ago(2)),        // critical, overdue
+      vio("org-a", "a-web", "in_review", "HIGH", ahead(3)),         // open, not overdue
+      vio("org-a", "a-api-new", "open", "CRITICAL", ahead(1)),      // critical, not overdue
+      vio("org-a", "a-api-new", "resolved", "CRITICAL", ago(9)),    // resolved: counts for nothing
+      vio("org-a", "a-api-old", "open", "CRITICAL", ago(5)),        // superseded by a newer scan: not live
+      vio("org-a", "a-off", "open", "HIGH", ago(1)),                // repository switched off: not live
+      vio("org-b", "b-1", "open", "HIGH", null),
     ],
   });
 });
@@ -64,6 +70,12 @@ describe("a regular user", () => {
       latest_risk: "HIGH", latest_ai_pct: 0.5,
     });
     expect(orgs[0].last_scan).toBe(ago(1));
+  });
+
+  it("counts only the latest scan of each active repository: not superseded scans, not switched-off repositories", async () => {
+    const { orgs } = await get();
+    expect(orgs[0].open_violations).toBe(3);        // two more open rows exist (on a-api-old and on the switched-off a-off)
+    expect(orgs[0].overdue).toBe(1);                // the superseded one is past its deadline too
   });
 
   it("a resolved violation is not counted as open, critical or overdue", async () => {
