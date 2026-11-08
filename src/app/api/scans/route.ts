@@ -22,7 +22,9 @@ export async function GET(req: NextRequest) {
   const repo  = params.get("repo") ?? undefined;
   const limit = Math.min(parseInt(params.get("limit") ?? "100") || 100, 200);
   // Paging and period (optional): ?before=<ISO created_at of the last row you have> for the next page, ?since=<ISO>.
-  const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/;
+  // Accepts both spellings of the same instant: "...Z" and "...+00:00", which is how the database returns created_at
+  // (and so what next_before hands back). Only "Z" used to pass, so every cursor taken from a row was refused.
+  const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/;
   const before = params.get("before");
   const since  = params.get("since");
   if ((before && !ISO.test(before)) || (since && !ISO.test(since))) {

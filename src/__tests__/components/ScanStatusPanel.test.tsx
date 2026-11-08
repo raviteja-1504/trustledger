@@ -12,6 +12,17 @@ const health = (files: string[]): ScanHealth => ({
 jest.setTimeout(30000);
 const base = { scanId: "s1", canTriage: true, onChanged: () => {} };
 
+import { sinceParam } from "@/components/ScanStatusPanel";
+
+describe("sinceParam", () => {
+  it("is plain UTC ISO", () => {
+    expect(sinceParam("2026-06-01T10:00:00.123456+00:00")).toBe("2026-06-01T10:00:00.123Z");
+    expect(sinceParam("2026-06-01T12:00:00+02:00")).toBe("2026-06-01T10:00:00.000Z");
+    expect(sinceParam("2026-06-01T10:00:00Z")).toBe("2026-06-01T10:00:00.000Z");
+    expect(sinceParam("garbage")).toBe("garbage");
+  });
+});
+
 describe("ScanStatusPanel", () => {
   it("clicking 'Incomplete scan' opens the one affected file directly", () => {
     const onOpenFile = jest.fn();
@@ -46,6 +57,18 @@ describe("ScanStatusPanel", () => {
       expect(await screen.findByText(/This page stays as it is/)).toBeInTheDocument();
       expect(screen.getByText(/aaaaaaa/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Rescanning…" })).toBeDisabled();
+    });
+
+    it("looks for the new scan with a plain UTC time even when the scan time came as +00:00 with microseconds (the database's spelling)", async () => {
+      authedFetch.mockImplementation((url: string) => url.includes("/rescan")
+        ? Promise.resolve({ head_sha: "aaaaaaa1111" })
+        : Promise.resolve({ scans: [{ scan_id: "new1", pr_number: 7, commit_sha: "aaaaaaa1111", created_at: "2026-06-01T10:02:00.5+00:00" }] }));
+      render(<ScanStatusPanel {...rescanProps} scanCreatedAt="2026-06-01T10:00:00.123456+00:00" />);
+      fireEvent.click(screen.getByRole("button", { name: "Rescan" }));
+      expect(await screen.findByRole("link", { name: /open the new results/i })).toHaveAttribute("href", "/pr/new1");
+      const poll = authedFetch.mock.calls.map(c => String(c[0])).find(u => u.startsWith("/api/scans?"))!;
+      expect(decodeURIComponent(poll)).toContain("since=2026-06-01T10:00:00.123Z");
+      expect(poll).not.toContain("%2B");
     });
 
     it("when the new scan appears it links to it, and says a same-commit rescan has no new code", async () => {

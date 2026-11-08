@@ -45,6 +45,11 @@ interface Props {
 
 const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 const MAX_POLLS = 45;
+/** The scan time as plain UTC ISO ("...Z"), whichever spelling the database gave ("...+00:00" with microseconds). */
+export function sinceParam(createdAt: string): string {
+  const t = Date.parse(createdAt);
+  return Number.isNaN(t) ? createdAt : new Date(t).toISOString();
+}
 
 type RescanState =
   | { phase: "idle" }
@@ -90,7 +95,7 @@ export default function ScanStatusPanel({
       polls++;
       try {
         const r = await authedFetch<{ scans: Array<{ scan_id: string; pr_number: number; commit_sha?: string; created_at: string }> }>(
-          `/api/scans?repo=${encodeURIComponent(repo)}&since=${encodeURIComponent(scanCreatedAt)}&limit=20`);
+          `/api/scans?repo=${encodeURIComponent(repo)}&since=${encodeURIComponent(sinceParam(scanCreatedAt))}&limit=20`);
         const newer = (r.scans ?? [])
           .filter(x => x.pr_number === prNumber && x.scan_id !== scanId && Date.parse(x.created_at) > Date.parse(scanCreatedAt))
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
