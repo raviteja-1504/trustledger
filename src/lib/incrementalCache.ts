@@ -73,7 +73,10 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     nested classes); Kotlin package-qualified constructors and constant-helper SQL proof; field writes in traces;
 //     exploitability from each finding's own trace (reachability "unknown", local attack vector, auth from code as
 //     Privileges Required, a reason per score) and entry points for HandleFunc / Kotlin / Rust / Rails / C main.
-export const SCAN_CACHE_VERSION = 22;
+// 23: AI attribution: backdoor / hallucinated-API / style-drift findings no longer feed the AI score, the explanation
+//     credits only signals that fed it, and files under 50 characters are scanned for security problems (AI signals
+//     skipped) instead of returning empty. Cached files from 22 carry the old scores and would hide those findings.
+export const SCAN_CACHE_VERSION = 23;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

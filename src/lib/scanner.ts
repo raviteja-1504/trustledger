@@ -285,6 +285,9 @@ export interface FileAnalysis {
   language:           string;
   ai_percentage:      number;
   risk_score:         RiskLevel;
+  /** The risk from security findings alone: no AI score in it. `risk_score` also rises for code that looks AI-written
+   *  (the governance gate: AI-heavy files need a human sign-off), so it is not a statement about vulnerabilities. Absent on results rebuilt from stored rows, which keep no findings. */
+  security_risk?:     RiskLevel;
   risk_indicators:    string[];
   indicators:         ScanIndicator[];
   content_hash:       string;
@@ -6459,22 +6462,46 @@ function computeCrossFileTaintIndicators(
   }
   if (taintByFile.size === 0) return out;
 
-  const seen = new Set<string>(); // dedupe per (consumer file, source file)
+  // Where each exported symbol of a file starts, so a taint path can be tied to the symbol the importer actually uses:
+  // a path belongs to a symbol when its sink lies between that symbol's start and the next symbol's start.
+  const symbolStarts = new Map<string, Array<{ name: string; line: number }>>();
+  for (const ref of graph.symbolTable.values()) {
+    const list = symbolStarts.get(ref.sourceFile) ?? [];
+    list.push({ name: ref.name, line: ref.line });
+    symbolStarts.set(ref.sourceFile, list);
+  }
+  for (const list of symbolStarts.values()) list.sort((x, y) => x.line - y.line);
+  const pathsInSymbol = (file: string, symbol: string, paths: TaintPath[]): TaintPath[] => {
+    const list = symbolStarts.get(file) ?? [];
+    const i = list.findIndex(x => x.name === symbol);
+    if (i < 0) return [];
+    const from = list[i].line, to = i + 1 < list.length ? list[i + 1].line : Infinity;
+    return paths.filter(t => t.sinkLine >= from && t.sinkLine < to);
+  };
+
+  const seen = new Set<string>(); // dedupe per (consumer file, source file, linked or not)
   for (const call of graph.crossFileCalls) {
     const taints = taintByFile.get(call.calleeFile);
     if (!taints || taints.length === 0) continue;
-    const best = taints.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+    // Tie the warning to the symbol the importer uses. A module can hold a vulnerable function AND safe ones: importing
+    // a safe one says nothing about the vulnerable one, so that case is only a low-severity note, not "confirmed".
+    const linked = pathsInSymbol(call.calleeFile, call.symbolName, taints).filter(t => t.confidence >= 0.5);
+    const strongest = (ts: TaintPath[]) => ts.reduce((x, y) => (y.confidence > x.confidence ? y : x));
+    const isLinked = linked.length > 0;
+    const best = isLinked ? strongest(linked) : strongest(taints);
     if (best.confidence < 0.5) continue;
-    const key = `${call.callerFile}::${call.calleeFile}`;
+    const key = `${call.callerFile}::${call.calleeFile}::${isLinked ? call.symbolName : "*"}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const list = out.get(call.callerFile) ?? [];
     list.push({
       id:       "cross-file-taint-exposure",
       label:    "Cross-File Taint Exposure",
-      severity: "medium",
+      severity: isLinked ? "medium" : "low",
       line:     call.importLine,
-      detail:   `Imports "${call.symbolName}" from ${call.calleeFile}, which has an unresolved ${best.sink} taint path (line ${best.sinkLine}) — verify sanitization across this module boundary`,
+      detail:   isLinked
+        ? `Imports "${call.symbolName}" from ${call.calleeFile}, whose code has an unresolved ${best.sink} taint path (line ${best.sinkLine}) — verify sanitization across this module boundary`
+        : `Imports "${call.symbolName}" from ${call.calleeFile}, which has an unresolved ${best.sink} taint path elsewhere in the module (line ${best.sinkLine}); ${call.symbolName} is not shown to be involved — a note, not a finding about this import`,
     });
     out.set(call.callerFile, list);
   }
@@ -7490,26 +7517,36 @@ export function detectAIToolingArtifacts(
   return out;
 }
 
-// ── TrustLedger signature chain ───────────────────────────────────────────────
+// ── TrustLedger scan integrity chain ──────────────────────────────────────────
+//
+// A hash chain over a scan's files: it commits to exactly which file contents the scan covered, so a copy of the scan
+// result can be compared with the original. It is an INTEGRITY COMMITMENT, not a signature: it uses no secret, so anyone
+// able to rewrite a stored scan can recompute it, and it does not prove who ran the scan. Authenticated evidence is the
+// Ed25519-signed Trust Record / audit export (exportSigning.ts), which a verifier checks against the published public
+// key. The attestation and audit-log hashes (buildAttestationHash, buildAuditHash) are persisted in that form and
+// verified as-is, so their format is deliberately unchanged here.
 
 export interface TrustChain {
   genesis_hash:  string;
-  file_hashes:   Array<{ path: string; hash: string }>;
-  chain_hash:    string;  // rolling SHA-256 over all file hashes in order
-  scan_seal:     string;  // final hash: chain_hash + scan_id + timestamp
+  file_hashes:   Array<{ path: string; hash: string }>;  // in canonical (path) order
+  chain_hash:    string;  // rolling SHA-256 over the file hashes, in canonical order: the same files give the same value
+  scan_seal:     string;  // final hash: chain_hash + scan_id + timestamp (the timestamp makes this one differ per run)
   timestamp:     string;
 }
 
 export function buildTrustChain(files: FileAnalysis[], scan_id: string): TrustChain {
   const timestamp = new Date().toISOString();
   const genesis_hash = crypto.createHash("sha256").update("TrustLedger::GENESIS").digest("hex");
+  // Canonical order, so the chain does not depend on the order files happened to be analysed in; and each step hashes a
+  // JSON array, so a path or hash containing the old "::" separator cannot be moved between fields to collide.
+  const ordered = [...files].sort((x, y) => (x.file_path < y.file_path ? -1 : x.file_path > y.file_path ? 1 : 0));
   let chain = genesis_hash;
-  const file_hashes = files.map(f => {
-    chain = crypto.createHash("sha256").update(`${chain}::${f.file_path}::${f.content_hash}`).digest("hex");
+  const file_hashes = ordered.map(f => {
+    chain = crypto.createHash("sha256").update(JSON.stringify([chain, f.file_path, f.content_hash])).digest("hex");
     return { path: f.file_path, hash: f.content_hash };
   });
   const chain_hash = chain;
-  const scan_seal  = crypto.createHash("sha256").update(`${chain_hash}::${scan_id}::${timestamp}`).digest("hex");
+  const scan_seal  = crypto.createHash("sha256").update(JSON.stringify([chain_hash, scan_id, timestamp])).digest("hex");
   return { genesis_hash, file_hashes, chain_hash, scan_seal, timestamp };
 }
 
@@ -7591,6 +7628,7 @@ function findAstTaintPythonFindings(
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
   }));
 }
+
 
 /**
  * `Class.method` keys of Java methods some OTHER file of the batch calls: `(new C()).m(`, `v = new C(); v.m(`,
@@ -7831,7 +7869,7 @@ export function analyzeFile(
 
   const emptyResult = (): FileAnalysis => ({
     file_path, language: lang,
-    ai_percentage: 0, risk_score: "LOW",
+    ai_percentage: 0, risk_score: "LOW", security_risk: "LOW",
     risk_indicators: [], indicators: [],
     content_hash: crypto.createHash("sha256").update(content ?? "").digest("hex"),
     line_count: 0, scan_quality: 0,
@@ -7843,7 +7881,11 @@ export function analyzeFile(
     ast_metrics: null, ast_risks: [], ssa_taint_paths: [], ml_score: null,
   });
 
-  if (!content || content.trim().length < 50) return emptyResult();
+  if (!content || content.trim().length === 0) return emptyResult();
+  // A file under 50 characters has too little text for the AI-style signals to mean anything, so those are skipped.
+  // The security checks always run: it used to return an empty result here, so a one-line `eval(req.query.x)` or a file
+  // holding only a leaked key was reported clean, as if it had been scanned.
+  const skipAI = fileMeta.skipAI || content.trim().length < 50;
 
   const lines     = content.split("\n");
   const lineCount = lines.length;
@@ -8168,7 +8210,7 @@ export function analyzeFile(
   // dampen the structural ai_percentage score below).
   const attribution = attributeCode(content, lang);
 
-  if (!fileMeta.skipAI) {
+  if (!skipAI) {
     // Compute style drift (recursive call to computeAIPercentage — safe because drift score is 0 inside)
     const driftScore = sigStyleDrift(content, lang, lineCount);
 
@@ -8246,7 +8288,7 @@ export function analyzeFile(
   // falls inside, per-indicator -- see scoreExploitability's own docblock
   // for why a single containingFunction string could never have been
   // correct even with a real (non-"unknown") value plugged in.
-  const callGraph   = !fileMeta.skipAI ? buildCallGraph(content) : null;
+  const callGraph   = !skipAI ? buildCallGraph(content) : null;
   // Cross-file reachability bridge (Decision 1): union in names this file
   // exports that runScan() already determined are called from a reachable
   // function in another JS/TS file -- see this function's own
@@ -8355,7 +8397,7 @@ export function analyzeFile(
   }
 
   // ML classifier — independent probability estimate
-  const ml_score = !fileMeta.skipAI
+  const ml_score = !skipAI
     ? classifyCode(content, ast_metrics, ai_percentage)
     : null;
 
@@ -8371,6 +8413,7 @@ export function analyzeFile(
 
   return {
     file_path, language: lang, ai_percentage, risk_score, risk_indicators, indicators,
+    security_risk: calculateRisk(indicators.filter(i => !AI_SIGNAL_IDS.has(i.id) && i.id !== "ai-model-attribution"), 0),
     content_hash: hash, line_count: lineCount, attribution, scan_quality,
     fix_suggestions, watermarks, supply_chain, behavioral_risk, provenance,
     line_attribution, explained_signals, exploitability, compliance,
@@ -8418,7 +8461,10 @@ export interface ScanSummary {
   medium_count:             number;
   low_count:                number;
   top_vuln_types:           string[];  // top 3 most frequent security vuln IDs
-  ai_high_confidence_files: number;   // files with scan_quality >= 0.70
+  // Files where at least 70% of the 8 reference AI signals applied (scan_quality >= 0.70). This counts how many signals
+  // COULD say something about the file; it is NOT a confidence in the AI score and not a coverage figure. How far to rely
+  // on the percentage is ai_evidence.confidence; how much code was analysed is ai_attribution.analysis_coverage.
+  ai_high_confidence_files: number;
   requires_immediate_action: boolean; // any critical or high findings
 }
 
@@ -8690,6 +8736,8 @@ export interface ScanOutput {
   pr_number:            number;
   commit_sha:           string;
   overall_risk:         RiskLevel;
+  // The worst risk from security findings alone (no AI score in it); overall_risk also reflects the AI-governance gate.
+  security_risk?:       RiskLevel;
   total_ai_percentage:  number;
   cross_file_ai_boost:  boolean;
   mixed_authorship:     boolean;
@@ -9867,6 +9915,7 @@ export function runScan(input: ScanInput): ScanOutput {
     pr_number:            input.pr_number,
     commit_sha:           input.commit_sha,
     overall_risk:         overallRisk,
+    security_risk:        files.reduce<RiskLevel>((max, f) => (f.security_risk && riskOrder[f.security_risk] > riskOrder[max] ? f.security_risk : max), "LOW"),
     // Use multi-signal combined score as the primary AI likelihood metric.
     // Guarded against NaN: any NaN in sub-calculations falls back to code-only.
     total_ai_percentage,
