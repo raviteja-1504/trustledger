@@ -156,13 +156,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
       expect(findings.some(f => f.id === "path-traversal")).toBe(true);
     });
 
-    it("flags filepath.Join with a tainted segment", () => {
+    it("does not flag filepath.Join with a tainted segment on its own: it builds a path, it reads nothing", () => {
       const content = wrap(`
 	name := r.URL.Query().Get("file")
 	filepath.Join("/uploads", name)
 `);
-      const findings = scanAstTaintGo(content, "x.go");
-      expect(findings.some(f => f.id === "path-traversal")).toBe(true);
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "path-traversal")).toBe(false);
+    });
+
+    it("flags a filepath.Join result when it reaches a file operation", () => {
+      const content = wrap(`
+	name := r.URL.Query().Get("file")
+	os.ReadFile(filepath.Join("/uploads", name))
+`);
+      expect(scanAstTaintGo(content, "x.go").some(f => f.id === "path-traversal")).toBe(true);
     });
 
     it("does not flag fixed path segments", () => {

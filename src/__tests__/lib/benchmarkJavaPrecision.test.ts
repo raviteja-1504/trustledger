@@ -14,7 +14,7 @@ public class T extends HttpServlet {
     public void doPost(HttpServletRequest request, HttpServletResponse response) throws Exception {
         String param = request.getParameter("p");
 ${body}
-        java.io.File f = new java.io.File(bar);
+        boolean f = new java.io.File(bar).exists();
     }
 }
 `;

@@ -87,7 +87,8 @@ describe("new sinks", () => {
     ["ReDoS static", get(`return Ok(System.Text.RegularExpressions.Regex.IsMatch("abc", q));`), "redos"],
     ["ReDoS ctor", get(`return Ok(new System.Text.RegularExpressions.Regex(q).IsMatch("abc"));`), "redos"],
     ["assembly load", get(`return Ok(System.Reflection.Assembly.Load(q).GetTypes().Length);`), "eval-exec"],
-    ["Type.GetType", get(`return Ok(Type.GetType(q));`), "eval-exec"],
+    // (Type.GetType alone only looks a type up; instantiating what it names is the code execution)
+    ["Type.GetType then CreateInstance", get(`return Ok(Activator.CreateInstance(Type.GetType(q)));`), "eval-exec"],
     ["script eval", get(`return Ok(Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.EvaluateAsync(q));`), "eval-exec"],
     ["reflection setter", get(`var o = new object(); typeof(C).GetProperty(q).SetValue(o, "x"); return Ok(o);`), "mass-assignment"],
     ["Mongo raw filter", get(`return Ok(coll.Find(q));`), "nosql-injection"],

@@ -41,6 +41,7 @@
  * insecure file upload (MultipartFile), TOCTOU.
  */
 
+import { recordEngineFailure } from "./taint/engineFailures";
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
@@ -316,6 +317,13 @@ function argsForShape<A>(args: readonly A[], shape: ParamShape): A[] {
 
 interface LocalMethod {
   name: string;
+  /**
+   * Canonical identity: `package.Class.name(ParamType,...)`. The local-methods map is keyed by this, so overloads and
+   * same-named methods of different classes are separate entries; `name` stays the secondary (conservative) index.
+   */
+  key: string;
+  /** Innermost enclosing type's simple name (undefined for a method extracted without class context). */
+  cls?: string;
   paramShapes: ParamShape[];
   springParamNames: Set<string>;
   // BOLA-specific, additive -- neither touches springParamNames' existing
@@ -403,7 +411,7 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
   const body = firstNode(methodDecl, "methodBody") ?? null;
   const authMeta = extractMethodAuthMeta(methodDecl, resourceIdParamNames);
   const isPrivate = allNodes(methodDecl, "methodModifier").some(m => tokenKids(m, "Private").length > 0);
-  return { name: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, isPrivate, body };
+  return { name: nameTok.image, key: nameTok.image, paramShapes, springParamNames, resourceIdParamNames, principalParamNames, authMeta, isPrivate, body };
 }
 
 /**
@@ -418,11 +426,86 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
  */
 function collectLocalMethods(root: CstNode): Map<string, LocalMethod> {
   const methods = new Map<string, LocalMethod>();
+  const pkg = packageNameOf(root);
+  const classes = typeRangesOf(root);
   for (const methodDecl of findAllNodes(root, "methodDeclaration")) {
     const info = extractMethodInfo(methodDecl);
-    if (info) methods.set(info.name, info);
+    if (!info) continue;
+    info.cls = innermostTypeAt(classes, startOf(methodDecl));
+    info.key = `${pkg ? pkg + "." : ""}${info.cls ?? ""}.${info.name}(${info.paramShapes.map(s => s.type.replace(/\s+/g, "")).join(",")})`;
+    methods.set(info.key, info);
   }
   return methods;
+}
+
+/** `package a.b.c;` of the file, or "". */
+function packageNameOf(root: CstNode): string {
+  const decl = findAllNodes(root, "packageDeclaration")[0];
+  return decl ? collectAllTokens(decl).filter(t => t.tokenType?.name === "Identifier").map(t => t.image).join(".") : "";
+}
+
+interface TypeRange { name: string; start: number; end: number }
+const typeRangesCache = new WeakMap<CstNode, TypeRange[]>();
+/** Every class / interface / enum / record of the file with its source range (the CST has no parent links). */
+function typeRangesOf(root: CstNode): TypeRange[] {
+  let out = typeRangesCache.get(root);
+  if (out) return out;
+  out = [];
+  for (const kind of ["normalClassDeclaration", "normalInterfaceDeclaration", "enumDeclaration", "recordDeclaration"]) {
+    for (const c of findAllNodes(root, kind)) {
+      const id = firstNode(c, "typeIdentifier");
+      const name = id ? firstTok(id, "Identifier")?.image : undefined;
+      if (name) out.push({ name, start: startOf(c), end: endOf(c) });
+    }
+  }
+  typeRangesCache.set(root, out);
+  return out;
+}
+const typeSupersCache = new WeakMap<CstNode, Map<string, string[]>>();
+/** class / interface simple name -> the simple names it directly extends or implements. */
+function typeSupersOf(root: CstNode): Map<string, string[]> {
+  let out = typeSupersCache.get(root);
+  if (out) return out;
+  out = new Map();
+  for (const kind of ["normalClassDeclaration", "normalInterfaceDeclaration"]) {
+    for (const c of findAllNodes(root, kind)) {
+      const id = firstNode(c, "typeIdentifier");
+      const name = id ? firstTok(id, "Identifier")?.image : undefined;
+      if (!name) continue;
+      const supers: string[] = [];
+      for (const key of ["classExtends", "classImplements", "interfaceExtends"]) {
+        const n = firstNode(c, key);
+        for (const ct of n ? findAllNodes(n, "classType") : []) { const t = tokenKids(ct, "Identifier").pop()?.image; if (t) supers.push(t); }
+        for (const ct of n ? findAllNodes(n, "interfaceType") : []) { const t = findAllNodes(ct, "classType")[0]; const id2 = t ? tokenKids(t, "Identifier").pop()?.image : undefined; if (id2) supers.push(id2); }
+      }
+      out.set(name, supers);
+    }
+  }
+  typeSupersCache.set(root, out);
+  return out;
+}
+/** Is `cls` the type `owner`, or (transitively, bounded) a subtype of it? */
+function isSubtypeOf(root: CstNode, cls: string | undefined, owner: string): boolean {
+  if (!cls) return false;
+  if (cls === owner) return true;
+  const supers = typeSupersOf(root);
+  const seen = new Set<string>([cls]);
+  let frontier = [cls];
+  for (let depth = 0; depth < 8 && frontier.length; depth++) {
+    const next: string[] = [];
+    for (const c of frontier) for (const sup of supers.get(c) ?? []) {
+      if (sup === owner) return true;
+      if (!seen.has(sup)) { seen.add(sup); next.push(sup); }
+    }
+    frontier = next;
+  }
+  return false;
+}
+
+function innermostTypeAt(ranges: readonly TypeRange[], at: number): string | undefined {
+  let best: TypeRange | undefined;
+  for (const r of ranges) if (r.start <= at && at <= r.end && (!best || r.start >= best.start)) best = r;
+  return best?.name;
 }
 
 // ── Enclosing-method lookup (shared with reachability.ts's resolver) ──────
@@ -459,7 +542,8 @@ function collectAllTokens(node: CstNode, acc: IToken[] = []): IToken[] {
 export function findEnclosingFunctionNameJava(cst: CstNode, row: number): string {
   const targetLine = row + 1;
   const methods = collectLocalMethods(cst);
-  for (const [name, method] of methods) {
+  for (const method of methods.values()) {
+    const name = method.name;
     if (!method.body) continue;
     const tokens = collectAllTokens(method.body);
     if (tokens.length === 0) continue;
@@ -517,7 +601,12 @@ interface EngineCtx {
   filePath: string;
   content: string;
   lines: string[];
+  /** Keyed by canonical identity (LocalMethod.key). */
   localMethods: Map<string, LocalMethod>;
+  /** Secondary index by simple name: the conservative fallback when a call cannot be tied to one method. */
+  methodsByName: Map<string, LocalMethod[]>;
+  /** Simple name of the class whose method is being walked. */
+  currentClass?: string;
   // Which of a local method's parameter INDICES have taint that reaches its
   // return value -- see computeReturnTaintPropagatingJava.
   propagatingParams: PropagatingJava;
@@ -623,7 +712,8 @@ function javaTraceResolver(ctx: EngineCtx): TraceResolver<CstNode> {
     position: startOf, line: lineOf, text: tokensText,
     scopeInfo: scope => { const m = methodOfBody(scope); return m ? { name: m.name, params: params(m), line: lineOf(m.body!) } : null; },
     functionInfo: name => {
-      const m = ctx.localMethods.get(name);
+      const named = ctx.methodsByName.get(name);
+      const m = named?.length === 1 ? named[0] : undefined;
       if (!m?.body) return null;
       const returns = findAllNodes(m.body, "returnStatement")
         .filter(r => !findAllNodes(m.body!, "lambdaExpression").some(l => startOf(l) <= startOf(r) && startOf(r) <= endOf(l)))
@@ -679,6 +769,21 @@ const ARG_CARRYING_TAILS = propagatorNames("java", "call-args");
 // Calls that store their arguments in the receiver container.
 const MUTATOR_TAILS = new Set(["put", "add", "addAll", "putAll", "push", "offer", "addFirst", "addLast", "putIfAbsent", "set", "insert"]);
 // Functional-interface invocations and the fluent methods that hand a value to a callback.
+/** Calls whose callback is run once per element of the receiver (stream / collection / optional plumbing). */
+const ELEMENT_CALLBACK_TAILS = new Set(["forEach", "forEachOrdered", "peek", "filter", "anyMatch", "allMatch", "noneMatch", "ifPresentOrElse", "removeIf", "computeIfAbsent", "replaceAll"]);
+
+let lambdaWalkDepth = 0;
+/** Walk a lambda's body for sinks with its parameters bound to the given taint (bounded: lambdas inside lambdas stop at depth 3). */
+function walkLambdaForSinks(lambda: CstNode, argMasks: readonly number[], env: Env, ctx: EngineCtx): void {
+  if (lambdaWalkDepth >= 3) return;
+  const body = firstNode(lambda, "lambdaBody");
+  if (!body) return;
+  const lenv = cloneEnv(env);
+  lambdaParamNames(lambda).forEach((p, i) => lenv.set(p, argMasks[i] ?? 0));
+  lambdaWalkDepth++;
+  try { walkForDeclarationsAndSinks(body, lenv, ctx); } finally { lambdaWalkDepth--; }
+}
+
 const FUNCTIONAL_TAILS = new Set(["apply", "accept", "test", "call", "applyAsInt", "applyAsLong", "applyAsDouble", "applyAsBoolean"]);
 const CALLBACK_TAILS = new Set(["thenApply", "thenApplyAsync", "thenCompose", "thenComposeAsync", "thenAccept", "map", "flatMap", "supplyAsync", "orElseGet", "ifPresent"]);
 const HTTP_HEADER_NAME_RE = /^(?:X-[\w-]+|Content-[\w-]+|Location|Set-Cookie|Refresh|Link|Cache-Control|Access-Control-[\w-]+|Authorization|Cookie|Retry-After|WWW-Authenticate|Referer|Origin|Host)$/i;
@@ -1062,6 +1167,10 @@ function walkPrimaryChain(
         chainTaint = ALL;
       }
       // Static/utility carriers (Path.of, String.join, URLDecoder.decode, Base64...decode, URI.create, ...)
+      // Reflection lookups and expression parsing do not DO anything: the Class / Method / Field / Expression they
+      // return stays as attacker-chosen as the name or text it came from, and invoke / newInstance / getValue / Field.set
+      // (see checkCallSink) are where that choice takes effect.
+      if (REFLECTION_LOOKUP_TAILS.has(tail)) chainTaint |= anyArgMask;
       if (ARG_CARRYING_TAILS.has(tail) || ((tail === "get") && (rootVar === "Paths" || rootVar === "Path"))) {
         // map.getOrDefault(key, fallback): the result is an entry of the map or the fallback -- never the key
         // (a request-chosen id looked up in a fixed table of destinations returns one of those destinations).
@@ -1080,7 +1189,11 @@ function walkPrimaryChain(
       // `f.apply(x)` on a local lambda variable: the lambda's body with its parameters bound to the arguments
       if (rootVar && FUNCTIONAL_TAILS.has(tail)) {
         const lam = ctx.lambdas.get(rootVar);
-        if (lam) chainTaint |= lambdaResultMask(lam, argMasks, env, ctx);
+        if (lam) {
+          chainTaint |= lambdaResultMask(lam, argMasks, env, ctx);
+          // a sink INSIDE the lambda is reached when it is called with tainted arguments
+          if (argMasks.some(m => (m & ALL) !== 0)) walkLambdaForSinks(lam, argMasks, env, ctx);
+        }
         // calling a callback PARAMETER: (recall-biased) as tainted as what it is called with
         else if (ctx.currentParams?.has(rootVar)) chainTaint |= anyArgMask;
       }
@@ -1089,6 +1202,26 @@ function walkPrimaryChain(
         for (const a of args) {
           const lam = soleLambda(a);
           if (lam) chainTaint |= lambdaResultMask(lam, [chainTaintBefore], env, ctx);
+        }
+      }
+      // A lambda or method reference handed to a callback-taking call sees the receiver's elements: a sink inside
+      // it (or inside the referenced local method) runs on tainted data when the receiver is tainted.
+      if ((CALLBACK_TAILS.has(tail) || ELEMENT_CALLBACK_TAILS.has(tail)) && (chainTaintBefore & ALL)) {
+        for (const a of args) {
+          const lam = soleLambda(a);
+          if (lam) { walkLambdaForSinks(lam, [chainTaintBefore], env, ctx); continue; }
+          const ref = /^(this|[A-Za-z_]\w*)\s*::\s*([A-Za-z_]\w*)$/.exec(tokensText(a).replace(/\s+/g, ""));
+          if (!ref) continue;
+          const callees = resolveCalleesJava(ctx, { tail: ref[2], args: [a], receiver: ref[1] === "this" ? undefined : ref[1], self: ref[1] === "this" });
+          for (const callee of callees) {
+            const shape = callee.paramShapes[0];
+            if (!shape) continue;
+            const existing = ctx.seededParams.get(callee.key) ?? new Map<number, number>();
+            existing.set(shape.index, (existing.get(shape.index) ?? 0) | (chainTaintBefore & ALL));
+            ctx.seededParams.set(callee.key, existing);
+            const surviving = ctx.propagatingParams.get(callee.key)?.get(shape.index);
+            if (surviving) chainTaint |= chainTaintBefore & surviving;
+          }
         }
       }
       // StringBuilder/StringBuffer .append() -- sticky, and propagate back onto the receiver variable.
@@ -1106,18 +1239,21 @@ function walkPrimaryChain(
       // buildQuery merely returns a tainted concatenation of uid and never
       // calls a sink itself. Only the arguments at the propagating indices
       // are checked, and only the classes that survive the callee's body.
-      const propIdx = ctx.propagatingParams.get(tail);
-      if (propIdx) {
-        const callee = ctx.localMethods.get(tail);
-        const shapes = callee?.paramShapes ?? [];
+      // The callee is resolved as a SYMBOL (overload by arity / argument types, class by receiver), and judged by ITS
+      // summary; an unresolved overload set contributes the union of its members.
+      const callees = resolveCalleesJava(ctx, { tail, args, receiver: receiverOf(), isNewOf: isNewExprOf, self: calls === 0 && nameParts.length === 1 && !receiverOf() });
+      const propIdxs = callees.map(c => ({ callee: c, idx: ctx.propagatingParams.get(c.key) })).filter(x => !!x.idx) as Array<{ callee: LocalMethod; idx: Map<number, number> }>;
+      if (propIdxs.length) {
         let m = 0;
-        for (const [i, surviving] of propIdx) {
-          // index -1: what it returns whatever it is passed (outside the proof pass: request input it reads itself;
-          // the proof pass resolves -1 below, only for calls it can tie to this file)
-          if (i === -1) { if (!ctx.proof) m |= surviving; continue; }
-          const shape = shapes[i];
-          if (!shape) continue;
-          for (const a of argsForShape(args, shape)) m |= taintMask(a, env, ctx) & surviving;
+        for (const { callee, idx } of propIdxs) {
+          for (const [i, surviving] of idx) {
+            // index -1: what it returns whatever it is passed (outside the proof pass: request input it reads itself;
+            // the proof pass resolves -1 below, only for calls it can tie to this file)
+            if (i === -1) { if (!ctx.proof) m |= surviving; continue; }
+            const shape = callee.paramShapes[i];
+            if (!shape) continue;
+            for (const a of argsForShape(args, shape)) m |= taintMask(a, env, ctx) & surviving;
+          }
         }
         if (m) chainTaint |= m;
       }
@@ -1149,9 +1285,9 @@ function walkPrimaryChain(
       // any other call may return what it is given, and a no-argument getter/reader may return input.
       if (ctx.proof && slotRead === undefined) {
         const recv = receiverOf();
-        const localTarget = ctx.localMethods.has(tail) && ((calls === 0 && nameParts.length === 1 && !recv) || prefixIsThis
+        const localTarget = callees.length > 0 && ((calls === 0 && nameParts.length === 1 && !recv) || prefixIsThis
           || (!!isNewExprOf && ctx.proof.localClasses.has(isNewExprOf)) || (!!recv && ctx.proof.localClasses.has(recv)));
-        if (localTarget) chainTaint |= propIdx?.get(-1) ?? 0;
+        if (localTarget) chainTaint |= propIdxs.reduce((acc, x) => acc | (x.idx.get(-1) ?? 0), 0);
         else {
           chainTaint |= anyArgMask;
           // a reader/getter with no arguments, or a static one (`System.getenv("X")`, `Util.readInput(k)`) may
@@ -1173,7 +1309,7 @@ function walkPrimaryChain(
 
       // `execute(x)` / `super.execute(x)` / `this.execute(x)`: the first call of the chain, on no receiver.
       const selfCall = calls === 0 && nameParts.length === 1 && !receiverOf() && (parts.length === 1 || prefixIsThis);
-      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall, prefix });
+      onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), selfCall, prefix, chainText: ctx.content.slice(startOf(primary), startOf(suffix)) });
       calls++;
 
       // Generic passthrough: any other call keeps existing chain taint sticky
@@ -1195,6 +1331,8 @@ interface CallInfo {
   selfCall?: boolean;
   /** The chain's first element (`new URL(x)` in `new URL(x).openStream()`). */
   prefix?: CstNode;
+  /** The source text of the chain up to (not including) this call: `new SpelExpressionParser().parseExpression(e)` for the `.getValue()` after it. */
+  chainText?: string;
 }
 
 function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
@@ -1295,16 +1433,70 @@ function culpritText(arg: CstNode, env: Env, ctx: EngineCtx): string {
  * parameter, or a static `UserService.find(id)` -- whose parameter reaches a sink inside that class (see
  * computeJavaMethodSinkFacts). Reported here, at the caller, with the callee's real sink in the trace.
  */
+interface JavaImports { pkg: string; explicit: Map<string, string>; wildcard: string[] }
+const importsCache = new WeakMap<CstNode, JavaImports>();
+function javaImportsOf(root: CstNode): JavaImports {
+  let out = importsCache.get(root);
+  if (out) return out;
+  out = { pkg: packageNameOf(root), explicit: new Map(), wildcard: [] };
+  for (const d of findAllNodes(root, "importDeclaration")) {
+    if (tokenKids(d, "Static").length > 0) continue;
+    const ids = collectAllTokens(d).filter(t => t.tokenType?.name === "Identifier").map(t => t.image);
+    if (ids.length === 0) continue;
+    if (tokenKids(d, "Star").length > 0 || collectAllTokens(d).some(t => t.image === "*")) out.wildcard.push(ids.join("."));
+    else out.explicit.set(ids[ids.length - 1], ids.slice(0, -1).join("."));
+  }
+  importsCache.set(root, out);
+  return out;
+}
+
+const factOwnersCache = new WeakMap<object, Map<string, Set<string>>>();
+/** simple class name -> the packages declaring a class of that name, read off the fully-qualified fact keys. */
+function factOwnersOf(facts: ReadonlyMap<string, unknown>): Map<string, Set<string>> {
+  let owners = factOwnersCache.get(facts);
+  if (!owners) {
+    owners = new Map();
+    for (const key of facts.keys()) {
+      const parts = key.split(".");
+      if (parts.length < 3) continue;                       // a simple `Class.method` key carries no package
+      const cls = parts[parts.length - 2];
+      if (!/^[A-Z]/.test(cls)) continue;
+      (owners.get(cls) ?? owners.set(cls, new Set()).get(cls)!).add(parts.slice(0, -2).join("."));
+    }
+    factOwnersCache.set(facts, owners);
+  }
+  return owners;
+}
+
+/**
+ * The fact key for `Type.method` as seen from this file. A class name declared in several packages is resolved the way
+ * the compiler does -- an explicit import, then the file's own package, then a wildcard import -- and left UNRESOLVED
+ * (null) when none of those picks exactly one: guessing would report a flow into the wrong class, or hide one.
+ */
+function factKeyForCall(type: string, method: string, facts: ReadonlyMap<string, unknown>, ctx: EngineCtx): string | null {
+  const simple = type.split(".").pop() ?? type;
+  const pkgs = factOwnersOf(facts).get(simple);
+  if (!pkgs || pkgs.size <= 1) return `${simple}.${method}`;
+  if (type.includes(".")) { const pkg = type.split(".").slice(0, -1).join("."); return pkgs.has(pkg) ? `${pkg}.${simple}.${method}` : null; }
+  const imp = ctx.root ? javaImportsOf(ctx.root) : undefined;
+  const pick = imp?.explicit.get(simple) ?? (imp && pkgs.has(imp.pkg) ? imp.pkg : undefined)
+    ?? (() => { const w = (imp?.wildcard ?? []).filter(x => pkgs.has(x)); return w.length === 1 ? w[0] : undefined; })();
+  return pick && pkgs.has(pick) ? `${pick}.${simple}.${method}` : null;
+}
+
 function checkCrossFileCallJava(info: CallInfo, env: Env, ctx: EngineCtx) {
   const facts = ctx.crossFileFacts;
   const recv = info.receiverName;
   if (!facts || facts.size === 0 || !recv || recv === "this" || recv === "super") return;
   const type = ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined);
   if (!type) return;
-  const key = `${type.replace(/<.*$/, "")}.${info.tail}`;
+  const key = factKeyForCall(type.replace(/<.*$/, ""), info.tail, facts, ctx);
+  if (!key) return;                       // the simple name matches several classes and nothing here says which: unknown
   const list = facts.get(key);
   if (!list) return;
   for (const fact of list) {
+    // the summarised overload must be one this call can reach (parameter count, varargs aware)
+    if (fact.param?.arity !== undefined && !(fact.param.varargs ? info.args.length >= fact.param.arity - 1 : info.args.length === fact.param.arity)) continue;
     const bound = fact.isRest ? info.args.slice(fact.index) : info.args[fact.index] ? [info.args[fact.index]] : [];
     for (const a of bound) {
       const m = taintMask(a, env, ctx);
@@ -1540,7 +1732,69 @@ function isSessionHolder(rootVar: string | null, calleeName: string, ctx: Engine
 /** XML parsers that resolve external entities unless configured not to. */
 const XML_PARSER_TYPE_RE = /^(?:DocumentBuilder|SAXParser|XMLReader)$/;
 /** Any of the standard hardening settings in the file: DOCTYPEs refused, secure processing, external DTDs/entities off. */
-const XML_PARSER_HARDENED_RE = /disallow-doctype-decl|FEATURE_SECURE_PROCESSING|ACCESS_EXTERNAL_DTD|external-general-entities|setExpandEntityReferences\s*\(\s*false|load-external-dtd/;
+
+/** The method body containing source offset `pos` (or the whole file when none does: a field initialiser, a static block). */
+function enclosingScopeJava(ctx: EngineCtx, pos: number): CstNode | undefined {
+  if (!ctx.root) return undefined;
+  let best: CstNode | undefined;
+  for (const m of findAllNodes(ctx.root, "methodDeclaration")) {
+    if (startOf(m) <= pos && pos <= endOf(m) && (!best || startOf(m) >= startOf(best))) best = m;
+  }
+  for (const c of findAllNodes(ctx.root, "constructorDeclaration")) {
+    if (startOf(c) <= pos && pos <= endOf(c) && (!best || startOf(c) >= startOf(best))) best = c;
+  }
+  return best ?? ctx.root;
+}
+
+/**
+ * Is the XML parser `parserVar`, used at `parsePos`, hardened against external entities? Judged for THIS instance: the
+ * factory it was created from (`DocumentBuilder b = f.newDocumentBuilder()` -> `f`), configured BEFORE the parser was
+ * created, or the parser itself (an XMLReader / SAXParser's reader) configured before this parse. Hardening of another
+ * factory, in another method, or after the parser existed, protects nothing here. Protections recognised:
+ * disallow-doctype-decl = true; FEATURE_SECURE_PROCESSING = true; ACCESS_EXTERNAL_DTD = ""; external-general-entities
+ * AND external-parameter-entities = false. Anything unknown is NOT hardened.
+ */
+function xmlParserHardenedJava(parserVar: string, parsePos: number, ctx: EngineCtx): boolean {
+  const scope = enclosingScopeJava(ctx, parsePos);
+  if (!scope || !ctx.root) return false;
+  // where the parser variable was created, and from which factory
+  let createdAt = -1;
+  let factory: string | null = null;
+  const searchIn = (node: CstNode) => {
+    for (const d of findAllNodes(node, "variableDeclarator")) {
+      const id = firstNode(d, "variableDeclaratorId");
+      if (!id || firstTok(id, "Identifier")?.image !== parserVar) continue;
+      const init = firstNode(d, "variableInitializer");
+      const m = init ? /^(\w+)\s*\.\s*(?:newDocumentBuilder|newSAXParser|getXMLReader)\s*\(/.exec(tokensText(init)) : null;
+      if (startOf(d) < parsePos) { createdAt = startOf(d); factory = m ? m[1] : null; }
+    }
+  };
+  searchIn(scope);
+  if (createdAt < 0 && scope !== ctx.root) searchIn(ctx.root);   // a field: configured wherever its factory is
+  const hardeningOn = (target: string, before: number): Set<string> => {
+    const got = new Set<string>();
+    const stmts = scope === ctx.root || createdAt < startOf(scope) ? findAllNodes(ctx.root!, "expressionStatement") : findAllNodes(scope, "expressionStatement");
+    for (const st of stmts) {
+      if (startOf(st) >= before) continue;
+      const t = tokensText(st);
+      const m = new RegExp("^" + target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\.\\s*(setFeature|setAttribute|setProperty|setExpandEntityReferences)\\s*\\((.*)\\)\\s*;?$").exec(t);
+      if (!m) continue;
+      const a = m[2];
+      if (m[1] === "setFeature") {
+        if (/disallow-doctype-decl["']?\s*,\s*true\b/.test(a)) got.add("doctype");
+        if (/FEATURE_SECURE_PROCESSING\s*,\s*true\b/.test(a)) got.add("secure-processing");
+        if (/external-general-entities["']?\s*,\s*false\b/.test(a)) got.add("general");
+        if (/external-parameter-entities["']?\s*,\s*false\b/.test(a)) got.add("parameter");
+      } else if (m[1] === "setAttribute" || m[1] === "setProperty") {
+        if (/ACCESS_EXTERNAL_DTD\s*,\s*""/.test(a)) got.add("access-dtd");
+      } else if (m[1] === "setExpandEntityReferences" && /^false\b/.test(a.trim())) got.add("no-expand");
+    }
+    return got;
+  };
+  const safe = (g: Set<string>) => g.has("doctype") || g.has("secure-processing") || g.has("access-dtd") || (g.has("general") && g.has("parameter"));
+  if (factory && safe(hardeningOn(factory, createdAt))) return true;
+  return safe(hardeningOn(parserVar, parsePos));
+}
 
 /** `request.getSession().setAttribute(...)`, or a receiver held as an HttpSession / named `session`. */
 function isSessionReceiver(info: CallInfo, ctx: EngineCtx): boolean {
@@ -1548,6 +1802,28 @@ function isSessionReceiver(info: CallInfo, ctx: EngineCtx): boolean {
   if (/^(?:session|httpSession|sess)$/i.test(recv) || /HttpSession$/.test(ctx.varTypes.get(recv) ?? "")) return true;
   return /getSession\s*\(\s*(?:true|false)?\s*\)\s*\.\s*(?:setAttribute|putValue)\s*\(/.test(ctx.lines[lineOf(info.node) - 1] ?? "");
 }
+
+/** java.io.File / java.nio.file.Path instance methods that act on the file system (as opposed to building or describing a path). */
+const FILE_OPERATION_TAILS = new Set([
+  "delete", "deleteOnExit", "exists", "isFile", "isDirectory", "isHidden", "listFiles", "list", "createNewFile", "mkdir", "mkdirs",
+  "renameTo", "length", "canRead", "canWrite", "canExecute", "lastModified", "setReadable", "setWritable", "setLastModified",
+]);
+
+/** The initializer text of a local `name` in the method being walked ("" when unknown). */
+function localInitText(name: string | null, ctx: EngineCtx): string {
+  if (!name || !ctx.currentBody) return "";
+  const init = collectLocalDeclInfo(ctx.currentBody).inits.get(name);
+  return init ? tokensText(init) : "";
+}
+/** The lookup argument a reflection chain was built from (`Class.forName(cls)...` -> "cls"), for the finding's source. */
+function reflectionLookupArg(text: string): string | undefined {
+  return /\b(?:getField|getDeclaredField|getMethod|getDeclaredMethod|getDeclaredConstructor|getConstructor|forName|loadClass|parseExpression)\s*\(\s*([^,)]+?)\s*[,)]/.exec(text)?.[1];
+}
+
+const REFLECTION_LOOKUP_TAILS = new Set([
+  "forName", "loadClass", "getMethod", "getDeclaredMethod", "getField", "getDeclaredField", "getConstructor", "getDeclaredConstructor",
+  "parseExpression", "parseRaw",
+]);
 
 function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   checkCrossFileCallJava(info, env, ctx);
@@ -1620,8 +1896,6 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     const id = sinkModel.model.rule as AstTaintJavaId;
     if (info.isNewURL) fire(id, combined, info.prefix ? tokensText(info.prefix) : sourceExpr);
     else if (rootVar && (chainTaintBefore & classOf(id))) fire(id, chainTaintBefore, rootVar);
-  } else if (tail === "get" && rootVar === "Paths") {
-    fire("path-traversal");
   } else if (rootVar === "Files" && ["readString", "readAllBytes", "write", "newInputStream", "newOutputStream", "delete"].includes(tail)) {
     fireArgs("path-traversal", [0]);
   } else if (tail === "search" && receiverMayBe(info, ctx, LDAP_RECEIVER_TYPE_RE)) {
@@ -1639,7 +1913,7 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   } else if ((tail === "setAttribute" || tail === "putValue") && args.length >= 2 && isSessionReceiver(info, ctx)) {
     // session.setAttribute(name, value): request data stored as server-side state that later code trusts
     fireArgs("trust-boundary", [0, 1]);
-  } else if (tail === "parse" && args.length > 0 && XML_PARSER_TYPE_RE.test(ctx.varTypes.get(rootVar ?? "") ?? "") && !XML_PARSER_HARDENED_RE.test(ctx.content)) {
+  } else if (tail === "parse" && args.length > 0 && XML_PARSER_TYPE_RE.test(ctx.varTypes.get(rootVar ?? "") ?? "") && !xmlParserHardenedJava(rootVar!, startOf(node), ctx)) {
     // DocumentBuilder.parse / SAXParser.parse / XMLReader.parse of request data with external entities left on
     // (the JDK default): a DOCTYPE in the input reads local files or makes requests
     fireArgs("xxe", [0]);
@@ -1670,8 +1944,11 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
       fire("header-injection", argMasks[1], culpritText(args[1], env, ctx));
     }
   }
-  // path traversal: Path.of / Paths.get and the wider java.nio.file.Files surface
-  if ((rootVar === "Path" || rootVar === "Paths") && (tail === "of" || tail === "get")) fire("path-traversal");
+  // path traversal: the java.nio.file.Files surface and java.io.File operations. Path.of / Paths.get / new File only
+  // BUILD a path (taint passes through them); the operation that finally touches the filesystem is the sink.
+  if (FILE_OPERATION_TAILS.has(tail) && (info.isNewOf === "File" || /^(?:File|Path)$/.test(ctx.varTypes.get(rootVar ?? "") ?? "")) && (chainTaintBefore & classOf("path-traversal"))) {
+    fire("path-traversal", chainTaintBefore, rootVar ?? "new File");
+  }
   if (rootVar === "Files" && ["writeString", "readAllLines", "lines", "copy", "move", "createFile", "createDirectories", "newBufferedReader", "newBufferedWriter", "list", "walk", "deleteIfExists", "exists"].includes(tail)) {
     // copy/move(source, target) take two paths -- except copy(InputStream, target), whose source is data.
     const sourceIsStream = tail === "copy" && !!args[0] && /InputStream|getInputStream\s*\(\s*\)|^(?:in|is|input|stream)$/.test(tokensText(args[0]));
@@ -1686,11 +1963,25 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
   if ((tail === "load" || tail === "loadAs") && arg0 && (info.isNewOf === "Yaml" || ctx.varTypes.get(rootVar ?? "") === "Yaml")) {
     fire("insecure-deserialization", argMasks[0], nodeText(arg0));
   }
-  // code execution: script engines, SpEL, reflection-selected classes/methods
-  if ((tail === "eval" || tail === "parseExpression") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
-  if (((tail === "forName" && rootVar === "Class") || tail === "loadClass") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
-  if ((tail === "getMethod" || tail === "getDeclaredMethod") && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
-  if ((tail === "getField" || tail === "getDeclaredField") && arg0) fire("mass-assignment", argMasks[0], nodeText(arg0));
+  // code execution: script engines evaluate their argument; SpEL / reflection take effect only when the parsed
+  // expression is EVALUATED or the looked-up method / class is INVOKED / INSTANTIATED -- the lookup alone runs nothing
+  if (tail === "eval" && arg0) fire("eval-exec", argMasks[0], nodeText(arg0));
+  const evalClass = classOf("eval-exec");
+  const chosenByAttacker = (chainTaintBefore & evalClass) !== 0;
+  const reflectionText = `${calleeName} ${info.chainText ?? ""} ${localInitText(rootVar, ctx)}`;
+  if (chosenByAttacker && (tail === "invoke" || tail === "newInstance" || tail === "newProxyInstance")
+      && (/^(?:Method|Constructor|Class)$/.test(ctx.varTypes.get(rootVar ?? "") ?? "") || /\b(?:getMethod|getDeclaredMethod|getDeclaredConstructor|getConstructor|forName|loadClass)\b/.test(reflectionText))) {
+    fire("eval-exec", chainTaintBefore, reflectionLookupArg(reflectionText) ?? rootVar ?? calleeName);
+  }
+  if (chosenByAttacker && /^(?:getValue|getValueType|setValue)$/.test(tail)
+      && (/^(?:Expression|SpelExpression)$/.test(ctx.varTypes.get(rootVar ?? "") ?? "") || /\bparseExpression\b/.test(reflectionText))) {
+    fire("eval-exec", chainTaintBefore, reflectionLookupArg(reflectionText) ?? rootVar ?? calleeName);
+  }
+  // writing through an attacker-chosen Field is the mass-assignment (the lookup alone is not)
+  if ((chainTaintBefore & classOf("mass-assignment")) !== 0 && /^set(?:Boolean|Byte|Char|Double|Float|Int|Long|Short|Accessible)?$/.test(tail) && tail !== "setAccessible"
+      && (/^Field$/.test(ctx.varTypes.get(rootVar ?? "") ?? "") || /\b(?:getField|getDeclaredField)\b/.test(reflectionText))) {
+    fire("mass-assignment", chainTaintBefore, reflectionLookupArg(reflectionText) ?? rootVar ?? calleeName);
+  }
   // regex built from user input
   if (arg0 && ((rootVar === "Pattern" && (tail === "compile" || tail === "matches")) ||
                (rootVar !== "Pattern" && (tail === "matches" || tail === "replaceAll" || tail === "replaceFirst" || tail === "split")))) {
@@ -1810,8 +2101,8 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
     }
   };
   if (className === "ProcessBuilder") checkProcessBuilderArgs(args, argMasks, fire);
-  // File(parent, child) takes two path parts; the streams/readers/writers take (file[, append|mode]).
-  if (className === "File") fire("path-traversal", "new File");
+  // new File(parent, child) only BUILDS a path (see FILE_OPERATION_TAILS for where it becomes a sink); the streams /
+  // readers / writers open it, taking (file[, append|mode]).
   if (className === "FileInputStream" || className === "FileOutputStream" ||
       className === "FileReader" || className === "FileWriter" || className === "RandomAccessFile") {
     fire("path-traversal", `new ${className}`, [0]);
@@ -1866,7 +2157,7 @@ function computeReturnTaintPropagatingJava(method: LocalMethod, ctx: EngineCtx):
       ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
       proof: ctx.proof && { ...ctx.proof, proven: [] },
       localNames: localNamesOfMethod(method), currentParams: new Set(method.paramShapes.map(p => p.name)),
-      currentBody: method.body ?? undefined, entryLoopVars: [],
+      currentBody: method.body ?? undefined, entryLoopVars: [], currentClass: method.cls, varTypes: methodTypeEnv(ctx, method),
     },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
@@ -1927,23 +2218,102 @@ function buildPropagatingMapJava(localMethods: Map<string, LocalMethod>, baseCtx
  * Records which parameter INDICES were tainted at this call site into
  * ctx.seededParams; a second full pass in scanAstTaintJava consumes it.
  */
-function seedLocalMethodParams(
-  info: { tail: string; args: CstNode[] }, env: Env, ctx: EngineCtx,
-) {
-  const callee = ctx.localMethods.get(info.tail);
-  if (!callee) return;
-  // param index -> classes tainted at THIS call site
-  const taintedIdx = new Map<number, number>();
-  info.args.forEach((arg, i) => {
-    const m = taintMask(arg, env, ctx) & ALL;
-    if (!m) return;
-    const shape = callee.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
-    if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
+// Static types of the primitives / literals Java overload resolution can tell apart without a type checker.
+const NUMERIC_RANK: Record<string, number> = { byte: 1, short: 2, char: 2, int: 3, long: 4, float: 5, double: 6 };
+const BOXED: Record<string, string> = { Byte: "byte", Short: "short", Character: "char", Integer: "int", Long: "long", Float: "float", Double: "double", Boolean: "boolean" };
+function simpleTypeName(t: string): string {
+  const base = t.replace(/<.*$/s, "").replace(/\[\]/g, "[]").trim();
+  const noPkg = base.split(".").pop() ?? base;
+  return BOXED[noPkg] ?? noPkg;
+}
+
+/** The static type of an argument when it is evident (a literal, a `new`, a typed local), else undefined. */
+function argStaticType(arg: CstNode, ctx: EngineCtx): string | undefined {
+  const t = tokensText(arg).trim();
+  if (/^"/.test(t)) return "String";
+  if (/^-?\d+$/.test(t)) return "int";
+  if (/^-?\d+[lL]$/.test(t)) return "long";
+  if (/^-?\d*\.\d+[fF]?$/.test(t) || /^-?\d+[dDfF]$/.test(t)) return /[fF]$/.test(t) ? "float" : "double";
+  if (/^(?:true|false)$/.test(t)) return "boolean";
+  if (/^'/.test(t)) return "char";
+  const ctor = /^new\s+([A-Z]\w*)/.exec(t);
+  if (ctor) return ctor[1];
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) { const v = ctx.varTypes.get(t); return v ? simpleTypeName(v) : undefined; }
+  return undefined;
+}
+
+/** Could an argument of static type `arg` be passed for a parameter declared `param`? Unknown -> yes (never exclude on a guess). */
+function argFitsParam(arg: string | undefined, param: string): boolean {
+  if (!arg) return true;
+  const a = simpleTypeName(arg), q = simpleTypeName(param);
+  if (a === q || q === "Object" || q.length === 1) return true;               // exact, Object, a type variable
+  const ar = NUMERIC_RANK[a], pr = NUMERIC_RANK[q];
+  if (ar !== undefined && pr !== undefined) return ar <= pr;                    // widening
+  if (a === "boolean" || q === "boolean") return a === q;
+  const primitive = (x: string) => x in NUMERIC_RANK;
+  if (primitive(a) !== primitive(q)) return !primitive(a) ? false : /^(?:Number|Comparable|Serializable)$/.test(q);
+  if (a === "String") return /^(?:CharSequence|Comparable|Serializable)$/.test(q);   // String is final: only its supertypes
+  return true;                                                                  // class types: subtyping unknown
+}
+
+/**
+ * Which local methods a call can reach. By name first, then arity (varargs aware), then the receiver's class, then the
+ * static types of the arguments among the remaining overloads. When the call still cannot be tied to one method every
+ * remaining candidate is returned (a union -- conservative), never a single guessed one.
+ */
+function resolveCalleesJava(
+  ctx: EngineCtx,
+  call: { tail: string; args: CstNode[]; receiver?: string; isNewOf?: string | null; self?: boolean },
+): LocalMethod[] {
+  const all = ctx.methodsByName.get(call.tail);
+  if (!all || all.length === 0) return [];
+  const argc = call.args.length;
+  let c = all.filter(m => {
+    const fixed = m.paramShapes.filter(s => !s.isRest).length;
+    return m.paramShapes.some(s => s.isRest) ? argc >= fixed : argc === fixed;
   });
-  if (taintedIdx.size === 0) return;
-  const existing = ctx.seededParams.get(info.tail) ?? new Map<number, number>();
-  for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
-  ctx.seededParams.set(info.tail, existing);
+  if (c.length === 0) c = [...all];
+  // receiver class
+  const owner = call.self ? ctx.currentClass
+    : call.isNewOf ?? (call.receiver ? simpleTypeName(ctx.varTypes.get(call.receiver) ?? (/^[A-Z]/.test(call.receiver) ? call.receiver : "")) : undefined);
+  if (owner) {
+    const ownerIsLocal = typeRangesOf(ctx.root!).some(r => r.name === owner);
+    if (ownerIsLocal) {
+      const inOwner = c.filter(m => isSubtypeOf(ctx.root!, m.cls, owner));   // the declared type's own method, or an implementation / override
+      if (inOwner.length) c = inOwner;
+    } else if (!call.self && call.receiver && ctx.varTypes.has(call.receiver) && !/^[A-Z]/.test(call.receiver)) {
+      // a typed variable of a library / other-file class (list.get(i), svc.find(i)): not a method of this file
+      // unless one of this file's classes could be a subtype -- unknowable here, so keep the candidates
+    }
+  }
+  if (c.length > 1) {
+    const types = call.args.map(a => argStaticType(a, ctx));
+    const fit = c.filter(m => m.paramShapes.every((s, i) => s.isRest || i >= types.length || argFitsParam(types[i], s.type)));
+    if (fit.length) c = fit;
+  }
+  return c;
+}
+
+function seedLocalMethodParams(
+  info: CallInfo, env: Env, ctx: EngineCtx,
+) {
+  const callees = resolveCalleesJava(ctx, { tail: info.tail, args: info.args, receiver: info.receiverName, isNewOf: info.isNewOf, self: info.selfCall });
+  if (callees.length === 0) return;
+  const masks = info.args.map(arg => taintMask(arg, env, ctx) & ALL);
+  if (!masks.some(m => m)) return;
+  for (const callee of callees) {
+    // param index -> classes tainted at THIS call site, for THIS overload
+    const taintedIdx = new Map<number, number>();
+    masks.forEach((m, i) => {
+      if (!m) return;
+      const shape = callee.paramShapes.find(s => s.isRest ? i >= s.index : s.index === i);
+      if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
+    });
+    if (taintedIdx.size === 0) continue;
+    const existing = ctx.seededParams.get(callee.key) ?? new Map<number, number>();
+    for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
+    ctx.seededParams.set(callee.key, existing);
+  }
 }
 
 // ── Location / ordering helpers (Chevrotain children are keyed by production, not source order) ──
@@ -2170,6 +2540,17 @@ function condSidesJava<T extends { holds: "true" | "false" }>(expr: CstNode, h: 
   return node?.name === "binaryExpression" ? binarySides(node, h) : [];
 }
 
+/** Is `name` declared (anywhere in the file) with an initializer that normalises or canonicalises the path? */
+function isNormalisedPathVarJava(name: string, root: CstNode): boolean {
+  for (const d of findAllNodes(root, "variableDeclarator")) {
+    const id = firstNode(d, "variableDeclaratorId");
+    if (!id || firstTok(id, "Identifier")?.image !== name) continue;
+    const init = firstNode(d, "variableInitializer");
+    return !!init && /\.\s*(?:normalize|getCanonicalFile|getCanonicalPath|toRealPath)\s*\(/.test(tokensText(init));
+  }
+  return false;
+}
+
 function guardHandlersJava(root: CstNode): CondHandlers<Guard> {
   return {
     compare(l, op, r) {
@@ -2194,6 +2575,14 @@ function guardHandlersJava(root: CstNode): CondHandlers<Guard> {
       if ((m.name === "equals" || m.name === "equalsIgnoreCase") && m.args.length === 1 && recv.length === 1 && !recv[0].args) {
         if (recv[0].literal) { const n = bareIdentifierOf(arg0); if (n) return [{ name: n, holds: "true" }]; }
         else if (isLiteralExprJava(arg0)) return [{ name: recv[0].name, holds: "true" }];
+      }
+      // canonical containment: `resolved.startsWith(base)` / `resolved.getPath().startsWith(base)` where `resolved` was
+      // normalised / canonicalised -- a prefix test on a path that was not (`/srv/../etc` starts with `/srv`) proves nothing
+      if (m.name === "startsWith" && m.args?.length === 1 && !/getParameter|getHeader|getQueryString|request\b/.test(tokensText(arg0))) {
+        const subject = recv.length === 2 && recv[1].args && ["getPath", "getCanonicalPath", "getAbsolutePath", "toString"].includes(recv[1].name) ? [recv[0]] : recv;
+        if (subject.length === 1 && !subject[0].args && isNormalisedPathVarJava(subject[0].name, root)) {
+          return [{ name: subject[0].name, holds: "true", clears: classOf("path-traversal") }];
+        }
       }
       // ALLOWED.contains(x) / Set.of("a","b").contains(x)
       if (m.name === "contains" && m.args.length === 1) {
@@ -2625,9 +3014,7 @@ export function computeJavaMethodSinkFacts(
           ctx.findings = [];
           ctx.seen = new Set();
           ctx.seededParams = new Map();
-          ctx.localNames = localNamesOfMethod(info);
-          ctx.currentParams = new Set(info.paramShapes.map(p => p.name));
-          ctx.currentBody = info.body ?? undefined;
+          enterMethodJava(ctx, [...localMethods.values()].find(m => m.body === info.body) ?? info);
           ctx.entryLoopVars.length = 0;
           const env: Env = new Map([[shape.name, ALL]]);
           walkForDeclarationsAndSinks(info.body!, env, ctx);
@@ -2638,7 +3025,8 @@ export function computeJavaMethodSinkFacts(
             if (f.id === "bola-missing-ownership-check") continue;
             const where = f.calleeSink;
             mergeSinkFacts(facts, [{
-              index: i, isRest: shape.isRest, id: f.id, sinkClass: classOf(f.id),
+              index: i, isRest: shape.isRest, param: { name: shape.name, arity: info.paramShapes.length, varargs: info.paramShapes.some(x => x.isRest) },
+              id: f.id, sinkClass: classOf(f.id),
               sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
               via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
               steps: f.trace?.length ? factStepsFromTrace(f.trace, `${clsName}.${info.name}`, filePath, lineOf(md!), shape.name,
@@ -2646,9 +3034,17 @@ export function computeJavaMethodSinkFacts(
             }]);
           }
         });
-        if (facts.length === 0) continue;
-        for (const owner of [clsName, ...supers]) {
-          const key = `${owner}.${info.name}`;
+        if (facts.length === 0) {
+          // no sink to report, but the class EXISTS: an empty fully-qualified entry is what lets a call site tell that the
+          // simple name `Svc` is declared in more than one package (and so must be resolved by import, not guessed)
+          const qualifiedPkg = packageNameOf(cst);
+          if (qualifiedPkg && !out.has(`${qualifiedPkg}.${clsName}.${info.name}`)) out.set(`${qualifiedPkg}.${clsName}.${info.name}`, []);
+          continue;
+        }
+        // keyed by the class's simple name (and every type it extends / implements, which a controller injects) AND by its
+        // fully qualified name, so two same-named classes of different packages stay distinguishable at the call site
+        const pkg = packageNameOf(cst);
+        for (const key of [...[clsName, ...supers].map(o => `${o}.${info.name}`), ...(pkg ? [`${pkg}.${clsName}.${info.name}`] : [])]) {
           const list = out.get(key) ?? [];
           mergeSinkFacts(list, facts);
           out.set(key, list);
@@ -2657,6 +3053,7 @@ export function computeJavaMethodSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintJava] threw computing method sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -2664,18 +3061,58 @@ export function computeJavaMethodSinkFacts(
 /** Every method with a body named `name` in the file -- `localMethods` keeps one per name, so of two classes'
  * `read` methods (a service delegating to a handler) only the last declared was ever walked. */
 const methodsByNameCache = new WeakMap<CstNode, Map<string, LocalMethod[]>>();
-function methodsNamedJava(ctx: EngineCtx, name: string, localMethods: Map<string, LocalMethod>): LocalMethod[] {
-  if (!ctx.root) { const m = localMethods.get(name); return m?.body ? [m] : []; }
-  let byName = methodsByNameCache.get(ctx.root);
-  if (!byName) {
-    byName = new Map();
-    for (const decl of findAllNodes(ctx.root, "methodDeclaration")) {
-      const info = extractMethodInfo(decl);
-      if (info?.body) byName.set(info.name, [...(byName.get(info.name) ?? []), info]);
-    }
-    methodsByNameCache.set(ctx.root, byName);
+function methodsNamedJava(_ctx: EngineCtx, key: string, localMethods: Map<string, LocalMethod>): LocalMethod[] {
+  // seeded parameters are recorded per canonical method (overload and class included), so exactly that method is walked
+  const m = localMethods.get(key);
+  return m?.body ? [m] : [];
+}
+
+/** Enter a method for a walk: its scope facts, its class, and a type environment of ITS OWN (fields of its class, then
+ * its parameters, then its locals -- each overriding the last), so a name typed one way in one method is not typed that
+ * way in another. */
+const methodTypeEnvCache = new WeakMap<LocalMethod, Map<string, string>>();
+function methodTypeEnv(ctx: EngineCtx, m: LocalMethod): Map<string, string> {
+  let env = methodTypeEnvCache.get(m);
+  if (!env) {
+    env = new Map(fieldTypesOfClass(ctx, m.cls));
+    for (const p of m.paramShapes) env.set(p.name, p.type);
+    if (m.body) for (const [name, type] of collectLocalDeclInfo(m.body).types) env.set(name, type);
+    methodTypeEnvCache.set(m, env);
   }
-  return byName.get(name) ?? [];
+  return new Map(env);   // a walk records declarations it meets: never into the shared copy
+}
+function enterMethodJava(ctx: EngineCtx, m: LocalMethod): void {
+  ctx.localNames = localNamesOfMethod(m);
+  ctx.currentParams = new Set(m.paramShapes.map(p => p.name));
+  ctx.currentBody = m.body ?? undefined;
+  ctx.currentClass = m.cls;
+  ctx.varTypes = methodTypeEnv(ctx, m);
+}
+
+const classFieldTypesCache = new WeakMap<CstNode, Map<string, Map<string, string>>>();
+/** Field types of one class (nested classes' fields excluded), falling back to the file's fields when it is unknown. */
+function fieldTypesOfClass(ctx: EngineCtx, cls: string | undefined): Map<string, string> {
+  if (!ctx.root) return new Map();
+  let byClass = classFieldTypesCache.get(ctx.root);
+  if (!byClass) {
+    byClass = new Map();
+    const ranges = typeRangesOf(ctx.root);
+    for (const fd of findAllNodes(ctx.root, "fieldDeclaration")) {
+      const owner = innermostTypeAt(ranges, startOf(fd));
+      if (!owner) continue;
+      const unannType = firstNode(fd, "unannType");
+      const classType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
+      const type = classType ? tokenKids(classType, "Identifier").pop()?.image : undefined;
+      if (!type) continue;
+      const vdl = firstNode(fd, "variableDeclaratorList");
+      for (const vd of vdl ? allNodes(vdl, "variableDeclarator") : []) {
+        const nameTok = firstTok(firstNode(vd, "variableDeclaratorId") ?? vd, "Identifier");
+        if (nameTok) (byClass.get(owner) ?? byClass.set(owner, new Map()).get(owner)!).set(nameTok.image, type);
+      }
+    }
+    classFieldTypesCache.set(ctx.root, byClass);
+  }
+  return (cls && byClass.get(cls)) || collectClassFieldTypes(ctx.root);
 }
 
 /** Re-walk same-file methods whose parameters a walk just seeded (a public method handing its argument to a
@@ -2690,9 +3127,7 @@ function drainSeededParamsJava(ctx: EngineCtx, localMethods: Map<string, LocalMe
       walked.add(signature);
       for (const method of methodsNamedJava(ctx, methodName, localMethods)) {
         changed = true;
-        ctx.localNames = localNamesOfMethod(method);
-        ctx.currentParams = new Set(method.paramShapes.map(p => p.name));
-        ctx.currentBody = method.body ?? undefined;
+        enterMethodJava(ctx, method);
         const env: Env = new Map();
         for (const [idx, m] of idxSet) {
           const shape = method.paramShapes[idx];
@@ -3141,14 +3576,15 @@ export function computeJavaSourceMethods(
       const walker = createWalkerJava({
         ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
         localNames: localNamesOfMethod(method), currentParams: new Set(method.paramShapes.map(p => p.name)),
-        currentBody: method.body, entryLoopVars: [],
+        currentBody: method.body, entryLoopVars: [], currentClass: method.cls, varTypes: methodTypeEnv(ctx, method),
       }, { descendFunctions: false, onReturn: (expr, env, mask) => { returned |= mask(expr, env); } });
       walker.walk(method.body, new Map());
       returned &= ALL;
-      if (returned) for (const c of classes) out.set(`${c}.${name}`, returned);
+      if (returned) for (const c of classes) out.set(`${c}.${method.name}`, returned);
     }
   } catch (err) {
     console.error(`[astTaintJava] threw computing source methods for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -3165,20 +3601,31 @@ export function computeJavaPassThroughMethods(content: string, filePath: string,
   try {
     const { ctx, localMethods } = makeJavaCtx(content, filePath, cst, undefined, undefined);
     const propagating = buildPropagatingMapJava(localMethods, ctx);
-    const owners = new Set<string>();
+    // a class answers to its own name and to every type it extends / implements (a controller injects the interface)
+    const ownersOf = new Map<string, Set<string>>();
     for (const m of content.matchAll(/\b(?:class|interface|enum)\s+([A-Z]\w*)(?:\s*<[^>{]*>)?((?:\s+(?:extends|implements)\s+[\w.<>,\s]+?)*)\s*\{/g)) {
-      owners.add(m[1]);
+      const owners = new Set<string>([m[1]]);
       for (const t of (m[2] ?? "").replace(/<[^>]*>/g, "").split(/\bextends\b|\bimplements\b|,/)) {
         const simple = t.trim().split(".").pop();
         if (simple && /^[A-Z]\w*$/.test(simple)) owners.add(simple);
       }
+      ownersOf.set(m[1], owners);
     }
-    for (const [name, idx] of propagating) {
-      const entries = [...idx].filter(([i, surviving]) => i >= 0 && (surviving & ALL)) as Array<[number, number]>;
-      if (entries.length) for (const o of owners) out.set(`${o}.${name}`, entries);
+    // overloads of one name share a call-site key: what any of them passes through counts (the call may be any)
+    const merged = new Map<string, Map<number, number>>();
+    for (const [key, idx] of propagating) {
+      const method = localMethods.get(key);
+      if (!method) continue;
+      for (const o of ownersOf.get(method.cls ?? "") ?? []) {
+        const slot = merged.get(`${o}.${method.name}`) ?? new Map<number, number>();
+        for (const [i, surviving] of idx) if (i >= 0 && (surviving & ALL)) slot.set(i, (slot.get(i) ?? 0) | surviving);
+        if (slot.size) merged.set(`${o}.${method.name}`, slot);
+      }
     }
+    for (const [k, slot] of merged) out.set(k, [...slot] as Array<[number, number]>);
   } catch (err) {
     console.error(`[astTaintJava] threw computing pass-through methods for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -3194,11 +3641,15 @@ export function computeJavaConstantMethods(content: string, cst: CstNode): strin
   if (classes.length !== 1) return [];
   const out: string[] = [];
   try {
-    for (const [name, method] of collectLocalMethods(cst)) {
-      if (!method.body) continue;
-      const rets = findAllNodes(method.body, "returnStatement").map(r => tokensText(r));
-      if (rets.length > 0 && rets.every(r => /^return\s*(?:"(?:[^"\\]|\\.)*"|-?\d+|null|true|false)\s*;$/.test(r))) out.push(`${classes[0]}.${name}`);
-    }
+    const isConstant = (m: LocalMethod): boolean => {
+      if (!m.body) return false;
+      const rets = findAllNodes(m.body, "returnStatement").map(r => tokensText(r));
+      return rets.length > 0 && rets.every(r => /^return\s*(?:"(?:[^"\\]|\\.)*"|-?\d+|null|true|false)\s*;$/.test(r));
+    };
+    // a name is constant only when EVERY overload of it is: the call site may not say which one runs
+    const byName = new Map<string, LocalMethod[]>();
+    for (const m of collectLocalMethods(cst).values()) (byName.get(m.name) ?? byName.set(m.name, []).get(m.name)!).push(m);
+    for (const [name, group] of byName) if (group.every(isConstant)) out.push(`${classes[0]}.${name}`);
   } catch (err) {
     console.error("[astTaintJava] threw computing constant methods:", err);
   }
@@ -3262,15 +3713,19 @@ function proveSinksSafeJava(ctx: EngineCtx, localMethods: Map<string, LocalMetho
   pctx.propagatingParams = buildPropagatingMapJava(localMethods, pctx);
   for (const [, method] of localMethods) {
     if (!method.body) continue;
-    pctx.localNames = localNamesOfMethod(method);
-    pctx.currentParams = new Set(method.paramShapes.map(p => p.name));
-    pctx.currentBody = method.body;
+    enterMethodJava(pctx, method);
     pctx.entryLoopVars.length = 0;
     const env: Env = new Map();
     for (const p of method.paramShapes) env.set(p.name, ALL);
     walkForDeclarationsAndSinks(method.body, env, pctx);
   }
   suppressedOut.push(...proof.proven);
+}
+
+function methodsByNameOf(localMethods: Map<string, LocalMethod>): Map<string, LocalMethod[]> {
+  const out = new Map<string, LocalMethod[]>();
+  for (const m of localMethods.values()) (out.get(m.name) ?? out.set(m.name, []).get(m.name)!).push(m);
+  return out;
 }
 
 function makeJavaCtx(
@@ -3283,7 +3738,7 @@ function makeJavaCtx(
   const lines = content.split("\n");
   const localMethods = collectLocalMethods(cst);
   const ctx: EngineCtx = {
-    filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+    filePath, content, lines, localMethods, methodsByName: methodsByNameOf(localMethods), propagatingParams: new Map(), seededParams: new Map(),
     varTypes: new Map(), classFieldNames: collectClassFieldNames(cst), root: cst, findings: [], seen: new Set(),
     suppressed: suppressedOut,
     sticky: new Map(), stickyDirty: false, recordSticky: false, lambdas: new Map(), entryLoopVars: [], htmlEscapers: new Set(),
@@ -3291,9 +3746,8 @@ function makeJavaCtx(
     constantMethods: crossFileMethods?.constantMethods,
   };
   // structural HTML escapers, and parameter types (so a `HttpServletRequest r` parameter is recognised as the request)
-  for (const [name, m] of localMethods) {
-    if (m.body && isHtmlEscaperBody(m.body)) ctx.htmlEscapers.add(name);
-    for (const p of m.paramShapes) if (!ctx.varTypes.has(p.name)) ctx.varTypes.set(p.name, p.type);
+  for (const m of localMethods.values()) {
+    if (m.body && isHtmlEscaperBody(m.body)) ctx.htmlEscapers.add(m.name);
   }
   // Field types, lowest precedence: an injected service -- `@Autowired UserService users;` or a
   // constructor-injected `private final UserService users;` -- is how a controller reaches the service layer.
@@ -3330,9 +3784,7 @@ function runJavaScan(
       !NON_ENTRY_METHOD_RE.test(m.name) && m.paramShapes.some(p => !p.annotated && STRINGY_PARAM_TYPE_RE.test(p.type));
 
     const enter = (m: LocalMethod) => {
-      ctx.localNames = localNamesOfMethod(m);
-      ctx.currentParams = new Set(m.paramShapes.map(p => p.name));
-      ctx.currentBody = m.body ?? undefined;
+      enterMethodJava(ctx, m);
       ctx.entryLoopVars.length = 0;
     };
 
@@ -3415,6 +3867,7 @@ function runJavaScan(
     return ctx.findings;
   } catch (err) {
     console.error(`[astTaintJava] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
     return [];
   }
 }

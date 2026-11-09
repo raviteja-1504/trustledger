@@ -77,11 +77,18 @@ describe("new sinks", () => {
 });
 
 describe("guards", () => {
-  it("'..' / quote absence proves safety only for the injection that needs it", () => {
-    expect(ids(view(`    if '../' in param:\n        return 'no'\n    return open(param).read()`), "path-traversal")).toEqual([]);
-    expect(ids(view(`    if "'" in param:\n        return 'no'\n    return root.xpath(f"/E[@id='{param}']")`), "xpath-injection")).toEqual([]);
-    // a quote check says nothing about paths
-    expect(ids(view(`    if "'" in param:\n        return 'no'\n    return open(param).read()`), "path-traversal")).toEqual([6]);
+  it("a missing '..' or quote is not proof of safety: absolute paths, and numeric/identifier positions, remain open", () => {
+    // an absolute path (/etc/passwd) needs no '..'
+    expect(ids(view(`    if '../' in param:
+        return 'no'
+    return open(param).read()`), "path-traversal")).toEqual([6]);
+    // the absence of a quote proves safety only inside a quoted literal, and a guard does not know the context
+    expect(ids(view(`    if "'" in param:
+        return 'no'
+    return root.xpath(f"/E[@id='{param}']")`), "xpath-injection")).toEqual([6]);
+    expect(ids(view(`    if "'" in param:
+        return 'no'
+    return open(param).read()`), "path-traversal")).toEqual([6]);
   });
 
   it("the quoted-literal check makes eval() safe; any one of its three parts alone does not", () => {

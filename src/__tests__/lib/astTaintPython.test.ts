@@ -176,9 +176,10 @@ describe("Real AST-based taint engine — FastAPI parameter-injection source sty
   it("treats every parameter of a route-decorated handler as tainted at entry, with no request.* prefix", () => {
     const content = `
 @app.get("/users/{user_id}")
-def get_user(user_id: int):
+def get_user(user_id: str):
     cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
 `;
+    // (an `int` parameter is validated by FastAPI before the handler runs: see astTaintPythonAccuracy.test.ts)
     const findings = scanAstTaintPython(content, "app.py");
     expect(findings.some(f => f.id === "sql-injection")).toBe(true);
   });

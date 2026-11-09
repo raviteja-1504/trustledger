@@ -182,10 +182,11 @@ describe("new sinks", () => {
     expect(entry(cls(`public static boolean q(String p, String i) { return Pattern.compile(p).matcher(i).find(); }`), "redos")).toBe(true);
     expect(entry(cls(`public static boolean q(String i) { return Pattern.compile("^a+$").matcher(i).find(); }`), "redos")).toBe(false);
   });
-  it("reflection and dynamic class loading", () => {
-    expect(entry(cls(`public static Class<?> q(String n) throws Exception { return Class.forName(n); }`), "eval-exec")).toBe(true);
+  it("reflection and dynamic class loading: the lookup alone runs nothing, instantiating / invoking / writing does", () => {
+    expect(entry(cls(`public static Class<?> q(String n) throws Exception { return Class.forName(n); }`), "eval-exec")).toBe(false);
+    expect(entry(cls(`public static Object q(String n) throws Exception { return Class.forName(n).getDeclaredConstructor().newInstance(); }`), "eval-exec")).toBe(true);
     expect(entry(cls(`public static Object q(Object o, String f, String v) throws Exception { o.getClass().getField(f).set(o, v); return o; }`), "mass-assignment")).toBe(true);
-    expect(entry(cls(`public static Class<?> q() throws Exception { return Class.forName("java.lang.String"); }`), "eval-exec")).toBe(false);
+    expect(entry(cls(`public static Object q() throws Exception { return Class.forName("java.lang.String").getDeclaredConstructor().newInstance(); }`), "eval-exec")).toBe(false);
   });
   it("script engines and SpEL", () => {
     expect(entry(cls(`public static Object q(javax.script.ScriptEngine e, String x) throws Exception { return e.eval(x); }`), "eval-exec")).toBe(true);

@@ -33,7 +33,7 @@ import {
 } from "./astTaint";
 import type { ParamShape } from "./astTaint";
 import { stringTextSpans } from "./stringSpans";
-import { resolveImportPath, resolvePythonImportPath } from "./semanticGraph";
+import { resolveImportPath, resolvePythonImportPath, setImportAliasRules, readImportAliasRules } from "./semanticGraph";
 import { resolveCrossFile } from "./taint/crossFile";
 import type { FileGraph, CrossFileShape } from "./taint/crossFile";
 import { assignFingerprints } from "./findingIdentity";
@@ -48,6 +48,7 @@ import type { ReachFile } from "./crossFileReachability";
 import { computeFileCacheKey, cloneAnalysis, sha256Hex, SCAN_CACHE_VERSION } from "./incrementalCache";
 import type { CachedFileResult } from "./incrementalCache";
 import { computeCacheValidity, computeModuleCacheContentHash, mapToEntries, MODULE_CACHE_VERSION } from "./moduleSummaryCache";
+import { engineFailureSince } from "./taint/engineFailures";
 import { summarizeHealth, slowestFiles, type CoverageGap, type ScanHealth, type ScanTelemetry } from "./scanHealth";
 import type { CachedImportEdge, CachedModuleSummary, CachedReexportEdge, CallEdgeLike } from "./moduleSummaryCache";
 import type { TraceStep, ParamSinkFact, StoredProvenanceIO } from "./taint/taintCore";
@@ -75,7 +76,7 @@ import {
 } from "./astTaintCSharp";
 import type { Node as CSharpSyntaxNode } from "web-tree-sitter";
 import {
-  parsePhpSourceSync, isPhpParserReady, scanAstTaintPHP, computePhpFunctionSinkFacts, staticIncludesPHP,
+  parsePhpSourceSync, isPhpParserReady, scanAstTaintPHP, computePhpFunctionSinkFacts, staticIncludesPHP, phpClassLinks,
   findEnclosingFunctionNamePHP, findNodeAtRowPHP, astTaintPHPSeverity, astTaintPHPLabel,
 } from "./astTaintPHP";
 import type { Node as PhpSyntaxNode } from "web-tree-sitter";
@@ -7834,8 +7835,9 @@ function findAstTaintGoFindings(
     line: f.line,
     detail: f.entryPointSeeded
       ? `${f.detail} [input assumed untrusted: string parameter of a function with no caller in this file]`
-      : f.detail,
-    confidence: f.entryPointSeeded ? 70 : 95,
+      : f.ambiguousCall ? `${f.detail} [call path not established: ${f.ambiguousCall}]` : f.detail,
+    // confidence is how sure the PATH is (not how severe the weakness is): an assumed source or an unresolved callee is less sure
+    confidence: f.entryPointSeeded ? 70 : f.ambiguousCall ? 75 : 95,
     sourceExpr: f.sourceExpr, sinkExpr: f.sinkExpr, trace: f.trace,
     sourceAssumed: f.entryPointSeeded || undefined,
   }));
@@ -8306,6 +8308,12 @@ export function analyzeFile(
     const k = `${i.id}:${i.line ?? ""}`;
     const existing = byKey.get(k);
     if (!existing) { byKey.set(k, i); continue; }
+    // a second DATA-FLOW finding of the same id on this line with a different source or sink is another flow, not a
+    // duplicate: the record keeps one slot per id+line, so the extra flow is named in its detail instead of dropped
+    if (i.sourceExpr && existing.sourceExpr && (i.sourceExpr !== existing.sourceExpr || i.sinkExpr !== existing.sinkExpr)
+        && !(existing.detail ?? "").includes(`'${i.sourceExpr}'`)) {
+      existing.detail = `${existing.detail ?? ""} [same line, also: '${i.sourceExpr}' → ${i.sinkExpr ?? "sink"}]`;
+    }
     if (i.label !== existing.label) {
       existing.supportingDetectors = existing.supportingDetectors ?? [];
       if (!existing.supportingDetectors.includes(i.label)) existing.supportingDetectors.push(i.label);
@@ -9138,6 +9146,24 @@ function phpIncludeClosure(trees: ReadonlyMap<string, PhpSyntaxNode>): Map<strin
     }
     direct.set(p, [...targets]);
   }
+  // Namespaced code is linked by class, not by include (Composer autoloading): a file that imports or names a class
+  // (`use App\Danger\Repo;`, `new Repo()` in the same namespace) sees the file that DECLARES that fully qualified name.
+  // A name declared by more than one file is ambiguous and links to none rather than to a guess.
+  const declaredBy = new Map<string, string[]>();
+  const classLinks = new Map<string, { declared: string[]; referenced: string[] }>();
+  for (const [p, root] of trees) {
+    const l = phpClassLinks(root);
+    classLinks.set(p, l);
+    for (const d of l.declared) declaredBy.set(d, [...(declaredBy.get(d) ?? []), p]);
+  }
+  for (const [p, l] of classLinks) {
+    const targets = new Set(direct.get(p) ?? []);
+    for (const ref of l.referenced) {
+      const files = declaredBy.get(ref);
+      if (files?.length === 1 && files[0] !== p) targets.add(files[0]);
+    }
+    if (targets.size) direct.set(p, [...targets]);
+  }
   const closure = new Map<string, string[]>();
   for (const p of paths) {
     const seen = new Set<string>();
@@ -9197,6 +9223,8 @@ export function runScan(input: ScanInput): ScanOutput {
     const content = f.content == null ? f.content : tameLongRuns(f.content);
     return content === f.content ? f : { ...f, content };
   });
+  // tsconfig/jsconfig `paths` of THIS batch drive import resolution (reset every scan, so none leaks between scans)
+  setImportAliasRules(readImportAliasRules(allFiles));
   const contentHashByPath = new Map(allFiles.map(f => [f.path, sha256Hex(f.content ?? "")]));
   // Namespaces BOTH cache round-trips (file_cache below, and moduleSummaryCache's own version+namespace
   // fold) -- declared once, this early, so a deploy boundary invalidates everything consistently rather
@@ -9311,7 +9339,7 @@ export function runScan(input: ScanInput): ScanOutput {
   // re-exports (`export { x } from`, `export * from`), resolved as a bounded multi-hop fixed point --
   // see taint/crossFile.ts's own docblock for the algorithm and what's explicitly out of scope
   // (a cross-file callee-body sink re-walk; same-file-only for every other language).
-  const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths));
+  const jsBridge = resolveCrossFile(jsFileGraphs, (from, spec) => resolveImportPath(from, spec, allScanPaths), { qualifiedNamespaces: true });
   const crossFilePropagatingByFile = jsBridge.propagatingByFile as Map<string, Map<string, { shapes: ParamShape[]; fromModule: string; resolvedPath: string; sinks: ParamSinkFact[] }>>;
 
   // Cross-file REACHABILITY bridge (multi-hop, JS/TS only) -- file path -> names IN THAT FILE that are reachable
@@ -9712,7 +9740,8 @@ export function runScan(input: ScanInput): ScanOutput {
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
     // file receive those indicators a second time, since the post-passes re-run over the full set each scan.
-    file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
+    // (a file whose parse or analysis FAILED is not cached: its empty result must not be replayed as a clean one)
+    if (!engineFailureSince(f.path, start)) file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
     fileTimings.set(f.path, Date.now() - t0);
     return analysis;
   });
@@ -10029,6 +10058,8 @@ export function runScan(input: ScanInput): ScanOutput {
   const gaps: CoverageGap[] = [
     ...allFiles.flatMap(f => { const g = coverageGapFor(f.path, f.content); return g ? [g] : []; }),
     ...(input.missing_content_paths ?? []).map(p => ({ file: p, language: detectLanguage(p), reason: "content-unavailable" as const })),
+    // an engine that threw returns no findings, which would read as clean: report the file instead
+    ...allFiles.flatMap(f => { const k = engineFailureSince(f.path, start); return k ? [{ file: f.path, language: detectLanguage(f.path), reason: k }] : []; }),
   ];
   const end = Date.now();
   const health = summarizeHealth(gaps, CURRENT_ENGINE_VERSION);

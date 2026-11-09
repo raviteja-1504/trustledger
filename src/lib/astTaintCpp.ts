@@ -34,6 +34,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -89,6 +90,12 @@ export function astTaintCppLabel(id: AstTaintCppId): string { return LABEL[id]; 
 
 let langPromise: Promise<LanguageT> | null = null;
 let parserPool: ParserT | null = null;
+let lastCppEngineError: string | null = null;
+
+/** Engine health for telemetry: ready / parser_unavailable (init failed or unfinished), and the last failure. */
+export function getCppEngineStatus(): { status: "ready" | "parser_unavailable"; lastError: string | null } {
+  return { status: parserPool ? "ready" : "parser_unavailable", lastError: lastCppEngineError };
+}
 
 function initCppParser(): Promise<LanguageT> {
   if (!langPromise) {
@@ -108,6 +115,8 @@ function initCppParser(): Promise<LanguageT> {
       return lang;
     })().catch(err => {
       console.error("[astTaintCpp] WASM init failed -- C/C++ AST scanning disabled, regex detectors unaffected:", err);
+      langPromise = null;   // a rejected init must not be cached forever: the next call retries
+      lastCppEngineError = String((err as Error)?.message ?? err);
       throw err;
     });
   }
@@ -127,6 +136,7 @@ export function parseCppSourceSync(content: string, filePath: string): SyntaxNod
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintCpp", filePath);
   } catch (err) {
     console.error(`[astTaintCpp] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -340,9 +350,61 @@ function refPeers(name: string, ctx: EngineCtx): string[] {
 
 const KIND_KEY = (kind: string, name: string) => `!${kind}:${name}`;
 
+/**
+ * The pointers a condition genuinely tests against null: `p`, `!p`, `p == NULL` / `p != nullptr` / `p == 0` (either side),
+ * through `&&` / `||` / parentheses, and an assignment in the test (`(p = malloc(n)) == NULL`). `p == other`, a call that
+ * merely mentions `p`, or a comparison of something else prove nothing about `p`.
+ */
+/** Does a #if / #ifdef chain end in a plain #else (so one arm is always compiled)? */
+function hasFinalElse(node: SyntaxNode): boolean {
+  let cur: SyntaxNode | null = node;
+  while (cur) {
+    const alt: SyntaxNode | null = field(cur, "alternative");
+    if (!alt) return false;
+    if (alt.type === "preproc_else") return true;
+    cur = alt;
+  }
+  return false;
+}
+
+function nullTestedNames(cond: SyntaxNode): string[] {
+  const out: string[] = [];
+  const nullish = (n: SyntaxNode | null) => !!n && (n.type === "null" || n.type === "nullptr" || n.text === "NULL" || n.text === "nullptr" || (n.type === "number_literal" && /^0[uUlL]*$/.test(n.text)));
+  const unwrap = (n: SyntaxNode | null): SyntaxNode | null => {
+    let cur = n;
+    while (cur && (cur.type === "parenthesized_expression" || cur.type === "condition_clause")) cur = named(cur)[0] ?? null;
+    return cur;
+  };
+  const subject = (n: SyntaxNode | null): string | null => {
+    const u = unwrap(n);
+    if (!u) return null;
+    if (u.type === "identifier") return u.text;
+    if (u.type === "assignment_expression") { const l = unwrap(field(u, "left")); return l?.type === "identifier" ? l.text : null; }
+    return null;
+  };
+  const visit = (n: SyntaxNode | null) => {
+    const u = unwrap(n);
+    if (!u) return;
+    if (u.type === "identifier" || u.type === "assignment_expression") { const nm = subject(u); if (nm) out.push(nm); return; }
+    if (u.type === "unary_expression" && u.text.startsWith("!")) { const nm = subject(field(u, "argument") ?? named(u)[0] ?? null); if (nm) out.push(nm); return; }
+    if (u.type === "binary_expression") {
+      const op = (u.children.find(c => c && !c.isNamed && /^(?:&&|\|\||==|!=)$/.test(c.type))?.type) ?? "";
+      const l = field(u, "left"), r = field(u, "right");
+      if (op === "&&" || op === "||") { visit(l); visit(r); return; }
+      if (op === "==" || op === "!=") {
+        if (nullish(unwrap(r))) { const nm = subject(l); if (nm) out.push(nm); }
+        else if (nullish(unwrap(l))) { const nm = subject(r); if (nm) out.push(nm); }
+      }
+    }
+  };
+  visit(cond);
+  return out;
+}
+
 function emit(ctx: EngineCtx, id: AstTaintCppId, node: SyntaxNode, sourceExpr: string, sinkExpr: string, detail?: string) {
   const line = lineOf(node);
-  const key = `${id}:${line}`;
+  // one finding per sink node: two calls of one class on a line are two findings (the scanner folds them into one record per id+line)
+  const key = `${id}:${line}:${node.startIndex}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
   ctx.findings.push({
@@ -779,7 +841,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   /** Names a condition tests (`if (p == NULL)`, `if (!p)`, `if (p)`): no longer an unchecked allocation. */
   const markChecked = (cond: SyntaxNode | null, env: Env) => {
     if (!cond) return;
-    for (const id of findAllNodes(cond, "identifier")) env.delete(KIND_KEY("unchecked", id.text));
+    for (const nm of nullTestedNames(cond)) env.delete(KIND_KEY("unchecked", nm));
   };
 
   // ── calls ──
@@ -1297,7 +1359,24 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   const walk = (node: SyntaxNode | null, env: Env): boolean => {
     if (!node) return false;
     switch (node.type) {
-      case "compound_statement": case "translation_unit": case "preproc_if": case "preproc_ifdef": case "preproc_else": case "preproc_elif":
+      case "preproc_if": case "preproc_ifdef": {
+        // The arms of #if / #ifdef / #else are alternative compilations, never one after the other: each is walked from the
+        // state before the directive and the results are joined (a later arm no longer overwrites an earlier one).
+        const ownStmts = (n: SyntaxNode): SyntaxNode[] => {
+          const skip = new Set([field(n, "name")?.id, field(n, "condition")?.id, field(n, "alternative")?.id]);
+          return named(n).filter(c => !skip.has(c.id) && !/comment$/.test(c.type));
+        };
+        const branches: Branch[] = [];
+        let cur: SyntaxNode | null = node;
+        while (cur) {
+          const stmts = ownStmts(cur);
+          branches.push({ body: (e) => walkStmts(stmts, e) });
+          cur = field(cur, "alternative");
+        }
+        if (!hasFinalElse(node)) branches.push({ body: () => false });   // no #else: the arm may not be compiled
+        return walkIfChain(env, branches);
+      }
+      case "compound_statement": case "translation_unit": case "preproc_else": case "preproc_elif":
       case "declaration_list": case "labeled_statement":
         return walkStmts(named(node), env);
       case "declaration": declare(node, env); return false;
@@ -1764,6 +1843,8 @@ export function scanAstTaintCpp(
     return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`) && SEEDED_IDS.has(f.id)).map(f => ({ ...f, entryPointSeeded: true }))];
   } catch (err) {
     console.error(`[astTaintCpp] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+    lastCppEngineError = `analysis_failed: ${filePath}: ${String((err as Error)?.message ?? err)}`;   // visible via getCppEngineStatus()
     return [];
   }
 }
@@ -1819,6 +1900,7 @@ export function computeCppFnSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintCpp] threw computing fn sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }

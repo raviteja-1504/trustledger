@@ -46,6 +46,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -179,6 +180,7 @@ export function parsePythonSourceSync(content: string, filePath: string): Syntax
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintPython", filePath);
   } catch (err) {
     console.error(`[astTaintPython] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -254,15 +256,65 @@ function paramNameOf(p: SyntaxNode): string | null {
   return first?.type === "identifier" ? first.text : null;
 }
 
-export interface ParamShape { name: string; index: number; isRest: boolean; mask?: number }
+/** How a parameter receives its argument: by position only, by position or name, by name only, or as the rest of either. */
+export type ParamKind = "posonly" | "pos" | "kwonly" | "varpos" | "varkw";
 
-/** Which of `args` correspond to `shape`: exactly one arg for a fixed
- * param, every arg from `shape.index` onward for a *args/**kwargs param
- * (kwargs is a deliberate over-approximation -- real name-based keyword
- * matching isn't tracked, this never under-taints, consistent with this
- * engine's recall-biased philosophy elsewhere). */
-function argsForShape<A>(args: readonly A[], shape: ParamShape): A[] {
-  return shape.isRest ? args.slice(shape.index) : (args[shape.index] !== undefined ? [args[shape.index]] : []);
+export interface ParamShape {
+  name: string; index: number; isRest: boolean; mask?: number;
+  /** Absent on summaries cached before argument binding existed: those bind positionally, as they always did. */
+  kind?: ParamKind;
+  /** Every named parameter of the function -- what a `**kwargs` parameter does NOT collect. */
+  names?: string[];
+}
+
+/** What the argument binder needs to know about a parameter (a ParamShape, or the same facts carried by a sink fact). */
+export interface BindShape { name?: string; index: number; isRest: boolean; kind?: ParamKind; names?: string[] }
+
+/**
+ * The call-site expressions bound to one parameter, following Python's own rules: positional arguments by order,
+ * keyword arguments by name (in any order), `*xs` / `**kw` at the call as possibly supplying anything not given
+ * explicitly, positional-only parameters never by name, keyword-only parameters never by position, `*args` the
+ * positional surplus, `**kwargs` the keywords no named parameter takes. A parameter the call does not supply binds
+ * nothing: its default is the callee's own constant, not caller-controlled. \`shift\` skips the implicit self / cls.
+ */
+function boundArgsPy(args: readonly SyntaxNode[], shape: BindShape, shift = 0): SyntaxNode[] {
+  const kind: ParamKind = shape.kind ?? (shape.isRest ? "varpos" : "pos");
+  const plain: SyntaxNode[] = [];
+  const keywords = new Map<string, SyntaxNode>();
+  const stars: SyntaxNode[] = [];
+  const doubleStars: SyntaxNode[] = [];
+  for (const a of args) {
+    if (a.type === "keyword_argument") {
+      const name = a.childForFieldName("name")?.text, value = a.childForFieldName("value");
+      if (name && value) keywords.set(name, value);
+    } else if (a.type === "list_splat") { const v = a.namedChildren[0]; if (v) stars.push(v); }
+    else if (a.type === "dictionary_splat") { const v = a.namedChildren[0]; if (v) doubleStars.push(v); }
+    else if (a.type !== "comment") plain.push(a);
+  }
+  const pos = shape.index - shift;
+  // legacy summaries (no kind) keep the old positional-only meaning
+  if (shape.kind === undefined) return kind === "varpos" ? [...plain.slice(Math.max(pos, 0)), ...stars] : plain[pos] !== undefined ? [plain[pos]] : [];
+  switch (kind) {
+    case "varpos": return [...plain.slice(Math.max(pos, 0)), ...stars];
+    case "varkw": {
+      const named = new Set(shape.names ?? []);
+      return [...[...keywords].filter(([k]) => !named.has(k)).map(([, v]) => v), ...doubleStars];
+    }
+    case "kwonly": { const v = shape.name ? keywords.get(shape.name) : undefined; return v ? [v] : doubleStars; }
+    case "posonly": return pos < 0 ? [] : plain[pos] !== undefined ? [plain[pos]] : pos >= plain.length ? stars : [];
+    default: {
+      if (pos < 0) return [];                       // the implicit self / cls
+      if (plain[pos] !== undefined) return [plain[pos]];
+      const v = shape.name ? keywords.get(shape.name) : undefined;
+      if (v) return [v];
+      return [...(pos >= plain.length ? stars : []), ...doubleStars];
+    }
+  }
+}
+
+/** Which of \`args\` correspond to \`shape\` (see boundArgsPy). */
+function argsForShape(args: readonly SyntaxNode[], shape: ParamShape, shift = 0): SyntaxNode[] {
+  return boundArgsPy(args, shape, shift);
 }
 
 function paramShapesOfPy(fn: SyntaxNode): ParamShape[] {
@@ -270,14 +322,21 @@ function paramShapesOfPy(fn: SyntaxNode): ParamShape[] {
   if (!params) return [];
   const shapes: ParamShape[] = [];
   let index = 0;
+  let afterStar = false;
   for (const p of params.namedChildren) {
     if (!p) continue;
+    if (p.type === "positional_separator") { for (const s of shapes) s.kind = "posonly"; continue; }
+    if (p.type === "keyword_separator") { afterStar = true; continue; }
     const name = paramNameOf(p);
     if (!name) continue;
     const isRest = p.type === "list_splat_pattern" || p.type === "dictionary_splat_pattern";
-    shapes.push({ name, index, isRest });
+    const kind: ParamKind = p.type === "list_splat_pattern" ? "varpos" : p.type === "dictionary_splat_pattern" ? "varkw" : afterStar ? "kwonly" : "pos";
+    if (p.type === "list_splat_pattern") afterStar = true;
+    shapes.push({ name, index, isRest, kind });
     index++;
   }
+  const names = shapes.map(s => s.name);
+  for (const s of shapes) s.names = names;
   return shapes;
 }
 
@@ -537,6 +596,7 @@ export function computeExportTaintSummaryPy(
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing export summary for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return summary;
 }
@@ -584,6 +644,7 @@ export function computeExportSinkSummaryPy(
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing export sink summary for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return summary;
 }
@@ -667,8 +728,11 @@ const PATH_FUNCS_PY = new Set([
   "shutil.copy", "shutil.copyfile", "shutil.copy2", "shutil.move", "shutil.rmtree", "shutil.copytree",
   // open() under another name: codecs.open / io.open / the low-level os.open
   "codecs.open", "io.open", "os.open",
+  // directory walks and the rest of the os file API
+  "os.scandir", "os.walk", "os.replace", "os.removedirs", "os.lstat", "os.readlink", "os.truncate", "os.symlink", "os.link",
+  "shutil.make_archive", "shutil.unpack_archive", "shutil.chown", "shutil.disk_usage",
   // file-existence / metadata probes: an attacker-chosen path tells them what exists outside the intended directory
-  "os.path.exists", "os.path.isfile", "os.path.isdir", "os.path.getsize", "os.stat",
+  "os.path.exists", "os.path.isfile", "os.path.isdir", "os.path.islink", "os.path.getsize", "os.path.getmtime", "os.stat",
 ]);
 // pathlib.Path methods that touch the file system (the receiver is the path)
 const PATH_OBJECT_METHODS_PY = new Set([
@@ -747,6 +811,24 @@ function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAlias
 
 /** The sink a call to `fnNode` with `args` is (see matchSinkPy). */
 function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[], importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
+  // p.read_text() / p.exists() / ... on a pathlib path: the path is the receiver, which may be an expression
+  // (`(Path(base) / name).read_text()`) with no dotted callee text at all
+  if (fnNode.type === "attribute" && PATH_OBJECT_METHODS_PY.has(attributeParts(fnNode).attribute ?? "")) {
+    const recv = attributeParts(fnNode).object;
+    if (recv && isPathObjectPy(recv)) return { id: "path-traversal", sinkExpr: calleeTextPy(fnNode) ?? `Path.${attributeParts(fnNode).attribute}`, args: [recv] };
+  }
+  // Archive extraction writes members under a destination chosen by the caller (and member names chosen by the archive)
+  if (fnNode.type === "attribute") {
+    const m = attributeParts(fnNode).attribute;
+    const recvText = attributeParts(fnNode).object?.text ?? "";
+    if ((m === "extractall" || m === "extract") && /zip|tar|archive|bundle/i.test(recvText)) {
+      const pos = args.filter(a => a.type !== "keyword_argument");
+      const dest = m === "extractall" ? (pos[0] ?? keywordArgPy(args, ["path"])) : (pos[1] ?? keywordArgPy(args, ["path"]));
+      const member = m === "extract" ? (pos[0] ?? keywordArgPy(args, ["member"])) : undefined;
+      const targets = [dest, member].filter((n): n is SyntaxNode => !!n);
+      if (targets.length) return { id: "path-traversal", sinkExpr: `${recvText.slice(0, 30)}.${m}`, args: targets };
+    }
+  }
   const text = calleeTextPy(fnNode);
   if (!text) return null;
   const parts = text.split(".");
@@ -803,18 +885,9 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     const target = [url, model.args.extraKeywords ? keywordArgPy(args, model.args.extraKeywords) : null].filter((n): n is SyntaxNode => !!n);
     return target.length ? { id: model.rule as AstTaintPyId, sinkExpr: text, args: target } : null;
   }
-  if (text === "os.path.join" || (resolvedModule === "os.path" && tail === "join")) {
-    return { id: "path-traversal", sinkExpr: text, args: positional };
-  }
-  // p.read_text() / p.exists() / ... on a pathlib path: the path is the receiver (`p = base / name`)
-  if (fnNode.type === "attribute" && PATH_OBJECT_METHODS_PY.has(tail)) {
-    const recv = attributeParts(fnNode).object;
-    if (recv && isPathObjectPy(recv)) return { id: "path-traversal", sinkExpr: text, args: [recv] };
-  }
-  // pathlib.Path(x): the path a later p.open()/read_text()/write_text()/unlink() acts on (like Java's new File(x))
-  if ((text === "pathlib.Path" || text === "pathlib.PurePath" || ((text === "Path" || text === "PurePath") && resolvedModule === "pathlib")) && first) {
-    return { id: "path-traversal", sinkExpr: text, args: positional };
-  }
+  // os.path.join / os.path.normpath / pathlib.Path(x) / base / x only BUILD a path: they are transformations (taint
+  // passes through them, see PY_PASSTHROUGH) and the filesystem operation that finally uses the result is the sink.
+  // Archive extraction writes members under a destination chosen by the caller (and member names chosen by the archive)
   if (text === "open" || PATH_FUNCS_PY.has(text) || (PATH_FUNCS_PY.has(tail) && (resolvedModule === "os" || resolvedModule === "shutil" || tail === "send_file" || tail === "FileResponse"))) {
     // The path(s) only -- not the mode, permissions, mimetype or flags. rename/copy/move take two paths.
     const paths = TWO_PATH_FUNCS_PY.has(tail) ? positional.slice(0, 2) : positional.slice(0, 1);
@@ -938,7 +1011,49 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
 // ── Taint environment / propagation ─────────────────────────────────────────
 
 type Env = TaintEnv;
-interface LocalFn { paramShapes: ParamShape[]; body: SyntaxNode }
+/**
+ * One function definition and the SYMBOL it is. A module-level function is keyed by its name, a method by
+ * `Class.method` (always), a nested function by its name only while that name is unambiguous. A method also
+ * gets a bare-name alias, but only when no other function in the file has that name, so `obj.run()` can never
+ * resolve to a module function `run` or to another class's `run`.
+ */
+interface LocalFn {
+  paramShapes: ParamShape[]; body: SyntaxNode;
+  kind?: "function" | "method" | "nested";
+  cls?: string;
+  /** `@staticmethod` / `@classmethod`: no instance is bound / the class is. */
+  deco?: "static" | "class";
+}
+
+const namespaceLocalsCache = new WeakMap<SyntaxNode, Set<string>>();
+/** Local names bound to a whole imported module (`import pkg.mod as m`, `from pkg import mod`). */
+function namespaceLocalsOfPy(root: SyntaxNode): Set<string> {
+  let s = namespaceLocalsCache.get(root);
+  if (!s) { s = new Set(namespaceLocalsPy(root)); namespaceLocalsCache.set(root, s); }
+  return s;
+}
+
+/**
+ * The `localFns` key a call resolves to, or null when the callee is not unambiguously a function of this file.
+ * A bare `f(x)` is a module-level (or unambiguous nested) function, never a method; `self.m(x)` and
+ * `Class(...).m(x)` are methods of that class; `var.m(x)` uses the variable's known class; `Class.m(x)` names the
+ * class directly; any other `obj.m(x)` resolves only if `m` is a method name used by exactly one definition.
+ */
+function resolveLocalCalleePy(fn: SyntaxNode | null, localFns: ReadonlyMap<string, LocalFn>): string | null {
+  if (!fn) return null;
+  if (fn.type === "identifier") {
+    const e = localFns.get(fn.text);
+    return e && e.kind !== "method" ? fn.text : null;
+  }
+  if (fn.type !== "attribute") return null;
+  const mk = methodKeyPy(fn, localFns);
+  if (mk) return mk;
+  for (const k of qualifiedCallKeysPy(fn)) if (localFns.has(k)) return k;
+  const attribute = attributeParts(fn).attribute;
+  if (!attribute || PY_BUILTIN_METHOD_NAMES.has(attribute)) return null;
+  const e = localFns.get(attribute);
+  return e && e.kind === "method" ? attribute : null;
+}
 // fn name -> (param index -> sink classes that survive to its return value)
 type PropagatingPy = Map<string, Map<number, number>>;
 
@@ -1013,9 +1128,14 @@ const PY_BUILTIN_METHOD_NAMES = new Set([
   "startswith", "endswith", "copy", "clear", "insert", "remove", "sort", "index", "count", "close", "open",
 ]);
 /** Parameter positions to skip when a method is called through an instance (`obj.m(x)` -> x binds after `self`/`cls`). */
-function selfShift(callee: LocalFn | undefined, viaAttribute: boolean): number {
+function selfShift(callee: LocalFn | undefined, viaAttribute: boolean, receiver?: SyntaxNode | null): number {
   const first = callee?.paramShapes[0]?.name;
-  return viaAttribute && (first === "self" || first === "cls") ? 1 : 0;
+  if (!viaAttribute || callee?.deco === "static") return 0;
+  if (first === "cls") return 1;
+  if (first !== "self") return 0;
+  // `Class.method(obj, x)`: called through the class itself, so self is passed explicitly
+  if (receiver?.type === "identifier" && PY_CLASS_NAME_RE.test(receiver.text) && callee?.kind === "method") return 0;
+  return 1;
 }
 // ... and stores that hand the value back later: ConfigParser.set(section, key, v) -> .get(), StringIO/BytesIO
 // .write(v) -> .getvalue()/.read(), a cache's .set(k, v) -> .get(k).
@@ -1728,34 +1848,36 @@ function makeTaintMaskPy(
     // Only the arguments at the propagating indices are checked, and only
     // the classes that survive the callee's own body count. Also resolves
     // `obj.method(x)` / `self.method(x)` to a local class method by name.
-    const fnName = fn?.type === "identifier" ? fn.text
-      : methodKeyPy(fn, localFns)
-        ?? (attr?.attribute && (attr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(attr.attribute)) ? attr.attribute : null);
-    if (fnName) {
-      const propIdx = propagating.get(fnName);
+    // The callee is a SYMBOL, not a name: a module function, a method of a particular class, or an imported name.
+    const localKey = resolveLocalCalleePy(fn, localFns);
+    const callee = localKey ? localFns.get(localKey) : undefined;
+    if (localKey && callee) {
+      const propIdx = propagating.get(localKey);
       if (propIdx) {
-        const callee = localFns.get(fnName);
-        const shapes = callee?.paramShapes ?? [];
-        const shift = selfShift(callee, fn?.type === "attribute");
+        const shapes = callee.paramShapes;
+        const shift = selfShift(callee, fn?.type === "attribute", attr?.object);
         let m = 0;
         for (const [i, surviving] of propIdx) {
           // index -1: what the helper returns whatever it is passed (it reads the request itself)
           if (i === -1) { m |= surviving; continue; }
           const shape = shapes[i];
           if (!shape || shape.index < shift) continue;
-          for (const a of argsForShape(args, { ...shape, index: shape.index - shift })) m |= taintMask(a, env) & surviving;
+          for (const a of argsForShape(args, shape, shift)) m |= taintMask(a, env) & surviving;
         }
         if (m) return m;
-      } else {
-        // A cross-file import has no LocalFn entry (there is no same-file body \`localFns\` could have
-        // indexed), so its shapes -- each already carrying its own surviving mask -- live in
-        // crossFileShapes instead of propagating/localFns.
-        const cfShapes = crossFileShapes?.get(fnName);
-        if (cfShapes) {
-          let m = 0;
-          for (const shape of cfShapes) for (const a of argsForShape(args, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
-          if (m) return m;
-        }
+      }
+    } else {
+      // A cross-file import has no LocalFn entry (there is no same-file body `localFns` could have
+      // indexed), so its shapes -- each already carrying its own surviving mask -- live in
+      // crossFileShapes instead of propagating/localFns. Only a bare imported name, or a member of an
+      // imported module, can be one: `obj.run(x)` on some other object is not the import's `run`.
+      const importedName = fn?.type === "identifier" ? fn.text
+        : attr?.object?.type === "identifier" && attr.attribute && namespaceLocalsOfPy(pyRootOf(fn!)).has(attr.object.text) ? attr.attribute : null;
+      const cfShapes = importedName && !localFns.has(importedName) ? crossFileShapes?.get(importedName) : undefined;
+      if (cfShapes) {
+        let m = 0;
+        for (const shape of cfShapes) for (const a of argsForShape(args, shape)) m |= taintMask(a, env) & (shape.mask ?? ALL);
+        if (m) return m;
       }
     }
     // Calling a value: an IIFE / `f()()` / a closure held in a variable returns what it captured;
@@ -1857,16 +1979,13 @@ function stringLiteralContentPy(s: SyntaxNode): string {
 }
 
 /**
- * The classes a "this sequence is not in the value" check makes safe: without `..` a path can't climb out of its
- * directory; without a quote the value can't close a quoted SQL/XPath string literal; without `<` it can't open a
- * tag. Null for any other substring -- it proves nothing.
+ * What a "this sequence is not in the value" check proves. Nothing, on its own: the absence of `..` leaves absolute
+ * paths (`/etc/passwd`, `C:\x`) open; the absence of a quote leaves numeric and identifier positions in SQL/XPath
+ * open; the absence of `<` leaves attribute, script, style and URL contexts open. Each of those proofs holds in ONE
+ * context, and a guard does not know which context the value will land in, so the taint is kept and the sink decides.
  */
-function substringGuardClearsPy(sub: string): number | null {
-  let clears = 0;
-  if (sub.includes("..")) clears |= classOf("path-traversal");
-  if (sub.includes("'") || sub.includes('"')) clears |= classOf("sql-injection") | classOf("xpath-injection");
-  if (sub.includes("<")) clears |= classOf("xss");
-  return clears || null;
+function substringGuardClearsPy(_sub: string): number | null {
+  return null;
 }
 
 /**
@@ -1913,7 +2032,60 @@ function quotedLiteralGuardPy(cond: SyntaxNode): Guard | null {
  * float/bool), and x.isdigit()/isnumeric()/isdecimal(). Regex matches,
  * startswith and custom validator calls are deliberately NOT recognized.
  */
+const CANONICAL_PATH_CALLS_PY = /^(?:(?:os\.)?path\.(?:realpath|abspath|normpath)|realpath|abspath|normpath)$/;
+
+/** Is `id` a local assigned (before `at`) from a canonicalising call -- `os.path.realpath(...)`, `abspath`, `normpath`, `Path(...).resolve()`? */
+function isCanonicalPathVarPy(id: SyntaxNode | null, at: SyntaxNode): boolean {
+  if (!id || id.type !== "identifier") return false;
+  let scope: SyntaxNode | null = at.parent;
+  while (scope && scope.type !== "function_definition" && scope.type !== "module") scope = scope.parent;
+  const rhs = scope ? resolveRecentAssignmentPy(scope, id.text, at) : null;
+  if (!rhs) return false;
+  const call = rhs.type === "await" ? rhs.namedChildren[0] : rhs;
+  if (call?.type !== "call") return false;
+  const fn = call.childForFieldName("function");
+  const text = fn ? calleeTextPy(fn) : null;
+  if (text && CANONICAL_PATH_CALLS_PY.test(text)) return true;
+  return fn?.type === "attribute" && attributeParts(fn).attribute === "resolve";
+}
+
+/** Containment of a CANONICAL path under a base: `full.startswith(base)`, `full.is_relative_to(base)`, `os.path.commonpath([base, full]) == base`. */
+function pathContainmentGuardPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
+  const clears = classOf("path-traversal");
+  const mentionsRequest = (n: SyntaxNode): boolean => isTaintSourceExprPy(n, true) || n.namedChildren.some(c => !!c && mentionsRequest(c));
+  if (cond.type === "call") {
+    const fn = cond.childForFieldName("function");
+    const arg = argListOf(cond)[0];
+    if (fn?.type === "attribute" && arg && !mentionsRequest(arg)) {
+      const { object, attribute } = attributeParts(fn);
+      if ((attribute === "startswith" || attribute === "is_relative_to") && isCanonicalPathVarPy(object, cond)) {
+        return [{ name: object!.text, holds: "true", clears }];
+      }
+    }
+  }
+  if (cond.type === "comparison_operator" && cond.namedChildren.length === 2) {
+    const [l, r] = cond.namedChildren;
+    const op = l && r ? cond.text.slice(l.endIndex - cond.startIndex, r.startIndex - cond.startIndex).trim() : "";
+    if (l?.type === "call" && r && (op === "==" || op === "!=")) {
+      const fn = l.childForFieldName("function");
+      const list = argListOf(l)[0];
+      if (fn && /(?:^|\.)commonpath$/.test(calleeTextPy(fn) ?? "") && list && (list.type === "list" || list.type === "tuple")) {
+        const items = list.namedChildren.filter((c): c is SyntaxNode => !!c);
+        const base = items.find(i => i.text === r.text);
+        const subject = items.find(i => i !== base);
+        if (base && subject && items.length === 2 && !mentionsRequest(base) && isCanonicalPathVarPy(subject, cond)) {
+          return [{ name: subject.text, holds: op === "==" ? "true" : "false", clears }];
+        }
+      }
+    }
+  }
+  void root;
+  return [];
+}
+
 function guardsOfConditionPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
+  const containment = pathContainmentGuardPy(cond, root);
+  if (containment.length) return containment;
   switch (cond.type) {
     case "parenthesized_expression": {
       const inner = cond.namedChildren[0];
@@ -2056,7 +2228,8 @@ function createWalkerPy(h: WalkHooksPy) {
     const fenv = cloneEnv(env);
     const seeded = isFastApiHandler(fn);
     const webargs = new Set(webargsParams(fn));
-    for (const prm of paramNamesOf(fn)) fenv.set(prm, seeded || webargs.has(prm) ? ALL : 0);
+    const fastapi = seeded ? fastApiTaintedParams(fn) : null;
+    for (const prm of paramNamesOf(fn)) fenv.set(prm, (fastapi ? fastapi.has(prm) : false) || webargs.has(prm) ? ALL : 0);
     for (const [field, mask] of decoratorSelfFields(fn, maskFor(django))) fenv.set(`self.${field}`, mask);
     walk(body, fenv, django);
   };
@@ -2231,6 +2404,18 @@ function createWalkerPy(h: WalkHooksPy) {
         for (const c of node.namedChildren) if (c) walk(c, env, django);
         return true;
 
+      // `abort(403)` / `sys.exit(1)` never return: a validation branch that ends in one leaves only the validated path
+      case "expression_statement": {
+        const call = node.namedChildren[0];
+        const callee = call?.type === "call" ? call.childForFieldName("function") : null;
+        const text = callee ? calleeTextPy(callee) : null;
+        if (call && text && /^(?:abort|flask\.abort|werkzeug\.exceptions\.abort|sys\.exit|exit|quit|os\._exit)$/.test(text)) {
+          walk(call, env, django);
+          return true;
+        }
+        break;
+      }
+
       // a generator's `yield v` is what calling it produces (`for item in arguments()` iterates the yielded values)
       case "yield": {
         const v = node.namedChildren[0];
@@ -2395,8 +2580,8 @@ function buildPropagatingMapPy(localFns: Map<string, LocalFn>, root: SyntaxNode,
 // and files, and the finding lands at the CALL SITE in the file under review.
 
 /** Which of `args` a sink fact's parameter binds: one arg for a fixed param, every arg from the index for a rest param. */
-function argsForFactPy<A>(args: readonly A[], f: Pick<ParamSinkFact, "index" | "isRest">): A[] {
-  return f.isRest ? args.slice(f.index) : (args[f.index] !== undefined ? [args[f.index]] : []);
+function argsForFactPy(args: readonly SyntaxNode[], f: Pick<ParamSinkFact, "index" | "isRest" | "param">, shift = 0): SyntaxNode[] {
+  return boundArgsPy(args, { index: f.index, isRest: f.isRest, name: f.param?.name, kind: f.param?.kind as ParamKind | undefined, names: f.param?.names }, shift);
 }
 
 /**
@@ -2579,7 +2764,7 @@ function computeFnSinkFactsPy(
   const out: ParamSinkFact[] = [];
   const defLine = (fn.body.parent ?? fn.body).startPosition.row + 1;
   for (const shape of fn.paramShapes) {
-    const base = { index: shape.index, isRest: shape.isRest };
+    const base = { index: shape.index, isRest: shape.isRest, param: { name: shape.name, kind: shape.kind, names: shape.names } };
     const record = (id: string, sinkExpr: string, file: string, line: number, via: string[], steps?: TraceStep[]) => {
       mergeSinkFacts(out, [{ ...base, id, sinkClass: classOf(id), sinkExpr, file, line, via, steps }]);
     };
@@ -2593,12 +2778,20 @@ function computeFnSinkFactsPy(
           factStepsFromTrace(pathTo(node, direct.arg, direct.sinkExpr), name, filePath, defLine, shape.name));
       }
       const fnNode = node.childForFieldName("function");
-      const calleeName = resolveKnownCalleePy(fnNode, knownFacts, resolveCallee);
+      // A same-file callee is resolved as a SYMBOL (module function / method of a class); only a name that is not a
+      // function of this file can be an import.
+      const localKey = resolveLocalCalleePy(fnNode, localFns);
+      const viaImport = resolveCallee(fnNode);
+      const calleeName = localKey && knownFacts.has(localKey) ? localKey
+        : !localKey && viaImport && !localFns.has(viaImport) && knownFacts.has(viaImport) ? viaImport
+        : !localKey ? resolveKnownCalleePy(fnNode, { has: k => !localFns.has(k) && knownFacts.has(k) }, () => null) : null;
       const facts = calleeName ? knownFacts.get(calleeName) : undefined;
       if (!calleeName || !facts) return;
       const args = argListOf(node);
+      const calleeFn = localKey ? localFns.get(localKey) : undefined;
+      const calleeShift = selfShift(calleeFn, fnNode?.type === "attribute", fnNode?.type === "attribute" ? attributeParts(fnNode).object : null);
       for (const f of facts) {
-        for (const a of argsForFactPy(args, f)) {
+        for (const a of argsForFactPy(args, f, calleeShift)) {
           if (mask(a, env) & f.sinkClass) {
             // Forwarding: this parameter reaches the SAME original sink (file/line/expr unchanged) one call further out.
             const own = factStepsFromTrace(pathTo(node, a, calleeName), name, filePath, defLine, shape.name);
@@ -3288,6 +3481,7 @@ export function computePassMethodsPy(content: string, filePath: string, prespars
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing pass-through methods for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -3324,6 +3518,7 @@ export function computeSourceFunctionsPy(content: string, filePath: string, pres
     }
   } catch (err) {
     console.error(`[astTaintPython] threw computing source functions for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -3441,19 +3636,33 @@ function methodKeyPy(fnNode: SyntaxNode | null, localFns: ReadonlyMap<string, Lo
 
 function collectLocalFunctionsPy(root: SyntaxNode): Map<string, LocalFn> {
   const fns = new Map<string, LocalFn>();
-  const visit = (node: SyntaxNode) => {
+  const nested = new Map<string, LocalFn[]>();
+  const methods = new Map<string, LocalFn[]>();
+  const visit = (node: SyntaxNode, insideFunction: boolean) => {
+    let inside = insideFunction;
     if (node.type === "function_definition") {
       const name = node.childForFieldName("name")?.text;
       const body = node.childForFieldName("body");
       if (name && body) {
-        fns.set(name, { paramShapes: paramShapesOfPy(node), body });
         const cls = enclosingClassNamePy(node);
-        if (cls) fns.set(`${cls}.${name}`, { paramShapes: paramShapesOfPy(node), body });
+        const decorators = node.parent?.type === "decorated_definition" ? node.parent.namedChildren.filter(c => c?.type === "decorator").map(c => c!.text) : [];
+        const deco = decorators.some(d => /^@\s*staticmethod\b/.test(d)) ? "static" : decorators.some(d => /^@\s*classmethod\b/.test(d)) ? "class" : undefined;
+        const lf: LocalFn = { paramShapes: paramShapesOfPy(node), body, kind: cls ? "method" : insideFunction ? "nested" : "function", cls: cls ?? undefined, deco };
+        if (cls) {
+          fns.set(`${cls}.${name}`, lf);
+          methods.set(name, [...(methods.get(name) ?? []), lf]);
+        } else if (insideFunction) nested.set(name, [...(nested.get(name) ?? []), lf]);
+        else fns.set(name, lf);                       // a later module-level definition replaces an earlier one, as in Python
       }
+      inside = true;
     }
-    for (const child of node.namedChildren) if (child) visit(child);
+    for (const child of node.namedChildren) if (child) visit(child, inside);
   };
-  visit(root);
+  visit(root, false);
+  // a nested function is reachable by its bare name only when that name is unambiguous in the file
+  for (const [name, defs] of nested) if (defs.length === 1 && !fns.has(name)) fns.set(name, defs[0]);
+  // a method also answers to its bare name when exactly one definition in the file has that name
+  for (const [name, defs] of methods) if (defs.length === 1 && !fns.has(name)) fns.set(name, defs[0]);
   return fns;
 }
 
@@ -3507,6 +3716,62 @@ function webargsParams(fn: SyntaxNode): string[] {
     }
   }
   return shapes.map(s => s.name).filter(n => bound.has(n));
+}
+
+// Annotation types FastAPI validates into a value that cannot carry an injection payload.
+const FASTAPI_SAFE_SCALARS = /^(?:int|float|bool|Decimal|UUID|uuid\.UUID|date|time|datetime|timedelta|datetime\.(?:date|time|datetime|timedelta)|PositiveInt|NegativeInt|conint\(.*\))$/;
+// Types FastAPI injects itself: they hold no request text, only accessors on it (`request.query_params` stays a source).
+const FASTAPI_INJECTED_TYPES = /^(?:Request|WebSocket|Response|HTTPConnection|BackgroundTasks|SecurityScopes|Session|AsyncSession|Connection|Engine|AsyncEngine)$/;
+
+/** The text of an annotation with `Optional[...]`, `X | None` and `Annotated[X, ...]` peeled to the underlying type. */
+function peeledAnnotation(t: string): { type: string; metadata: string } {
+  let type = t.replace(/\s+/g, "");
+  let metadata = "";
+  for (let i = 0; i < 4; i++) {
+    const ann = /^(?:typing\.)?Annotated\[(.*)\]$/.exec(type);
+    if (ann) {
+      // split at the first top-level comma
+      let depth = 0, cut = -1;
+      for (let k = 0; k < ann[1].length; k++) {
+        const ch = ann[1][k];
+        if (ch === "[" || ch === "(") depth++; else if (ch === "]" || ch === ")") depth--;
+        else if (ch === "," && depth === 0) { cut = k; break; }
+      }
+      type = cut < 0 ? ann[1] : ann[1].slice(0, cut);
+      metadata += cut < 0 ? "" : ann[1].slice(cut + 1);
+      continue;
+    }
+    const opt = /^(?:typing\.)?Optional\[(.*)\]$/.exec(type);
+    if (opt) { type = opt[1]; continue; }
+    if (/\|None$/.test(type)) { type = type.replace(/\|None$/, ""); continue; }
+    if (/^None\|/.test(type)) { type = type.replace(/^None\|/, ""); continue; }
+    break;
+  }
+  return { type, metadata };
+}
+
+/**
+ * Which parameters of a FastAPI route handler carry request input. A `Depends(...)` / `Security(...)` parameter is
+ * produced by the application (a database session, the authenticated principal), not by the request; a parameter
+ * annotated with a type FastAPI injects itself, or with a scalar it validates (int, UUID, datetime...), cannot carry
+ * a payload. Every other parameter -- plain, `Query`, `Path`, `Body`, `Header`, `Cookie`, `Form`, `File`, a
+ * request model, or no annotation at all -- stays attacker input.
+ */
+function fastApiTaintedParams(fn: SyntaxNode): Set<string> {
+  const out = new Set<string>();
+  const params = fn.childForFieldName("parameters");
+  for (const p of params?.namedChildren ?? []) {
+    if (!p) continue;
+    const name = paramNameOf(p);
+    if (!name || name === "self" || name === "cls") continue;
+    const annotation = p.childForFieldName("type")?.text ?? "";
+    const value = p.childForFieldName("value")?.text ?? "";
+    const { type, metadata } = peeledAnnotation(annotation);
+    if (/\b(?:Depends|Security)\(/.test(value) || /\b(?:Depends|Security)\(/.test(metadata)) continue;
+    if (FASTAPI_INJECTED_TYPES.test(type.replace(/^.*\./, "")) || FASTAPI_SAFE_SCALARS.test(type)) continue;
+    out.add(name);
+  }
+  return out;
 }
 
 function isFastApiHandler(fn: SyntaxNode): boolean {
@@ -3812,23 +4077,19 @@ export function scanAstTaintPython(
         else if (match.args.length > 0 && match.args.every(a => provenLiteralPy(a, env))) suppressedOut?.push({ id: match.id, line: lineOf(node) });
       }
       const fnNode = node.childForFieldName("function");
-      const seedAttr = fnNode?.type === "attribute" ? attributeParts(fnNode) : null;
-      const seedName = fnNode?.type === "identifier" ? fnNode.text
-        : methodKeyPy(fnNode, localFns)
-          ?? (seedAttr?.attribute && (seedAttr.object?.text === "self" || !PY_BUILTIN_METHOD_NAMES.has(seedAttr.attribute)) ? seedAttr.attribute : null);
-      if (seedName && localFns.has(seedName)) {
+      const seedName = resolveLocalCalleePy(fnNode, localFns);
+      if (seedName) {
         const fnName = seedName;
         const fn = localFns.get(fnName)!;
-        const shift = selfShift(fn, fnNode?.type === "attribute");
+        const shift = selfShift(fn, fnNode?.type === "attribute", fnNode?.type === "attribute" ? attributeParts(fnNode).object : null);
         const args = argListOf(node);
         const taintedIdx = new Map<number, number>();
-        args.forEach((arg, i) => {
-          const m = taintMask(arg, env) & ALL;
-          if (!m) return;
-          const pos = i + shift;
-          const shape = fn.paramShapes.find(s => s.isRest ? pos >= s.index : s.index === pos);
-          if (shape) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
-        });
+        for (const shape of fn.paramShapes) {
+          if (shape.index < shift) continue;
+          let m = 0;
+          for (const a of boundArgsPy(args, shape, shift)) m |= taintMask(a, env) & ALL;
+          if (m) taintedIdx.set(shape.index, (taintedIdx.get(shape.index) ?? 0) | m);
+        }
         if (taintedIdx.size > 0) {
           const existing = seededParams.get(fnName) ?? new Map<number, number>();
           for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
@@ -4046,16 +4307,46 @@ export function scanAstTaintPython(
       walk(root, new Map(), false);
     }
 
-    // A hand-rolled JWT payload decode in a file that never verifies a signature
-    if (!/\bimport jwt\b|\bfrom jwt\b|jwt\.decode|\bfrom jose\b|\bimport jose\b|authlib|itsdangerous/.test(content)) {
+    // A hand-rolled JWT payload decode in a file that never verifies a signature. The evidence is structural, not
+    // textual: a function that splits a TOKEN-named value on ".", base64-decodes a part and JSON-parses it, while no
+    // call anywhere in the file verifies a signature (library verify/decode, hmac, constant-time compare). A custom
+    // verifier is therefore recognised for what it does, whether or not a JWT library is imported, and a base64+JSON
+    // parse of some unrelated blob is not a JWT at all (no dotted token being taken apart).
+    {
+      const calls: SyntaxNode[] = [];
       const fns: SyntaxNode[] = [];
-      const findFns = (n: SyntaxNode) => { if (n.type === "function_definition") fns.push(n); for (const c of n.namedChildren) if (c) findFns(c); };
-      findFns(root);
-      for (const fn of fns) {
-        const t = fn.text;
-        if (/\.split\(\s*["']\.["']\s*\)/.test(t) && /b64decode/.test(t) && /json\.loads|\bloads\(/.test(t)) {
-          emit("jwt-none-alg", fn.childForFieldName("name") ?? fn, "token", "manual JWT decode",
-            "JWT payload is base64-decoded and JSON-parsed by hand and the file never verifies a signature — claims (role, sub, ...) are attacker-controlled; use jwt.decode(..., algorithms=[...]) with a key");
+      const collect = (n: SyntaxNode) => {
+        if (n.type === "call") calls.push(n);
+        if (n.type === "function_definition") fns.push(n);
+        for (const c of n.namedChildren) if (c) collect(c);
+      };
+      collect(root);
+      const calleeOf = (c: SyntaxNode) => { const f = c.childForFieldName("function"); return f ? calleeTextPy(f) ?? "" : ""; };
+      const VERIFYING = /(?:^|\.)(?:compare_digest|verify|verify_signature|check_signature|decode_complete|checkpw)$|^hmac\.(?:new|digest)$|^jwt\.decode$|^jose\.|^authlib\.|itsdangerous|Serializer$/;
+      const verifiesSomewhere = calls.some(c => VERIFYING.test(calleeOf(c)));
+      // a JWT / JOSE library imported at all means verification is the library's job somewhere in this file
+      const jwtLibraryImported = root.namedChildren.some(n => !!n && (n.type === "import_statement" || n.type === "import_from_statement")
+        && /^(?:import|from)\s+(?:jwt|jose|authlib|itsdangerous|jwcrypto)\b/.test(n.text));
+      if (!verifiesSomewhere && !jwtLibraryImported) {
+        const TOKEN_NAME = /token|jwt|bearer|authorization|credential/i;
+        for (const fn of fns) {
+          const inFn: SyntaxNode[] = [];
+          const gather = (n: SyntaxNode) => { if (n.type === "call") inFn.push(n); for (const c of n.namedChildren) if (c) gather(c); };
+          gather(fn);
+          const splitsToken = inFn.some(c => {
+            const f = c.childForFieldName("function");
+            if (f?.type !== "attribute" || attributeParts(f).attribute !== "split") return false;
+            const a0 = argListOf(c)[0];
+            if (!a0 || a0.type !== "string" || stringLiteralContentPy(a0) !== ".") return false;
+            const recv = attributeParts(f).object;
+            return !!recv && (TOKEN_NAME.test(recv.text) || isTaintSourceExprPy(recv, true) || (recv.type === "identifier" && paramNamesOf(fn).includes(recv.text)));
+          });
+          const decodes = inFn.some(c => /(?:^|\.)(?:urlsafe_)?b64decode$/.test(calleeOf(c)));
+          const parses = inFn.some(c => /(?:^|\.)loads$/.test(calleeOf(c)));
+          if (splitsToken && decodes && parses) {
+            emit("jwt-none-alg", fn.childForFieldName("name") ?? fn, "token", "manual JWT decode",
+              "JWT payload is base64-decoded and JSON-parsed by hand and nothing in the file verifies a signature — claims (role, sub, ...) are attacker-controlled; use jwt.decode(..., algorithms=[...]) with a key");
+          }
         }
       }
     }
@@ -4101,6 +4392,7 @@ export function scanAstTaintPython(
     return findings;
   } catch (err) {
     console.error(`[astTaintPython] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
     return [];
   }
 }

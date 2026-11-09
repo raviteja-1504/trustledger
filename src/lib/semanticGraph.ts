@@ -10,6 +10,7 @@
  *   - AI contamination spread analysis (AI-generated file exports infect callers)
  */
 
+import * as ts from "typescript";
 import type { ImportInfo, ExportInfo, ParseResult } from "./ast";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -187,13 +188,83 @@ function pathIndexFor(allFiles: string[]): Map<string, string> {
 // pass rather than rushed in here.
 const ROOT_ALIAS_RE = /^@\//;
 
+/** One `compilerOptions.paths` entry of a tsconfig/jsconfig in the scanned batch. */
+export interface ImportAliasRule {
+  /** Directory the tsconfig lives in ("" = repo root) — a rule only applies to files under it. */
+  scope: string;
+  /** Specifier pattern with at most one `*`, e.g. "@data/*" or "config". */
+  pattern: string;
+  /** Replacement patterns, already joined to baseUrl and normalised, e.g. "src/data/*". */
+  targets: string[];
+}
+
+const dirOf = (p: string): string => (/[\\/]/.test(p) ? p.replace(/[\\/][^\\/]+$/, "") : "");
+
+let aliasRules: readonly ImportAliasRule[] = [];
+/** Rules for the scan in progress (runScan sets them first, synchronously, and resets them for each scan). */
+export function setImportAliasRules(rules: readonly ImportAliasRule[]): void { aliasRules = rules; }
+
+/**
+ * `paths` rules from the tsconfig.json / jsconfig.json files among `files` (comments and trailing commas are fine).
+ * `extends` is not followed: a rule inherited from another config is not seen, and the import stays unresolved.
+ */
+export function readImportAliasRules(files: ReadonlyArray<{ path: string; content?: string | null }>): ImportAliasRule[] {
+  const rules: ImportAliasRule[] = [];
+  for (const f of files) {
+    if (!/(?:^|[\\/])(?:tsconfig|jsconfig)(?:\.[\w-]+)?\.json$/.test(f.path) || !f.content || f.content.length > 200_000) continue;
+    try {
+      const parsed = ts.parseConfigFileTextToJson(f.path, f.content).config as { compilerOptions?: { baseUrl?: unknown; paths?: unknown } } | undefined;
+      const opts = parsed?.compilerOptions;
+      if (!opts || !opts.paths || typeof opts.paths !== "object") continue;
+      const dir = normPath(dirOf(f.path));
+      const joinDir = (a: string, b: string) => normPath(a ? `${a}/${b}` : b);
+      const base = typeof opts.baseUrl === "string" ? joinDir(dir, opts.baseUrl) : dir;
+      for (const [pattern, targets] of Object.entries(opts.paths as Record<string, unknown>)) {
+        if (!Array.isArray(targets) || (pattern.match(/\*/g)?.length ?? 0) > 1) continue;
+        const joined = targets.filter((t): t is string => typeof t === "string").map(t => joinDir(base, t));
+        if (joined.length) rules.push({ scope: dir, pattern, targets: joined });
+      }
+    } catch { /* an unreadable config simply contributes no rules */ }
+  }
+  return rules;
+}
+
+/** Candidate base paths (pre-extension) one alias rule yields for `spec`, for a file in `fromDir`. */
+function aliasCandidates(fromDir: string, spec: string): string[] {
+  const out: string[] = [];
+  for (const r of aliasRules) {
+    if (r.scope && fromDir !== r.scope && !fromDir.startsWith(r.scope + "/")) continue;
+    const star = r.pattern.indexOf("*");
+    let captured: string | null = null;
+    if (star < 0) captured = spec === r.pattern ? "" : null;
+    else {
+      const head = r.pattern.slice(0, star), tail = r.pattern.slice(star + 1);
+      if (spec.startsWith(head) && spec.endsWith(tail) && spec.length >= head.length + tail.length) captured = spec.slice(head.length, spec.length - tail.length);
+    }
+    if (captured === null) continue;
+    for (const t of r.targets) out.push(normPath(t.includes("*") ? t.replace("*", captured) : t));
+  }
+  return out;
+}
+
 export function resolveImportPath(fromFile: string, importSpec: string, allFiles: string[]): string | null {
   const isRelative = importSpec.startsWith(".");
+  const fromDir  = normPath(dirOf(fromFile));
+  // a configured alias is tried before the built-in `@/` guess, and is the only way a bare-looking specifier resolves
+  if (!isRelative && aliasRules.length) {
+    for (const base of aliasCandidates(fromDir, importSpec)) {
+      const hit = resolveBase(base, allFiles);
+      if (hit) return hit;
+    }
+  }
   const isAliased = ROOT_ALIAS_RE.test(importSpec);
   if (!isRelative && !isAliased) return null; // external package — not in our graph
 
-  const fromDir  = fromFile.replace(/[\\/][^\\/]+$/, "");
-  const resolved = isAliased ? normPath("src/" + importSpec.replace(ROOT_ALIAS_RE, "")) : normPath(fromDir + "/" + importSpec);
+  const resolved = isAliased ? normPath("src/" + importSpec.replace(ROOT_ALIAS_RE, "")) : normPath((fromDir ? fromDir + "/" : "") + importSpec);
+  return resolveBase(resolved, allFiles);
+}
+
+function resolveBase(resolved: string, allFiles: string[]): string | null {
   const index = pathIndexFor(allFiles);
 
   const exact = index.get(resolved);
@@ -260,18 +331,16 @@ function resolvePythonAbsolute(fromFile: string, dotted: string, index: Map<stri
     if (parent === dir || !dir.includes("/")) break;
     dir = parent;
   }
-  // Longest-suffix fallback: does any batch file END with these path segments? (source root unknown,
-  // so a full match isn't possible -- this is a best-effort heuristic, consistent with this module's
-  // own "external/unresolvable = out of graph, never throws" posture elsewhere.)
+  // Suffix fallback: does a batch file END with these path segments? The source root is unknown, so this is only
+  // sound when exactly ONE file matches. Two modules that both end in `db.py` make `from db import x` ambiguous, and
+  // picking either would attribute a flow (or its absence) to the wrong module -- so the import stays unresolved.
   const suffix = `/${rel}.py`;
   const suffixInit = `/${rel}/__init__.py`;
-  let best: string | null = null;
+  const matches = new Set<string>();
   for (const [norm, real] of index) {
-    if (norm.endsWith(suffix) || norm.endsWith(suffixInit) || norm === `${rel}.py`) {
-      if (!best || norm.length > best.length) best = real;
-    }
+    if (norm.endsWith(suffix) || norm.endsWith(suffixInit) || norm === `${rel}.py` || norm === `${rel}/__init__.py`) matches.add(real);
   }
-  return best;
+  return matches.size === 1 ? [...matches][0] : null;
 }
 
 /** Resolves a Python import specifier (as tree-sitter-python gives it -- see astTaintPython.ts's

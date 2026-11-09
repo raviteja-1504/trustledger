@@ -76,7 +76,51 @@ import type { ParamSinkFact } from "./taint/taintCore";
 // 23: AI attribution: backdoor / hallucinated-API / style-drift findings no longer feed the AI score, the explanation
 //     credits only signals that fed it, and files under 50 characters are scanned for security problems (AI signals
 //     skipped) instead of returning empty. Cached files from 22 carry the old scores and would hide those findings.
-export const SCAN_CACHE_VERSION = 23;
+// 24: AST taint engine accuracy: namespace imports / `export * as ns` resolve by qualified key (`ns.fn`) instead of a
+//     bare name, a same-named local function is no longer replaced by an imported one, tsconfig `paths` aliases
+//     resolve, `path.join/resolve` are transformations (the filesystem call is the sink), a prefix test on a normalised
+//     path proves containment, nested request destructuring is tainted, and a literal member of an object literal is
+//     no longer tainted by its siblings. Python: functions are keyed by symbol (module function / `Class.method`), call
+//     arguments bind by Python's rules (keywords, keyword-only, *args/**kwargs), os.path.join / Path() are
+//     transformations and the filesystem call is the sink (os.scandir, archive extraction added), a missing `..` /
+//     quote / `<` no longer clears a class, canonical containment does, FastAPI Depends / validated scalars are not
+//     request input, an ambiguous absolute import stays unresolved, `abort()`/`sys.exit()` end a validation branch.
+//     Java: methods are keyed by package.Class.method(ParamTypes) (overloads and same-named methods of different
+//     classes are separate, a call is resolved by arity / receiver class / argument types), each method has its own type
+//     environment, Path.of / Paths.get / new File are transformations and the filesystem operation is the sink,
+//     XXE hardening is judged per factory / parser instance and in order, Class.forName / getMethod / getField /
+//     parseExpression alone are not findings (invoke / newInstance / getValue / Field.set are), lambdas and method
+//     references see the receiver's taint, cross-file facts are package-qualified and resolved by import.
+//     Go: filepath.Join / Clean / Abs / Rel are transformations (the file operation is the sink; os.OpenRoot added), a
+//     `..` check no longer clears path traversal while filepath.IsLocal and a checked filepath.Rel do, response
+//     writers and framework contexts are recognised by declared type per function (not by the name `w`),
+//     MethodByName / FieldByName alone are not findings (Call / Set* are), a call whose receiver is unresolved is
+//     reported at lower confidence with the reason, JWT / CSRF evidence is scoped to the function / router that
+//     holds it, and cross-package facts are keyed by directory so two packages named alike stay apart.
+//     C#: methods are keyed by namespace.Class.Method<arity>(ParamTypes) and a call is resolved by receiver class, arity /
+//     named / optional / params binding and argument types; each method has its own type environment; Type.GetType /
+//     GetMethod / GetProperty alone are not findings (Invoke / SetValue / CreateInstance are, through a variable too);
+//     a StartsWith containment check needs a directory boundary; JWT evidence is the reading method's own; an owner
+//     check on the looked-up record counts as BOLA evidence; [Authorize(Roles)] no longer suppresses mass assignment;
+//     a virtual / override method is not proven by its own body; local functions and tuples carry taint; cross-file
+//     facts are namespace-qualified and resolved by using; one finding per flow (same-line flows named in the detail).
+//     PHP: functions / methods are keyed by namespace (a call resolves against its own namespace, then the global one;
+//     \system() names the built-in, a namespaced user function of the same name is the user's), named / optional /
+//     variadic / unpacked arguments bind by PHP's rules, a '..' check clears a path only under a fixed directory prefix,
+//     JWT verification must mention the same token, a record-level abort_unless / Gate::authorize after a lookup counts as
+//     BOLA evidence, SplFileObject / DirectoryIterator open their path, proc_open with an argv array runs no shell, files
+//     are linked by use / namespace (Composer-style) as well as by include, one finding per sink call.
+//     Ruby: a lambda / proc is walked where it is called (.call / .() / [] / yield), never at its definition, a class
+//     constant resolves lexically (innermost namespace outward, no suffix match) in calls and cross-file keys, an owner
+//     check only counts between the lookup and the first write, one finding per sink call, and a failed parser init is retried.
+//     Rust: a closure runs where it is called or consumed, never where it is written; an owner check only counts before the
+//     write; one finding per sink node. C/C++: a null check must test the pointer against null (p == other proves nothing),
+//     #if / #ifdef / #else arms are joined as alternatives, one finding per sink call; both retry a failed parser init.
+//     Kotlin: a stored lambda runs where it is invoked, same-file functions are keyed by class (same-named methods of two
+//     classes stay apart), an authorize()/assertOwner() helper counts only when given the record or id and run before the write,
+//     one finding per sink node, a failed parser init is retried.
+//     Cached results from 23 would keep the old findings.
+export const SCAN_CACHE_VERSION = 24;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

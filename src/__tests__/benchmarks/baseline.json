@@ -318,8 +318,8 @@
   },
   "java": {
     "totalCases": 67,
-    "casesWithFinding": 60,
-    "astOnlyFindingCount": 56,
+    "casesWithFinding": 59,
+    "astOnlyFindingCount": 55,
     "astOnlyByCase": {
       "11": [
         "xss"
@@ -422,9 +422,6 @@
       ],
       "48": [
         "redos"
-      ],
-      "49": [
-        "eval-exec"
       ],
       "50": [
         "path-traversal"

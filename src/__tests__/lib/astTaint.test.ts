@@ -257,10 +257,40 @@ app.get("/x", (req, res) => {
     expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(false);
   });
 
-  it("still collapses to root-object taint for an object-literal blob (pre-existing behavior preserved, not regressed)", () => {
-    const content = `
+  it("a member initialised with a plain literal is that literal; the object as a whole is still tainted", () => {
+    // Previously the whole literal collapsed to its worst member, so `user.age` (the literal 5) was reported.
+    const member = `
 app.get("/x", (req, res) => {
   const user = { name: req.query.name, age: 5 };
+  exec(user.age);
+});`;
+    expect(scanAstTaint(member, "app.ts").some(f => f.id === "command-injection")).toBe(false);
+    const whole = `
+app.get("/x", (req, res) => {
+  const user = { name: req.query.name, age: 5 };
+  exec(user);
+});`;
+    expect(scanAstTaint(whole, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+    const dirty = `
+app.get("/x", (req, res) => {
+  const user = { name: req.query.name, age: 5 };
+  exec(user.name);
+});`;
+    expect(scanAstTaint(dirty, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+  it("a literal member that is later overwritten with request data is tainted again", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const user = { name: "n", age: 5 };
+  user.age = req.query.age;
+  exec(user.age);
+});`;
+    expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);
+  });
+  it("a spread after the literal member can overwrite it, so the member is not assumed clean", () => {
+    const content = `
+app.get("/x", (req, res) => {
+  const user = { age: 5, ...req.query };
   exec(user.age);
 });`;
     expect(scanAstTaint(content, "app.ts").some(f => f.id === "command-injection")).toBe(true);

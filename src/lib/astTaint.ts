@@ -25,6 +25,7 @@
  * open-redirect, eval-exec), so no new UI wiring is needed anywhere.
  */
 
+import { recordEngineFailure } from "./taint/engineFailures";
 import * as ts from "typescript";
 import {
   ALL, FIXED_POINT_CAP, applyGuards, applyGuardSet, applySanitizer, assignEnv, classOf, cloneEnv, isTaintedMask, joinArms, joinEnvs, SinkClass,
@@ -270,8 +271,19 @@ function destructuredRequestSources(f: ts.FunctionLikeDeclaration): Map<string, 
   for (const el of first.name.elements) {
     const prop = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text
       : ts.isIdentifier(el.name) ? el.name.text : null;
-    if (prop && SOURCE_PROPS.has(prop) && ts.isIdentifier(el.name)) out.set(el.name.text, ALL);
+    if (!prop || !SOURCE_PROPS.has(prop)) continue;
+    // `{ query }` binds the whole container; `{ query: { cmd } }` / `{ query: { cmd: c, ...rest } }` bind members of it
+    for (const leaf of bindingLeafNames(el.name)) out.set(leaf, ALL);
   }
+  return out;
+}
+
+/** Every identifier a binding name introduces, however deeply it is destructured. */
+function bindingLeafNames(name: ts.BindingName, depth = 0): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  if (depth > 6) return [];
+  const out: string[] = [];
+  for (const el of name.elements) if (!ts.isOmittedExpression(el)) out.push(...bindingLeafNames(el.name, depth + 1));
   return out;
 }
 
@@ -754,9 +766,9 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     // The path only: what writeFile writes, or the options/callback, can't choose which file is touched.
     return call.arguments[0] ? { id: "path-traversal", sinkExpr: text, args: [call.arguments[0]] } : null;
   }
-  if (parts[0] === "path" && (tail === "join" || tail === "resolve")) {
-    return { id: "path-traversal", sinkExpr: text, args: call.arguments };
-  }
+  // path.join / path.resolve only BUILD a path string: they are transformations (still propagating taint, see
+  // PASSTHROUGH_CALLS), and the filesystem call that finally uses the result is the sink. Reporting the builder
+  // flagged every join of a request value even when the result never touched the filesystem.
   if (text === "res.redirect" || text === "res.location") {
     // res.redirect([status,] url): the location is the LAST argument; a status code picks no destination.
     const loc = call.arguments[call.arguments.length - 1];
@@ -1045,6 +1057,60 @@ function isParamOfEnclosingFn(id: ts.Identifier): boolean {
   return false;
 }
 
+/** The nearest lexical declaration of `id` that is a `const` with an initializer, or null when the nearest binding is anything else. */
+function nearestConstInitializer(id: ts.Identifier): ts.Expression | null {
+  for (let cur: ts.Node | undefined = id.parent; cur; cur = cur.parent) {
+    if (isFunctionLike(cur)) {
+      if ((cur as ts.FunctionLikeDeclaration).parameters.some(p => bindingLeafNames(p.name).includes(id.text))) return null;
+    }
+    const stmts = ts.isBlock(cur) || ts.isSourceFile(cur) || ts.isModuleBlock(cur) ? cur.statements
+      : ts.isCaseClause(cur) || ts.isDefaultClause(cur) ? cur.statements : undefined;
+    if (!stmts) continue;
+    for (const st of stmts) {
+      if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) {
+          if (!bindingLeafNames(d.name).includes(id.text)) continue;
+          return ts.isIdentifier(d.name) && d.initializer && (st.declarationList.flags & ts.NodeFlags.Const) ? d.initializer : null;
+        }
+      } else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name?.text === id.text) return null;
+    }
+  }
+  return null;
+}
+
+const isScalarLiteral = (e: ts.Expression): boolean =>
+  ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e) ||
+  e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword || e.kind === ts.SyntaxKind.NullKeyword;
+
+/**
+ * Is `access` (`cfg.mode`, `o.a.b`) a member of a `const` object literal that was initialised with a plain scalar
+ * literal? Then the member is that literal: the object's OTHER members being tainted says nothing about it, and
+ * only an explicit write to this very path (tracked in env under the same key) can change it. Any spread, computed
+ * key, duplicate key or non-literal link on the way makes the answer "unknown" (false), so the object-wide mask applies.
+ */
+function isScalarLiteralMember(access: ts.PropertyAccessExpression): boolean {
+  const names: string[] = [];
+  let cur: ts.Expression = access;
+  while (ts.isPropertyAccessExpression(cur)) { names.unshift(cur.name.text); cur = cur.expression; }
+  if (!ts.isIdentifier(cur) || names.length === 0 || names.length > 4) return false;
+  let node = nearestConstInitializer(cur);
+  for (let i = 0; i < names.length; i++) {
+    if (!node) return false;
+    node = unwrapExpr(node);
+    if (!ts.isObjectLiteralExpression(node)) return false;
+    let hit: ts.Expression | null = null;
+    for (const p of node.properties) {
+      if (ts.isSpreadAssignment(p)) return false;
+      if (ts.isPropertyAssignment(p) && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) {
+        if (p.name.text === names[i]) { if (hit) return false; hit = p.initializer; }
+      } else if (!ts.isShorthandPropertyAssignment(p)) return false;
+      else if (p.name.text === names[i]) return false;
+    }
+    node = hit;
+  }
+  return !!node && isScalarLiteral(unwrapExpr(node));
+}
+
 function rootIdentifier(e: ts.Expression): ts.Identifier | null {
   let cur: ts.Expression = e;
   while (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur) || ts.isParenthesizedExpression(cur) ||
@@ -1141,6 +1207,9 @@ function qualifiedCallKeys(callee: ts.Expression): string[] {
   const m = callee.name.text;
   const recv = unwrapExpr(callee.expression);
   const keys: string[] = [];
+  // a dotted receiver chain (`ns.Service.find`, `store.runQuery`) is its own key
+  const full = calleeText(callee);
+  if (full && full.includes(".")) keys.push(full);
   if (ts.isIdentifier(recv)) {
     keys.push(`${recv.text}.${m}`);
     const t = declaredTypeOfIdentifier(recv);
@@ -1159,10 +1228,29 @@ function qualifiedCallKeys(callee: ts.Expression): string[] {
 function resolveKnownCallee(
   callee: ts.Expression, known: { has(k: string): boolean }, resolveByName: (c: ts.Expression) => string | null,
 ): string | null {
-  const byName = resolveByName(callee);
-  if (byName && known.has(byName)) return byName;
+  // `store.run(x)` where `store` is an import: `run` is a member of THAT module, never a same-named local function
+  // or another module's export, so only the qualified key (`store.run`) may answer.
+  if (!isImportedReceiverCall(callee)) {
+    const byName = resolveByName(callee);
+    if (byName && known.has(byName)) return byName;
+  }
   for (const k of qualifiedCallKeys(callee)) if (known.has(k)) return k;
   return null;
+}
+
+const importedLocalsCache = new WeakMap<ts.SourceFile, Set<string>>();
+/** Local names bound by an import / require in this file (namespace, named, default). */
+function importedLocals(sf: ts.SourceFile): Set<string> {
+  let s = importedLocalsCache.get(sf);
+  if (!s) { s = new Set(buildImportBindings(sf).map(b => b.localName)); importedLocalsCache.set(sf, s); }
+  return s;
+}
+
+/** Is `callee` a member call on a name bound by an import (and not shadowed by a local of the same name)? */
+function isImportedReceiverCall(callee: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  const root = rootIdentifier(callee);
+  return !!root && importedLocals(callee.getSourceFile()).has(root.text) && !isShadowed(root);
 }
 
 function calleeFnName(callee: ts.Expression): string | null {
@@ -1221,6 +1309,8 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       // found that way. The ROOT identifier contributes only its own mask,
       // not its other fields (that would defeat field sensitivity).
       const path = calleeText(expr);
+      // `cfg.mode` where `const cfg = { mode: "fast", name: req.query.n }`: the member is the literal it was given
+      if (path && isScalarLiteralMember(expr)) return env.get(path) ?? 0;
       const base = expr.expression;
       const baseMask = ts.isIdentifier(base)
         ? (env.get(base.text) ?? 0) | (sticky && !isShadowed(base) ? (sticky.get(base.text) ?? 0) : 0)
@@ -1451,9 +1541,7 @@ function applyDeclAndAssign(node: ts.Node, env: Env, maskFn: TaintMaskFn): void 
       if (ts.isIdentifier(decl.name)) {
         env.set(decl.name.text, mask);
       } else if ((ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) && isTaintedMask(mask)) {
-        for (const el of decl.name.elements) {
-          if (!ts.isOmittedExpression(el) && ts.isIdentifier(el.name)) env.set(el.name.text, mask);
-        }
+        for (const leaf of bindingLeafNames(decl.name)) env.set(leaf, mask);
       }
     }
   } else if (
@@ -1564,6 +1652,48 @@ function literalProvenArms(c: ts.ConditionalExpression): { whenTrue: boolean; wh
   };
 }
 
+const PATH_NORMALISERS = new Set(["path.resolve", "path.normalize", "path.join", "fs.realpathSync", "fs.promises.realpath", "realpathSync"]);
+
+function containsTaintSource(e: ts.Node): boolean {
+  let hit = false;
+  const go = (n: ts.Node) => { if (hit) return; if (ts.isExpression(n) && isTaintSourceExpr(n)) { hit = true; return; } ts.forEachChild(n, go); };
+  go(e);
+  return hit;
+}
+
+/** Is `id` a `const` whose value is a normalised path (so `..` segments are already collapsed)? */
+function isNormalisedPathConst(id: ts.Expression): id is ts.Identifier {
+  if (!ts.isIdentifier(id)) return false;
+  const init = nearestConstInitializer(id);
+  const call = init && unwrapExpr(init);
+  const inner = call && ts.isAwaitExpression(call) ? unwrapExpr(call.expression) : call;
+  return !!inner && ts.isCallExpression(inner) && PATH_NORMALISERS.has(calleeText(inner.expression) ?? "");
+}
+
+/**
+ * A containment test on a path that is already normalised. `p.startsWith(base)` proves `p` stays under `base` when it
+ * holds; `path.relative(base, p).startsWith("..")` proves it when it does NOT. A prefix test on an UN-normalised path
+ * (`"/srv/files/../../etc".startsWith("/srv/files")` is true) proves nothing, so the subject must be a normalised const,
+ * and the base must not itself come from the request.
+ */
+function pathContainmentGuard(call: ts.CallExpression): Guard | null {
+  if (!ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== "startsWith" || call.arguments.length < 1) return null;
+  const subject = unwrapExpr(call.expression.expression);
+  const prefix = call.arguments[0];
+  if (containsTaintSource(prefix)) return null;
+  if (isNormalisedPathConst(subject)) return { name: subject.text, holds: "true", clears: SinkClass.PATH };
+  // `const rel = path.relative(BASE, p)`; `rel.startsWith("..")` is false when p stays inside BASE
+  if (ts.isIdentifier(subject) && ts.isStringLiteralLike(prefix) && prefix.text === "..") {
+    const init = nearestConstInitializer(subject);
+    const rel = init && unwrapExpr(init);
+    if (rel && ts.isCallExpression(rel) && calleeText(rel.expression) === "path.relative" && rel.arguments.length === 2) {
+      const target = unwrapExpr(rel.arguments[1]);
+      if (isNormalisedPathConst(target) && !containsTaintSource(rel.arguments[0])) return { name: target.text, holds: "false", clears: SinkClass.PATH };
+    }
+  }
+  return null;
+}
+
 /**
  * The variables a condition PROVES safe, and on which side. Deliberately a
  * closed, unambiguous set -- literal-collection membership, strict
@@ -1624,6 +1754,10 @@ function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
         cond.arguments.length === 1 && arg && ts.isIdentifier(arg) && isLiteralCollection(callee.expression, sf)) {
       return [{ name: arg.text, holds: "true" }];
     }
+    // Path containment: `resolved.startsWith(BASE + sep)` where `resolved` is a normalised path, or the
+    // `path.relative(BASE, resolved).startsWith("..")` escape test. Proves the PATH class only.
+    const containment = pathContainmentGuard(cond);
+    if (containment) return [containment];
     // Number.isInteger / isFinite / isSafeInteger (x)
     if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Number" &&
         ["isInteger", "isFinite", "isSafeInteger"].includes(callee.name.text) && arg && ts.isIdentifier(arg)) {
@@ -1999,7 +2133,9 @@ function makeSinkCalleeResolver(localFns: ReadonlyMap<string, LocalFn>, namespac
     const name = callee.name.text;
     const recv = callee.expression;
     if (recv.kind === ts.SyntaxKind.ThisKeyword) return name;
-    if (ts.isIdentifier(recv) && namespaceLocals.has(recv.text)) return name;
+    // a namespace member is addressed by its qualified key, matching how the cross-file bridge registers it
+    const root = rootIdentifier(callee);
+    if (root && namespaceLocals.has(root.text)) return calleeText(callee);
     return localFns.get(name)?.isMethod && !BUILTIN_METHOD_NAMES.has(name) ? name : null;
   };
 }
@@ -2383,6 +2519,9 @@ export function collectReexports(sourceFile: ts.SourceFile): ReexportEdge[] {
       for (const spec of node.exportClause.elements) {
         out.push({ publicName: spec.name.text, importedName: (spec.propertyName ?? spec.name).text, moduleSpecifier });
       }
+    } else if (ts.isNamespaceExport(node.exportClause)) {
+      // `export * as store from "./db"`: the module's exports under one name, addressed `store.<name>`
+      out.push({ publicName: node.exportClause.name.text, importedName: "*", moduleSpecifier });
     }
   });
   return out;
@@ -2419,6 +2558,7 @@ export function computeExportTaintSummary(
     }
   } catch (err) {
     console.error(`[astTaint] threw computing export summary for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return summary;
 }
@@ -2448,6 +2588,7 @@ export function computeExportSinkSummary(
     }
   } catch (err) {
     console.error(`[astTaint] threw computing export sink summary for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return summary;
 }
@@ -3121,7 +3262,11 @@ export function scanAstTaint(
     const localFns = collectLocalFunctions(sourceFile);
     const propagating = buildPropagatingMap(localFns);
     if (crossFilePropagating) {
-      for (const [name, info] of crossFilePropagating) propagating.set(name, info.shapes);
+      // A same-named non-method local function keeps its own summary: the import is a different symbol.
+      for (const [name, info] of crossFilePropagating) {
+        const local = localFns.get(name);
+        if (!local || local.isMethod) propagating.set(name, info.shapes);
+      }
     }
     // Module-scope container memory (stored XSS / second-order SQL): taint pushed into a module-level
     // array/Map/object by one handler is visible to every handler that reads it back.
@@ -3189,7 +3334,7 @@ export function scanAstTaint(
     const crossFileCallIn = (text: string): [string, { shapes: ParamShape[]; fromModule: string; resolvedPath?: string }] | null => {
       if (!crossFilePropagating) return null;
       for (const entry of crossFilePropagating) {
-        if (new RegExp(`\\b${entry[0]}\\s*\\(`).test(text)) return entry;
+        if (new RegExp(`(?<![\\w$.])${entry[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\(`).test(text)) return entry;
       }
       return null;
     };
@@ -4391,6 +4536,7 @@ export function scanAstTaint(
     return findings;
   } catch (err) {
     console.error(`[astTaint] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
     return [];
   }
 }

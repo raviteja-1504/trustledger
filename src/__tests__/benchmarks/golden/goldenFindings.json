@@ -69,7 +69,7 @@
   "HardCSharpBenchmark.cs:85 xss <- SendToBrowser(render())",
   "HardCSharpBenchmark.cs:88 header-injection <- \"attachment; filename=\" + value",
   "HardCSharpBenchmark.cs:91 mass-assignment <- s",
-  "HardCSharpBenchmark.cs:95 mass-assignment <- typeof(Config).GetProperty(field)",
+  "HardCSharpBenchmark.cs:95 mass-assignment <- field",
   "HardCSharpBenchmark.cs:98 sql-injection <- id"
  ],
  "hard/HardJavaBenchmark.java.fixture": [
@@ -82,12 +82,11 @@
   "HardJavaBenchmark.java:113 sql-injection <- col",
   "HardJavaBenchmark.java:115 redos <- pattern",
   "HardJavaBenchmark.java:117 redos <- p",
-  "HardJavaBenchmark.java:119 eval-exec <- name",
   "HardJavaBenchmark.java:121 path-traversal <- Path.of(\"/etc/myapp\",name+\".json\").toAbsolutePath()",
   "HardJavaBenchmark.java:123 header-injection <- restored",
   "HardJavaBenchmark.java:125 xss <- \"<span>\"",
   "HardJavaBenchmark.java:127 xss <- f",
-  "HardJavaBenchmark.java:132 mass-assignment <- e",
+  "HardJavaBenchmark.java:132 mass-assignment <- e.getKey(",
   "HardJavaBenchmark.java:134 jwt-none-alg <- token",
   "HardJavaBenchmark.java:136 weak-crypto <- MD5",
   "HardJavaBenchmark.java:138 timing-attack <- supplied",
@@ -128,7 +127,7 @@
   "HardJavaBenchmark.java:79 ssrf <- new URL(\"http://\"+host+\"/internal\")",
   "HardJavaBenchmark.java:81 ssrf <- new URL(u)",
   "HardJavaBenchmark.java:83 command-injection <- new String[]{\"sh\",\"-c\",program+\" \"+arg}",
-  "HardJavaBenchmark.java:85 path-traversal <- name",
+  "HardJavaBenchmark.java:85 path-traversal <- p",
   "HardJavaBenchmark.java:87 sql-injection <- id",
   "HardJavaBenchmark.java:89 xss <- f",
   "HardJavaBenchmark.java:91 xss <- enc",
@@ -150,7 +149,7 @@
   "hard.go:192 sql-injection <- \"SELECT id, owner_id, name FROM projects WHERE id = '\" + id ",
   "hard.go:202 ssti <- r.FormValue(\"template\")",
   "hard.go:208 eval-exec <- r.FormValue(\"plugin\")",
-  "hard.go:216 eval-exec <- r.FormValue(\"method\")",
+  "hard.go:217 eval-exec <- r.FormValue(\"method\")",
   "hard.go:230 nosql-injection <- body[\"username\"]",
   "hard.go:237 nosql-injection <- deepMerge(map[string]interface{}{\"active\": true}, f)",
   "hard.go:243 ldap-injection <- \"(&(objectClass=person)(uid=\" + r.URL.Query().Get(\"user\") + ",
@@ -207,7 +206,6 @@
   "hard.go:67 sql-injection <- \"SELECT * FROM users WHERE name = '\" + stored + \"'\"",
   "hard.go:81 argument-injection <- c.Argument",
   "hard.go:81 command-injection <- c.Executable",
-  "hard.go:87 path-traversal <- decodeTwice(name)",
   "hard.go:89 path-traversal <- resolveUpload(r.URL.Query().Get(\"name\"))",
   "hard.go:96 path-traversal <- filepath.Clean(filepath.Join(baseDir, name))"
  ],
@@ -293,7 +291,6 @@
  "hard/hard.py.fixture": [
   "hard.py:105 sql-injection <- -",
   "hard.py:124 command-injection <- f\"{executable} {argument}\"",
-  "hard.py:138 path-traversal <- decoded",
   "hard.py:142 path-traversal <- target",
   "hard.py:152 path-traversal <- target",
   "hard.py:167 ssrf <- target",
@@ -340,7 +337,6 @@
   "hard.py:597 redos <- pattern",
   "hard.py:601 redos <- request_obj.form.get(\"input\")",
   "hard.py:606 eval-exec <- module_name",
-  "hard.py:612 path-traversal <- f\"{name}.json\"",
   "hard.py:614 path-traversal <- candidate",
   "hard.py:626 header-injection <- parsed[\"value\"]",
   "hard.py:636 xss <- f\"<span>{value}</span>\"",
@@ -706,6 +702,7 @@
  ],
  "interprocedural/JAVA-01": [
   "SessionPathServlet.java:18 trust-boundary <- path",
+  "SessionPathServlet.java:21 xss <- new FileService().read(saved)",
   "SessionPathServlet.java:7 path-traversal <- path"
  ],
  "interprocedural/JAVA-02": [

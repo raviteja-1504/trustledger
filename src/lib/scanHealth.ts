@@ -14,7 +14,7 @@
  * Client-safe: no imports.
  */
 
-export type CoverageGapReason = "engine-unavailable" | "content-unavailable" | "too-large" | "minified-or-generated";
+export type CoverageGapReason = "engine-unavailable" | "content-unavailable" | "parse-failed" | "analysis-failed" | "too-large" | "minified-or-generated";
 
 export interface CoverageGap { file: string; language: string; reason: CoverageGapReason }
 
@@ -46,7 +46,7 @@ export interface ScanTelemetry {
 }
 
 export const MAX_GAPS = 50;
-const DEGRADING: ReadonlySet<CoverageGapReason> = new Set(["engine-unavailable", "content-unavailable"]);
+const DEGRADING: ReadonlySet<CoverageGapReason> = new Set(["engine-unavailable", "content-unavailable", "parse-failed", "analysis-failed"]);
 
 export function summarizeHealth(gaps: readonly CoverageGap[], engineVersion: string): ScanHealth {
   const gap_counts: Partial<Record<CoverageGapReason, number>> = {};
@@ -64,6 +64,8 @@ export const languageName = (lang: string) => LANGUAGE_NAMES[lang] ?? lang;
 export const GAP_REASON_TEXT: Record<CoverageGapReason, string> = {
   "engine-unavailable": "data-flow engine not loaded yet",
   "content-unavailable": "file content could not be fetched",
+  "parse-failed": "the file could not be parsed for data-flow analysis",
+  "analysis-failed": "data-flow analysis failed on this file",
   "too-large": "over the data-flow size limit",
   "minified-or-generated": "minified or generated code",
 };
@@ -75,6 +77,8 @@ export function describeHealth(h: Pick<ScanHealth, "status" | "gap_counts" | "en
   const parts: string[] = [];
   if (n("engine-unavailable")) parts.push(`${n("engine-unavailable")} file${n("engine-unavailable") === 1 ? "" : "s"} got pattern checks only because the ${h.engines_unavailable.map(languageName).join("/")} data-flow engine wasn't loaded yet`);
   if (n("content-unavailable")) parts.push(`${n("content-unavailable")} file${n("content-unavailable") === 1 ? "" : "s"} couldn't be fetched`);
+  if (n("parse-failed")) parts.push(`${n("parse-failed")} file${n("parse-failed") === 1 ? "" : "s"} could not be parsed for data-flow analysis`);
+  if (n("analysis-failed")) parts.push(`data-flow analysis failed on ${n("analysis-failed")} file${n("analysis-failed") === 1 ? "" : "s"} (an empty result there is not a clean result)`);
   if (n("too-large")) parts.push(`${n("too-large")} file${n("too-large") === 1 ? " is" : "s are"} over the data-flow size limit`);
   if (n("minified-or-generated")) parts.push(`${n("minified-or-generated")} minified or generated file${n("minified-or-generated") === 1 ? "" : "s"} were checked with patterns only`);
   return parts.join("; ") + ".";

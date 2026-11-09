@@ -180,10 +180,12 @@ describe("new sinks", () => {
     const code = `${HEAD.replace('"regexp"', '"regexp"; "text/template"')}\nfunc h(w http.ResponseWriter, r *http.Request) {\n\ttemplate.New("x").Parse(r.FormValue("t"))\n}\n`;
     expect(has(code, "ssti")).toBe(true);
   });
-  it("plugin loading and reflection-selected members", () => {
+  it("plugin loading and reflection-selected members (the lookup alone is not a finding; Call / Set* on it is)", () => {
     expect(has(handler(`plugin.Open(${SRC()})`), "eval-exec")).toBe(true);
-    expect(has(handler(`reflect.ValueOf(h).MethodByName(${SRC()})`), "eval-exec")).toBe(true);
-    expect(has(handler(`reflect.ValueOf(&cfg{}).Elem().FieldByName(${SRC()})`), "mass-assignment")).toBe(true);
+    expect(has(handler(`reflect.ValueOf(h).MethodByName(${SRC()})`), "eval-exec")).toBe(false);
+    expect(has(handler(`reflect.ValueOf(h).MethodByName(${SRC()}).Call(nil)`), "eval-exec")).toBe(true);
+    expect(has(handler(`reflect.ValueOf(&cfg{}).Elem().FieldByName(${SRC()})`), "mass-assignment")).toBe(false);
+    expect(has(handler(`reflect.ValueOf(&cfg{}).Elem().FieldByName(${SRC()}).SetString("x")`), "mass-assignment")).toBe(true);
   });
   it("NoSQL find/update with a request-derived filter", () => {
     // A decoded map's entry can be an object ({"$ne": ""}); a string from the query string cannot, unless it
@@ -217,7 +219,10 @@ describe("new sinks", () => {
   it("hand-rolled JWT payload decode in a file with no verification", () => {
     const code = `${HEAD}\nfunc h(w http.ResponseWriter, r *http.Request) {\n\tparts := strings.Split(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), ".")\n\tp, _ := base64.RawURLEncoding.DecodeString(parts[1])\n\tvar c map[string]interface{}\n\tjson.Unmarshal(p, &c)\n}\n`;
     expect(has(code, "jwt-none-alg")).toBe(true);
-    expect(has(code.replace('"strings"', '"strings"; "github.com/golang-jwt/jwt/v5"'), "jwt-none-alg")).toBe(false);
+    // importing a JWT package verifies nothing: the decode is still hand-rolled and unverified
+    expect(has(code.replace('"strings"', '"strings"; "github.com/golang-jwt/jwt/v5"'), "jwt-none-alg")).toBe(true);
+    // a signature check in the same function does
+    expect(has(code.replace("\tparts :=", "\thmac.Equal(nil, nil)\n\tparts :="), "jwt-none-alg")).toBe(false);
   });
   it("decoding a request into a struct with role/admin-like fields", () => {
     const top = `type account struct { Email string; Role string }`;

@@ -148,7 +148,11 @@ function mergeSinksInto(target: Map<string, ParamSinkFact[]>, name: string, fact
 export function resolveCrossFile(
   files: readonly FileGraph[],
   resolvePath: (fromFile: string, moduleSpecifier: string) => string | null,
+  options: { qualifiedNamespaces?: boolean } = {},
 ): CrossFileBridge {
+  // JS/TS addresses a namespace member as `ns.name` at the call site, so it is registered under that key. Python's
+  // call resolution still goes by the last identifier, so it keeps the bare-name form.
+  const nsKey = (local: string, name: string) => (options.qualifiedNamespaces ? `${local}.${name}` : name);
   const summaries = new Map<string, Map<string, CrossFileShape[]>>(files.map(f => [f.path, new Map()]));
   const sinkSummaries = new Map<string, Map<string, ParamSinkFact[]>>(files.map(f => [f.path, new Map()]));
 
@@ -170,6 +174,10 @@ export function resolveCrossFile(
         if (re.publicName === null) {
           for (const [name, shapes] of calleeSummary) if (mergeShapesInto(target, name, shapes)) changed = true;
           for (const [name, facts] of calleeSinks) if (mergeSinksInto(sinkTarget, name, facts)) changed = true;
+        } else if (re.importedName === "*") {
+          // `export * as ns from`: every export of the module, under the qualified key `ns.<name>`
+          for (const [name, shapes] of calleeSummary) if (mergeShapesInto(target, `${re.publicName}.${name}`, shapes)) changed = true;
+          for (const [name, facts] of calleeSinks) if (mergeSinksInto(sinkTarget, `${re.publicName}.${name}`, facts)) changed = true;
         } else if (re.importedName) {
           for (const [from, to] of bindingKeys(calleeSummary.keys(), re.importedName, re.publicName)) {
             if (mergeShapesInto(target, to, calleeSummary.get(from) ?? [])) changed = true;
@@ -194,8 +202,10 @@ export function resolveCrossFile(
         const calleeSinks = sinkSummaries.get(calleePath);
         if (!calleeSummary || !calleeSinks) continue;
         if (imp.namespace) {
-          for (const [name, shapes] of calleeSummary) mergeShapesInto(incoming, name, shapes);
-          for (const [name, facts] of calleeSinks) mergeSinksInto(incomingSinks, name, facts);
+          // registered under the QUALIFIED key `ns.<name>`: the call site `ns.run(x)` names this module's `run`,
+          // and a bare `run` stays whatever it is in the importing file
+          for (const [name, shapes] of calleeSummary) mergeShapesInto(incoming, nsKey(imp.localName, name), shapes);
+          for (const [name, facts] of calleeSinks) mergeSinksInto(incomingSinks, nsKey(imp.localName, name), facts);
         } else {
           for (const [from, to] of bindingKeys(calleeSummary.keys(), imp.importedName, imp.localName)) {
             mergeShapesInto(incoming, to, calleeSummary.get(from) ?? []);
@@ -238,7 +248,7 @@ export function resolveCrossFile(
         }
       };
       if (imp.namespace) {
-        for (const name of new Set([...calleeSummary.keys(), ...calleeSinks.keys()])) entryFor(name, name);
+        for (const name of new Set([...calleeSummary.keys(), ...calleeSinks.keys()])) entryFor(name, nsKey(imp.localName, name));
       } else {
         const exporterKeys = new Set([...calleeSummary.keys(), ...calleeSinks.keys()]);
         for (const [from, to] of bindingKeys(exporterKeys, imp.importedName, imp.localName)) entryFor(from, to);

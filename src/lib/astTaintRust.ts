@@ -33,6 +33,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT, Tree } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough, treeTooDeep } from "./treeSitterRuntime";
 import {
@@ -103,6 +104,12 @@ export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]
 
 let langPromise: Promise<LanguageT> | null = null;
 let parserPool: ParserT | null = null;
+let lastRustEngineError: string | null = null;
+
+/** Engine health for telemetry: ready / parser_unavailable (init failed or unfinished), and the last failure. */
+export function getRustEngineStatus(): { status: "ready" | "parser_unavailable"; lastError: string | null } {
+  return { status: parserPool ? "ready" : "parser_unavailable", lastError: lastRustEngineError };
+}
 
 function initRustParser(): Promise<LanguageT> {
   if (!langPromise) {
@@ -123,6 +130,8 @@ function initRustParser(): Promise<LanguageT> {
       return lang;
     })().catch(err => {
       console.error("[astTaintRust] WASM init failed -- Rust AST taint scanning disabled, regex detectors unaffected:", err);
+      langPromise = null;   // a rejected init must not be cached forever: the next call retries
+      lastRustEngineError = String((err as Error)?.message ?? err);
       throw err;
     });
   }
@@ -146,6 +155,7 @@ export function parseRustSourceSync(content: string, filePath: string): SyntaxNo
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintRust", filePath);
   } catch (err) {
     console.error(`[astTaintRust] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -456,7 +466,9 @@ function emit(
   detailOverride?: string, severityOverride?: "critical" | "high" | "medium",
 ) {
   const line = lineOf(node);
-  const key = `${id}:${line}`;
+  // One finding per sink node: two calls of one class on a line are two findings (the scanner folds them into one record
+  // per id+line and keeps both flows in its detail). A shape finding is dropped later if a modelled sink reports it too.
+  const key = `${id}:${line}:${node.startIndex}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
   ctx.findings.push({
@@ -1299,6 +1311,64 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     return walkIfChain(env, branches);
   };
 
+  // A closure is a VALUE: its body runs when it is called (`task()`), handed to something that calls it, or consumed by an
+  // iterator adaptor -- not where it is written. `let task = || { ... }` records the closure; one never called is never
+  // walked. A closure literal given to a function of this file is walked only if that function uses the parameter; given to
+  // a library function (whose use of it is unknown) it is walked as before.
+  const closureVars = new Map<string, SyntaxNode>();
+  let closureDepth = 0;
+  const closureOf = (v: SyntaxNode | null | undefined): SyntaxNode | null => {
+    let n = v ? unwrapExpr(v) : null;
+    if (n && n.type === "call_expression") {                       // Box::new(|| ..) / Arc::new(..)
+      const cp = callParts(n);
+      const a = argNodes(n);
+      if (cp.name === "new" && a.length === 1 && /^(?:Box|Arc|Rc)$/.test(cp.path?.split("::").slice(-2, -1)[0] ?? "")) n = unwrapExpr(a[0]);
+    }
+    return n && n.type === "closure_expression" ? n : null;
+  };
+  const usesParam = (f: LocalFn, index: number): boolean => {
+    const shape = f.params.find(x => x.index === index);
+    if (!shape || !f.body) return false;
+    const names = new Set(shape.names);
+    return findAllNodes(f.body, "identifier").some(i => names.has(i.text));
+  };
+  /** Does every same-file candidate callee ignore argument `index`? (No candidates: unknown, so no.) */
+  const calleeIgnores = (call: SyntaxNode, index: number): boolean => {
+    const callees = resolveLocalRs(ctx, call);
+    return callees.length > 0 && !callees.some(c => usesParam(c, index));
+  };
+  const returnedClosures = (f: LocalFn): SyntaxNode[] => {
+    if (!f.body) return [];
+    const out: SyntaxNode[] = [];
+    const kids = named(f.body).filter(n => !/comment$/.test(n.type));
+    const last = kids[kids.length - 1];
+    const tail = last?.type === "expression_statement" ? named(last)[0] : last;
+    const t = closureOf(tail?.type === "return_expression" ? named(tail)[0] : tail);
+    if (t) out.push(t);
+    for (const r of findAllNodes(f.body, "return_expression")) { const c = closureOf(named(r)[0]); if (c && !out.includes(c)) out.push(c); }
+    return out;
+  };
+  const invokeClosure = (cl: SyntaxNode, paramMask: number | readonly number[], env: Env) => {
+    if (closureDepth >= 3) return;
+    closureDepth++;
+    try {
+      if (typeof paramMask === "number") walkClosure(cl, paramMask, env);
+      else walkClosureWith(cl, paramMask, env);
+    } finally { closureDepth--; }
+  };
+
+  const walkClosureWith = (cl: SyntaxNode, masks: readonly number[], env: Env) => {
+    const params = closureParams(cl);
+    const saved = new Map(params.map(p => [p, env.get(p)]));
+    walkLoop(env, (e) => {
+      params.forEach((p, i) => e.set(p, masks[i] ?? 0));
+      const body = field(cl, "body");
+      if (body) walk(body, e);
+      return false;
+    });
+    for (const [k, v] of saved) { if (v === undefined) env.delete(k); else env.set(k, v); }
+  };
+
   const walkClosure = (cl: SyntaxNode, paramMask: number, env: Env) => {
     const params = closureParams(cl);
     const saved = new Map(params.map(p => [p, env.get(p)]));
@@ -1341,13 +1411,31 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       case "function_item": case "struct_item": case "impl_item": case "trait_item": case "mod_item": case "enum_item":
       case "use_declaration": case "attribute_item": case "const_item": case "static_item": case "macro_definition":
         return false;
-      case "closure_expression":
-        if (opts.descendClosures) walkClosure(node, 0, cloneEnv(env));
+      case "closure_expression": {
+        if (!opts.descendClosures) return false;
+        // a returned closure runs where its caller calls it
+        const par = node.parent;
+        if (par?.type === "return_expression") return false;
+        if (par?.type === "block" && named(par).filter(n => !/comment$/.test(n.type)).pop()?.id === node.id) return false;   // tail expression
+        walkClosure(node, 0, cloneEnv(env));
         return false;
+      }
       case "block": case "unsafe_block": case "async_block": case "expression_statement": case "parenthesized_expression":
         return walkSeq(named(node), env);
       case "let_declaration": {
         const value = field(node, "value");
+        const lpat = field(node, "pattern");
+        if (lpat?.type === "identifier" && opts.descendClosures) {
+          const cl = closureOf(value);
+          if (cl) { closureVars.set(lpat.text, cl); env.set(lpat.text, 0); return false; }
+          closureVars.delete(lpat.text);
+          // `let f = make();` where make() returns a closure
+          const v = value ? unwrapExpr(value) : null;
+          if (v?.type === "call_expression") {
+            const rc = resolveLocalRs(ctx, v).flatMap(returnedClosures);
+            if (rc.length) { walk(v, env); closureVars.set(lpat.text, rc[0]); env.set(lpat.text, 0); return false; }
+          }
+        }
         if (value) walk(value, env);
         let m = value ? mask(value, env) : 0;
         const t = field(node, "type");
@@ -1438,6 +1526,13 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       }
       case "call_expression": {
         const { name, recv, fnNode } = callParts(node);
+        // `task(x)`: the call that makes a deferred closure run
+        if (!recv && fnNode?.type === "identifier" && closureVars.has(fnNode.text)) {
+          const argMasks = argNodes(node).map(a => mask(a, env));
+          for (const a of argNodes(node)) walk(a, env);
+          invokeClosure(closureVars.get(fnNode.text)!, argMasks, env);
+          return false;
+        }
         if (recv) walk(recv, env);
         else if (fnNode && fnNode.type !== "identifier" && fnNode.type !== "scoped_identifier") walk(fnNode, env);
         for (const a of argNodes(node)) if (a.type !== "closure_expression") walk(a, env);
@@ -1456,9 +1551,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
           if (am) assignTo(recv, am, env, true);
         }
         if (recv && (name === "arg" || name === "args") && unwrapExpr(recv).type === "identifier") appendCommandArgs(unwrapExpr(recv).text, node, ctx);
-        for (const cl of argNodes(node).filter(a => a.type === "closure_expression")) {
-          walkClosure(cl, recv && ELEMENT_CLOSURES.has(name) ? mask(recv, env) : 0, env);
-        }
+        const elemMask = () => (recv && ELEMENT_CLOSURES.has(name) ? mask(recv, env) : 0);
+        argNodes(node).forEach((a, i) => {
+          if (a.type === "closure_expression") {
+            if (calleeIgnores(node, i)) return;               // a function of this file that never uses it
+            walkClosure(a, elemMask(), env);
+          } else if (a.type === "identifier" && closureVars.has(a.text)) {
+            if (calleeIgnores(node, i)) return;
+            invokeClosure(closureVars.get(a.text)!, elemMask(), env);   // handed to something that may call it
+          }
+        });
         return false;
       }
       default:
@@ -2336,7 +2438,8 @@ function collectBola(fn: LocalFn, ctx: EngineCtx) {
 
   // ownership / role evidence anywhere in the handler: an owner field compared to the principal, an owner column
   // filter, or a guard call judged by name
-  let evidence: AuthzKind | null = null;
+  // (each piece of evidence remembers where it is: a check AFTER the write protects nothing)
+  const evs: Array<{ kind: AuthzKind; pos: number }> = [];
   for (const b of findAllNodes(body, "binary_expression")) {
     if (!/^(?:==|!=)$/.test(operatorOf(b))) continue;
     const l = field(b, "left"), r = field(b, "right");
@@ -2349,16 +2452,22 @@ function collectBola(fn: LocalFn, ctx: EngineCtx) {
       const def = /^[a-z_]\w*$/.test(base) ? lastAssignment(base, b) : null;
       return !!def && mentionsId(def);
     };
-    if ((owner(l) && mentionsPrincipal(r.text)) || (owner(r) && mentionsPrincipal(l.text))) evidence = "ownership";
+    if ((owner(l) && mentionsPrincipal(r.text)) || (owner(r) && mentionsPrincipal(l.text))) evs.push({ kind: "ownership", pos: b.startIndex });
   }
   for (const c of findAllNodes(body, "call_expression")) {
     const k = classifyGuardName(callParts(c).name);
-    if (k === "ownership" || (k === "role" && evidence === null)) evidence = k === "role" && argNodes(c).some(mentionsId) ? "ownership" : k;
-    if (callParts(c).name === "filter" && OWNER_COLUMN_RE.test(c.text) && mentionsPrincipal(c.text)) evidence = "ownership";
+    if (k === "ownership" || k === "role") evs.push({ kind: k === "role" && argNodes(c).some(mentionsId) ? "ownership" : k, pos: c.startIndex });
+    if (callParts(c).name === "filter" && OWNER_COLUMN_RE.test(c.text) && mentionsPrincipal(c.text)) evs.push({ kind: "ownership", pos: c.startIndex });
   }
-  if (evidence === "ownership") return;
+  /** The authorization evidence in force at a write: only what appears before the write ends (a filter inside it counts). */
+  const evidenceAt = (at: SyntaxNode): AuthzKind | null => {
+    const before = evs.filter(e => e.pos < at.endIndex);
+    return before.some(e => e.kind === "ownership") ? "ownership" : before.some(e => e.kind === "role") ? "role" : null;
+  };
 
   const report = (at: SyntaxNode, src: string, sink: string) => {
+    const evidence = evidenceAt(at);
+    if (evidence === "ownership") return;
     const roleOnly = authzVerdict(new Set(evidence ? [evidence] : [])) === "role-only";
     emit(ctx, "bola-missing-ownership-check", at, src, sink,
       roleOnly
@@ -2532,6 +2641,8 @@ export function scanAstTaintRust(
     return dropShapeDuplicates([...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))]);
   } catch (err) {
     console.error(`[astTaintRust] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+    lastRustEngineError = `analysis_failed: ${filePath}: ${String((err as Error)?.message ?? err)}`;   // visible via getRustEngineStatus()
     return [];
   }
 }
@@ -2590,6 +2701,7 @@ export function computeRustFnSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintRust] threw computing fn sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }

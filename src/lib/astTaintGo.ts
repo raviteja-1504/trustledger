@@ -49,6 +49,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -95,6 +96,11 @@ export interface AstTaintGoFinding {
   calleeSink?: { file: string; line: number; sinkExpr: string; via: string[] };
   /** Found only by treating a function's string parameters as input (nothing in the file calls it): lower confidence. */
   entryPointSeeded?: boolean;
+  /**
+   * Found through a call whose callee could not be tied to ONE function (a receiver of unknown type with several
+   * same-named methods): the taint is real, the path through THIS method is not established. Why, for the evidence.
+   */
+  ambiguousCall?: string;
 }
 
 /** Cross-package inputs (see computeGoFuncSinkFacts). */
@@ -161,6 +167,7 @@ export function parseGoSourceSync(content: string, filePath: string): SyntaxNode
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintGo", filePath);
   } catch (err) {
     console.error(`[astTaintGo] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -289,6 +296,7 @@ interface SinkMatch { id: AstTaintGoId; sinkExpr: string; args: SyntaxNode[] }
 
 interface GoScanCtx {
   writerVars: Set<string>;      // parameters typed http.ResponseWriter
+  frameworkPkgs: Set<string>;   // import names of web-framework packages (gin / echo / fiber), aliases included
   pluginVars: Set<string>;      // variables assigned from plugin.Open(...)
   gobVars: Set<string>;         // variables assigned from gob.NewDecoder(...)
   htmlEscapers: Set<string>;    // local funcs that replace "<" with an entity
@@ -298,7 +306,7 @@ interface GoScanCtx {
   otherTypedVars: Set<string>;     // parameters of any other declared type (a `c Cfg` is not a framework context)
 }
 const emptyGoCtx = (): GoScanCtx => ({
-  writerVars: new Set(["w"]), pluginVars: new Set(), gobVars: new Set(), htmlEscapers: new Set(),
+  writerVars: new Set(["w"]), frameworkPkgs: new Set(), pluginVars: new Set(), gobVars: new Set(), htmlEscapers: new Set(),
   sensitiveStructs: new Set(), varStructTypes: new Map(), frameworkCtxVars: new Set(), otherTypedVars: new Set(),
 });
 // gin, echo, fiber (also aliased: `g "github.com/gin-gonic/gin"` then `ctx *g.Context`)
@@ -307,6 +315,85 @@ const FRAMEWORK_IMPORT_RE_GO = /(?:^|\/)(?:gin-gonic\/gin|labstack\/echo(?:\/v\d
 /** A handler's framework context: a parameter typed as one, or -- with no declared type seen -- the usual `c`. */
 function isFrameworkCtxGo(name: string): boolean {
   return goCtx.frameworkCtxVars.has(name) || (FRAMEWORK_CTX_RE.test(name) && !goCtx.otherTypedVars.has(name));
+}
+
+/**
+ * The declared type of `name` as seen from `at`: the nearest enclosing function (closures walk outward) that binds it
+ * as a parameter / receiver, `var x T`, `x := T{}` / `&T{}` / `new(T)` / `T(v)` / `v.(T)` / `f()` of a function with one declared
+ * result -- else the package-level `var`. Null when it cannot be told. Each function has its own answer, so a
+ * variable called `w` that is a `*bytes.Buffer` here and an `http.ResponseWriter` there is never confused.
+ */
+function declaredTypeGo(name: string, at: SyntaxNode, depth = 0): string | null {
+  if (depth > 4) return null;
+  const rootOf = (n: SyntaxNode) => { let r = n; while (r.parent) r = r.parent; return r; };
+  const infer = (expr: SyntaxNode | null | undefined): string | null => {
+    if (!expr) return null;
+    if (expr.type === "unary_expression" && expr.child(0)?.text === "&") { const t = infer(expr.namedChildren[0]); return t ? `*${t}` : null; }
+    if (expr.type === "composite_literal") return expr.childForFieldName("type")?.text ?? null;
+    if (expr.type === "type_assertion_expression") return expr.childForFieldName("type")?.text ?? null;
+    if (expr.type === "identifier") return declaredTypeGo(expr.text, expr, depth + 1);
+    if (expr.type === "call_expression") {
+      const f = expr.childForFieldName("function");
+      if (f?.type === "identifier") {
+        if (f.text === "new") { const a = argListOfGo(expr)[0]; return a ? `*${a.text}` : null; }
+        const decl = rootOf(expr).namedChildren.find(d => d?.type === "function_declaration" && d.childForFieldName("name")?.text === f.text);
+        const result = decl?.childForFieldName("result");
+        if (result && result.type !== "parameter_list") return result.text;
+        if (/^[A-Z]\w*$/.test(f.text) && !decl) return f.text;                   // a conversion T(v)
+      }
+    }
+    return null;
+  };
+  for (let fn: SyntaxNode | null = enclosingFnGo(at); fn; fn = fn.parent ? enclosingFnGo(fn.parent) : null) {
+    for (const list of [fn.childForFieldName("parameters"), fn.childForFieldName("receiver")]) {
+      for (const prm of list?.namedChildren ?? []) {
+        if (prm?.type === "parameter_declaration" && prm.childrenForFieldName("name").some(nm => nm?.text === name)) return prm.childForFieldName("type")?.text ?? null;
+      }
+    }
+    let best: { pos: number; type: string | null } | null = null;
+    const visit = (n: SyntaxNode) => {
+      if (n.startIndex >= at.startIndex) return;
+      if (n.type === "func_literal" && !(n.startIndex <= at.startIndex && at.endIndex <= n.endIndex)) return;
+      if (n.type === "var_spec" && n.childrenForFieldName("name").some(nm => nm?.text === name)) {
+        const t = n.childForFieldName("type")?.text ?? infer(n.childForFieldName("value")?.namedChildren[0]);
+        best = { pos: n.startIndex, type: t };
+      } else if (n.type === "short_var_declaration" || n.type === "assignment_statement") {
+        const l = n.childForFieldName("left"), r = n.childForFieldName("right");
+        const names = l?.namedChildren ?? [];
+        const i = names.findIndex(x => x?.text === name);
+        if (i >= 0 && n.type === "short_var_declaration") best = { pos: n.startIndex, type: infer(r?.namedChildren[i] ?? null) };
+      }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    const body = fn.childForFieldName("body");
+    if (body) visit(body);
+    if (best) return (best as { pos: number; type: string | null }).type;
+  }
+  for (const decl of rootOf(at).namedChildren) {
+    if (decl?.type !== "var_declaration") continue;
+    for (const spec of findAllNodesGo(decl, "var_spec")) {
+      if (spec.childrenForFieldName("name").some(nm => nm?.text === name)) return spec.childForFieldName("type")?.text ?? infer(spec.childForFieldName("value")?.namedChildren[0]);
+    }
+  }
+  return null;
+}
+
+/** Is this expression an HTTP response writer *by type* (not by name)? A framework context's `c.Writer` counts. */
+function isResponseWriterGo(expr: SyntaxNode, at: SyntaxNode): boolean {
+  const e = expr.type === "unary_expression" && expr.child(0)?.text === "&" ? expr.namedChildren[0] : expr;
+  if (!e) return false;
+  if (e.type === "identifier") return /(?:^|[*.])ResponseWriter$/.test(declaredTypeGo(e.text, at) ?? "");
+  if (e.type === "selector_expression") {
+    const op = e.childForFieldName("operand");
+    return e.childForFieldName("field")?.text === "Writer" && op?.type === "identifier" && isFrameworkCtxAtGo(op.text, at);
+  }
+  return false;
+}
+/** isFrameworkCtxGo, but judged from the declaration visible at `at` when there is one. */
+function isFrameworkCtxAtGo(name: string, at: SyntaxNode): boolean {
+  const t = declaredTypeGo(name, at);
+  if (t) { const m = /^\*?([A-Za-z_]\w*)\.(?:Context|Ctx)$/.exec(t); return !!m && (/^(?:gin|echo|fiber)$/.test(m[1]) || goCtx.frameworkPkgs.has(m[1])); }
+  return isFrameworkCtxGo(name);
 }
 // Per-scan facts. Scans are synchronous, so a module-level slot set at scan start is safe.
 let goCtx: GoScanCtx = emptyGoCtx();
@@ -525,7 +612,7 @@ const FRAMEWORK_CTX_RE = /^(?:c|ctx|context|gc|ec)$/;
 const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download"]);
 const FS_SINKS_GO = new Set([
   "Open", "Create", "OpenFile", "ReadFile", "WriteFile", "Remove", "RemoveAll", "Mkdir", "MkdirAll", "Rename", "Stat",
-  "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown",
+  "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown", "Readlink", "Chtimes", "Lchown", "CopyFS",
 ]);
 const TWO_PATH_FS_GO = new Set(["os.Rename", "os.Link", "os.Symlink"]);
 const TEMPLATE_PARSE_RE_GO = /^(?:text\/)?template\.(?:New|Must)\b[\s\S]*\.(?:Parse|ParseFiles|ParseGlob)$/;
@@ -572,6 +659,21 @@ function isLogWriterGo(w: SyntaxNode, at: SyntaxNode): boolean {
   return !!path && /(?:^|\/)logs?\/|\.log$/i.test(path);
 }
 
+/**
+ * The name argument of the reflection lookup (`lookup` = MethodByName / FieldByName) that `recv` is the result of --
+ * directly (`v.MethodByName(n).Call(...)`, through `.Elem()`) or through a variable (`m := v.MethodByName(n); m.Call(...)`).
+ */
+function reflectLookupNameGo(recv: SyntaxNode | null, at: SyntaxNode, lookup: string, depth = 0): SyntaxNode | null {
+  if (!recv || depth > 3) return null;
+  if (recv.type === "call_expression") {
+    const f = recv.childForFieldName("function");
+    if (f?.type === "selector_expression" && f.childForFieldName("field")?.text === lookup) return argListOfGo(recv)[0] ?? null;
+    return null;
+  }
+  if (recv.type === "identifier") return reflectLookupNameGo(lastAssignmentGo(recv.text, at), at, lookup, depth + 1);
+  return null;
+}
+
 function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -597,12 +699,12 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     // destination or link is the write that escapes); every other call's path is its first argument
     return { id: "path-traversal", sinkExpr: text, args: TWO_PATH_FS_GO.has(text) ? args.slice(0, 2) : args.slice(0, 1).length ? args.slice(0, 1) : args };
   }
-  if (text === "filepath.Join") {
-    return { id: "path-traversal", sinkExpr: text, args };
-  }
+  // filepath.Join / Clean / Abs / Rel / EvalSymlinks and path.Join only BUILD a path: taint passes through them (see
+  // GO_PASSTHROUGH) and the file operation that finally uses the result is the sink.
+  if (text === "os.OpenRoot" && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
   if (text === "http.ServeFile" && args[2]) return { id: "path-traversal", sinkExpr: text, args: [args[2]] };
   // Web-framework helpers on the handler's context (gin, echo, fiber): serve a file from a path, or redirect.
-  if (isFrameworkCtxGo(receiverText)) {
+  if (fnNode.type === "selector_expression" && fnNode.childForFieldName("operand")?.type === "identifier" ? isFrameworkCtxAtGo(receiverText, call) : isFrameworkCtxGo(receiverText)) {
     if (FRAMEWORK_FILE_TAILS.has(tail) && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
     // gin c.SaveUploadedFile(file, dst) / fiber c.SaveFile(file, dst): writes to dst
     if ((tail === "SaveUploadedFile" || tail === "SaveFile") && args[1]) return { id: "path-traversal", sinkExpr: text, args: [args[1]] };
@@ -620,11 +722,11 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     return { id: "open-redirect", sinkExpr: text, args: [args[args.length - 1]] };
   }
   // XSS: writes to the response body
-  if (/^fmt\.Fprint(?:f|ln)?$/.test(text) && args[0] && (goCtx.writerVars.has(args[0].text) || /^(?:c\.Writer|resp|res|rw)$/.test(args[0].text))) {
+  if (/^fmt\.Fprint(?:f|ln)?$/.test(text) && args[0] && isResponseWriterGo(args[0], call)) {
     return { id: "xss", sinkExpr: text, args: args.slice(1) };
   }
-  if (text === "io.WriteString" && args[0] && goCtx.writerVars.has(args[0].text) && args[1]) return { id: "xss", sinkExpr: text, args: [args[1]] };
-  if ((tail === "Write" || tail === "WriteString") && (goCtx.writerVars.has(receiverText) || receiverText === "c.Writer")) {
+  if (text === "io.WriteString" && args[0] && isResponseWriterGo(args[0], call) && args[1]) return { id: "xss", sinkExpr: text, args: [args[1]] };
+  if ((tail === "Write" || tail === "WriteString") && fnNode.type === "selector_expression" && isResponseWriterGo(fnNode.childForFieldName("operand")!, call)) {
     return { id: "xss", sinkExpr: text, args };
   }
   if ((tail === "String" || tail === "HTML" || tail === "SendString" || tail === "Send") && /^(?:c|ctx)$/.test(receiverText) && args.length > 0) {
@@ -673,9 +775,17 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   // dynamic code / reflection
   if (text === "plugin.Open" && args[0]) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
   if (tail === "Lookup" && goCtx.pluginVars.has(receiverText) && args[0]) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
-  if (tail === "MethodByName" && args[0]) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
+  // reflection: looking a method up runs nothing; calling it does. The attacker-chosen NAME is what matters.
+  if ((tail === "Call" || tail === "CallSlice") && fnNode.type === "selector_expression") {
+    const name = reflectLookupNameGo(fnNode.childForFieldName("operand"), call, "MethodByName");
+    if (name) return { id: "eval-exec", sinkExpr: text, args: [name] };
+  }
   if ((tail === "RunString" || tail === "Eval") && args[0] && parts.length > 1) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
-  if (tail === "FieldByName" && args[0]) return { id: "mass-assignment", sinkExpr: text, args: [args[0]] };
+  // ... and looking a field up writes nothing; Set / SetString / SetInt / SetBool / SetMapIndex on it does
+  if (/^Set(?:String|Int|Uint|Float|Bool|Bytes|Complex|MapIndex)?$/.test(tail) && fnNode.type === "selector_expression") {
+    const name = reflectLookupNameGo(fnNode.childForFieldName("operand"), call, "FieldByName");
+    if (name) return { id: "mass-assignment", sinkExpr: text, args: [name] };
+  }
   // NoSQL (mongo-style) with an operator-capable filter document
   if (parts.length > 1 && NOSQL_TAILS_GO.has(tail) && NOSQL_RECEIVER_RE_GO.test(receiverText) && args.length > 0) {
     // (ctx, filter[, update|opts...]): the documents after the context, never the context itself.
@@ -743,8 +853,19 @@ function matchSqlInjectionGo(call: SyntaxNode): SinkMatch | null {
   // stmt.Exec(x) on a prepared statement: the query text is fixed, every argument is a bind value
   const recv = fnNode?.type === "selector_expression" ? fnNode.childForFieldName("operand") : null;
   if (recv?.type === "identifier" && isPreparedStmtGo(recv)) return null;
+  // a receiver whose type is declared in this file with its OWN method of that name is not database/sql
+  if (recv?.type === "identifier") {
+    const rt = declaredTypeGo(recv.text, call)?.replace(/^\*/, "");
+    if (rt && /^[A-Za-z_]\w*$/.test(rt) && localTypeDeclaresMethodGo(call, rt, tail)) return null;
+  }
   const args = argListOfGo(call);
   return args[0] ? { id: "sql-injection", sinkExpr: text, args: [args[0]] } : null;
+}
+
+function localTypeDeclaresMethodGo(at: SyntaxNode, typeName: string, method: string): boolean {
+  let root: SyntaxNode = at;
+  while (root.parent) root = root.parent;
+  return root.namedChildren.some(d => d?.type === "method_declaration" && d.childForFieldName("name")?.text === method && receiverOfMethodGo(d)?.type === typeName);
 }
 
 const PREPARE_TAILS_GO = /^(?:Prepare|PrepareContext|Preparex|PreparexContext|PrepareNamed|PrepareNamedContext|Stmt|StmtContext)$/;
@@ -870,6 +991,21 @@ function boundPathReachesFsSinkGo(call: SyntaxNode): boolean {
   const mentions = new RegExp(`\\b${escapeRe(target.text)}\\b`);
   return findAllNodesGo(fn, "call_expression").some(c => c.startIndex > call.endIndex &&
     matchSinkGo(c)?.id === "path-traversal" && matchSinkGo(c)?.sinkExpr !== "filepath.Join" && argListOfGo(c).some(a => mentions.test(a.text)));
+}
+
+/** Is `call` an argument (through passthrough wrappers) of a file operation this engine models as a path sink? */
+function isInsideFsSinkCallGo(call: SyntaxNode): boolean {
+  for (let p: SyntaxNode | null = call.parent; p; p = p.parent) {
+    if (p.type === "call_expression") {
+      const m = matchSinkGo(p);
+      if (m?.id === "path-traversal") return true;
+      const t = calleeTextGo(p.childForFieldName("function") ?? p);
+      if (t && (GO_PASSTHROUGH.has(t) || t === "filepath.EvalSymlinks")) continue;
+      return false;
+    }
+    if (p.type !== "argument_list" && p.type !== "expression_list" && p.type !== "parenthesized_expression") return false;
+  }
+  return false;
 }
 
 /** Is this call's value (through passthrough wrappers like filepath.Clean) bound to a variable rather than used inline? */
@@ -1487,12 +1623,23 @@ function calleeKeysGo(fn: SyntaxNode | null | undefined, localFns: Map<string, L
   const operand = fn.childForFieldName("operand");
   if (!field || !operand) return [];
   let type: string | undefined;
-  const lit = operand.type === "unary_expression" ? operand.namedChildren[0] : operand;
+  let unwrapped: SyntaxNode = operand;
+  while (unwrapped.type === "parenthesized_expression" && unwrapped.namedChildren[0]) unwrapped = unwrapped.namedChildren[0]!;
+  const lit = unwrapped.type === "unary_expression" ? unwrapped.namedChildren[0] : unwrapped;
   if (lit?.type === "composite_literal") type = lit.childForFieldName("type")?.text;
-  else if (operand.type === "identifier") {
+  else if (operand.type === "call_expression") {
+    // `maker().Process(x)`: the declared result type of a function of this file
+    const mf = operand.childForFieldName("function");
+    let root: SyntaxNode = operand;
+    while (root.parent) root = root.parent;
+    const decl = mf?.type === "identifier" ? root.namedChildren.find(d => d?.type === "function_declaration" && d.childForFieldName("name")?.text === mf.text) : undefined;
+    const result = decl?.childForFieldName("result");
+    if (result && result.type !== "parameter_list" && /^\*?[A-Za-z_]\w*$/.test(result.text)) type = result.text;
+  } else if (operand.type === "identifier") {
     const decl = findEnclosingFunctionNodeGo(fn);
     const own = decl ? receiverOfMethodGo(decl) : null;
-    type = own && own.name === operand.text ? own.type : goCtx.varStructTypes.get(operand.text);
+    const declared = declaredTypeGo(operand.text, fn);
+    type = own && own.name === operand.text ? own.type : declared ? declared.replace(/^\*/, "") : goCtx.varStructTypes.get(operand.text);
   }
   if (type) {
     const key = `${type.replace(/^\*/, "")}.${field}`;
@@ -1627,7 +1774,7 @@ function invertGo(g: Guard): Guard {
  */
 function substringGuardClearsGo(sub: string): number | null {
   let clears = 0;
-  if (sub.includes("..")) clears |= SinkClass.PATH;
+  // (no path clearing for "..": an absolute path `/etc/passwd` or `C:\\x` escapes any base directory without one)
   if (sub.includes("'") || sub.includes('"')) clears |= SinkClass.SQL | SinkClass.XPATH;
   if (sub.includes("<")) clears |= SinkClass.XSS;
   return clears || null;
@@ -1884,6 +2031,17 @@ function guardsOfConditionGo(cond: SyntaxNode, root: SyntaxNode, aliases: Readon
       // strings.HasPrefix(x, "/") / (x, "//") / (x, "https://example.com/"): URL facets
       if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier" && /^(?:\/\/?|https?:\/\/.*)$/.test(goStringLiteralValue(args[1]) ?? "")) {
         return urlPrefixFacets(args[0].text, goStringLiteralValue(args[1])!, "starts");
+      }
+      // filepath.IsLocal(x): x is relative, lexically inside its directory and not a reserved name -- when true
+      if (text === "filepath.IsLocal" && args.length === 1 && args[0].type === "identifier") {
+        return [{ name: args[0].text, holds: "true", clears: SinkClass.PATH }];
+      }
+      // rel, err := filepath.Rel(base, p); strings.HasPrefix(rel, "..") -- when false, p stays inside base (lexically)
+      if (text === "strings.HasPrefix" && args.length === 2 && args[0].type === "identifier" && goStringLiteralValue(args[1]) === "..") {
+        const def = lastAssignmentGo(args[0].text, cond);
+        const rt = def?.type === "call_expression" ? calleeTextGo(def.childForFieldName("function") ?? def) : null;
+        const target = rt === "filepath.Rel" ? argListOfGo(def!)[1] : undefined;
+        if (target?.type === "identifier") return [{ name: target.text, holds: "false", clears: SinkClass.PATH }];
       }
       // strings.Contains(x, "..") -- when false, x lacks that sequence
       if (text === "strings.Contains" && args.length === 2 && args[0].type === "identifier") {
@@ -2484,6 +2642,11 @@ export function scanAstTaintGo(
     // Import local name -> the imported package's last path segment (Go's default package name, which is
     // what a cross-package summary is keyed by). `.` and `_` imports bind no qualifier.
     const importedPkgs = new Map<string, string>();
+    // Import local name -> the full import path (what tells two packages named `util` apart).
+    const importedPaths = new Map<string, string>();
+    // variable / field name -> the import local name its type's package was imported under
+    const qualifierOfVar = new Map<string, string>();
+    const qualifierOfField = new Map<string, string>();
     // Variable -> `pkg.Type` for values of another package's type (`svc *models.Store`, `s := &models.Store{}`).
     const qualifiedVarTypes = new Map<string, string>();
     // Struct field -> `pkg.Type` (`type Server struct { Store *models.Store }`, then `s.Store.Find(x)`).
@@ -2495,14 +2658,14 @@ export function scanAstTaintGo(
         const alias = spec.childForFieldName("name");
         if (alias && alias.type !== "package_identifier") continue;
         const local = alias?.text ?? seg;
-        if (local && seg) importedPkgs.set(local, seg);
+        if (local && seg) { importedPkgs.set(local, seg); importedPaths.set(local, path); }
       }
     }
 
     // Per-scan facts: request/writer variables, escapers, plugin/gob variables, structs with role-like fields.
     goCtx = emptyGoCtx();
     // import local name of a web framework package (gin / echo / fiber), aliases included
-    const frameworkPkgs = new Set<string>();
+    const frameworkPkgs = goCtx.frameworkPkgs;
     for (const spec of findAllNodesGo(root, "import_spec")) {
       const path = goStringLiteralValue(spec.childForFieldName("path") ?? spec) ?? "";
       if (!FRAMEWORK_IMPORT_RE_GO.test(path)) continue;
@@ -2522,12 +2685,12 @@ export function scanAstTaintGo(
         const isFw = !!fw && (frameworkPkgs.has(fw[1]) || /^(?:gin|echo|fiber)$/.test(fw[1]));
         for (const nm of names) (isFw ? goCtx.frameworkCtxVars : goCtx.otherTypedVars).add(nm);
         const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(type);
-        if (q && importedPkgs.has(q[1])) for (const nm of names) qualifiedVarTypes.set(nm, `${importedPkgs.get(q[1])}.${q[2]}`);
+        if (q && importedPkgs.has(q[1])) for (const nm of names) { qualifiedVarTypes.set(nm, `${importedPkgs.get(q[1])}.${q[2]}`); qualifierOfVar.set(nm, q[1]); }
       } else if (n.type === "short_var_declaration") {
         const rhs = n.childForFieldName("right")?.text ?? "";
         const ids = identifiersOf(n.childForFieldName("left") ?? n);
         const q = /^&?([A-Za-z_]\w*)\.([A-Za-z_]\w*)\{/.exec(rhs);
-        if (q && ids[0] && importedPkgs.has(q[1])) qualifiedVarTypes.set(ids[0].text, `${importedPkgs.get(q[1])}.${q[2]}`);
+        if (q && ids[0] && importedPkgs.has(q[1])) { qualifiedVarTypes.set(ids[0].text, `${importedPkgs.get(q[1])}.${q[2]}`); qualifierOfVar.set(ids[0].text, q[1]); }
         if (/^plugin\.Open\(/.test(rhs) && ids[0]) goCtx.pluginVars.add(ids[0].text);
         if (/gob\.NewDecoder\(/.test(rhs) && ids[0]) goCtx.gobVars.add(ids[0].text);
         const composite = /^&?([A-Za-z_]\w*)\{/.exec(rhs) ?? /^new\(([A-Za-z_]\w*)\)/.exec(rhs);
@@ -2543,7 +2706,7 @@ export function scanAstTaintGo(
           for (const fd of findAllNodesGo(st, "field_declaration")) {
             const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(fd.childForFieldName("type")?.text ?? "");
             if (q && importedPkgs.has(q[1])) {
-              for (const f of fd.childrenForFieldName("name")) if (f) qualifiedFieldTypes.set(f.text, `${importedPkgs.get(q[1])}.${q[2]}`);
+              for (const f of fd.childrenForFieldName("name")) if (f) { qualifiedFieldTypes.set(f.text, `${importedPkgs.get(q[1])}.${q[2]}`); qualifierOfField.set(f.text, q[1]); }
             }
             if (/^\*?http\.Request$/.test(fd.childForFieldName("type")?.text ?? "")) {
               for (const f of fd.childrenForFieldName("name")) if (f) requestFields.push(f.text);
@@ -2687,6 +2850,8 @@ export function scanAstTaintGo(
 
     // fn name -> (tainted param index -> classes tainted at the call site)
     const seededParams = new Map<string, Map<number, number>>();
+    // functions seeded ONLY through calls that could not be tied to one callee -> why (the first such call)
+    const ambiguousSeeds = new Map<string, string>();
 
     // Local functions passed as values to local functions: callee -> its parameter -> the functions bound to it
     // (`dispatch(path, save)` binds dispatch's `writer` to save).
@@ -2730,15 +2895,27 @@ export function scanAstTaintGo(
       const field = fn.childForFieldName("field")?.text;
       const operand = fn.childForFieldName("operand");
       if (!field || !operand) return null;
+      // `local` = the import name the package was imported under; `rest` = `Func` or `Type.Method`
+      const keyFor = (local: string | undefined, rest: string): string | null => {
+        const pkg = local ? importedPkgs.get(local) : undefined;
+        if (!local || !pkg) return null;
+        const dirs = crossFileFacts ? factDirsOfGo(crossFileFacts).get(pkg) : undefined;
+        if (!dirs || dirs.size <= 1) return `${pkg}.${rest}`;          // one package of that name in the batch: unambiguous
+        // several: the import path names exactly one directory of the batch (module prefix aside), or the call is unresolved
+        const importedFrom = importedPaths.get(local) ?? "";
+        const matched: string[] = [];
+        for (const d of dirs) if (importedFrom === d || importedFrom.endsWith("/" + d)) matched.push(d);
+        return matched.length === 1 ? `${matched[0]}::${pkg}.${rest}` : null;
+      };
       if (operand.type === "identifier") {
         const t = qualifiedVarTypes.get(operand.text);
-        if (t) return `${t}.${field}`;
-        const pkg = importedPkgs.get(operand.text);
-        return pkg ? `${pkg}.${field}` : null;
+        if (t) return keyFor(qualifierOfVar.get(operand.text), `${t.slice(t.indexOf(".") + 1)}.${field}`);
+        return keyFor(operand.text, field);
       }
       if (operand.type === "selector_expression") {
-        const t = qualifiedFieldTypes.get(operand.childForFieldName("field")?.text ?? "");
-        return t ? `${t}.${field}` : null;
+        const name = operand.childForFieldName("field")?.text ?? "";
+        const t = qualifiedFieldTypes.get(name);
+        return t ? keyFor(qualifierOfField.get(name), `${t.slice(t.indexOf(".") + 1)}.${field}`) : null;
       }
       return null;
     };
@@ -2807,10 +2984,12 @@ export function scanAstTaintGo(
           `The uploaded file is saved under the name the client sent — any extension (a .php / .html served back) and, unless cleaned, any directory; generate the name server-side and check the type`);
       }
       // `p := filepath.Join(base, name)`: building a path reads nothing -- p is judged where it is used
-      if (match?.sinkExpr === "filepath.Join" && joinResultIsBoundGo(node)) {
-        // no finding here; the file call that uses the bound path carries it -- and when that call is one this engine
+      const isJoinCall = calleeTextGo(node.childForFieldName("function") ?? node) === "filepath.Join";
+      if (isJoinCall) {
+        // no finding here; the file call that uses the path carries it -- and when that call is one this engine
         // models, it answers for the regex layer's Join-line finding too
-        if (boundPathReachesFsSinkGo(node)) suppressedOut?.push({ id: "path-traversal", line: lineOf(node) });
+        const consumed = joinResultIsBoundGo(node) ? boundPathReachesFsSinkGo(node) : isInsideFsSinkCallGo(node);
+        if (consumed) suppressedOut?.push({ id: "path-traversal", line: lineOf(node) });
       } else if (match) {
         const taintedArg = sinkHit(node, match.args, match.id, env, taintMask);
         if (taintedArg && match.id === "ssrf" && resolvedAddressesVettedGo(node, taintedArg)) suppressedOut?.push({ id: "ssrf", line: lineOf(node) });
@@ -2974,11 +3153,17 @@ export function scanAstTaintGo(
       // only a call that runs exactly one function / method of this file
       const resolved = calleeKeysGo(fn, localFns);
       const directName = resolved.length === 1 ? resolved[0] : null;
+      // an unresolved receiver with several same-named methods: any may run, so each is seeded (conservative) -- and
+      // flagged, so what is found through it is not presented as an exact call path
+      const ambiguousNames = resolved.length > 1 && fn?.type === "selector_expression" ? resolved : [];
       // a call of a function-valued parameter (`writer(path)` in `dispatch(path, save)`): a call of the function bound to it
       const encName = fn?.type === "identifier" && !localFns.has(fn.text) ? findEnclosingFunctionNodeGo(node)?.childForFieldName("name")?.text : undefined;
       const boundNames = encName ? [...(fnValueArgs.get(encName)?.get(fn!.text) ?? [])] : [];
-      for (const seedName of [directName, ...boundNames]) if (seedName && localFns.has(seedName)) {
+      for (const seedName of [directName, ...boundNames, ...ambiguousNames]) if (seedName && localFns.has(seedName)) {
         const fnName = seedName;
+        if (ambiguousNames.includes(seedName) && directName === null && !boundNames.includes(seedName)) {
+          if (!seededParams.has(fnName)) ambiguousSeeds.set(fnName, `receiver type of ${fn?.text ?? "the call"} is not resolved: ${resolved.join(" and ")} are all candidates`);
+        } else ambiguousSeeds.delete(fnName);
         const localFn = localFns.get(fnName)!;
         const taintedIdx = new Map<number, number>();
         args.forEach((arg, i) => {
@@ -3146,7 +3331,10 @@ export function scanAstTaintGo(
             const shape = fn.paramShapes.find(s => s.index === idx);
             if (shape) env.set(shape.name, m);
           }
+          const before = findings.length;
           walker.walk(fn.body, env);
+          const why = ambiguousSeeds.get(fnName);
+          if (why) for (let i = before; i < findings.length; i++) findings[i] = { ...findings[i], ambiguousCall: why };
         }
         if (!changed) break;
       }
@@ -3196,7 +3384,11 @@ export function scanAstTaintGo(
     // whose callers live elsewhere -- with its string-like parameters taken as untrusted input. Handlers (they read the
     // request themselves), main/init and tests are not. What only this finds is marked entryPointSeeded (lower
     // confidence) -- the caller may well pass a constant.
-    const calledHere = new Set(findAllNodesGo(root, "call_expression").map(c => calleeTextGo(c.childForFieldName("function") ?? c)?.split(".").pop() ?? ""));
+    // (the called name is the selector's field whatever its operand is: `Logger{}.Process(x)` and `maker().Process(x)` have no dotted text)
+    const calledHere = new Set(findAllNodesGo(root, "call_expression").map(c => {
+      const f = c.childForFieldName("function");
+      return f?.type === "selector_expression" ? f.childForFieldName("field")?.text ?? "" : f?.type === "identifier" ? f.text : calleeTextGo(f ?? c)?.split(".").pop() ?? "";
+    }));
     const beforeEntry = findings.length;
     for (const decl of [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]) {
       const name = decl.childForFieldName("name")?.text ?? "";
@@ -3216,10 +3408,26 @@ export function scanAstTaintGo(
     drainSeeded();
     for (let i = beforeEntry; i < findings.length; i++) findings[i] = { ...findings[i], entryPointSeeded: true };
 
-    // A hand-rolled JWT payload decode in a file that never verifies a signature
-    if (!/golang-jwt|dgrijalva\/jwt-go|go-jose|jwt\.Parse|jwt\.Verify|lestrrat/.test(content)) {
+    // A hand-rolled JWT payload decode in a function that never verifies a signature. Verification is evidence of
+    // what THAT function does (a library Parse / Verify, an HMAC or signature check) or of a helper of this file it
+    // calls -- an imported JWT package, or a verifying function elsewhere in the file, proves nothing about this one.
+    {
+      const VERIFIES_RE = /\bjwt\.(?:Parse\w*|Verify\w*)\(|\bjws\.(?:Verify|Parse)\w*\(|\bjwt\.ParseWithClaims\(|hmac\.(?:New|Equal)\(|\.Verify\w*\(|VerifyPKCS1v15|VerifyPSS|ecdsa\.Verify|ed25519\.Verify|ConstantTimeCompare/;
+      const allDecls = [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")];
+      const declByName = new Map(allDecls.map(d => [d.childForFieldName("name")?.text ?? "", d]));
+      const verifiesFn = (d: SyntaxNode, depth = 0): boolean => {
+        if (VERIFIES_RE.test(d.text)) return true;
+        if (depth >= 2) return false;
+        return findAllNodesGo(d, "call_expression").some(c => {
+          const f = c.childForFieldName("function");
+          const callee = f?.type === "identifier" ? f.text : f?.type === "selector_expression" ? f.childForFieldName("field")?.text : undefined;
+          const target = callee ? declByName.get(callee) : undefined;
+          return !!target && target !== d && verifiesFn(target, depth + 1);
+        });
+      };
       for (const fnDecl of findAllNodesGo(root, "function_declaration")) {
         const t = fnDecl.text;
+        if (verifiesFn(fnDecl)) continue;
         if (/strings\.Split\([\s\S]*?"\."\s*\)/.test(t) && /base64\.\w+\.DecodeString/.test(t) && /json\.Unmarshal/.test(t)) {
           emit("jwt-none-alg", fnDecl.childForFieldName("name") ?? fnDecl, "token", "manual JWT decode",
             "JWT payload is base64-decoded and JSON-parsed by hand and the file never verifies a signature — claims (role, sub, ...) are attacker-controlled; verify with a JWT library");
@@ -3249,13 +3457,52 @@ export function scanAstTaintGo(
     // handler with no cookie / session use is left alone: its auth may sit in middleware this file doesn't show.)
     const usesSessionLib = /gorilla\/sessions|alexedwards\/scs|gin-contrib\/sessions|sessions\.NewCookieStore/.test(content);
     const csrfDefended = /csrf|xsrf|nosurf|SameSite|"Origin"|Referer\(\)|"Referer"/i;
+    // Routers a CSRF middleware wraps (`csrf.Protect(k)(mux)`, `nosurf.New(mux)`, `r.Use(csrf.Middleware)`) and which router each
+    // handler is registered on. A handler on a wrapped router is protected; one registered on another router is not;
+    // a handler this file does not register is judged as before (a CSRF middleware call anywhere in the file).
+    const CSRF_MW_RE = /csrf|xsrf|nosurf/i;
+    const wrappedRouters = new Set<string>();
+    let csrfMiddlewareApplied = false;
+    const registeredOn = new Map<string, Set<string>>();
+    for (const call of findAllNodesGo(root, "call_expression")) {
+      const f = call.childForFieldName("function");
+      const text = f ? calleeTextGo(f) ?? f.text : "";
+      const args = argListOfGo(call);
+      if (f?.type === "call_expression" && CSRF_MW_RE.test(f.text)) {                  // csrf.Protect(key)(mux)
+        csrfMiddlewareApplied = true;
+        for (const a of args) if (a.type === "identifier") wrappedRouters.add(a.text);
+      } else if (CSRF_MW_RE.test(text) && /\.(?:New|Handler|Wrap)$|^nosurf\.New$/.test(text)) {
+        csrfMiddlewareApplied = true;
+        for (const a of args) if (a.type === "identifier") wrappedRouters.add(a.text);
+      }
+      if (f?.type === "selector_expression") {
+        const router = f.childForFieldName("operand")?.text ?? "";
+        const method = f.childForFieldName("field")?.text ?? "";
+        if (method === "Use" && args.some(a => CSRF_MW_RE.test(a.text))) { csrfMiddlewareApplied = true; wrappedRouters.add(router); }
+        if (/^(?:Handle|HandleFunc|GET|POST|PUT|PATCH|DELETE|Any|Post|Get|Put|Delete)$/.test(method)) {
+          for (const a of args.slice(1)) {
+            const h = a.type === "identifier" ? a.text : a.type === "call_expression" ? argListOfGo(a)[0]?.text : undefined;
+            if (h) (registeredOn.get(h) ?? registeredOn.set(h, new Set()).get(h)!).add(router);
+          }
+        }
+      }
+    }
+    const csrfProtectedByRouter = (handler: string): boolean | null => {
+      const routers = registeredOn.get(handler);
+      if (!routers || !csrfMiddlewareApplied) return null;                               // not decidable from this file
+      return [...routers].every(r => wrappedRouters.has(r));
+    };
     for (const fnDecl of [...findAllNodesGo(root, "function_declaration"), ...findAllNodesGo(root, "method_declaration")]) {
       const t = fnDecl.text;
       const params = fnDecl.childForFieldName("parameters")?.text ?? "";
       if (!/http\.ResponseWriter|\*gin\.Context|echo\.Context|\*fiber\.Ctx/.test(params)) continue;
       if (!/\.Cookie\(|session/i.test(t) && !usesSessionLib) continue;
       if (!/\b(?:Exec|ExecContext)\(|\b(?:UPDATE|INSERT|DELETE)\b|\.(?:Save|Create|Delete|Updates?)\(/.test(t)) continue;
-      if (csrfDefended.test(t) || csrfDefended.test(content.slice(0, 3000))) continue;
+      const handlerName = fnDecl.childForFieldName("name")?.text ?? "";
+      const byRouter = csrfProtectedByRouter(handlerName);
+      if (byRouter === true) continue;                                  // registered only on routers a CSRF middleware wraps
+      // (decidable and not protected: the file-head "csrf" word of an import no longer excuses it)
+      if (csrfDefended.test(t) || (byRouter === null && csrfDefended.test(content.slice(0, 3000)))) continue;
       emit("csrf", fnDecl.childForFieldName("name") ?? fnDecl, "session cookie", "state-changing handler",
         "This handler changes state on the strength of a session cookie alone — another site can make the browser send it (CSRF); require a CSRF token (gorilla/csrf, nosurf), check Origin, or set the cookie SameSite=Strict");
     }
@@ -3265,6 +3512,7 @@ export function scanAstTaintGo(
     return findings;
   } catch (err) {
     console.error(`[astTaintGo] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
     return [];
   }
 }
@@ -3311,6 +3559,7 @@ export function computeGoFuncSinkFacts(
         owner = `${pkg}.${t}`;
       }
       decls.push({ decl, key: `${owner}.${name}`, alsoKey: samePkg, shapes });
+      // (an exported function with no facts still registers its directory below, so ambiguity is visible to importers)
     }
     if (decls.length === 0) return out;
     const seedRuns = decls.flatMap(d => [{ decl: d.decl, index: -1 }, ...d.shapes.map(s => ({ decl: d.decl, index: s.index }))]);
@@ -3340,8 +3589,11 @@ export function computeGoFuncSinkFacts(
           }]);
         }
       }
-      if (facts.length === 0) continue;
-      for (const key of [d.key, d.alsoKey]) {
+      if (facts.length === 0) {
+        if (!d.key.startsWith("@")) { const q = `${dirOfGo(filePath)}::${d.key}`; if (!out.has(q)) out.set(q, []); }
+        continue;
+      }
+      for (const key of [d.key, d.alsoKey, d.key.startsWith("@") ? undefined : `${dirOfGo(filePath)}::${d.key}`]) {
         if (!key) continue;
         const list = out.get(key) ?? [];
         mergeSinkFacts(list, facts);
@@ -3350,6 +3602,28 @@ export function computeGoFuncSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintGo] threw computing function sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+  }
+  return out;
+}
+
+function dirOfGo(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+}
+
+const factDirsCacheGo = new WeakMap<object, Map<string, Set<string>>>();
+/** package name -> the directories of the batch that declare a package of that name (read off `dir::pkg.Name` keys). */
+function factDirsOfGo(facts: ReadonlyMap<string, unknown>): Map<string, Set<string>> {
+  let out = factDirsCacheGo.get(facts);
+  if (!out) {
+    out = new Map();
+    for (const key of facts.keys()) {
+      const i = key.indexOf("::");
+      if (i < 0) continue;
+      const pkg = key.slice(i + 2).split(".")[0];
+      (out.get(pkg) ?? out.set(pkg, new Set()).get(pkg)!).add(key.slice(0, i));
+    }
+    factDirsCacheGo.set(facts, out);
   }
   return out;
 }

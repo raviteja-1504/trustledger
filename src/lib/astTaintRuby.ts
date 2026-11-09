@@ -48,6 +48,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -92,6 +93,12 @@ export interface AstTaintRubyFinding {
 
 let langPromise: Promise<LanguageT> | null = null;
 let parserPool: ParserT | null = null;
+let lastRubyEngineError: string | null = null;
+
+/** Engine health for telemetry: ready / parser_unavailable (init failed or not finished) and the last error. */
+export function getRubyEngineStatus(): { status: "ready" | "parser_unavailable"; lastError: string | null } {
+  return { status: parserPool ? "ready" : "parser_unavailable", lastError: lastRubyEngineError };
+}
 
 function initRubyParser(): Promise<LanguageT> {
   if (!langPromise) {
@@ -112,6 +119,8 @@ function initRubyParser(): Promise<LanguageT> {
       return lang;
     })().catch(err => {
       console.error("[astTaintRuby] WASM init failed -- Ruby AST taint scanning disabled, regex detectors unaffected:", err);
+      langPromise = null;   // a rejected init must not be cached forever: the next call retries
+      lastRubyEngineError = String((err as Error)?.message ?? err);
       throw err;
     });
   }
@@ -135,6 +144,7 @@ export function parseRubySourceSync(content: string, filePath: string): SyntaxNo
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintRuby", filePath);
   } catch (err) {
     console.error(`[astTaintRuby] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -437,13 +447,32 @@ const methodId = (m: LocalMethod): string => m.key ?? m.name.toLowerCase();
  * `Klass.new(...).m` / `x.m` with `x = Klass.new` an instance method of Klass. Any other receiver: none (a library
  * object). Two classes' same-named methods never stand in for each other.
  */
+/**
+ * The fully qualified name a constant written at `site` refers to, the way Ruby looks it up: `::A::B` exactly; otherwise
+ * from the innermost enclosing namespace outward (`Svc` inside `module Admin; class Ctl` is tried as Admin::Ctl::Svc,
+ * Admin::Svc, then Svc). The first candidate that names a class this file (or `known`) defines wins -- never a name
+ * that merely ENDS the same way.
+ */
+function resolveConstantRb(written: string, site: SyntaxNode, defines: (fqn: string) => boolean): string | null {
+  if (written.startsWith("::")) { const exact = written.slice(2); return defines(exact) ? exact : null; }
+  const nesting = (enclosingClassName(site) ?? "").split("::").filter(Boolean);
+  for (let i = nesting.length; i >= 0; i--) {
+    const fqn = [...nesting.slice(0, i), written].join("::");
+    if (defines(fqn)) return fqn;
+  }
+  return null;
+}
+
 function resolveLocal(ctx: EngineCtx, name: string, recv: SyntaxNode | null, site: SyntaxNode): LocalMethod[] {
   // a file re-opening a library's namespace (`module Net; module LDAP; module Filter; def self.escape ...`) holds a
   // stub or monkeypatch: the library's own model (sanitizer, safe constructor) speaks for its calls, not that body
   const cands = (ctx.byName.get(name) ?? []).filter(m => !m.className || !LIBRARY_NAMESPACE_RB.test(m.className));
   if (cands.length === 0) return [];
-  const ofClass = (cls: string, singleton: boolean) => cands.filter(m => m.singleton === singleton && !!m.className &&
-    (m.className === cls || m.className.endsWith(`::${cls}`) || cls.endsWith(`::${m.className}`)));
+  const ofClass = (cls: string, singleton: boolean) => {
+    const defined = new Set(cands.filter(m => !!m.className).map(m => m.className!));
+    const fqn = resolveConstantRb(cls, site, c => defined.has(c) || [...ctx.byName.values()].some(ms => ms.some(m => m.className === c)));
+    return fqn ? cands.filter(m => m.singleton === singleton && m.className === fqn) : [];
+  };
   if (!recv || recv.type === "self") {
     const encl = enclosingClassName(site);
     const own = encl ? cands.filter(m => m.className === encl) : [];
@@ -461,9 +490,20 @@ function emit(
   detailOverride?: string, severityOverride?: "critical" | "high" | "medium",
 ) {
   const line = lineOf(node);
-  const key = `${id}:${line}`;
-  if (ctx.seen.has(key)) return;
-  ctx.seen.add(key);
+  // One finding per sink CALL: two calls of one class on a line are two findings (the scanner folds them into one record
+  // per id+line and keeps both flows in its detail). A shape finding and a call finding on the same line are one flow
+  // seen twice, and stay one.
+  const isCall = node.type === "call" || node.type === "subshell";
+  const lineKey = `${id}:${line}`;
+  if (isCall) {
+    const callKey = `${lineKey}:${node.startIndex}`;
+    if (ctx.seen.has(callKey) || ctx.seen.has(`${lineKey}:shape`)) return;
+    ctx.seen.add(callKey);
+    ctx.seen.add(`${lineKey}:call`);
+  } else {
+    if (ctx.seen.has(`${lineKey}:shape`) || ctx.seen.has(`${lineKey}:call`)) return;
+    ctx.seen.add(`${lineKey}:shape`);
+  }
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr.slice(0, 80)}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
@@ -1164,18 +1204,86 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     }
   };
 
+  // A lambda / proc is a VALUE: its body runs when it is called, not where it is written. Variables holding one, and the
+  // lambda a method returns, are walked at their call sites (`f.call(x)`, `f.(x)`, `f[x]`, `f.yield(x)`); one that is never
+  // called is never walked. A lambda handed to a method of this file is walked when that method calls it; handed to a
+  // library method (whose use of it is unknown) it is walked as before.
+  const lambdaVars = new Map<string, SyntaxNode>();
+  let lambdaDepth = 0;
+  const INVOKERS = new Set(["call", "yield", "()", "===", "curry"]);
+  const deferredLiteral = (right: SyntaxNode | null): SyntaxNode | null => {
+    if (!right) return null;
+    if (right.type === "lambda") return right;
+    if (right.type === "call") {
+      const nm = methodNameOf(right), r = receiverOf(right), block = right.childForFieldName("block");
+      if (block && ((!r && (nm === "lambda" || nm === "proc")) || (nm === "new" && r?.text === "Proc"))) return block;
+    }
+    return null;
+  };
+  const lambdaParamNames = (lam: SyntaxNode): string[] => lam.type === "lambda"
+    ? paramShapesOf(lam.childForFieldName("parameters")).map(p => p.name)
+    : findAllNodes(lam.childForFieldName("parameters") ?? lam, "identifier").filter(id => id.parent?.type === "block_parameters").map(id => id.text);
+  const invokeLambda = (lam: SyntaxNode, argMasks: readonly number[], env: Env) => {
+    if (lambdaDepth >= 3) return;
+    const lenv = cloneEnv(env);
+    lambdaParamNames(lam).forEach((nm, i) => lenv.set(nm, argMasks[i] ?? 0));
+    const body = lam.childForFieldName("body");
+    lambdaDepth++;
+    try { if (body) walk(body, lenv); } finally { lambdaDepth--; }
+  };
+  /** The lambda literals a local method returns (a `return -> { }` or its last expression). */
+  const returnedLambdas = (m: LocalMethod): SyntaxNode[] => {
+    if (!m.body) return [];
+    const out: SyntaxNode[] = [];
+    const kids = named(m.body).filter(n => n.type !== "comment");
+    const last = kids[kids.length - 1];
+    if (last) { const v = last.type === "return" ? named(last)[0] : last; const u = v?.type === "argument_list" ? named(v)[0] : v; const d = deferredLiteral(u ?? null); if (d) out.push(d); }
+    for (const r of findAllNodes(m.body, "return")) { const v = named(r)[0]; const u = v?.type === "argument_list" ? named(v)[0] : v; const d = deferredLiteral(u ?? null); if (d && !out.includes(d)) out.push(d); }
+    return out;
+  };
+  /** Does local method `m` ever call (or pass on) its `index`-th positional parameter? */
+  const callsParam = (m: LocalMethod, index: number): boolean => {
+    const shape = m.params.find(p => !p.keyword && p.index === index);
+    if (!shape || !m.body) return false;
+    return findAllNodes(m.body, "identifier").some(id => id.text === shape.name && (() => {
+      const par = id.parent;
+      if (!par) return false;
+      if (par.type === "call" && par.childForFieldName("receiver")?.id === id.id && INVOKERS.has(methodNameOf(par) || "()")) return true;
+      if (par.type === "element_reference" && par.childForFieldName("object")?.id === id.id) return true;
+      return par.type === "argument_list" || par.type === "block_argument";            // handed on to something else: may be called there
+    })());
+  };
+  const lambdaInvocationTargets = (call: SyntaxNode, env: Env): SyntaxNode[] => {
+    const recv = receiverOf(call);
+    const nm = methodNameOf(call) || "()";
+    if (!recv || !INVOKERS.has(nm)) return [];
+    if (recv.type === "identifier" && lambdaVars.has(recv.text)) return [lambdaVars.get(recv.text)!];
+    if (recv.type === "call") return resolveLocal(ctx, methodNameOf(recv), receiverOf(recv), recv).flatMap(returnedLambdas);
+    void env;
+    return [];
+  };
+
   const walk = (node: SyntaxNode, env: Env): boolean => {
     switch (node.type) {
       case "method": case "singleton_method": case "class": case "module": case "singleton_class":
         return false;   // walked separately, each in its own scope
-      case "lambda":
-        if (opts.descendLambdas) {
-          const lenv = cloneEnv(env);
-          for (const p of paramShapesOf(node.childForFieldName("parameters"))) lenv.set(p.name, 0);
-          const body = node.childForFieldName("body");
-          if (body) walk(body, lenv);
+      case "lambda": {
+        if (!opts.descendLambdas) return false;
+        const par = node.parent;
+        const inReturnPosition = par?.type === "return" || (par?.type === "body_statement" && named(par).filter(n => n.type !== "comment").pop()?.id === node.id);
+        if (inReturnPosition) return false;                           // a returned lambda runs where its caller calls it
+        if (par?.type === "argument_list" && par.parent?.type === "call") {
+          const call = par.parent;
+          const callees = resolveLocal(ctx, methodNameOf(call), receiverOf(call), call);
+          if (callees.length > 0) {
+            // positional index of this argument
+            const idx = positionalArgs(call).findIndex(a => a.id === node.id);
+            if (idx < 0 || !callees.some(c => callsParam(c, idx))) return false;   // the method never calls it
+          }
         }
+        invokeLambda(node, [], env);
         return false;
+      }
       case "body_statement": case "begin":
         // A method body can carry its own rescue/else/ensure clauses, exactly like an explicit begin block.
         if (node.type === "begin" || named(node).some(n => n.type === "rescue" || n.type === "ensure")) return walkBeginLike(node, env);
@@ -1263,6 +1371,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
     if (node.type === "assignment") {
       const right = node.childForFieldName("right");
+      const target = node.childForFieldName("left");
+      const deferred = target?.type === "identifier" ? deferredLiteral(right) : null;
+      if (deferred && target) {
+        lambdaVars.set(target.text, deferred);
+        assign(target, 0, env, false);
+        return false;
+      }
+      if (target?.type === "identifier") lambdaVars.delete(target.text);
       if (right) walk(right, env);
       const left = node.childForFieldName("left");
       const m = right ? mask(right, env) : 0;
@@ -1285,6 +1401,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
     if (node.type === "call") {
       const block = node.childForFieldName("block");
+      // `handler.call(x)` / `handler.(x)` / `make.call`: the call that makes a deferred lambda run
+      const targets = lambdaInvocationTargets(node, env);
+      if (targets.length) {
+        const argMasks = positionalArgs(node).map(a => mask(a, env));
+        for (const c of named(node)) if (c.id !== block?.id) walk(c, env);
+        for (const lam of targets) invokeLambda(lam, argMasks, env);
+        return statementTerminates(node);
+      }
       for (const c of named(node)) if (c.id !== block?.id) walk(c, env);
       checkCallSink(node, env, ctx, mask);
       seedLocalMethod(node, env, ctx, mask);
@@ -1296,6 +1420,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const am = argsOf(node).reduce((m, a) => m | mask(a, env), 0);
         if (am) assign(recv, am, env, true);
       }
+      // a bare `proc { }` / `lambda { }` / `Proc.new { }` builds a value; its block runs when the value is called
+      if (block && deferredLiteral(node)) return false;
       if (block) {
         const elementMask = recv && ITERATOR_METHODS.has(name) ? mask(recv, env) : 0;
         const firstArg = argsOf(node)[0];
@@ -1303,6 +1429,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         walkBlock(block, elementMask, env, route);
       }
       return statementTerminates(node);
+    }
+
+    if (node.type === "element_reference") {
+      const obj = node.childForFieldName("object");
+      if (obj?.type === "identifier" && lambdaVars.has(obj.text)) {
+        const argMasks = named(node).filter(c => c.id !== obj.id).map(a => mask(a, env));
+        for (const c of named(node)) walk(c, env);
+        invokeLambda(lambdaVars.get(obj.text)!, argMasks, env);
+        return false;
+      }
     }
 
     if (node.type === "binary") {
@@ -1822,7 +1958,13 @@ function callKeys(node: SyntaxNode, ctx: EngineCtx): string[] {
   const recv = receiverOf(node);
   if (!recv) return [];
   const keys: string[] = [];
-  const cls = (t: string) => { const c = t.replace(/^::/, ""); keys.push(c); const last = c.split("::").pop()!; if (last !== c) keys.push(last); };
+  // the written constant under each enclosing namespace, innermost first (the first the facts define wins): never the
+  // bare last segment, which would merge Admin::UserService with Billing::UserService
+  const cls = (t: string) => {
+    if (t.startsWith("::")) { keys.push(t.slice(2)); return; }
+    const nesting = (enclosingClassName(node) ?? "").split("::").filter(Boolean);
+    for (let i = nesting.length; i >= 0; i--) keys.push([...nesting.slice(0, i), t].join("::"));
+  };
   if (recv.type === "constant" || recv.type === "scope_resolution") {
     const before = keys.length; cls(recv.text);
     for (let i = before; i < keys.length; i++) keys[i] = `${keys[i]}.${name}`;
@@ -2039,7 +2181,10 @@ function collectBola(method: LocalMethod, ctx: EngineCtx, mask: TaintMaskFn) {
     // the record's own owner field against the principal, on one line (a check on another record proves nothing)
     const recordVar = (() => { for (let p = call.parent; p && p.id !== method.body!.id; p = p.parent) if (p.type === "assignment") { const l = p.childForFieldName("left"); return l && (l.type === "identifier" || l.type === "instance_variable") ? l.text : null; } return null; })();
     const ownerOfRecord = recordVar ? new RegExp(`(?:^|[^\\w@])${recordVar.replace(/[$@]/g, "\\$&")}\\.(?:user|owner|author|account|creator)(?:_id)?\\b`) : null;
-    const laterLines = ctx.lines.slice(lineOf(call), method.body.endPosition.row + 1);
+    // (only lines between the lookup and the first write count: an owner check after the record was changed protects nothing)
+    const afterLookup = ctx.lines.slice(lineOf(call), method.body.endPosition.row + 1);
+    const firstWrite = afterLookup.findIndex(l => WRITE_ON_RECORD.test(l));
+    const laterLines = firstWrite >= 0 ? afterLookup.slice(0, firstWrite) : afterLookup;
     if (ownerOfRecord && laterLines.some(l => ownerOfRecord.test(l) && PRINCIPAL_RE.test(l) && /(?:==|!=|eql\?)/.test(l))) continue;
     const writes = WRITE_ACTIONS.test(method.name) || WRITE_ON_RECORD.test(ctx.lines.slice(lineOf(call), method.body.endPosition.row + 1).join("\n"));
     if (!writes) continue;   // an unscoped READ may be of a public record -- not reported (see module docblock)
@@ -2142,6 +2287,8 @@ export function scanAstTaintRuby(
     return ctx.findings;
   } catch (err) {
     console.error(`[astTaintRuby] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+    lastRubyEngineError = `analysis_failed: ${filePath}: ${String((err as Error)?.message ?? err)}`;   // visible via getRubyEngineStatus()
     return [];
   }
 }
@@ -2231,6 +2378,7 @@ export function computeRubyMethodSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintRuby] threw computing method sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }

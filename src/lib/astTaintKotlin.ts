@@ -43,6 +43,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -89,6 +90,12 @@ export function astTaintKotlinLabel(id: AstTaintKotlinId): string { return astTa
 
 let langPromise: Promise<LanguageT> | null = null;
 let parserPool: ParserT | null = null;
+let lastKotlinEngineError: string | null = null;
+
+/** Engine health for telemetry: ready / parser_unavailable (init failed or unfinished), and the last failure. */
+export function getKotlinEngineStatus(): { status: "ready" | "parser_unavailable"; lastError: string | null } {
+  return { status: parserPool ? "ready" : "parser_unavailable", lastError: lastKotlinEngineError };
+}
 
 function initKotlinParser(): Promise<LanguageT> {
   if (!langPromise) {
@@ -109,6 +116,8 @@ function initKotlinParser(): Promise<LanguageT> {
       return lang;
     })().catch(err => {
       console.error("[astTaintKotlin] WASM init failed -- Kotlin AST taint scanning disabled, regex detectors unaffected:", err);
+      langPromise = null;   // a rejected init must not be cached forever: the next call retries
+      lastKotlinEngineError = String((err as Error)?.message ?? err);
       throw err;
     });
   }
@@ -132,6 +141,7 @@ export function parseKotlinSourceSync(content: string, filePath: string): Syntax
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintKotlin", filePath);
   } catch (err) {
     console.error(`[astTaintKotlin] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -464,6 +474,9 @@ interface LocalFn {
 }
 type TaintMaskFn = (node: SyntaxNode, env: Env) => number;
 
+/** A function's identity: `Class.name` / `::name` plus its offset (overloads and local functions never share one). */
+const fnIdKt = (f: LocalFn): string => `${f.key ?? f.name}@${f.decl.startIndex}`;
+
 // SLF4J / Log4j / kotlin-logging / java.util.logging write methods, on a receiver named like a logger
 const KT_LOG_TAILS = new Set(["trace", "debug", "info", "warn", "error", "fatal", "severe", "warning", "log"]);
 const KT_LOGGER_RE = /^_?(?:\w*[Ll]ogger|[Ll]og|LOG|LOGGER)$/;
@@ -498,7 +511,10 @@ interface EngineCtx {
   root: SyntaxNode;
   /** function start offset -> its single-assignment constant locals (see constValueKt) */
   constLocals?: Map<number, Map<string, ConstVal>>;
+  /** Every same-file function by identity (see fnIdKt): two classes' `find` are two entries. */
   fns: Map<string, LocalFn>;
+  /** bare name -> every function of that name (see resolveLocalKt) */
+  byName: Map<string, LocalFn[]>;
   propagating: Map<string, Map<number, number>>;
   intrinsic: Map<string, number>;
   seeded: Map<string, Map<number, number>>;
@@ -524,7 +540,8 @@ function emit(
   detailOverride?: string, severityOverride?: "critical" | "high" | "medium",
 ) {
   const line = lineOf(node);
-  const key = `${id}:${line}`;
+  // one finding per sink node: two calls of one class on a line are two findings (the scanner folds them into one record per id+line)
+  const key = `${id}:${line}:${node.startIndex}`;
   if (ctx.seen.has(key)) return;
   ctx.seen.add(key);
   ctx.findings.push({
@@ -717,11 +734,14 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     // Same-file function: summary of what its parameters (and its own body) contribute to its return value.
     if (!recv || recv.type === "this_expression") {
-      const local = ctx.fns.get(name);
-      if (local && local.body) {
-        let m = ctx.intrinsic.get(name) ?? 0;
-        const prop = ctx.propagating.get(name);
-        if (prop) for (const [i, surviving] of prop) for (const a of bindArgument(local, node, i)) m |= mask(a, env) & surviving;
+      const locals = resolveLocalKt(ctx, node).filter(f => !!f.body);
+      if (locals.length) {
+        let m = 0;
+        for (const local of locals) {
+          m |= ctx.intrinsic.get(fnIdKt(local)) ?? 0;
+          const prop = ctx.propagating.get(fnIdKt(local));
+          if (prop) for (const [i, surviving] of prop) for (const a of bindArgument(local, node, i)) m |= mask(a, env) & surviving;
+        }
         return m;
       }
     }
@@ -743,11 +763,11 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     }
     // a method of a class of this file called on an object (`p.name()` on a `Params(request)`): its summary, plus the
     // receiver's own taint below
-    const method = recv ? ctx.fns.get(name) : undefined;
+    const methods = recv ? resolveLocalKt(ctx, node).filter(f => !!f.body && !!f.className) : [];
     let own = 0;
-    if (method?.body && method.className) {
-      own = ctx.intrinsic.get(name) ?? 0;
-      const prop = ctx.propagating.get(name);
+    for (const method of methods) {
+      own |= ctx.intrinsic.get(fnIdKt(method)) ?? 0;
+      const prop = ctx.propagating.get(fnIdKt(method));
       if (prop) for (const [i, surviving] of prop) for (const a of bindArgument(method, node, i)) own |= mask(a, env) & surviving;
     }
     if (recv) {
@@ -1056,6 +1076,26 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     return walkIfChain(env, branches);
   };
 
+  // `val task = { ... }` is a VALUE: its body runs when it is called (`task()`, `task.invoke()`) or handed to something that
+  // calls it -- not where it is written. A lambda never called is never walked. A trailing lambda given to a function of this
+  // file is walked only if that function uses the parameter; given to a library function it is walked as before.
+  const lambdaVars = new Map<string, SyntaxNode>();
+  let lambdaDepth = 0;
+  const invokeLambda = (lam: SyntaxNode, masks: readonly number[], env: Env) => {
+    if (lambdaDepth >= 3) return;
+    const params = lambdaParamNames(lam);
+    const saved = new Map(params.map(q => [q, env.get(q)]));
+    params.forEach((q, i) => env.set(q, masks[i] ?? 0));
+    const body = childOfType(lam, "statements");
+    lambdaDepth++;
+    try { if (body) walk(body, env); } finally { lambdaDepth--; }
+    for (const [k, v] of saved) { if (v === undefined) env.delete(k); else env.set(k, v); }
+  };
+  const lambdaParamUsed = (f: LocalFn): boolean => {
+    const last = f.params[f.params.length - 1];
+    return !!last && !!f.body && findAllNodes(f.body, "simple_identifier").some(i => i.text === last.name);
+  };
+
   /** A lambda passed to a call: Kotlin lambdas read and write the enclosing scope and may run zero or more times. */
   const walkLambda = (lam: SyntaxNode, paramMask: number, env: Env) => {
     const params = lambdaParamNames(lam);
@@ -1101,6 +1141,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
 
   const declare = (pd: SyntaxNode, env: Env) => {
     const value = propertyValue(pd);
+    const declName = childOfType(childOfType(pd, "variable_declaration"), "simple_identifier")?.text;
+    if (declName) {
+      const lv = value ? unwrapParens(value) : null;
+      if (lv?.type === "lambda_literal" && opts.descendLambdas) { lambdaVars.set(declName, lv); env.set(declName, 0); return; }
+      lambdaVars.delete(declName);
+    }
     if (value) walk(value, env);
     const m = value ? mask(value, env) : 0;
     const vd = childOfType(pd, "variable_declaration");
@@ -1138,6 +1184,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const kids = named(node);
         const target = kids[0], value = kids[kids.length - 1];
         if (!target || !value || target === value) return false;
+        const bareTarget = target.type === "simple_identifier" ? target
+          : target.type === "directly_assignable_expression" && named(target).length === 1 && named(target)[0].type === "simple_identifier" ? named(target)[0] : null;
+        if (bareTarget && operatorOf(node) === "=") {
+          // `task = { ... }` re-binds a lambda variable (deferred); any other value drops the old lambda
+          const lv = unwrapParens(value);
+          if (lv.type === "lambda_literal" && opts.descendLambdas) { lambdaVars.set(bareTarget.text, lv); env.set(bareTarget.text, 0); return false; }
+          lambdaVars.delete(bareTarget.text);
+        }
         walk(value, env);
         const m = mask(value, env);
         const op = operatorOf(node);
@@ -1241,6 +1295,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     if (node.type === "call_expression") {
       const lam = trailingLambda(node);
       const { name, recv, callee } = callParts(node);
+      // `task(x)` / `task.invoke(x)`: the call that makes a deferred lambda run
+      const invoked = !recv ? lambdaVars.get(name) : recv.type === "simple_identifier" && name === "invoke" ? lambdaVars.get(recv.text) : undefined;
+      if (invoked) {
+        const argMasks = argsOf(node).map(a => mask(a.expr, env));
+        for (const a of argsOf(node)) walk(a.expr, env);
+        invokeLambda(invoked, argMasks, env);
+        return false;
+      }
       // the callee chain (receiver + its own calls) and the arguments first
       if (callee && callee.type !== "simple_identifier") walk(callee, env);
       for (const a of argsOf(node)) walk(a.expr, env);
@@ -1259,7 +1321,18 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (lam) {
         const elementMask = recv && ELEMENT_LAMBDAS.has(name) ? mask(recv, env)
           : name === "with" ? positionalArgs(node).reduce((m, a) => m | mask(a, env), 0) : 0;
-        if (THIS_SCOPE_LAMBDAS.has(name) || ELEMENT_LAMBDAS.has(name) || opts.descendLambdas) walkLambda(lam, elementMask, env);
+        const callees = resolveLocalKt(ctx, node).filter(f => !!f.body);
+        const ignored = callees.length > 0 && !callees.some(lambdaParamUsed);   // a function of this file that never uses it
+        if (!ignored && (THIS_SCOPE_LAMBDAS.has(name) || ELEMENT_LAMBDAS.has(name) || opts.descendLambdas)) walkLambda(lam, elementMask, env);
+      }
+      // a stored lambda handed to something that may call it
+      for (const a of argsOf(node)) {
+        const ae = a.expr;
+        if (ae.type === "simple_identifier" && lambdaVars.has(ae.text)) {
+          const callees = resolveLocalKt(ctx, node).filter(f => !!f.body);
+          if (callees.length > 0 && !callees.some(c => c.params.some(q => c.body && findAllNodes(c.body, "simple_identifier").some(i => i.text === q.name)))) continue;
+          invokeLambda(lambdaVars.get(ae.text)!, [recv && ELEMENT_LAMBDAS.has(name) ? mask(recv, env) : 0], env);
+        }
       }
       return !recv && TERMINATING_CALLS.has(name);
     }
@@ -1361,7 +1434,8 @@ function provenConstantKt(node: SyntaxNode, ctx: EngineCtx, depth = 0): boolean 
   }
   if (n.type === "call_expression") {
     const { name, recv } = callParts(n);
-    const fn = !recv ? ctx.fns.get(name) : undefined;
+    const fnCands = !recv ? resolveLocalKt(ctx, n) : [];
+    const fn = fnCands.length === 1 ? fnCands[0] : undefined;
     if (!fn?.body || fn.params.length > 0 || positionalArgs(n).length > 0) return false;
     const expr = expressionBody(fn);
     const rets = expr ? [expr] : findAllNodes(fn.body, "jump_expression").filter(j => /^return\b/.test(j.text)).map(j => named(j)[0]);
@@ -1821,19 +1895,44 @@ function checkTimingCompare(node: SyntaxNode, l: SyntaxNode, r: SyntaxNode, env:
 // ── Same-file helpers (re-walk with seeded parameters) ────────────────────────────────────────────────────
 
 function seedLocalFn(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
-  const { name, recv } = callParts(node);
+  const { recv } = callParts(node);
   if (recv && recv.type !== "this_expression") return;
-  const callee = ctx.fns.get(name);
-  if (!callee?.body) return;
-  const tainted = new Map<number, number>();
-  for (const p of callee.params) {
-    const m = bindArgument(callee, node, p.index).reduce((acc, a) => acc | (mask(a, env) & ALL), 0);
-    if (m) tainted.set(p.index, m);
+  for (const callee of resolveLocalKt(ctx, node)) {
+    if (!callee.body) continue;
+    const tainted = new Map<number, number>();
+    for (const p of callee.params) {
+      const m = bindArgument(callee, node, p.index).reduce((acc, a) => acc | (mask(a, env) & ALL), 0);
+      if (m) tainted.set(p.index, m);
+    }
+    if (tainted.size === 0) continue;
+    const id = fnIdKt(callee);
+    const existing = ctx.seeded.get(id) ?? new Map<number, number>();
+    for (const [i, m] of tainted) existing.set(i, (existing.get(i) ?? 0) | m);
+    ctx.seeded.set(id, existing);
   }
-  if (tainted.size === 0) return;
-  const existing = ctx.seeded.get(callee.name) ?? new Map<number, number>();
-  for (const [i, m] of tainted) existing.set(i, (existing.get(i) ?? 0) | m);
-  ctx.seeded.set(callee.name, existing);
+}
+
+/**
+ * The same-file function(s) a call runs, by identity: a bare call is a top-level function, a method of the enclosing class,
+ * or an extension; `this.f()` the enclosing class's; `x.f()` the method of x's type when known (declared, constructed, or a
+ * `Type.f()` companion/object call). A receiver of unknown type resolves only when exactly one function has that name --
+ * two classes' same-named methods never stand in for each other.
+ */
+function resolveLocalKt(ctx: EngineCtx, call: SyntaxNode): LocalFn[] {
+  const { name, recv } = callParts(call);
+  const cands = ctx.byName.get(name) ?? [];
+  if (cands.length === 0) return [];
+  const cur = ctx.current?.className ?? null;
+  if (!recv) {
+    const own = cands.filter(f => !f.className || (cur !== null && f.className === cur) || cur === null);
+    return own;
+  }
+  if (recv.type === "this_expression") return cur ? cands.filter(f => f.className === cur) : cands;
+  let type: string | null = null;
+  if (recv.type === "simple_identifier") type = ctx.varTypes.get(recv.text) ?? (/^[A-Z]/.test(recv.text) ? recv.text : null);
+  else type = constructedClass(recv);
+  if (type) { const t = bareType(type); return cands.filter(f => f.className === t); }
+  return cands.length === 1 ? cands : [];
 }
 
 // ── Cross-file calls (facts from other files' methods, Kotlin or Java) ────────────────────────────────────
@@ -1841,7 +1940,7 @@ function seedLocalFn(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMask
 function callKeys(node: SyntaxNode, env: Env, ctx: EngineCtx): string[] {
   const { name, recv } = callParts(node);
   if (!name) return [];
-  if (!recv) return ctx.fns.has(name) || env.has(name) ? [] : [`::${name}`];
+  if (!recv) return ctx.byName.has(name) || env.has(name) ? [] : [`::${name}`];
   if (recv.type === "simple_identifier") {
     const t = ctx.varTypes.get(recv.text);
     if (t) return [`${bareType(t)}.${name}`];
@@ -2144,10 +2243,19 @@ function collectBola(fn: LocalFn, ctx: EngineCtx) {
     } else if (a.type === "simple_identifier" && viaLocal && findAllNodes(viaLocal, "call_expression").some(c => BOLA_LOOKUP.has(callParts(c).name))) {
       record = a; from = viaLocal.endIndex; to = call.startIndex;
     }
+    if (BOLA_WRITE.has(name)) to = Math.min(to, call.startIndex);   // a check after the write protects nothing
     const ev = new Set(baseEvidence);
     const dom = dominatingEvidence(call, fn.body, ids, principals, record, from, to);
     if (dom) ev.add(dom);
-    if (findAllNodes(fn.body, "call_expression").some(c => /^(?:authorize|checkPermission|checkAccess|assertOwner|verifyOwner|requireOwner|ensureOwner)$/.test(callParts(c).name))) ev.add("ownership");
+    // A helper like authorize(...) proves ownership only when it is given the record or id in question and runs before the
+    // write; authorize(user) says who is calling, not that they own THIS object (a role/permission check at most).
+    for (const c of findAllNodes(fn.body, "call_expression")) {
+      if (!/^(?:authorize|checkPermission|checkAccess|assertOwner|verifyOwner|requireOwner|ensureOwner)$/.test(callParts(c).name)) continue;
+      if (c.startIndex >= to) continue;
+      const names = new Set(findAllNodes(c, new Set(["simple_identifier", "interpolated_identifier"])).map(i => i.text));
+      if ((record && names.has(record.text)) || [...ids].some(i => names.has(i))) ev.add("ownership");
+      else ev.add("role");
+    }
     const verdict = authzVerdict(ev);
     if (verdict === "proven") continue;
     const roleOnly = verdict === "role-only";
@@ -2219,13 +2327,17 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
   const all = collectFns(root);
   const fns = new Map<string, LocalFn>();
-  for (const f of all) if (!fns.has(f.name)) fns.set(f.name, f);
+  const byName = new Map<string, LocalFn[]>();
+  for (const f of all) {
+    fns.set(fnIdKt(f), f);
+    byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
+  }
   const fieldTypes = collectFields(root);
   const varTypes = new Map<string, string>();
   for (const [n, t] of fieldTypes) if (t) varTypes.set(n, t);
   for (const f of all) for (const p of f.params) if (!varTypes.has(p.name) && p.type) varTypes.set(p.name, p.type);
   const ctx: EngineCtx = {
-    filePath, content, lines: content.split("\n"), root, fns, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
+    filePath, content, lines: content.split("\n"), root, fns, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
     suppressed, findings: [], seen: new Set(), fields: new Set(fieldTypes.keys()), sticky: new Map(), stickyDirty: false, varTypes,
     crossFileFacts, localKeys: new Set(all.map(f => f.key).filter((k): k is string => !!k)), current: null,
   };
@@ -2358,6 +2470,8 @@ export function scanAstTaintKotlin(
     return [...strict, ...relaxed.filter(f => !have.has(`${f.id}:${f.line}`)).map(f => ({ ...f, entryPointSeeded: true }))];
   } catch (err) {
     console.error(`[astTaintKotlin] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+    lastKotlinEngineError = `analysis_failed: ${filePath}: ${String((err as Error)?.message ?? err)}`;   // visible via getKotlinEngineStatus()
     return [];
   }
 }
@@ -2416,6 +2530,8 @@ export function computeKotlinMethodSinkFacts(
     }
   } catch (err) {
     console.error(`[astTaintKotlin] threw computing method sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
+    lastKotlinEngineError = `analysis_failed: ${filePath}: ${String((err as Error)?.message ?? err)}`;
   }
   return out;
 }

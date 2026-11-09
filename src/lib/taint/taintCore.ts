@@ -190,6 +190,8 @@ export interface ParamSinkFact {
   /** Parameter index the taint enters through; with `isRest`, every argument from this index on. */
   index: number;
   isRest: boolean;
+  /** How the parameter receives its argument (Python: by name, keyword-only, **kwargs...). Absent = by position only. */
+  param?: { name?: string; kind?: string; names?: string[]; /** Java: the summarised overload's parameter count / varargs-ness */ arity?: number; varargs?: boolean };
   /** Finding id the sink reports as (e.g. "sql-injection"). */
   id: string;
   /** The single SinkClass bit for `id` -- stored so a consumer never re-derives it from an id table. */

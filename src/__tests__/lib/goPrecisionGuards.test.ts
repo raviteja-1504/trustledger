@@ -88,9 +88,9 @@ describe("guards", () => {
     expect(has(handler(body("parsed.Path", `http.Redirect(w, r, parsed.String(), http.StatusFound)`), decls), "open-redirect")).toBe(true);
   });
 
-  it("strings.Contains(x, \"..\") rules out traversal, not SQL", () => {
+  it("strings.Contains(x, \"..\") proves nothing: an absolute path escapes without one, and it says nothing about SQL", () => {
     const guard = `\tname := r.URL.Query().Get("file")\n\tif strings.Contains(name, "..") {\n\t\treturn\n\t}\n`;
-    expect(has(handler(`${guard}\tdata, _ := os.ReadFile("/data/" + name)\n\t_ = data`), "path-traversal")).toBe(false);
+    expect(has(handler(`${guard}\tdata, _ := os.ReadFile(name)\n\t_ = data`), "path-traversal")).toBe(true);
     expect(has(handler(`${guard}\trows, _ := DB.Query("SELECT * FROM f WHERE n = '" + name + "'")\n\t_ = rows`), "sql-injection")).toBe(true);
     expect(has(handler(`\tname := r.URL.Query().Get("file")\n\tif strings.Contains(name, "x") {\n\t\treturn\n\t}\n\tdata, _ := os.ReadFile("/data/" + name)\n\t_ = data`), "path-traversal")).toBe(true);
   });
@@ -103,9 +103,11 @@ describe("guards", () => {
     expect(has(handler(body(`filepath.Clean(filepath.Join(base, name))`, "/var/data")), "path-traversal")).toBe(true);
   });
 
-  it("a bound filepath.Join is judged where the path is used; an inline one is still a finding", () => {
-    expect(has(handler(`\tname := r.URL.Query().Get("file")\n\tp := filepath.Join("/var/data", name)\n\tif strings.Contains(p, "..") {\n\t\treturn\n\t}\n\tdata, _ := os.ReadFile(p)\n\t_ = data`), "path-traversal")).toBe(false);
-    expect(has(handler(`\tname := r.URL.Query().Get("file")\n\tsave(filepath.Join("/var/data", name))`), "path-traversal")).toBe(true);
+  it("filepath.Join is judged where the path is used, bound or inline", () => {
+    // (a '..' check is not containment -- an absolute path needs none -- so a directory-anchored prefix check is the twin)
+    expect(has(handler(`\tname := r.URL.Query().Get("file")\n\tp := filepath.Join("/var/data", name)\n\tif !strings.HasPrefix(p, "/var/data/") {\n\t\treturn\n\t}\n\tdata, _ := os.ReadFile(p)\n\t_ = data`), "path-traversal")).toBe(false);
+    // (a path handed to an unmodelled helper stays a heuristic regex-layer finding; the AST engine no longer claims it)
+    expect(has(handler(`\tname := r.URL.Query().Get("file")\n\tos.ReadFile(filepath.Join("/var/data", name))`), "path-traversal")).toBe(true);
   });
 
   it("an anchored regexp character class, local or package-level", () => {

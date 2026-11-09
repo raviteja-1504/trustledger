@@ -58,6 +58,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Parser, Language } = require("web-tree-sitter") as typeof import("web-tree-sitter");
+import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
@@ -163,6 +164,7 @@ export function parseCSharpSourceSync(content: string, filePath: string): Syntax
     return rootIfShallowEnough(parserPool.parse(content)?.rootNode, "astTaintCSharp", filePath);
   } catch (err) {
     console.error(`[astTaintCSharp] parse threw for ${filePath}:`, err);
+    recordEngineFailure(filePath, "parse-failed");
     return null;
   }
 }
@@ -611,9 +613,27 @@ type Env = TaintEnv;
 // method name -> (param index -> sink classes that survive to its return value)
 type PropagatingCS = Map<string, Map<number, number>>;
 type VarTypes = Map<string, string>;
-interface ParamShape { name: string; index: number }
+interface ParamShape {
+  name: string; index: number;
+  /** Declared type (simple text), for overload resolution. */
+  type?: string;
+  /** `T x = default`: a call may leave it out. */
+  hasDefault?: boolean;
+  /** `params T[] x`: takes every trailing argument. */
+  isParams?: boolean;
+}
 interface LocalMethod {
   name: string;
+  /**
+   * Canonical identity: `Namespace.Class.Name<arity>(ParamType,...)` (static methods marked `static `). The local-methods
+   * map is keyed by this, so overloads and same-named methods of different classes are separate entries; `name` is the
+   * secondary (conservative) index.
+   */
+  key: string;
+  cls?: string;
+  ns?: string;
+  isStatic: boolean;
+  decl: SyntaxNode;
   paramShapes: ParamShape[];
   sourceParamNames: Set<string>;      // [FromRoute]/[FromQuery]/[FromBody]/[FromHeader]/[FromForm]
   resourceIdParamNames: Set<string>;  // [FromRoute]/[FromQuery] subset -- "which resource" (BOLA)
@@ -625,7 +645,12 @@ interface EngineCtx {
   filePath: string;
   content: string;
   lines: string[];
+  /** Keyed by canonical identity (LocalMethod.key). */
   localMethods: Map<string, LocalMethod>;
+  /** Secondary index by simple name -- the conservative fallback when a call cannot be tied to one method. */
+  methodsByName: Map<string, LocalMethod[]>;
+  /** Simple name of the class whose method is being walked. */
+  currentClass?: string;
   propagatingParams: PropagatingCS;
   // method name -> (tainted param index -> classes tainted at the call site)
   seededParams: Map<string, Map<number, number>>;
@@ -685,9 +710,20 @@ function emit(
   severityOverride?: "critical" | "high" | "medium", detailOverride?: string,
 ) {
   const line = lineOf(node);
-  const key = `${id}:${line}`;
-  if (ctx.seen.has(key)) return;
-  ctx.seen.add(key);
+  // One finding per sink CALL: two calls of one class on a line are two findings (the scanner folds them into one record
+  // per id+line and keeps both flows in its detail). A shape-based finding (a string built around the value) and a call
+  // finding on the same line are one flow seen twice, and stay one.
+  const isCall = node.type === "invocation_expression" || node.type === "object_creation_expression";
+  const lineKey = `${id}:${line}`;
+  if (isCall) {
+    const callKey = `${lineKey}:${node.startIndex}`;
+    if (ctx.seen.has(callKey) || ctx.seen.has(`${lineKey}:shape`)) return;
+    ctx.seen.add(callKey);
+    ctx.seen.add(`${lineKey}:call`);
+  } else {
+    if (ctx.seen.has(`${lineKey}:shape`) || ctx.seen.has(`${lineKey}:call`)) return;
+    ctx.seen.add(`${lineKey}:shape`);
+  }
   ctx.findings.push({
     id, line, sinkExpr, sourceExpr, severityOverride,
     detail: detailOverride ?? `Tainted expression '${sourceExpr}' flows into ${sinkExpr}(...) — real data-flow match, not a line-pattern guess`,
@@ -700,19 +736,216 @@ type TaintMaskFnCS = (node: SyntaxNode, env: Env) => number;
 // `typeof(T).GetProperty(name)` / `type.GetMethod(name)` -- the looked-up member is chosen by the argument.
 const CS_REFLECTION_LOOKUPS = new Set(["GetProperty", "GetField", "GetMethod", "GetMember", "GetConstructor", "GetEvent"]);
 
-/** The bare name of the same-file method a call resolves to: `Foo(x)`, `this.Foo(x)`, `repo.Foo(x)`, `Helper.Foo(x)`. */
-function resolveLocalCalleeCS(fn: SyntaxNode | null | undefined, ctx: EngineCtx): string | null {
-  if (!fn) return null;
-  if (fn.type === "identifier") return ctx.localMethods.has(fn.text) ? fn.text : null;
-  if (fn.type === "generic_name") { const n = fn.namedChildren.find(c => c?.type === "identifier")?.text; return n && ctx.localMethods.has(n) ? n : null; }
-  if (fn.type === "member_access_expression") {
-    const name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
-    if (name && ctx.localMethods.has(name) && !CS_BUILTIN_METHOD_NAMES.has(name)) return name;
+/** The name written `name: value` for a named argument (argListOfCSharp hands back the value; its parent holds the name). */
+function argNameCS(a: SyntaxNode): string | null {
+  return a.parent?.type === "argument" ? /^\s*@?([A-Za-z_]\w*)\s*:(?!:)/.exec(a.parent.text)?.[1] ?? null : null;
+}
+
+/**
+ * The call-site expressions bound to one parameter, by C#'s rules: positional arguments by order, named arguments by
+ * name (in any order), a `params` parameter takes every trailing positional argument. A parameter the call leaves
+ * out binds nothing: its default is the callee's own constant, not caller-controlled.
+ */
+function boundArgsCS(args: readonly SyntaxNode[], shape: ParamShape): SyntaxNode[] {
+  const positional: SyntaxNode[] = [];
+  let named: SyntaxNode | undefined;
+  for (const a of args) {
+    const n = argNameCS(a);
+    if (n === null) positional.push(a);
+    else if (n === shape.name) named = a;
   }
-  return null;
+  if (shape.isParams) return positional.slice(shape.index);
+  const byPosition = positional[shape.index];
+  return byPosition ? [byPosition] : named ? [named] : [];
+}
+
+/** Can a call with these arguments be a call of `m`? (arity with optional / params, and every named argument names a parameter) */
+function callFitsCS(m: LocalMethod, args: readonly SyntaxNode[]): boolean {
+  const names = new Set(m.paramShapes.map(p => p.name));
+  const positional = args.filter(a => argNameCS(a) === null);
+  for (const a of args) { const n = argNameCS(a); if (n !== null && !names.has(n)) return false; }
+  const hasParams = m.paramShapes.some(p => p.isParams);
+  const fixed = m.paramShapes.filter(p => !p.isParams);
+  if (!hasParams && positional.length > fixed.length) return false;
+  return fixed.every(p => p.hasDefault || p.index < positional.length || args.some(a => argNameCS(a) === p.name));
+}
+
+const CS_NUMERIC_RANK: Record<string, number> = { byte: 1, sbyte: 1, short: 2, ushort: 2, char: 2, int: 3, uint: 3, long: 4, ulong: 4, float: 5, double: 6, decimal: 6 };
+function csArgStaticType(arg: SyntaxNode, ctx: EngineCtx): string | undefined {
+  const t = arg.text.trim();
+  if (arg.type === "string_literal" || arg.type === "interpolated_string_expression" || /^\$?@?"/.test(t)) return "string";
+  if (/^-?\d+$/.test(t)) return "int";
+  if (/^-?\d+[lL]$/.test(t)) return "long";
+  if (/^-?\d*\.\d+[fF]$/.test(t)) return "float";
+  if (/^-?\d*\.\d+[dD]?$/.test(t)) return "double";
+  if (/^(?:true|false)$/.test(t)) return "bool";
+  const ctor = /^new\s+([A-Z][\w.]*)/.exec(t);
+  if (ctor) return ctor[1].split(".").pop();
+  if (/^[A-Za-z_]\w*$/.test(t)) return ctx.varTypes.get(t);
+  return undefined;
+}
+function csFitsParamType(arg: string | undefined, param: string | undefined): boolean {
+  if (!arg || !param) return true;
+  const a = arg.replace(/\?$/, ""), q = param.replace(/\?$/, "");
+  if (a === q || q === "object" || q.length === 1) return true;
+  const ar = CS_NUMERIC_RANK[a], pr = CS_NUMERIC_RANK[q];
+  if (ar !== undefined && pr !== undefined) return ar <= pr;
+  if (a === "bool" || q === "bool") return a === q;
+  const prim = (x: string) => x in CS_NUMERIC_RANK;
+  if (prim(a) !== prim(q)) return false;
+  if (a === "string") return /^(?:IComparable|IEnumerable|ICloneable|IConvertible)/.test(q);   // string is sealed
+  return true;                                                                                  // class types: subtyping unknown
+}
+
+const csHierarchyCache = new WeakMap<SyntaxNode, Map<string, string[]>>();
+/** type simple name -> the simple names in its base list. */
+function csSupersOf(root: SyntaxNode): Map<string, string[]> {
+  let out = csHierarchyCache.get(root);
+  if (out) return out;
+  out = new Map();
+  for (const kind of ["class_declaration", "struct_declaration", "record_declaration", "interface_declaration"]) {
+    for (const c of findAllNodes(root, kind)) {
+      const name = c.childForFieldName("name")?.text;
+      if (!name) continue;
+      const bases = c.namedChildren.find(x => x?.type === "base_list");
+      out.set(name, (bases?.namedChildren ?? []).map(b => simpleTypeNameCS(b)).filter((n): n is string => !!n));
+    }
+  }
+  csHierarchyCache.set(root, out);
+  return out;
+}
+function csIsSubtype(root: SyntaxNode, cls: string | undefined, owner: string): boolean {
+  if (!cls) return false;
+  if (cls === owner) return true;
+  const supers = csSupersOf(root);
+  const seen = new Set([cls]);
+  let frontier = [cls];
+  for (let depth = 0; depth < 8 && frontier.length; depth++) {
+    const next: string[] = [];
+    for (const c of frontier) for (const sup of supers.get(c) ?? []) {
+      if (sup === owner) return true;
+      if (!seen.has(sup)) { seen.add(sup); next.push(sup); }
+    }
+    frontier = next;
+  }
+  return false;
+}
+
+/**
+ * Which same-file methods a call can reach: by name, then the receiver's class (`this`/bare = the current class and its
+ * bases; `new X().M()`, a typed variable, `X.M()`), then arity / named / optional / params binding, then argument
+ * static types among the remaining overloads. A call that still cannot be tied to one method yields every remaining
+ * candidate (a union -- conservative), never one guessed method.
+ */
+function resolveCalleesCS(fn: SyntaxNode | null | undefined, args: readonly SyntaxNode[], ctx: EngineCtx): LocalMethod[] {
+  if (!fn) return [];
+  let name = "";
+  let receiver: SyntaxNode | null = null;
+  if (fn.type === "identifier") name = fn.text;
+  else if (fn.type === "generic_name") name = fn.namedChildren.find(c => c?.type === "identifier")?.text ?? "";
+  else if (fn.type === "member_access_expression") {
+    name = stripGenerics(fn.childForFieldName("name")?.text ?? "");
+    receiver = fn.childForFieldName("expression");
+  } else return [];
+  const all = ctx.methodsByName.get(name);
+  if (!all || all.length === 0) return [];
+  let c = all.filter(m => callFitsCS(m, args));
+  if (c.length === 0) c = [...all];
+  // the receiver's class
+  let owner: string | undefined;
+  if (!receiver || receiver.type === "this_expression") owner = ctx.currentClass;
+  else if (receiver.type === "object_creation_expression") owner = receiver.childForFieldName("type") ? stripGenerics(receiver.childForFieldName("type")!.text).split(".").pop() : undefined;
+  else if (receiver.type === "identifier") owner = ctx.varTypes.get(receiver.text) ?? (/^[A-Z]/.test(receiver.text) ? receiver.text : undefined);
+  else if (receiver.type === "member_access_expression") owner = ctx.varTypes.get(receiver.childForFieldName("name")?.text ?? "");   // this._svc.M()
+  // a name like Run / Add / Get on a receiver that is not one of this file's classes is the framework's, not ours
+  if (receiver && CS_BUILTIN_METHOD_NAMES.has(name)) {
+    const o = owner ? stripGenerics(owner).split(".").pop()! : undefined;
+    if (!o || !ctx.root || !csSupersOf(ctx.root).has(o)) return [];
+  }
+  if (owner && ctx.root) {
+    owner = stripGenerics(owner).split(".").pop()!;
+    const inOwner = c.filter(m => csIsSubtype(ctx.root!, m.cls, owner!) || (csSupersOf(ctx.root!).get(owner!) ?? []).some(b => m.cls === b));
+    if (inOwner.length) c = inOwner;
+  }
+  if (c.length > 1) {
+    const types = args.map(a => csArgStaticType(a, ctx));
+    const fit = c.filter(m => m.paramShapes.every(p => p.isParams || p.index >= types.length || argNameCS(args[p.index]) !== null || csFitsParamType(types[p.index], p.type)));
+    if (fit.length) c = fit;
+  }
+  return c;
+}
+
+/** Declared types visible inside `m`: its class's fields / properties / primary-constructor parameters, then its parameters. */
+const csMethodTypeEnvCache = new WeakMap<LocalMethod, Map<string, string>>();
+const csClassMemberTypesCache = new WeakMap<SyntaxNode, Map<string, Map<string, string>>>();
+function classMemberTypesCS(root: SyntaxNode, cls: string | undefined): Map<string, string> {
+  let byClass = csClassMemberTypesCache.get(root);
+  if (!byClass) {
+    byClass = new Map();
+    const put = (owner: string | undefined, name: string | undefined, t: string | undefined) => {
+      if (!owner || !name || !t) return;
+      const m = byClass!.get(owner) ?? byClass!.set(owner, new Map()).get(owner)!;
+      if (!m.has(name)) m.set(name, t);
+    };
+    for (const fd of findAllNodes(root, "field_declaration")) {
+      const vd = fd.namedChildren.find(c => c?.type === "variable_declaration");
+      const t = simpleTypeNameCS(vd?.childForFieldName("type"));
+      for (const d of vd?.namedChildren ?? []) if (d?.type === "variable_declarator") put(declaringTypeNameCS(fd), d.namedChildren.find(c => c?.type === "identifier")?.text, t);
+    }
+    for (const pd of findAllNodes(root, "property_declaration")) put(declaringTypeNameCS(pd), pd.childForFieldName("name")?.text, simpleTypeNameCS(pd.childForFieldName("type")));
+    for (const c of findAllNodes(root, "class_declaration")) {
+      const err = c.namedChildren.find(x => x?.type === "ERROR");
+      const m = err ? /^\(([^()]*)\)$/.exec(err.text.trim()) : null;
+      for (const part of m ? m[1].split(",") : []) {
+        const pm = /^([A-Za-z_][\w.]*)(?:<[^>]*>)?\??\s+([A-Za-z_]\w*)\s*(?:=.*)?$/.exec(part.replace(/\[[^\]]*\]/g, "").trim());
+        if (pm) put(c.childForFieldName("name")?.text, pm[2], pm[1].split(".").pop());
+      }
+    }
+    csClassMemberTypesCache.set(root, byClass);
+  }
+  return (cls && byClass.get(cls)) || new Map();
+}
+function methodTypeEnvCS(ctx: EngineCtx, m: LocalMethod): Map<string, string> {
+  let env = csMethodTypeEnvCache.get(m);
+  if (!env) {
+    env = new Map(ctx.root ? classMemberTypesCache(ctx.root, m.cls) : []);
+    for (const p of m.paramShapes) if (p.type) env.set(p.name, p.type.replace(/\?$/, ""));
+    csMethodTypeEnvCache.set(m, env);
+  }
+  return new Map(env);   // a walk records the locals it meets: never into the shared copy
+}
+function classMemberTypesCache(root: SyntaxNode, cls: string | undefined): Map<string, string> { return classMemberTypesCS(root, cls); }
+/** Enter a method for a walk: its class and a type environment of its own (so a name typed one way in one method or class is not typed that way in another). */
+function enterMethodCS(ctx: EngineCtx, m: LocalMethod): void {
+  ctx.currentClass = m.cls;
+  ctx.varTypes = methodTypeEnvCS(ctx, m);
 }
 
 function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
+  let localFunctionDepth = 0;
+  /** The local_function_statement `name` refers to from `at`: the nearest enclosing method's, else null. */
+  const localFunctionNamed = (at: SyntaxNode): SyntaxNode | null => {
+    for (let p: SyntaxNode | null = at.parent; p; p = p.parent) {
+      if (p.type === "method_declaration" || p.type === "constructor_declaration" || p.type === "local_function_statement" || p.type === "lambda_expression") {
+        const found = findAllNodes(p, "local_function_statement").find(f => f.childForFieldName("name")?.text === at.text && f !== p);
+        if (found) return found;
+        if (p.type === "method_declaration" || p.type === "constructor_declaration") return null;
+      }
+    }
+    return null;
+  };
+  const localFunctionResultMask = (lf: SyntaxNode, args: readonly SyntaxNode[], env: Env): number => {
+    const params = lf.childForFieldName("parameters")?.namedChildren.filter(c => c?.type === "parameter") ?? [];
+    const fenv: Env = new Map(env);
+    params.forEach((prm, i) => { const nm = prm!.childForFieldName("name")?.text; if (nm) fenv.set(nm, args[i] ? taintMask(args[i], env) : 0); });
+    const body = lf.childForFieldName("body") ?? lf.namedChildren.find(c => c?.type === "arrow_expression_clause") ?? null;
+    if (!body) return 0;
+    if (body.type === "arrow_expression_clause") { const e = body.namedChildren[0]; return e ? taintMask(e, fenv) : 0; }
+    let m = 0;
+    createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false },
+      { descendFunctions: false, onReturn: (expr, e, mask) => { m |= mask(expr, e); } }).walk(body, fenv);
+    return m;
+  };
   const taintMask = (node: SyntaxNode, env: Env): number => {
     if (isTaintSourceExprCSharp(node, ctx.requestNames)) return ALL;
     if (node.type === "identifier") {
@@ -725,8 +958,10 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       if (!ctx.classFieldNames.has(node.text) || isLocalNameCS(node)) return 0;
       return ctx.sticky.get(node.text) ?? 0;
     }
+    if (node.type === "tuple_expression") return node.namedChildren.reduce((m, c) => m | (c ? taintMask(c, env) : 0), 0);
     if (node.type === "argument" || node.type === "parenthesized_expression" || node.type === "interpolation") {
-      const inner = node.namedChildren[0];
+      // (a named argument / tuple element `name: value` holds its name first and its value last)
+      const inner = node.type === "argument" ? node.namedChildren[node.namedChildren.length - 1] : node.namedChildren[0];
       return inner ? taintMask(inner, env) : 0;
     }
     if (node.type === "cast_expression") {
@@ -816,23 +1051,41 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
         if (CS_NETWORK_READS.has(nm) && recvNode && isNetworkValueCS(recvNode, ctx)) return ALL;
       }
       // Same-file interprocedural, bounded (see buildPropagatingMapCSharp).
-      const localName = resolveLocalCalleeCS(fn, ctx);
-      if (localName) {
-        const propIdx = ctx.propagatingParams.get(localName);
-        if (propIdx) {
-          const callee = ctx.localMethods.get(localName);
-          const shapes = callee?.paramShapes ?? [];
-          let m = 0;
+      const callees = resolveCalleesCS(fn, args, ctx);
+      if (callees.length) {
+        let m = 0;
+        let summarised = false;
+        for (const callee of callees) {
+          const propIdx = ctx.propagatingParams.get(callee.key);
+          if (!propIdx) continue;
+          summarised = true;
           for (const [i, surviving] of propIdx) {
-            if (shapes[i] !== undefined && args[i] !== undefined) m |= taintMask(args[i], env) & surviving;
+            const shape = callee.paramShapes[i];
+            if (shape) for (const a of boundArgsCS(args, shape)) m |= taintMask(a, env) & surviving;
           }
           // index -1, what it returns with no tainted argument: request input it reads itself (and, in the proof pass,
           // a field or an unmodelled input)
           m |= propIdx.get(-1) ?? 0;
-          if (m || ctx.proof) return m;
         }
+        // proof pass: a virtual / abstract / override / interface method may be replaced by a class this file does not
+        // show, so its own body proves nothing about what it returns
+        if (ctx.proof && callees.some(c => modifiersOf(c.decl).some(x => /^(?:virtual|abstract|override)$/.test(x)) || c.decl.parent?.parent?.type === "interface_declaration")) return ALL;
+        if (summarised && (m || ctx.proof)) return m;
         // proof pass: a local method with no summary entry returns nothing the caller gave it
         if (ctx.proof) return 0;
+      }
+      // `string Echo(string s) => s; Echo(input)`: a LOCAL function (declared inside the calling method) is judged by its body
+      if (fn?.type === "identifier" && !ctx.methodsByName.has(fn.text) && localFunctionDepth < 3) {
+        const lf = localFunctionNamed(fn);
+        if (lf) {
+          localFunctionDepth++;
+          try { return localFunctionResultMask(lf, args, env); } finally { localFunctionDepth--; }
+        }
+      }
+      // A reflection lookup returns the member / type its name argument chose: still as attacker-chosen as that name
+      // (the Invoke / SetValue / CreateInstance that uses it is where it takes effect)
+      if (text && args.length > 0 && (CS_REFLECTION_LOOKUPS.has(text.split(".").pop() ?? "") || /(?:^|\.)(?:Type|Assembly)\.GetType$/.test(text))) {
+        return args.reduce((acc, a) => acc | taintMask(a, env), 0);
       }
       // Curated string/path/URL/JSON plumbing: the result carries its arguments' taint. Decoders
       // re-taint what a sanitizer cleared (encode-then-decode).
@@ -844,7 +1097,7 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       if (fn?.type === "invocation_expression") return taintMask(fn, env);
       // `cb(v)` / `render()` -- a delegate held in a parameter or local: its result depends on what it was
       // built from (the variable's own taint) and on what it is called with.
-      if (fn?.type === "identifier" && !ctx.localMethods.has(fn.text) && isLocalNameCS(fn)) {
+      if (fn?.type === "identifier" && !ctx.methodsByName.has(fn.text) && isLocalNameCS(fn)) {
         return args.reduce((acc, a) => acc | taintMask(a, env), env.get(fn.text) ?? 0);
       }
       const argsAll = () => args.reduce((acc, a) => acc | taintMask(a, env), 0);
@@ -903,7 +1156,7 @@ function computeReturnTaintPropagatingCSharp(method: LocalMethod, ctx: EngineCtx
     // Sink checks would run against a throwaway ctx, so use a sink-free copy (and a summary walk's hypothetical
     // seeds prove nothing).
     const walker = createWalkerCS({ ...ctx, findings: [], seen: new Set(), suppressed: undefined, seededParams: new Map(), recordSticky: false,
-      proof: ctx.proof && { proven: [] } },
+      currentClass: method.cls, varTypes: methodTypeEnvCS(ctx, method), proof: ctx.proof && { proven: [] } },
       { descendFunctions: false, onReturn: (expr, env, mask) => { surviving |= mask(expr, env); } });
     const env: Env = new Map();
     if (shape.name !== null) env.set(shape.name, ALL);
@@ -941,20 +1194,22 @@ function buildPropagatingMapCSharp(localMethods: Map<string, LocalMethod>, baseC
 /** Seeds ctx.seededParams from a call site whose arguments are tainted --
  * consumed by scanAstTaintCSharp's bounded second pass so a sink INSIDE a
  * local method's own body (not just its return) becomes reachable. */
-function seedLocalMethodParams(calleeName: string, args: SyntaxNode[], env: Env, ctx: EngineCtx) {
-  const callee = ctx.localMethods.get(calleeName);
-  if (!callee) return;
+function seedLocalMethodParams(callees: readonly LocalMethod[], args: SyntaxNode[], env: Env, ctx: EngineCtx) {
+  if (callees.length === 0) return;
   const taintMask = makeTaintMaskCSharp(ctx);
-  const taintedIdx = new Map<number, number>();
-  args.forEach((arg, i) => {
-    const m = taintMask(arg, env) & ALL;
-    if (!m) return;
-    if (callee.paramShapes.some(s => s.index === i)) taintedIdx.set(i, (taintedIdx.get(i) ?? 0) | m);
-  });
-  if (taintedIdx.size === 0) return;
-  const existing = ctx.seededParams.get(calleeName) ?? new Map<number, number>();
-  for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
-  ctx.seededParams.set(calleeName, existing);
+  for (const callee of callees) {
+    // param index -> classes tainted at THIS call site, for THIS overload and its own bound arguments
+    const taintedIdx = new Map<number, number>();
+    for (const shape of callee.paramShapes) {
+      let m = 0;
+      for (const a of boundArgsCS(args, shape)) m |= taintMask(a, env) & ALL;
+      if (m) taintedIdx.set(shape.index, m);
+    }
+    if (taintedIdx.size === 0) continue;
+    const existing = ctx.seededParams.get(callee.key) ?? new Map<number, number>();
+    for (const [i, m] of taintedIdx) existing.set(i, (existing.get(i) ?? 0) | m);
+    ctx.seededParams.set(callee.key, existing);
+  }
 }
 
 // ── BOLA: authorization metadata extraction ─────────────────────────────
@@ -1018,11 +1273,15 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
     let index = 0;
     for (const param of paramList.namedChildren) {
       // tree-sitter-c-sharp mis-parses `params T[] name`: the name arrives as a bare identifier sibling
-      if (param?.type === "identifier") { paramShapes.push({ name: param.text, index }); index++; continue; }
+      if (param?.type === "identifier") { paramShapes.push({ name: param.text, index, isParams: /\bparams\b/.test(paramList.text), type: undefined }); index++; continue; }
       if (!param || param.type !== "parameter") continue;
       const pName = param.childForFieldName("name");
       if (!pName) { index++; continue; }
-      paramShapes.push({ name: pName.text, index });
+      paramShapes.push({
+        name: pName.text, index, type: simpleTypeNameCS(param.childForFieldName("type")) ?? param.childForFieldName("type")?.text,
+        hasDefault: param.namedChildren.some(c => c?.type === "equals_value_clause"),
+        isParams: param.namedChildren.some(c => c?.type === "modifier" && c.text === "params") || /^params\b/.test(param.text),
+      });
       const attrs = attributeNamesOf(param);
       const hasExplicitSource = attrs.some(a => ASP_SOURCE_ATTRIBUTES.has(a));
       if (hasExplicitSource) sourceParamNames.add(pName.text);
@@ -1043,7 +1302,10 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
     }
   }
   const body = methodDecl.childForFieldName("body") ?? methodDecl.namedChildren.find(c => c?.type === "arrow_expression_clause") ?? null;
-  return { name: nameNode.text, paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null };
+  return {
+    name: nameNode.text, key: nameNode.text, isStatic: modifiersOf(methodDecl).includes("static"), decl: methodDecl,
+    paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null,
+  };
 }
 
 /**
@@ -1067,31 +1329,38 @@ function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
   for (const decl of findAllNodes(root, "method_declaration")) {
     const info = extractMethodInfo(decl);
     if (!info) continue;
-    // Two different classes in the same file can legitimately declare a
-    // method with the same bare name -- e.g. a controller action colliding
-    // with an unrelated static helper's method of the same name
-    // (ChangeEmail/Transfer/DisableMfa/Deserialize/DeleteUser all collide
-    // with a same-named Database.*/BinaryHelper.* stub in a real OWASP
-    // benchmark file this phase was built against). Since interprocedural
-    // resolution elsewhere in this engine keys callees by bare name (the
-    // same same-file-scope precedent every other engine here uses), a
-    // flat overwrite silently lost the REAL entry-point method's body to
-    // whichever same-named declaration happened to appear LATER in the
-    // file, regardless of which one actually mattered -- confirmed via a
-    // real re-scan (BinaryHelper.Deserialize's own empty/null-bodied stub
-    // overwrote the controller's Deserialize action, silently dropping
-    // its insecure-deserialization finding). Prefer an already-recorded
-    // entry-point method over a later non-entry-point same-named one;
-    // only let a later declaration replace an earlier one when the later
-    // one is itself an endpoint and the earlier one wasn't. Two
-    // same-named ENDPOINT methods in different classes (not present in
-    // that benchmark) is an accepted, undetected residual edge case, same
-    // "flat file-wide namespace" tradeoff already documented elsewhere.
-    const existing = methods.get(info.name);
-    if (existing && existing.authMeta.isEndpoint && !info.authMeta.isEndpoint) continue;
-    methods.set(info.name, info);
+    info.cls = declaringTypeNameCS(decl);
+    info.ns = namespaceOfCS(root, decl);
+    const generics = decl.childForFieldName("type_parameters")?.namedChildren.filter(c => c?.type === "type_parameter").length ?? 0;
+    // (two methods of one class with identical signatures cannot exist; a duplicate key from a partial class keeps the first)
+    info.key = `${info.ns ? info.ns + "." : ""}${info.cls ?? ""}.${info.isStatic ? "static " : ""}${info.name}${generics ? "<" + generics + ">" : ""}(${info.paramShapes.map(p => (p.isParams ? "params " : "") + (p.type ?? "?")).join(",")})`;
+    if (!methods.has(info.key)) methods.set(info.key, info);
   }
   return methods;
+}
+
+/** Simple name of the class / struct / record / interface that declares `decl`. */
+function declaringTypeNameCS(decl: SyntaxNode): string | undefined {
+  for (let p: SyntaxNode | null = decl.parent; p; p = p.parent) {
+    if (/^(?:class_declaration|struct_declaration|record_declaration|record_struct_declaration|interface_declaration)$/.test(p.type)) return p.childForFieldName("name")?.text;
+  }
+  return undefined;
+}
+
+/** Dotted namespace of `decl`: enclosing `namespace A.B { }` blocks, or the file's `namespace A.B;`. */
+function namespaceOfCS(root: SyntaxNode, decl: SyntaxNode): string {
+  const parts: string[] = [];
+  for (let p: SyntaxNode | null = decl.parent; p; p = p.parent) {
+    if (p.type === "namespace_declaration") { const n = p.childForFieldName("name")?.text; if (n) parts.unshift(n); }
+  }
+  if (parts.length) return parts.join(".");
+  return root.namedChildren.find(c => c?.type === "file_scoped_namespace_declaration")?.childForFieldName("name")?.text ?? "";
+}
+
+function methodsByNameOf(localMethods: Map<string, LocalMethod>): Map<string, LocalMethod[]> {
+  const out = new Map<string, LocalMethod[]>();
+  for (const m of localMethods.values()) (out.get(m.name) ?? out.set(m.name, []).get(m.name)!).push(m);
+  return out;
 }
 
 // ── Sink checks ──────────────────────────────────────────────────────────
@@ -1115,7 +1384,7 @@ const CS_LOG_TAILS = new Set([
 ]);
 const CS_LOGGER_OWNER_RE = /^_?(?:\w*[Ll]ogger|[Ll]og)$/;
 const CS_EVAL_TAILS = new Set([
-  "EvaluateAsync", "RunAsync", "Create", "Evaluate", "Load", "LoadFrom", "LoadFile", "UnsafeLoadFrom", "GetType", "CreateInstance",
+  "EvaluateAsync", "RunAsync", "Create", "Evaluate", "Load", "LoadFrom", "LoadFile", "UnsafeLoadFrom", "CreateInstance",
   "CreateInstanceFrom", "CreateComInstanceFrom",
 ]);
 const CS_REGEX_STATIC_TAILS = new Set(["IsMatch", "Match", "Matches", "Replace", "Split", "Count", "EnumerateMatches"]);
@@ -1133,6 +1402,43 @@ function lastCallNameCS(call: SyntaxNode | null | undefined): string {
  * primary-constructor parameter, a typed local/parameter, or a static `SqlUtil.Run(q)` -- whose parameter
  * reaches a sink inside that class (see computeCSharpMethodSinkFacts). Reported at the caller.
  */
+const csFactOwnersCache = new WeakMap<object, Map<string, Set<string>>>();
+/** simple class name -> the namespaces declaring a class of that name, read off the namespace-qualified fact keys. */
+function csFactOwnersOf(facts: ReadonlyMap<string, unknown>): Map<string, Set<string>> {
+  let owners = csFactOwnersCache.get(facts);
+  if (!owners) {
+    owners = new Map();
+    for (const key of facts.keys()) {
+      const parts = key.split(".");
+      if (parts.length < 3) continue;                       // a simple `Class.Method` key carries no namespace
+      const cls = parts[parts.length - 2];
+      if (!/^[A-Z]/.test(cls)) continue;
+      (owners.get(cls) ?? owners.set(cls, new Set()).get(cls)!).add(parts.slice(0, -2).join("."));
+    }
+    csFactOwnersCache.set(facts, owners);
+  }
+  return owners;
+}
+/**
+ * The fact key for `Type.Method` as seen from this file. A class name declared in several namespaces is resolved the way
+ * the compiler does -- the file's own namespace (and its parents), then its using directives -- and left UNRESOLVED
+ * (null) when none of those picks exactly one.
+ */
+function csFactKeyForCall(type: string, method: string, facts: ReadonlyMap<string, unknown>, ctx: EngineCtx): string | null {
+  const simple = type.split(".").pop() ?? type;
+  const nss = csFactOwnersOf(facts).get(simple);
+  if (!nss || nss.size <= 1) return `${simple}.${method}`;
+  if (type.includes(".")) { const ns = type.split(".").slice(0, -1).join("."); return nss.has(ns) ? `${ns}.${simple}.${method}` : null; }
+  const root = ctx.root;
+  if (!root) return null;
+  const usings = root.namedChildren.filter(c => c?.type === "using_directive").map(c => c!.namedChildren.find(x => x?.type === "qualified_name" || x?.type === "identifier")?.text ?? "").filter(Boolean);
+  const own = root.namedChildren.find(c => c?.type === "file_scoped_namespace_declaration")?.childForFieldName("name")?.text
+    ?? findAllNodes(root, "namespace_declaration")[0]?.childForFieldName("name")?.text ?? "";
+  const matches = new Set<string>();
+  for (const ns of nss) if (usings.includes(ns) || ns === own || (own && own.startsWith(ns + "."))) matches.add(ns);
+  return matches.size === 1 ? `${[...matches][0]}.${simple}.${method}` : null;
+}
+
 function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
   const facts = ctx.crossFileFacts;
   if (!facts || facts.size === 0 || fn.type !== "member_access_expression") return;
@@ -1145,13 +1451,16 @@ function checkCrossFileCallCS(fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNo
   if (recv === "this") return;
   const type = ctx.varTypes.get(recv) ?? (/^[A-Z]/.test(recv) ? recv : undefined);
   if (!type) return;
-  const key = `${stripGenerics(type).split(".").pop()}.${method}`;
+  const key = csFactKeyForCall(stripGenerics(type), method, facts, ctx);
+  if (!key) return;                       // the simple name matches several classes and nothing here says which: unknown
   const list = facts.get(key);
   if (!list) return;
-  // named arguments (`Find(id: x, name: y)`) bind by name, not position: any of them may be the fact's parameter
-  const named = args.some(isNamedArgCS);
   for (const fact of list) {
-    const bound = named ? args : fact.isRest ? args.slice(fact.index) : args[fact.index] ? [args[fact.index]] : [];
+    // the summarised overload must be one this call can reach (parameter count with optional / params)
+    if (fact.param?.arity !== undefined && !(fact.param.varargs ? args.length >= fact.param.arity - 1 : args.length <= fact.param.arity)) continue;
+    // positional by order; a named argument by the parameter's name
+    const byName = fact.param?.name ? args.find(a => argNameCS(a) === fact.param!.name) : undefined;
+    const bound = byName ? [byName] : fact.isRest ? args.slice(fact.index) : args[fact.index] && argNameCS(args[fact.index]) === null ? [args[fact.index]] : [];
     for (const a of bound) {
       const m = taintMask(a, env);
       if (!(m & fact.sinkClass)) {
@@ -1251,6 +1560,33 @@ function filledObjectCS(arg: SyntaxNode, at: SyntaxNode): boolean {
   return !!m && new RegExp(`\\b${v}\\s*(?:\\.\\s*\\w+|\\[[^\\]]*\\])\\s*(?:[+]?=(?!=))|\\b${v}\\s*\\.\\s*(?:Add\\w*|Insert\\w*|Push|Enqueue|Append\\w*|Set\\w*|Put)\\s*\\(`).test(m.text);
 }
 
+/**
+ * Is `owner` (a variable named like a connection) plausibly a database connection? Its declared type, in the
+ * scope being walked, decides when it is known: a class of this file, or any type that is not a connection / DbContext
+ * / transaction, is not what Dapper extends. Unknown types keep the name heuristic.
+ */
+function dapperReceiverPlausibleCS(owner: string, ctx: EngineCtx): boolean {
+  const t = ctx.varTypes.get(owner);
+  if (!t) return true;
+  if (ctx.root && csSupersOf(ctx.root).has(t)) return false;
+  return /Connection|IDb|DbContext|Transaction|Database|Sql/i.test(t);
+}
+
+/**
+ * The expression that chose what a reflective call acts on: the name given to the lookup (`t.GetMethod(method)` ->
+ * `method`), or -- when the type itself was looked up from a name (`var t = Type.GetType(cls)`) -- that type name.
+ */
+function reflectionLookupSourceCS(lookup: SyntaxNode, at: SyntaxNode): string | undefined {
+  const fn = lookup.childForFieldName("function");
+  const recv = fn?.type === "member_access_expression" ? fn.childForFieldName("expression") : null;
+  const typeDef = recv?.type === "identifier" ? lastAssignmentCS(recv.text, at) : recv;
+  if (typeDef?.type === "invocation_expression" && /(?:^|\.)GetType$/.test(typeDef.childForFieldName("function")?.text ?? "")) {
+    const typeName = argListOfCSharp(typeDef)[0];
+    if (typeName) return typeName.text;
+  }
+  return argListOfCSharp(lookup)[0]?.text;
+}
+
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
@@ -1290,7 +1626,11 @@ function checkCallSink(
     fire(id, mask, args[culprit].text);
   };
   const receiver = fn.type === "member_access_expression" ? fn.childForFieldName("expression") : null;
-  const reflective = receiver?.type === "invocation_expression" && CS_REFLECTION_LOOKUPS.has(lastCallNameCS(receiver));
+  // Looking a member up (GetMethod / GetProperty / GetField, Type.GetType) runs and writes nothing: the finding is at the
+  // Invoke / SetValue on what was looked up -- directly (`t.GetMethod(n).Invoke(...)`) or through the variable it was kept in
+  // (`var m = t.GetMethod(n); m.Invoke(...)`).
+  const lookedUp = receiver?.type === "identifier" ? lastAssignmentCS(receiver.text, node) : receiver;
+  const reflective = lookedUp?.type === "invocation_expression" && CS_REFLECTION_LOOKUPS.has(lastCallNameCS(lookedUp));
 
   // sql-injection: EF Core raw-SQL calls (arg-tainted) and ADO.NET
   // SqlCommand receiver-tainted (tracked via env at the SqlCommand-typed
@@ -1307,7 +1647,8 @@ function checkCallSink(
     const created = lastAssignmentCS(rootVar, node);
     const commandText = created?.type === "object_creation_expression" ? argListOfCSharp(created)[0] : undefined;
     if (commandText && !(env.get(rootVar) ?? 0) && provenConstantCS(commandText, node)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
-  } else if (CS_DAPPER_TAILS.has(tail) && owner && /conn|db|sql|database/i.test(owner) && args[0]) {
+  } else if (CS_DAPPER_TAILS.has(tail) && owner && /conn|db|sql|database/i.test(owner) && args[0]
+             && dapperReceiverPlausibleCS(owner, ctx)) {
     fire("sql-injection", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Start" && owner === "Process") {
     checkProcessArgsCS(args, argMasks, (id, idx) => fireArgs(id, [idx]));
@@ -1375,9 +1716,9 @@ function checkCallSink(
     if (tail === "CreateInstance" || tail === "CreateInstanceFrom") fireArgs("eval-exec", args.map((_, i) => i).slice(0, 2));
     else fire("eval-exec", argMasks[0] ?? 0, args[0].text);
   } else if (tail === "Invoke" && reflective) {
-    fire("eval-exec", taintMask(receiver!, env), receiver!.text);
+    fire("eval-exec", taintMask(receiver!, env), reflectionLookupSourceCS(lookedUp!, node) ?? receiver!.text);
   } else if (tail === "SetValue" && reflective) {
-    fire("mass-assignment", taintMask(receiver!, env), receiver!.text);
+    fire("mass-assignment", taintMask(receiver!, env), reflectionLookupSourceCS(lookedUp!, node) ?? receiver!.text);
   } else if (owner === "Regex" && CS_REGEX_STATIC_TAILS.has(tail) && args[1] && !/Regex\s*\.\s*Escape\s*\(/.test(args[1].text)) {
     fire("redos", argMasks[1] ?? 0, args[1].text);
   } else if (CS_TEMPLATE_ROOT_RE.test(owner) && CS_SSTI_TAILS.has(tail) && args[0]) {
@@ -1386,7 +1727,8 @@ function checkCallSink(
     fire("nosql-injection", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   } else if (tail === "Parse" && owner === "BsonDocument") {
     fire("nosql-injection", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
-  } else if ((tail === "ReadJwtToken" || tail === "ReadToken") && !/ValidateToken|TokenValidationParameters/.test(ctx.content)) {
+  } else if ((tail === "ReadJwtToken" || tail === "ReadToken") && !/ValidateToken|TokenValidationParameters/.test(enclosingMethodCS(node)?.text ?? "")) {
+    // (validation counts only in the method that reads the token: a ValidateToken elsewhere in the file validates a different token)
     fire("jwt-none-alg", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
   }
 }
@@ -1646,6 +1988,29 @@ function provenConstantCS(n: SyntaxNode | null, at: SyntaxNode, depth = 0): bool
   return false;
 }
 
+/**
+ * Does the prefix of a StartsWith containment check end at a directory boundary? `"/srv/app/"` and
+ * `base + Path.DirectorySeparatorChar` do; `"/srv/app"` also admits the sibling `/srv/app-evil`, and a prefix this
+ * analysis cannot read is not assumed to.
+ */
+function prefixEndsAtDirCS(n: SyntaxNode, at: SyntaxNode, depth = 0): boolean {
+  if (depth > 3) return false;
+  const lit = csStringValue(n);
+  if (lit !== null) return /[\\/]$/.test(lit);
+  if (n.type === "parenthesized_expression" && n.namedChildren[0]) return prefixEndsAtDirCS(n.namedChildren[0], at, depth + 1);
+  if (n.type === "binary_expression") {
+    const right = n.childForFieldName("right");
+    if (right && /DirectorySeparatorChar(?:\.ToString\(\))?$/.test(right.text)) return true;
+    return !!right && prefixEndsAtDirCS(right, at, depth + 1);
+  }
+  if (n.type === "interpolated_string_expression") return /[\\/]"\s*$/.test(n.text);
+  if (n.type === "identifier") {
+    const def = lastAssignmentCS(n.text, at);
+    return !!def && def !== n && prefixEndsAtDirCS(def, at, depth + 1);
+  }
+  return false;
+}
+
 function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Guard[] {
   switch (cond.type) {
     case "parenthesized_expression": {
@@ -1733,7 +2098,8 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       // full.StartsWith(base) after full = Path.GetFullPath(...): the resolved path stays under base
       if (name === "StartsWith" && recv.type === "identifier") {
         const def = lastAssignmentCS(recv.text, cond);
-        if (def && /\bPath\.GetFullPath\s*\(|\bnew\s+(?:FileInfo|DirectoryInfo)\s*\([^)]*\)\.FullName|\.FullName$/.test(def.text)) {
+        if (def && /\bPath\.GetFullPath\s*\(|\bnew\s+(?:FileInfo|DirectoryInfo)\s*\([^)]*\)\.FullName|\.FullName$/.test(def.text)
+            && args[0] && prefixEndsAtDirCS(args[0], cond)) {
           return [{ name: recv.text, holds: "true", clears: SinkClass.PATH }];
         }
       }
@@ -2149,8 +2515,9 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
       const args = argListOfCSharp(node);
       if (fn) {
         checkCallSink(fn, args, node, env, ctx, taintMask);
-        const localName = resolveLocalCalleeCS(fn, ctx);
-        if (localName) seedLocalMethodParams(localName, args, env, ctx);
+        const callees = resolveCalleesCS(fn, args, ctx);
+        const localName = callees.length > 0;
+        if (localName) seedLocalMethodParams(callees, args, env, ctx);
         // proof pass: `memStream.Write(tainted, ...)` -- what a local object is given, it may hand back later
         if (ctx.proof && !localName && fn.type === "member_access_expression") {
           const recvId = fn.childForFieldName("expression");
@@ -2426,6 +2793,60 @@ function ownershipDominatesCS(sink: SyntaxNode, ids: Set<string>, body: SyntaxNo
  * dominates it (see ownershipDominatesCS) -- not merely "a comparison exists
  * somewhere in the method". Purely structural (no env/taint).
  */
+const OWNER_MEMBER_RE = /^(?:owner|owner_?id|user_?id|account_?id|customer_?id|tenant_?id|created_?by|author(?:_?id)?|member_?id|org(?:anization)?_?id)$/i;
+
+/** The local a lookup's result is stored in: `var o = _db.Orders.Find(id)` / `o = ...` -> "o". */
+function lookupResultVarCS(call: SyntaxNode): string | null {
+  for (let p: SyntaxNode | null = call.parent; p; p = p.parent) {
+    if (p.type === "variable_declarator") return p.namedChildren.find(c => c?.type === "identifier")?.text ?? null;
+    if (p.type === "assignment_expression") { const l = p.childForFieldName("left"); return l?.type === "identifier" ? l.text : null; }
+    if (/^(?:expression_statement|return_statement|block|method_declaration)$/.test(p.type)) return null;
+  }
+  return null;
+}
+
+/**
+ * Resource ownership checked AFTER the lookup, on the very object it returned: `var o = Find(id); if (o.OwnerId != User...)
+ * return Forbid();`. It protects only when (1) the compared member is an owner / tenant field of THAT result, (2) the
+ * other side is the authenticated principal, (3) the failing branch leaves the method, and (4) the result is not used
+ * before the check -- a role test, or a comparison on some other member or object, is not ownership.
+ */
+function ownerCheckAfterLookupCS(candidate: BolaSinkCandidate, body: SyntaxNode): boolean {
+  const result = lookupResultVarCS(candidate.node);
+  if (!result) return false;
+  const uses = (from: number, to: number) => findAllNodes(body, "identifier").some(i => i.text === result && i.startIndex >= from && i.endIndex <= to);
+  const sides = (cond: SyntaxNode): Array<{ op: string; left: SyntaxNode; right: SyntaxNode }> => {
+    const out: Array<{ op: string; left: SyntaxNode; right: SyntaxNode }> = [];
+    const visit = (n: SyntaxNode) => {
+      if (n.type === "binary_expression") {
+        const op = n.childForFieldName("operator")?.text ?? "";
+        const l = n.childForFieldName("left"), r = n.childForFieldName("right");
+        if ((op === "==" || op === "!=") && l && r) out.push({ op, left: l, right: r });
+        if (op === "||" || op === "&&") { if (l) visit(l); if (r) visit(r); }
+      }
+      if (n.type === "parenthesized_expression" || n.type === "prefix_unary_expression") for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(cond);
+    return out;
+  };
+  for (const st of findAllNodes(body, "if_statement")) {
+    const cond = st.childForFieldName("condition");
+    if (!cond || cond.startIndex < candidate.node.endIndex) continue;
+    for (const { op, left, right } of sides(cond)) {
+      const member = [left, right].find(x => x.type === "member_access_expression" && x.childForFieldName("expression")?.text === result);
+      const other = member === left ? right : left;
+      if (!member || !OWNER_MEMBER_RE.test(member.childForFieldName("name")?.text ?? "") || !isPrincipalShaped(other.text)) continue;
+      // the branch where ownership does NOT hold must leave the method
+      const cons = st.childForFieldName("consequence"), alt = st.childForFieldName("alternative");
+      const failing = op === "!=" ? cons : alt;
+      if (!statementTerminatesCS(failing)) continue;
+      if (uses(candidate.node.endIndex, st.startIndex)) continue;       // the result was already used before it was checked
+      return true;
+    }
+  }
+  return false;
+}
+
 function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
   if (!method.body) return;
   if (!method.authMeta.isEndpoint) return;
@@ -2446,6 +2867,7 @@ function collectBolaFindings(method: LocalMethod, ctx: EngineCtx) {
     const evidence = new Set<AuthzKind>(method.authMeta.annotationEvidence);
     const dominating = ownershipDominatesCS(c.node, c.idNames, method.body);
     if (dominating) evidence.add(dominating);
+    if (ownerCheckAfterLookupCS(c, method.body)) evidence.add("ownership");
     const verdict = authzVerdict(evidence);
     if (verdict === "proven") continue;
     const roleOnly = verdict === "role-only";
@@ -2466,7 +2888,9 @@ function collectSensitiveTypesCS(root: SyntaxNode): Set<string> {
     if (!name) continue;
     for (const prop of findAllNodes(cls, "property_declaration")) {
       const pn = prop.childForFieldName("name")?.text;
-      if (pn && CS_SENSITIVE_PROP_RE.test(pn) && !attributeNamesOf(prop).some(a => /^(?:BindNever|JsonIgnore|ReadOnly)$/.test(a))) out.add(name);
+      // (writable: a get-only property cannot be bound)
+      const writable = /\b(?:set|init)\s*[;{]/.test(prop.text) || /=>/.test(prop.text) === false && !/\{\s*get\s*;\s*\}/.test(prop.text);
+      if (pn && CS_SENSITIVE_PROP_RE.test(pn) && writable && !attributeNamesOf(prop).some(a => /^(?:BindNever|JsonIgnore|ReadOnly)$/.test(a))) out.add(name);
     }
   }
   return out;
@@ -2476,7 +2900,7 @@ function collectSensitiveTypesCS(root: SyntaxNode): Set<string> {
 function checkMassAssignmentBinding(methodDecl: SyntaxNode, method: LocalMethod, sensitiveTypes: Set<string>, ctx: EngineCtx) {
   if (!method.authMeta.isEndpoint || method.authMeta.verbTier === "read" || sensitiveTypes.size === 0) return;
   const attrText = methodDecl.namedChildren.filter(c => c?.type === "attribute_list").map(c => c!.text).join(" ");
-  if (/Authorize\s*\([^)]*(?:Roles|Policy)/.test(attrText)) return;
+  const roleRestricted = /Authorize\s*\([^)]*(?:Roles|Policy)/.test(attrText);   // (limits who may call it, not what the model can overwrite)
   const params = methodDecl.childForFieldName("parameters");
   for (const p of params?.namedChildren ?? []) {
     if (!p || p.type !== "parameter") continue;
@@ -2485,7 +2909,8 @@ function checkMassAssignmentBinding(methodDecl: SyntaxNode, method: LocalMethod,
     const typeName = stripGenerics(p.childForFieldName("type")?.text ?? "").replace(/[?\[\]]/g, "");
     if (!sensitiveTypes.has(typeName)) continue;
     emit(ctx, "mass-assignment", p, typeName, "model binding", undefined,
-      "The request body is bound straight onto '" + typeName + "', which has privileged properties (role / isAdmin / ...) — bind a dedicated DTO or use [Bind]");
+      "The request body is bound straight onto '" + typeName + "', which has privileged properties (role / isAdmin / ...) — bind a dedicated DTO or use [Bind]"
+      + (roleRestricted ? " (the [Authorize] role limits who may call this action, not which properties the body can overwrite)" : ""));
   }
 }
 
@@ -2613,38 +3038,35 @@ function proveSinksSafeCS(
   // A private method that is only ever CALLED (never passed as a delegate, no overload) has no caller outside this
   // file: its parameters hold what the calls here pass (Juliet's GoodG2BSink(data) called with "foo"). Every other
   // method may be called from anywhere, so all its parameters are input.
-  const declsByName = new Map<string, SyntaxNode[]>();
-  for (const d of findAllNodes(root, "method_declaration")) {
-    const n = d.childForFieldName("name")?.text;
-    if (n) declsByName.set(n, [...(declsByName.get(n) ?? []), d]);
-  }
+  const declsOf = (m: LocalMethod): SyntaxNode[] => (ctx.methodsByName.get(m.name) ?? []).map(x => x.decl);
   const contextual = new Set<string>();
-  for (const [name, method] of localMethods) {
-    const decls = declsByName.get(name) ?? [];
+  for (const [key, method] of localMethods) {
+    const decls = declsOf(method);
+    const name = method.name;
     if (!method.body || decls.length !== 1 || modifiersOf(decls[0]).some(m => /^(?:public|internal|protected)$/.test(m))) continue;
     const esc = name.replace(/[$]/g, "\\$&");
     const all = ctx.content.match(new RegExp(`\\b${esc}\\b`, "g"))?.length ?? 0;
     const called = ctx.content.match(new RegExp(`\\b${esc}\\s*\\(`, "g"))?.length ?? 0;
     // ...and called at least once here (the declaration is one match): a private method nothing here calls may still
     // be wired by reflection or a framework (WebForms `OnClick="Handler"`), so its parameters stay input
-    if (all === called && called >= 2) contextual.add(name);
+    if (all === called && called >= 2) contextual.add(key);
   }
   // A public method other files of the batch call (Juliet's `Helper_51b.GoodG2BSink(data)`, a repository a service
   // calls) receives what those calls pass -- unless it is an entry point a framework or outside caller can reach.
   const fromCallers = new Map<string, ReadonlyMap<number, number>>();
-  for (const [name] of localMethods) {
-    const decls = declsByName.get(name) ?? [];
-    if (!ctx.callerArgMasks?.size || contextual.has(name) || decls.length !== 1 || isEntryPointCS(decls[0])) continue;
+  for (const [key, lm] of localMethods) {
+    const decls = declsOf(lm);
+    if (!ctx.callerArgMasks?.size || contextual.has(key) || decls.length !== 1 || isEntryPointCS(decls[0])) continue;
     const owners = ownerTypesCS(decls[0]);
     const merged = new Map<number, number>();
     let found = false;
     for (const o of owners) {
-      const s = ctx.callerArgMasks.get(`${o}.${name}`);
+      const s = ctx.callerArgMasks.get(`${o}.${lm.name}`);
       if (!s) continue;
       found = true;
       for (const [i, m] of s) merged.set(i, (merged.get(i) ?? 0) | m);
     }
-    if (found) fromCallers.set(name, merged);
+    if (found) fromCallers.set(key, merged);
   }
 
   // Fixed point over the call-site seeds; only the final (stable) round's proofs count.
@@ -2657,6 +3079,7 @@ function proveSinksSafeCS(
       const env: Env = new Map();
       const seeded = seeds.get(name);
       const callers = fromCallers.get(name);
+      enterMethodCS(pctx, method);
       for (const p of method.paramShapes) {
         // an argument some call site leaves out (a defaulted parameter) or binds by name: assume anything
         const fromBatch = callers && (callers.has(-1) || !callers.has(p.index) ? ALL : callers.get(p.index)!);
@@ -2680,7 +3103,7 @@ function makeCSharpCtx(
   const lines = content.split("\n");
   const localMethods = collectLocalMethods(root);
   const ctx: EngineCtx = {
-    filePath, content, lines, localMethods, propagatingParams: new Map(), seededParams: new Map(),
+    filePath, content, lines, localMethods, methodsByName: methodsByNameOf(localMethods), propagatingParams: new Map(), seededParams: new Map(),
     varTypes: collectMemberTypesCS(root), root, findings: [], seen: new Set(), suppressed: suppressedOut,
     sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     crossFileFacts,
@@ -2706,6 +3129,7 @@ function drainSeededParamsCS(ctx: EngineCtx, localMethods: Map<string, LocalMeth
         const shape = method.paramShapes[idx];
         if (shape) env.set(shape.name, m);
       }
+      enterMethodCS(ctx, method);
       walkForDeclarationsAndSinks(method.body, env, ctx);
     }
     if (!changed) break;
@@ -2727,6 +3151,7 @@ export function computeCSharpCallSiteArgs(
     proveSinksSafeCS(ctx, localMethods, root, [], out);
   } catch (err) {
     console.error(`[astTaintCSharp] threw computing call-site arguments for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -2765,10 +3190,12 @@ export function computeCSharpMethodSinkFacts(
         const info = extractMethodInfo(decl);
         if (!info?.body || info.paramShapes.length === 0) continue;
         const facts: ParamSinkFact[] = [];
+        const lm = [...localMethods.values()].find(m => m.decl === decl) ?? info;
         info.paramShapes.forEach((shape, i) => {
           ctx.findings = [];
           ctx.seen = new Set();
           ctx.seededParams = new Map();
+          enterMethodCS(ctx, lm);
           walkForDeclarationsAndSinks(info.body!, new Map([[shape.name, ALL]]), ctx);
           drainSeededParamsCS(ctx, localMethods);
           // One fact per real sink, with the path inside this method (see astTaintJava.ts's twin).
@@ -2776,7 +3203,8 @@ export function computeCSharpMethodSinkFacts(
             if (f.id === "bola-missing-ownership-check") continue;
             const where = f.calleeSink;
             mergeSinkFacts(facts, [{
-              index: i, isRest: false, id: f.id, sinkClass: classOf(f.id),
+              index: i, isRest: false, param: { name: shape.name, arity: info.paramShapes.length, varargs: info.paramShapes.some(x => x.isParams) },
+              id: f.id, sinkClass: classOf(f.id),
               sinkExpr: where?.sinkExpr ?? f.sinkExpr, file: where?.file ?? filePath, line: where?.line ?? f.line,
               via: [`${clsName}.${info.name}`, ...(where?.via ?? [])],
               steps: f.trace?.length ? factStepsFromTrace(f.trace, `${clsName}.${info.name}`, filePath, lineOf(decl), shape.name,
@@ -2784,16 +3212,23 @@ export function computeCSharpMethodSinkFacts(
             }]);
           }
         });
-        if (facts.length === 0) continue;
-        for (const owner of [clsName, ...supers]) {
-          const list = out.get(`${owner}.${info.name}`) ?? [];
+        const ns = namespaceOfCS(root, decl);
+        if (facts.length === 0) {
+          // no sink to report, but the class EXISTS: an empty namespace-qualified entry lets a call site see that the
+          // simple name is declared in more than one namespace (and so must be resolved by using / namespace, not guessed)
+          if (ns && !out.has(`${ns}.${clsName}.${info.name}`)) out.set(`${ns}.${clsName}.${info.name}`, []);
+          continue;
+        }
+        for (const key of [...[clsName, ...supers].map(o => `${o}.${info.name}`), ...(ns ? [`${ns}.${clsName}.${info.name}`] : [])]) {
+          const list = out.get(key) ?? [];
           mergeSinkFacts(list, facts);
-          out.set(`${owner}.${info.name}`, list);
+          out.set(key, list);
         }
       }
     }
   } catch (err) {
     console.error(`[astTaintCSharp] threw computing method sink facts for ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
   }
   return out;
 }
@@ -2812,27 +3247,22 @@ export function scanAstTaintCSharp(
     const { ctx, localMethods } = makeCSharpCtx(content, filePath, root, suppressedOut, crossFileFacts);
     ctx.callerArgMasks = callerArgMasks;
     const sensitiveTypes = collectSensitiveTypesCS(root);
-    const methodDecls = new Map<string, SyntaxNode>();
-    for (const decl of findAllNodes(root, "method_declaration")) {
-      const nm = decl.childForFieldName("name")?.text;
-      if (nm && localMethods.get(nm)?.body && !methodDecls.has(nm)) methodDecls.set(nm, decl);
-    }
 
     const propagating = buildPropagatingMapCSharp(localMethods, ctx);
     for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
 
     ctx.recordSticky = true;
     const scanMethods = (structural: boolean) => {
-      for (const [name, method] of localMethods) {
+      for (const method of localMethods.values()) {
         if (!method.body) continue;
         const env: Env = new Map();
         method.sourceParamNames.forEach(p => env.set(p, ALL));
+        enterMethodCS(ctx, method);
         walkForDeclarationsAndSinks(method.body, env, ctx);
         if (structural) {
           collectBolaFindings(method, ctx);
           checkHandRolledJwt(method, ctx);
-          const decl = methodDecls.get(name);
-          if (decl) checkMassAssignmentBinding(decl, method, sensitiveTypes, ctx);
+          checkMassAssignmentBinding(method.decl, method, sensitiveTypes, ctx);
         }
       }
     };
@@ -2870,6 +3300,7 @@ export function scanAstTaintCSharp(
           const shape = method.paramShapes[idx];
           if (shape) env.set(shape.name, m);
         }
+        enterMethodCS(ctx, method);
         walkForDeclarationsAndSinks(method.body, env, ctx);
       }
       if (!changed) break;
@@ -2882,6 +3313,7 @@ export function scanAstTaintCSharp(
     return ctx.findings;
   } catch (err) {
     console.error(`[astTaintCSharp] threw scanning ${filePath}:`, err);
+    recordEngineFailure(filePath, "analysis-failed");
     return [];
   }
 }
