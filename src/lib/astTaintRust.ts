@@ -1555,6 +1555,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         argNodes(node).forEach((a, i) => {
           if (a.type === "closure_expression") {
             if (calleeIgnores(node, i)) return;               // a function of this file that never uses it
+            if (recv && LAZY_ADAPTORS.has(name) && lazyIteratorDropped(node)) return;   // an iterator nothing drives
             walkClosure(a, elemMask(), env);
           } else if (a.type === "identifier" && closureVars.has(a.text)) {
             if (calleeIgnores(node, i)) return;
@@ -1627,6 +1628,39 @@ const fnId = (f: LocalFn): string => f.key ?? `${f.name}@${f.decl.startIndex}`;
  * `T::new()`, `T { .. }`, a unit struct `T`). Another module's path, or a receiver of unknown type: none (cross-file
  * facts and receiver propagation speak for those). Two types' same-named methods never stand in for each other.
  */
+/** Iterator adaptors that only describe work: their closure runs when something consumes the iterator. */
+const LAZY_ADAPTORS = new Set(["map", "filter", "filter_map", "flat_map", "flatten", "take_while", "skip_while", "map_while", "inspect", "scan", "peekable", "zip", "enumerate", "chain", "rev", "skip", "take", "step_by", "cloned", "copied"]);
+
+/**
+ * Is the lazy adaptor call `call` ever driven? `v.iter().map(f);` and `let _ = v.iter().map(f);` build an iterator and drop
+ * it, `let it = v.iter().map(f);` with `it` never used again does the same; chained into a consumer (`.collect()`, `.count()`,
+ * `for`, `.for_each(..)`) or handed on (argument, return, `?`, `.await`) it runs. Unknown shapes count as consumed.
+ */
+function lazyIteratorDropped(call: SyntaxNode): boolean {
+  let top: SyntaxNode = call;
+  // walk up the method chain: another lazy adaptor keeps it lazy, anything else consumes it
+  for (;;) {
+    const par: SyntaxNode | null = top.parent;
+    if (par?.type !== "field_expression" || field(par, "value")?.id !== top.id) break;
+    const outer: SyntaxNode | null = par.parent;
+    if (outer?.type !== "call_expression" || field(outer, "function")?.id !== par.id) return false;
+    if (!LAZY_ADAPTORS.has(field(par, "field")?.text ?? "")) return false;    // a consumer (collect, count, for_each, next, ...)
+    top = outer;
+  }
+  const par = top.parent;
+  if (!par) return false;
+  if (par.type === "expression_statement") return true;
+  if (par.type === "let_declaration" && field(par, "value")?.id === top.id) {
+    const pat = field(par, "pattern");
+    if (pat?.text === "_") return true;
+    if (pat?.type === "identifier") {
+      const scope = par.parent;
+      return !!scope && !findAllNodes(scope, "identifier").some(i => i.text === pat.text && i.startIndex > par.endIndex);
+    }
+  }
+  return false;
+}
+
 function resolveLocalRs(ctx: EngineCtx, node: SyntaxNode): LocalFn[] {
   const { name, recv, path } = callParts(node);
   const cands = ctx.byName.get(name) ?? [];

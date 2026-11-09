@@ -95,3 +95,19 @@ describe("scan status and parser lifecycle", () => {
     expect(st.lastError).toMatch(/analysis_failed/);
   });
 });
+
+describe("lazy iterators only run when something drives them", () => {
+  const vec = `    let v = vec![params.command.clone()];\n`;
+  it("an iterator built and dropped never runs its closure", () => {
+    expect(ids(handler(`${vec}    v.iter().map(|c| Command::new(c).spawn());`))).not.toContain("command-injection");
+    expect(ids(handler(`${vec}    let _ = v.iter().map(|c| Command::new(c).spawn());`))).not.toContain("command-injection");
+    expect(ids(handler(`${vec}    let it = v.iter().map(|c| Command::new(c).spawn());`))).not.toContain("command-injection");
+    expect(ids(handler(`${vec}    v.iter().filter(|c| !c.is_empty()).map(|c| Command::new(c).spawn());`))).not.toContain("command-injection");
+  });
+  it("one that is consumed does", () => {
+    expect(ids(handler(`${vec}    let _r: Vec<_> = v.iter().map(|c| Command::new(c).spawn()).collect();`))).toContain("command-injection");
+    expect(ids(handler(`${vec}    v.iter().map(|c| Command::new(c).spawn()).for_each(drop);`))).toContain("command-injection");
+    expect(ids(handler(`${vec}    let it = v.iter().map(|c| Command::new(c).spawn());\n    for _ in it {}`))).toContain("command-injection");
+    expect(ids(handler(`${vec}    let n = v.iter().map(|c| Command::new(c).spawn()).count();\n    let _ = n;`))).toContain("command-injection");
+  });
+});
