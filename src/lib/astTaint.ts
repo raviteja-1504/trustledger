@@ -725,7 +725,7 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   // a template engine compiling request data as the template SOURCE (`dot.template(t)`, `ejs.render(t, data)`):
   // the engine turns it into code -- the data argument is rendered, escaped, and is not the sink
   const engine = (resolvedModule ?? head).toLowerCase();
-  if (parts.length === 2 && call.arguments[0] && (TEMPLATE_COMPILE[engine]?.has(tail) || (engine === "_" || engine === "lodash") && tail === "template")) {
+  if (parts.length === 2 && call.arguments[0] && (Object.prototype.hasOwnProperty.call(TEMPLATE_COMPILE, engine) && TEMPLATE_COMPILE[engine].has(tail) || (engine === "_" || engine === "lodash") && tail === "template")) {
     return { id: "ssti", sinkExpr: text, args: [call.arguments[0]] };
   }
   if (CMD_SINK_NAMES.has(tail) && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {

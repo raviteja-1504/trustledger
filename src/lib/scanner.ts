@@ -132,6 +132,8 @@ import { findRubyTaintFindings } from "./rubyTaint";
 import { tameLongRuns } from "./scanInputLimits";
 import { summarizeAIAttribution, type AIAttributionSummary } from "./aiAttributionSummary";
 import { buildEvidenceGroups, type AIEvidenceReport } from "./aiEvidenceGroups";
+import { findCredentialAssignment } from "./credentialAssignments";
+import { findCredentialFileFormats } from "./credentialFiles";
 
 // Registered once at module load (detectorRegistry.register() throws on a
 // duplicate id, so this must not live inside analyzeFile). First real
@@ -410,12 +412,53 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: /AKIA[0-9A-Z]{16}/,                                                    label: "AWS Access Key ID",           severity: "critical" },
   { re: /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}/,                           label: "GitHub token",                severity: "critical" },
   { re: /glpat-[A-Za-z0-9_-]{20}/,                                             label: "GitLab token",                severity: "critical" },
-  { re: /SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/,                          label: "SendGrid API key",            severity: "critical" },
-  { re: /xox[baprs]-[0-9A-Za-z-]+/,                                            label: "Slack token",                 severity: "critical" },
+  { re: /SG\.[A-Za-z0-9_-]{16,32}\.[A-Za-z0-9_-]{40,64}/,                          label: "SendGrid API key",            severity: "critical" },
+  { re: /xox[baprse]-[0-9A-Za-z-]+/,                                           label: "Slack token",                 severity: "critical" },
   { re: /AIza[0-9A-Za-z_-]{35}/,                                               label: "Google API key",              severity: "high"     },
   { re: /AC[a-z0-9]{32}/,                                                       label: "Twilio Account SID",          severity: "critical" },
   { re: /SK[a-z0-9]{32}/,                                                       label: "Twilio Auth Token",           severity: "critical" },
   { re: /npm_[A-Za-z0-9]{36}/,                                                  label: "NPM access token",            severity: "critical" },
+  // ── More provider formats. Each has a distinctive prefix, shape or context word, so a match is a credential, not a guess.
+  // Anthropic first: its key also starts with "sk-", and the OpenAI pattern below must not report it a second time.
+  { re: /\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{60,}/,                      label: "Anthropic API key",           severity: "critical" },
+  // OpenAI: sk-, optionally proj-/svcacct-/admin-, then a long random run that mixes letters and digits
+  { re: /\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[A-Za-z0-9_-]{32,})(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/, label: "OpenAI API key", severity: "critical" },
+  { re: /https:\/\/hooks\.slack\.com\/(?:services\/T[A-Z0-9]{6,}\/B[A-Z0-9]{6,}\/[A-Za-z0-9]{20,}|workflows\/[A-Za-z0-9\/]{20,})/, label: "Slack webhook URL", severity: "high" },
+  { re: /\bxapp-\d-[A-Z0-9]+-\d+-[a-f0-9]{40,}/,                               label: "Slack app token",             severity: "critical" },
+  { re: /discord(?:app)?\.com\/api\/webhooks\/\d{17,20}\/[A-Za-z0-9_-]{60,}/,  label: "Discord webhook URL",         severity: "high"     },
+  // Discord bot token: three dot-separated parts, the first starting M/N/O, base64 of the bot's id (contains a digit)
+  { re: /(?<![\w.-])[MNO](?=[A-Za-z0-9_-]{23,25}\.)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}(?![\w.-])/, label: "Discord bot token", severity: "critical" },
+  // Telegram bot token: the bot's numeric id, a colon, 35 characters
+  { re: /(?<![\w:.-])\d{8,10}:(?=[A-Za-z0-9_-]{35}(?![\w-]))(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{35}/, label: "Telegram bot token", severity: "critical" },
+  { re: /\bdo[opr]_v1_[a-f0-9]{64}\b/,                                         label: "DigitalOcean token",          severity: "critical" },
+  { re: /\bhf_[A-Za-z0-9]{34,}\b/,                                             label: "Hugging Face token",          severity: "critical" },
+  { re: /\bgithub_pat_[A-Za-z0-9_]{50,}/,                                      label: "GitHub fine-grained token",   severity: "critical" },
+  { re: /\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}/,                            label: "PyPI upload token",           severity: "critical" },
+  { re: /\b(?:rk_live|rk_test)_[A-Za-z0-9]{20,}/,                              label: "Stripe restricted key",       severity: "critical" },
+  { re: /\bwhsec_[A-Za-z0-9]{24,}/,                                            label: "Stripe webhook secret",       severity: "high"     },
+  { re: /\bgsk_[A-Za-z0-9]{40,}/,                                              label: "Groq API key",                severity: "critical" },
+  { re: /\br8_[A-Za-z0-9]{37}\b/,                                              label: "Replicate API token",         severity: "critical" },
+  { re: /\bntn_[A-Za-z0-9]{40,}/,                                              label: "Notion integration token",    severity: "critical" },
+  { re: /\blin_api_[A-Za-z0-9]{40}\b/,                                         label: "Linear API key",              severity: "critical" },
+  { re: /\bdapi[a-f0-9]{32}\b/,                                                label: "Databricks token",            severity: "critical" },
+  { re: /\bsq0(?:atp|csp)-[A-Za-z0-9_-]{22,43}/,                               label: "Square credential",           severity: "critical" },
+  { re: /\b[a-f0-9]{32}-us\d{1,2}\b/,                                          label: "Mailchimp API key",           severity: "high"     },
+  // Azure: a storage connection string's AccountKey, a SAS token's signature, an AD client secret (…\dQ~…)
+  { re: /\bAccountKey=[A-Za-z0-9+\/]{43,}={0,2}/,                              label: "Azure storage account key",   severity: "critical" },
+  { re: /\bsv=\d{4}-\d{2}-\d{2}&[^"'\s]*\bsig=[A-Za-z0-9%+\/=]{30,}/,           label: "Azure SAS token",             severity: "critical" },
+  { re: /(?<![\w~.-])[A-Za-z0-9_~.-]{3}\dQ~[A-Za-z0-9_~.-]{31,34}(?![\w~.-])/, label: "Azure AD client secret",      severity: "critical" },
+  // Google Cloud service-account JSON: the key id sits beside the private key
+  { re: /["']private_key_id["']\s*:\s*["'][a-f0-9]{40}["']/,                   label: "GCP service account key",     severity: "critical" },
+  // Keys named for their provider, with the value as its own capture (checked for placeholders on its own)
+  { re: /\baws[_-]?secret[_-]?(?:access[_-]?)?key\b[\s"':=(]{1,8}([A-Za-z0-9\/+]{40})(?![A-Za-z0-9\/+=])/i, label: "AWS secret access key", severity: "critical", ownValue: true },
+  { re: /\b(?:dd|datadog)[_-]?(?:api|app)[_-]?key\b[\s"':=(]{1,8}([a-f0-9]{32}(?:[a-f0-9]{8})?)(?![A-Za-z0-9])/i, label: "Datadog API key", severity: "high", ownValue: true },
+  // PASETO tokens and PASERK keys (v1-v4, local / public / secret, optionally password-wrapped)
+  { re: /\bv[1-4]\.(?:local|public)\.[A-Za-z0-9_-]{30,}/,                      label: "PASETO token",                severity: "high"     },
+  { re: /\bk[1-4]\.(?:local|secret)(?:-pw|-wrap\.[a-z]+)?\.[A-Za-z0-9_-]{20,}/,  label: "PASERK key",                  severity: "critical" },
+  // a long opaque Bearer token (the JWT form is matched above)
+  { re: /\bBearer\s+(?!ey)[A-Za-z0-9._~+\/=-]{40,}/,                            label: "Hardcoded Bearer token",      severity: "high"     },
+  // a credential in a query string: ?access_token=..., &oauth_token_secret=..., &client_secret=...
+  { re: /[?&](?:access_token|oauth_token(?:_secret)?|client_secret|api_?key|apikey|auth_token|secret|password|passwd)=([A-Za-z0-9._~+\/%-]{12,})/i, label: "Credential in URL query", severity: "high", genericValue: true },
   // Word-boundary guards required: without them, "s." + 24 alnum chars matches
   // ANY property access on an object name ending in "s" followed by a long
   // property name (values.someVeryLongPropertyName, options.anotherFieldHere,
@@ -426,28 +469,27 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // never itself a function call, and every Go method/function call requires
   // "(" even with zero arguments, so this exclusion is safe.
   { re: /(?<![\w.])s\.[A-Za-z0-9]{24,}(?![.\w(])/,                             label: "HashiCorp Vault token",       severity: "critical" },
-  { re: /(?:DD_API_KEY|DATADOG_API_KEY)[^=\n]*=\s*["'][A-Za-z0-9]{32,}["']/i, label: "Datadog API key",             severity: "high"     },
   { re: /xkeysib-[a-f0-9]{64}-[A-Za-z0-9_-]+/,                                label: "Brevo API key",               severity: "critical" },
   { re: /key-[a-f0-9]{32}/,                                                     label: "Mailgun API key",             severity: "critical" },
   { re: /shpat_[A-Za-z0-9]{32}/,                                                label: "Shopify access token",        severity: "critical" },
   { re: /(?:HEROKU_API_KEY)[^=\n]*=\s*["'][A-Za-z0-9-]{36}["']/i,             label: "Heroku API key",              severity: "critical" },
-  { re: /Basic\s+[A-Za-z0-9+/]{20,}={0,2}/,                                    label: "HTTP Basic Auth header",      severity: "high"     },
+  { re: /Basic\s+([A-Za-z0-9+/]{12,}={0,2})/,                                   label: "HTTP Basic Auth header",      severity: "high"     },
   { re: /Bearer\s+ey[A-Za-z0-9_-]{20,}/,                                        label: "Hardcoded Bearer token",      severity: "high"     },
   { re: /(?:eyJ[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]+/,                       label: "Hardcoded JWT",               severity: "high"     },
   { re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY/,                   label: "Private key",                 severity: "critical" },
-  { re: /(?:private_key|private_key_id)\s*:\s*["'][-\w /+]+["']/i,            label: "Service account key",         severity: "critical" },
+  { re: /(?:private_key|private_key_id)["']?\s*:\s*["'][-\w /+]{16,}["']/i,       label: "Service account key",         severity: "critical" },
   // A template's placeholders (%s, %v, {user}, ${PASS}) are filled in from variables -- "mongodb://%s:%s@%s" names no
   // credential. A URL-encoded real password (p%40ss) still matches: only format verbs and braces are skipped.
-  { re: /postgresql:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,             label: "Postgres credentials",        severity: "critical" },
+  { re: /postgres(?:ql)?:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,       label: "Postgres credentials",        severity: "critical" },
   { re: /mongodb(?:\+srv)?:\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,      label: "MongoDB credentials",         severity: "critical" },
-  { re: /mysql:\/\/[^@\s]+:[^@\s]+@/,                                          label: "MySQL credentials",           severity: "critical" },
+  { re: /(?:mysql|mariadb):\/\/(?![^@\s]*(?:%[sdvq]|\{))[^@\s]+:[^@\s]+@/,     label: "MySQL credentials",           severity: "critical" },
   { re: /jdbc:[a-z]+:\/\/[^\s"']+password=[^\s&"']+/i,                         label: "DB connection string",        severity: "critical" },
   // ADO.NET / ODBC: "Server=db;Database=app;User Id=sa;Password=s3cr3t;" -- a templated value ({0}, $(VAR), %VAR%, <pw>) names none
   { re: /["'][^"'\n]*\b(?:Server|Data Source|Host|Address)\s*=[^"'\n]*\b(?:Password|Pwd)\s*=\s*(?![{$%<])([^;"'\s]{4,})/i, label: "DB connection string", severity: "critical", ownValue: true },
   // JDBC: DriverManager.getConnection(url, "root", "s3cr3t")
   { re: /\bDriverManager\.getConnection\s*\([^)]*,\s*["'][^"']*["']\s*,\s*["']([^"'\s]{3,})["']\s*\)/, label: "DB password", severity: "critical", ownValue: true },
   // PHP: define('DB_PASSWORD', '...')
-  { re: /\bdefine\s*\(\s*["']\w*(?:PASSWORD|PASSWD|PWD|SECRET|API_?KEY|TOKEN)\w*["']\s*,\s*["']([^"']{6,})["']\s*\)/i, label: "secret constant", severity: "high", genericValue: true },
+  { re: /\bdefine\s*\(\s*["']\w*(?:PASSWORD|PASSWD|PWD|SECRET|API_?KEY|TOKEN|AUTH_KEY|LOGGED_IN_KEY|NONCE_KEY|AUTH_SALT|LOGGED_IN_SALT|NONCE_SALT)\w*["']\s*,\s*["']([^"']{6,})["']\s*\)/i, label: "secret constant", severity: "high", genericValue: true },
   // Generic word-keyed patterns — value captured in group 1, checked by
   // looksLikeRealSecret() in findSecrets() before being reported. Variable
   // name allows a _KEY/_TOKEN/_VALUE suffix to catch real-world names like
@@ -490,6 +532,12 @@ function looksLikeRealSecret(value: string): boolean {
   // at build time) is not a password: upper-case words joined by underscores.
   if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return false;
   if (/^(.)\1{5,}$/.test(value)) return false;               // repeated-char filler (aaaaaa, xxxxxx)
+  // A name, not a secret: a config key path (session.secret), snake_case words (paypal_express_token), CamelCase words
+  // (KDFKeySecret, base64EncodedKey), or a build-time template (%PUBLIC_URL%, @VERSION@).
+  if (/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(value)) return false;
+  if (/^[a-z]+(?:_[a-z]+)+$/.test(value)) return false;
+  if (/^(?:[A-Z]{1,4}[a-z]{2,}){2,}$/.test(value) || /^[a-z]{3,}\d*(?:[A-Z]{1,3}[a-z]{2,}){1,}$/.test(value)) return false;
+  if (/^(?:%[A-Za-z0-9_]+%|@[A-Z0-9_]+@|<%.*%>)$/.test(value)) return false;
   const hasUpper  = /[A-Z]/.test(value);
   const hasLower  = /[a-z]/.test(value);
   const hasDigit  = /[0-9]/.test(value);
@@ -511,10 +559,14 @@ const TEST_FILE_RE = /(?:^|\/)(?:__tests__|__mocks__|tests?|fixtures?|mocks?|spe
 // never real secrets — flagging them is a pure false positive.
 const KNOWN_PLACEHOLDER_SECRET_RE = /AKIAIOSFODNN7EXAMPLE|wJalrXUtnFEMI\/K7MDENG\/bPxRfiCYEXAMPLEKEY/;
 
+const DB_URL_LABELS = new Set(["Postgres credentials", "MongoDB credentials", "MySQL credentials", "Credentials in URL"]);
+const DB_URL_PLACEHOLDER_PASSWORD_RE = /^(?:pw|pass|passwd|password|passw0rd|secret|user|username|root|admin|xxx+|\*+|\[?pass\w*\]?|<[^>]*>|\$\w+)$/i;
+
 // Quoted string literals of 4+ chars — used to inspect *values* assigned to
 // secret-shaped variables, rather than the whole line (which would also match
 // the variable name itself, e.g. "...PASSWORD...").
-const QUOTED_VALUE_RE = /["']([^"']{4,})["']/g;
+// Group 2 is set when the string is followed by a colon: it is a KEY (`"consumerSecret": "..."`), not a value.
+const QUOTED_VALUE_RE = /["']([^"']{4,})["'](\s*:)?/g;
 
 // A quoted value containing one of these markers is a synthetic/demo
 // placeholder, not a real credential: "..." truncation, "xxxx" filler, or
@@ -534,16 +586,45 @@ const PLACEHOLDER_VALUE_RE = /\.\.\.|[xX]{4,}|trustledger|\bpassword\b|demo|samp
 // is a UI string, not a credential — e.g. private_key: "Private Key".
 const LABEL_VALUE_RE = /^[A-Za-z][A-Za-z ]{2,29}$/;
 
-function isPlaceholderSecretLine(line: string): boolean {
+/**
+ * Whether a line's quoted strings show the secret on it is a placeholder or a label.
+ * - A string followed by a colon is a KEY. It used to count as a value, and a key like "consumerSecret" is letters
+ *   only, so it looked like a UI label and silenced every `"consumerSecret": "..."` line (most JSON and dict secrets).
+ * - `ownToken` is the text a provider-format pattern matched: its own quoted string is the finding, not a label. An AWS
+ *   key made only of letters (rather than letters and digits) was read as a label and dropped.
+ */
+function isPlaceholderSecretLine(line: string, ownToken?: string): boolean {
   if (KNOWN_PLACEHOLDER_SECRET_RE.test(line)) return true;
   QUOTED_VALUE_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = QUOTED_VALUE_RE.exec(line))) {
+    if (m[2]) continue;
     const v = m[1];
+    if (ownToken && v.includes(ownToken)) continue;
     if (PLACEHOLDER_VALUE_RE.test(v) || LABEL_VALUE_RE.test(v)) return true;
   }
   return false;
 }
+
+/**
+ * Whether a line carries a documented example credential. For a provider-format token nothing else on the line
+ * matters: other quoted words are not labels for it, and placeholder wording inside the token itself (xxxxxx, example,
+ * <your-key>) is judged separately by PLACEHOLDER_TOKEN_RE. (A connection string's own quoted value may contain words like
+ * "testuser" without being a placeholder, so its surrounding string is not judged either.)
+ */
+function isPlaceholderToken(line: string, _token: string): boolean {
+  return KNOWN_PLACEHOLDER_SECRET_RE.test(line);
+}
+
+/** A line that is only a comment (not a regex literal or an example field). */
+function isCommentLine(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("//") || t.startsWith("#") || t.startsWith("*") || t.startsWith("/*");
+}
+
+// A token of a provider's own format that is really a placeholder: filler characters, "<your-key>", "..." or a word
+// that only appears in documentation. Real tokens are random, so they do not contain these.
+const PLACEHOLDER_TOKEN_RE = /(.)\1{9,}|x{6,}|\*{4,}|\.{3}|<[a-z_ -]{2,30}>|your[-_]?(?:api|key|token|secret)|example|placeholder|dummy|changeme|redacted/i;
 
 // Source files whose entire content is fixture/demo data describing
 // *other* (fictional) findings for the demo UI and test suite — not this
@@ -1720,6 +1801,18 @@ function hasPemKeyBody(lines: string[], i: number, afterHeader: number): boolean
   return lines.slice(i + 1, i + 3).some(l => PEM_BODY_RE.test(l));
 }
 
+/** Files an infrastructure detector already judges for literal secrets (see appsecDetectors.ts / containerDetectors.ts). */
+function hasInfraSecretRules(file_path: string, lines: readonly string[]): boolean {
+  if (/\.(?:tf|tfvars|bicep)$/i.test(file_path) || isDockerfilePath(file_path)) return true;
+  if (!/\.ya?ml$|\.json$|\.template$/i.test(file_path)) return false;
+  const head = lines.slice(0, 80).join("\n");
+  return (/^\s*apiVersion:/m.test(head) && /^\s*kind:/m.test(head))            // Kubernetes
+    || /AWSTemplateFormatVersion|^\s*Resources:\s*$/m.test(head)                // CloudFormation
+    || /(?:^|\/)serverless\.ya?ml$/i.test(file_path)                           // Serverless
+    || (/^\s*services:\s*$/m.test(head) && /^\s*(?:image|build):/m.test(head)) // Docker Compose
+    || /"\$schema"\s*:\s*"[^"]*deploymentTemplate/i.test(head);                // ARM
+}
+
 function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
   if (DEMO_DATA_FILE_RE.test(file_path)) return [];
   const isTestFile = TEST_FILE_RE.test(file_path);
@@ -1730,11 +1823,22 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
     // branded/structural patterns still run there since a real leaked key is
     // real regardless of which file it's in.
     if (genericValue && isTestFile) continue;
+    const branded = !genericValue && !ownValue;
     for (let i = 0; i < lines.length; i++) {
-      if (isNonExecutableLine(lines[i])) continue;
-      if (!ownValue && isPlaceholderSecretLine(lines[i])) continue;
+      // A provider-format token is a leak wherever it sits: pasted into a comment, a TODO, a README. Only the generic
+      // word=value patterns read code alone (a comment saying "password = ..." describes, it does not set).
+      if (isNonExecutableLine(lines[i]) && !(branded && isCommentLine(lines[i]))) continue;
       const m = re.exec(lines[i]);
       if (!m) continue;
+      // A provider-format token is the secret by its shape: only a placeholder INSIDE its own quoted value counts, not
+      // an unrelated quoted word elsewhere on the line (`require('stripe')('sk_live_...')` is a leaked key; 'stripe'
+      // is not a label for it).
+      if (!ownValue && (branded ? isPlaceholderToken(lines[i], m[0]) : isPlaceholderSecretLine(lines[i]))) continue;
+      if (branded && PLACEHOLDER_TOKEN_RE.test(m[0])) continue;
+      // A Basic credential decodes to user:password; anything else after the word "Basic" is prose
+      if (label === "HTTP Basic Auth header") { try { if (!/^[^:\s]{1,64}:[^\s]{1,128}$/.test(Buffer.from(m[1], "base64").toString("utf8"))) continue; } catch { continue; } }
+      // user:pass@host, root:pw@localhost: the password of a documented example, not a credential
+      if (DB_URL_LABELS.has(label)) { const pw = /:\/\/[^:@/\s"']*:([^@\s"']*)@/.exec(m[0])?.[1] ?? ""; if (DB_URL_PLACEHOLDER_PASSWORD_RE.test(pw)) continue; }
       if (ownValue && (PLACEHOLDER_VALUE_RE.test(m[1]) || DUMMY_SECRET_VALUES_RE.test(m[1]) || KNOWN_PLACEHOLDER_SECRET_RE.test(lines[i]))) continue;
       if (genericValue && !looksLikeRealSecret(m[1] ?? "")) continue;
       // `"API_KEY=" + UUID.randomUUID()`: the literal only starts a value built at runtime.
@@ -1744,6 +1848,30 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       if (label === "Private key" && !hasPemKeyBody(lines, i, m.index + m[0].length)) continue;
       // "Hardcoded secret" / "Hardcoded password" patterns already say so: don't prefix them twice
       found.push({ id:"hardcoded-secret", label: /^hardcoded\b/i.test(label) ? label : `Hardcoded ${label}`, severity, line:i+1, detail:`${label} detected` });
+    }
+  }
+  // Infrastructure files have their own, more specific secret rules (Kubernetes Secret, CloudFormation / Serverless /
+  // Terraform literals, Dockerfile ENV, Compose environment) with tailored fixes; the generic rules below would take
+  // the same line first and the merge of same-weakness findings would keep the less specific one.
+  const infraFile = hasInfraSecretRules(file_path, lines);
+  // Credentials assigned to a name that says what they are (the name is the evidence; see credentialAssignments.ts).
+  // Skipped in test files like the other generic patterns, and for lines a pattern above already reported.
+  if (!isTestFile && !infraFile) {
+    const reported = new Set(found.map(f => f.line));
+    for (let i = 0; i < lines.length; i++) {
+      if (reported.has(i + 1) || isNonExecutableLine(lines[i])) continue;
+      const hit = findCredentialAssignment(lines[i], file_path, { isPlaceholder: v => PLACEHOLDER_VALUE_RE.test(v) || DUMMY_SECRET_VALUES_RE.test(v) });
+      if (!hit) continue;
+      if (KNOWN_PLACEHOLDER_SECRET_RE.test(lines[i])) continue;
+      found.push({ id:"hardcoded-secret", label: hit.passwordLike ? "Hardcoded password" : "Hardcoded secret", severity: hit.passwordLike ? "critical" : "high", line:i+1, detail:`Credential assigned to "${hit.key}" — move it to an environment variable or secrets manager` });
+    }
+  }
+  // Files that exist to hold credentials (.netrc, .pgpass, .npmrc, htpasswd, Docker config...): the format is the evidence.
+  if (!isTestFile && !infraFile) {
+    const reported = new Set(found.map(f => f.line));
+    for (const f of findCredentialFileFormats(lines, file_path)) {
+      if (reported.has(f.line)) continue;
+      found.push({ id:"hardcoded-secret", label: f.label, severity: f.severity, line: f.line, detail: `${f.label} — remove it from the repository and rotate the credential` });
     }
   }
   if (isPropertiesFile && !isTestFile) {
@@ -1765,6 +1893,14 @@ function findHighEntropySecrets(lines: string[], file_path: string): ScanIndicat
     const line = lines[i];
     if (isNonExecutableLine(line)) continue;
     if (!ENTROPY_CRED_RE.test(line)) continue;
+    // `Key = 8cd67855dd92d361...` / `secret: 4d243dd6e4dc...`: a long hex run written without quotes, ending the line.
+    // Hex only (a hash-named line is excluded below): other unquoted values are too often ordinary identifiers.
+    const bare = /\b(?:key|secret|token|hmac|signing[\s_-]?key|api[\s_-]?key|private[\s_-]?key)\s*(?:=|:)\s*([0-9a-fA-F]{32,128})\s*[,;]?\s*$/i.exec(line);
+    if (bare && shannonEntropy(bare[1]) > 3.3 && !/hash|digest|checksum|sha\d|md5|integrity|commit|fingerprint|etag|uuid|cache|id\b/i.test(line)) {
+      found.push({ id:"high-entropy-secret", label:"High-Entropy Secret", severity:"critical", line:i+1,
+        detail:`${shannonEntropy(bare[1]).toFixed(1)} bits/char hex value assigned to a key — likely a hardcoded key or token` });
+      continue;
+    }
     ENTROPY_STRING_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = ENTROPY_STRING_RE.exec(line)) !== null) {

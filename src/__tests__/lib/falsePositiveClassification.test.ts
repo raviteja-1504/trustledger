@@ -21,7 +21,7 @@ describe("legacy widget", () => {
     const content = `
 describe("payment client", () => {
   it("authenticates", () => {
-    const apiKey = "sk_live_${"a".repeat(24)}";
+    const apiKey = "sk_live_${"Zx9Kq2Lm7Pw4Rt8Vb3NcHd5J"}";
     client.authenticate(apiKey);
   });
 });
