@@ -82,6 +82,7 @@ export async function GET(req: NextRequest) {
   // or two clicks racing the check-then-insert), and must still count once.
   const attestedFiles  = new Map<string, Set<string>>();
   const highCritCounts = new Map<string, number>();
+  const lastAttestedAt = new Map<string, string>();
 
   if (scanIds.length > 0) {
     // Compute latest scan per (repo, pr_number) from the already-fetched scans
@@ -94,13 +95,16 @@ export async function GET(req: NextRequest) {
     const latestIds = [...new Set(latestPerPR.values())];
 
     const [attestRes, highCritRes] = await Promise.all([
-      db.from("attestations").select("scan_id, file_path").in("scan_id", latestIds),
+      db.from("attestations").select("scan_id, file_path, created_at").in("scan_id", latestIds),
       db.from("scan_files").select("scan_id").in("scan_id", latestIds).in("risk_score", ["CRITICAL", "HIGH"]),
     ]);
     (attestRes.data ?? []).forEach(a => {
       const set = attestedFiles.get(a.scan_id) ?? new Set<string>();
       set.add(a.file_path);
       attestedFiles.set(a.scan_id, set);
+      // The scan row's date is when it was SCANNED; this is when someone last signed a file off on it.
+      const at = (a as { created_at?: string | null }).created_at;
+      if (at && at > (lastAttestedAt.get(a.scan_id) ?? "")) lastAttestedAt.set(a.scan_id, at);
     });
     (highCritRes.data ?? []).forEach(f => {
       highCritCounts.set(f.scan_id, (highCritCounts.get(f.scan_id) ?? 0) + 1);
@@ -120,7 +124,8 @@ export async function GET(req: NextRequest) {
       high_crit_count:     highCritCounts.get(s.id) ?? 0,
       attested_count:      attestedFiles.get(s.id)?.size ?? 0,
       attested_files:      [...(attestedFiles.get(s.id) ?? [])],
-      created_at:          s.created_at,
+      last_attested_at:    lastAttestedAt.get(s.id) ?? null,
+      created_at:         s.created_at,
       triggered_by:        s.triggered_by ?? "api",
     })),
     // Cursor for the next page (pass as ?before=); null when this page wasn't full.

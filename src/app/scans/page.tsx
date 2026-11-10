@@ -235,6 +235,9 @@ function ScansContent() {
                                 : <span className={`text-xs font-bold px-2 py-1 rounded-lg ${done >= total ? "bg-emerald-50 text-emerald-700" : done ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700"}`}>
                                     {done}/{total} high-risk signed off
                                   </span>}
+                              {!old && s.last_attested_at && (
+                                <p className="mt-1 text-[11px] text-gray-400" title={new Date(s.last_attested_at).toLocaleString()}>last sign-off {ago(s.last_attested_at)}</p>
+                              )}
                             </div>
                             <div className="shrink-0 w-20 text-right">
                               <p className="text-sm font-bold tabular-nums text-gray-800">{Math.round(s.total_ai_percentage * 100)}%</p>

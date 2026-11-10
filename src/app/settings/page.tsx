@@ -2359,7 +2359,7 @@ function GitLabIntegration() {
 
 type Tab = "policies" | "repositories" | "integrations" | "notifications" | "team" | "api" | "sso" | "privacy" | "webhooks" | "branding" | "roles";
 
-const TABS: { key: Tab; label: string }[] = [
+const ALL_TABS: { key: Tab; label: string }[] = [
   { key: "policies",      label: "Policies"      },
   { key: "repositories",  label: "Repositories"  },
   { key: "integrations",  label: "Integrations"  },
@@ -2373,9 +2373,13 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "privacy",       label: "Privacy & Data" },
 ];
 
+// Held back for now (the pages and their routes are untouched): remove a key here to show its tab again.
+const HIDDEN_TABS: ReadonlySet<Tab> = new Set<Tab>(["policies", "repositories", "integrations", "webhooks", "roles", "api", "sso"]);
+const TABS = ALL_TABS.filter(t => !HIDDEN_TABS.has(t.key));
+
 export default function SettingsPage() {
     const tz = useTimezone();
-  const [tab,    setTab]    = useState<Tab>("policies");
+  const [tab,    setTab]    = useState<Tab>(TABS[0].key);
   const [policy, setPolicy] = useState<OrgPolicy>(DEFAULT_POLICY);
   const [saved,  setSaved]  = useState(false);
   const { profile } = useAuth();
@@ -2452,7 +2456,7 @@ export default function SettingsPage() {
               </span>
             </div>
             <p className="text-sm text-gray-400">
-              Policies · Repositories · Integrations · Team · Notifications · API keys
+              Notifications · Team · Branding · Privacy & data
             </p>
           </div>
           <button

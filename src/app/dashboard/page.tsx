@@ -59,9 +59,12 @@ function KeyboardIcon() {
   );
 }
 
+// The dashboard's New scan button, its N shortcut and its panel are held back for now; set true to show them again.
+const SHOW_NEW_SCAN = false;
+
 function ShortcutsToast({ onClose }: { onClose: () => void }) {
   const shortcuts = [
-    { key: "N", desc: "New scan" }, { key: "E", desc: "Export CSV" },
+    ...(SHOW_NEW_SCAN ? [{ key: "N", desc: "New scan" }] : []), { key: "E", desc: "Export CSV" },
     { key: "7", desc: "Last 7 days" }, { key: "3", desc: "Last 30 days" }, { key: "9", desc: "Last 90 days" },
     { key: "?", desc: "This menu" },
   ];
@@ -370,7 +373,7 @@ export default function DashboardPage() {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "?" || e.key === "/") { setShowShortcuts(s => !s); return; }
-      if (e.key === "n" || e.key === "N") { if (permissions.canScan) setScanPanelOpen(true); }
+      if (e.key === "n" || e.key === "N") { if (SHOW_NEW_SCAN && permissions.canScan) setScanPanelOpen(true); }
       if (e.key === "e" || e.key === "E") { if (permissions.canExportData) exportCSV(); }
       if (e.key === "7") { setDays(7); setRangeMode(7); }
       if (e.key === "3") { setDays(30); setRangeMode(30); }
@@ -439,13 +442,13 @@ export default function DashboardPage() {
               className="hidden lg:flex w-9 h-9 items-center justify-center text-gray-400 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 shadow-sm">
               <KeyboardIcon />
             </button>
-            <RoleGate requires="canScan">
+            {SHOW_NEW_SCAN && <RoleGate requires="canScan">
               <button onClick={() => setScanPanelOpen(true)} title="New scan (N)"
                 className="flex items-center gap-1.5 px-4 py-2 text-sm font-bold bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-sm shadow-indigo-200">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 New scan
               </button>
-            </RoleGate>
+            </RoleGate>}
           </div>
         </header>
 
@@ -555,7 +558,7 @@ export default function DashboardPage() {
         )}
       </div>
 
-      <NewScanPanel open={scanPanelOpen} onClose={() => setScanPanelOpen(false)} />
+      {SHOW_NEW_SCAN && <NewScanPanel open={scanPanelOpen} onClose={() => setScanPanelOpen(false)} />}
       {showShortcuts && <ShortcutsToast onClose={() => setShowShortcuts(false)} />}
     </AuthGuard>
   );

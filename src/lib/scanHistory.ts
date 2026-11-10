@@ -16,6 +16,8 @@ export interface ScanRow {
   high_crit_count?: number;
   attested_count: number;
   attested_files?: string[];
+  /** When a file of this scan was last signed off (null: none yet, or not loaded for a superseded scan). */
+  last_attested_at?: string | null;
   created_at: string;
   triggered_by: string;
 }

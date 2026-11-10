@@ -23,7 +23,7 @@ jest.mock("@/lib/useRealData", () => ({
     if (url.startsWith("/api/violation-status")) return { overrides: { "high::new::b.ts": { status: "resolved" } } };
     if (fail) throw new Error("boom");
     const before = new URLSearchParams(url.split("?")[1]).get("before");
-    if (!before) return { scans: [scan("new"), scan("old", { created_at: iso(30), attested_files: [] })], next_before: iso(30) };
+    if (!before) return { scans: [scan("new", { last_attested_at: iso(0.5) }), scan("old", { created_at: iso(30), attested_files: [], last_attested_at: iso(2) })], next_before: iso(30) };
     return { scans: [scan("push", { pr_number: 0, overall_risk: "CRITICAL", created_at: iso(50), high_crit_count: 1, attested_files: [] })], next_before: null };
   }),
 }));
@@ -45,7 +45,11 @@ describe("Scan history page", () => {
     const rows = within(list).getAllByRole("link");
     expect(rows).toHaveLength(3);
     expect(rows[0]).toHaveTextContent("2/2 high-risk signed off");     // a.ts attested + b.ts resolved
+    // the row's date is when it was scanned; the sign-off time is shown separately
+    expect(rows[0]).toHaveTextContent("last sign-off 30m ago");
     expect(rows[1]).toHaveTextContent("Superseded by a newer push");
+    expect(rows[1]).not.toHaveTextContent("last sign-off");
+    expect(rows[2]).not.toHaveTextContent("last sign-off");
     expect(rows[2]).toHaveTextContent("Direct push");
     expect(rows[2]).toHaveTextContent("0/1 high-risk signed off");
     expect(rows[0]).toHaveAttribute("href", "/pr/new");
