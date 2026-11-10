@@ -146,6 +146,27 @@ export default function TrustScorePage() {
 
   const col = scoreColor(score.total);
 
+  // Nothing scanned yet: there is nothing to score. (An empty organisation used to read 790 "Good" for having no
+  // findings; the score now starts with the first scan.)
+  if (score.scored === false) {
+    return (
+      <AuthGuard>
+        <div className="max-w-3xl mx-auto space-y-5 pb-10">
+          <h1 className="text-xl font-black text-gray-900">Trust Score</h1>
+          <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center shadow-sm">
+            <p className="text-5xl font-black text-gray-300 tabular-nums">—</p>
+            <p className="text-lg font-bold text-gray-900 mt-3">No score yet</p>
+            <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto leading-relaxed">Your Trust Score measures how well your organisation governs its code, so it appears after your first scan. Nothing has been scanned yet, so there is nothing to score.</p>
+            <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+              <a href="/onboarding" className="px-4 py-2 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700">Connect a repository</a>
+              <a href="/demo" className="px-4 py-2 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50">Try the live demo</a>
+            </div>
+          </div>
+        </div>
+      </AuthGuard>
+    );
+  }
+
   return (
     <AuthGuard>
       <div className="max-w-5xl mx-auto space-y-5 pb-10">

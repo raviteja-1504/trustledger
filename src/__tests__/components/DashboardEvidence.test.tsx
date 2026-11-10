@@ -23,7 +23,7 @@ const dim = (key: Dimension["key"], label: string, value: number, grade: Dimensi
   ({ key, label, weight: 0.2, value, points: Math.round(value * 200), max_points: 200, gain: 0, grade, formula: "", facts: [], actions });
 
 const score: GovernanceScore = {
-  total: 640, band: "Fair", computed_at: "2026-10-19T00:00:00Z", repos: [],
+  total: 640, band: "Fair", scored: true, computed_at: "2026-10-19T00:00:00Z", repos: [],
   dimensions: [
     dim("exposure", "Open risk", 0.5, "F", [{ label: "Fix 3 CRITICAL findings in api", href: "/violations?repo=api", gain: 90 }]),
     dim("review", "Human review of risky code", 0.7, "C", [{ label: "Review 4 high-risk files", href: "/violations", gain: 60 }, { label: "Fix 3 CRITICAL findings in api", href: "/x", gain: 10 }]),

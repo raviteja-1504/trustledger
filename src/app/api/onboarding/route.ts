@@ -1,5 +1,5 @@
 /**
- * GET  /api/onboarding  → { complete: boolean, org_name: string }
+ * GET  /api/onboarding  → { complete: boolean, org_name: string, members: number, has_scans: boolean }
  * POST /api/onboarding  → actions:
  *   { action: "complete" }                          → marks org onboarding_complete = true
  *   { action: "save_github_login", github_login }   → updates caller's org_members.github_login
@@ -21,9 +21,18 @@ export async function GET(req: NextRequest) {
     .eq("id", auth.org_id)
     .single();
 
+  // Whether this organisation is already running: AuthGuard sends only a brand-new one (its creator, alone, nothing
+  // scanned) to the setup wizard, and leaves an admin who joined an existing organisation alone.
+  const [members, scans] = await Promise.all([
+    db.from("org_members").select("id", { count: "exact", head: true }).eq("org_id", auth.org_id),
+    db.from("scans").select("id", { count: "exact", head: true }).eq("org_id", auth.org_id),
+  ]);
+
   return NextResponse.json({
     complete: org?.onboarding_complete ?? false,
     org_name: org?.name ?? "",
+    members: members.count ?? 0,
+    has_scans: (scans.count ?? 0) > 0,
   });
 }
 

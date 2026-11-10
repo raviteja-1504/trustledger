@@ -20,6 +20,9 @@ export default function CreateOrgPage() {
   const [slug,      setSlug]      = useState("");
   const [githubOrg, setGithubOrg] = useState("");
   const [creating,  setCreating]  = useState(false);
+  // the address this app is served from, so the slug preview matches the real URL (not a hardcoded domain)
+  const [host,      setHost]      = useState("");
+  useEffect(() => { setHost(window.location.host); }, []);
   const [error,     setError]     = useState<string | null>(null);
 
   // Auto-generate slug from name
@@ -149,7 +152,7 @@ export default function CreateOrgPage() {
               URL slug <span className="text-rose-500">*</span>
             </label>
             <div className="flex items-center gap-2 border border-gray-200 rounded-xl px-4 py-3 focus-within:ring-2 focus-within:ring-indigo-400">
-              <span className="text-sm text-gray-400 shrink-0">trustledger.dev/</span>
+              <span className="text-sm text-gray-400 shrink-0">{host ? `${host}/` : ""}</span>
               <input
                 type="text"
                 value={slug}

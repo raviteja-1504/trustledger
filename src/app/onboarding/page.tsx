@@ -451,6 +451,13 @@ export default function OnboardingPage() {
   });
 
   const step = STEPS[stepIdx].key;
+  const router = useRouter();
+
+  // Leave the wizard without finishing: the saved step is kept, and the dashboard's setup guide offers to resume it
+  function skip() {
+    authedFetch("/api/onboarding", { method: "POST", body: JSON.stringify({ action: "complete" }) }).catch(() => {});
+    router.push("/dashboard");
+  }
 
   function next() {
     const next = Math.min(stepIdx + 1, STEPS.length - 1);
@@ -518,6 +525,12 @@ export default function OnboardingPage() {
           <button onClick={() => { const prev = stepIdx - 1; setStepIdx(prev); localStorage.setItem(PROGRESS_KEY, String(prev)); }}
             className="mt-4 w-full text-center text-xs text-gray-400 hover:text-gray-600 transition-colors">
             ← Back
+          </button>
+        )}
+
+        {stepIdx < STEPS.length - 1 && (
+          <button onClick={skip} className="mt-2 w-full text-center text-xs text-gray-400 hover:text-gray-600 underline underline-offset-2 transition-colors">
+            Skip for now — you can finish setup later from the dashboard
           </button>
         )}
 

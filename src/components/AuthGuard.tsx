@@ -8,6 +8,7 @@ import { fullPageReplace } from "@/lib/authFlow";
 
 import { BrandLogo } from "./BrandLogo";
 import { contactEmail } from "@/lib/contacts";
+import { onboardingAction, ONBOARDING_PROMPTED_KEY, type OnboardingStatus } from "@/lib/onboardingGate";
 
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
@@ -25,27 +26,29 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
   const checked   = useRef(false);
 
   // Check onboarding status once after the user + profile loads.
-  // Only redirect to /onboarding if the org itself is incomplete — skip
-  // entirely if the org already has repos/scans (i.e. a team member joining
-  // an existing org should never see the onboarding flow).
+  // Only a brand-new organisation's creator is sent to /onboarding (lib/onboardingGate.ts); an admin joining an
+  // organisation that already has members or scans is marked complete and never sees the flow.
   useEffect(() => {
     if (SKIP_AUTH || loading || !user || !profile || checked.current) return;
     if (pathname === "/onboarding") return;
     if (profile.role !== "admin") return;
     checked.current = true;
-    authedFetch<{ complete: boolean; org_name: string }>("/api/onboarding")
+    authedFetch<OnboardingStatus>("/api/onboarding")
       .then(data => {
-        // Already marked complete — nothing to do
-        if (data.complete) return;
-        // If org has a name it's an existing org — auto-complete and skip
-        // onboarding so admins joining via invite don't hit the setup flow
-        if (data.org_name) {
+        let prompted = false;
+        try { prompted = sessionStorage.getItem(ONBOARDING_PROMPTED_KEY) === "1"; } catch { /* storage unavailable */ }
+        const action = onboardingAction(data, prompted);
+        if (action === "none") return;
+        if (action === "complete") {
+          // an admin who joined an organisation that is already running: nothing to set up
           authedFetch("/api/onboarding", {
             method: "POST",
             body: JSON.stringify({ action: "complete" }),
           }).catch(() => {});
           return;
         }
+        // a brand-new organisation: offer setup once per session; after that it is resumed from the dashboard
+        try { sessionStorage.setItem(ONBOARDING_PROMPTED_KEY, "1"); } catch { /* storage unavailable */ }
         fullPageReplace("/onboarding");
       })
       .catch(() => {}); // if check fails, allow access

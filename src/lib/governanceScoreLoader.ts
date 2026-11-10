@@ -54,6 +54,8 @@ export async function computeOrgScore(db: Db, orgId: string, now = new Date()): 
 
 /** Upsert today's snapshot (UTC day). Best-effort: false when the history table isn't there yet. */
 export async function saveSnapshot(db: Db, orgId: string, score: GovernanceScore): Promise<boolean> {
+  // an org that has scanned nothing has no score; a zero in its history would read as a collapse once it does
+  if (!score.scored) return false;
   const { error } = await db.from("trust_score_history").upsert({
     org_id: orgId,
     day: score.computed_at.slice(0, 10),

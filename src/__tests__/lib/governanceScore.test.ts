@@ -37,6 +37,20 @@ describe("a well-governed org", () => {
   });
 });
 
+describe("an organisation that has scanned nothing has no score", () => {
+  it("is unscored (0, not 790 'Good' for having no findings), with a repository connected or not", () => {
+    for (const repos of [[], ["acme/app"]]) {
+      const s = computeGovernanceScore(base({ repos, scans: [], shadow: { policy_configured: false, compliance: null, open_violations: 0 } }));
+      expect(s.scored).toBe(false);
+      expect(s.total).toBe(0);
+    }
+  });
+  it("is scored from the first scan on", () => {
+    expect(computeGovernanceScore(base()).scored).toBe(true);
+    expect(computeGovernanceScore(base({ scans: [{ id: "a1", repo: "acme/app", pr_number: 1, created_at: daysAgo(1) }] })).scored).toBe(true);
+  });
+});
+
 describe("AI use is not penalised; ungoverned AI is", () => {
   it("lots of reviewed AI-written risky code costs nothing", () => {
     const s = computeGovernanceScore(base({

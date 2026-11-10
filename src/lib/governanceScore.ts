@@ -58,6 +58,9 @@ export interface GovernanceScore {
   dimensions: Dimension[];
   repos: RepoScore[];
   computed_at: string;
+  /** False when the org has no scans in the window: nothing was measured, so `total` (0) and `band` mean nothing and
+   *  must not be shown. An org that has scanned nothing used to score 790-850 "Good" / "Excellent" for having no findings. */
+  scored: boolean;
 }
 
 export const WEIGHTS = { exposure: 0.25, review: 0.20, sla: 0.15, shadow_ai: 0.15, coverage: 0.15, secrets: 0.10 } as const;
@@ -244,5 +247,6 @@ export function computeGovernanceScore(input: ScoreInput): GovernanceScore {
     return { repo, score, open_critical: pr?.crit ?? 0, open_high: pr?.high ?? 0, review_coverage: r && r.want ? rv : null, open_secrets: secretsByRepo.get(repo)?.n ?? 0, last_scan: lastScan.get(repo) ?? null };
   }).sort((a, b) => a.score - b.score);
 
-  return { total, band: band(total), dimensions: dims, repos, computed_at: input.now };
+  const scored = input.scans.length > 0;
+  return { total: scored ? total : 0, band: scored ? band(total) : "Critical", scored, dimensions: dims, repos, computed_at: input.now };
 }

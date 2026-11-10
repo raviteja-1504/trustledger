@@ -86,8 +86,10 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
   demoTotal?: number | null;
   loading?: boolean;
 }) {
-  const total = score?.total ?? demoTotal ?? null;
-  const band = score?.band ?? (total != null ? bandFor(total) : null);
+  // an org that has scanned nothing has no score (it used to read 790 "Good" for having no findings)
+  const unscored = !!score && score.scored === false;
+  const total = unscored ? null : (score?.total ?? demoTotal ?? null);
+  const band = unscored ? null : (score?.band ?? (total != null ? bandFor(total) : null));
   const color = band ? BAND_COLOR[band] : "#818cf8";
   const delta = scoreDelta(history);
   const actions = score ? topActions(score.dimensions) : [];
@@ -106,6 +108,7 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
           <div className="min-w-0 space-y-2">
             <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70">Trust Score</p>
             {band && <p className="text-2xl font-black leading-none" style={{ color }}>{band}</p>}
+            {unscored && <p className="text-lg font-black leading-tight text-white/90">No score yet</p>}
             {delta != null && (
               <p className={`text-xs font-semibold ${delta > 0 ? "text-emerald-300" : delta < 0 ? "text-rose-300" : "text-white/50"}`}>
                 {delta > 0 ? "▲" : delta < 0 ? "▼" : "■"} {Math.abs(delta)} pts in 7 days
@@ -119,7 +122,11 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
         {/* Next actions */}
         <div className="rounded-2xl bg-white/[0.06] ring-1 ring-white/10 p-5 self-start">
           <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-2.5">Do next</p>
-          {actions.length ? (
+          {unscored ? (
+            <p className="text-sm text-white/80 leading-relaxed">
+              Your Trust Score appears after your first scan. <Link href="/onboarding" className="font-semibold text-indigo-200 underline underline-offset-2 hover:text-white">Connect a repository</Link> and open a pull request: nothing has been measured yet, so there is nothing to score.
+            </p>
+          ) : actions.length ? (
             <ol className="space-y-2.5">
               {actions.map((a, i) => (
                 <li key={a.label}>

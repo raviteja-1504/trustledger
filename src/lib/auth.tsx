@@ -4,6 +4,7 @@ import {
   createContext, useContext, useEffect, useRef, useState, type ReactNode,
 } from "react";
 import type { User, Session } from "@supabase/supabase-js";
+import { claimBrowserState, clearUserBrowserState } from "./browserState";
 import { supabase } from "./supabase";
 import { authedFetch } from "./useRealData";
 import { authLinkErrorCode, fullPageReplace, hasAuthCallbackParams } from "./authFlow";
@@ -223,6 +224,8 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
+      // before anything reads the browser's saved state: it must belong to this user
+      claimBrowserState(session?.user?.id);
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
@@ -237,6 +240,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
       // (window.location.replace causes a full reload which resets React state).
       if (event === "PASSWORD_RECOVERY") {
         if (typeof window !== "undefined") {
+          claimBrowserState(session?.user?.id);
           localStorage.setItem("tl_password_recovery", "1");
           setPasswordRecovery(true);
           // Keep the reset session in state too: the login page tells "reset in progress" apart from
@@ -250,6 +254,8 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
         }
         return;
       }
+      if (event === "SIGNED_OUT") clearUserBrowserState();
+      else claimBrowserState(session?.user?.id);
       syncSessionCookie(session);
       setSession(session);
       setUser(session?.user ?? null);
@@ -328,6 +334,8 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
     syncSessionCookie(null);
     setProfile(null);
     if (typeof window !== "undefined") localStorage.removeItem("tl_password_recovery");
+    // the next person to use this browser must not see this account's notifications, snapshot or setup state
+    clearUserBrowserState();
     setPasswordRecovery(false);
   }
 
