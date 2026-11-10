@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { cacheGet, cacheSet } from "@/lib/cache";
+import { cacheGet, cacheSet, cacheBackend } from "@/lib/cache";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -37,12 +37,15 @@ async function checkCache(): Promise<ServiceCheck> {
   const t0 = Date.now();
   try {
     const probe = `__health_${Date.now()}`;
-    await cacheSet(probe, "1", 5);
-    const val = await cacheGet<string>(probe);
+    // An object, not a bare string: Redis hands a stored string back unwrapped, so "1" came back as the number 1 and a
+    // working Redis was reported as degraded.
+    await cacheSet(probe, { ok: 1 }, 5);
+    const val = await cacheGet<{ ok?: number }>(probe);
     return {
-      status:     val === "1" ? "ok" : "degraded",
+      status:     val?.ok === 1 ? "ok" : "degraded",
       latency_ms: Date.now() - t0,
-      detail:     process.env.UPSTASH_REDIS_REST_URL ? "redis" : "in-memory",
+      // What is actually serving the cache, not just whether the variable is set: a missing token falls back to memory.
+      detail:     (await cacheBackend()),
     };
   } catch (e) {
     logger.error("healthz_cache_check_failed", { detail: e instanceof Error ? e.message : String(e) });

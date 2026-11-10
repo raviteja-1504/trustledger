@@ -121,22 +121,25 @@ async function computeFindings(orgId: string): Promise<DependencyResult> {
   const scanIds = latestScans.map(s => s.id);
   type FileRow = { scan_id: string; file_path: string; content: string | null; content_hash: string | null; ai_percentage: number };
   const files: FileRow[] = [];
-  // The listing carries no source: the same text is stored on several rows (a file kept through N scans) and the
-  // routes' own cache recomputes after every deploy, so reading `content` here moved it again each time. Source is
-  // read once per distinct hash below (fetchContentByHash, cached); only a row with no hash keeps its own copy.
   for (let i = 0; i < scanIds.length; i += IN_CHUNK) {
     const chunk = scanIds.slice(i, i + IN_CHUNK);
-    const page = (cols: string, hashless: boolean) => allRows<Omit<FileRow, "content"> & { content?: string | null }>((from, to) => {
-      const q = db.from("scan_files").select(cols).eq("org_id", orgId).in("scan_id", chunk);
-      return (hashless ? q.is("content_hash", null) : q.not("content_hash", "is", null))
-        .order("scan_id", { ascending: true }).order("file_path", { ascending: true }).range(from, to) as unknown as PromiseLike<{ data: (Omit<FileRow, "content"> & { content?: string | null })[] | null; error: unknown }>;
-    });
-    for (const r of await page("scan_id, file_path, content_hash, ai_percentage", false)) files.push({ ...r, content: null });
-    for (const r of await page("scan_id, file_path, content, content_hash, ai_percentage", true)) files.push({ ...r, content: r.content ?? null });
+    files.push(...await allRows<FileRow>((from, to) => db
+      .from("scan_files")
+      .select("scan_id, file_path, content, content_hash, ai_percentage")
+      .eq("org_id", orgId)
+      .in("scan_id", chunk)
+      .order("scan_id", { ascending: true })
+      .order("file_path", { ascending: true })
+      .range(from, to) as unknown as PromiseLike<{ data: FileRow[] | null; error: unknown }>));
   }
 
-  const allHashes = [...new Set((files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string))];
-  const contentByHash = allHashes.length > 0 ? await fetchContentByHash(db, orgId, allHashes) : new Map<string, string>();
+  // Files carried forward unchanged across an incremental scan don't store
+  // their own copy of `content` (see api/scan-worker/route.ts) -- backfill
+  // from any other row for this org sharing the same content_hash.
+  const missingHashes = [...new Set(
+    (files ?? []).filter(f => !f.content && f.content_hash).map(f => f.content_hash as string),
+  )];
+  const contentByHash = missingHashes.length > 0 ? await fetchContentByHash(db, orgId, missingHashes) : new Map<string, string>();
 
   const filesByScan = new Map<string, { file_path: string; content: string | null; ai_percentage: number }[]>();
   for (const f of files ?? []) {

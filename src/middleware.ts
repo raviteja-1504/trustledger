@@ -33,7 +33,8 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
 // infrastructure (GitHub/GitLab/Bitbucket shared egress IPs), already have
 // per-installation/per-repo limits in their handlers, and a global per-IP
 // cap here would risk throttling legitimate delivery traffic from a shared IP.
-const GLOBAL_API_LIMIT = { limit: 300, windowMs: 60_000, prefix: "global" };
+// Counted in memory: this runs on every API request, and each Redis check is several commands.
+const GLOBAL_API_LIMIT = { limit: 300, windowMs: 60_000, prefix: "global", memoryOnly: true };
 
 function isRateLimitExempt(pathname: string): boolean {
   return pathname.startsWith("/api/webhook")

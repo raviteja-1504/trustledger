@@ -28,26 +28,35 @@ function memLimit(key: string, limit: number, windowMs: number): { success: bool
 
 // ── Upstash Redis (production) ────────────────────────────────────────────────
 
-let _ratelimiter: unknown | null = null;
+type Limiter = { limit: (key: string) => Promise<{ success: boolean; remaining: number; reset: number }> };
+/** One limiter per distinct (limit, window, prefix): each caller asks for its own numbers (10 per 15 minutes for a
+ *  login code, 10 per hour for key creation, 300 per minute globally). A single shared limiter built for 100 per
+ *  minute used to answer for all of them, which only went unnoticed while Redis was not connected and the in-memory
+ *  fallback, which does honour them, was serving every check. */
+const _limiters = new Map<string, Limiter>();
 
-async function getUpstashLimiter() {
-  if (_ratelimiter) return _ratelimiter as { limit: (key: string) => Promise<{ success: boolean; remaining: number; reset: number }> };
-
+async function getUpstashLimiter(config: RateLimitConfig): Promise<Limiter | null> {
   const redisUrl   = process.env.UPSTASH_REDIS_REST_URL;
   const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!redisUrl || !redisToken) return null;
+
+  const id = `${config.limit}:${config.windowMs}:${config.prefix ?? "tl"}`;
+  const known = _limiters.get(id);
+  if (known) return known;
 
   try {
     const { Ratelimit } = await import("@upstash/ratelimit");
     const { Redis }     = await import("@upstash/redis");
     const redis         = new Redis({ url: redisUrl, token: redisToken });
-    _ratelimiter        = new Ratelimit({
+    const limiter = new Ratelimit({
       redis,
-      limiter:   Ratelimit.slidingWindow(100, "1 m"),
-      analytics: true,
+      limiter:   Ratelimit.slidingWindow(config.limit, `${config.windowMs} ms`),
+      // Analytics writes extra commands on every check; nothing reads them.
+      analytics: false,
       prefix:    "tl:rl",
-    });
-    return _ratelimiter as typeof _ratelimiter & { limit: (key: string) => Promise<{ success: boolean; remaining: number; reset: number }> };
+    }) as unknown as Limiter;
+    _limiters.set(id, limiter);
+    return limiter;
   } catch {
     return null;
   }
@@ -62,6 +71,9 @@ export interface RateLimitConfig {
   windowMs: number;
   /** Key prefix for namespacing */
   prefix?:  string;
+  /** Count in this instance's memory only. For a blanket limit on every request, where a Redis round trip (several
+   *  commands) per request is not worth it: the per-route limits that guard sensitive actions still use Redis. */
+  memoryOnly?: boolean;
 }
 
 export interface RateLimitResult {
@@ -82,7 +94,7 @@ export async function checkRateLimit(
   const key = `${config.prefix ?? "tl"}:${identifier}`;
 
   // Try Upstash first
-  const upstash = await getUpstashLimiter();
+  const upstash = config.memoryOnly ? null : await getUpstashLimiter(config);
   if (upstash) {
     try {
       const result = await upstash.limit(key);

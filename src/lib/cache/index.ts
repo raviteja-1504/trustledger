@@ -32,7 +32,7 @@ function memDel(pattern: string): void {
 
 // ── Upstash Redis ──────────────────────────────────────────────────────────
 
-let _redis: { get: (k: string) => Promise<string | null>; mget?: (...k: string[]) => Promise<unknown[]>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown> } | null = null;
+let _redis: { get: (k: string) => Promise<string | null>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown> } | null = null;
 let _redisInit = false;
 
 async function getRedis() {
@@ -48,6 +48,11 @@ async function getRedis() {
     _redis = new Redis({ url, token });
     return _redis;
   } catch { return null; }
+}
+
+/** Which store is serving the cache right now: "redis", or "memory" when Redis is not configured or failed to load. */
+export async function cacheBackend(): Promise<"redis" | "memory"> {
+  return (await getRedis()) ? "redis" : "memory";
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -98,29 +103,6 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
     // The client hands a stored JSON string back already unwrapped ("hello", not "\"hello\""), which does not parse.
     try { return JSON.parse(text) as T; } catch { return raw as T; }
   } catch { return null; }
-}
-
-/** Several keys at once (one round trip per 100 keys on Redis); a missing or unreadable key is null. */
-export async function cacheGetMany<T>(keys: string[]): Promise<Array<T | null>> {
-  if (keys.length === 0) return [];
-  try {
-    const redis = await getRedis();
-    if (!redis) return keys.map(k => { const raw = memGet(k); return raw ? JSON.parse(raw) as T : null; });
-    const out: Array<T | null> = [];
-    for (let i = 0; i < keys.length; i += 100) {
-      const chunk = keys.slice(i, i + 100);
-      const raws = redis.mget ? await redis.mget(...chunk) : await Promise.all(chunk.map(k => redis.get(k)));
-      for (let j = 0; j < chunk.length; j++) {
-        try {
-          const raw = raws[j];
-          if (!raw) { out.push(null); continue; }
-          const text = await decodeFromRedis(redis, chunk[j], raw);
-          out.push(text == null ? null : JSON.parse(text) as T);
-        } catch { out.push(null); }
-      }
-    }
-    return out;
-  } catch { return keys.map(() => null); }
 }
 
 export async function cacheSet<T>(key: string, value: T, ttlSeconds = 300): Promise<void> {
