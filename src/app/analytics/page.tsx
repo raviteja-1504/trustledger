@@ -22,7 +22,7 @@ import { backlogSentence, clearSentence, reviewSentence, shortDuration } from "@
 const WeeklyChart = dynamic(() => import("@/components/analytics/WeeklyChart"), { ssr: false, loading: () => <div className="h-[260px] rounded-xl bg-gray-50 animate-pulse" /> });
 
 const PERIODS = [7, 30, 90] as const;
-const POLL_MS = 60_000;
+const POLL_MS = 300_000;   // the server caches the result until the data changes; this is only the idle safety net
 
 const pct = (n: number | null | undefined) => n == null ? "—" : `${Math.round(n * 100)}%`;
 

@@ -11,6 +11,8 @@ let db: ReturnType<typeof fakeSupabase>;
 let auth: { org_id: string; role: string; user_id?: string } = { org_id: "org-1", role: "admin", user_id: "u1" };
 jest.mock("@/lib/supabase", () => ({ createServiceClient: () => db.client }));
 jest.mock("@/app/api/_middleware", () => ({ verifyApiKey: async () => auth }));
+// These tests re-seed the database between cases; the result cache is covered in analyticsCaching.test.ts.
+jest.mock("@/lib/cache", () => ({ ...jest.requireActual("@/lib/cache"), cached: async (_k: string, _t: number, fn: () => Promise<unknown>) => fn() }));
 
 import { GET } from "@/app/api/analytics/route";
 
