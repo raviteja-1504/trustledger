@@ -75,7 +75,7 @@ const CHANGELOG = [
   },
 ];
 
-/** Detection-engine releases, by the commit that shipped them; measured effect on /benchmarks#history. */
+/** Detection-engine releases, by the commit that shipped them; scores are on /benchmarks. */
 const ENGINE_RELEASES = [
   {
     commit: "e2f90ea",
@@ -151,7 +151,7 @@ export default function ChangelogPage() {
         {/* Engine releases */}
         <div className="mb-14">
           <h2 className="text-lg font-black text-gray-900 mb-1">Detection engine releases</h2>
-          <p className="text-sm text-gray-500 mb-6">By commit. The measured effect of each release is on the <a href="/benchmarks#history" className="text-indigo-600 hover:underline">benchmark report</a>.</p>
+          <p className="text-sm text-gray-500 mb-6">By commit. The current scores are on the <a href="/benchmarks" className="text-indigo-600 hover:underline">benchmark report</a>.</p>
           <div className="space-y-8">
             {ENGINE_RELEASES.map(r => (
               <div key={r.commit} id={`engine-${r.commit}`}>

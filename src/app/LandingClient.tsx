@@ -236,18 +236,73 @@ function Eyebrow({ children, color = CYAN }: { children: React.ReactNode; color?
   );
 }
 
-// ── Hero visual: a real screenshot of the live demo ─────────────────────────
+// ── Hero visual: what a pull request gets ───────────────────────────────────
 
-/** Captured from /demo scanning its SQL-injection sample with the real engine (scripts/record-demo-videos.mjs). */
-function RealScan() {
+/** An illustrative pull-request check (labelled as an example on the card): the signals, the files and the gate. */
+const PR_SIGNALS = [
+  { label: "AI-generated", value: "62%", tone: VIOLET },
+  { label: "Vulnerabilities traced", value: "2", tone: ROSE },
+  { label: "Secrets", value: "1", tone: AMBER },
+  { label: "Reachable deps", value: "3", tone: CYAN },
+];
+const PR_FILES = [
+  { file: "src/billing/export.ts", risk: "CRITICAL", tone: ROSE, note: "SQL injection traced across 2 files", state: "needs sign-off" },
+  { file: "src/auth/session.ts", risk: "HIGH", tone: AMBER, note: "78% AI-generated · Cursor", state: "needs sign-off" },
+  { file: "src/ui/Table.tsx", risk: "LOW", tone: EMERALD, note: "No findings", state: "clear" },
+];
+
+function PrCheckVisual() {
   return (
     <div className="relative">
       <div className="absolute -inset-6 rounded-[2rem] blur-3xl pointer-events-none" style={{ background: `linear-gradient(135deg, ${CYAN}26, ${VIOLET}1f, ${ROSE}1a)` }} />
-      <Link href="/demo" className="relative block rounded-2xl overflow-hidden border" style={{ borderColor: "rgba(255,255,255,0.13)", boxShadow: "0 40px 100px rgba(0,0,0,0.6)" }}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/screens/demo-scan.png" alt="TrustLedger's live demo: a SQL injection traced from the query string in routes/users.ts to the database call in db/users.ts, with the merge blocked by the default policy" width={1280} height={800} className="w-full h-auto block" />
-      </Link>
-      <p className="relative text-center text-[10.5px] font-mono text-white/45 mt-3">Real output · the live demo scanning a sample app · <Link href="/demo" className="underline underline-offset-2 text-white/70">try it yourself</Link></p>
+      <div className="relative rounded-2xl overflow-hidden border text-left" style={{ borderColor: "rgba(255,255,255,0.13)", background: "linear-gradient(180deg, rgba(10,15,28,0.94), rgba(6,10,18,0.97))", boxShadow: "0 40px 100px rgba(0,0,0,0.6)" }}>
+        <div className="px-4 py-2.5 flex items-center gap-2 border-b" style={{ borderColor: "rgba(255,255,255,0.09)", background: "rgba(255,255,255,0.035)" }}>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${ROSE}80` }} />
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${AMBER}80` }} />
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: `${EMERALD}80` }} />
+          </div>
+          <span className="text-[11px] font-mono font-semibold ml-2 text-white/70">TrustLedger check · pull request</span>
+          <span className="ml-auto text-[10px] font-mono text-white/40">illustrative example</span>
+        </div>
+        <div className="p-5 sm:p-6 space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-white/90 font-bold truncate">Add CSV export to billing</p>
+              <p className="text-[11.5px] font-mono text-white/45 mt-0.5 truncate">#482 · feature/billing-export · 14 files</p>
+            </div>
+            <div className="shrink-0 text-right">
+              <p className="text-[10px] font-bold uppercase tracking-wider font-mono" style={{ color: ROSE }}>Risk · High</p>
+              <p className="text-3xl font-black font-mono leading-none mt-0.5" style={{ color: ROSE }}>74</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {PR_SIGNALS.map(sg => (
+              <div key={sg.label} className="rounded-xl border px-3 py-2.5" style={{ borderColor: `${sg.tone}33`, background: `${sg.tone}0f` }}>
+                <p className="text-xl font-black font-mono leading-none" style={{ color: sg.tone }}>{sg.value}</p>
+                <p className="text-[10.5px] text-white/55 mt-1.5 leading-tight">{sg.label}</p>
+              </div>
+            ))}
+          </div>
+          <ul className="space-y-2">
+            {PR_FILES.map(f => (
+              <li key={f.file} className="flex items-center gap-3 rounded-xl border px-3 py-2.5" style={{ borderColor: "rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.025)" }}>
+                <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded font-mono shrink-0" style={{ color: f.tone, background: `${f.tone}1a` }}>{f.risk}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12.5px] font-mono text-white/85 truncate">{f.file}</p>
+                  <p className="text-[11px] text-white/45 truncate">{f.note}</p>
+                </div>
+                <span className="text-[10.5px] font-mono shrink-0" style={{ color: f.state === "clear" ? EMERALD : "rgba(255,255,255,0.5)" }}>{f.state}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="rounded-xl border px-4 py-3 flex items-center gap-3" style={{ borderColor: `${ROSE}44`, background: `${ROSE}12` }}>
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ROSE, boxShadow: `0 0 10px ${ROSE}` }} />
+            <p className="text-[12.5px] text-white/80"><strong className="text-white">Merge held</strong> until the 2 flagged files are signed off by a named reviewer.</p>
+          </div>
+        </div>
+      </div>
+      <p className="relative text-center text-[10.5px] font-mono text-white/45 mt-3">An example of one pull request check · <Link href="/demo" className="underline underline-offset-2 text-white/70">scan a sample app yourself</Link></p>
     </div>
   );
 }
@@ -348,7 +403,7 @@ function HeroSection({ evidence }: { evidence: LandingEvidence }) {
           </ul>
         </Reveal>
         <Reveal delay={150} className="min-w-0 w-full max-w-xl mx-auto lg:max-w-none">
-          <RealScan />
+          <PrCheckVisual />
         </Reveal>
       </div>
 
