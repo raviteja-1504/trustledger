@@ -47,4 +47,33 @@ describe("fetchContentByHash", () => {
     const out = await fetchContentByHash(db, "o1", ["h3", "missing"]);
     expect(out.size).toBe(0);
   });
+
+  it("serves a hash seen in the last hour from the cache, without asking the database again", async () => {
+    const cacheRows: Row[] = [
+      { org_id: "oc", content_hash: "c1", content: "first source" },
+      { org_id: "oc", content_hash: "c2", content: "second source" },
+    ];
+    const first = fakeDb(cacheRows);
+    expect(Object.fromEntries(await fetchContentByHash(first.db, "oc", ["c1", "c2"]))).toEqual({ c1: "first source", c2: "second source" });
+    expect(first.queries).toHaveLength(2);
+
+    const second = fakeDb(cacheRows);
+    expect(Object.fromEntries(await fetchContentByHash(second.db, "oc", ["c1", "c2", "c3"]))).toEqual({ c1: "first source", c2: "second source" });
+    // only the hash never seen is looked up
+    expect(second.queries.map(q => q.hash)).toEqual(["c3"]);
+  });
+
+  it("a file whose text is itself valid JSON comes back as text, not an object", async () => {
+    const json = '{"name":"app","dependencies":{"left-pad":"1.3.0"}}';
+    const { db } = fakeDb([{ org_id: "oj", content_hash: "j1", content: json }]);
+    await fetchContentByHash(db, "oj", ["j1"]);
+    const again = await fetchContentByHash(fakeDb([]).db, "oj", ["j1"]);
+    expect(again.get("j1")).toBe(json);
+  });
+
+  it("one organisation never reads another's cached source", async () => {
+    await fetchContentByHash(fakeDb([{ org_id: "oa", content_hash: "x1", content: "org A secret" }]).db, "oa", ["x1"]);
+    const other = await fetchContentByHash(fakeDb([]).db, "ob", ["x1"]);
+    expect(other.size).toBe(0);
+  });
 });

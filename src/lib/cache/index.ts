@@ -4,6 +4,8 @@
  * Used to cache expensive dashboard queries and scan results.
  */
 
+import { gzipSync, gunzipSync, constants as zlibConstants } from "zlib";
+
 const MEM_CACHE = new Map<string, { value: string; expires: number }>();
 
 // ── In-memory fallback ─────────────────────────────────────────────────────
@@ -30,7 +32,7 @@ function memDel(pattern: string): void {
 
 // ── Upstash Redis ──────────────────────────────────────────────────────────
 
-let _redis: { get: (k: string) => Promise<string | null>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown> } | null = null;
+let _redis: { get: (k: string) => Promise<string | null>; mget?: (...k: string[]) => Promise<unknown[]>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown> } | null = null;
 let _redisInit = false;
 
 async function getRedis() {
@@ -50,21 +52,86 @@ async function getRedis() {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
+// ── Large values ───────────────────────────────────────────────────────────
+// Upstash's REST API rejects a request body over about 1 MB. A scan's files (their source included) are several MB,
+// so before this the write failed silently (the catch below) and a big scan was never cached: every view read the
+// whole scan from the database again, which was most of the project's database egress. Values over LARGE_VALUE are
+// gzipped; one that is still over CHUNK is split across several keys. Small values are stored exactly as before.
+
+const LARGE_VALUE = 64_000;
+const CHUNK       = 700_000;
+
+/** What to store for `key`: the main value, and any extra chunks (stored under `${key}~${i}`). */
+function encodeForRedis(serialised: string): { main: string; chunks: string[] } {
+  if (serialised.length <= LARGE_VALUE) return { main: serialised, chunks: [] };
+  const packed = "gz:" + gzipSync(serialised, { level: zlibConstants.Z_BEST_SPEED }).toString("base64");
+  if (packed.length <= CHUNK) return { main: packed, chunks: [] };
+  const chunks: string[] = [];
+  for (let i = 0; i < packed.length; i += CHUNK) chunks.push(packed.slice(i, i + CHUNK));
+  return { main: `gzc:${chunks.length}`, chunks };
+}
+
+/** The serialised JSON behind a stored value, or null when a chunk is missing (expired or not yet written). */
+async function decodeFromRedis(redis: NonNullable<typeof _redis>, key: string, raw: unknown): Promise<string | null> {
+  if (typeof raw === "string" && raw.startsWith("gzc:")) {
+    const n = Number(raw.slice(4));
+    if (!Number.isInteger(n) || n < 1 || n > 64) return null;
+    const parts = await Promise.all(Array.from({ length: n }, (_, i) => redis.get(`${key}~${i}`)));
+    if (parts.some(p => typeof p !== "string")) return null;
+    return gunzipSync(Buffer.from((parts as string[]).join("").slice(3), "base64")).toString("utf8");
+  }
+  if (typeof raw === "string" && raw.startsWith("gz:")) return gunzipSync(Buffer.from(raw.slice(3), "base64")).toString("utf8");
+  return typeof raw === "string" ? raw : JSON.stringify(raw);
+}
+
 export async function cacheGet<T>(key: string): Promise<T | null> {
   try {
     const redis = await getRedis();
-    const raw   = redis ? await redis.get(key) : memGet(key);
+    if (!redis) {
+      const raw = memGet(key);
+      return raw ? JSON.parse(raw) as T : null;
+    }
+    const raw = await redis.get(key);
     if (!raw) return null;
-    return JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw)) as T;
+    const text = await decodeFromRedis(redis, key, raw);
+    if (text == null) return null;
+    // The client hands a stored JSON string back already unwrapped ("hello", not "\"hello\""), which does not parse.
+    try { return JSON.parse(text) as T; } catch { return raw as T; }
   } catch { return null; }
+}
+
+/** Several keys at once (one round trip per 100 keys on Redis); a missing or unreadable key is null. */
+export async function cacheGetMany<T>(keys: string[]): Promise<Array<T | null>> {
+  if (keys.length === 0) return [];
+  try {
+    const redis = await getRedis();
+    if (!redis) return keys.map(k => { const raw = memGet(k); return raw ? JSON.parse(raw) as T : null; });
+    const out: Array<T | null> = [];
+    for (let i = 0; i < keys.length; i += 100) {
+      const chunk = keys.slice(i, i + 100);
+      const raws = redis.mget ? await redis.mget(...chunk) : await Promise.all(chunk.map(k => redis.get(k)));
+      for (let j = 0; j < chunk.length; j++) {
+        try {
+          const raw = raws[j];
+          if (!raw) { out.push(null); continue; }
+          const text = await decodeFromRedis(redis, chunk[j], raw);
+          out.push(text == null ? null : JSON.parse(text) as T);
+        } catch { out.push(null); }
+      }
+    }
+    return out;
+  } catch { return keys.map(() => null); }
 }
 
 export async function cacheSet<T>(key: string, value: T, ttlSeconds = 300): Promise<void> {
   try {
     const serialised = JSON.stringify(value);
     const redis      = await getRedis();
-    if (redis) await redis.set(key, serialised, { ex: ttlSeconds });
-    else        memSet(key, serialised, ttlSeconds);
+    if (!redis) { memSet(key, serialised, ttlSeconds); return; }
+    const { main, chunks } = encodeForRedis(serialised);
+    // Chunks first: the main value is what readers look for, so it must never be visible before its chunks.
+    if (chunks.length > 0) await Promise.all(chunks.map((c, i) => redis.set(`${key}~${i}`, c, { ex: ttlSeconds })));
+    await redis.set(key, main, { ex: ttlSeconds });
   } catch { /* non-fatal */ }
 }
 

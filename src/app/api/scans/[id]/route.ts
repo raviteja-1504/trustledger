@@ -95,7 +95,7 @@ type StoredIndicatorLite = { id: string; label: string; line?: number; fingerpri
 
 /** Fingerprints from this PR's earlier scans (see findingLifecycle.ts PrHistory): the scan just before this
  * one, and the few before that. Only `file_path` and `indicators` are read -- never file content. */
-async function loadPrHistory(
+async function loadPrHistoryFromDb(
   db: ReturnType<typeof createServiceClient>, orgId: string, repo: string, prNumber: number, createdAt: string, scanId: string,
 ): Promise<PrHistory & { previousFiles: Array<{ file_path: string; indicators: StoredIndicatorLite[] }> | null; previousScan: { scan_id: string; commit_sha: string; created_at: string } | null }> {
   const empty = { previous: null, earlier: new Set<string>(), previousFiles: null, previousScan: null };
@@ -130,10 +130,32 @@ async function loadPrHistory(
     const earlier = new Set<string>();
     for (const s of prior.slice(1)) for (const fp of fps(byScan.get(s.id) ?? [])) earlier.add(fp);
     // Which scan the lifecycle compares with, so the page can say so ("compared with abc1234 from 3 Nov").
-    return { previous: fps(previousFiles), earlier, previousFiles, previousScan: { scan_id: prior[0].id, commit_sha: prior[0].commit_sha, created_at: prior[0].created_at } };
+    // Only the fields the lifecycle reads are kept (not each finding's trace), which is what keeps this small enough to cache.
+    const slimFiles = previousFiles.map(f => ({ file_path: f.file_path, indicators: f.indicators.filter(i => i.fingerprint).map(i => ({ id: i.id, label: i.label, line: i.line, fingerprint: i.fingerprint })) }));
+    return { previous: fps(previousFiles), earlier, previousFiles: slimFiles, previousScan: { scan_id: prior[0].id, commit_sha: prior[0].commit_sha, created_at: prior[0].created_at } };
   } catch {
     return empty;
   }
+}
+
+type PrHistoryResult = Awaited<ReturnType<typeof loadPrHistoryFromDb>>;
+type PrHistoryStored = { previous: string[]; earlier: string[]; previousFiles: PrHistoryResult["previousFiles"]; previousScan: PrHistoryResult["previousScan"] };
+
+/** This scan's PR history. It is fixed once the scan exists (the earlier scans and their findings never change), but
+ * reading it meant loading every file's findings from up to six earlier scans on EVERY view -- megabytes each time for
+ * a large PR -- so the result is cached per scan. */
+async function loadPrHistory(
+  db: ReturnType<typeof createServiceClient>, orgId: string, repo: string, prNumber: number, createdAt: string, scanId: string,
+): Promise<PrHistoryResult> {
+  const key = `prhist:v1:${scanId}`;
+  const hit = await cacheGet<PrHistoryStored>(key);
+  if (hit) return { previous: new Set(hit.previous), earlier: new Set(hit.earlier), previousFiles: hit.previousFiles, previousScan: hit.previousScan };
+  const result = await loadPrHistoryFromDb(db, orgId, repo, prNumber, createdAt, scanId);
+  // An empty history is cheap to rebuild and also what a failed read returns, so only a real one is kept.
+  if (result.previousScan) {
+    await cacheSet<PrHistoryStored>(key, { previous: [...(result.previous ?? [])], earlier: [...result.earlier], previousFiles: result.previousFiles, previousScan: result.previousScan }, TTL.SCAN);
+  }
+  return result;
 }
 
 /** The scan's health and telemetry columns -- a separate, best-effort read so a database without them yet
@@ -199,7 +221,23 @@ export async function GET(
 
   // Live re-analysis below needs the data-flow engines loaded, or a cold instance would show fewer findings
   // than the scan stored (see engineWarmup.ts).
-  if (files.some((f, i) => f.content && i < MAX_LIVE_REANALYSIS_FILES && !crossFileContext.has(f.file_path))) await ensureTaintEngines();
+  // The re-analysed findings of this scan, computed once per (scan, scanner version) and reused: without this every
+  // view loaded the data-flow engines (WASM parsers, on each cold instance) and walked the top files again, which was
+  // this route's sustained Active CPU. A scanner change is a new CURRENT_ENGINE_VERSION, so it is a new key at once.
+  const liveTargets = files.filter((f, i) => f.content && i < MAX_LIVE_REANALYSIS_FILES && !crossFileContext.has(f.file_path));
+  const liveKey = `scanlive:v1:${CURRENT_ENGINE_VERSION}:${params.id}`;
+  let live: Record<string, ReanalysisResult> | null = liveTargets.length > 0 ? await cacheGet<Record<string, ReanalysisResult>>(liveKey) : {};
+  if (!live) {
+    const fresh: Record<string, ReanalysisResult> = {};
+    await ensureTaintEngines();
+    await Promise.all(liveTargets.map(async f => {
+      try { fresh[f.file_path] = await reanalyze(f.file_path, f.content as string, f.content_hash); }
+      catch { /* re-analysis threw: this file falls back to its stored snapshot below */ }
+    }));
+    live = fresh;
+    // Only a complete result is kept: one with a failed file would pin that file to its snapshot for the whole TTL.
+    if (Object.keys(fresh).length === liveTargets.length) await cacheSet(liveKey, fresh, TTL.SCAN);
+  }
 
   const outFiles = await Promise.all((files ?? []).map(async (f, i) => {
       // Prefer freshly re-analysed indicators (current scanner logic) over
@@ -219,17 +257,9 @@ export async function GET(
       const storedIndicators = Array.isArray(f.indicators) && f.indicators.length > 0
         ? f.indicators as FileIndicator[]
         : null;
-      let freshIndicators: FileIndicator[] | null = null;
-      let freshAttribution: AttributionResult | null = null;
-      // A file tied to other files by a data flow keeps its stored result: re-analysed alone it would lose the
-      // cross-file finding (or re-report a duplicate the scan folded into another file's finding).
-      if (content && i < MAX_LIVE_REANALYSIS_FILES && !crossFileContext.has(f.file_path)) {
-        try {
-          const result = await reanalyze(f.file_path, content, f.content_hash);
-          freshIndicators = result.indicators;
-          freshAttribution = result.attribution;
-        } catch { /* re-analysis threw — freshIndicators/freshAttribution stay null, falls back below */ }
-      }
+      const liveResult = live![f.file_path];
+      let freshIndicators: FileIndicator[] | null = liveResult?.indicators ?? null;
+      const freshAttribution: AttributionResult | null = liveResult?.attribution ?? null;
       // Facts only the scan itself knew (the PR diff behind `introduced`) survive live re-analysis: carried over
       // from the stored finding with the same fingerprint, or failing that the same rule on the same line.
       if (freshIndicators && storedIndicators) {

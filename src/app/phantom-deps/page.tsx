@@ -17,12 +17,9 @@ import { useAuth } from "@/lib/auth";
 import { formatDateTime, formatDateOnly, relativeTime, useTimezone } from "@/lib/timezone";
 import PageSkeleton from "@/components/PageSkeleton";
 import InfoTooltip from "@/components/InfoTooltip";
-import { api } from "@/lib/api";
-import { collectManifestPackages } from "@/lib/manifestPackages";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { fetchServerOverrides, invalidateServerStatuses, type ServerOverride } from "@/lib/violationStatuses";
 import { phantomFromServer, phantomPatch, phantomUploads, type PhantomOverride, type RemediationStatus } from "@/lib/phantomOverrides";
-import type { DashboardData, ScanResult } from "@/types";
 
 
 // ── Private package scopes/prefixes for this org ─────────────────────────────
@@ -158,10 +155,10 @@ export default function PhantomDepsPage() {
     (async () => {
       try {
         if (cached.length === 0) {
-          const dash: DashboardData = await api.dashboard(profile.org_slug || "org", 90);
-          const scanPromises = dash.repos.filter(r => r.latest_scan_id).map(r => api.getScan(r.latest_scan_id).catch(() => null));
-          const scans = (await Promise.all(scanPromises)).filter((s): s is ScanResult => s !== null);
-          const pkgs = collectManifestPackages(scans);
+          // The dependencies endpoint already computes these (cached on the server). This used to download the whole
+          // latest scan of every repository, source of every file included, just to read the manifests.
+          const res = await authedFetch<{ manifestPackages?: Array<{ name: string; version: string; source: string; aiPr: boolean }> }>("/api/dependencies");
+          const pkgs = res.manifestPackages ?? [];
           localStorage.setItem("tl_phantom_packages", JSON.stringify(pkgs));
           setResults(pkgs.map(p => ({ ...p, status:"pending" as CheckStatus })));
         }

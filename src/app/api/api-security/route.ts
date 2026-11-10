@@ -68,15 +68,23 @@ async function computeReport(orgId: string): Promise<ApiSecurityReport> {
   if (latest.length === 0) return buildApiSecurityReport([]);
 
   type FileRow = { scan_id: string; file_path: string; content: string | null; content_hash: string | null };
+  type RawRow = { scan_id: string; file_path: string; content?: string | null; content_hash: string | null };
   const ids = latest.map(s => s.id);
   const files: FileRow[] = [];
+  // The listing carries no source: the same text is stored on several rows (a file kept through N scans), so reading
+  // `content` here moved it again every time the report was recomputed. Source is read once per distinct hash below
+  // (fetchContentByHash, cached); only a row with no hash keeps its own copy.
   for (let i = 0; i < ids.length; i += IN_CHUNK) {
     const chunk = ids.slice(i, i + IN_CHUNK);
-    files.push(...await all<FileRow>((f, t) => db.from("scan_files").select("scan_id, file_path, content, content_hash")
-      .eq("org_id", orgId).in("scan_id", chunk).order("scan_id", { ascending: true }).order("file_path", { ascending: true }).range(f, t) as unknown as Page<FileRow>));
+    const page = (cols: string, hashless: boolean) => all<RawRow>((f, t) => {
+      const q = db.from("scan_files").select(cols).eq("org_id", orgId).in("scan_id", chunk);
+      return (hashless ? q.is("content_hash", null) : q.not("content_hash", "is", null))
+        .order("scan_id", { ascending: true }).order("file_path", { ascending: true }).range(f, t) as unknown as Page<RawRow>;
+    });
+    for (const r of await page("scan_id, file_path, content_hash", false)) files.push({ ...r, content: null });
+    for (const r of await page("scan_id, file_path, content, content_hash", true)) files.push({ ...r, content: r.content ?? null });
   }
 
-  // Files carried forward unchanged by an incremental scan share another row's content (see api/dependencies).
   const missing = [...new Set(files.filter(f => !f.content && f.content_hash).map(f => f.content_hash as string))];
   const byHash = missing.length > 0 ? await fetchContentByHash(db, orgId, missing) : new Map<string, string>();
 

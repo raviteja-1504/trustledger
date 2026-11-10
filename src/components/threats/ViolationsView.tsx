@@ -9,7 +9,7 @@ import { useToastHelpers } from "@/lib/toast";
 import CodeViewer from "@/components/CodeViewer";
 import { api } from "@/lib/api";
 import { readSeed } from "@/lib/offlineData";
-import type { DashboardData, FileResult } from "@/types";
+import type { DashboardData, FileResult, ScanResult } from "@/types";
 import { patchDataWithAttestations } from "@/lib/trustScore";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
 import { readLocalStatuses } from "@/lib/localStatuses";
@@ -125,6 +125,19 @@ function detectIndicators(content: string): string[] {
   return Array.from(new Set(found));
 }
 
+/** One download per scan for a minute: expanding several violations of the same scan used to fetch the whole scan
+ *  (every file's source) once per violation. */
+const SCAN_MEMO_MS = 60_000;
+const scanMemo = new Map<string, { at: number; scan: Promise<ScanResult> }>();
+function getScanOnce(scanId: string): Promise<ScanResult> {
+  const hit = scanMemo.get(scanId);
+  if (hit && Date.now() - hit.at < SCAN_MEMO_MS) return hit.scan;
+  const scan = api.getScan(scanId);
+  scanMemo.set(scanId, { at: Date.now(), scan });
+  scan.catch(() => { if (scanMemo.get(scanId)?.scan === scan) scanMemo.delete(scanId); });
+  return scan;
+}
+
 function InlineCodeReview({ scanId, filePath, onResolve, onReopen, canAttest }: InlineCodeReviewProps) {
   const [copied, setCopied] = useState(false);
   const [file, setFile] = useState<FileResult | null>(null);
@@ -133,7 +146,7 @@ function InlineCodeReview({ scanId, filePath, onResolve, onReopen, canAttest }: 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    api.getScan(scanId)
+    getScanOnce(scanId)
       .then(result => {
         if (!active) return;
         setFile(result.files.find(f => f.file_path === filePath) ?? null);
