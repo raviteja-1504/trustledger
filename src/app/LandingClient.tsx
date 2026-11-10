@@ -2,12 +2,11 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { FINDING_CATALOG } from "@/lib/findingCatalog";
 import { BrandMark } from "@/components/BrandLogo";
 import { contactEmail } from "@/lib/contacts";
 import { LANGUAGE_ENGINES, type LanguageEngine } from "@/lib/publicCoverage";
 import { SiteNav, SiteFooter } from "@/components/marketing/Site";
-import { DemoVideos } from "@/components/marketing/DemoVideos";
+import { IAC_FORMATS } from "@/lib/siteContent";
 
 /** Figures computed server-side (app/page.tsx) from the published benchmark report and the engine registries. */
 export interface LandingEvidence {
@@ -110,28 +109,7 @@ const CodeRiskIcon = (s = 20) => iconEl(<><polyline points="16 18 22 12 16 6" />
 const ComplianceIcon = (s = 20) => iconEl(<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" /></>, s);
 const AuditIcon = (s = 20) => iconEl(<><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></>, s);
 const AiIntelIcon = (s = 20) => iconEl(<><path d="M12 2a4 4 0 0 0-4 4v1a3 3 0 0 0-2 2.83V13a3 3 0 0 0 2 2.83V17a4 4 0 0 0 8 0v-1.17A3 3 0 0 0 18 13v-3.17A3 3 0 0 0 16 7V6a4 4 0 0 0-4-4z" /><line x1="12" y1="17" x2="12" y2="22" /><line x1="9" y1="22" x2="15" y2="22" /></>, s);
-const ScanIcon = (s = 22) => iconEl(<><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /><line x1="3" y1="12" x2="21" y2="12" /></>, s);
-const GitBranchIcon = (s = 22) => iconEl(<><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></>, s);
-const RouteIcon = (s = 22) => iconEl(<><circle cx="6" cy="19" r="2" /><circle cx="18" cy="5" r="2" /><path d="M18 7v3a5 5 0 0 1-5 5H8" /></>, s);
-const LockIcon = (s = 22) => iconEl(<><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>, s);
-const PackageIcon = (s = 22) => iconEl(<><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" /><polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" /></>, s);
-const FingerprintIcon = (s = 22) => iconEl(<><path d="M12 10a2 2 0 0 0-2 2c0 1.5-.5 2.5-1 3" /><path d="M6 8a6 6 0 0 1 12 0c0 1 0 3-1 5" /><path d="M15 19c1-1 2-3 2-5" /><path d="M4 14c0 2 1 4 2 5" /><path d="M9 14c0 1 0 2-1 3.5" /><path d="M12 4a8 8 0 0 1 8 8c0 2 0 3-.5 4.5" /></>, s);
-const IncidentIcon = (s = 20) => iconEl(<><circle cx="12" cy="12" r="10" /><path d="M8 12l2.5 2.5L16 8.5" /></>, s);
-const RadarIcon = (s = 20) => iconEl(<><path d="M12 2a10 10 0 1 0 10 10" /><path d="M12 6v6l4 2" /><circle cx="18" cy="6" r="3" fill="currentColor" stroke="none" /></>, s);
-const GaugeIcon = (s = 20) => iconEl(<><path d="M12 2a10 10 0 1 0 10 10" strokeOpacity="0" /><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></>, s);
-const KeyIcon = (s = 20) => iconEl(<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />, s);
-const UsersIcon = (s = 20) => iconEl(<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>, s);
-const ClipboardIcon = (s = 20) => iconEl(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /></>, s);
-const FileScanIcon = (s = 20) => iconEl(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><circle cx="11.5" cy="14.5" r="2.5" /><line x1="13.3" y1="16.3" x2="16" y2="19" /></>, s);
-const AlertIcon = (s = 20) => iconEl(<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>, s);
-const WebhookIcon = (s = 20) => iconEl(<><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c0-.9.3-1.72.83-2.38" /><path d="M18.4 15.03a4 4 0 0 0-3.2-6.03h-.46" /><path d="M8.5 8.5a4 4 0 0 1 6.72-1.5" /><circle cx="18" cy="16.98" r="1.5" /><circle cx="2" cy="17" r="1" /></>, s);
-const DownloadIcon = (s = 20) => iconEl(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>, s);
-const CheckCircleIcon = (s = 20) => iconEl(<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></>, s);
 const CloudIcon = (s = 20) => iconEl(<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />, s);
-const ApiIcon = (s = 20) => iconEl(<><path d="M4 7h16M4 12h10M4 17h7" /><circle cx="18" cy="16" r="3" /><path d="M20.2 18.2 22 20" /></>, s);
-const ContainerIcon = (s = 20) => iconEl(<><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M6 7V4h12v3M7 11v6M12 11v6M17 11v6" /></>, s);
-const HelmIcon = (s = 20) => iconEl(<><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>, s);
-const MergeIcon = (s = 20) => iconEl(<><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="12" r="2.5" /><path d="M6 8.5v7M8.3 7.2 15.7 11M8.3 16.8l7.4-3.8" /></>, s);
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -219,44 +197,10 @@ const PILLARS: Pillar[] = [
   },
 ];
 
-interface VulnClass { name: string; cwe: string; group: string }
-const VULN_CLASSES: VulnClass[] = [
-  { name: "SQL Injection", cwe: "CWE-89", group: "Injection" },
-  { name: "Command Injection", cwe: "CWE-78", group: "Injection" },
-  { name: "NoSQL Injection", cwe: "CWE-943", group: "Injection" },
-  { name: "LDAP Injection", cwe: "CWE-90", group: "Injection" },
-  { name: "XPath Injection", cwe: "CWE-643", group: "Injection" },
-  { name: "SSTI", cwe: "CWE-1336", group: "Injection" },
-  { name: "Reflected XSS", cwe: "CWE-79", group: "Injection" },
-  { name: "SSRF", cwe: "CWE-918", group: "Request forgery" },
-  { name: "Open Redirect", cwe: "CWE-601", group: "Request forgery" },
-  { name: "Path Traversal", cwe: "CWE-22", group: "Filesystem" },
-  { name: "File Inclusion", cwe: "CWE-98", group: "Filesystem" },
-  { name: "Insecure Deserialization", cwe: "CWE-502", group: "Data handling" },
-  { name: "Mass Assignment", cwe: "CWE-915", group: "Data handling" },
-  { name: "Prototype Pollution", cwe: "CWE-1321", group: "Data handling" },
-  { name: "HTTP Header Injection", cwe: "CWE-113", group: "Data handling" },
-  { name: "BOLA / IDOR", cwe: "CWE-639", group: "Authorization" },
-  { name: "JWT Signature Bypass", cwe: "CWE-347", group: "Authorization" },
-  { name: "Timing Attack", cwe: "CWE-208", group: "Authorization" },
-  { name: "ReDoS", cwe: "CWE-1333", group: "Availability" },
-  { name: "Arbitrary Code Execution", cwe: "CWE-95", group: "Availability" },
-  { name: "Buffer Overflow", cwe: "CWE-120", group: "Memory safety" },
-  { name: "Format String", cwe: "CWE-134", group: "Memory safety" },
-  { name: "Use After Free", cwe: "CWE-416", group: "Memory safety" },
-  { name: "Double Free", cwe: "CWE-415", group: "Memory safety" },
-  { name: "NULL Dereference", cwe: "CWE-690", group: "Memory safety" },
-  { name: "Mismatched Deallocation", cwe: "CWE-762", group: "Memory safety" },
-  { name: "Uncontrolled Allocation Size", cwe: "CWE-789", group: "Memory safety" },
-  { name: "Insecure Temporary File", cwe: "CWE-377", group: "Filesystem" },
-];
-const GROUP_COLORS: Record<string, string> = { "Injection": CYAN, "Request forgery": ORANGE, "Filesystem": AMBER, "Data handling": VIOLET, "Authorization": ROSE, "Availability": EMERALD, "Memory safety": SKY };
 
 /** The ten engines, as described in lib/publicCoverage.ts (shared with the docs). */
 type LangEngine = LanguageEngine;
 const LANGUAGES: LangEngine[] = LANGUAGE_ENGINES;
-/** Frameworks the engines model by name (sources, sinks, injection) -- each one appears in an engine. */
-const FRAMEWORKS = ["Express", "NestJS", "Next.js", "Flask", "FastAPI", "Spring", "JAX-RS", "Ktor", "ASP.NET", "Laravel", "Rails", "Sinatra", "Axum", "Actix", "Rocket"];
 
 const FAQS = [
   { q: "Do I need to change my CI pipeline?", a: "No. TrustLedger installs as a GitHub App — GitLab and Bitbucket are supported too — and scans every pull request automatically, with no config files and no CI changes. If you'd rather drive it yourself, scans can also be submitted through the REST API." },
@@ -267,16 +211,6 @@ const FAQS = [
   { q: "Does it help with compliance?", a: "Attestations, exceptions and findings land in an immutable audit trail and export as signed evidence packages mapped to SOC 2, the EU AI Act and PCI-DSS, along with SBOMs in SPDX and CycloneDX." },
 ];
 
-const PIPELINE_STAGES = [
-  { label: "GitHub webhook", detail: "PR opened or updated", color: "#94a3b8", icon: WebhookIcon },
-  { label: "File fetch", detail: "Every changed file, async via queue", color: "#7dd3fc", icon: DownloadIcon },
-  { label: "AI signal scan", detail: "AST · git provenance · behavioral", color: SKY, icon: AiIntelIcon },
-  { label: "Taint engine", detail: "Per-language AST + cross-file data-flow", color: ROSE, icon: CodeRiskIcon },
-  { label: "Secrets, deps, IaC", detail: "Credentials · CVEs by reachability · cloud, container & API config", color: AMBER, icon: KeyIcon },
-  { label: "Policy engine", detail: "Risk score against merge gates", color: VIOLET, icon: ComplianceIcon },
-  { label: "Attestation gate", detail: "Blocks until reviewer sign-off", color: EMERALD, icon: UsersIcon },
-  { label: "Check run", detail: "Posted to the PR", color: EMERALD, icon: CheckCircleIcon },
-];
 
 const WHY_ROWS = [
   { vs: "Point tools (one per risk type)", them: "A SAST tool for vulnerabilities, a separate secrets scanner, an SCA tool, an IaC scanner, an API inventory, and no visibility into what's actually AI-generated — a dashboard and an audit trail for each, nothing reconciled.", us: "One platform: vulnerabilities, secrets, dependencies, cloud and container config, API auth coverage, and AI provenance scored together on every PR, with one policy engine and one audit trail behind all of it.", accent: CYAN },
@@ -285,22 +219,6 @@ const WHY_ROWS = [
   { vs: "Manual review + spreadsheets", them: "Reviewers eyeball the diff, chase compliance evidence by hand, and track AI tool usage — if at all — in a doc that's out of date by Friday.", us: "Every PR gets a risk score, a named attestation, and an audit-ready trail. Shadow AI usage, policy exceptions, and SLA breaches live in one system that's always current.", accent: AMBER },
 ];
 
-const AI_FACTS = [
-  { label: "AST structural analysis", desc: "Parses source into an abstract syntax tree and scores structural patterns that correlate with LLM output — long function bodies, uniform naming, missing edge-case handling." },
-  { label: "Git provenance scoring", desc: "Scores commit velocity, message entropy, signing rate, and LOC/commit ratio against norms. A 1,300 LOC/commit average from a single author is a signal, not a fact — weighted accordingly." },
-  { label: "Developer baseline deviation", desc: "Tracks each contributor's historical AI%, file count, and commit cadence. A sudden 3× spike in AI content on a PR flags as anomalous even if the absolute score is moderate." },
-  { label: "AI tool attribution", desc: "Detects .cursor/, .claude/, .copilot-instructions, Windsurf config, and inline marker comments to attribute code to specific assistants — not just \"AI wrote this\" but \"Cursor wrote this\"." },
-  { label: "Shadow AI detection", desc: "Flags AI-tool usage signatures that aren't on your org's approved-tools policy list, confidence-scored, with the affected developers surfaced directly." },
-  { label: "Cross-file semantic graph", desc: "Builds a call graph across the entire PR to catch AI-generated glue code that wires together real modules in unsafe ways — invisible to a per-file tool." },
-];
-const ENGINE_FACTS = [
-  { label: "Sink-class bitmask model", desc: "A taint value is a bitmask of 15 sink classes, not a boolean. A sanitizer clears only the classes it neutralizes — and the trace shows it: htmlspecialchars() before a SQL query is called out, not trusted." },
-  { label: "Path-sensitive propagation", desc: "Branches are walked on cloned state and merged with a may-taint join; a value sanitized on one branch and raw on another is tracked correctly on both." },
-  { label: "Narrow validation guards", desc: "Only unambiguous proofs clear a variable — literal-collection membership, strict numeric checks, equality with a literal, a fully anchored digits-only or character-class pattern. A loose regex match is deliberately NOT trusted." },
-  { label: "BOLA ownership dominance", desc: "An authorization check only suppresses a finding when it actually dominates the sink in control-flow order — not merely present somewhere in the function." },
-  { label: "Fixed-point call resolution", desc: "Call summaries iterate until nothing changes — same-file and across files — so an eight-deep helper chain or a five-file flow converges, with a safety cap instead of an arbitrary round limit." },
-  { label: "Cross-file flows, one finding", desc: "Imports, injected services, Go packages and PHP includes are followed in all ten languages, including Rails autoloading, Kotlin↔Java calls, Rust modules and C/C++ functions across translation units. A flow is reported once, at the caller, listing every file on its path — the callee's duplicate is folded in." },
-];
 
 const STEPS = [
   { n: 1, title: "Connect your repos", desc: "Install the GitHub App in under 2 minutes (GitLab and Bitbucket also supported). Every pull request is scanned automatically — no config files, no CI changes." },
@@ -446,52 +364,7 @@ function HeroSection({ evidence }: { evidence: LandingEvidence }) {
   );
 }
 
-// ── Stack band: "does it support us?", answered right under the hero ────────
 
-function Monogram({ l, size = 34 }: { l: LangEngine; size?: number }) {
-  return (
-    <span className="rounded-lg flex items-center justify-center shrink-0 font-black font-mono" style={{ width: size, height: size, fontSize: l.mono.length > 2 ? size * 0.3 : size * 0.36, color: l.color, background: `${l.color}1f`, border: `1px solid ${l.color}55`, boxShadow: `inset 0 1px 0 rgba(255,255,255,0.06)` }}>{l.mono}</span>
-  );
-}
-
-function StackBand() {
-  return (
-    <section className="relative py-14 px-5 border-y overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.07)", background: SURFACE }}>
-      <Reveal className="max-w-6xl mx-auto text-center">
-        <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/45 font-mono">Works with the stack you already ship</p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2.5">
-          {LANGUAGES.map(l => (
-            <a key={l.lang} href="#languages" className="flex items-center gap-2 pl-1.5 pr-3.5 py-1.5 rounded-xl border transition-all hover:-translate-y-0.5"
-              style={{ borderColor: "rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.035)" }}
-              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = `${l.color}66`; }}
-              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.1)"; }}>
-              <Monogram l={l} size={28} />
-              <span className="text-sm font-semibold text-white/85">{l.short}</span>
-            </a>
-          ))}
-        </div>
-      </Reveal>
-      {/* a scrolling row (two copies for a seamless loop); with reduced motion, one static wrapped list */}
-      <div className="tl-marquee-mask relative mt-7 max-w-5xl mx-auto overflow-hidden">
-        <div className="tl-marquee flex w-max gap-8">
-          {[0, 1].flatMap(copy => [...FRAMEWORKS, "GitHub", "GitLab", "Bitbucket"].map(f => (
-            <span key={`${f}-${copy}`} aria-hidden={copy === 1 || undefined} className={`text-[13px] font-semibold text-white/40 whitespace-nowrap font-mono${copy === 1 ? " tl-dup" : ""}`}>{f}</span>
-          )))}
-        </div>
-      </div>
-      <style>{`
-        .tl-marquee-mask { mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
-        .tl-marquee { animation: tlMarquee 38s linear infinite; }
-        @keyframes tlMarquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-        @media (prefers-reduced-motion: reduce) {
-          .tl-marquee-mask { mask-image: none; -webkit-mask-image: none; }
-          .tl-marquee { animation: none; flex-wrap: wrap; justify-content: center; width: auto; row-gap: 0.6rem; }
-          .tl-dup { display: none; }
-        }
-      `}</style>
-    </section>
-  );
-}
 
 // ── Proof: the trace next to "them vs us" ───────────────────────────────────
 
@@ -580,8 +453,8 @@ function PillarsSection() {
       <div className="max-w-5xl mx-auto">
         <Reveal className="text-center mb-12">
           <Eyebrow>The platform</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Seven pillars. One scan.</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every pull request runs through all seven — the same structure as the dashboard itself, not a marketing simplification of it.</p>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Everything on a pull request, in one place</h2>
+          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Six areas, one scan: pick a tab to see what each one covers.</p>
         </Reveal>
 
         {/* Tab bar */}
@@ -626,263 +499,19 @@ function PillarsSection() {
   );
 }
 
-// ── Vulnerability coverage grid ─────────────────────────────────────────────
 
-function VulnCoverageSection({ ruleCount }: { ruleCount: number }) {
-  const groups = Array.from(new Set(VULN_CLASSES.map(v => v.group)));
-  return (
-    <section id="vulnerabilities" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${ROSE}0c, transparent 65%), ${SURFACE}` }}>
-      <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Vulnerability classes with real data-flow evidence</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Every finding below is matched by tracking an actual tainted value from its source to a real sink — or, for C/C++ memory safety, a pointer&apos;s real allocation state along the path — not a keyword or a line pattern. The main classes are shown; the <Link href="/docs/coverage" className="underline underline-offset-4 text-white/80">coverage matrix</Link> lists all {ruleCount} data-flow rules by language.</p>
-        </Reveal>
-        <div className="space-y-8">
-          {groups.map((g, gi) => (
-            <Reveal key={g} delay={gi * 60}>
-              <div className="flex items-center gap-2 mb-3">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ background: GROUP_COLORS[g] }} />
-                <span className="text-[11px] font-bold uppercase tracking-widest text-white/50 font-mono">{g}</span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                {VULN_CLASSES.filter(v => v.group === g).map(v => (
-                  <div key={v.name} className="group relative flex items-center gap-3 pl-4 pr-3 py-3 rounded-xl border overflow-hidden transition-all" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
-                    onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${GROUP_COLORS[g]}55`; el.style.background = "rgba(255,255,255,0.07)"; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 24px ${GROUP_COLORS[g]}22, inset 0 1px 0 rgba(255,255,255,0.06)`; }}
-                    onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.14)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.05)"; }}>
-                    <span className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: GROUP_COLORS[g] }} />
-                    <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ color: GROUP_COLORS[g], background: `${GROUP_COLORS[g]}1c` }}>{AlertIcon(15)}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-white/90 truncate">{v.name}</p>
-                      <p className="text-[10px] font-mono text-white/45 mt-0.5">{v.cwe}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-// ── Language engines ─────────────────────────────────────────────────────────
-
-function LanguageEngineSection() {
-  return (
-    <section id="languages" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0a, transparent 65%), ${INK}` }}>
-      <div className="max-w-5xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow color={ROSE}>Zoom in — Code Risk</Eyebrow>
-          <h2 className="text-4xl sm:text-5xl font-black text-white mt-4 tracking-tight">Ten languages. <span style={{ color: "#67e8f9" }}>Ten real engines.</span></h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Each language gets its own dedicated AST parser and taint-propagation engine, tuned to that ecosystem's own frameworks — not one ruleset stretched across ten syntaxes.</p>
-        </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {LANGUAGES.map((l, i) => (
-            <Reveal key={l.lang} delay={i * 70}>
-              <div className="group relative h-full p-5 rounded-2xl border transition-all overflow-hidden" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
-                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${l.color}66`; el.style.background = "rgba(255,255,255,0.06)"; el.style.transform = "translateY(-3px)"; }}
-                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; }}>
-                <span className="absolute -top-10 -right-10 w-28 h-28 rounded-full blur-2xl pointer-events-none" style={{ background: l.color, opacity: 0.08 }} />
-                <div className="relative flex items-center gap-3 mb-3">
-                  <Monogram l={l} />
-                  <div className="min-w-0 flex-1">
-                    <p className="font-bold text-white text-sm truncate">{l.lang}</p>
-                    <p className="text-[10px] font-mono text-white/40">{l.ext}</p>
-                  </div>
-                </div>
-                <p className="text-sm text-white/75 leading-relaxed">{l.note}</p>
-                <p className="text-xs text-white/45 mt-1.5">{l.extra}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 // ── Cloud & API coverage, generated from the live rule catalog ──────────────
 
-const IAC_FORMATS = ["Terraform", "CloudFormation / SAM", "ARM templates", "Bicep", "Serverless", "Kubernetes & Helm", "Docker & Compose"];
 
-const LEGACY_K8S = ["iac-privileged-container", "iac-container-run-as-root", "iac-host-namespace-access", "iac-dangerous-capability", "iac-unpinned-image-tag"];
-// Older Terraform-only rules; iac-s3-public-acl and iac-public-db are the same checks as cloud-storage-public
-// and cloud-db-public (for more formats), so they aren't listed twice.
-const LEGACY_CLOUD = ["iac-open-ingress", "iac-unencrypted-storage", "iac-iam-wildcard"];
-const CLOUD_API_GROUPS: Array<{ name: string; color: string; icon: (s?: number) => React.ReactNode; blurb: string; match: (id: string) => boolean }> = [
-  { name: "Kubernetes & Helm", color: SKY, icon: HelmIcon, blurb: "Checked per container, with pod-level settings inherited and Helm values respected.", match: id => id.startsWith("iac-k8s-") || LEGACY_K8S.includes(id) },
-  { name: "Cloud posture", color: AMBER, icon: CloudIcon, blurb: "AWS, GCP and Azure resources as your templates define them — before they're created.", match: id => id.startsWith("cloud-") || LEGACY_CLOUD.includes(id) },
-  { name: "Containers", color: ORANGE, icon: ContainerIcon, blurb: "Dockerfiles and Compose files: what the image is built from and how it runs.", match: id => id.startsWith("container-") },
-  { name: "API security", color: EMERALD, icon: ApiIcon, blurb: "Your code's routes and your OpenAPI specs, with the authentication visible for each.", match: id => id.startsWith("api-") },
-];
 
-function CloudApiSection() {
-  const groups = CLOUD_API_GROUPS.map(g => {
-    const titles = Array.from(new Set(Object.entries(FINDING_CATALOG).filter(([id]) => g.match(id)).map(([, e]) => e.title)));
-    return { ...g, titles };
-  });
-  const total = groups.reduce((n, g) => n + g.titles.length, 0);
-  return (
-    <section id="cloud-api" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${AMBER}0c, transparent 65%), ${INK}` }}>
-      <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-10">
-          <Eyebrow color={AMBER}>Zoom in — Cloud & API</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">{total} checks for what you deploy and expose</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Infrastructure, containers and APIs are read from the same pull request as your code — each finding on its exact line, with a fix. No cloud credentials, no agents.</p>
-        </Reveal>
-        <Reveal delay={60} className="flex flex-wrap justify-center gap-2 mb-12">
-          {IAC_FORMATS.map(f => (
-            <span key={f} className="text-[11px] font-mono px-3 py-1.5 rounded-full border text-white/70" style={{ borderColor: `${AMBER}40`, background: `${AMBER}10` }}>{f}</span>
-          ))}
-          <span className="text-[11px] font-mono px-3 py-1.5 rounded-full border text-white/70" style={{ borderColor: `${EMERALD}40`, background: `${EMERALD}10` }}>OpenAPI / Swagger</span>
-        </Reveal>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {groups.map((g, gi) => (
-            <Reveal key={g.name} delay={gi * 70}>
-              <div className="h-full p-6 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}>
-                <div className="flex items-center gap-3 mb-2">
-                  <span className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{ color: g.color, background: `${g.color}1c`, border: `1px solid ${g.color}40` }}>{g.icon(19)}</span>
-                  <div className="min-w-0">
-                    <p className="font-bold text-white">{g.name}</p>
-                    <p className="text-[11px] font-mono" style={{ color: g.color }}>{g.titles.length} checks</p>
-                  </div>
-                </div>
-                <p className="text-[13px] text-white/60 leading-relaxed mb-4">{g.blurb}</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {g.titles.map(t => (
-                    <span key={t} className="text-[11px] px-2 py-1 rounded-md text-white/75" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.09)" }}>{t}</span>
-                  ))}
-                </div>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
-// ── Pipeline: what a PR scan actually does ──────────────────────────────────
-
-function PipelineSection() {
-  return (
-    <section id="how-it-analyzes" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${VIOLET}0c, transparent 65%), ${INK}` }}>
-      <div className="max-w-5xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow>Every PR, every push</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">What one scan actually does</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">All seven pillars run on the same scan, in this order. Measured throughput is on the <Link href="/benchmarks" className="underline underline-offset-4 text-white/80">benchmark report</Link>.</p>
-        </Reveal>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {PIPELINE_STAGES.map((s, i) => (
-            <Reveal key={s.label} delay={i * 60}>
-              <div className="group relative h-full min-h-[168px] p-5 rounded-2xl border transition-all" style={{ borderColor: "rgba(255,255,255,0.11)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)" }}
-                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${s.color}55`; el.style.background = "rgba(255,255,255,0.065)"; el.style.transform = "translateY(-3px)"; }}
-                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.11)"; el.style.background = "rgba(255,255,255,0.04)"; el.style.transform = "translateY(0)"; }}>
-                <div className="flex items-center justify-between mb-4">
-                  <span className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ color: s.color, background: `${s.color}1c`, border: `1px solid ${s.color}38` }}>{s.icon(20)}</span>
-                  <span className="text-[11px] font-mono font-black text-white/30">{String(i + 1).padStart(2, "0")}</span>
-                </div>
-                <p className="text-base font-bold text-white leading-tight">{s.label}</p>
-                <p className="text-[12.5px] text-white/55 mt-1.5 leading-snug">{s.detail}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 // ── FeaturesSection ──────────────────────────────────────────────────────────
 
-const FEATURES = [
-  { icon: RouteIcon, title: "Source → Sink Traces", desc: "Every finding ships with the actual data-flow path, hop by hop, with real file and line numbers — including across a file boundary.", accent: CYAN },
-  { icon: GitBranchIcon, title: "Cross-File Data Flow", desc: "In all ten languages: imports and re-exports, injected services (Spring, ASP.NET, NestJS, Axum state), Go packages, PHP includes, Rails autoloading, Rust modules — with a 72-case cross-file suite across six of the languages run on every change.", accent: CYAN },
-  { icon: MergeIcon, title: "One Issue, One Finding", desc: "When the pattern layer, the taint engine and cross-file analysis see the same bug, it becomes one finding listing every location and every detector that agreed.", accent: CYAN },
-  { icon: LockIcon, title: "Broken Object-Level Authorization", desc: "Structural ownership-dominance analysis: a resource lookup only clears when a real comparison against the principal dominates every path to the sink.", accent: ROSE },
-  { icon: PackageIcon, title: "Reachable Dependencies", desc: "Live CVEs across 8 ecosystems, ranked by whether the vulnerable function is called, the package is reachable from an entry point, used only in tests, or never imported.", accent: AMBER },
-  { icon: CloudIcon, title: "Cloud & IaC Posture", desc: "Terraform (AWS, GCP, Azure), CloudFormation, ARM, Bicep and Serverless: public storage, open admin ports, public databases, wildcard IAM, hard-coded credentials — no cloud credentials needed.", accent: AMBER },
-  { icon: HelmIcon, title: "Kubernetes & Containers", desc: "Per-container hardening in manifests and Helm charts, RBAC wildcards, committed Secrets; end-of-life base images and disabled sandboxing in Dockerfiles and Compose.", accent: AMBER },
-  { icon: ApiIcon, title: "API Endpoint Inventory", desc: "Every route across Express, Next.js, Flask, FastAPI, Spring, ASP.NET, Go and Laravel plus OpenAPI specs — and the endpoint missing the auth its siblings have.", accent: EMERALD },
-  { icon: FingerprintIcon, title: "Stable Finding Fingerprints", desc: "A hash of the flow itself, not the line number — the same finding survives unrelated edits elsewhere in the file across scans.", accent: CYAN },
-  { icon: UsersIcon, title: "Reviewer Attestation", desc: "Named sign-off recorded per file with signature, timestamp, and risk context at review time — an audit trail that answers itself.", accent: VIOLET },
-  { icon: KeyIcon, title: "Context-Aware Sanitizers", desc: "An HTML-escaped value dropped into a <script> block or an unquoted attribute is still flagged — encoding for one context doesn't cover another.", accent: ROSE },
-  { icon: AlertIcon, title: "Exact Sink Arguments", desc: "Only the exploitable argument counts: the SQL text, not bound parameters; the LDAP filter, not the base DN; the program, not its arguments.", accent: ROSE },
-];
 
-function FeaturesSection() {
-  return (
-    <section id="features" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${CYAN}0c, transparent 65%), ${SURFACE}` }}>
-      <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow>Features</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Built like a scanner, not a linter</h2>
-          <p className="text-white/60 mt-3 max-w-xl mx-auto text-lg">Every capability below maps to a real, tested component — not a roadmap slide.</p>
-        </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {FEATURES.map((f, i) => (
-            <Reveal key={f.title} delay={(i % 4) * 60}>
-              <div className="group relative p-5 rounded-2xl transition-all duration-200 h-full" style={{ background: "rgba(255,255,255,0.045)", border: "1px solid rgba(255,255,255,0.14)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)" }}
-                onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = `${f.accent}66`; el.style.background = "rgba(255,255,255,0.07)"; el.style.transform = "translateY(-3px)"; el.style.boxShadow = `0 16px 36px ${f.accent}2e, inset 0 1px 0 rgba(255,255,255,0.08)`; }}
-                onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.borderColor = "rgba(255,255,255,0.14)"; el.style.background = "rgba(255,255,255,0.045)"; el.style.transform = "translateY(0)"; el.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)"; }}>
-                <div className="w-9 h-9 rounded-lg flex items-center justify-center mb-3.5" style={{ color: f.accent, background: `${f.accent}1c`, border: `1px solid ${f.accent}38` }}>{f.icon(18)}</div>
-                <h3 className="text-sm font-bold text-white mb-1.5">{f.title}</h3>
-                <p className="text-[13px] text-white/65 leading-relaxed">{f.desc}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
-// ── ArchSection: two engines, side by side ──────────────────────────────────
 
-function FactGrid({ facts, color }: { facts: { label: string; desc: string }[]; color: string }) {
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {facts.map((s, i) => (
-        <Reveal key={s.label} delay={i * 40}>
-          <div className="p-4 rounded-xl border h-full" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.035)", minHeight: 128 }}>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-[9px] font-black tabular-nums w-4.5 h-4.5 rounded-md flex items-center justify-center shrink-0 font-mono" style={{ background: `${color}2c`, color, border: `1px solid ${color}4d`, width: 18, height: 18 }}>{i + 1}</span>
-              <p className="text-xs font-bold text-white/90">{s.label}</p>
-            </div>
-            <p className="text-xs text-white/60 leading-relaxed">{s.desc}</p>
-          </div>
-        </Reveal>
-      ))}
-    </div>
-  );
-}
-
-function ArchSection() {
-  return (
-    <section className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${SKY}0c, transparent 65%), ${INK}` }}>
-      <div className="max-w-5xl mx-auto">
-        <Reveal className="text-center mb-14">
-          <Eyebrow color={SKY}>Under the hood</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Two real engines, documented in the open</h2>
-          <p className="text-white/60 mt-3 text-lg max-w-2xl mx-auto">The AI-provenance model and the vulnerability taint model are two separate, independently-tested systems — here's the shape of each.</p>
-        </Reveal>
-        <div className="grid lg:grid-cols-2 gap-10">
-          <Reveal>
-            <div className="flex items-center gap-2 mb-4"><span style={{ color: SKY }}>{AiIntelIcon(18)}</span><h3 className="font-bold text-white text-sm">AI provenance engine</h3></div>
-            <FactGrid facts={AI_FACTS} color={SKY} />
-          </Reveal>
-          <Reveal delay={100}>
-            <div className="flex items-center gap-2 mb-4"><span style={{ color: ROSE }}>{CodeRiskIcon(18)}</span><h3 className="font-bold text-white text-sm">Vulnerability taint engine</h3></div>
-            <FactGrid facts={ENGINE_FACTS} color={ROSE} />
-          </Reveal>
-        </div>
-      </div>
-    </section>
-  );
-}
 
 // ── HowItWorksSection ────────────────────────────────────────────────────────
 
@@ -905,14 +534,8 @@ function HowItWorksSection() {
             </Reveal>
           ))}
         </div>
-        <Reveal delay={260} className="mt-10 p-5 rounded-2xl overflow-x-auto border" style={{ borderColor: "rgba(255,255,255,0.11)", background: "#080b12" }}>
-          <p className="text-xs text-white/45 font-mono mb-3"># Or submit scans via the REST API</p>
-          <pre className="text-xs font-mono leading-relaxed whitespace-pre" style={{ color: "#5eead4" }}>{`curl -X POST https://<your-trustledger-host>/api/scans \\
-  -H 'X-TrustLedger-Key: YOUR_API_KEY' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"repo": "myorg/myrepo", "pr_number": 42,
-       "commit_sha": "abc1234",
-       "files": [{"path": "src/auth.py", "content": "..."}]}'`}</pre>
+        <Reveal delay={260} className="mt-8 text-center">
+          <p className="text-[13px] text-white/55">Prefer to drive it yourself? Scans can also be submitted through the <Link href="/docs/api" className="underline underline-offset-4 text-white/75">REST API</Link>.</p>
         </Reveal>
       </div>
     </section>
@@ -949,90 +572,99 @@ function CTASection() {
   );
 }
 
-// ── Watch the demo ───────────────────────────────────────────────────────────
 
-function WatchDemoSection() {
+
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+// ── Inside the dashboard: one line per sidebar page ──────────────────────────
+
+const DASH_GROUPS: { name: string; color: string; pages: { name: string; desc: string }[] }[] = [
+  { name: "Overview", color: CYAN, pages: [
+    { name: "Overview", desc: "Org health score, per-repo breakdown and what needs attention now." },
+    { name: "Analytics", desc: "Scan volume, finding trends and time-to-attest." },
+    { name: "TrustScore™", desc: "One blended score across attestation, policy and risk resolution." },
+  ] },
+  { name: "Threats", color: ORANGE, pages: [
+    { name: "Threats", desc: "Policy breaches, alerts and incidents with SLA deadlines, plus threat intelligence on patterns found in your repos." },
+  ] },
+  { name: "Code Risk", color: ROSE, pages: [
+    { name: "Scan History", desc: "Every scan, with per-file risk and source-to-sink traces." },
+    { name: "Secrets", desc: "Hardcoded keys and tokens, caught as they land." },
+    { name: "Dependencies", desc: "Live CVEs ranked by whether your code actually reaches them." },
+    { name: "API Security", desc: "Every endpoint inventoried, and the route missing the auth its siblings have." },
+  ] },
+  { name: "Compliance", color: EMERALD, pages: [
+    { name: "Compliance", desc: "Evidence mapped to SOC 2, the EU AI Act and PCI-DSS." },
+    { name: "SLA Dashboard", desc: "What is on track, at risk or overdue." },
+    { name: "Risk Register", desc: "CWE-mapped risks with assigned reviewers and deadlines." },
+  ] },
+  { name: "Audit", color: VIOLET, pages: [
+    { name: "Audit Trail", desc: "An immutable record of every attestation, scan and override." },
+    { name: "Reports", desc: "Signed evidence packages and SBOM exports (SPDX, CycloneDX)." },
+    { name: "Trace", desc: "Follow any scan step by step to see why a result looks the way it does." },
+    { name: "Rule Catalog", desc: "Every rule with its CWE, what it flags and how to fix it." },
+  ] },
+  { name: "AI Intel", color: SKY, pages: [
+    { name: "Shadow AI", desc: "AI tools that are not on your approved list, confidence-scored." },
+  ] },
+];
+
+function DashboardSection() {
   return (
-    <section id="watch" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${CYAN}0c, transparent 65%), ${SURFACE}` }}>
+    <section id="dashboard" className="py-20 px-5" style={{ background: SURFACE }}>
       <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-12">
-          <Eyebrow>Watch the demo</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">See a real scan, start to finish</h2>
-          <p className="text-white/60 mt-3 max-w-2xl mx-auto text-lg">Recorded from the <Link href="/demo" className="underline underline-offset-4 text-white/80">live demo</Link> running the real engine — or open it and drive it yourself.</p>
+        <Reveal className="text-center mb-10">
+          <Eyebrow>Inside the dashboard</Eyebrow>
+          <h2 className="text-3xl font-black text-white mt-4 tracking-tight">Every page, in one line</h2>
         </Reveal>
-        <Reveal delay={80}><DemoVideos /></Reveal>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-8">
+          {DASH_GROUPS.map((g, gi) => (
+            <Reveal key={g.name} delay={gi * 40}>
+              <p className="text-[11px] font-bold uppercase tracking-widest font-mono mb-3" style={{ color: g.color }}>{g.name}</p>
+              <ul className="space-y-2.5">
+                {g.pages.map(pg => (
+                  <li key={pg.name} className="pl-3 border-l-2" style={{ borderColor: `${g.color}80` }}>
+                    <p className="text-sm font-bold text-white">{pg.name}</p>
+                    <p className="text-[13px] text-white/65 leading-snug">{pg.desc}</p>
+                  </li>
+                ))}
+              </ul>
+            </Reveal>
+          ))}
+        </div>
       </div>
     </section>
   );
 }
 
-// ── Evidence: the benchmark report in one glance ────────────────────────────
+// ── Explore: the rest of the story lives in the site's tabs ─────────────────
 
-function EvidenceSection({ evidence }: { evidence: LandingEvidence }) {
+const EXPLORE = [
+  { href: "/demo", color: CYAN, title: "Live demo", desc: "Run the real scanner on a sample app, edit the code, and watch the walkthrough videos." },
+  { href: "/benchmarks", color: EMERALD, title: "Benchmarks", desc: "Precision and recall on public labelled benchmarks, published with the failures." },
+  { href: "/docs", color: VIOLET, title: "Docs", desc: "How a scan works, the ten language engines, every rule and the cloud & API checks." },
+  { href: "/trust", color: AMBER, title: "Trust Center", desc: "What happens to your code, permissions, retention, subprocessors and compliance." },
+];
+
+function ExploreSection() {
   return (
-    <section id="evidence" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${INK}` }}>
+    <section id="explore" className="py-20 px-5" style={{ background: INK }}>
       <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-12">
-          <Eyebrow color={EMERALD}>Proof</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Measured on public benchmarks, published with the failures</h2>
-          <p className="text-white/60 mt-3 max-w-3xl mx-auto text-lg">Score = share of real vulnerabilities found minus share of safe code flagged (category average). Engine {evidence.engineCommit}, measured {evidence.measuredAt}.</p>
+        <Reveal className="text-center mb-10">
+          <Eyebrow>Go deeper</Eyebrow>
+          <h2 className="text-3xl font-black text-white mt-4 tracking-tight">Want the details? They are one click away</h2>
         </Reveal>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {evidence.corpora.map((c, i) => (
-            <Reveal key={c.name} delay={i * 50}>
-              <div className="h-full p-5 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
-                <p className="text-3xl font-black font-mono" style={{ color: c.score >= 70 ? EMERALD : c.score >= 40 ? AMBER : ROSE }}>{c.score}</p>
-                <p className="text-sm font-bold text-white mt-1">{c.name}</p>
-                <p className="text-[11.5px] text-white/50">{c.languages.join(", ")}</p>
-              </div>
-            </Reveal>
-          ))}
-          <Reveal delay={evidence.corpora.length * 50}>
-            <div className="h-full p-5 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
-              <p className="text-3xl font-black font-mono" style={{ color: CYAN }}>{evidence.juiceDetected}/{evidence.juiceTotal}</p>
-              <p className="text-sm font-bold text-white mt-1">OWASP Juice Shop</p>
-              <p className="text-[11.5px] text-white/50">code-level challenges detected</p>
-            </div>
-          </Reveal>
-        </div>
-        <Reveal delay={200} className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3 text-center">
-          <Link href="/benchmarks" className="px-6 py-3 rounded-xl font-bold text-sm text-[#050810]" style={{ background: `linear-gradient(135deg, #6ee7b7, ${EMERALD})` }}>Read the full report</Link>
-          <p className="text-[13px] text-white/50 max-w-md">Includes per-category results, known false positives and negatives, and why there is no CodeQL or Semgrep comparison yet.</p>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-// ── Trust Center teaser ──────────────────────────────────────────────────────
-
-function TrustSection() {
-  const items = [
-    { t: "Read-only access to code", d: "Pull requests and contents: read. Checks: write. Nothing else." },
-    { t: "Analysed, never executed", d: "Code is parsed as text in TrustLedger's infrastructure; it is never built or run." },
-    { t: "Isolated per organisation", d: "Row-level security per organisation, and a test that fails if a server query isn't limited to one organisation." },
-    { t: "Verifiable records", d: "Attestations bound to file content; exports signed with Ed25519 and verifiable offline." },
-  ];
-  return (
-    <section id="trust" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${VIOLET}0c, transparent 65%), ${SURFACE}` }}>
-      <div className="max-w-5xl mx-auto">
-        <Reveal className="text-center mb-12">
-          <Eyebrow color={VIOLET}>Trust Center</Eyebrow>
-          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Know what happens to your code before you connect it</h2>
-        </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {items.map((it, i) => (
-            <Reveal key={it.t} delay={i * 60}>
-              <div className="h-full p-5 rounded-2xl border" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
-                <p className="font-bold text-white">{it.t}</p>
-                <p className="text-sm text-white/60 mt-1">{it.d}</p>
-              </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {EXPLORE.map((x, i) => (
+            <Reveal key={x.href} delay={i * 60}>
+              <Link href={x.href} className="block h-full p-5 rounded-2xl border transition-colors hover:bg-white/[0.07]" style={{ borderColor: `${x.color}40`, background: "rgba(255,255,255,0.04)" }}>
+                <p className="font-bold text-white flex items-center gap-2" style={{ color: x.color }}>{x.title} <ArrowRightIcon size={14} /></p>
+                <p className="text-[13px] text-white/65 mt-2 leading-relaxed">{x.desc}</p>
+              </Link>
             </Reveal>
           ))}
         </div>
-        <Reveal delay={260} className="text-center mt-8">
-          <Link href="/trust" className="inline-block px-6 py-3 rounded-xl font-bold text-sm border text-white" style={{ borderColor: `${VIOLET}80`, background: `${VIOLET}1f` }}>Architecture, retention, subprocessors and compliance status →</Link>
-        </Reveal>
       </div>
     </section>
   );
@@ -1041,9 +673,10 @@ function TrustSection() {
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 /**
- * Section order follows the visitor's questions: what it is (hero), can I see it (watch the demo), how it works,
- * what evidence backs it (proof), what makes it different, does it fit my stack (integrations), is it safe to
- * connect (trust), and how do I try it (call to action).
+ * Kept short on purpose: what it is (hero), everything it covers (the pillar tabs and a one-line list of every dashboard page), how to start, why it differs,
+ * where to go deeper (the site's tabs), common questions, and the call to action. The engine internals, pipeline,
+ * benchmark results, language and framework lists, and the trust details live in Docs, Benchmarks, Live demo and
+ * the Trust Center.
  */
 export default function LandingClient({ evidence }: { evidence: LandingEvidence }) {
   return (
@@ -1051,19 +684,11 @@ export default function LandingClient({ evidence }: { evidence: LandingEvidence 
       <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
       <SiteNav active="/" />
       <HeroSection evidence={evidence} />
-      <WatchDemoSection />
-      <HowItWorksSection />
-      <PipelineSection />
-      <EvidenceSection evidence={evidence} />
-      <ProofSection />
       <PillarsSection />
-      <ArchSection />
-      <VulnCoverageSection ruleCount={evidence.ruleCount} />
-      <CloudApiSection />
-      <FeaturesSection />
-      <StackBand />
-      <LanguageEngineSection />
-      <TrustSection />
+      <DashboardSection />
+      <HowItWorksSection />
+      <ProofSection />
+      <ExploreSection />
       <FaqSection />
       <CTASection />
       <SiteFooter />

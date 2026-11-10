@@ -5,6 +5,8 @@
 import Link from "next/link";
 import { dataFlowRules, COVERAGE_LANGUAGES, LANGUAGE_ENGINES, rulesByLanguage } from "@/lib/publicCoverage";
 import { BENCHMARK_REPORT } from "@/lib/benchmarkReport";
+import { FINDING_CATALOG } from "@/lib/findingCatalog";
+import { SCANNER_FEATURES, PIPELINE_STAGES, AI_FACTS, ENGINE_FACTS, IAC_FORMATS, CLOUD_API_GROUPS } from "@/lib/siteContent";
 import type { DocsSlug } from "./docsNav";
 
 const Code = ({ children }: { children: string }) => <pre><code>{children}</code></pre>;
@@ -39,6 +41,13 @@ function Architecture() {
       <p>One engine per language walks the syntax tree and tracks which values come from untrusted input and which dangerous calls (sinks) they reach. Engines summarise functions — which parameters reach a sink, which reach the return value — and iterate those summaries to a fixed point, within a file and then across the files of the batch. See <Link href="/docs/taint-analysis">Taint analysis</Link>.</p>
       <h2>Line-level detectors</h2>
       <p>Pattern-based detectors cover what is not a data flow: hardcoded secrets, weak cryptography, insecure configuration, infrastructure-as-code misconfigurations, and language-specific hardening rules (for example a rate limiter keyed on a spoofable header). Where a data-flow engine positively proves a sink safe, the matching line-level finding is withdrawn.</p>
+      <h2>The scan, step by step</h2>
+      <ol>{PIPELINE_STAGES.map(st => <li key={st.label}><strong className="text-white">{st.label}</strong> — {st.detail}</li>)}</ol>
+      <h2>How the data-flow engines decide</h2>
+      <ul>{ENGINE_FACTS.map(f => <li key={f.label}><strong className="text-white">{f.label}.</strong> {f.desc}</li>)}</ul>
+      <h2>How the AI estimate is built</h2>
+      <ul>{AI_FACTS.map(f => <li key={f.label}><strong className="text-white">{f.label}.</strong> {f.desc}</li>)}</ul>
+      <p>The <Link href="/docs/ai-attribution">AI attribution</Link> page covers validation and limits.</p>
       <h2>Results</h2>
       <p>Findings from all layers are de-duplicated, mapped to CWE, scored for severity and confidence, and rolled up into a per-file risk level (CRITICAL, HIGH, MEDIUM, LOW). The pull request&apos;s merge decision is made from those risk levels by the merge gate (see <Link href="/docs/pr-integration">Pull-request integration</Link>). The AI-generated estimate is computed alongside, from separate signals (see <Link href="/docs/ai-attribution">AI attribution</Link>).</p>
     </>
@@ -85,6 +94,18 @@ function Coverage() {
         </table>
       </div>
       <p>Line-level detectors add hardcoded secrets, weak cryptography, cookie flags, debug and diagnostics exposure, infrastructure-as-code and container checks, and hardening rules; they are pattern-based and are not listed in this matrix.</p>
+      <h2>Infrastructure, container and API checks</h2>
+      <p>Read from the same pull request as the code, with no cloud credentials. Formats: {IAC_FORMATS.join(", ")}, and OpenAPI / Swagger.</p>
+      {CLOUD_API_GROUPS.map(g => {
+        const titles = Array.from(new Set(Object.entries(FINDING_CATALOG).filter(([id]) => g.match(id)).map(([, e]) => e.title)));
+        return (
+          <div key={g.name}>
+            <h3>{g.name} ({titles.length} checks)</h3>
+            <p>{g.blurb}</p>
+            <p className="text-white/70 text-[13px]">{titles.join(" · ")}</p>
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -106,6 +127,8 @@ function Taint() {
       <p>Imports, injected services, packages and includes are followed in all ten languages. A flow that crosses files is reported once, at the caller, with every file on its path in the trace. For C#, a public helper that other files only ever call with constants is proven safe from those call sites.</p>
       <h2>Reading a trace</h2>
       <p>Each step has a kind — <code>source</code>, <code>assignment</code>, <code>call</code>, <code>sanitizer</code>, <code>cross-file</code>, <code>parameter</code>, <code>sink</code> — a file and line, a short label and the code snippet. The <Link href="/demo">live demo</Link> shows real traces.</p>
+      <h2>What sets the engines apart</h2>
+      <ul>{SCANNER_FEATURES.map(f => <li key={f.title}><strong className="text-white">{f.title}.</strong> {f.desc}</li>)}</ul>
     </>
   );
 }
