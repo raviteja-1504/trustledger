@@ -471,7 +471,7 @@ function PillarsSection() {
         </Reveal>
 
         {/* Panel */}
-        <div key={p.id} className="grid md:grid-cols-5 gap-8 pt-10" style={{ animation: "fadeSlideIn 0.4s cubic-bezier(0.16,1,0.3,1)" }}>
+        <div key={p.id} className="grid md:grid-cols-5 gap-8 p-6 sm:p-9 mt-8 rounded-3xl border" style={{ animation: "fadeSlideIn 0.4s cubic-bezier(0.16,1,0.3,1)", borderColor: `${p.color}38`, background: `radial-gradient(ellipse 80% 70% at 0% 0%, ${p.color}14, transparent 70%), rgba(255,255,255,0.025)`, boxShadow: `inset 0 1px 0 ${p.color}40, 0 24px 60px rgba(0,0,0,0.3)` }}>
           <div className="md:col-span-3">
             <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4" style={{ color: p.color, background: `${p.color}1c`, border: `1px solid ${p.color}4d` }}>
               {p.icon(22)}
@@ -517,19 +517,20 @@ function PillarsSection() {
 
 function HowItWorksSection() {
   return (
-    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${SURFACE}` }}>
-      <div className="max-w-4xl mx-auto">
+    <section id="how-it-works" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 50% at 50% 0%, ${EMERALD}0c, transparent 65%), ${INK}` }}>
+      <div className="max-w-6xl mx-auto">
         <Reveal className="text-center mb-14">
           <Eyebrow>How it works</Eyebrow>
           <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Up and running in 5 minutes</h2>
           <p className="text-white/60 mt-3 text-lg">No CI/CD changes. No config files. Install once and every PR is scanned automatically.</p>
         </Reveal>
-        <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           {STEPS.map((s, i) => (
-            <Reveal key={s.n} delay={i * 80}>
-              <div className="flex gap-6 p-6 rounded-2xl border transition-colors" style={{ borderColor: "rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.04)" }}>
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shrink-0 text-[#050810]" style={{ background: CYAN, boxShadow: `0 4px 16px ${CYAN}4d` }}>{s.n}</div>
-                <div><h3 className="font-bold text-white mb-1">{s.title}</h3><p className="text-sm text-white/65 leading-relaxed">{s.desc}</p></div>
+            <Reveal key={s.n} delay={i * 90}>
+              <div className="relative h-full p-6 pt-7 rounded-2xl border text-center" style={{ borderColor: "rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)" }}>
+                <div className="mx-auto w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg text-[#050810]" style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 24px ${CYAN}55` }}>{s.n}</div>
+                <h3 className="font-bold text-white text-lg mt-4 mb-2">{s.title}</h3>
+                <p className="text-sm text-white/65 leading-relaxed">{s.desc}</p>
               </div>
             </Reveal>
           ))}
@@ -610,27 +611,45 @@ const DASH_GROUPS: { name: string; color: string; pages: { name: string; desc: s
   ] },
 ];
 
+/** Three columns of group cards, balanced by page count, so the section reads as a grid and not a ragged list. */
+const DASH_COLUMNS = [["Overview", "Compliance"], ["Code Risk", "AI Intel"], ["Audit", "Threats"]];
+
 function DashboardSection() {
+  const byName = new Map(DASH_GROUPS.map(g => [g.name, g]));
   return (
-    <section id="dashboard" className="py-20 px-5" style={{ background: SURFACE }}>
+    <section id="dashboard" className="py-24 px-5" style={{ background: `radial-gradient(ellipse 70% 45% at 50% 0%, ${CYAN}0d, transparent 65%), ${SURFACE}` }}>
       <div className="max-w-6xl mx-auto">
-        <Reveal className="text-center mb-10">
+        <Reveal className="text-center mb-12">
           <Eyebrow>Inside the dashboard</Eyebrow>
-          <h2 className="text-3xl font-black text-white mt-4 tracking-tight">Every page, in one line</h2>
+          <h2 className="text-4xl font-black text-white mt-4 tracking-tight">Every page, in one line</h2>
+          <p className="text-white/60 mt-3 max-w-xl mx-auto text-lg">What you will find in the sidebar once you connect a repository.</p>
         </Reveal>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-8">
-          {DASH_GROUPS.map((g, gi) => (
-            <Reveal key={g.name} delay={gi * 40}>
-              <p className="text-[11px] font-bold uppercase tracking-widest font-mono mb-3" style={{ color: g.color }}>{g.name}</p>
-              <ul className="space-y-2.5">
-                {g.pages.map(pg => (
-                  <li key={pg.name} className="pl-3 border-l-2" style={{ borderColor: `${g.color}80` }}>
-                    <p className="text-sm font-bold text-white">{pg.name}</p>
-                    <p className="text-[13px] text-white/65 leading-snug">{pg.desc}</p>
-                  </li>
-                ))}
-              </ul>
-            </Reveal>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 items-start">
+          {DASH_COLUMNS.map((col, ci) => (
+            <div key={ci} className="flex flex-col gap-5">
+              {col.map(name => {
+                const g = byName.get(name)!;
+                return (
+                  <Reveal key={g.name} delay={ci * 70}>
+                    <div className="rounded-2xl border overflow-hidden" style={{ borderColor: `${g.color}33`, background: "rgba(255,255,255,0.035)", boxShadow: `inset 0 1px 0 ${g.color}40, 0 18px 40px rgba(0,0,0,0.25)` }}>
+                      <div className="flex items-center gap-2.5 px-5 py-3.5 border-b" style={{ borderColor: "rgba(255,255,255,0.07)", background: `linear-gradient(90deg, ${g.color}1a, transparent)` }}>
+                        <span className="w-2 h-2 rounded-full" style={{ background: g.color, boxShadow: `0 0 10px ${g.color}` }} />
+                        <p className="text-[11px] font-bold uppercase tracking-widest font-mono" style={{ color: g.color }}>{g.name}</p>
+                        <span className="ml-auto text-[11px] font-mono text-white/35">{g.pages.length} {g.pages.length === 1 ? "page" : "pages"}</span>
+                      </div>
+                      <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                        {g.pages.map(pg => (
+                          <li key={pg.name} className="px-5 py-3.5" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                            <p className="text-sm font-bold text-white">{pg.name}</p>
+                            <p className="text-[13px] text-white/65 leading-snug mt-0.5">{pg.desc}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </Reveal>
+                );
+              })}
+            </div>
           ))}
         </div>
       </div>
@@ -647,6 +666,11 @@ const EXPLORE = [
   { href: "/trust", color: AMBER, title: "Trust Center", desc: "What happens to your code, permissions, retention, subprocessors and compliance." },
 ];
 
+/** A hairline between sections, so the page reads as separate chapters. */
+function Divider() {
+  return <div aria-hidden className="h-px w-full" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent)" }} />;
+}
+
 function ExploreSection() {
   return (
     <section id="explore" className="py-20 px-5" style={{ background: INK }}>
@@ -658,7 +682,7 @@ function ExploreSection() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {EXPLORE.map((x, i) => (
             <Reveal key={x.href} delay={i * 60}>
-              <Link href={x.href} className="block h-full p-5 rounded-2xl border transition-colors hover:bg-white/[0.07]" style={{ borderColor: `${x.color}40`, background: "rgba(255,255,255,0.04)" }}>
+              <Link href={x.href} className="group block h-full p-5 rounded-2xl border transition-all duration-200 hover:-translate-y-1 hover:bg-white/[0.07]" style={{ borderColor: `${x.color}40`, background: `linear-gradient(180deg, ${x.color}14, rgba(255,255,255,0.03) 55%)`, boxShadow: `inset 0 2px 0 ${x.color}88` }}>
                 <p className="font-bold text-white flex items-center gap-2" style={{ color: x.color }}>{x.title} <ArrowRightIcon size={14} /></p>
                 <p className="text-[13px] text-white/65 mt-2 leading-relaxed">{x.desc}</p>
               </Link>
@@ -684,11 +708,17 @@ export default function LandingClient({ evidence }: { evidence: LandingEvidence 
       <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
       <SiteNav active="/" />
       <HeroSection evidence={evidence} />
+      <Divider />
       <PillarsSection />
+      <Divider />
       <DashboardSection />
+      <Divider />
       <HowItWorksSection />
+      <Divider />
       <ProofSection />
+      <Divider />
       <ExploreSection />
+      <Divider />
       <FaqSection />
       <CTASection />
       <SiteFooter />
