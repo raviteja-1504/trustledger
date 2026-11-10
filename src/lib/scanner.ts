@@ -4338,6 +4338,70 @@ function findTOCTOU(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+// TOCTOU outside JavaScript: a path is checked (exists / stat / is-file) and then CREATED or WRITTEN under the same name a few
+// lines later -- another process can put a symlink or a different file there in the window (CWE-367). Only the same path in
+// both calls, only operations that create / overwrite / change permissions (a read after a stat, a rename or copy of the checked
+// source, or an idempotent mkdir -p, is the
+// everyday benign shape), and nothing nearby that makes the creation exclusive or locks it.
+const TOCTOU_ID = String.raw`(&?\$?[A-Za-z_][\w.]*(?:->\w+)*)`;
+const toctouRe = (src: string) => new RegExp(src.replace(/ID/g, TOCTOU_ID));
+const TOCTOU_OTHER: Record<string, { check: RegExp[]; use: RegExp[] }> = {
+  golang: {
+    check: [toctouRe(String.raw`\bos\.(?:Stat|Lstat)\s*\(\s*ID\s*\)`)],
+    use:   [toctouRe(String.raw`\b(?:os\.(?:Create|OpenFile|WriteFile|Chmod|Chown|Truncate)|ioutil\.WriteFile)\s*\(\s*ID\s*[,)]`)],
+  },
+  python: {
+    check: [toctouRe(String.raw`\bos\.(?:path\.(?:exists|isfile|isdir|islink)|access)\s*\(\s*ID\s*[,)]`)],
+    use:   [toctouRe(String.raw`\bopen\s*\(\s*ID\s*,\s*['"][wa]`), toctouRe(String.raw`\bos\.(?:chmod|chown|truncate)\s*\(\s*ID\s*[,)]`)],
+  },
+  ruby: {
+    check: [toctouRe(String.raw`\bFile\.(?:exist\?|exists\?|file\?|directory\?)\s*\(?\s*ID\s*\)?`)],
+    use:   [toctouRe(String.raw`\bFile\.(?:write|chmod)\s*\(?\s*ID\s*[,)]`), toctouRe(String.raw`\bFile\.(?:open|new)\s*\(?\s*ID\s*,\s*['"][wa]`)],
+  },
+  php: {
+    check: [toctouRe(String.raw`\b(?:file_exists|is_file|is_dir|is_writable|is_writeable)\s*\(\s*ID\s*\)`)],
+    use:   [toctouRe(String.raw`\b(?:file_put_contents|chmod|touch)\s*\(\s*ID\s*[,)]`), toctouRe(String.raw`\bfopen\s*\(\s*ID\s*,\s*['"][wac]`)],
+  },
+  java: {
+    check: [toctouRe(String.raw`\bFiles\.(?:exists|notExists)\s*\(\s*ID\s*[,)]`)],
+    use:   [toctouRe(String.raw`\bFiles\.(?:write|createFile|newOutputStream|writeString)\s*\(\s*ID\s*[,)]`)],
+  },
+  csharp: {
+    check: [toctouRe(String.raw`\bFile\.Exists\s*\(\s*ID\s*\)`)],
+    use:   [toctouRe(String.raw`\bFile\.(?:WriteAllText|WriteAllBytes|AppendAllText|Create)\s*\(\s*ID\s*[,)]`)],
+  },
+  rust: {
+    check: [toctouRe(String.raw`\bPath::new\s*\(\s*ID\s*\)\s*\.exists\s*\(\)`), toctouRe(String.raw`\bfs::metadata\s*\(\s*ID\s*\)`), toctouRe(String.raw`\bID\.exists\s*\(\)`)],
+    use:   [toctouRe(String.raw`\b(?:fs::write|File::create)\s*\(\s*ID\s*[,)]`)],
+  },
+};
+const TOCTOU_SAFE_RE = /O_EXCL|O_NOFOLLOW|CreateNew|create_new|LOCK_EX|\bflock\b|\bFileLock\b|\.Lock\s*\(|mkstemp|TempFile|CreateTemp|NamedTemporaryFile|tempfile|Tempfile|\bwith\s+open\s*\([^)]*['"]x/;
+
+function findTOCTOUOtherLangs(lines: string[], lang: string): ScanIndicator[] {
+  const spec = TOCTOU_OTHER[lang];
+  if (!spec) return [];
+  const found: ScanIndicator[] = [];
+  const norm = (t: string) => t.replace(/^&/, "");
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i])) continue;
+    let path: string | null = null;
+    for (const re of spec.check) { const m = re.exec(lines[i]); if (m) { path = norm(m[1]); break; } }
+    if (!path) continue;
+    for (let j = i + 1; j < Math.min(lines.length, i + 16); j++) {
+      if (isNonExecutableLine(lines[j])) continue;
+      let hit = false;
+      for (const re of spec.use) { const m = re.exec(lines[j]); if (m && norm(m[1]) === path) { hit = true; break; } }
+      if (!hit) continue;
+      // a lock or exclusive flag anywhere from a few lines before the check through the use makes the pair safe
+      if (lines.slice(Math.max(0, i - 4), j + 1).some(l => TOCTOU_SAFE_RE.test(l))) break;
+      found.push({ id:"toctou", label:"TOCTOU Race Condition", severity:"medium", line:i+1,
+        detail:`'${path}' is checked and then created or written a few lines later — another process can swap in a symlink or a different file between the two; create it exclusively (O_EXCL / create-new) or open it and handle the error instead of checking first` });
+      break;
+    }
+  }
+  return found;
+}
+
 // Cookie security: res.cookie() on session/auth cookies missing httpOnly or secure flag.
 // Only flags cookies whose name suggests authentication or session data.
 // Preference/analytics cookies missing these flags are low-value noise.
@@ -8270,6 +8334,7 @@ export function analyzeFile(
     ...findInsecureFileUpload(codeLines),
     ...findInsecureFileUploadCSharp(codeLines),
     ...findTOCTOU(codeLines),
+    ...findTOCTOUOtherLangs(codeLines, lang),
     ...findCookieInsecurity(codeLines),
     ...findCookieInsecurityOtherLangs(codeLines),
     ...findSessionCookieFlags(codeLines),

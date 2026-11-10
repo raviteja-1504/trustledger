@@ -2300,7 +2300,11 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
         for (const [input, other] of [[l, r], [r, l]] as const) {
           // strcmp($input, ...) returns a number: the input is one of its arguments
           const isStrcmp = input.type === "function_call_expression" && /^(?:strcmp|strcasecmp|strncmp)$/.test(input.childForFieldName("function")?.text ?? "");
-          const tainted = isStrcmp ? argListOfPHP(input).some(a => taintMask(a, env) & ALL) : (taintMask(input, env) & ALL) !== 0;
+          // `md5($input) == $stored`: a digest of input is not tainted (hashing clears it) but is attacker-chosen all the same --
+          // an input whose digest is "0e<digits>" equals every other "0e<digits>" under ==
+          const isDigestOfInput = input.type === "function_call_expression" && /^(?:md5|sha1|crc32|hash)$/.test(builtinFunctionNamePHP(input, ctx) ?? "")
+            && argListOfPHP(input).some(a => (taintMask(a, env) & ALL) !== 0);
+          const tainted = isStrcmp ? argListOfPHP(input).some(a => taintMask(a, env) & ALL) : isDigestOfInput || (taintMask(input, env) & ALL) !== 0;
           if (!tainted) continue;
           const numeric = other.type === "integer" || other.type === "float" || /^-?\d+(?:\.\d+)?$/.test(other.text);
           // `$storedHash`, `$expected_token`, `md5(...)` -- a hash / secret by name, camelCase included
@@ -2308,11 +2312,35 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
           const secretish = /(?:hash|token|secret|password|passwd|signature|hmac|digest|api_?key)/i.test(other.text) || /^(?:md5|sha1|crypt|hash)\s*\(/.test(other.text)
             || isHashValuePHP(other, ctx);
           const strcmpLike = /^(?:strcmp|strcasecmp|strncmp)\s*\(/.test(input.text) && numeric;
-          if (numeric || secretish || strcmpLike) {
+          // a digest of input against a number-looking string literal ("0e462097...") or against any value that isn't a
+          // plain string literal (a stored hash, a variable); a non-numeric literal compares as text and is safe
+          const stringLiteral = other.type === "string" || other.type === "encapsed_string";
+          const digestLoose = isDigestOfInput && (!stringLiteral || /^['"]\s*[+-]?(?:0*\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s*['"]$/i.test(other.text));
+          if (numeric || secretish || strcmpLike || digestLoose) {
             emit(ctx, "type-juggling", node, input.text, op, undefined,
               `Loose comparison (${op}) of input '${input.text.slice(0, 40)}' with ${numeric ? "a number" : "a hash / secret"} — PHP coerces types first ("0e1" == "0e2", "1abc" == 1, strcmp(array, ...) == 0); use === / hash_equals`);
             break;
           }
+        }
+      }
+    }
+
+    // in_array($input, [1, 2, 3]) / array_search without the strict flag: a loose comparison against a list that holds numbers,
+    // booleans or null ("1abc" == 1, "1e1" == "10", true == "any")
+    if (node.type === "function_call_expression") {
+      const fn = builtinFunctionNamePHP(node, ctx);
+      if (fn === "in_array" || fn === "array_search") {
+        const args = argListOfPHP(node);
+        const strict = args[2];
+        const looseFlag = !strict || strict.text.toLowerCase() === "false";
+        const hay = args[1];
+        const mixed = hay?.type === "array_creation_expression" && hay.namedChildren.some(el => {
+          const v = el?.namedChildren[el.namedChildren.length - 1];
+          return !!v && ["integer", "float", "boolean", "null"].includes(v.type);
+        });
+        if (looseFlag && mixed && args[0] && (taintMask(args[0], env) & ALL) !== 0) {
+          emit(ctx, "type-juggling", node, args[0].text, fn, undefined,
+            `${fn}() without the strict flag compares input '${args[0].text.slice(0, 40)}' loosely with a list that holds numbers / booleans — PHP coerces types first ("1abc" == 1, "1e1" == "10"); pass true as the third argument`);
         }
       }
     }

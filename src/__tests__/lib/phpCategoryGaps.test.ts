@@ -124,6 +124,23 @@ describe("type juggling", () => {
     expect(ids(fn(`    $token = $_GET['token'];\n    if ($token === $storedHash) { echo "ok"; }`))).not.toContain("type-juggling");
     expect(ids(fn(`    $name = $_GET['name'];\n    if ($name == 'admin') { echo "hi"; }`))).not.toContain("type-juggling");
   });
+  it("a digest of input compared loosely with a number-looking string or a stored value; a text literal and strict comparison are not", () => {
+    // "0e462097431906509019562988736854" is a "magic hash": every "0e<digits>" digest equals it under ==
+    expect(ids(fn(`    $in = $_POST['pw'];\n    if (md5($in) == '0e462097431906509019562988736854') { echo "ok"; }`))).toContain("type-juggling");
+    expect(ids(fn(`    $in = $_POST['pw'];\n    if (md5($in) == $stored) { echo "ok"; }`))).toContain("type-juggling");
+    // a literal that is not number-like compares as text; === and hash_equals are exact
+    expect(ids(fn(`    $in = $_POST['pw'];\n    if (sha1($in) == '0e89100756225895e68e7ba9189a28f18fc8bcc5') { echo "ok"; }`))).not.toContain("type-juggling");
+    expect(ids(fn(`    $in = $_POST['pw'];\n    if (md5($in) === $stored) { echo "ok"; }`))).not.toContain("type-juggling");
+    // a digest of something the request did not choose
+    expect(ids(fn(`    if (md5('static') == $stored) { echo "ok"; }`))).not.toContain("type-juggling");
+  });
+  it("in_array / array_search without the strict flag against a list holding numbers or booleans; strict, or an all-string list, is not", () => {
+    expect(ids(fn(`    $role = $_GET['role'];\n    if (in_array($role, [1, 2, 3])) { echo "admin"; }`))).toContain("type-juggling");
+    expect(ids(fn(`    $k = $_GET['k'];\n    $i = array_search($k, ['a', 0, 'b']);`))).toContain("type-juggling");
+    expect(ids(fn(`    $role = $_GET['role'];\n    if (in_array($role, [1, 2, 3], true)) { echo "admin"; }`))).not.toContain("type-juggling");
+    expect(ids(fn(`    $role = $_GET['role'];\n    if (in_array($role, ['viewer', 'editor'])) { echo "ok"; }`))).not.toContain("type-juggling");
+    expect(ids(fn(`    if (in_array('x', [1, 2, 3])) { echo "ok"; }`))).not.toContain("type-juggling");
+  });
 });
 
 describe("file upload", () => {
