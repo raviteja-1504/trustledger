@@ -23,7 +23,7 @@ import { loadPolicy } from "@/lib/policy";
 import { computeTrustScore } from "@/lib/trustScore";
 import { useScansRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
-import SetupGuide from "@/components/setup/SetupGuide";
+import SetupBanner from "@/components/setup/SetupBanner";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/roles";
 import RoleGate from "@/components/RoleGate";
 import NewScanPanel from "@/components/NewScanPanel";
@@ -471,7 +471,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {!loading && !error && data && data.repos.length === 0 && <SetupGuide />}
+        <SetupBanner />
 
         {error && !loading && (
           <div role="alert" className="flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl text-sm">

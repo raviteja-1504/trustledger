@@ -9,7 +9,6 @@ import type { DashboardData } from "@/types";
 jest.mock("next/dynamic", () => () => () => null);
 jest.mock("@/components/AuthGuard", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/components/NewScanPanel", () => ({ __esModule: true, default: () => null }));
-jest.mock("@/components/setup/SetupGuide", () => ({ __esModule: true, default: () => <div>Setup guide</div> }));
 jest.mock("@/components/RoleGate", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/lib/realtime", () => ({ useScansRealtime: () => {} }));
 jest.mock("@/lib/policy", () => ({ loadPolicy: () => ({ name: "Standard" }) }));

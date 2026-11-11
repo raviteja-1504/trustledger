@@ -114,7 +114,7 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
                 {delta > 0 ? "▲" : delta < 0 ? "▼" : "■"} {Math.abs(delta)} pts in 7 days
               </p>
             )}
-            <div className="w-44"><Sparkline points={history} /></div>
+            {!unscored && <div className="w-44"><Sparkline points={history} /></div>}
             <Link href="/trust-score" className="inline-block text-xs font-semibold text-indigo-200 hover:text-white">How it&apos;s calculated →</Link>
           </div>
         </div>
@@ -147,7 +147,7 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
         {/* Dimensions */}
         <div className="min-w-0 lg:col-span-2 pt-6 border-t border-white/10">
           <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-200/70 mb-4">What drives it</p>
-          {score ? (
+          {score && !unscored ? (
             <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-10 gap-y-5">
               {score.dimensions.map(d => (
                 <li key={d.key} className="min-w-0">
@@ -166,7 +166,7 @@ export default function TrustHero({ score, history, demoTotal, loading }: {
             </ul>
           ) : (
             <p className="text-sm text-white/55">
-              {loading ? "Calculating from your scans, reviews, findings and AI tool usage…" : "Open risk, review of risky code, fix deadlines, approved AI tools, scan coverage and leaked secrets — each scored from your real data."}
+              {unscored ? "The six drivers (open risk, review, fix deadlines, approved AI tools, scan coverage and leaked secrets) are scored once your first scan lands. Until then there is nothing to grade." : loading ? "Calculating from your scans, reviews, findings and AI tool usage…" : "Open risk, review of risky code, fix deadlines, approved AI tools, scan coverage and leaked secrets — each scored from your real data."}
             </p>
           )}
         </div>

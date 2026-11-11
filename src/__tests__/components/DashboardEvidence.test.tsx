@@ -45,6 +45,16 @@ describe("Trust Score hero", () => {
     expect(actions[0]).toHaveAttribute("href", "/violations?repo=api");
   });
 
+  it("an organisation that has scanned nothing shows 'No score yet', not a score, a band or full-marks drivers", () => {
+    const unscored: GovernanceScore = { ...score, scored: false, total: 0, band: "Critical", dimensions: [dim("exposure", "Open risk", 1, "A"), dim("review", "Human review of risky code", 1, "A")] };
+    render(<TrustHero score={unscored} history={[]} />);
+    expect(screen.getByText("No score yet")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Connect a repository" })).toHaveAttribute("href", "/onboarding");
+    // nothing measured, so no grades: "Open risk 250/250 A" for an empty org was the bug
+    expect(screen.queryByText("Open risk")).toBeNull();
+    expect(screen.queryByText("Human review of risky code")).toBeNull();
+    expect(screen.queryByText("Critical")).toBeNull();
+  });
   it("demo mode shows only the estimated total", () => {
     render(<TrustHero score={null} history={[]} demoTotal={720} />);
     expect(screen.getByRole("img", { name: "Trust Score 720 out of 1000" })).toBeInTheDocument();

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 import { BrandMark } from "@/components/BrandLogo";
+import { clearDoneSteps, firstUnfinishedIndex, loadDoneSteps, markStepDone, type WizardStep } from "@/lib/onboardingProgress";
 
 // ── Step definitions ──────────────────────────────────────────────────────────
 
@@ -18,7 +19,6 @@ const STEPS: { key: Step; label: string }[] = [
   { key: "done",    label: "Ready"          },
 ];
 
-const PROGRESS_KEY = "tl_onboarding_step";
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -444,25 +444,30 @@ function DoneStep() {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function OnboardingPage() {
-  const [stepIdx, setStepIdx] = useState<number>(() => {
-    if (typeof window === "undefined") return 0;
-    const saved = parseInt(localStorage.getItem(PROGRESS_KEY) ?? "0");
-    return isNaN(saved) ? 0 : Math.min(saved, STEPS.length - 1);
-  });
+  // The same five steps until setup is finished. Finished steps are remembered (lib/onboardingProgress.ts) and show as
+  // done; the wizard reopens at the first one still to do. Leaving part-way does not complete setup.
+  const [stepIdx, setStepIdx] = useState<number>(0);
+  const [done, setDone] = useState<WizardStep[]>([]);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const saved = loadDoneSteps();
+    setDone(saved);
+    setStepIdx(firstUnfinishedIndex(saved));
+    setReady(true);
+  }, []);
 
   const step = STEPS[stepIdx].key;
   const router = useRouter();
 
-  // Leave the wizard without finishing: the saved step is kept, and the dashboard's setup guide offers to resume it
+  // Leave the wizard without finishing: setup is NOT marked complete, so the overview keeps offering it
   function skip() {
-    authedFetch("/api/onboarding", { method: "POST", body: JSON.stringify({ action: "complete" }) }).catch(() => {});
     router.push("/dashboard");
   }
 
   function next() {
     const next = Math.min(stepIdx + 1, STEPS.length - 1);
+    setDone(markStepDone(STEPS[stepIdx].key));      // this step is finished: remembered, shown as done
     setStepIdx(next);
-    if (typeof window !== "undefined") localStorage.setItem(PROGRESS_KEY, String(next));
 
     // Mark org as onboarding_complete when reaching the done step
     if (next === STEPS.length - 1) {
@@ -470,8 +475,7 @@ export default function OnboardingPage() {
         method: "POST",
         body: JSON.stringify({ action: "complete" }),
       }).catch(() => {});
-      // Clear saved progress
-      if (typeof window !== "undefined") localStorage.removeItem(PROGRESS_KEY);
+      clearDoneSteps();     // finished: nothing left to remember
     }
   }
 
@@ -487,20 +491,20 @@ export default function OnboardingPage() {
               <div key={s.key} className="flex items-center gap-1">
                 <div className="flex items-center justify-center transition-all overflow-hidden"
                   style={{
-                    width:        i <= stepIdx ? 28 : 8,
+                    width:        i === stepIdx || done.includes(s.key) ? 28 : 8,
                     height:       8,
                     borderRadius: 4,
-                    background:   i < stepIdx ? "#10b981" : i === stepIdx ? "#6366f1" : "#e2e8f0",
+                    background:   done.includes(s.key) ? "#10b981" : i === stepIdx ? "#6366f1" : "#e2e8f0",
                     transition:   "all 0.3s ease",
                   }}>
-                  {i < stepIdx && (
+                  {done.includes(s.key) && (
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="20 6 9 17 4 12"/>
                     </svg>
                   )}
                 </div>
                 {i < STEPS.length - 1 && (
-                  <div className="w-4 h-0.5 rounded-full" style={{ background: i < stepIdx ? "#10b981" : "#e2e8f0" }} />
+                  <div className="w-4 h-0.5 rounded-full" style={{ background: done.includes(s.key) ? "#10b981" : "#e2e8f0" }} />
                 )}
               </div>
             ))}
@@ -508,21 +512,22 @@ export default function OnboardingPage() {
           <p className="text-center text-xs text-gray-400">
             Step {stepIdx + 1} of {STEPS.length} —{" "}
             <span className="font-semibold text-gray-600">{STEPS[stepIdx].label}</span>
+            {done.length > 0 && step !== "done" && <span className="text-gray-400"> · {done.length} of {STEPS.length - 1} done</span>}
           </p>
         </div>
 
         {/* Card */}
-        <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8">
-          {step === "welcome" && <WelcomeStep onNext={next} />}
-          {step === "github"  && <GithubStep  onNext={next} />}
-          {step === "team"    && <TeamStep    onNext={next} />}
-          {step === "policy"  && <PolicyStep  onNext={next} />}
-          {step === "done"    && <DoneStep />}
+        <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8 min-h-[12rem]">
+          {ready && step === "welcome" && <WelcomeStep onNext={next} />}
+          {ready && step === "github"  && <GithubStep  onNext={next} />}
+          {ready && step === "team"    && <TeamStep    onNext={next} />}
+          {ready && step === "policy"  && <PolicyStep  onNext={next} />}
+          {ready && step === "done"    && <DoneStep />}
         </div>
 
         {/* Back link (except welcome and done) */}
         {stepIdx > 0 && stepIdx < STEPS.length - 1 && (
-          <button onClick={() => { const prev = stepIdx - 1; setStepIdx(prev); localStorage.setItem(PROGRESS_KEY, String(prev)); }}
+          <button onClick={() => setStepIdx(stepIdx - 1)}
             className="mt-4 w-full text-center text-xs text-gray-400 hover:text-gray-600 transition-colors">
             ← Back
           </button>
@@ -530,7 +535,7 @@ export default function OnboardingPage() {
 
         {stepIdx < STEPS.length - 1 && (
           <button onClick={skip} className="mt-2 w-full text-center text-xs text-gray-400 hover:text-gray-600 underline underline-offset-2 transition-colors">
-            Skip for now — you can finish setup later from the dashboard
+            Skip for now — your overview will keep offering setup until it is finished
           </button>
         )}
 
