@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 import { BrandMark } from "@/components/BrandLogo";
+import GithubAppGuide from "@/components/onboarding/GithubAppGuide";
 import { clearDoneSteps, firstUnfinishedIndex, loadDoneSteps, markStepDone, type WizardStep } from "@/lib/onboardingProgress";
 
 // ── Step definitions ──────────────────────────────────────────────────────────
@@ -99,21 +100,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   const { profile } = useAuth();
   const [orgHandle,   setOrgHandle]   = useState(profile?.org_slug ?? "");
   const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? "");
-  const [webhookSecret, setWebhookSecret] = useState("");
-  const [copied,  setCopied]  = useState<string | null>(null);
   const [saving,  setSaving]  = useState(false);
-  const [appUrl,  setAppUrl]  = useState("https://app.trustledger.dev");
-
-  useEffect(() => {
-    setWebhookSecret(Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join(""));
-    setAppUrl(window.location.origin);
-  }, []);
-
-  function copy(text: string, key: string) {
-    navigator.clipboard.writeText(text).catch(() => {});
-    setCopied(key);
-    setTimeout(() => setCopied(null), 2000);
-  }
 
   async function save() {
     setSaving(true);
@@ -141,53 +128,12 @@ function GithubStep({ onNext }: { onNext: () => void }) {
           <GithubIcon />
         </div>
         <h2 className="text-xl font-black text-gray-900">Connect GitHub</h2>
-        <p className="text-sm text-gray-500 mt-1">Install the GitHub App and configure the webhook.</p>
+        <p className="text-sm text-gray-500 mt-1">Create the GitHub App, give TrustLedger its credentials, and install it on your repositories.</p>
       </div>
 
-      {/* 1 — Install app */}
-      <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-black flex items-center justify-center shrink-0">1</span>
-          <p className="text-sm font-bold text-indigo-900">Install your GitHub App</p>
-        </div>
-        <p className="text-xs text-indigo-700">
-          Go to <strong>github.com → Settings → Developer settings → GitHub Apps</strong>, find your app and click <strong>Install</strong> on your organisation.
-        </p>
-        <p className="text-xs text-indigo-600">
-          Or if you haven&apos;t created a GitHub App yet, create one at{" "}
-          <a href="https://github.com/settings/apps/new" target="_blank" rel="noopener noreferrer"
-            className="font-bold underline underline-offset-2">
-            github.com/settings/apps/new →
-          </a>
-        </p>
-      </div>
+      <GithubAppGuide />
 
-      {/* 2 — Webhook config */}
-      <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="w-6 h-6 rounded-full bg-gray-600 text-white text-xs font-black flex items-center justify-center shrink-0">2</span>
-          <p className="text-sm font-bold text-gray-900">Configure webhook in GitHub App settings</p>
-        </div>
-        {[
-          { label: "Webhook URL",    value: `${appUrl}/api/webhook/github`, key: "url"    },
-          { label: "Webhook Secret", value: webhookSecret,                  key: "secret" },
-        ].map(row => (
-          <div key={row.key}>
-            <p className="text-xs font-semibold text-gray-500 mb-1">{row.label}</p>
-            <div className="flex items-center gap-2 bg-white rounded-xl border border-gray-200 px-3 py-2">
-              <code className="text-xs font-mono text-gray-700 flex-1 truncate select-all">{row.value}</code>
-              <button onClick={() => copy(row.value, row.key)}
-                className="shrink-0 text-xs font-bold px-2 py-1 rounded-lg transition-colors"
-                style={{ background: copied === row.key ? "#d1fae5" : "#f1f5f9", color: copied === row.key ? "#065f46" : "#374151" }}>
-                {copied === row.key ? "Copied!" : "Copy"}
-              </button>
-            </div>
-          </div>
-        ))}
-        <p className="text-[10px] text-gray-400">Select events: Pull requests · Pushes · Check runs</p>
-      </div>
-
-      {/* 3 — Org details */}
+      {/* Org details */}
       <div className="space-y-3">
         <div>
           <label className="text-xs font-semibold text-gray-700 block mb-1.5">

@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logger } from "@/lib/logger";
 import { reportServerError } from "@/lib/serverErrors";
+import { githubAppManifest } from "@/lib/githubAppConfig";
 
 export async function GET(req: NextRequest) {
   const url    = new URL(req.url);
@@ -25,45 +26,10 @@ export async function GET(req: NextRequest) {
 
   if (code) return handleConversion(code, origin);
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev";
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? origin;
 
-  const manifest = {
-    name:        "TrustLedger",
-    url:         appUrl,
-    description: "AI code provenance, attestation, and compliance for every pull request",
-    public:      false,
-
-    // Callback after OAuth flow
-    callback_url:          `${origin}/api/auth/callback`,
-    setup_url:             `${origin}/onboarding`,
-    // GitHub redirects here (GET, with ?code=) right after app creation
-    redirect_url:          `${origin}/api/github-app/manifest`,
-    setup_on_update:       true,
-    request_oauth_on_install: true,
-
-    // Webhook
-    hook_attributes: {
-      url:    `${origin}/api/webhook/github`,
-      active: true,
-    },
-
-    // Default permissions
-    default_permissions: {
-      pull_requests: "read",
-      contents:      "read",
-      checks:        "write",
-      metadata:      "read",
-      statuses:      "write",
-    },
-
-    // Subscribe to these events
-    default_events: [
-      "pull_request",
-      "push",
-      "check_run",
-      "check_suite",
-    ],
-  };
+  // Built from lib/githubAppConfig.ts, which the setup wizard's field-by-field instructions also use.
+  const manifest = githubAppManifest(origin, appUrl);
 
   return NextResponse.json(manifest);
 }
