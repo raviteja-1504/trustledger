@@ -207,3 +207,35 @@ def run():
     expect(findings(content, "src/example.py")).toHaveLength(0);
   });
 });
+
+describe("hallucinated method call -- false positives found scanning the Angular repository", () => {
+  const hits = (body: string) => findings(`function run(input, update, headers, params, selector) {\n${body}\n}\n`);
+
+  it("Object.hasOwn (ES2022) is a real method; the other recent built-ins too (165 of the 243 findings on Angular)", () => {
+    expect(hits(`  return Object.hasOwn(input, 'value');`)).toHaveLength(0);
+    expect(hits(`  return Array.fromAsync(input);`)).toHaveLength(0);
+    expect(hits(`  return 'x'.isWellFormed();`)).toHaveLength(0);
+    // an invented one on the same namespaces is still flagged
+    expect(hits(`  return Object.hasOwned(input, 'value');`).length).toBeGreaterThan(0);
+  });
+
+  it("a regex literal is not an array: `=[` inside it is no array assignment", () => {
+    const body = `  const attributeRegex = /\[([^\]=]+)(?:=[^\]]+)?\]/g;\n  let match;\n  while ((match = attributeRegex.exec(selector)) !== null) { use(match); }`;
+    expect(hits(body)).toHaveLength(0);
+  });
+
+  it("a parameter followed by another with a default is not assigned that default", () => {
+    const content = `class FormArray {\n  push(control: TControl | Array<TControl>, options: {emitEvent?: boolean} = {}): void {\n    if (Array.isArray(control)) {\n      control.forEach((ctrl) => this.add(ctrl));\n    }\n  }\n}\n`;
+    expect(findings(content)).toHaveLength(0);
+  });
+
+  it("the result of `.reduce(...)` on Object.keys is not an array, and an arrow parameter shadows the outer name", () => {
+    const body = `  if (update.setHeaders !== undefined) {\n    headers = Object.keys(update.setHeaders).reduce(\n      (headers, name) => headers.set(name, update.setHeaders[name]),\n      headers,\n    );\n  }`;
+    expect(hits(body)).toHaveLength(0);
+    // still an array through array-returning methods, and a real mistake on it is still flagged
+    expect(hits(`  const names = Object.keys(input).map(k => k.trim());\n  return names.isEmpty();`).length).toBeGreaterThan(0);
+    expect(hits(`  const joined = Object.keys(input).join(',');\n  return joined.length;`)).toHaveLength(0);
+    // a plain array still gets flagged for a method it lacks
+    expect(hits(`  const list = [1, 2, 3];\n  return list.isEmpty();`).length).toBeGreaterThan(0);
+  });
+});

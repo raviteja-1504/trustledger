@@ -49,6 +49,7 @@ export function plausibleCredentialValue(value: string, keyName: string, o: Cred
   if (NOT_A_CREDENTIAL_KEY_RE.test(keyName) || /__/.test(keyName)) return false;   // a Django lookup is password__startswith
   if (value.length < (PASSWORD_LIKE_RE.test(keyName) ? minPw : minOther)) return false;
   if (/\s/.test(value)) return false;
+  if (/^(?:anonymous|use-credentials|same-origin|include|omit)$/i.test(value)) return false;   // fetch / CORS credential modes
   // a reference, call, template, path or placeholder syntax: the secret, if any, is elsewhere
   if (/^[$@%<{(\[/~.]|\$\{|\{\{|%\(|\$\(|%s|\)|\(|;$/.test(value)) return false;
   // dotted identifier / OID / indexed lookup (auth.pass, opts.Password, 1.2.840.113549, values[Env])
@@ -79,7 +80,9 @@ const MAX_LINE = 2000;
 /** The credential assigned on this line, or null. `ext` is the file path (only its ending matters). */
 export function findCredentialAssignment(line: string, filePath: string, o: CredentialOptions = {}): CredentialHit | null {
   if (line.length > MAX_LINE || !NAME_PRESENT_RE.test(line)) return null;
-  const q = QUOTED_ASSIGNMENT_RE.exec(line);
+  let q = QUOTED_ASSIGNMENT_RE.exec(line);
+  // `x === 'use-credentials' ? 'use-credentials' : 'anonymous'`: the `:` of a ternary is not a key/value separator
+  if (q && /\?\s*["']?$/.test(line.slice(0, q.index))) q = null;
   // `"API_KEY=" + UUID.randomUUID()`: a literal that only STARTS a value built at runtime is not the secret.
   const concatenated = q ? /^\s*\+/.test(line.slice(q.index + q[0].length)) : false;
   if (q && !concatenated && plausibleCredentialValue(q[3], q[1], o)) return { key: q[1], value: q[3], passwordLike: PASSWORD_LIKE_RE.test(q[1]) };

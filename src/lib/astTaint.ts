@@ -298,6 +298,25 @@ function bindingLeafNames(name: ts.BindingName, depth = 0): string[] {
 // accepted narrower gap.
 
 const CMD_SINK_NAMES = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
+
+/**
+ * `regex.exec(s)` runs a regular expression, not a command (it was reported as command injection: `while ((m = re.exec(search)))`).
+ * A receiver is a RegExp when it is a regex literal, `new RegExp(...)`, a name declared as one in this file
+ * (`const attributeRegex = /.../g`), or named like one (`re`, `regex`, `searchPattern`, `idRe`).
+ */
+function isRegExpReceiver(callee: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  const recv = unwrapExpr(callee.expression);
+  if (ts.isRegularExpressionLiteral(recv)) return true;
+  if (ts.isNewExpression(recv) && ts.isIdentifier(recv.expression) && recv.expression.text === "RegExp") return true;
+  if (!ts.isIdentifier(recv)) return false;
+  const name = recv.text;
+  try {
+    const declared = new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\b\\s*(?::[^=]+)?=\\s*(?:/(?![*/])|new\\s+RegExp\\b)`);
+    if (declared.test(callee.getSourceFile().text)) return true;
+  } catch { /* no source file: judge by the name */ }
+  return /^(?:re|rx|regex|regexp|pattern|matcher)$/i.test(name) || /[a-z0-9](?:Re|Rx|Regex|RegExp|Pattern|Matcher)$/.test(name) || /_(?:re|rx|regex|regexp|pattern)$/i.test(name);
+}
 const FS_SINK_NAMES = new Set([
   "readFile", "readFileSync", "writeFile", "writeFileSync",
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
@@ -740,7 +759,8 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (parts.length === 2 && call.arguments[0] && (Object.prototype.hasOwnProperty.call(TEMPLATE_COMPILE, engine) && TEMPLATE_COMPILE[engine].has(tail) || (engine === "_" || engine === "lodash") && tail === "template")) {
     return { id: "ssti", sinkExpr: text, args: [call.arguments[0]] };
   }
-  if (CMD_SINK_NAMES.has(tail) && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {
+  if (CMD_SINK_NAMES.has(tail) && !(tail === "exec" && resolvedModule !== "child_process" && isRegExpReceiver(callee))
+      && (resolvedModule === "child_process" || parts.length > 1 || CMD_SINK_NAMES.has(text))) {
     return { id: "command-injection", sinkExpr: text, args: commandArgs(call, tail) };
   }
   if (text === "res.send" || text === "res.write" || text === "res.end") {

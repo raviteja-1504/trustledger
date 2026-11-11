@@ -1143,7 +1143,8 @@ const PATH_TRAVERSAL_RE = [
   /path\.(?:join|resolve)\s*\([^)]*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
   /fs\.(?:readFile|writeFile|readdir|stat|unlink|createReadStream|createWriteStream)\s*\([^)]*(?:req\.|params\.|body\.|query\.)\w+/i,
   /__dirname\s*\+\s*(?:req\.|params\.|body\.|query\.)\w+/i,
-  /path\.join\s*\([^)]*['"]\.\.['"]/,
+  // a '..' segment AND a variable last argument (`path.join(base, '..', name)`); constant segments are ordinary relative paths
+  /path\.join\s*\([^)]*['"]\.\.['"][^)]*,\s*(?!['"`])[A-Za-z_$][\w$.]*\s*\)/,
   // Java/Kotlin — File/Paths/Files built from a request-derived path segment
   /new\s+File\s*\([^)]*request\.getParameter\s*\(/i,
   /Paths\.get\s*\([^)]*request\.getParameter\s*\(/i,
@@ -1543,7 +1544,8 @@ const TOCTOU_SINK_RE   = /\bfs\.(?:readFile|writeFile|unlink|rename|rmdir|mkdir|
 
 // XSS patterns
 const XSS_RE = [
-  /\.innerHTML\s*[+=]\s*(?!\s*["']<(?:div|span|p|strong|em|br)\b)/,
+  // not a CONSTANT string (`el.innerHTML = ''` clears it; `= '<app-root></app-root>'` is fixed markup): no input can reach it
+  /\.innerHTML\s*[+=]\s*(?!\s*["']<(?:div|span|p|strong|em|br)\b)(?!\s*(?:"[^"$+\\]*"|'[^'$+\\]*'|`[^`$\\]*`)\s*[;,)}]?\s*(?:\/\/.*|\/\*.*)?$)/,
   /\.innerHTML\s*=\s*`[^`]*\$\{/,
   /document\.write\s*\(\s*(?!["'])/,
   /document\.writeln\s*\(\s*(?!["'])/,
@@ -3014,9 +3016,22 @@ function findSSRF(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+/**
+ * `const file = path.resolve(base, req.url)` followed, within 10 lines, by `file.startsWith(...)` or a `path.relative(..., file)`
+ * check: the resolved path is validated against the base directory (the fix this finding asks for), so it is not traversal.
+ */
+function pathIsGuarded(lines: string[], idx: number): boolean {
+  const m = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*path\.(?:resolve|join|normalize)\s*\(/.exec(lines[idx] ?? "");
+  if (!m) return false;
+  const v = m[1].replace(/\$/g, "\\$");
+  const after = lines.slice(idx + 1, idx + 11).join("\n");
+  return new RegExp(`\\b${v}\\.startsWith\\s*\\(`).test(after) || new RegExp(`path\\.relative\\s*\\([^)]*\\b${v}\\b`).test(after);
+}
+
 function findPathTraversal(lines: string[]): ScanIndicator[] {
   return runDetector(lines, PATH_TRAVERSAL_RE, "path-traversal", "Path Traversal", "critical",
-    "User input in file path — resolve and validate against base directory");
+    "User input in file path — resolve and validate against base directory")
+    .filter(f => !pathIsGuarded(lines, (f.line ?? 1) - 1));
 }
 
 // Go named-taint path traversal, mirroring findNamedTaintPathTraversalJS's

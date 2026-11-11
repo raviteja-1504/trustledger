@@ -638,7 +638,10 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
           return m | valueMask(field(arm, "value"), aenv);
         }, 0);
       }
-      case "block": case "unsafe_block": case "async_block": case "loop_expression": return valueMask(node, env);
+      case "block": case "unsafe_block": case "async_block": return valueMask(node, env);
+      // a `loop` is not a block, and valueMask hands anything but a block back to mask: sending the loop itself there was infinite
+      // recursion ("Maximum call stack size exceeded", the whole file unanalysed). Its value is its body's, and `loop { break x }` carries none out.
+      case "loop_expression": return valueMask(field(node, "body"), env);
       case "struct_expression": return named(field(node, "body")).reduce((m, f) => m | (f.type === "shorthand_field_initializer" ? mask(named(f)[0]!, env) : field(f, "value") ? mask(field(f, "value")!, env) : f.type === "base_field_initializer" ? mask(named(f)[0]!, env) : 0), 0);
       case "macro_invocation": return macroMask(node, env);
       case "call_expression": return callMask(node, env);

@@ -51,7 +51,7 @@ const LABEL = "Hallucinated Method Call";
 // different method sets -- `Array.prototype.map` is not a static method, and
 // `Array.isArray` is not an instance method.
 
-const ARRAY_STATIC_METHODS = new Set(["isArray", "from", "of"]);
+const ARRAY_STATIC_METHODS = new Set(["isArray", "from", "of", "fromAsync"]);
 const ARRAY_INSTANCE_METHODS = new Set([
   "push", "pop", "shift", "unshift", "slice", "splice", "concat", "join", "reverse", "sort",
   "indexOf", "lastIndexOf", "includes", "find", "findIndex", "findLast", "findLastIndex",
@@ -65,6 +65,8 @@ const OBJECT_STATIC_METHODS = new Set([
   "preventExtensions", "isExtensible", "create", "defineProperty", "defineProperties",
   "getOwnPropertyDescriptor", "getOwnPropertyDescriptors", "getOwnPropertyNames",
   "getOwnPropertySymbols", "getPrototypeOf", "setPrototypeOf", "is", "fromEntries", "groupBy",
+  // ES2022: the standard replacement for hasOwnProperty.call; flagging it as invented was 165 of 243 findings on Angular
+  "hasOwn",
 ]);
 const OBJECT_INSTANCE_METHODS = new Set([
   "hasOwnProperty", "toString", "valueOf", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString",
@@ -76,7 +78,7 @@ const STRING_INSTANCE_METHODS = new Set([
   "lastIndexOf", "localeCompare", "match", "matchAll", "normalize", "padEnd", "padStart",
   "repeat", "replace", "replaceAll", "search", "slice", "split", "startsWith", "substring",
   "substr", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "trim",
-  "trimStart", "trimEnd", "toString", "valueOf", "at",
+  "trimStart", "trimEnd", "toString", "valueOf", "at", "isWellFormed", "toWellFormed",
 ]);
 
 const JSON_STATIC_METHODS = new Set(["parse", "stringify"]);
@@ -183,22 +185,69 @@ function receiverLooksLikeMock(lines: string[], lineIdx: number, name: string): 
 // Object.keys/values/entries return ARRAYS (so .find/.map/.filter on them are real); Object.assign returns
 // its target, which is a plain object only when that target is an object literal --
 // `Object.assign(document.createElement("a"), {...})` is an element, with .click().
-const ARRAY_CTOR_RE = /=\s*(?:\[\s*\]|\[[^\]]{0,300}\]|Array\.from\(|Array\(|new\s+Array\(|Object\.(?:keys|values|entries)\()/;
-const OBJECT_CTOR_RE = /=\s*(?:\{\s*\}|Object\.assign\(\s*\{)/;
+// Matched against the VALUE (the text after the `=`), not anywhere on the line: a `=[` inside a regex literal
+// (`/\[(x)(?:=[^\]]+)?\]/g`) is not an array being assigned.
+const ARRAY_VALUE_RE = /^\s*(?:\[\s*\]|\[[^\]]{0,300}\]|Array\.from\(|Array\(|new\s+Array\(|Object\.(?:keys|values|entries)\()/;
+const OBJECT_VALUE_RE = /^\s*(?:\{\s*\}|Object\.assign\(\s*\{)/;
+// Array methods that return an array again. After `Object.keys(x)`, these keep the value an array; any other
+// (`.reduce(...)`, `.join(...)`, `.find(...)`, `.length`) does not: `h = Object.keys(o).reduce((h, k) => h.set(k, 1), h)`
+// is the accumulator, not an array.
+const ARRAY_RETURNING_METHODS = new Set([
+  "map", "filter", "slice", "concat", "sort", "reverse", "flat", "flatMap", "fill", "copyWithin",
+  "toReversed", "toSorted", "toSpliced", "with",
+]);
+
+/** Index just past the first balanced (...) or [...] in `s`, or -1 when it does not close on this line. */
+function endOfFirstGroup(s: string): number {
+  const open = s.search(/[([]/);
+  if (open < 0) return -1;
+  let depth = 0;
+  for (let k = open; k < s.length; k++) {
+    const c = s[k];
+    if (c === "(" || c === "[") depth++;
+    else if (c === ")" || c === "]") { depth--; if (depth === 0) return k + 1; }
+  }
+  return -1;
+}
+
+/** Whether the value that starts `rest` is still an array after any method chain on it. */
+function valueIsArray(rest: string): boolean {
+  let k = endOfFirstGroup(rest);
+  if (k < 0) return false;                       // the arguments run past this line: unknown
+  for (;;) {
+    const tail = rest.slice(k);
+    const m = /^\s*\??\.\s*([A-Za-z_$][\w$]*)\s*\(/.exec(tail);
+    if (!m) return !/^\s*(?:\??\.|\[)/.test(tail);   // ends here: an array; `.length` / `[0]`: not
+    if (!ARRAY_RETURNING_METHODS.has(m[1])) return false;
+    const callStart = k + m[0].length - 1;
+    const end = endOfFirstGroup(rest.slice(callStart));
+    if (end < 0) return false;
+    k = callStart + end;
+  }
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 type ReceiverKind = "array" | "object" | null;
 
 function resolveIdentifierReceiver(lines: string[], lineIdx: number, name: string): ReceiverKind | "mock" {
   if (receiverLooksLikeMock(lines, lineIdx, name)) return "mock";
-  const nameRe = new RegExp(`\\b${name}\\s*(?::[^=]+)?` + "=");
+  const n = escapeRe(name);
+  // an arrow-function parameter of the same name shadows any outer assignment: `(headers, name) => headers.set(...)`
+  if (new RegExp(`\\([^()]*\\b${n}\\b[^()]*\\)\\s*(?::[^=>]+)?=>|\\b${n}\\s*=>`).test(lines[lineIdx])) return null;
+  // `name = ...` / `name: Type = ...`; the type annotation cannot run across a comma, so a PARAMETER with no default
+  // (`control: A | B, options = {}`) is not read as `control = {}`
+  const nameRe = new RegExp(`\\b${n}\\s*(?::[^=,;]+)?=(?![=>])`);
   let seen = 0;
   for (let i = lineIdx; i >= 0 && seen < 4; i--) {
     const line = lines[i];
     if (line.trim().length === 0) continue;
     seen++;
-    if (!nameRe.test(line)) continue;
-    if (ARRAY_CTOR_RE.test(line)) return "array";
-    if (OBJECT_CTOR_RE.test(line)) return "object";
+    const m = nameRe.exec(line);
+    if (!m) continue;
+    const rest = line.slice(m.index + m[0].length);
+    if (ARRAY_VALUE_RE.test(rest)) return valueIsArray(rest) ? "array" : null;
+    if (OBJECT_VALUE_RE.test(rest)) return "object";
     return null; // assigned, but not to an unambiguous constructor -- stay out of scope
   }
   return null;

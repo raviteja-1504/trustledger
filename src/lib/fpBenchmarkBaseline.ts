@@ -34,8 +34,6 @@ export const FP_BASELINE: FpBaselineEntry[] = [
     reason: "Same shape as scans/pr/route.ts: recordEvent's message is the literal event kind; only the object as a whole is tainted (auth.org_id), and the logger serializes its context as JSON." },
   { file: "src/lib/seedFileSamples.ts", id: "command-injection", lineHash: "e5aa10162c73", line: 450, severity: "critical",
     reason: "This line is inside seedFileSamples.ts's demo/seed fixture content -- deliberately vulnerable-looking sample code used to seed demo scans, never executed as part of the application itself." },
-  { file: "src/lib/taint/sanitizers.ts", id: "hallucinated-method-call", lineHash: "f103599fc91b", line: 126, severity: "medium",
-    reason: "False positive: the detector cannot infer that `calleeText` is a `string` (it is a typed string parameter of sanitizerClears) and flags the real built-in String.prototype.split() as hallucinated. Confirmed a genuine built-in at this call site." },
   { file: "src/lib/scanner.ts", id: "hallucinated-method-call", lineHash: "22a5d5b840fa", line: 1646, severity: "medium",
     reason: "False positive: the detector cannot infer an array-index expression's (e.g. arr[i], match[1]) element type and defaults to flagging real built-in String/Array/Object methods (.trim(), .split(), .toLowerCase(), .sort(), .charCodeAt(), etc.) as hallucinated. Confirmed a genuine built-in at this call site." },
   { file: "src/lib/seedFileSamples.ts", id: "hallucinated-method-call", lineHash: "c214a36398b3", line: 499, severity: "medium",
@@ -98,4 +96,9 @@ export const FP_BASELINE: FpBaselineEntry[] = [
   { file: "src/lib/jwt.ts", id: "jwt-none-alg", lineHash: "ba3a2f2a74f7", line: 14, severity: "critical",
     reason: "Reviewed: decodeJwtPayload is a documented decode-only helper (its header comment says it does NOT verify the signature and must only be used on tokens already verified via supabase.auth.getUser(), to read extra claims such as session_id). It is never used as an authorization decision on its own." },
   // Added with the Java BOLA PrincipalState work: same known array-index type-inference gap as the entries above.
+  // Added with the GitHub install-return flow (the wizard reads GitHub's ?installation_id=... when the person comes back).
+  { file: "src/app/onboarding/page.tsx", id: "ssrf", lineHash: "febcf18cc92f", line: 115, severity: "critical",
+    reason: "False positive: the request URL is the same-origin relative path /api/github-app/installation?id=<n> (authedFetch sends only to this app's own API, never to another host). The id comes from the address bar (GitHub's installation_id) but is used only after the lines above check it is digits-only (/^\\d+$/), so it cannot change the host or the path. The engine does not treat a regex test as a sanitizer." },
+  { file: "src/components/AuthGuard.tsx", id: "open-redirect", lineHash: "f400a09f622b", line: 35, severity: "medium",
+    reason: "False positive: the destination is the fixed same-site path /onboarding; only the current page's own query string (GitHub's installation_id and setup_action) is appended after the `?`, so the host and path cannot be changed by the input. A query string cannot turn a path into an external redirect." },
 ];
