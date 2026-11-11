@@ -9,7 +9,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import AuthGuard from "@/components/AuthGuard";
 import RiskBadge from "@/components/RiskBadge";
 import { authedFetch, isSeedMode } from "@/lib/useRealData";
@@ -18,6 +18,8 @@ import { useScansRealtime } from "@/lib/realtime";
 import { dailyActivity, historyStats, reviewedCount, supersededIds, type ScanRow } from "@/lib/scanHistory";
 import type { RiskLevel } from "@/types";
 import { LoadingBlock } from "@/components/Loading";
+import Tour, { TourButton, useTour } from "@/components/tour/Tour";
+import { SCANS_TOUR } from "@/lib/tour";
 
 const PERIODS = [{ k: "7", l: "7 days" }, { k: "30", l: "30 days" }, { k: "90", l: "90 days" }] as const;
 type Period = (typeof PERIODS)[number]["k"];
@@ -125,6 +127,12 @@ function ScansContent() {
   }, [filtered]);
   const filteredOut = (scans?.length ?? 0) - filtered.length;
 
+  // Guided tour: points at the first scan row (and its sign-off badge, if it has one); finishing it opens that scan.
+  const router = useRouter();
+  const tourScan = filtered.find(s => !superseded.has(s.scan_id));
+  const signoffScanId = filtered.find(s => !superseded.has(s.scan_id) && (s.high_crit_count ?? 0) > 0)?.scan_id;
+  const tour = useTour(SCANS_TOUR, !!tourScan);
+
   return (
     <AuthGuard>
       <div className="max-w-[1400px] mx-auto space-y-8 pb-16">
@@ -136,6 +144,8 @@ function ScansContent() {
               {updatedAt && <span className="text-gray-400"> · live, updated {updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>}
             </p>
           </div>
+          <div className="flex items-center gap-3">
+          {tour.available && tourScan && <TourButton onClick={tour.start} />}
           <div className="flex items-center gap-0.5 bg-gray-100 p-1 rounded-xl" role="group" aria-label="Period">
             {PERIODS.map(p => (
               <button key={p.k} onClick={() => setPeriod(p.k)} aria-pressed={period === p.k}
@@ -144,7 +154,9 @@ function ScansContent() {
               </button>
             ))}
           </div>
+          </div>
         </header>
+        {tour.active && <Tour def={SCANS_TOUR} onClose={tour.close} onFinish={() => { if (tourScan) router.push(`/pr/${tourScan.scan_id}`); }} />}
 
         {offline && <div className="section-card p-6 text-sm text-gray-600">Connect a repository to start scanning pull requests.</div>}
         {error && !scans && (
@@ -190,7 +202,7 @@ function ScansContent() {
               </div>
             </section>
 
-            <section aria-label="Scans" className="animate-fade-up section-card overflow-hidden">
+            <section aria-label="Scans" data-tour="scans-list" className="animate-fade-up section-card overflow-hidden">
               <div className="flex flex-wrap items-center gap-3 px-6 pt-5 pb-4 border-b border-gray-100">
                 <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search repo, branch, commit, #PR" aria-label="Search scans"
                   className="flex-1 min-w-[200px] text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200" />
@@ -219,7 +231,7 @@ function ScansContent() {
                       const total = s.high_crit_count ?? 0;
                       const done = reviewedCount(s, resolved);
                       return (
-                        <li key={s.scan_id}>
+                        <li key={s.scan_id} data-tour={s.scan_id === tourScan?.scan_id ? "scans-row" : undefined}>
                           <Link href={`/pr/${s.scan_id}`} className={`flex flex-wrap items-center gap-x-5 gap-y-2 px-6 py-4 hover:bg-indigo-50/30 transition-colors ${old ? "opacity-60" : ""}`}>
                             <div className="w-20 shrink-0"><RiskBadge level={s.overall_risk} /></div>
                             <div className="min-w-[200px] flex-1">
@@ -229,7 +241,7 @@ function ScansContent() {
                                 <span> · {s.branch} · <span className="font-mono">{s.commit_sha.slice(0, 7)}</span></span>
                               </p>
                             </div>
-                            <div className="shrink-0 w-40">
+                            <div className="shrink-0 w-40" data-tour={s.scan_id === signoffScanId ? "scans-signoff" : undefined}>
                               {old ? <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2 py-1 rounded-lg">Superseded by a newer push</span>
                                 : total === 0 ? <span className="text-xs text-gray-400">No high-risk files</span>
                                 : <span className={`text-xs font-bold px-2 py-1 rounded-lg ${done >= total ? "bg-emerald-50 text-emerald-700" : done ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700"}`}>

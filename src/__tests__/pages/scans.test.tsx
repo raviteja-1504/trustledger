@@ -8,7 +8,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 jest.mock("@/components/AuthGuard", () => ({ __esModule: true, default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1" } }) }));
 jest.mock("@/lib/realtime", () => ({ useScansRealtime: () => {} }));
-jest.mock("next/navigation", () => ({ useSearchParams: () => null }));
+jest.mock("next/navigation", () => ({ useSearchParams: () => null, useRouter: () => ({ push: jest.fn() }) }));
 
 const now = Date.now();
 const iso = (h: number) => new Date(now - h * 3600_000).toISOString();
@@ -57,6 +57,17 @@ describe("Scan history page", () => {
 
     fireEvent.change(screen.getByLabelText("Review"), { target: { value: "pending" } });
     expect(within(list).getAllByRole("link").map(a => a.getAttribute("href"))).toEqual(["/pr/push"]);
+  });
+
+  it("marks what the guided tour points at: the list, and the first current scan with its sign-off badge (not a superseded one)", async () => {
+    render(<ScansPage />);
+    const list = await screen.findByRole("region", { name: "Scans" }, WAIT);
+    expect(list).toHaveAttribute("data-tour", "scans-list");
+    const marked = (n: string) => Array.from(document.querySelectorAll(`[data-tour="${n}"]`));
+    expect(marked("scans-row")).toHaveLength(1);
+    expect(marked("scans-row")[0].querySelector("a")).toHaveAttribute("href", "/pr/new");
+    expect(marked("scans-signoff")).toHaveLength(1);
+    expect(marked("scans-signoff")[0]).toHaveTextContent("2/2 high-risk signed off");
   });
 
   it("a failed load shows an error, never demo scans", async () => {

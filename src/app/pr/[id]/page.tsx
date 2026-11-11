@@ -20,6 +20,8 @@ import { readLocalStatuses, recordLocalStatuses } from "@/lib/localStatuses";
 import { invalidateServerStatuses } from "@/lib/violationStatuses";
 import { formatDateTime, useTimezone } from "@/lib/timezone";
 import { useAuth } from "@/lib/auth";
+import Tour, { TourButton, useTour } from "@/components/tour/Tour";
+import { PR_TOUR } from "@/lib/tour";
 import { usePresence, initials } from "@/lib/presence";
 import AIAttributionBadge from "@/components/AIAttributionBadge";
 import { isSecuritySignal, realSeverity, realReachability, REACH_COLORS, REACH_LABEL, REACH_DESC, realRemediationUrgency, URGENCY_COLORS, URGENCY_LABEL, URGENCY_DESC } from "@/lib/signalClassification";
@@ -729,6 +731,7 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
             <Tip tip={ACTION_TIP.attest}>
               <button
                 onClick={e => { e.stopPropagation(); onRequestAttest(file); }}
+                data-tour="pr-attest"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all active:scale-95 shadow-sm bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-md"
               >
                 <ShieldIcon size={12} /> Attest
@@ -1089,6 +1092,7 @@ function PRDetailContent() {
   const [error,   setError]   = useState<string | null>(null);
   const [syncRetrying, setSyncRetrying] = useState(false);
   const { permissions: rolePerms, canAttestRisk, role, isDemo } = useRole();
+  const tour = useTour(PR_TOUR, !!scan);   // first visit: a short guide to reading the files and attesting
   /** A file someone linked here to attest, which this viewer's role can't sign off: shown read-only with a note. */
   const [viewOnly, setViewOnly] = useState<FileResult | null>(null);
   const canTriage = rolePerms.canTriage;
@@ -2092,9 +2096,11 @@ function PRDetailContent() {
           );
         })()}
 
+        {tour.active && <Tour def={PR_TOUR} onClose={tour.close} />}
+
         {/* ── Files table ────────────────────────────────────────────────── */}
         {scan && (
-          <div className="section-card animate-fade-up delay-100">
+          <div className="section-card animate-fade-up delay-100" data-tour="pr-files">
 
             {/* Table header + filter */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-5 py-4 border-b border-gray-100">
@@ -2123,7 +2129,8 @@ function PRDetailContent() {
                 </button>
                 </Tip>
               )}
-              <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg">
+              {tour.available && <TourButton onClick={tour.start} />}
+              <div className="flex items-center gap-0.5 bg-gray-100 p-0.5 rounded-lg" data-tour="pr-filters">
                 {([
                   ["high",       "Critical & High", null],
                   ["unattested", "Needs Attest",     unattested],

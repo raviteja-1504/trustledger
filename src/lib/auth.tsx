@@ -6,6 +6,7 @@ import {
 import type { User, Session } from "@supabase/supabase-js";
 import { claimBrowserState, clearUserBrowserState } from "./browserState";
 import { invitePasswordUrl, needsInvitePassword } from "./invitePassword";
+import { tourSeenOf, withTourSeen } from "./tour";
 import { supabase } from "./supabase";
 import { authedFetch } from "./useRealData";
 import { authLinkErrorCode, fullPageReplace, hasAuthCallbackParams } from "./authFlow";
@@ -35,6 +36,10 @@ interface AuthContextValue {
   passwordRecovery: boolean;
   /** Invited by email and has not chosen a password yet: must, before using the app (lib/invitePassword.ts). */
   invitePasswordPending: boolean;
+  /** Guided tours: only a real signed-in account has them (not demo mode). `tourSeen` = ids finished or skipped. */
+  tourEnabled: boolean;
+  tourSeen: string[];
+  markTourSeen: (id: string) => Promise<void>;
   clearPasswordRecovery: () => void;
   /** Leave a half-finished password reset: forget the reset state and sign the reset session out. */
   cancelPasswordRecovery: () => Promise<void>;
@@ -127,6 +132,7 @@ function makeDemoAuth(): AuthContextValue {
     loading: false,
     passwordRecovery:      false,
     invitePasswordPending: false,
+    tourEnabled: false, tourSeen: [], markTourSeen: async () => {},
     clearPasswordRecovery: () => {},
     cancelPasswordRecovery: async () => {},
     completePasswordReset: async () => ({ error: null, mfaRequired: false }),
@@ -175,6 +181,15 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   async function cancelPasswordRecovery() {
     clearPasswordRecovery();
     await signOut();
+  }
+
+  // Remember on the account that a tour was finished or skipped, so it is not shown again on any device.
+  async function markTourSeen(id: string) {
+    const next = withTourSeen(tourSeenOf(user), id);
+    try {
+      const { data, error } = await supabase.auth.updateUser({ data: { tour_seen: next } });
+      if (!error && data?.user) setUser(data.user);
+    } catch { /* not remembered: the tour may show once more, nothing breaks */ }
   }
 
   async function completePasswordReset(password: string) {
@@ -382,7 +397,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, invitePasswordPending: needsInvitePassword(user), clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword, signOut }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, invitePasswordPending: needsInvitePassword(user), tourEnabled: !!user, tourSeen: tourSeenOf(user), markTourSeen, clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -394,6 +409,7 @@ const _noopAuth: AuthContextValue = {
   user: null, session: null, profile: null, loading: false,
   passwordRecovery:      false,
   invitePasswordPending: false,
+  tourEnabled: false, tourSeen: [], markTourSeen: async () => {},
   clearPasswordRecovery: () => {},
   cancelPasswordRecovery: async () => {},
   completePasswordReset: async () => ({ error: null, mfaRequired: false }),
