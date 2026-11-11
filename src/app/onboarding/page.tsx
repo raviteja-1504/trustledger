@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 import { BrandMark } from "@/components/BrandLogo";
-import GithubAppGuide from "@/components/onboarding/GithubAppGuide";
 import { clearDoneSteps, firstUnfinishedIndex, loadDoneSteps, markStepDone, type WizardStep } from "@/lib/onboardingProgress";
 
 // ── Step definitions ──────────────────────────────────────────────────────────
@@ -101,6 +100,14 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   const [orgHandle,   setOrgHandle]   = useState(profile?.org_slug ?? "");
   const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? "");
   const [saving,  setSaving]  = useState(false);
+  // Is TrustLedger's GitHub App already set up on this deployment, and where does a customer install it?
+  const [info, setInfo] = useState<{ configured: boolean; install_url: string | null } | null>(null);
+  const [infoFailed, setInfoFailed] = useState(false);
+  const loadInfo = () => {
+    setInfoFailed(false);
+    authedFetch<{ configured: boolean; install_url: string | null }>("/api/github-app/info").then(setInfo).catch(() => setInfoFailed(true));
+  };
+  useEffect(() => { loadInfo(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
   async function save() {
     setSaving(true);
@@ -128,10 +135,43 @@ function GithubStep({ onNext }: { onNext: () => void }) {
           <GithubIcon />
         </div>
         <h2 className="text-xl font-black text-gray-900">Connect GitHub</h2>
-        <p className="text-sm text-gray-500 mt-1">Create the GitHub App, give TrustLedger its credentials, and install it on your repositories.</p>
+        <p className="text-sm text-gray-500 mt-1">Install the TrustLedger GitHub App on the repositories you want scanned.</p>
       </div>
 
-      <GithubAppGuide />
+      {infoFailed ? (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
+          <p className="text-sm text-amber-900">We couldn&apos;t check the GitHub connection just now.</p>
+          <button type="button" onClick={loadInfo} className="text-xs font-bold text-amber-900 underline underline-offset-2">Try again</button>
+        </div>
+      ) : !info ? (
+        <div className="h-24 rounded-2xl bg-gray-50 border border-gray-100 animate-pulse" aria-label="Checking the GitHub connection" />
+      ) : !info.configured ? (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
+          <p className="text-sm font-bold text-amber-900">TrustLedger isn&apos;t connected to GitHub yet</p>
+          <p className="text-xs text-amber-800 leading-relaxed">
+            The GitHub App is created once, by whoever runs this TrustLedger deployment. Ask them to finish that, then come back and click Install.
+          </p>
+          <a href="/setup/github-app" className="inline-block text-xs font-bold text-amber-900 underline underline-offset-2">
+            I run this deployment: set up the GitHub App →
+          </a>
+        </div>
+      ) : info.install_url ? (
+        <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 space-y-3">
+          <p className="text-sm font-bold text-indigo-900">Install the TrustLedger GitHub App</p>
+          <p className="text-xs text-indigo-800 leading-relaxed">
+            Click the button, choose your GitHub organisation, and select the repositories you want scanned. One repository is enough to start.
+          </p>
+          <a href={info.install_url} target="_blank" rel="noopener noreferrer"
+            className="block text-center text-sm font-bold text-white rounded-xl py-2.5" style={{ background: "#24292f" }}>
+            Install on GitHub →
+          </a>
+        </div>
+      ) : (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
+          <p className="text-sm text-amber-900">We couldn&apos;t get the GitHub install link just now.</p>
+          <button type="button" onClick={loadInfo} className="text-xs font-bold text-amber-900 underline underline-offset-2">Try again</button>
+        </div>
+      )}
 
       {/* Org details */}
       <div className="space-y-3">

@@ -71,6 +71,7 @@ async function handleConversion(code: string, origin: string): Promise<NextRespo
 </style></head>
 <body>
   <h1>✅ GitHub App "${data.slug}" created</h1>
+  <p class="warn"><b>Only use these values if this new app should be the one TrustLedger uses.</b> Creating the app changes nothing by itself. If TrustLedger already has a GitHub App, putting these into the environment replaces it, and the installations of the old app stop working. If this was a test, delete the app on GitHub (Settings &rarr; Developer settings &rarr; GitHub Apps &rarr; your app &rarr; Advanced &rarr; Delete).</p>
   <p class="warn">The private key below is shown <b>once</b> — copy these 3 values into Vercel env vars now
   (<code>GITHUB_APP_ID</code>, <code>GITHUB_APP_PRIVATE_KEY</code>, <code>GITHUB_WEBHOOK_SECRET</code>), then redeploy.</p>
 

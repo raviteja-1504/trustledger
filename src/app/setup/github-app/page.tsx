@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { authedFetch } from "@/lib/useRealData";
 
 /**
  * One-click GitHub App creation via the manifest flow.
@@ -10,6 +11,11 @@ import { useState } from "react";
 export default function GithubAppSetupPage() {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState<string | null>(null);
+  // Creating another app does not replace the one in use: only changing the GITHUB_APP_* environment variables does.
+  const [alreadySet, setAlreadySet] = useState(false);
+  useEffect(() => {
+    authedFetch<{ configured: boolean }>("/api/github-app/info").then(i => setAlreadySet(!!i.configured)).catch(() => {});
+  }, []);
 
   async function createApp() {
     setLoading(true);
@@ -48,6 +54,16 @@ export default function GithubAppSetupPage() {
           copy those into the project&apos;s environment variables.
         </p>
       </div>
+
+      {alreadySet && (
+        <div role="note" className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-1">
+          <p className="text-sm font-bold text-amber-900">This deployment already has a GitHub App</p>
+          <p className="text-xs text-amber-800 leading-relaxed">
+            You only need this page to replace it. Creating a new app changes nothing by itself; TrustLedger switches to it only if you put its credentials into the
+            <code className="font-mono"> GITHUB_APP_*</code> environment variables, and installations of the current app would then stop working. Customers never need this page: they click Install on GitHub.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-3">
         <button

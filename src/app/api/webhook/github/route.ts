@@ -84,6 +84,14 @@ async function handle(req: NextRequest) {
     annotateTrace({ org_id: orgId, repo: repoFullName, pr_number: prNumber });
     void recordEvent({ kind: "webhook.received", message: `pull_request.${action}`, data: { head_sha: headSha, branch, author: prAuthor, installation_id: installationId ?? null, org_matched: !!orgId } });
 
+    // The app is public, so anyone can install it. A pull request from an installation no TrustLedger organisation has claimed
+    // gets no check run, no comment and no scan: there is no organisation to save the results to or to count the scan against,
+    // and TrustLedger must not post on a stranger's pull requests or spend compute on them.
+    if (!orgId) {
+      void recordEvent({ kind: "webhook.ignored", message: "pull_request from an installation not linked to an organisation", data: { installation_id: installationId ?? null, repo: repoFullName } });
+      return NextResponse.json({ ok: true, skipped: true, reason: "installation_not_linked" });
+    }
+
     let checkRunId: number | null = null;
 
     // Create "in_progress" check run immediately so GitHub shows a spinner
