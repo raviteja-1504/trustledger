@@ -8,6 +8,10 @@
  *
  * Query params: code (unused — the app authenticates via its own JWT +
  * installation tokens, not user OAuth tokens), installation_id, setup_action.
+ *
+ * Where the person lands afterwards: back in the setup wizard while setup is unfinished (it shows where the app was
+ * installed and carries on), the dashboard once it is done. Settings has nothing about GitHub to show.
+ * setup_action=request (an organisation owner must approve the install; no installation_id) also goes to the wizard.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -23,8 +27,9 @@ function authCookieName(): string {
 
 export async function GET(req: NextRequest) {
   const installationId = req.nextUrl.searchParams.get("installation_id");
+  const setupAction = req.nextUrl.searchParams.get("setup_action") ?? "install";
   if (!installationId) {
-    return NextResponse.redirect(new URL("/settings?error=missing_installation_id", req.url));
+    return NextResponse.redirect(new URL(setupAction === "request" ? "/onboarding?setup_action=request" : "/onboarding?error=missing_installation_id", req.url));
   }
 
   const raw = req.cookies.get(authCookieName())?.value;
@@ -74,8 +79,10 @@ export async function GET(req: NextRequest) {
 
   if (upsertErr) {
     logger.error("Saving the GitHub App installation failed", { installation_id: installationId, detail: upsertErr.message });
-    return NextResponse.redirect(new URL("/settings?error=installation_save_failed", req.url));
+    return NextResponse.redirect(new URL("/onboarding?error=installation_save_failed", req.url));
   }
 
-  return NextResponse.redirect(new URL("/settings?github_app=connected", req.url));
+  const { data: org } = await db.from("organizations").select("onboarding_complete").eq("id", member.org_id).maybeSingle() as { data: { onboarding_complete?: boolean } | null };
+  if (org?.onboarding_complete) return NextResponse.redirect(new URL("/dashboard?github_app=connected", req.url));
+  return NextResponse.redirect(new URL(`/onboarding?github_app=connected&installation_id=${encodeURIComponent(installationId)}&setup_action=${encodeURIComponent(setupAction)}`, req.url));
 }

@@ -55,6 +55,8 @@ describe("setup wizard", () => {
       openGithubStep();
       const link = await screen.findByRole("link", { name: /Install on GitHub/ });
       expect(link).toHaveAttribute("href", "https://github.com/apps/trustledger/installations/new");
+      // same tab: GitHub sends the person back to the wizard, rather than leaving this tab behind
+      expect(link).not.toHaveAttribute("target");
       expect(screen.queryByText(/Create it for me in one click/)).toBeNull();
       expect(screen.queryByText(/GITHUB_APP_PRIVATE_KEY/)).toBeNull();
       expect(screen.queryByText(/isn.t connected to GitHub yet/)).toBeNull();
@@ -94,6 +96,12 @@ describe("setup wizard", () => {
       expect(await screen.findByText(/GitHub App installed on acme-corp/)).toBeInTheDocument();
       expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("acme-corp");
       expect(screen.queryByRole("link", { name: /^Install on GitHub/ })).toBeNull();
+    });
+
+    it("an error the install callback sends back is shown", async () => {
+      window.history.pushState({}, "", "/onboarding?error=installation_save_failed");
+      openGithubStep();
+      expect(await screen.findByText(/couldn.t save the connection/)).toBeInTheDocument();
     });
 
     it("an install that is waiting for an organisation owner's approval says so, rather than looking installed", async () => {

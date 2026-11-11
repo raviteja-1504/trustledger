@@ -108,6 +108,8 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (q.get("setup_action") === "request") setRequested(true);
+    if (q.get("error") === "installation_save_failed") setSaveError("GitHub installed the app, but we couldn't save the connection. Please try the install again.");
+    if (q.get("error") === "missing_installation_id") setSaveError("GitHub didn't send back the installation details. Please try the install again.");
     const id = q.get("installation_id");
     if (!id || !/^\d+$/.test(id)) return;
     authedFetch<{ login: string }>(`/api/github-app/installation?id=${id}`)
@@ -170,7 +172,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 space-y-1">
           <p className="text-sm font-bold text-emerald-900">✓ GitHub App installed on {installedOn}</p>
           <p className="text-xs text-emerald-800 leading-relaxed">Check the details below and continue. Open or update a pull request on one of the repositories you selected and it will be scanned.</p>
-          {info?.install_url && <a href={info.install_url} target="_blank" rel="noopener noreferrer" className="inline-block text-xs font-semibold text-emerald-900 underline underline-offset-2">Install on another account</a>}
+          {info?.install_url && <a href={info.install_url} className="inline-block text-xs font-semibold text-emerald-900 underline underline-offset-2">Install on another account</a>}
         </div>
       ) : infoFailed ? (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
@@ -195,7 +197,8 @@ function GithubStep({ onNext }: { onNext: () => void }) {
           <p className="text-xs text-indigo-800 leading-relaxed">
             Click the button, choose your GitHub organisation, and select the repositories you want scanned. One repository is enough to start.
           </p>
-          <a href={info.install_url} target="_blank" rel="noopener noreferrer"
+          {/* same tab: GitHub sends the person back here when the install is done */}
+          <a href={info.install_url}
             className="block text-center text-sm font-bold text-white rounded-xl py-2.5" style={{ background: "#24292f" }}>
             Install on GitHub →
           </a>
