@@ -71,8 +71,9 @@ function ClaimAdminCard() {
           try {
             await authedFetch("/api/claim-admin", { method: "POST" });
             setDone(true);
-          } catch {
-            alert("Could not claim admin. The org may already have an admin.");
+          } catch (err) {
+            // the server says why: someone else is the owner, an admin exists, or too many attempts
+            alert(err instanceof Error && err.message ? err.message : "Could not claim admin. The org may already have an admin.");
           } finally {
             setClaiming(false);
           }

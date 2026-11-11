@@ -1,19 +1,30 @@
 /**
  * POST /api/claim-admin
- * Promotes the caller to admin when the org has no admins (e.g. the user
- * ended up as developer/reviewer through an invite chain but is the
- * de-facto org owner).
- * Allowed when: caller belongs to the org AND there are 0 existing admins.
+ * Recovery path for an organisation that has NO admin (its admin was removed or deleted): promotes its owner.
+ *
+ * Allowed when ALL of these hold:
+ *  - the caller is a signed-in person (not an API key);
+ *  - the organisation has 0 admins;
+ *  - the caller is the organisation's OLDEST member, the one who created it. Before, ANY member of such an organisation
+ *    (a viewer, a developer) could make themselves admin; now everyone else is refused and told who to ask.
+ *
+ * Every claim is written to the audit log, and attempts are rate-limited.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey } from "../_middleware";
+import { checkRateLimit } from "@/lib/rateLimit";
+import { writeAuditLog } from "@/lib/audit";
+import { safeError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyApiKey(req);
   if (auth.error) return NextResponse.json({ error: auth.error }, { status: 401 });
   if (!auth.user_id) return NextResponse.json({ error: "user_required" }, { status: 400 });   // not for API keys
+
+  const rl = await checkRateLimit(auth.user_id, { limit: 5, windowMs: 60 * 60_000, prefix: "claim-admin" });
+  if (!rl.success) return NextResponse.json({ error: "too_many_attempts" }, { status: 429, headers: rl.headers });
 
   const db = createServiceClient();
 
@@ -31,12 +42,44 @@ export async function POST(req: NextRequest) {
     }, { status: 403 });
   }
 
-  // No admins — promote caller
-  await db
+  // The organisation's de-facto owner is its oldest member who has actually joined (an invitation nobody has accepted
+  // has no user yet). Only they may claim.
+  const { data: owner } = await db
+    .from("org_members")
+    .select("user_id")
+    .eq("org_id", auth.org_id)
+    .not("user_id", "is", null)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle() as { data: { user_id: string } | null };
+
+  if (!owner || owner.user_id !== auth.user_id) {
+    return NextResponse.json({
+      error: "not_the_owner",
+      message: "Only the organisation's first member can claim admin rights while it has no admin. Ask them, or contact support.",
+    }, { status: 403 });
+  }
+
+  // No admins and the caller is the owner: promote them
+  const { error: updateErr } = await db
     .from("org_members")
     .update({ role: "admin" })
     .eq("org_id", auth.org_id)
-    .eq("user_id", auth.user_id!);
+    .eq("user_id", auth.user_id);
+  if (updateErr) {
+    return safeError(updateErr, { code: "claim_admin_failed", message: "We couldn't make you an admin right now. Please try again." });
+  }
+
+  await writeAuditLog(db, {
+    org_id:        auth.org_id,
+    event_type:    "member_role_changed",
+    actor_id:      auth.user_id,
+    actor_email:   auth.actor_email ?? null,
+    resource_type: "org_member",
+    resource_id:   auth.user_id,
+    payload:       { via: "claim_admin", to: "admin" },
+  });
 
   return NextResponse.json({ ok: true });
 }
