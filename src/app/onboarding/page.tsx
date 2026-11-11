@@ -100,6 +100,20 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   const [orgHandle,   setOrgHandle]   = useState(profile?.org_slug ?? "");
   const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? "");
   const [saving,  setSaving]  = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // GitHub sends the person back here after installing, with ?installation_id=...: ask GitHub which account that is
+  const [installedOn, setInstalledOn] = useState<string | null>(null);
+  // setup_action=request: installed on an organisation whose owner must approve it first, so it is not installed yet
+  const [requested, setRequested] = useState(false);
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("setup_action") === "request") setRequested(true);
+    const id = q.get("installation_id");
+    if (!id || !/^\d+$/.test(id)) return;
+    authedFetch<{ login: string }>(`/api/github-app/installation?id=${id}`)
+      .then(r => { setInstalledOn(r.login); setOrgHandle(r.login); })
+      .catch(() => {});
+  }, []);
   // Is TrustLedger's GitHub App already set up on this deployment, and where does a customer install it?
   const [info, setInfo] = useState<{ configured: boolean; install_url: string | null } | null>(null);
   const [infoFailed, setInfoFailed] = useState(false);
@@ -111,21 +125,27 @@ function GithubStep({ onNext }: { onNext: () => void }) {
 
   async function save() {
     setSaving(true);
+    setSaveError(null);
     try {
-      await Promise.all([
-        orgHandle.trim() && authedFetch("/api/onboarding", {
-          method: "POST",
-          body: JSON.stringify({ action: "save_github_org", github_org: orgHandle.trim() }),
-        }).catch(() => {}),
-        githubLogin.trim() && authedFetch("/api/onboarding", {
-          method: "POST",
-          body: JSON.stringify({ action: "save_github_login", github_login: githubLogin.trim() }),
-        }).catch(() => {}),
-      ]);
-    } finally {
+      // Linking the organisation is what makes pull requests from it scanned: if it fails, do not move on as if it worked
+      await authedFetch("/api/onboarding", {
+        method: "POST",
+        body: JSON.stringify({ action: "save_github_org", github_org: orgHandle.trim() }),
+      });
+    } catch (e) {
+      const code = e instanceof Error ? e.message : "";
+      setSaveError(code === "github_org_taken"
+        ? "That GitHub organisation is already connected to another TrustLedger organisation. If it is yours, ask whoever connected it to remove it first."
+        : "We couldn't save that. Please try again.");
       setSaving(false);
-      onNext();
+      return;
     }
+    // the username is optional and only for the developer view: a failure here does not stop setup
+    if (githubLogin.trim()) {
+      await authedFetch("/api/onboarding", { method: "POST", body: JSON.stringify({ action: "save_github_login", github_login: githubLogin.trim() }) }).catch(() => {});
+    }
+    setSaving(false);
+    onNext();
   }
 
   return (
@@ -138,7 +158,21 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         <p className="text-sm text-gray-500 mt-1">Install the TrustLedger GitHub App on the repositories you want scanned.</p>
       </div>
 
-      {infoFailed ? (
+      {requested && !installedOn && (
+        <div role="note" className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-1">
+          <p className="text-sm font-bold text-amber-900">Your install request is waiting for approval</p>
+          <p className="text-xs text-amber-800 leading-relaxed">
+            You asked to install the app on a GitHub organisation you don&apos;t own, so GitHub sent the request to that organisation&apos;s owner. The app is not installed there until an owner approves it (GitHub &rarr; the organisation&apos;s Settings &rarr; GitHub Apps &rarr; Pending requests). Once approved, come back here, or install it on your own account instead.
+          </p>
+        </div>
+      )}
+      {installedOn ? (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 space-y-1">
+          <p className="text-sm font-bold text-emerald-900">✓ GitHub App installed on {installedOn}</p>
+          <p className="text-xs text-emerald-800 leading-relaxed">Check the details below and continue. Open or update a pull request on one of the repositories you selected and it will be scanned.</p>
+          {info?.install_url && <a href={info.install_url} target="_blank" rel="noopener noreferrer" className="inline-block text-xs font-semibold text-emerald-900 underline underline-offset-2">Install on another account</a>}
+        </div>
+      ) : infoFailed ? (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
           <p className="text-sm text-amber-900">We couldn&apos;t check the GitHub connection just now.</p>
           <button type="button" onClick={loadInfo} className="text-xs font-bold text-amber-900 underline underline-offset-2">Try again</button>
@@ -165,6 +199,10 @@ function GithubStep({ onNext }: { onNext: () => void }) {
             className="block text-center text-sm font-bold text-white rounded-xl py-2.5" style={{ background: "#24292f" }}>
             Install on GitHub →
           </a>
+          <p className="text-[11px] text-indigo-700 leading-snug">
+            GitHub installs on the account you are <strong>signed into in this browser</strong>: check the avatar at the top right of the GitHub page before you confirm.
+            To use a different account, <a href="https://github.com/logout" target="_blank" rel="noopener noreferrer" className="font-bold underline underline-offset-2">sign out of GitHub first</a>, then click Install again.
+          </p>
         </div>
       ) : (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
@@ -191,6 +229,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         </div>
       </div>
 
+      {saveError && <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">{saveError}</p>}
       <PrimaryBtn onClick={save} disabled={saving || !orgHandle.trim()}>
         {saving ? "Saving…" : "I've installed the app →"}
       </PrimaryBtn>

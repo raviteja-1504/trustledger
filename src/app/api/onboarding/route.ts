@@ -78,10 +78,16 @@ export async function POST(req: NextRequest) {
     const handle = body.github_org?.trim();
     if (!handle) return NextResponse.json({ error: "github_org_required" }, { status: 400 });
 
-    await db
+    // A GitHub organisation belongs to one TrustLedger organisation (its pull requests are routed by this handle): refuse a
+    // handle another organisation already holds, instead of failing quietly.
+    const { data: holder } = await db.from("organizations").select("id").eq("github_org", handle).neq("id", auth.org_id).maybeSingle();
+    if (holder) return NextResponse.json({ error: "github_org_taken" }, { status: 409 });
+
+    const { error: updErr } = await db
       .from("organizations")
       .update({ github_org: handle })
       .eq("id", auth.org_id);
+    if (updErr) return NextResponse.json({ error: (updErr as { code?: string }).code === "23505" ? "github_org_taken" : "save_failed" }, { status: (updErr as { code?: string }).code === "23505" ? 409 : 500 });
 
     return NextResponse.json({ ok: true });
   }

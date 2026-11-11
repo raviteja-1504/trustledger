@@ -5,9 +5,12 @@ jest.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: jest.fn
 jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_slug: "acme", role: "admin", name: "Ada" }, user: { id: "u1" } }) }));
 let githubInfo: unknown = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" };
 let githubInfoFails = false;
+let saveOrgError: string | null = null;
 jest.mock("@/lib/useRealData", () => ({
-  authedFetch: jest.fn(async (url: string) => {
+  authedFetch: jest.fn(async (url: string, opts?: { body?: string }) => {
     if (url === "/api/github-app/info") { if (githubInfoFails) throw new Error("boom"); return githubInfo; }
+    if (url.startsWith("/api/github-app/installation?id=")) return { login: "acme-corp" };
+    if (url === "/api/onboarding" && opts?.body?.includes("save_github_org") && saveOrgError) throw new Error(saveOrgError);
     return {};
   }),
   getAuthHeader: async () => ({}),
@@ -18,6 +21,7 @@ import OnboardingPage from "@/app/onboarding/page";
 beforeEach(() => {
   localStorage.removeItem("tl_onboarding_done"); push.mockClear();
   githubInfo = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" }; githubInfoFails = false;
+  saveOrgError = null; window.history.pushState({}, "", "/onboarding");
 });
 
 describe("setup wizard", () => {
@@ -54,6 +58,9 @@ describe("setup wizard", () => {
       expect(screen.queryByText(/Create it for me in one click/)).toBeNull();
       expect(screen.queryByText(/GITHUB_APP_PRIVATE_KEY/)).toBeNull();
       expect(screen.queryByText(/isn.t connected to GitHub yet/)).toBeNull();
+      // GitHub uses the account signed in on this browser: the wizard says so and links to sign out first
+      expect(screen.getByText(/signed into in this browser/)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /sign out of GitHub first/ })).toHaveAttribute("href", "https://github.com/logout");
     });
 
     it("no app set up yet: a short note and a link for whoever runs the deployment; the app-creation guide is not in the wizard", async () => {
@@ -79,6 +86,31 @@ describe("setup wizard", () => {
       openGithubStep();
       expect(await screen.findByText(/couldn.t check the GitHub connection/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    });
+
+    it("returning from GitHub after installing: shows where it was installed, fills in the organisation handle, hides the Install button", async () => {
+      window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
+      openGithubStep();
+      expect(await screen.findByText(/GitHub App installed on acme-corp/)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("acme-corp");
+      expect(screen.queryByRole("link", { name: /^Install on GitHub/ })).toBeNull();
+    });
+
+    it("an install that is waiting for an organisation owner's approval says so, rather than looking installed", async () => {
+      window.history.pushState({}, "", "/onboarding?setup_action=request");
+      openGithubStep();
+      expect(await screen.findByText(/waiting for approval/)).toBeInTheDocument();
+      expect(screen.queryByText(/GitHub App installed on/)).toBeNull();
+    });
+
+    it("a GitHub organisation another TrustLedger organisation holds: the error is shown and setup does not move on", async () => {
+      saveOrgError = "github_org_taken";
+      window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
+      openGithubStep();
+      await screen.findByText(/GitHub App installed on acme-corp/);
+      screen.getByRole("button", { name: /I've installed the app/ }).click();
+      expect(await screen.findByText(/already connected to another TrustLedger organisation/)).toBeInTheDocument();
+      expect(screen.getByText(/Step 2 of 5/)).toBeInTheDocument();
     });
   });
 });

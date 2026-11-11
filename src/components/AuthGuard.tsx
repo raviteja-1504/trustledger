@@ -25,6 +25,16 @@ export default function AuthGuard({ children }: { children: ReactNode }) {
   const pathname  = usePathname() ?? "";
   const checked   = useRef(false);
 
+  // GitHub sends a person back to the app's Setup URL after installing it, with ?installation_id=...&setup_action=...
+  // If that is some page other than the wizard (the dashboard, say), carry on to the wizard with the same details.
+  useEffect(() => {
+    if (SKIP_AUTH || loading || !user || pathname === "/onboarding") return;
+    const q = new URLSearchParams(window.location.search);
+    // setup_action=request: a member installed it on an organisation whose owner has not approved it yet (no installation_id)
+    const action = q.get("setup_action");
+    if (action && (q.get("installation_id") || action === "request")) fullPageReplace(`/onboarding?${q.toString()}`);
+  }, [loading, user, pathname]);
+
   // Check onboarding status once after the user + profile loads.
   // Only a brand-new organisation's creator is sent to /onboarding (lib/onboardingGate.ts); an admin joining an
   // organisation that already has members or scans is marked complete and never sees the flow.
