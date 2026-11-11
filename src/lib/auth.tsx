@@ -5,6 +5,7 @@ import {
 } from "react";
 import type { User, Session } from "@supabase/supabase-js";
 import { claimBrowserState, clearUserBrowserState } from "./browserState";
+import { invitePasswordUrl, needsInvitePassword } from "./invitePassword";
 import { supabase } from "./supabase";
 import { authedFetch } from "./useRealData";
 import { authLinkErrorCode, fullPageReplace, hasAuthCallbackParams } from "./authFlow";
@@ -32,6 +33,8 @@ interface AuthContextValue {
   profile:          OrgProfile | null;
   loading:          boolean;
   passwordRecovery: boolean;
+  /** Invited by email and has not chosen a password yet: must, before using the app (lib/invitePassword.ts). */
+  invitePasswordPending: boolean;
   clearPasswordRecovery: () => void;
   /** Leave a half-finished password reset: forget the reset state and sign the reset session out. */
   cancelPasswordRecovery: () => Promise<void>;
@@ -123,6 +126,7 @@ function makeDemoAuth(): AuthContextValue {
     profile: getDemoProfile(role),
     loading: false,
     passwordRecovery:      false,
+    invitePasswordPending: false,
     clearPasswordRecovery: () => {},
     cancelPasswordRecovery: async () => {},
     completePasswordReset: async () => ({ error: null, mfaRequired: false }),
@@ -174,7 +178,8 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function completePasswordReset(password: string) {
-    const { error } = await supabase.auth.updateUser({ password });
+    // password_set: an invited person who has chosen one is not asked again (lib/invitePassword.ts)
+    const { error } = await supabase.auth.updateUser({ password, data: { password_set: true } });
     if (error) return { error: error.message, mfaRequired: false };
     clearPasswordRecovery();
     // The reset link signed in a new session; make it the active one (otherwise the next API call is
@@ -205,6 +210,15 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
       console.warn("[loadProfile] error", e);
     }
   }
+
+  // The activation link in an invitation email signs the person in with no password and lands on whatever page Supabase is set
+  // to return to (possibly a public one). Take them straight to choosing a password, keeping where they landed.
+  useEffect(() => {
+    if (typeof window === "undefined" || loading || !user || passwordRecovery || !needsInvitePassword(user)) return;
+    const here = window.location.pathname;
+    if (here === "/login" || here.startsWith("/auth/callback")) return;
+    fullPageReplace(invitePasswordUrl(`${here}${window.location.search}`));
+  }, [loading, user, passwordRecovery]);
 
   // Emailed links (confirm sign-up, password reset) that Supabase couldn't complete — expired, already
   // used, or opened in a different browser than the one that requested them — otherwise fail silently on
@@ -368,7 +382,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword, signOut }}>
+    <AuthContext.Provider value={{ user, session, profile, loading, passwordRecovery, invitePasswordPending: needsInvitePassword(user), clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -379,6 +393,7 @@ function SupabaseAuthProvider({ children }: { children: ReactNode }) {
 const _noopAuth: AuthContextValue = {
   user: null, session: null, profile: null, loading: false,
   passwordRecovery:      false,
+  invitePasswordPending: false,
   clearPasswordRecovery: () => {},
   cancelPasswordRecovery: async () => {},
   completePasswordReset: async () => ({ error: null, mfaRequired: false }),

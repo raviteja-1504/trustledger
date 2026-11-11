@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -265,6 +265,7 @@ function ProductionLoginPage() {
     user, loading, passwordRecovery,
     signInWithGitHub, signInWithEmail, signUpWithEmail, resendConfirmation, resetPassword,
     clearPasswordRecovery, cancelPasswordRecovery, completePasswordReset, signOut,
+    invitePasswordPending,
   } = useAuth();
   const router       = useRouter();
   const searchParams = useSearchParams();
@@ -275,8 +276,20 @@ function ProductionLoginPage() {
   const [ssoEmail,   setSsoEmail]   = useState("");
   const [ssoBusy,    setSsoBusy]    = useState(false);
 
+  // An invited person MUST choose a password (components/AuthGuard.tsx sends them here from any page, and this page shows it
+  // however they arrived): the same screen as a password reset, with different wording. Once seen, the wording stays through
+  // the save, although the pending flag clears when it succeeds.
+  // `activated`: the password was just chosen and the person is being signed out to sign in with it. Until the sign-out lands
+  // the account still looks signed in with no password; without this the page would flip back to the choose-a-password screen
+  // or carry on into the app in that moment.
+  const [activated, setActivated] = useState(false);
+  const mustChoosePassword = !!user && invitePasswordPending && !activated;
+  const inviteFlow = useRef(searchParams?.get("setup") === "password");
+  if (mustChoosePassword) inviteFlow.current = true;
+  const inviteSetup = inviteFlow.current;
   const [mode, setMode] = useState<Mode>(() =>
-    errorParam && LINK_ERROR_CODES.has(errorParam) ? "forgot"
+    inviteSetup ? "set-password"
+    : errorParam && LINK_ERROR_CODES.has(errorParam) ? "forgot"
     : searchParams?.get("mode") === "signup" ? "signup"
     : "signin");
   const [newPass,    setNewPass]    = useState("");
@@ -307,16 +320,31 @@ function ProductionLoginPage() {
     setFormErr(RESET_EXPIRED);
   }, [loading, passwordRecovery, user, clearPasswordRecovery]);
 
+  // Signed in as an invited person with no password: the choose-a-password screen, whatever page they arrived on
+  useEffect(() => {
+    if (mustChoosePassword && mode !== "set-password" && mode !== "mfa") setMode("set-password");
+  }, [mustChoosePassword, mode]);
+
+  // Signed out after activating: back to normal, so the NEXT sign-in continues into the app
+  useEffect(() => { if (!user && activated) setActivated(false); }, [user, activated]);
+
+  // Nothing (left) to choose, or nobody signed in: leave the invite screen
+  useEffect(() => {
+    if (!inviteSetup || loading || passwordRecovery) return;
+    if (!user) setMode("signin");
+    else if (!invitePasswordPending && mode === "set-password" && !newPassOk) router.replace(next);
+  }, [inviteSetup, loading, user, invitePasswordPending, passwordRecovery, mode, newPassOk, next, router]);
+
   // Signed in (any route here: email, GitHub, a finished reset): ask for the 2FA code if this session
   // still needs it, otherwise continue to where the user was going.
   useEffect(() => {
-    if (!user || passwordRecovery || mode === "set-password" || mode === "mfa") return;
+    if (!user || passwordRecovery || mustChoosePassword || activated || mode === "set-password" || mode === "mfa") return;
     let cancelled = false;
     authedFetch<{ required: boolean; verified: boolean }>("/api/auth/2fa/login")
       .then(s => { if (!cancelled) { if (s.required && !s.verified) setMode("mfa"); else router.replace(next); } })
       .catch(() => { if (!cancelled) router.replace(next); });
     return () => { cancelled = true; };
-  }, [user, passwordRecovery, mode, next, router]);
+  }, [user, passwordRecovery, mustChoosePassword, activated, mode, next, router]);
 
   function switchMode(m: "signin" | "signup" | "forgot") {
     setMode(m); setFormErr(null); setFormOk(null); setNeedsConfirmation(false);
@@ -369,6 +397,15 @@ function ProductionLoginPage() {
     setBusy(false);
     if (error) { setFormErr(error); return; }
     if (mfaRequired) { setMode("mfa"); setFormOk("Password set. Now enter your two-factor code."); return; }
+    if (inviteSetup) {
+      // Activated. They sign in with the password they just chose, which is how they will come back every time.
+      const mail = user?.email ?? "";
+      setActivated(true);
+      await signOut();
+      switchMode("signin"); setShowEmail(true); setEmail(mail);
+      setFormOk("Your account is active. Sign in with your email and the password you just chose.");
+      return;
+    }
     setNewPassOk("Password set! Taking you to the dashboard…");
     setTimeout(() => router.replace(next), 1500);
   }
@@ -436,10 +473,12 @@ function ProductionLoginPage() {
         <AuthCard>
           <div className="flex flex-col items-center text-center gap-3">
             <BrandMark size={68} />
-            <Eyebrow>{isMfa ? "Step 2 of 2" : "Account recovery"}</Eyebrow>
-            <h1 className="text-3xl font-black tracking-tight">{isMfa ? "Two-factor authentication" : "Set your password"}</h1>
+            <Eyebrow>{isMfa ? "Step 2 of 2" : inviteSetup ? "Welcome to TrustLedger" : "Account recovery"}</Eyebrow>
+            <h1 className="text-3xl font-black tracking-tight">{isMfa ? "Two-factor authentication" : inviteSetup ? "Activate your account" : "Set your password"}</h1>
             <p className="text-base text-white/60 leading-relaxed">
-              {isMfa ? "Enter the 6-digit code from your authenticator app, or one of your backup codes." : "Choose a new password for your TrustLedger account."}
+              {isMfa ? "Enter the 6-digit code from your authenticator app, or one of your backup codes."
+                : inviteSetup ? "You were invited by email. Choose a password to activate your account. You will then sign in with it."
+                : "Choose a new password for your TrustLedger account."}
             </p>
           </div>
           {errBox}
@@ -461,8 +500,10 @@ function ProductionLoginPage() {
               <input type="password" placeholder="Confirm new password" aria-label="Confirm new password" value={newConfirm}
                 onChange={e => setNewConfirm(e.target.value)} required minLength={8} autoComplete="new-password"
                 className={inputCls} />
-              {primaryBtn("Set password & sign in", "Saving…")}
-              {quietLink("Cancel and go back to sign in", async () => { await cancelPasswordRecovery(); switchMode("signin"); })}
+              {primaryBtn(inviteSetup ? "Activate account" : "Set password & sign in", "Saving…")}
+              {inviteSetup
+                ? quietLink("Use a different account", async () => { await signOut(); switchMode("signin"); })
+                : quietLink("Cancel and go back to sign in", async () => { await cancelPasswordRecovery(); switchMode("signin"); })}
             </form>
           )}
         </AuthCard>

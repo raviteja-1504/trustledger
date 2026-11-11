@@ -202,3 +202,81 @@ describe("sign in / sign up forms", () => {
     expect(auth.signUpWithEmail).not.toHaveBeenCalled();
   });
 });
+
+describe("activating an invited account: choose a password, then sign in with it", () => {
+  const invitee = (over: Auth = {}) => baseAuth({ user: { id: "u", email: "ada@acme.test" }, invitePasswordPending: true, ...over });
+  const W = { timeout: 5000 };
+
+  it("shows the activation wording and no way to skip it", async () => {
+    params = { setup: "password", next: "/mine-1" };
+    auth = invitee();
+    render(<LoginPage />);
+    expect(await screen.findByRole("heading", { name: "Activate your account" }, W)).toBeInTheDocument();
+    expect(screen.getByText("Welcome to TrustLedger")).toBeInTheDocument();
+    expect(screen.getByText(/Choose a password to activate your account\. You will then sign in with it/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
+    expect(screen.queryByText(/Skip/i)).toBeNull();
+    expect(screen.queryByText("Account recovery")).toBeNull();
+    expect(replace).not.toHaveBeenCalledWith("/mine-1");
+  });
+
+  it("arriving on the sign-in page already signed in, with no ?setup, still shows it and does not continue into the app", async () => {
+    params = { next: "/mine-2" };
+    auth = invitee();
+    render(<LoginPage />);
+    expect(await screen.findByRole("heading", { name: "Activate your account" }, W)).toBeInTheDocument();
+    await new Promise(r => setTimeout(r, 100));
+    expect(replace).not.toHaveBeenCalledWith("/mine-2");
+    expect(authedFetch).not.toHaveBeenCalledWith("/api/auth/2fa/login");
+  });
+
+  it("choosing a password activates the account, signs them out and shows sign-in with their email filled in", async () => {
+    params = { setup: "password", next: "/pr/abc" };
+    auth = invitee();
+    render(<LoginPage />);
+    fireEvent.change(await screen.findByLabelText("New password", {}, W), { target: { value: "a-long-password" } });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "a-long-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Activate account" }));
+    await waitFor(() => expect(auth.completePasswordReset as jest.Mock).toHaveBeenCalledWith("a-long-password"));
+    await waitFor(() => expect(auth.signOut as jest.Mock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/Your account is active\. Sign in with your email and the password you just chose/, {}, W)).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("ada@acme.test", {}, W)).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalledWith("/pr/abc");     // not straight into the app: they sign in
+  });
+
+  it("mismatched passwords are refused", async () => {
+    params = { setup: "password" };
+    auth = invitee();
+    render(<LoginPage />);
+    fireEvent.change(await screen.findByLabelText("New password", {}, W), { target: { value: "a-long-password" } });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "another-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Activate account" }));
+    expect(await screen.findByText("Passwords do not match.", {}, W)).toBeInTheDocument();
+    expect(auth.completePasswordReset as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it("they can leave only by signing out (in case they are signed in as the wrong person)", async () => {
+    params = { setup: "password", next: "/mine-3" };
+    auth = invitee();
+    render(<LoginPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use a different account" }, W));
+    await waitFor(() => expect(auth.signOut as jest.Mock).toHaveBeenCalledTimes(1));
+    expect(replace).not.toHaveBeenCalledWith("/mine-3");
+  });
+
+  it("once a password is set (nothing left to choose): straight on, no screen", async () => {
+    params = { setup: "password", next: "/dashboard" };
+    auth = invitee({ invitePasswordPending: false });
+    render(<LoginPage />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/dashboard"));
+  });
+
+  it("nobody signed in: the ordinary sign-in, not a password screen with nothing to save", async () => {
+    params = { setup: "password" };
+    auth = baseAuth();
+    render(<LoginPage />);
+    expect(await screen.findByText("Welcome back", {}, W)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Activate your account" })).toBeNull();
+  });
+});

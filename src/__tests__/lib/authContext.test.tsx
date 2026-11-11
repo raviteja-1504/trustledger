@@ -48,7 +48,7 @@ it("completing a reset sets the password, clears the reset state and registers t
   await mount();
   let result: Awaited<ReturnType<typeof ctx.completePasswordReset>> | undefined;
   await act(async () => { result = await ctx.completePasswordReset("new-password-1"); });
-  expect(sb.updateUser).toHaveBeenCalledWith({ password: "new-password-1" });
+  expect(sb.updateUser).toHaveBeenCalledWith({ password: "new-password-1", data: { password_set: true } });
   expect(authedFetch).toHaveBeenCalledWith("/api/auth/bootstrap", { method: "POST" });
   expect(result).toEqual({ error: null, mfaRequired: false });
   expect(ctx.passwordRecovery).toBe(false);
@@ -100,4 +100,55 @@ it("leaves ordinary pages alone", async () => {
   await mount();
   expect(sb.initialize).not.toHaveBeenCalled();
   expect(replaceTo).not.toHaveBeenCalled();
+});
+
+describe("invited by email: must choose a password", () => {
+  const invited = (md: Record<string, unknown> = {}) => ({ access_token: "a", refresh_token: "r", expires_in: 3600, user: { id: "u", email: "ada@acme.test", invited_at: "2026-11-10T10:00:00Z", user_metadata: md } });
+
+  it("an invited person with no password is flagged until they set one; a person who signed up is never flagged", async () => {
+    await mount();
+    act(() => authCallback("SIGNED_IN", invited()));
+    expect(ctx.invitePasswordPending).toBe(true);
+    act(() => authCallback("USER_UPDATED", invited({ password_set: true })));
+    expect(ctx.invitePasswordPending).toBe(false);
+    // a "Not now" stored by an earlier build excuses nobody
+    act(() => authCallback("USER_UPDATED", invited({ password_prompt_dismissed: true })));
+    expect(ctx.invitePasswordPending).toBe(true);
+    act(() => authCallback("SIGNED_IN", { access_token: "a", refresh_token: "r", expires_in: 3600, user: { id: "u2", email: "b@acme.test" } }));
+    expect(ctx.invitePasswordPending).toBe(false);
+  });
+
+  it("there is no way to skip it: the context offers no dismissal", async () => {
+    await mount();
+    expect((ctx as unknown as Record<string, unknown>).dismissInvitePasswordPrompt).toBeUndefined();
+  });
+});
+
+describe("the activation link: wherever it lands, an invitee with no password is taken to choose one", () => {
+  const invited = (md: Record<string, unknown> = {}) => ({ access_token: "a", refresh_token: "r", expires_in: 3600, user: { id: "u", email: "ada@acme.test", invited_at: "2026-11-10T10:00:00Z", user_metadata: md } });
+
+  it("from any page, keeping where they landed", async () => {
+    window.history.replaceState({}, "", "/pr/abc?tab=files");
+    await mount();
+    act(() => authCallback("SIGNED_IN", invited()));
+    await waitFor(() => expect(replaceTo).toHaveBeenCalledWith("/login?setup=password&next=%2Fpr%2Fabc%3Ftab%3Dfiles"));
+  });
+
+  it("also from the home page, which is where the link lands when Supabase's Site URL is the site's root", async () => {
+    window.history.replaceState({}, "", "/");
+    await mount();
+    act(() => authCallback("SIGNED_IN", invited()));
+    await waitFor(() => expect(replaceTo).toHaveBeenCalledWith("/login?setup=password&next=%2F"));
+  });
+
+  it("not on the sign-in page itself (the screen is there), not once a password is set, not for someone who signed up", async () => {
+    window.history.replaceState({}, "", "/login?setup=password");
+    await mount();
+    act(() => authCallback("SIGNED_IN", invited()));
+    window.history.replaceState({}, "", "/dashboard");
+    act(() => authCallback("USER_UPDATED", invited({ password_set: true })));
+    act(() => authCallback("SIGNED_IN", { access_token: "a", refresh_token: "r", expires_in: 3600, user: { id: "u2", email: "b@acme.test" } }));
+    await new Promise(r => setTimeout(r, 50));
+    expect(replaceTo).not.toHaveBeenCalledWith(expect.stringContaining("setup=password"));
+  });
 });
