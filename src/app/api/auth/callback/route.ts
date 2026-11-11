@@ -6,8 +6,10 @@
  * in /api/github-app/manifest. Links the installation_id to the signed-in
  * user's org so scans/checks can look it up later.
  *
- * Query params: code (unused — the app authenticates via its own JWT +
- * installation tokens, not user OAuth tokens), installation_id, setup_action.
+ * Query params: code (one-time, from "Request user authorization during installation"), installation_id, setup_action.
+ * The installation_id in the URL can be edited by anyone, so it is linked only after GitHub confirms, through that
+ * code, that the person has access to it (lib/githubUserAuth.ts); an installation already linked to this same
+ * organisation is just refreshed. Anything unverifiable is refused.
  *
  * Where the person lands afterwards: back in the setup wizard while setup is unfinished (it shows where the app was
  * installed and carries on), the dashboard once it is done. Settings has nothing about GitHub to show.
@@ -17,6 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { getInstallationAccount } from "@/lib/github";
+import { verifyInstallationAccess } from "@/lib/githubUserAuth";
 import { logger } from "@/lib/logger";
 
 function authCookieName(): string {
@@ -61,6 +64,16 @@ export async function GET(req: NextRequest) {
 
   if (!member) {
     return NextResponse.redirect(new URL("/onboarding?error=no_org", req.url));
+  }
+
+  // Is this really the person's installation? (Not needed to refresh one this organisation already has.)
+  const { data: existing } = await db.from("github_installations").select("org_id").eq("installation_id", Number(installationId)).maybeSingle() as { data: { org_id: string } | null };
+  if (existing?.org_id !== member.org_id) {
+    const proof = await verifyInstallationAccess(req.nextUrl.searchParams.get("code"), Number(installationId));
+    if (!proof.ok) {
+      logger.warn("GitHub App installation not linked: could not verify access", { installation_id: installationId, reason: proof.reason, org_id: member.org_id });
+      return NextResponse.redirect(new URL(`/onboarding?error=installation_not_verified&why=${proof.reason}`, req.url));
+    }
   }
 
   let githubOrg = "unknown";

@@ -109,6 +109,9 @@ function GithubStep({ onNext }: { onNext: () => void }) {
     const q = new URLSearchParams(window.location.search);
     if (q.get("setup_action") === "request") setRequested(true);
     if (q.get("error") === "installation_save_failed") setSaveError("GitHub installed the app, but we couldn't save the connection. Please try the install again.");
+    if (q.get("error") === "installation_not_verified") setSaveError(q.get("why") === "not_configured"
+      ? "We couldn't confirm the GitHub installation because TrustLedger's GitHub sign-in isn't configured yet. Please contact support."
+      : "We couldn't confirm that this GitHub installation is yours, so it wasn't connected. Click Install on GitHub again and approve the install with your own GitHub account.");
     if (q.get("error") === "missing_installation_id") setSaveError("GitHub didn't send back the installation details. Please try the install again.");
     const id = q.get("installation_id");
     if (!id || !/^\d+$/.test(id)) return;

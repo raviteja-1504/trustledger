@@ -14,6 +14,8 @@ jest.mock("@/lib/supabase", () => ({
 }));
 const getInstallationAccount = jest.fn(async (_id: number) => "acme-corp");
 jest.mock("@/lib/github", () => ({ getInstallationAccount: (...a: unknown[]) => getInstallationAccount(...(a as [number])) }));
+const verify = jest.fn(async (..._a: unknown[]): Promise<{ ok: boolean; reason?: string }> => ({ ok: true }));
+jest.mock("@/lib/githubUserAuth", () => ({ verifyInstallationAccess: (...a: unknown[]) => verify(...a) }));
 jest.mock("@/lib/logger", () => ({ logger: { error: jest.fn(), info: jest.fn(), warn: jest.fn() } }));
 
 import { GET } from "@/app/api/auth/callback/route";
@@ -32,7 +34,7 @@ const seed = (complete: boolean) => {
     github_installations: [],
   });
 };
-beforeEach(() => { seed(false); getInstallationAccount.mockClear(); });
+beforeEach(() => { seed(false); getInstallationAccount.mockClear(); verify.mockClear(); verify.mockResolvedValue({ ok: true }); });
 
 describe("GitHub App install callback", () => {
   it("setup unfinished: back into the wizard, with the installation, and the installation is linked to the organisation", async () => {
@@ -53,6 +55,35 @@ describe("GitHub App install callback", () => {
 
   it("no installation id and no request: back to the wizard with an error it shows", async () => {
     expect((await call("")).path).toBe("/onboarding?error=missing_installation_id");
+  });
+
+  it("the installation is verified with the code from the URL before it is linked", async () => {
+    await call("?code=abc&installation_id=777&setup_action=install");
+    expect(verify).toHaveBeenCalledWith("abc", 777);
+  });
+
+  it("an installation the person cannot access (someone else's id, or no code) is NOT linked, and the wizard says why", async () => {
+    verify.mockResolvedValue({ ok: false, reason: "not_accessible" });
+    const r = await call("?code=abc&installation_id=999&setup_action=install");
+    expect(r.path).toBe("/onboarding?error=installation_not_verified&why=not_accessible");
+    const rows = ((await db.client.from("github_installations").select("*")) as unknown as { data: unknown[] }).data;
+    expect(rows).toHaveLength(0);
+    expect(getInstallationAccount).not.toHaveBeenCalled();
+  });
+
+  it("an installation another organisation already has cannot be taken over without proof", async () => {
+    db = fakeSupabase({ org_members: [{ org_id: "org-1", user_id: "u1" }], organizations: [{ id: "org-1", onboarding_complete: false }], github_installations: [{ org_id: "org-victim", installation_id: 555, github_org: "victim" }] });
+    verify.mockResolvedValue({ ok: false, reason: "no_code" });
+    expect((await call("?installation_id=555&setup_action=install")).path).toContain("installation_not_verified");
+    const rows = ((await db.client.from("github_installations").select("*")) as unknown as { data: Array<{ org_id: string }> }).data;
+    expect(rows).toEqual([expect.objectContaining({ org_id: "org-victim" })]);
+  });
+
+  it("refreshing an installation this organisation already has needs no new proof", async () => {
+    db = fakeSupabase({ org_members: [{ org_id: "org-1", user_id: "u1" }], organizations: [{ id: "org-1", onboarding_complete: true }], github_installations: [{ org_id: "org-1", installation_id: 555, github_org: "old" }] });
+    verify.mockResolvedValue({ ok: false, reason: "no_code" });
+    expect((await call("?installation_id=555&setup_action=update")).path).toBe("/dashboard?github_app=connected");
+    expect(verify).not.toHaveBeenCalled();
   });
 
   it("not signed in: the login page", async () => {
