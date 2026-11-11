@@ -34,7 +34,7 @@ const RISK_EMOJI: Record<string, string> = {
 };
 
 function verifySlackSignature(body: string, timestamp: string | null, signature: string | null, secret: string): boolean {
-  if (!timestamp || !signature || !secret) return !secret;
+  if (!timestamp || !signature || !secret) return false;   // no signing secret configured: nothing can be verified, so nothing is accepted
   // Reject requests older than 5 minutes
   if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) return false;
   const sigBase = `v0:${timestamp}:${body}`;
@@ -193,6 +193,11 @@ function handleHelp(appUrl: string) {
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // Slack is not a supported integration yet: findOrgBySlackTeam is a single-organisation shortcut (an env var, not the
+  // workspace), which is not safe for several customers. Off unless explicitly enabled (ENABLE_SLACK_COMMANDS=true).
+  if (process.env.ENABLE_SLACK_COMMANDS !== "true") {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   const rawBody  = await req.text();
   const timestamp = req.headers.get("x-slack-request-timestamp");
   const signature = req.headers.get("x-slack-signature");

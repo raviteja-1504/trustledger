@@ -108,13 +108,19 @@ async function postGitLabStatus(
 }
 
 export async function POST(req: NextRequest) {
+  // GitLab is not a supported integration (TrustLedger supports GitHub): the endpoint is off unless explicitly enabled
+  // (ENABLE_GITLAB_WEBHOOK=true), so an unconfigured deployment exposes nothing here.
+  if (process.env.ENABLE_GITLAB_WEBHOOK !== "true") {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   const rawBody  = await req.text();
   const token    = req.headers.get("x-gitlab-token") ?? "";
   const event    = req.headers.get("x-gitlab-event") ?? "";
   const secret   = process.env.GITLAB_WEBHOOK_TOKEN ?? "";
 
   // ── 1. Verify token ───────────────────────────────────────────────────────
-  if (secret && !safeEqual(token, secret)) {
+  // mandatory: with no token configured every request used to be accepted
+  if (!secret || !safeEqual(token, secret)) {
     return NextResponse.json({ error: "invalid_token" }, { status: 401 });
   }
 

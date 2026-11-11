@@ -32,7 +32,7 @@ const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 const MAX_FILES_READ = CAPS.providerFilesRead.value;
 
 function verifyBitbucketSignature(rawBody: string, signature: string | null, secret: string): boolean {
-  if (!signature || !secret) return !secret; // if no secret configured, allow all
+  if (!signature || !secret) return false;   // no secret configured: nothing can be verified, so nothing is accepted
   const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
   try { return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)); } catch { return false; }
 }
@@ -124,6 +124,11 @@ async function postBitbucketBuildStatus(
 }
 
 export async function POST(req: NextRequest) {
+  // Bitbucket is not a supported integration (TrustLedger supports GitHub): the endpoint is off unless explicitly enabled
+  // (ENABLE_BITBUCKET_WEBHOOK=true), so an unconfigured deployment exposes nothing here.
+  if (process.env.ENABLE_BITBUCKET_WEBHOOK !== "true") {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   const rawBody = await req.text();
   const sig     = req.headers.get("x-hub-signature-256") ?? req.headers.get("x-hub-signature");
   const event   = req.headers.get("x-event-key") ?? "";

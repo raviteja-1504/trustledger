@@ -24,7 +24,8 @@ export function verifyWebhookSignature(
   signature: string | null,
   secret: string,
 ): boolean {
-  if (!signature) return false;
+  // No secret configured: an HMAC with an empty key can be computed by anyone, so nothing is verified. Fail closed.
+  if (!signature || !secret) return false;
   const expected = `sha256=${crypto
     .createHmac("sha256", secret)
     .update(payload)
