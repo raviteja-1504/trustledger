@@ -3,8 +3,8 @@ import { filterOrgs, orgAttention, orgHealth, portfolioTotals, scanTrend, sortOr
 const NOW = new Date("2026-06-30T12:00:00Z");
 const daysAgo = (d: number) => new Date(NOW.getTime() - d * 86_400_000).toISOString();
 const org = (over: Partial<OrgMetrics> = {}): OrgMetrics => ({
-  plan: "growth", created_at: daysAgo(200), scans_30d: 40, scans_prev_30d: 40, scans_this_month: 40, open_violations: 3, open_critical: 0, overdue: 0,
-  member_count: 5, repo_count: 8, latest_risk: "LOW", latest_ai_pct: 0.2, last_scan: daysAgo(1), ...over,
+  plan: "free", created_at: daysAgo(200), scans_30d: 40, scans_prev_30d: 40, scans_this_month: 1, open_violations: 3, open_critical: 0, overdue: 0,
+  member_count: 1, repo_count: 1, latest_risk: "LOW", latest_ai_pct: 0.2, last_scan: daysAgo(1), ...over,
 });
 const texts = (o: OrgMetrics) => orgAttention(o, NOW).map(a => a.text);
 
@@ -28,15 +28,16 @@ describe("orgAttention", () => {
     expect(texts(org({ last_scan: null, created_at: daysAgo(30) }))).toEqual(["Repositories are connected but no scan has run"]);
     expect(texts(org({ last_scan: null, created_at: daysAgo(2) }))).toEqual([]);                  // give it a few days
   });
-  it("plan limits: info near the cap, warning at or over it", () => {
-    expect(texts(org({ plan: "starter", member_count: 4, repo_count: 2 }))).toEqual(["Members at 80% of the plan limit (4 of 5)"]);
-    expect(texts(org({ plan: "starter", member_count: 5, repo_count: 2 }))).toEqual(["Members at the plan limit (5)"]);
-    expect(texts(org({ plan: "starter", scans_this_month: 1_200, repo_count: 2, member_count: 2 }))).toEqual(["Scans over the plan limit (1200 of 1000)"]);
-    expect(orgAttention(org({ plan: "starter", member_count: 4, repo_count: 2 }), NOW)[0].level).toBe("info");
-    expect(orgAttention(org({ plan: "starter", member_count: 5, repo_count: 2 }), NOW)[0].level).toBe("warning");
+  it("plan limits: a warning at or over the cap", () => {
+    expect(texts(org({ scans_this_month: 2 }))).toEqual([]);                                        // 2 of 3 is below the 80% mark
+    expect(texts(org({ scans_this_month: 3 }))).toEqual(["Scans at the plan limit (3)"]);
+    expect(texts(org({ scans_this_month: 5 }))).toEqual(["Scans over the plan limit (5 of 3)"]);
+    expect(texts(org({ member_count: 2 }))).toEqual(["Members at the plan limit (2)"]);
+    expect(orgAttention(org({ scans_this_month: 3 }), NOW)[0].level).toBe("warning");
   });
-  it("enterprise is unlimited: no plan warnings however much is used", () => {
-    expect(texts(org({ plan: "enterprise", scans_this_month: 9e6, member_count: 900, repo_count: 900 }))).toEqual([]);
+  it("the one repository the free trial allows is not news; a second would be over the limit", () => {
+    expect(texts(org({ repo_count: 1 }))).toEqual([]);
+    expect(texts(org({ repo_count: 2 }))).toEqual(["Repositories over the plan limit (2 of 1)"]);
   });
   it("a sharp drop in scan activity is noted, but not from a tiny base", () => {
     expect(texts(org({ scans_prev_30d: 100, scans_30d: 40 }))).toEqual(["Scan activity down 60% on the previous 30 days"]);
@@ -53,7 +54,8 @@ describe("orgHealth", () => {
   it("watch for warnings, healthy when clear", () => {
     expect(h(org({ last_scan: daysAgo(20) }))).toBe("watch");
     expect(h(org())).toBe("healthy");
-    expect(h(org({ plan: "starter", member_count: 4, repo_count: 2 }))).toBe("healthy");               // an info note alone isn't a problem
+    expect(h(org({ scans_this_month: 3 }))).toBe("watch");                                               // at the limit is a warning
+    expect(h(org({ scans_prev_30d: 100, scans_30d: 40 }))).toBe("healthy");                              // an info note alone isn't a problem
   });
   it("inactive when scanning stopped long ago or never started; new in the first week", () => {
     expect(h(org({ last_scan: daysAgo(STALE_DAYS * 2) }))).toBe("inactive");

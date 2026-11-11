@@ -19,8 +19,8 @@ jest.setTimeout(30_000);
 const fetchMock = authedFetch as jest.Mock;
 const ago = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString();
 const org = (id: string, name: string, over: Record<string, unknown> = {}) => ({
-  id, slug: id, name, github_org: null, plan: "growth", created_at: ago(200), is_current: false,
-  scans_30d: 40, scans_prev_30d: 40, scans_this_month: 40, open_violations: 3, open_critical: 0, overdue: 0, member_count: 5, repo_count: 8,
+  id, slug: id, name, github_org: null, plan: "free", created_at: ago(200), is_current: false,
+  scans_30d: 40, scans_prev_30d: 40, scans_this_month: 1, open_violations: 3, open_critical: 0, overdue: 0, member_count: 1, repo_count: 1,
   latest_risk: "LOW", latest_ai_pct: 0.2, last_scan: ago(1), ...over,
 });
 const respond = (orgs: unknown[], total = orgs.length) => fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
@@ -66,13 +66,13 @@ describe("your own organisation (everyone)", () => {
     expect(screen.getByText("At risk")).toHaveAttribute("data-health", "at_risk");
   });
 
-  it("plan usage: a meter per quota, warning before the cap with a link to the plans", async () => {
-    respond([org("org-a", "Acme", { is_current: true, plan: "starter", scans_this_month: 900, repo_count: 2, member_count: 2 })]);
+  it("plan usage: a meter per quota, a message at the cap with a link to the usage page", async () => {
+    respond([org("org-a", "Acme", { is_current: true, plan: "free", scans_this_month: 3, repo_count: 1, member_count: 1 })]);
     await renderPage();
     const usage = within(screen.getByLabelText("Acme: plan usage"));
-    expect(usage.getByText("900 / 1,000")).toBeInTheDocument();
-    expect(usage.getByText(/100 of 1,000 scans left on your plan/)).toBeInTheDocument();
-    expect(usage.getByRole("link", { name: "See plans" })).toHaveAttribute("href", "/billing");
+    expect(usage.getByText("3 / 3")).toBeInTheDocument();
+    expect(usage.getByText(/At the limit: all 3 scans on your plan are used/)).toBeInTheDocument();
+    expect(usage.getAllByRole("link", { name: "See usage" })[0]).toHaveAttribute("href", "/billing");
   });
 
   it("a load failure says so and can be retried", async () => {
@@ -99,7 +99,7 @@ describe("a platform admin", () => {
   const portfolio = () => [
     org("org-a", "Acme", { is_current: true }),
     org("org-b", "Beta", { open_critical: 3, open_violations: 9, latest_risk: "CRITICAL" }),
-    org("org-c", "Gamma", { last_scan: ago(20), plan: "starter", member_count: 5, repo_count: 2, scans_this_month: 3 }),
+    org("org-c", "Gamma", { last_scan: ago(20), plan: "free", member_count: 2, repo_count: 1, scans_this_month: 1 }),
     org("org-d", "Delta", { last_scan: ago(90), scans_30d: 0 }),
   ];
 

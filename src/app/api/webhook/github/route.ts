@@ -18,6 +18,7 @@ import { verifyWebhookSignature, getInstallationToken, createCheckRun, updateChe
 import { enqueueScan } from "@/lib/queue";
 import { runWithTrace, annotateTrace, traceIdFrom, currentTrace } from "@/lib/trace";
 import { recordEvent } from "@/lib/opsEvents";
+import { checkScanAllowed } from "@/lib/planGate";
 import { reportServerError } from "@/lib/serverErrors";
 
 // Trace ID = GitHub's delivery GUID (X-GitHub-Delivery), the same ID shown under the App's "Recent Deliveries",
@@ -90,6 +91,22 @@ async function handle(req: NextRequest) {
     if (!orgId) {
       void recordEvent({ kind: "webhook.ignored", message: "pull_request from an installation not linked to an organisation", data: { installation_id: installationId ?? null, repo: repoFullName } });
       return NextResponse.json({ ok: true, skipped: true, reason: "installation_not_linked" });
+    }
+
+    // Plan limit (scans a month, repositories): over it, no scan is queued, and the check says why instead of failing silently.
+    const verdict = await checkScanAllowed(db, orgId, repoFullName);
+    if (!verdict.allowed) {
+      void recordEvent({ kind: "webhook.ignored", message: `plan limit: ${verdict.reason}`, data: { repo: repoFullName, head_sha: headSha } });
+      if (installationId) {
+        try {
+          const { token } = await getInstallationToken(installationId);
+          await createCheckRun(token, owner, repoName, {
+            name: "TrustLedger AI Governance", head_sha: headSha, status: "completed", conclusion: "neutral",
+            output: { title: verdict.title!, summary: verdict.summary! },
+          });
+        } catch { /* the check is a courtesy; the skip is what matters */ }
+      }
+      return NextResponse.json({ ok: true, skipped: true, reason: `plan_limit_${verdict.reason}` });
     }
 
     let checkRunId: number | null = null;
@@ -206,6 +223,17 @@ async function handle(req: NextRequest) {
     annotateTrace({ org_id: scan.org_id, pr_number: scan.pr_number });
     void recordEvent({ kind: "webhook.received", message: "check_run.rerequested", data: { head_sha: headSha, check_run_id: checkRunId } });
     const [owner, repoName] = repoFullName.split("/");
+    const rerunVerdict = await checkScanAllowed(createServiceClient(), scan.org_id, repoFullName);
+    if (!rerunVerdict.allowed) {
+      try {
+        const { token } = await getInstallationToken(scan.installation_id);
+        await updateCheckRun(token, owner, repoName, checkRunId, {
+          name: "TrustLedger AI Governance", status: "completed", conclusion: "neutral",
+          output: { title: rerunVerdict.title!, summary: rerunVerdict.summary! },
+        });
+      } catch { /* courtesy only */ }
+      return NextResponse.json({ ok: true, skipped: true, reason: `plan_limit_${rerunVerdict.reason}` });
+    }
     try {
       const { token } = await getInstallationToken(scan.installation_id);
       await updateCheckRun(token, owner, repoName, checkRunId, {

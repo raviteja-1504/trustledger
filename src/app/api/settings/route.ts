@@ -2,6 +2,7 @@
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole, requirePermission } from "../_middleware";
 import { writeAuditLog } from "@/lib/audit";
+import { checkMemberSlot } from "@/lib/planGate";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES, isAssignableRole } from "@/lib/memberRoles";
@@ -144,6 +145,10 @@ export async function POST(req: NextRequest) {
     if (!rl.success) {
       return NextResponse.json({ error: "too_many_invites" }, { status: 429, headers: rl.headers });
     }
+
+    // Plan limit on team size (counts members already invited too)
+    const seat = await checkMemberSlot(db, org_id);
+    if (!seat.allowed) return NextResponse.json({ error: "plan_limit_members", message: seat.message }, { status: 403 });
 
     // Send Supabase magic link invite
     const { data: invited, error: invErr } = await db.auth.admin.inviteUserByEmail(body.email, {

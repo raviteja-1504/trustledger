@@ -56,7 +56,7 @@ export function orgAttention(o: OrgMetrics, now: Date = new Date()): Attention[]
     const s = limitStatus(used, limit);
     const Noun = `${noun[0].toUpperCase()}${noun.slice(1)}`;
     if (s.level === "warn") out.push({ level: "info", text: `${Noun} at ${s.pct}% of the plan limit (${used} of ${limit})` });
-    else if (s.level === "full") out.push({ level: "warning", text: `${Noun} at the plan limit (${limit})` });
+    else if (s.level === "full" && noun !== "repositories") out.push({ level: "warning", text: `${Noun} at the plan limit (${limit})` });
     else if (s.level === "over") out.push({ level: "warning", text: `${Noun} over the plan limit (${used} of ${limit})` });
   }
 

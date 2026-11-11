@@ -25,6 +25,8 @@ jest.mock("@/lib/supabase", () => ({
     }) },
   }),
 }));
+// plan limits have their own tests; here the organisation has room for repositories
+jest.mock("@/lib/planGate", () => ({ ...jest.requireActual("@/lib/planGate"), repoSlotsLeft: async () => ({ left: null, limit: -1 }) }));
 jest.mock("@/lib/rateLimit", () => ({ checkRateLimit: async () => ({ success: true, reset: 0, headers: {} }) }));
 jest.mock("@/lib/cache", () => ({ cacheDel: async () => {}, cacheKeys: { dashboard: () => "d" }, cached: async (_k: string, _t: number, f: () => unknown) => f() }));
 let caller: Record<string, unknown> = {};

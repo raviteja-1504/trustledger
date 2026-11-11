@@ -36,9 +36,9 @@ describe("limitMessage", () => {
     expect(limitMessage("scans", limitStatus(1, -1))).toBeNull();
   });
   it("says how many are left when nearing the cap, and that you are at or over it", () => {
-    expect(limitMessage("scans", limitStatus(90, 100))).toBe("10 of 100 scans left on your plan. Consider upgrading before you reach it.");
-    expect(limitMessage("scans", limitStatus(100, 100))).toBe("At the limit: all 100 scans on your plan are used. Upgrade your plan to raise it.");
-    expect(limitMessage("scans", limitStatus(1_250, 1_000))).toBe("Over the limit: 1,250 scans against 1,000 on your plan. Upgrade your plan to raise it.");
+    expect(limitMessage("scans", limitStatus(90, 100))).toBe("10 of 100 scans left on your plan. Contact us before you reach it.");
+    expect(limitMessage("scans", limitStatus(100, 100))).toBe("At the limit: all 100 scans on your plan are used. Contact us to raise it.");
+    expect(limitMessage("scans", limitStatus(1_250, 1_000))).toBe("Over the limit: 1,250 scans against 1,000 on your plan. Contact us to raise it.");
   });
   it("can leave out the upgrade nudge", () => {
     expect(limitMessage("members", limitStatus(3, 3), { upgrade: false })).toBe("At the limit: all 3 members on your plan are used.");
@@ -47,18 +47,12 @@ describe("limitMessage", () => {
 });
 
 describe("plan limits", () => {
-  it("an unknown or missing plan gets the trial limits, the most restrictive", () => {
-    expect(planLimits("nonsense")).toBe(PLAN_LIMITS.trial);
-    expect(planLimits(null)).toBe(PLAN_LIMITS.trial);
-    expect(planLimits(undefined)).toBe(PLAN_LIMITS.trial);
+  it("the free trial is the only plan: any plan name, or none, gets it", () => {
+    expect(Object.keys(PLAN_LIMITS)).toEqual(["free"]);
+    for (const p of ["free", "starter", "enterprise", "nonsense", null, undefined]) expect(planLimits(p)).toBe(PLAN_LIMITS.free);
   });
-  it("plans only get roomier going up, and enterprise is unlimited", () => {
-    const order = ["trial", "starter", "growth"] as const;
-    for (const k of ["scans", "attestations", "repos", "members", "reports"] as const) {
-      expect(PLAN_LIMITS[order[0]][k]).toBeLessThan(PLAN_LIMITS[order[1]][k]);
-      expect(PLAN_LIMITS[order[1]][k]).toBeLessThan(PLAN_LIMITS[order[2]][k]);
-      expect(PLAN_LIMITS.enterprise[k]).toBe(-1);
-    }
+  it("it limits scans, repositories and members, never attesting, and carries no price", () => {
+    expect(PLAN_LIMITS.free).toEqual({ scans: 3, attestations: -1, repos: 1, members: 2, reports: 1 });
   });
 });
 

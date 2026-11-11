@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 
   // Build the insert object — omit onboarding_complete so the DB default
   // (false) is used; this avoids failures if the migration hasn't run yet.
-  const orgInsert: Record<string, unknown> = { slug, name, plan: "trial" };
+  const orgInsert: Record<string, unknown> = { slug, name, plan: "free" };
   if (github_org) orgInsert.github_org = github_org;
 
   const { data: org, error: orgErr } = await db

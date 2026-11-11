@@ -8,17 +8,18 @@
 
 // ── Plan quotas ─────────────────────────────────────────────────────────────
 
-export interface PlanLimits { scans: number; attestations: number; repos: number; members: number; reports: number; price: number }
+export interface PlanLimits { scans: number; attestations: number; repos: number; members: number; reports: number }
 
+/**
+ * The only plan for now: a free trial. Scans are what is limited; viewing and attesting existing scans is never blocked
+ * (attestations unlimited). Enforced by lib/planGate.ts. There are no prices: more is by contacting us.
+ */
 export const PLAN_LIMITS: Record<string, PlanLimits> = {
-  trial:      { scans:    100, attestations:   500, repos:  3, members:  3, reports:  5, price:    0 },
-  starter:    { scans:  1_000, attestations: 5_000, repos: 10, members:  5, reports: 12, price:  299 },
-  growth:     { scans: 10_000, attestations:50_000, repos: 50, members: 20, reports: 60, price:  999 },
-  enterprise: { scans:     -1, attestations:    -1, repos: -1, members: -1, reports: -1, price:    0 },
+  free: { scans: 3, attestations: -1, repos: 1, members: 2, reports: 1 },
 };
 
-/** The limits of a plan; an unknown plan is treated as the trial, the most restrictive. */
-export const planLimits = (plan: string | null | undefined): PlanLimits => PLAN_LIMITS[plan ?? ""] ?? PLAN_LIMITS.trial;
+/** The limits of a plan; any plan name is the free trial, the only one there is. */
+export const planLimits = (_plan?: string | null): PlanLimits => PLAN_LIMITS.free;
 
 /** Usage at or above this share of a limit is a warning. */
 export const WARN_AT = 0.8;
@@ -46,10 +47,10 @@ const n = (v: number) => v.toLocaleString("en-US");
 
 /** The sentence for a limit nearing or past its cap; null while there is plenty of room. */
 export function limitMessage(noun: string, s: LimitStatus, opts: { upgrade?: boolean } = {}): string | null {
-  const up = opts.upgrade === false ? "" : " Upgrade your plan to raise it.";
+  const up = opts.upgrade === false ? "" : " Contact us to raise it.";
   if (s.level === "over") return `Over the limit: ${n(s.used)} ${noun} against ${n(s.limit)} on your plan.${up}`;
   if (s.level === "full") return `At the limit: all ${n(s.limit)} ${noun} on your plan are used.${up}`;
-  if (s.level === "warn") return `${n(s.remaining ?? 0)} of ${n(s.limit)} ${noun} left on your plan.${opts.upgrade === false ? "" : " Consider upgrading before you reach it."}`;
+  if (s.level === "warn") return `${n(s.remaining ?? 0)} of ${n(s.limit)} ${noun} left on your plan.${opts.upgrade === false ? "" : " Contact us before you reach it."}`;
   return null;
 }
 

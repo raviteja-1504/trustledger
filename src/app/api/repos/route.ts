@@ -15,6 +15,7 @@ import { getInstallationToken, listInstallationRepos } from "@/lib/github";
 import { safeError } from "@/lib/errors";
 import { cacheDel, cacheKeys } from "@/lib/cache";
 import { writeAuditLog } from "@/lib/audit";
+import { repoSlotsLeft, UPGRADE_LINE } from "@/lib/planGate";
 
 /** Repos switched on/off or added change what the dashboard counts — drop its cached numbers right away. */
 async function invalidateDashboard(orgId: string) {
@@ -68,7 +69,11 @@ export async function POST(req: NextRequest) {
 
       const { data: existing } = await db.from("repositories").select("repo_full_name").eq("org_id", org_id) as { data: Array<{ repo_full_name: string }> | null };
       const known = new Set((existing ?? []).map(r => r.repo_full_name));
-      const fresh = [...found].filter(([name]) => !known.has(name));
+      let fresh = [...found].filter(([name]) => !known.has(name));
+      // Plan limit: connect only as many as the plan has room for, and say so.
+      const slots = await repoSlotsLeft(db, org_id);
+      const overLimit = slots.left !== null && fresh.length > slots.left ? fresh.length - slots.left : 0;
+      if (slots.left !== null) fresh = fresh.slice(0, slots.left);
       if (fresh.length > 0) {
         const { error: insErr } = await db
           .from("repositories")
@@ -82,7 +87,10 @@ export async function POST(req: NextRequest) {
           payload: { source: "github_import", count: fresh.length, repos: fresh.slice(0, 100).map(([name]) => name) },
         });
       }
-      return NextResponse.json({ added: fresh.length, already_connected: found.size - fresh.length, total: found.size });
+      return NextResponse.json({
+        added: fresh.length, already_connected: known.size ? found.size - fresh.length - overLimit : 0, total: found.size,
+        ...(overLimit > 0 ? { not_added_plan_limit: overLimit, message: `Your plan covers ${slots.limit} repositor${slots.limit === 1 ? "y" : "ies"}, so ${overLimit} more ${overLimit === 1 ? "was" : "were"} not connected. ${UPGRADE_LINE}` } : {}),
+      });
     } catch (err) {
       return safeError(err, { code: "import_failed", message: "We couldn't import repositories from GitHub. Check that the TrustLedger GitHub App is still installed." });
     }
@@ -92,6 +100,15 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({})) as { repo_full_name?: string; default_branch?: string };
   const name = (body.repo_full_name ?? "").trim();
   if (!REPO_RE.test(name)) return NextResponse.json({ error: "invalid_repo", message: "Use the owner/name form, e.g. my-org/payments-api." }, { status: 400 });
+
+  // Plan limit: a repository that is not connected yet needs a free slot.
+  const { data: already } = await db.from("repositories").select("id").eq("org_id", org_id).eq("repo_full_name", name).maybeSingle() as { data: unknown };
+  if (!already) {
+    const slots = await repoSlotsLeft(db, org_id);
+    if (slots.left !== null && slots.left <= 0) {
+      return NextResponse.json({ error: "plan_limit_repos", message: `Your plan covers ${slots.limit} repositor${slots.limit === 1 ? "y" : "ies"} and ${slots.limit === 1 ? "it is" : "they are"} in use. ${UPGRADE_LINE}` }, { status: 403 });
+    }
+  }
 
   const { data, error: insErr } = await db
     .from("repositories")

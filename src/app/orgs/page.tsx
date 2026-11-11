@@ -25,10 +25,7 @@ type ApiOrg = OrgMetrics & { id: string; slug: string; name: string; github_org:
 type OrgView = ListedOrg & { is_current: boolean };
 
 const RISK_COLOR: Record<string, string> = { CRITICAL: "#ef4444", HIGH: "#f97316", MEDIUM: "#f59e0b", LOW: "#22c55e", UNKNOWN: "#94a3b8" };
-const PLAN_BADGE: Record<string, { bg: string; text: string }> = {
-  trial: { bg: "#fef3c7", text: "#92400e" }, starter: { bg: "#eff6ff", text: "#1d4ed8" },
-  growth: { bg: "#f0fdf4", text: "#15803d" }, enterprise: { bg: "#ede9fe", text: "#6d28d9" },
-};
+const PLAN_BADGE = { bg: "#fef3c7", text: "#92400e" };   // the only plan: the free trial
 const HEALTH_STYLE: Record<OrgHealth, string> = {
   at_risk: "bg-rose-50 text-rose-700 ring-rose-200", watch: "bg-amber-50 text-amber-800 ring-amber-200",
   healthy: "bg-emerald-50 text-emerald-700 ring-emerald-200", inactive: "bg-gray-100 text-gray-600 ring-gray-200", new: "bg-sky-50 text-sky-700 ring-sky-200",
@@ -55,7 +52,7 @@ function Metric({ label, value, sub, tip, tone }: { label: string; value: React.
 }
 
 function OrgCard({ org, tz }: { org: OrgView; tz: string }) {
-  const plan = PLAN_BADGE[org.plan] ?? PLAN_BADGE.starter;
+  const plan = PLAN_BADGE;
   const riskCol = RISK_COLOR[org.latest_risk] ?? "#94a3b8";
   const trend = scanTrend(org.scans_30d, org.scans_prev_30d);
   const lim = planLimits(org.plan);
@@ -72,7 +69,7 @@ function OrgCard({ org, tz }: { org: OrgView; tz: string }) {
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-base font-black text-gray-900">{org.name}</h2>
             {org.is_current && <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-700 ring-1 ring-indigo-200">Your organisation</span>}
-            <span className="rounded-full px-2 py-0.5 text-[10px] font-bold capitalize" style={{ background: plan.bg, color: plan.text }}>{org.plan}</span>
+            <span className="rounded-full px-2 py-0.5 text-[10px] font-bold capitalize" style={{ background: plan.bg, color: plan.text }}>Free trial</span>
             <Tip tip={HEALTH_TIP[org.health]}>
               <span tabIndex={0} data-health={org.health} className={`cursor-help rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 focus:outline-none focus-visible:ring-2 ${HEALTH_STYLE[org.health]}`}>{HEALTH_LABEL[org.health]}</span>
             </Tip>
@@ -138,7 +135,7 @@ export default function OrgsPage() {
   const [health, setHealth] = useState<OrgHealth | "all">("all");
   const [sort, setSort] = useState<OrgSortKey>("attention");
   const [showNew, setShowNew] = useState(false);
-  const [newOrg, setNewOrg] = useState({ slug: "", name: "", github_org: "", plan: "starter" });
+  const [newOrg, setNewOrg] = useState({ slug: "", name: "", github_org: "" });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const isPlatformAdmin = profile?.role === "platform_admin";
@@ -151,7 +148,7 @@ export default function OrgsPage() {
       // Demo mode: the current organisation only
       if (orgSlug && orgName) {
         const o: ApiOrg = {
-          id: orgId ?? "demo", slug: orgSlug, name: orgName, github_org: null, plan: "growth", is_current: true,
+          id: orgId ?? "demo", slug: orgSlug, name: orgName, github_org: null, plan: "free", is_current: true,
           created_at: new Date(Date.now() - 30 * 86_400_000).toISOString(), scans_30d: 171, scans_prev_30d: 140, scans_this_month: 96,
           open_violations: 12, open_critical: 2, overdue: 1, member_count: 6, repo_count: 9, latest_risk: "CRITICAL", latest_ai_pct: 0.61,
           last_scan: new Date(Date.now() - 3_600_000).toISOString(),
@@ -177,7 +174,7 @@ export default function OrgsPage() {
     try {
       await authedFetch("/api/orgs", { method: "POST", body: JSON.stringify(newOrg) });
       setShowNew(false);
-      setNewOrg({ slug: "", name: "", github_org: "", plan: "starter" });
+      setNewOrg({ slug: "", name: "", github_org: "" });
       await load();                                        // the new organisation, with its real (empty) numbers
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : "We couldn't create that organisation. Please try again.");
@@ -252,13 +249,6 @@ export default function OrgsPage() {
                 <span className="mb-1 block text-xs font-semibold text-gray-600">GitHub organisation handle</span>
                 <input value={newOrg.github_org} onChange={e => setNewOrg(p => ({ ...p, github_org: e.target.value }))} placeholder="acme-corp"
                   className="w-full rounded-xl border border-gray-200 px-3.5 py-2.5 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-xs font-semibold text-gray-600">Plan</span>
-                <select value={newOrg.plan} onChange={e => setNewOrg(p => ({ ...p, plan: e.target.value }))}
-                  className="w-full rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
-                  {["trial", "starter", "growth", "enterprise"].map(p => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
-                </select>
               </label>
             </div>
             {createError && <p role="alert" className="text-xs font-semibold text-rose-600">{createError}</p>}

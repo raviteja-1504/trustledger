@@ -10,11 +10,11 @@ describe("LimitMeter", () => {
     expect(screen.queryByText(/left on your plan|Over the limit|At the limit/)).toBeNull();
   });
 
-  it("warns from 80% with how many are left and a way to the plans", () => {
+  it("warns from 80% with how many are left and a way to the usage page", () => {
     const { container } = render(<LimitMeter label="Members" noun="members" used={17} limit={20} />);
     expect(container.firstElementChild).toHaveAttribute("data-level", "warn");
     expect(screen.getByText(/3 of 20 members left on your plan/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "See plans" })).toHaveAttribute("href", "/billing");
+    expect(screen.getByRole("link", { name: "See usage" })).toHaveAttribute("href", "/billing");
   });
 
   it("says plainly when the cap is reached, and when it is passed", () => {
@@ -37,7 +37,7 @@ describe("LimitMeter", () => {
   it("without an upgrade link the nudge is left out entirely", () => {
     render(<LimitMeter label="Members" noun="members" used={20} limit={20} upgradeHref={null} />);
     expect(screen.getByText(/At the limit: all 20 members on your plan are used\./)).toBeInTheDocument();
-    expect(screen.queryByText(/Upgrade your plan/)).toBeNull();
+    expect(screen.queryByText(/Contact us/)).toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
   });
 });

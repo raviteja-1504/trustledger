@@ -14,8 +14,8 @@ jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile }) }));
 jest.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams() }));
 let usage: Record<string, number> = {};
 jest.mock("@/lib/useRealData", () => ({ isSeedMode: () => false, authedFetch: jest.fn(async () => ({
-  org: { name: "Acme", plan: "starter", member_since: "2026-01-01T00:00:00Z" },
-  limits: { scans: 1000, attestations: 5000, repos: 10, members: 5, reports: 20, price: 99 },
+  org: { name: "Acme", plan: "free", member_since: "2026-01-01T00:00:00Z" },
+  limits: { scans: 1000, attestations: 5000, repos: 10, members: 5, reports: 20 },
   usage: { scans_this_month: 100, attestations_this_month: 100, repos_active: 3, members: 2, reports_this_month: 1, scans_all_time: 5, attestations_all_time: 5, ...usage },
   period: { start: "2026-11-01T00:00:00Z", end: "2026-11-08T00:00:00Z" },
 })) }));

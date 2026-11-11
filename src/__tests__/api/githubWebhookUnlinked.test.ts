@@ -64,3 +64,34 @@ describe("GitHub webhook: pull_request from an installation nobody has claimed",
     expect(enqueueScan).toHaveBeenCalledWith(expect.objectContaining({ org_id: "org-1", repo_full_name: "acme/app", pr_number: 7 }));
   });
 });
+
+describe("GitHub webhook: the free trial's limits", () => {
+  const scansThisMonth = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `s${i}`, org_id: "org-1", created_at: new Date().toISOString() }));
+  const setup = (scans: number, repos: string[] = ["acme/app"]) => {
+    db = fakeSupabase({
+      organizations: [{ id: "org-1", github_org: "acme", plan: "free" }], webhook_deliveries: [],
+      scans: scansThisMonth(scans), repositories: repos.map((r, i) => ({ id: `r${i}`, org_id: "org-1", repo_full_name: r, is_active: true })),
+    });
+  };
+
+  it("under the limit: scanned as usual", async () => {
+    setup(2);
+    expect((await send(body("acme"))).body).toMatchObject({ queued: true });
+    expect(enqueueScan).toHaveBeenCalled();
+  });
+
+  it("at 3 scans this month: no scan is queued, and the check says so (neutral, not a failure) instead of failing silently", async () => {
+    setup(3);
+    const r = await send(body("acme"));
+    expect(r.body).toMatchObject({ ok: true, skipped: true, reason: "plan_limit_scans" });
+    expect(enqueueScan).not.toHaveBeenCalled();
+    expect(createCheckRun).toHaveBeenCalledTimes(1);
+    expect(createCheckRun.mock.calls[0]).toEqual(expect.arrayContaining([expect.objectContaining({ status: "completed", conclusion: "neutral", output: expect.objectContaining({ title: "Plan limit reached: 3 of 3 scans used this month" }) })]));
+  });
+
+  it("a second repository is not scanned", async () => {
+    setup(0, ["acme/other"]);
+    expect((await send(body("acme"))).body).toMatchObject({ skipped: true, reason: "plan_limit_repos" });
+    expect(enqueueScan).not.toHaveBeenCalled();
+  });
+});

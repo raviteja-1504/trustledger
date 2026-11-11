@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
 
   const { data: org, error: insErr } = await db
     .from("organizations")
-    .insert({ slug: body.slug, name: body.name, github_org: body.github_org ?? null, plan: body.plan ?? "starter" })
+    .insert({ slug: body.slug, name: body.name, github_org: body.github_org ?? null, plan: "free" })
     .select("id, slug, name")
     .single() as { data: { id: string; slug: string; name: string } | null; error: unknown };
 

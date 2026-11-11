@@ -41,7 +41,7 @@ export function LimitMeter({ label, noun, used, limit, upgradeHref = "/billing",
       {msg && (
         <p className={`text-[11px] font-medium ${TEXT[s.level]}`}>
           {msg}{" "}
-          {upgradeHref && <Link href={upgradeHref} className="font-bold underline underline-offset-2">See plans</Link>}
+          {upgradeHref && <Link href={upgradeHref} className="font-bold underline underline-offset-2">See usage</Link>}
         </p>
       )}
     </div>

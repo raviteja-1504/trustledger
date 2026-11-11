@@ -56,6 +56,8 @@ export const TENANT_SCOPE_EXCEPTIONS: TenantScopeException[] = [
   { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "update", keys: ["email","user_id"], why: "own-membership" },
   { file: "src/app/api/auth/bootstrap/route.ts", table: "org_members", op: "update", keys: ["user_id"], why: "own-membership" },
   { file: "src/app/api/auth/callback/route.ts", table: "org_members", op: "select", keys: ["user_id"], why: "own-membership" },
+  // Is this installation already linked to the caller's own org? Read only to decide whether proof of access is needed; the result is compared with the caller's org id.
+  { file: "src/app/api/auth/callback/route.ts", table: "github_installations", op: "select", keys: ["installation_id"], why: "credential-lookup" },
   { file: "src/app/api/cron/pipeline-health/route.ts", table: "ops_events", op: "delete", keys: ["created_at"], why: "system-job" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_configs", op: "select", keys: ["enabled","last_delivery_status","last_delivery_at"], why: "system-job" },
   { file: "src/app/api/cron/webhook-retry/route.ts", table: "webhook_configs", op: "update", keys: ["id"], why: "system-job" },

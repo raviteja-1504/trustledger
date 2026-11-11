@@ -26,6 +26,10 @@ jest.mock("@/lib/github", () => ({
   getAppPublicInfo: () => gh.getAppPublicInfo(),
 }));
 
+// The existing tests are about importing, toggling and adding, not about plan limits: unlimited here, the limits have their own tests below.
+let slots: { left: number | null; limit: number } = { left: null, limit: -1 };
+jest.mock("@/lib/planGate", () => ({ ...jest.requireActual("@/lib/planGate"), repoSlotsLeft: async () => slots }));
+
 import { GET, POST, PATCH } from "@/app/api/repos/route";
 import { GET as githubStatus } from "@/app/api/repos/github/route";
 
@@ -35,6 +39,7 @@ const req = (url: string, method = "GET", body?: unknown) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
+  slots = { left: null, limit: -1 };
   role = "admin";
   db = fakeSupabase({
     repositories: [
@@ -126,4 +131,34 @@ it("reports the GitHub App's installations and its install link", async () => {
   db = fakeSupabase({ github_installations: [] });
   gh.getAppPublicInfo.mockRejectedValueOnce(new Error("no key"));
   expect(await (await githubStatus(req("/api/repos/github"))).json()).toEqual({ installed: false, accounts: [], install_url: null });
+});
+
+describe("the free trial's repository limit", () => {
+  it("adding a new repository with no slot left is refused with a message; nothing is added", async () => {
+    slots = { left: 0, limit: 1 };
+    const res = await POST(req("/api/repos", "POST", { repo_full_name: "acme/new-repo" }));
+    expect(res.status).toBe(403);
+    const b = await res.json() as { error: string; message: string };
+    expect(b.error).toBe("plan_limit_repos");
+    expect(b.message).toMatch(/1 repository/);
+    expect(b.message).toMatch(/Contact us to upgrade/);
+    expect(rows("repositories").some(r => r.repo_full_name === "acme/new-repo")).toBe(false);
+  });
+
+  it("re-adding a repository that is already connected is not blocked", async () => {
+    slots = { left: 0, limit: 1 };
+    expect((await POST(req("/api/repos", "POST", { repo_full_name: "acme/payments-api" }))).status).toBe(200);
+  });
+
+  it("importing from GitHub connects only as many as there is room for, and says how many were left out", async () => {
+    gh.listInstallationRepos.mockImplementation(async () => [
+      { full_name: "n/a", default_branch: "main", private: false }, { full_name: "n/b", default_branch: "main", private: false }, { full_name: "n/c", default_branch: "main", private: false },
+    ]);
+    slots = { left: 1, limit: 1 };
+    const res = await POST(req("/api/repos?import=github", "POST"));
+    const b = await res.json() as { added: number; not_added_plan_limit?: number; message?: string };
+    expect(b.added).toBe(1);
+    expect(b.not_added_plan_limit).toBeGreaterThanOrEqual(2);
+    expect(b.message).toMatch(/Contact us to upgrade/);
+  });
 });

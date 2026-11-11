@@ -23,6 +23,7 @@ import { loadPolicy } from "@/lib/policy";
 import { computeTrustScore } from "@/lib/trustScore";
 import { useScansRealtime } from "@/lib/realtime";
 import { useAuth } from "@/lib/auth";
+import PlanBanner from "@/components/PlanBanner";
 import SetupBanner from "@/components/setup/SetupBanner";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/roles";
 import RoleGate from "@/components/RoleGate";
@@ -393,6 +394,8 @@ export default function DashboardPage() {
   return (
     <AuthGuard>
       <div className="max-w-[1400px] mx-auto space-y-10 pb-16">
+
+        <PlanBanner />
 
         {/* ── Header ── */}
         <header className="animate-fade-up flex flex-wrap items-end justify-between gap-4">
