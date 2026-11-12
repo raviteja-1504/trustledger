@@ -722,6 +722,8 @@ const DESERIALIZERS_PY = new Set([
 ]);
 const PY_LOG_METHODS = new Set(["debug", "info", "warning", "warn", "error", "critical", "exception", "fatal", "log"]);
 const PY_LOGGER_RECEIVER_RE = /^(?:logging|(?:self\.|app\.|current_app\.)?_?(?:\w*_)?(?:logger|log|LOGGER|LOG))$/;
+/** Response constructors whose body is not HTML (JSON, a redirect, a file, plain text): a variable holding one is not a string body. */
+const NON_HTML_RESPONSE_CTORS_PY = new Set(["JsonResponse", "django.http.JsonResponse", "jsonify", "flask.jsonify", "JSONResponse", "ORJSONResponse", "UJSONResponse", "PlainTextResponse", "json_response", "web.json_response", "redirect", "flask.redirect", "HttpResponseRedirect", "HttpResponsePermanentRedirect", "RedirectResponse", "send_file", "FileResponse", "StreamingHttpResponse"]);
 const XSS_RESPONSES_PY = new Set(["Response", "flask.Response", "make_response", "flask.make_response", "HttpResponse", "HTMLResponse", "Markup", "markupsafe.Markup", "mark_safe"]);
 const PATH_FUNCS_PY = new Set([
   "send_file", "FileResponse", "os.remove", "os.unlink", "os.rename", "os.listdir", "os.rmdir", "os.makedirs", "os.mkdir", "os.chmod",
@@ -3850,10 +3852,13 @@ export function scanAstTaintPython(
     collectAliases(root);
     // variables holding a Response object (returning one is not returning attacker HTML as a string)
     const responseObjects = new Set<string>();
+    // A response built by a NON-HTML constructor (JsonResponse, jsonify, a redirect, a file) is just as much a response object:
+    // `response = JsonResponse({"origin": origin}); response["X"] = origin; return response` returns JSON, not an HTML body.
     const hasResponseCtor = (n: SyntaxNode): boolean => {
       if (n.type === "call") {
         const f = n.childForFieldName("function");
-        if (f && XSS_RESPONSES_PY.has(calleeTextPy(f) ?? "")) return true;
+        const name = f ? (calleeTextPy(f) ?? "") : "";
+        if (f && (XSS_RESPONSES_PY.has(name) || NON_HTML_RESPONSE_CTORS_PY.has(name))) return true;
       }
       return n.namedChildren.some(c => !!c && hasResponseCtor(c));
     };

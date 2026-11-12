@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAuth } from "@/lib/auth";
 import { tourTarget, type TourDef } from "@/lib/tour";
 
@@ -40,6 +41,25 @@ export function TourButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * Bring `el` to the middle of the screen by scrolling VERTICALLY only. Element.scrollIntoView scrolls every ancestor on both axes,
+ * including the app shell's `overflow: hidden` containers: when the target (a wide table, an Attest button at its far right) sat
+ * beyond the right edge, it shifted the whole page sideways and left it "not fitting the window". The page scrolls inside <main>,
+ * so find the nearest scrollable ancestor and change only its scrollTop.
+ */
+export function scrollVerticallyTo(el: HTMLElement) {
+  let box: HTMLElement | null = el.parentElement;
+  while (box && !(box.scrollHeight > box.clientHeight && /(auto|scroll)/.test(getComputedStyle(box).overflowY))) box = box.parentElement;
+  const scroller = box ?? (document.scrollingElement as HTMLElement | null);
+  if (!scroller) return;
+  const er = el.getBoundingClientRect();
+  const top = box ? box.getBoundingClientRect().top : 0;
+  const height = box ? box.clientHeight : window.innerHeight;
+  // centred, or its top edge a little below the container's top when it is taller than the container
+  const delta = er.height >= height - 48 ? er.top - top - 24 : er.top - top - (height - er.height) / 2;
+  scroller.scrollTop += delta;
+}
+
 const find = (name: string) => (typeof document === "undefined" ? null : document.querySelector<HTMLElement>(tourTarget(name)));
 
 /** A spotlight on one element of the page with a short explanation, stepping through `def.steps`. */
@@ -57,12 +77,14 @@ export default function Tour({ def, onClose, onFinish }: { def: TourDef; onClose
     const t = step ? find(step.target) : null;
     if (!t) { setRect(null); return; }
     const r = t.getBoundingClientRect();
+    // beyond the left or right edge of the window (a far-right table column): nothing to point at, so say it in the middle
+    if (r.right <= 0 || r.left >= window.innerWidth) { setRect(null); return; }
     setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
   }, [step]);
 
   // bring the target into view, then follow it while the page scrolls or resizes
   useLayoutEffect(() => {
-    if (el) el.scrollIntoView?.({ block: "center", behavior: "auto" });
+    if (el) scrollVerticallyTo(el);
     measure();
   }, [el, measure]);
   useEffect(() => {
@@ -104,8 +126,12 @@ export default function Tour({ def, onClose, onFinish }: { def: TourDef; onClose
     style = { left: Math.max(12, (vw - w) / 2), top: Math.max(12, vh / 3), width: w };
   }
 
-  return (
-    <div className="fixed inset-0 z-[100]" role="dialog" aria-modal="true" aria-label="Guided tour">
+  // Rendered into <body>, not where the page put it: <main> has `contain: layout`, which makes it the containing block of `position: fixed`
+  // descendants. The overlay and the card were then placed against <main> (not the window) using window coordinates, and the card, offset
+  // by the sidebar's width, stretched <main>'s scrollable area: the whole page scrolled sideways while the tour was open.
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[100] overflow-hidden" role="dialog" aria-modal="true" aria-label="Guided tour">
       {/* dims the page, leaving the target lit; a click on the dimmed area does nothing */}
       {rect ? (
         <div aria-hidden className="absolute rounded-lg pointer-events-none transition-all duration-150"
@@ -119,7 +145,7 @@ export default function Tour({ def, onClose, onFinish }: { def: TourDef; onClose
           <h2 className="text-sm font-semibold text-gray-900">{step.title}</h2>
           <button type="button" onClick={onClose} aria-label="Skip the tour" className="text-gray-400 hover:text-gray-600 text-lg leading-none -mt-1">×</button>
         </div>
-        <p className="text-xs text-gray-600 leading-relaxed mt-1.5">{rect || !step.fallback ? step.body : step.fallback}</p>
+        <p className="text-xs text-gray-600 leading-relaxed mt-1.5">{rect || el || !step.fallback ? step.body : step.fallback}</p>
         <div className="flex items-center justify-between mt-3.5">
           <span className="text-[11px] text-gray-400 tabular-nums">{i + 1} of {steps.length}</span>
           <div className="flex items-center gap-2">
@@ -132,6 +158,7 @@ export default function Tour({ def, onClose, onFinish }: { def: TourDef; onClose
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

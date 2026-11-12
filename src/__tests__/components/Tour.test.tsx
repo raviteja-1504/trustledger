@@ -136,3 +136,43 @@ describe("<Tour> / useTour", () => {
     expect(screen.queryByText("T")).not.toBeInTheDocument();
   });
 });
+
+describe("<Tour> layout (the PR page scrolled sideways while the tour was open)", () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it("is rendered into <body>, outside the page: a `contain: layout` ancestor would turn `fixed` into 'relative to the page'", () => {
+    const { container } = render(<div style={{ contain: "layout" }}><Page /></div>);
+    const dialog = screen.getByRole("dialog", { name: "Guided tour" });
+    expect(container.contains(dialog)).toBe(false);
+    expect(dialog.parentElement).toBe(document.body);
+  });
+
+  it("brings the target into view by scrolling the page's scroller vertically only, never with scrollIntoView (which shifts every ancestor sideways too)", () => {
+    const rect = (top: number, height: number) => ({ top, height, left: 10, right: 60, width: 50, bottom: top + height, x: 10, y: top, toJSON: () => ({}) });
+    jest.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return (this.dataset.tour === "a" ? rect(900, 40) : this.tagName === "MAIN" ? rect(50, 500) : rect(0, 0)) as DOMRect;
+    });
+    jest.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) { return this.tagName === "MAIN" ? 500 : 0; });
+    jest.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) { return this.tagName === "MAIN" ? 3000 : 0; });
+    const scrollIntoView = jest.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    function InMain() {
+      const tour = useTour(TWO, true);
+      return <main data-testid="main" style={{ overflowY: "auto" }}><div data-tour="a">A</div>{tour.active && <Tour def={TWO} onClose={tour.close} />}</main>;
+    }
+    render(<InMain />);
+    const main = screen.getByTestId("main");
+    expect(main.scrollTop).toBe(900 - 50 - (500 - 40) / 2);   // centred in the scroller
+    expect(main.scrollLeft).toBe(0);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it("a target beyond the window's right edge (a far-right table column) is not pointed at: the step still reads, in the middle", () => {
+    jest.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return (this.dataset.tour === "a" ? { top: 100, height: 30, left: 5000, right: 5100, width: 100, bottom: 130, x: 5000, y: 100, toJSON: () => ({}) } : { top: 0, height: 0, left: 0, right: 0, width: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    });
+    render(<Page />);
+    expect(screen.getByText("About A")).toBeInTheDocument();
+  });
+});

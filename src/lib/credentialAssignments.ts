@@ -98,3 +98,55 @@ export function findCredentialAssignment(line: string, filePath: string, o: Cred
   }
   return null;
 }
+
+// ── A literal that BECOMES a credential by how it is used ─────────────────────────────────────────────────────
+// The name-based rule above refuses weak and placeholder-looking values (`password123`, `dev-secret`), because beside a
+// documentation example those are not secrets. These three uses are different: the code itself says the literal IS the
+// credential, whatever it looks like --
+//   process.env.JWT_SECRET ?? "dev-secret"         the fallback every deployment that forgets the variable will run with
+//   bcrypt.hash("Password123!", 10)                the password of an account created by the code
+//   const DEMO_PASSWORD = "Password123!"           a password constant (a seed script's default account)
+// They were the largest group of credentials the RealVuln benchmark labelled and we missed: 100+ cases in 140 repositories.
+
+export interface LiteralCredentialUse { label: string; severity: "high"; detail: string }
+
+const SECRET_ENV_NAME = "\\w*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASS|CREDENTIAL)\\w*";
+const ENV_FALLBACK_JS_RE = new RegExp(String.raw`\bprocess\.env\.(${SECRET_ENV_NAME})\s*(?:\|\||\?\?)\s*(["'\x60])([^"'\x60\n$]{6,200})\2`);
+const ENV_FALLBACK_PY_RE = new RegExp(String.raw`\bos\.(?:environ\.get|getenv)\(\s*["'](${SECRET_ENV_NAME})["']\s*,\s*(["'])([^"'\n]{6,200})\2\s*\)|\bos\.environ\.get\(\s*["'](${SECRET_ENV_NAME})["']\s*\)\s*or\s*(["'])([^"'\n]{6,200})\5|\benv(?:\.str)?\(\s*["'](${SECRET_ENV_NAME})["']\s*,\s*default\s*=\s*(["'])([^"'\n]{6,200})\8`);
+const PASSWORD_HASH_LITERAL_RE = /\b(?:bcrypt(?:js)?\.hash(?:Sync)?|argon2\.hash|hashPassword|hash_password|generate_password_hash|make_password|encodePassword|passwordEncoder\.encode)\s*\(\s*(["'`])([^"'`\n$]{4,100})\1/;
+const PASSWORD_CONSTANT_RE = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?(\w*(?:password|passwd|pwd)\w*)\s*(?::\s*[\w.]+\s*)?=\s*(["'])([^"'\n$]{6,100})\2\s*;?\s*(?:\/\/.*|#.*)?$/i;
+/** A password-named constant that holds wording, a rule or a field name rather than a password. */
+/** Words that make a password-named constant wording, a rule or a field name rather than a password (whole words of the name: "ADMIN" is not "min"). */
+const PASSWORD_TEXT_WORDS = new Set(["message", "messages", "error", "errors", "label", "labels", "text", "placeholder", "prompt", "title", "hint", "regex", "pattern", "rule", "rules", "policy", "requirement", "requirements", "min", "max", "minimum", "maximum", "field", "fields", "input", "type", "mode", "status", "msg", "help", "description", "invalid", "required", "mismatch", "header", "param", "params", "selector", "class", "route", "url", "path", "reset", "forgot", "change", "strength", "length", "key"]);
+const passwordNameIsText = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[^A-Za-z0-9]+/).some(w => PASSWORD_TEXT_WORDS.has(w.toLowerCase()));
+const NOT_A_VALUE_RE = /^(?:true|false|none|null|undefined|production|development|staging|prod|dev|test|local|localhost|default|info|debug|warn|error)$/i;
+
+function plausibleLiteral(value: string, o: CredentialOptions): boolean {
+  if (/\s/.test(value) || /\$\{|\{\{|%\(|^[$@%<{(\[/~.]|;$/.test(value)) return false;
+  if (/^(?:https?|file|ftp):/i.test(value) || NOT_A_VALUE_RE.test(value) || ENV_VAR_NAME_RE.test(value)) return false;
+  if (/^(?:\*+|x{4,}|\.{3,})$/i.test(value) || /<[^>]*>|your[-_ ]|insert|replace|redacted/i.test(value)) return false;
+  return !o.isPlaceholder?.(value);
+}
+
+/** The credential a line hard-codes by how it uses a literal, or null. */
+export function findLiteralCredentialUse(line: string, o: CredentialOptions = {}): LiteralCredentialUse | null {
+  if (line.length > MAX_LINE) return null;
+  const env = ENV_FALLBACK_JS_RE.exec(line) ?? ENV_FALLBACK_PY_RE.exec(line);
+  if (env) {
+    const name = env[1] ?? env[4] ?? env[7] ?? "", value = env[3] ?? env[6] ?? env[9] ?? "";
+    if (name && !NOT_A_CREDENTIAL_KEY_RE.test(name) && plausibleLiteral(value, o)) {
+      return { label: "Hardcoded fallback secret", severity: "high",
+        detail: `${name} falls back to a literal when the variable is unset, so every deployment that misses the setting runs with this publicly visible value — fail at startup instead of using a default` };
+    }
+  }
+  const hashed = PASSWORD_HASH_LITERAL_RE.exec(line);
+  if (hashed && plausibleLiteral(hashed[2], { ...o, isPlaceholder: undefined })) {
+    return { label: "Hardcoded password", severity: "high",
+      detail: "A literal is hashed as the password of an account the code creates — a default login that ships in the source; generate it at install time or read it from the environment" };
+  }
+  const c = PASSWORD_CONSTANT_RE.exec(line);
+  if (c && !passwordNameIsText(c[1]) && !NOT_A_CREDENTIAL_KEY_RE.test(c[1]) && plausibleLiteral(c[3], { ...o, isPlaceholder: undefined })) {
+    return { label: "Hardcoded password", severity: "high", detail: `Password constant "${c[1]}" holds a literal — move it to an environment variable or secrets manager` };
+  }
+  return null;
+}

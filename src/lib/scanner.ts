@@ -133,7 +133,7 @@ import { findRubyTaintFindings } from "./rubyTaint";
 import { tameLongRuns } from "./scanInputLimits";
 import { summarizeAIAttribution, type AIAttributionSummary } from "./aiAttributionSummary";
 import { buildEvidenceGroups, type AIEvidenceReport } from "./aiEvidenceGroups";
-import { findCredentialAssignment } from "./credentialAssignments";
+import { findCredentialAssignment, findLiteralCredentialUse } from "./credentialAssignments";
 import { findCredentialFileFormats } from "./credentialFiles";
 
 // Registered once at module load (detectorRegistry.register() throws on a
@@ -388,6 +388,28 @@ function getFileTypeMeta(filePath: string): FileTypeMeta {
   };
 }
 
+// ── Vendored third-party libraries ───────────────────────────────────────────
+// A copy of jQuery, SweetAlert2 or DataTables checked into the repository is not the customer's code: its own
+// `.innerHTML = value` is the library's internals, and the customer cannot fix it here. Minified bundles were already
+// recognised by their shape (analyzeFile's looksMinified); an UNminified copy was not, so every `.html(...)` inside a
+// vendored jquery.js was reported as the customer's cross-site scripting. This recognises vendored files by where they
+// live, by a known library's own name and version banner, or by an unmistakable library file name. The findings are kept
+// as evidence ("third_party") and excluded from the file's risk, the same as minified code.
+const VENDOR_DIR_RE = /(?:^|\/)(?:node_modules|bower_components|jspm_packages|vendor|vendors|third[_-]?party|3rd[_-]?party)\//i;
+const ASSET_LIB_DIR_RE = /(?:^|\/)(?:static|public|assets|wwwroot|webroot|resources)\/(?:[\w.-]+\/)*(?:plugins?|vendors?|libs?|libraries|lib)\//i;
+const VENDOR_LIBRARIES = "jquery(?:[ -]ui)?|bootstrap|lodash|underscore(?:\\.js)?|moment(?:\\.js)?|angularjs|popper(?:\\.js)?|modernizr|html5 ?shiv|select2|datatables|sweetalert2?|summernote|codemirror|handlebars(?:\\.js)?|mustache(?:\\.js)?|knockout|zepto|backbone(?:\\.js)?|chart\\.js|highcharts|flot|bootstrap-datepicker|owl carousel|slick|fancybox|tinymce|ckeditor";
+const VENDOR_BANNER_RE = new RegExp(`^\\s*(?:/\\*[!*]?|\\*)\\s*(?:@(?:license|preserve)\\s+)?(?:${VENDOR_LIBRARIES})\\b[^\\n]{0,40}?\\bv?\\d+\\.\\d+`, "im");
+const VENDOR_BASENAME_RE = /^(?:jquery(?:[-.](?:ui|slim|migrate|validate|mobile))?|bootstrap(?:[-.]bundle)?|lodash|underscore|moment|angular|popper|modernizr|html5(?:shiv)?|select2|datatables|sweetalert2?|summernote(?:-bs\d)?|codemirror|handlebars|mustache|knockout|zepto|backbone)(?:[-.]v?\d[\w.]*)?(?:[-.](?:min|slim|bundle|full|umd|production))*\.(?:js|css)$/i;
+
+export function looksVendored(filePath: string, content: string): boolean {
+  const p = filePath.replace(/\\/g, "/");
+  if (VENDOR_DIR_RE.test(p) || ASSET_LIB_DIR_RE.test(p)) return true;
+  const base = p.slice(p.lastIndexOf("/") + 1);
+  if (VENDOR_BASENAME_RE.test(base)) return true;
+  // the library's own banner, near the top of the file (never the whole file: an app file may mention jQuery in a comment)
+  return /\.(?:js|jsx|mjs|css)$/i.test(base) && VENDOR_BANNER_RE.test(content.slice(0, 800));
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // SECURITY DETECTORS
 // All patterns compiled once at module level for throughput.
@@ -631,7 +653,9 @@ const PLACEHOLDER_TOKEN_RE = /(.)\1{9,}|x{6,}|\*{4,}|\.{3}|<[a-z_ -]{2,30}>|your
 // *other* (fictional) findings for the demo UI and test suite — not this
 // app's own runtime logic. Secret-shaped strings here are intentional demo
 // content, not exposed credentials.
-const DEMO_DATA_FILE_RE = /\/(seed|seedFileSamples|vulnCatalog)\.ts$|\/secrets\/page\.tsx$/;
+// TrustLedger's own demo-data modules, which hold sample "leaked" secrets on purpose. Anchored to lib/ and app/secrets/: this used to match ANY
+// */seed.ts, so a customer's prisma/seed.ts or scripts/seed.ts (where default passwords and keys live) was never checked for secrets.
+const DEMO_DATA_FILE_RE = /(?:^|\/)lib\/(?:seed|seedFileSamples|vulnCatalog)\.ts$|(?:^|\/)app\/secrets\/page\.tsx$/;
 
 // Shannon entropy — detects novel secret formats that match no known pattern
 function shannonEntropy(s: string): number {
@@ -1869,6 +1893,17 @@ function findSecrets(lines: string[], file_path: string): ScanIndicator[] {
       found.push({ id:"hardcoded-secret", label: hit.passwordLike ? "Hardcoded password" : "Hardcoded secret", severity: hit.passwordLike ? "critical" : "high", line:i+1, detail:`Credential assigned to "${hit.key}" — move it to an environment variable or secrets manager` });
     }
   }
+  // A literal that is a credential by how the code uses it: `process.env.X ?? "dev-secret"`, `bcrypt.hash("Password123!")`,
+  // `const DEMO_PASSWORD = "..."` (credentialAssignments.ts). Not in test files; not on a line already reported.
+  if (!isTestFile && !infraFile) {
+    const reported = new Set(found.map(f => f.line));
+    for (let i = 0; i < lines.length; i++) {
+      if (reported.has(i + 1) || isNonExecutableLine(lines[i])) continue;
+      const use = findLiteralCredentialUse(lines[i], { isPlaceholder: v => PLACEHOLDER_VALUE_RE.test(v) || DUMMY_SECRET_VALUES_RE.test(v) });
+      if (!use) continue;
+      found.push({ id:"hardcoded-secret", label: use.label, severity: use.severity, line:i+1, detail: use.detail });
+    }
+  }
   // Files that exist to hold credentials (.netrc, .pgpass, .npmrc, htpasswd, Docker config...): the format is the evidence.
   if (!isTestFile && !infraFile) {
     const reported = new Set(found.map(f => f.line));
@@ -2893,6 +2928,15 @@ function findNamedTaintCommandInjectionGo(lines: string[]): ScanIndicator[] {
 // overlap with at all. Any framework that returns raw, un-templated HTML
 // built from request data is vulnerable regardless of whether a browser's
 // DOM APIs are involved.
+/** Was `name` last assigned from a data-store lookup (`await Model.findOne(...)`, `repo.findBy(...)`, `db.get(...)`, `.query(...)`)? */
+const STORE_LOOKUP_ASSIGN_RE = (name: string) =>
+  new RegExp(String.raw`\b(?:const|let|var)\s+${name.replace(/\$/g, "\\$")}\s*(?::[^=]+)?=\s*(?:await\s+)?[\w$.]+\.(?:find\w*|get\w*|query\w*|select|first|aggregate|populate|exec|execute|raw|fetch\w*|load\w*|read\w*)\s*\(`);
+function isStoreResultVar(lines: string[], name: string, before: number): boolean {
+  const re = STORE_LOOKUP_ASSIGN_RE(name);
+  for (let k = before - 1; k >= 0 && k >= before - 60; k--) if (re.test(lines[k])) return true;
+  return false;
+}
+
 const EXPRESS_HTML_RESPONSE_SINK_RE = /\bres\.(?:send|write|end)\s*\(\s*(\w+)\s*\)/;
 
 function findNamedTaintReflectedXSS(lines: string[]): ScanIndicator[] {
@@ -2905,6 +2949,9 @@ function findNamedTaintReflectedXSS(lines: string[]): ScanIndicator[] {
     const m = EXPRESS_HTML_RESPONSE_SINK_RE.exec(line);
     if (!m || !tainted.has(m[1])) continue;
     if (XSS_RE.some(r => r.test(line))) continue; // already caught inline
+    // `const user = await User.findById(req.params.id); res.send(user)`: the request supplied the lookup KEY, and what is sent is
+    // the stored record, which Express serialises as JSON. (Stored-content XSS is a different finding, from a different source.)
+    if (isStoreResultVar(lines, m[1], i)) continue;
     found.push({ id:"xss", label:"Reflected XSS", severity:"critical", line:i+1,
       detail:`Tainted variable '${m[1]}' returned directly as the HTTP response body — sanitize/escape or use a templating engine with auto-escaping` });
   }
@@ -8122,7 +8169,7 @@ export function analyzeFile(
   // vendored code -- an eval() in a *.spec.ts test fixture isn't a production
   // RCE risk. Vendored takes priority in the rare case a file matches both.
   const fileCategory: "application" | "third_party" | "test_code" =
-    looksMinified ? "third_party" : fileMeta.isTestFile ? "test_code" : "application";
+    looksMinified || looksVendored(file_path, content) ? "third_party" : fileMeta.isTestFile ? "test_code" : "application";
 
   // Real AST parse (JS/TS only, Phase 1 of the multi-language OWASP hardening
   // effort -- see astTaint.ts). Skips vendored/generated files (already
