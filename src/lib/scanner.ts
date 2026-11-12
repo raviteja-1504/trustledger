@@ -922,7 +922,8 @@ const SQL_INJECTION_RE = [
   /cursor\.execute\s*\(\s*(?:f["']|["'][^"']*["']\s*(?:%\s*[\w(]|\+|\.format\s*\())/i,
   /db\.query\s*\(\s*(?:`[^`]*\$\{|['"][^?][^'"]*\+)/i,
   /(?:execute|query)\s*\(\s*["'].*\+\s*\w/i,
-  /(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{/i,
+  // a TAGGED template (sql`...`, Prisma.sql`...`, $queryRaw`...`: drizzle, postgres.js, slonik) binds each ${} as a parameter; only an untagged one splices text
+  /^(?!.*\b(?:sql|\$queryRaw|\$executeRaw)\s*`)(?=[\s\S]*?(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{)/i,
   /knex\.raw\s*\(`[^`]*\$\{/i,
   /sequelize\.query\s*\(\s*`[^`]*\$\{/i,
   // Ruby/Rails ActiveRecord — .where()/.find_by_sql() etc. accept a raw SQL

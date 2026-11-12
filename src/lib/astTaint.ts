@@ -28,7 +28,7 @@
 import { recordEngineFailure } from "./taint/engineFailures";
 import * as ts from "typescript";
 import {
-  ALL, FIXED_POINT_CAP, applyGuards, applyGuardSet, applySanitizer, assignEnv, classOf, cloneEnv, isTaintedMask, joinArms, joinEnvs, SinkClass,
+  ALL, FIXED_POINT_CAP, applyClears, applyGuards, applyGuardSet, urlPrefixFacets, combineUrlFacets, applySanitizer, assignEnv, classOf, cloneEnv, isTaintedMask, joinArms, joinEnvs, SinkClass,
   SHADOW, mergeSinkFacts, wasCleared, buildBackwardTraceGeneric, crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Arm, type Guard, type ParamSinkFact, type StoredProvenanceIO,
   type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
@@ -186,7 +186,10 @@ export function isInsideRouteCallback(node: ts.Node): boolean {
 
 // (`_req`: the underscore convention for a parameter a linter thought unused -- still the request when it is read)
 const SOURCE_ROOTS = new Set(["req", "request", "_req", "_request"]);
-const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies"]);
+// `url` / `nextUrl` / `searchParams`: the Fetch-API / Next.js route-handler request (`req.url`, `req.nextUrl.searchParams.get("q")`).
+const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies", "url", "originalUrl", "nextUrl", "searchParams"]);
+/** Fetch-API Request body readers: `await req.json()`, `req.formData()`, `req.text()`: what the client sent. */
+const REQUEST_BODY_READERS = new Set(["json", "formData", "text", "arrayBuffer"]);
 
 // Browser input: the page URL (anyone can craft a link), the referrer, window.name (set by the opener)
 const DOM_URL_PROPS = new Set(["hash", "search", "href", "pathname"]);
@@ -321,7 +324,8 @@ const FS_SINK_NAMES = new Set([
   "readFile", "readFileSync", "writeFile", "writeFileSync",
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
 ]);
-const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare"]);
+// Prisma's raw-string entry points ($queryRaw`...` as a tagged template is parameterized and is not a call, so it never reaches here)
+const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare", "$queryRawUnsafe", "$executeRawUnsafe"]);
 const SQLITE_SINK_METHODS = new Set(["exec", "all", "get", "each"]);
 const DB_ACCESSOR_RE = /^(?:get)?(?:db|database|sqlite|pool|conn|connection|knex)$/i;
 
@@ -789,6 +793,10 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   // path.join / path.resolve only BUILD a path string: they are transformations (still propagating taint, see
   // PASSTHROUGH_CALLS), and the filesystem call that finally uses the result is the sink. Reporting the builder
   // flagged every join of a request value even when the result never touched the filesystem.
+  if (text === "NextResponse.redirect" || text === "Response.redirect") {
+    // NextResponse.redirect(url[, status]): the destination is the first argument
+    return call.arguments[0] ? { id: "open-redirect", sinkExpr: text, args: [call.arguments[0]] } : null;
+  }
   if (text === "res.redirect" || text === "res.location") {
     // res.redirect([status,] url): the location is the LAST argument; a status code picks no destination.
     const loc = call.arguments[call.arguments.length - 1];
@@ -1362,7 +1370,18 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
     if (ts.isConditionalExpression(expr)) {
       // `ALLOWED.includes(E) ? E : "default"`: the arm the condition proves is a literal member is clean.
       const proven = literalProvenArms(expr);
-      return (proven.whenTrue ? 0 : taintMask(expr.whenTrue, env)) | (proven.whenFalse ? 0 : taintMask(expr.whenFalse, env));
+      // an arm that is a variable the condition validates (a same-site path check) loses the classes the check clears
+      const armMask = (arm: ts.Expression, side: "true" | "false"): number => {
+        const m = taintMask(arm, env);
+        const u = unwrapExpr(arm);
+        if (!m || !ts.isIdentifier(u)) return m;
+        let out = m;
+        for (const g of guardsOfCondition(expr.condition, expr.getSourceFile())) {
+          if (g.name === u.text && g.holds === side && g.clears && !g.facet) out = applyClears(out, g.clears);
+        }
+        return out;
+      };
+      return (proven.whenTrue ? 0 : armMask(expr.whenTrue, "true")) | (proven.whenFalse ? 0 : armMask(expr.whenFalse, "false"));
     }
     if (ts.isTemplateExpression(expr)) return expr.templateSpans.reduce((m, s) => m | taintMask(s.expression, env), 0);
     if (ts.isSpreadElement(expr)) return taintMask(expr.expression, env);
@@ -1384,12 +1403,19 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       try { return functionResultMask(expr, [], env); } finally { fnValueDepth--; }
     }
     if (ts.isNewExpression(expr)) {
+      // `new URL(req.url)`: parsing keeps the attacker's text (`.searchParams.get("q")`, `.pathname`)
+      if (ts.isIdentifier(expr.expression) && expr.expression.text === "URL" && expr.arguments?.length) return taintMask(expr.arguments[0], env);
       if (ts.isIdentifier(expr.expression) && PASSTHROUGH_NEW.has(expr.expression.text) && expr.arguments) {
         return expr.arguments.reduce((m, a) => (isFunctionExpr(a) ? m : m | taintMask(a, env)), 0);
       }
       return 0;
     }
-    if (ts.isCallExpression(expr)) return callMask(expr, env);
+    if (ts.isCallExpression(expr)) {
+      const c = expr.expression;
+      if (ts.isPropertyAccessExpression(c) && REQUEST_BODY_READERS.has(c.name.text) && expr.arguments.length === 0 &&
+          ts.isIdentifier(c.expression) && SOURCE_ROOTS.has(c.expression.text)) return ALL;
+      return callMask(expr, env);
+    }
     if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr) || ts.isTypeAssertionExpression(expr) || ts.isSatisfiesExpression(expr)) {
       return taintMask(expr.expression, env);
     }
@@ -1730,10 +1756,13 @@ function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
     const k = cond.operatorToken.kind;
     const { left, right } = cond;
     if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
-      return [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)].filter(g => g.holds === "true");
+      // `p.startsWith("/") && !p.startsWith("//")`: the prefix facets combine into "a path on this site"
+      const all = [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)];
+      return [...all.filter(g => g.holds === "true" && !g.facet), ...combineUrlFacets(all, "true")];
     }
     if (k === ts.SyntaxKind.BarBarToken) {
-      return [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)].filter(g => g.holds === "false");
+      const all = [...guardsOfCondition(left, sf), ...guardsOfCondition(right, sf)];
+      return [...all.filter(g => g.holds === "false" && !g.facet), ...combineUrlFacets(all, "false")];
     }
     const eq = k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsEqualsToken;
     const neq = k === ts.SyntaxKind.ExclamationEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken;
@@ -1773,6 +1802,12 @@ function guardsOfCondition(cond: ts.Expression, sf: ts.SourceFile): Guard[] {
     if (ts.isPropertyAccessExpression(callee) && (callee.name.text === "includes" || callee.name.text === "has") &&
         cond.arguments.length === 1 && arg && ts.isIdentifier(arg) && isLiteralCollection(callee.expression, sf)) {
       return [{ name: arg.text, holds: "true" }];
+    }
+    // `next.startsWith("/")` / `next.startsWith("//")`: facets that, together, prove a same-site path (redirect class only)
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === "startsWith" && ts.isIdentifier(callee.expression) &&
+        arg && ts.isStringLiteralLike(arg) && cond.arguments.length === 1) {
+      const facets = urlPrefixFacets(callee.expression.text, arg.text, "starts");
+      if (facets.length) return facets;
     }
     // Path containment: `resolved.startsWith(BASE + sep)` where `resolved` is a normalised path, or the
     // `path.relative(BASE, resolved).startsWith("..")` escape test. Proves the PATH class only.
