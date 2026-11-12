@@ -5,6 +5,7 @@
 jest.mock("@/lib/cache", () => ({
   cached: async (_key: string, _ttl: number, fn: () => unknown) => fn(),
   cacheGet: async () => null,
+  cacheGetMany: async (keys: string[]) => keys.map(() => null),
   cacheSet: async () => {},
   cacheKeys: {
     osvPackage: (eco: string, name: string, version: string) => `osvpkg:${eco}:${name}:${version}`,

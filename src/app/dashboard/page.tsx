@@ -170,7 +170,9 @@ export default function DashboardPage() {
     window.addEventListener("focus", sync);
     window.addEventListener("tl:badge", sync);
     document.addEventListener("visibilitychange", onVisible);
-    const id = setInterval(() => { if (!document.hidden) sync(); }, 30_000);
+    // Focus, a badge event and the tab becoming visible refresh at once; the interval only catches changes made elsewhere. 3 minutes, like the
+    // other pages' background refresh (it was 30 s: three requests, several Redis commands each, for every visible Dashboard tab).
+    const id = setInterval(() => { if (!document.hidden) sync(); }, 180_000);
     return () => {
       window.removeEventListener("focus", sync);
       window.removeEventListener("tl:badge", sync);

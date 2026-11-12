@@ -5,7 +5,7 @@ describe("test-code classification (false-positive reduction)", () => {
     const content = `
 describe("legacy widget", () => {
   it("renders untrusted markup for a snapshot fixture", () => {
-    const template = "<div>{{name}}</div>";
+    const template = loadTemplate("name");
     eval(template);
   });
 });

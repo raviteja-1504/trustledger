@@ -12,7 +12,7 @@ describe("short files are still scanned for security problems", () => {
     ["eval-exec", "a.js", "eval(req.query.x)"],
     ["xss", "b.js", "res.send(req.query.name)"],
     ["hardcoded-secret", "c.py", 'password = "hunter2hunter2"'],
-    ["eval-exec", "d.py", "os.system(input())"],
+    ["command-injection", "d.py", "os.system(input())"],
   ])("%s in a %s one-liner is reported", (id, path, code) => {
     expect(code.length).toBeLessThan(50);
     const f = scan(path, code);

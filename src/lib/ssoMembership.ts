@@ -68,8 +68,13 @@ export async function resolveSsoMembership(db: Db, user: SsoUser, providerId: st
 
 const enforcementKey = (orgId: string) => `sso:enforce:${orgId}`;
 
-/** The org's SSO enforcement, cached briefly (it's read on every API request). */
+/** SSO is switched off for now (no sign-in button, no settings tab). Set ENABLE_SSO=true to turn it back on everywhere. */
+export const ssoEnabled = () => process.env.ENABLE_SSO === "true";
+
+/** The org's SSO enforcement, cached briefly (it's read on every API request). With SSO off it is never enforced, and nothing is
+ * read: this used to cost a Redis command on EVERY authenticated API request, the largest share of the project's commands. */
 export async function ssoEnforcement(db: Db, orgId: string): Promise<{ enforce: boolean; provider_id: string | null }> {
+  if (!ssoEnabled()) return { enforce: false, provider_id: null };
   return cached(enforcementKey(orgId), 60, async () => {
     const { data, error } = await db.from("sso_connections").select("enforce_sso, provider_id").eq("org_id", orgId).maybeSingle() as
       { data: { enforce_sso: boolean; provider_id: string | null } | null; error: { code?: string } | null };

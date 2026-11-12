@@ -428,11 +428,9 @@
   "hard.ts:594 timing-attack <- String(req.query.token)",
   "hard.ts:600 insecure-randomness <- -",
   "hard.ts:606 command-injection <- `echo ${env.TOOL_ARGS}`",
-  "hard.ts:606 eval-exec <- -",
   "hard.ts:66 sql-injection <- sqlPart",
   "hard.ts:77 sql-injection <- stored",
   "hard.ts:92 command-injection <- command",
-  "hard.ts:92 eval-exec <- -",
   "hard.ts:97 argument-injection <- config.argument",
   "hard.ts:97 command-injection <- config.executable"
  ],
@@ -478,7 +476,6 @@
   "app/views.py:3 sql-injection <- request.GET.get(\"id\")"
  ],
  "cross-file/python/command injection through a helper module": [
-  "app/sh.py:3 eval-exec <- -",
   "app/views.py:3 command-injection <- request.GET.get(\"dir\")"
  ],
  "cross-file/python/negative: parameterised callee": [],
@@ -675,8 +672,7 @@
   "py_02.py:13 eval-exec <- self.expression"
  ],
  "interprocedural/PY-03": [
-  "py_03.py:10 command-injection <- command",
-  "py_03.py:10 eval-exec <- -"
+  "py_03.py:10 command-injection <- command"
  ],
  "interprocedural/PY-04": [
   "py_04.py:10 path-traversal <- path"

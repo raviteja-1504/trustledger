@@ -7,6 +7,9 @@
 import { NextRequest } from "next/server";
 import { fakeSupabase } from "../helpers/fakeSupabase";
 
+// SSO is off unless enabled (lib/ssoMembership.ts ssoEnabled); these tests are about it working when it is on.
+process.env.ENABLE_SSO = "true";
+
 let db: ReturnType<typeof fakeSupabase>;
 const getUser = jest.fn();
 const getUserById = jest.fn();

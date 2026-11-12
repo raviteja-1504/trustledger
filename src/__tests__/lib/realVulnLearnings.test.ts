@@ -102,3 +102,64 @@ ${body}
   res.send(html);`)).length).toBeGreaterThan(0);
   });
 });
+
+describe("a command or code that is a constant is not an injection (DataFlowBench negative cases)", () => {
+  const evalExec = (path: string, src: string) => indicators([[path, src]], path).filter(i => i.id === "eval-exec" || i.id === "command-injection");
+
+  it("a plain string constant passed to os.system / eval / execSync / exec: not reported", () => {
+    expect(evalExec("run.py", `import os\n\ndef run():\n    os.system("clean")\n    os.system('ls -la')\n`)).toHaveLength(0);
+    expect(evalExec("run.js", `function run() {\n  eval("clean");\n  eval(\`1 + 1\`);\n}\n`)).toHaveLength(0);
+    expect(evalExec("build.js", `const { execSync } = require("child_process");\nexecSync("npm run build", { stdio: "inherit" });\n`)).toHaveLength(0);
+    expect(evalExec("s.py", `import subprocess\nsubprocess.call("make all", shell=True)\n`)).toHaveLength(0);
+  });
+
+  it("anything built into the command is still reported: concatenation, formatting, f-strings, template interpolation, a variable", () => {
+    expect(evalExec("a.py", `import os\ndef f(x):\n    os.system("ls " + x)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("b.py", `import os\ndef f(x):\n    os.system("ls %s" % x)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("c.py", `import os\ndef f(x):\n    os.system(f"ls {x}")\n`).length).toBeGreaterThan(0);
+    expect(evalExec("d.py", `import os\ndef f(x):\n    os.system("ls {}".format(x))\n`).length).toBeGreaterThan(0);
+    expect(evalExec("e.js", "function f(x) {\n  eval(`1 + ${x}`);\n}\n").length).toBeGreaterThan(0);
+    expect(evalExec("f.js", `function f(x) {\n  eval("1 + " + x);\n}\n`).length).toBeGreaterThan(0);
+    expect(evalExec("g.js", `function f(cmd) {\n  eval(cmd);\n}\n`).length).toBeGreaterThan(0);
+    expect(evalExec("h.py", `import subprocess\ndef f(c):\n    subprocess.call(c, shell=True)\n`).length).toBeGreaterThan(0);
+  });
+});
+
+describe("a variable last set to a string literal is a constant command", () => {
+  const evalExec = (path: string, src: string) => indicators([[path, src]], path).filter(i => i.id === "eval-exec" || i.id === "command-injection");
+
+  it("overwritten with a literal before the call: not reported (DataFlowBench local-overwrite)", () => {
+    expect(evalExec("a.py", `import os\nfrom flask import request\n\ndef run():\n    value = request.args.get("x")\n    value = "clean"\n    os.system(value)\n`)).toHaveLength(0);
+    expect(evalExec("a.js", `function run(req) {\n  let value = req.query.x;\n  value = "clean";\n  eval(value);\n}\n`)).toHaveLength(0);
+  });
+
+  it("the same in a file with Windows (CRLF) line endings", () => {
+    const crlf = (src: string) => src.replace(/\n/g, "\r\n");
+    expect(evalExec("w.js", crlf(`const cp = require("child_process");\nfunction run() {\n  const value = "printf constant";\n  cp.execSync(value);\n}\n`))).toHaveLength(0);
+    expect(evalExec("w.py", crlf(`import os\n\ndef run():\n    value = "clean"\n    os.system(value)\n`))).toHaveLength(0);
+    expect(evalExec("w2.js", crlf(`function run(req) {\n  let value = "clean";\n  value = req.query.x;\n  eval(value);\n}\n`)).length).toBeGreaterThan(0);
+  });
+
+  it("still reported when the last assignment is computed, conditional, augmented, or the variable is a parameter", () => {
+    expect(evalExec("b.py", `import os\nfrom flask import request\n\ndef run():\n    value = "clean"\n    value = request.args.get("x")\n    os.system(value)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("c.py", `import os\nfrom flask import request\n\ndef run(flag):\n    value = request.args.get("x")\n    if flag:\n        value = "clean"\n    os.system(value)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("d.py", `import os\nfrom flask import request\n\ndef run():\n    value = "ls "\n    value += request.args.get("x")\n    os.system(value)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("e.py", `import os\n\ndef run(value):\n    os.system(value)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("f.js", `function run(req) {\n  let value = "clean";\n  value = req.query.x;\n  eval(value);\n}\n`).length).toBeGreaterThan(0);
+  });
+});
+
+describe("a command made of literals and shell-quoted values is not an injection", () => {
+  const evalExec = (path: string, src: string) => indicators([[path, src]], path).filter(i => i.id === "eval-exec" || i.id === "command-injection");
+
+  it("every non-literal piece wrapped in shlex.quote / pipes.quote: not reported", () => {
+    expect(evalExec("q.py", `import os, shlex\n\ndef run(a):\n    os.system("echo " + shlex.quote(a))\n`)).toHaveLength(0);
+    expect(evalExec("q2.py", `import os, pipes\n\ndef run(a, b):\n    os.system("cp " + pipes.quote(a) + " " + pipes.quote(b))\n`)).toHaveLength(0);
+  });
+
+  it("any unquoted piece, or a quote around only part of it, is still reported", () => {
+    expect(evalExec("r.py", `import os, shlex\n\ndef run(a, b):\n    os.system("echo " + shlex.quote(a) + b)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("r2.py", `import os, shlex\n\ndef run(a):\n    os.system("echo " + a)\n`).length).toBeGreaterThan(0);
+    expect(evalExec("r3.py", `import os, shlex\n\ndef run(a):\n    os.system(shlex.quote(a) + " x" + a.upper())\n`).length).toBeGreaterThan(0);
+  });
+});

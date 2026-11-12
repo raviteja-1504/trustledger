@@ -921,6 +921,16 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     const fragments = ["where", "select", "tables", "order_by"].map(k => keywordArgPy(args, [k])).filter((n): n is SyntaxNode => !!n);
     return fragments.length ? { id: "sql-injection", sinkExpr: text, args: fragments } : null;
   }
+  // jinja2.Template(source) / Mako Template(text=...) / django.template.Template(source) / tornado.template.Template(source): the argument is
+  // compiled as a template, so request input in it is server-side template injection (and code execution). Resolved by the module the name was
+  // imported from, so string.Template (plain substitution, not injectable) is not matched.
+  if (tail === "Template") {
+    const mod = parts.length === 1 ? resolvedModule : [resolvedModule, ...parts.slice(1, -1)].join(".");
+    if (/^(?:jinja2(?:\.\w+)*|mako(?:\.template)?|django\.template(?:\.\w+)*|tornado\.template)$/.test(mod)) {
+      const source = first ?? keywordArgPy(args, ["source", "text", "template_string"]);
+      return source ? { id: "ssti", sinkExpr: text, args: [source] } : null;
+    }
+  }
   if (text === "render_template_string" || tail === "from_string") {
     // The template SOURCE only: context values are rendered as data (autoescaped), never compiled.
     const source = first ?? keywordArgPy(args, ["source"]);

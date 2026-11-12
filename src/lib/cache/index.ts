@@ -32,7 +32,7 @@ function memDel(pattern: string): void {
 
 // ── Upstash Redis ──────────────────────────────────────────────────────────
 
-let _redis: { get: (k: string) => Promise<string | null>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown> } | null = null;
+let _redis: { get: (k: string) => Promise<string | null>; set: (k: string, v: string, opts: { ex: number }) => Promise<unknown>; del: (...k: string[]) => Promise<unknown>; mget: (...k: string[]) => Promise<unknown[]> } | null = null;
 let _redisInit = false;
 
 async function getRedis() {
@@ -117,6 +117,32 @@ export async function cacheSet<T>(key: string, value: T, ttlSeconds = 300): Prom
   } catch { /* non-fatal */ }
 }
 
+/** Keys per MGET. One MGET is ONE Redis command however many keys it reads, so a dependency report of 800 packages costs 4, not 800. */
+const MGET_BATCH = 200;
+
+/** Read many keys at once. Same answers as cacheGet for each key (null = missing), in the same order, in ceil(n / 200) commands instead of n. */
+export async function cacheGetMany<T>(keys: string[]): Promise<Array<T | null>> {
+  if (keys.length === 0) return [];
+  try {
+    const redis = await getRedis();
+    if (!redis) return keys.map(k => { const raw = memGet(k); return raw ? JSON.parse(raw) as T : null; });
+    const out: Array<T | null> = new Array(keys.length).fill(null);
+    for (let i = 0; i < keys.length; i += MGET_BATCH) {
+      const slice = keys.slice(i, i + MGET_BATCH);
+      const raws = await redis.mget(...slice);
+      for (let j = 0; j < slice.length; j++) {
+        const raw = raws[j];
+        if (raw == null || raw === "") continue;
+        // a large (compressed / chunked) value needs its own reads: rare, and exactly what cacheGet already does
+        if (typeof raw === "string" && (raw.startsWith("gz:") || raw.startsWith("gzc:"))) { out[i + j] = await cacheGet<T>(slice[j]); continue; }
+        const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+        try { out[i + j] = JSON.parse(text) as T; } catch { out[i + j] = raw as T; }
+      }
+    }
+    return out;
+  } catch { return keys.map(() => null); }
+}
+
 /** Delete a specific cache key. Pass the full key (not a prefix) when Redis is active. */
 export async function cacheDel(key: string): Promise<void> {
   try {
@@ -174,6 +200,21 @@ export async function cached<T>(
   });
 }
 
+/**
+ * Like cached(), but in THIS instance's memory only -- no Redis command, ever. For a result that is cheap to recompute and is only
+ * worth reusing within one server instance for a short while (the key should carry anything that makes it stale, e.g. the org's data
+ * version): a Redis round trip costs more than it saves, and counts against the plan.
+ */
+export async function memoryCached<T>(key: string, ttlSeconds: number, fn: () => Promise<T>): Promise<T> {
+  const raw = memGet(key);
+  if (raw !== null) return JSON.parse(raw) as T;
+  return singleFlight(key, async () => {
+    const result = await fn();
+    memSet(key, JSON.stringify(result), ttlSeconds);
+    return result;
+  });
+}
+
 // ── Cache key builders ─────────────────────────────────────────────────────
 
 export const cacheKeys = {
@@ -217,8 +258,11 @@ export async function invalidateSecretsCache(orgId: string): Promise<void> {
 export const TTL = {
   DASHBOARD:   300,  //  5 minutes
   SCAN:        3600, //  1 hour (immutable after creation)
-  VIOLATIONS:  60,   //  1 minute (changes frequently)
-  SECRETS:     60,   //  1 minute (changes frequently)
+  // The violations list is keyed by the org's data version (lib/orgDataVersion.ts), so a change is a new key at once and the TTL only bounds
+  // memory. The secrets list is deleted on every write (invalidateSecretsCache). At 60 s, with pages polling every 30-180 s, about half the
+  // requests were misses (a read and a write each).
+  VIOLATIONS:  600,  // 10 minutes
+  SECRETS:     300,  //  5 minutes
   ORG_SETTINGS:600,  // 10 minutes
   BILLING:     300,  //  5 minutes
   DEPENDENCIES:3600, //  1 hour: keyed by the org's latest scan and the deployment, so a new scan or release is a new

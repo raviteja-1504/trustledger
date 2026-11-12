@@ -9,6 +9,9 @@ import { LINK_ERROR_CODES, fullPageNavigate, loginErrorMessage, safeNextPath, ss
 import { supabase } from "@/lib/supabase";
 import { BrandLogo, BrandMark, BrandWordmark } from "@/components/BrandLogo";
 
+/** Single sign-on is switched off for now: the button and the work-email form are not shown (NEXT_PUBLIC_ENABLE_SSO=true shows them). */
+const SSO_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SSO === "true";
+
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
 
 const DEMO_ROLES = [
@@ -573,8 +576,8 @@ function ProductionLoginPage() {
           </button>
         )}
 
-        {/* SSO — work email → the organisation's identity provider */}
-        {mode === "signin" && (ssoOpen ? (
+        {/* SSO — work email → the organisation's identity provider. Off for now (NEXT_PUBLIC_ENABLE_SSO=true shows it). */}
+        {SSO_ENABLED && mode === "signin" && (ssoOpen ? (
           <form onSubmit={handleSso} className="space-y-3" aria-label="Sign in with SSO">
             <input type="email" placeholder="Work email" aria-label="Work email for single sign-on" value={ssoEmail}
               onChange={e => setSsoEmail(e.target.value)} required autoFocus autoComplete="email" className={inputCls} />

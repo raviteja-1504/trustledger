@@ -280,3 +280,12 @@ describe("activating an invited account: choose a password, then sign in with it
     expect(screen.queryByRole("heading", { name: "Activate your account" })).toBeNull();
   });
 });
+
+describe("single sign-on is switched off for now", () => {
+  it("the sign-in page has no SSO button or work-email form; GitHub and email sign-in are still there", () => {
+    render(<LoginPage />);
+    expect(screen.queryByText(/sign in with sso/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/work email for single sign-on/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Continue with GitHub")).toBeInTheDocument();
+  });
+});

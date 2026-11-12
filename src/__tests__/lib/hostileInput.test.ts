@@ -78,7 +78,7 @@ describe("deeply nested code", () => {
 
   it("the regex rules still scan a file that is too deep for the AST engines", () => {
     const py = "import os\nos.system(request.args.get('c'))\nx = " + nest("f(", ")", 20000) + "\n";
-    expect(ids("d.py", py)).toContain("eval-exec@2");
+    expect(ids("d.py", py)).toContain("command-injection@2");
   });
 });
 

@@ -33,7 +33,21 @@ async function checkDatabase(): Promise<ServiceCheck> {
   }
 }
 
+// Every open tab's status bar calls this every 5 minutes, and it is public (a monitor or a bot can call it as often as it likes). Each
+// call used to write and read a fresh Redis key. The cache is probed at most once per CACHE_PROBE_EVERY_MS per server instance and the
+// answer reused in between: "is the cache up" does not change by the second.
+const CACHE_PROBE_EVERY_MS = 5 * 60_000;
+let lastCacheProbe: { at: number; result: ServiceCheck } | null = null;
+
 async function checkCache(): Promise<ServiceCheck> {
+  const now = Date.now();
+  if (lastCacheProbe && now - lastCacheProbe.at < CACHE_PROBE_EVERY_MS) return lastCacheProbe.result;
+  const result = await probeCache();
+  lastCacheProbe = { at: now, result };
+  return result;
+}
+
+async function probeCache(): Promise<ServiceCheck> {
   const t0 = Date.now();
   try {
     const probe = `__health_${Date.now()}`;

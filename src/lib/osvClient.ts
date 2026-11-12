@@ -12,7 +12,7 @@
  */
 
 import { mapWithConcurrency } from "@/lib/github";
-import { cached, cacheGet, cacheSet, cacheKeys, TTL } from "@/lib/cache";
+import { cached, cacheGetMany, cacheSet, cacheKeys, TTL } from "@/lib/cache";
 import type { LangEcosystem } from "@/lib/dependencyScan";
 
 const OSV_API = "https://api.osv.dev";
@@ -158,11 +158,13 @@ export async function lookupVulnerabilities(lookups: OsvLookup[]): Promise<Map<s
   // fetch entirely regardless of which package triggered it).
   const idsByKey = new Map<string, string[]>();
   const uncached: OsvLookup[] = [];
-  await Promise.all(lookups.map(async lookup => {
-    const hit = await cacheGet<string[]>(cacheKeys.osvPackage(lookup.ecosystem, lookup.name, lookup.version));
+  // One bulk read (MGET) for every package, not a read per package: a project's dependency report was hundreds of Redis commands.
+  const cachedIds = await cacheGetMany<string[]>(lookups.map(l => cacheKeys.osvPackage(l.ecosystem, l.name, l.version)));
+  lookups.forEach((lookup, i) => {
+    const hit = cachedIds[i];
     if (hit !== null) idsByKey.set(lookupKey(lookup), hit);
     else uncached.push(lookup);
-  }));
+  });
 
   for (const batch of chunk(uncached, QUERY_CHUNK_SIZE)) {
     try {
@@ -194,7 +196,12 @@ export async function lookupVulnerabilities(lookups: OsvLookup[]): Promise<Map<s
   for (const ids of idsByKey.values()) ids.forEach(id => idSet.add(id));
 
   const details = new Map<string, OsvVulnerability>();
-  await mapWithConcurrency(Array.from(idSet), DETAIL_CONCURRENCY, async id => {
+  // The cached details for every id in one bulk read; only the ids missing from it are fetched (and then cached, one write each).
+  const allIds = Array.from(idSet);
+  const cachedDetails = await cacheGetMany<OsvVulnerability>(allIds.map(id => cacheKeys.osvVulnId(id)));
+  const missing: string[] = [];
+  allIds.forEach((id, i) => { const hit = cachedDetails[i]; if (hit) details.set(id, hit); else missing.push(id); });
+  await mapWithConcurrency(missing, DETAIL_CONCURRENCY, async id => {
     const detail = await fetchVulnDetail(id);
     if (detail) details.set(id, detail);
   });

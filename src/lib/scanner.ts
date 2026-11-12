@@ -963,6 +963,13 @@ const EVAL_EXEC_RE = [
   /child_process\.exec\s*\(/,
   /\bexecSync\s*\(/,
 ];
+// The patterns above that run a SHELL COMMAND (the rest evaluate code). Reported as command injection (CWE-78), not code injection (CWE-95):
+// the weakness is what the attacker gets (a shell), and that is how every benchmark and standard names it.
+const SHELL_EXEC_RE = EVAL_EXEC_RE.slice(2);
+// Node: spawn / spawnSync / execFile(Sync) with `shell: true` hand the command to a shell; a bare exec( / execSync( imported from child_process
+// is the same call without the `child_process.` prefix.
+const NODE_SHELL_SPAWN_RE = /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\([^;\n]*\bshell\s*:\s*true\b/;
+const NODE_BARE_EXEC_RE = /(?<![.\w$])exec(?:Sync)?\s*\(/;
 
 // "ignoreExpiration" must be set to true to be a bypass — the bare keyword
 // also appears when explicitly disabled (ignoreExpiration: false), which is
@@ -2351,9 +2358,92 @@ function findSQLInjectionGoSprintf(lines: string[]): ScanIndicator[] {
   return found;
 }
 
-function findEvalExec(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, EVAL_EXEC_RE, "eval-exec", "Arbitrary Code Execution", "critical",
+/** Is the first argument of the call whose `(` ends `before` a complete string literal with nothing built into it? (`"clear"`, `'npm run build'`,
+ * a backtick string with no `${`): followed by `,` or `)`, not by `+`, `%`, `.format(` or a template. Nothing attacker-controlled can reach it. */
+const CONSTANT_FIRST_ARG_RE = /^\s*(?:"(?:[^"\\$]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`$\\]*`)\s*[,)]/;
+const LEADING_FSTRING_RE = /^\s*[fF]["']/;
+const BARE_IDENTIFIER_ARG_RE = /^\s*([A-Za-z_$][\w$]*)\s*[,)]/;
+const CONSTANT_LITERAL_RHS_RE = /^(?:"(?:[^"\\$]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`$\\]*`)\s*;?\s*(?:#.*|\/\/.*)?$/;
+const indentOf = (l: string) => l.length - l.trimStart().length;
+/** `value = dfb_source(); value = "clean"; os.system(value)`: the variable's most recent assignment (same block or an outer one, so it
+ * dominates the call) is a plain string literal. Anything else -- a parameter, a deeper branch, a computed value -- is not known constant. */
+function variableIsConstantAt(lines: string[], at: number, name: string): boolean {
+  const assign = new RegExp(String.raw`^\s*(?:(?:const|let|var|final|val|readonly)\s+)?(?:[\w<>\[\],.?]+\s+)?${name.replace(/\$/g, "\\$")}\s*(?::\s*[\w.<>\[\]|?]+\s*)?([-+*/%|&^]|\?\?|\|\|)?=\s*([^=].*)$`);
+  const sinkIndent = indentOf(lines[at]);
+  for (let k = at - 1; k >= 0 && k >= at - 60; k--) {
+    const l = lines[k].replace(/\r$/, "");   // CRLF files: "." does not match \r, so the assignment below would never match
+    if (/^\s*(?:def|function|async\s+function|class|public|private|protected|static)\b|=>\s*\{?\s*$/.test(l) && !assign.test(l)) return false;   // left the function
+    const m = assign.exec(l);
+    if (!m) continue;
+    return !m[1] && indentOf(l) <= sinkIndent && CONSTANT_LITERAL_RHS_RE.test(m[2].trim());
+  }
+  return false;
+}
+/** The argument text of the call whose `(` is at `open`, up to its matching `)` on this line ("" when the call continues on the next line). */
+function callArgumentText(line: string, open: number): string {
+  let depth = 0, quote = "";
+  for (let k = open; k < line.length; k++) {
+    const c = line[k];
+    if (quote) { if (c === "\\") k++; else if (c === quote) quote = ""; continue; }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return line.slice(open + 1, k);
+  }
+  return "";
+}
+const SHELL_QUOTE_CALL_RE = /\b(?:shlex|pipes)\.quote\s*\([^()]*\)/g;
+const STRING_LITERAL_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
+/** `"echo " + shlex.quote(arg)`: string literals joined by `+`, with every non-literal piece wrapped in the shell-quoting function: the quoted value can
+ * only be one shell word, which is exactly what the quoting is for. */
+function commandIsLiteralsAndShellQuoted(arg: string): boolean {
+  if (!arg || !SHELL_QUOTE_CALL_RE.test(arg)) return false;
+  SHELL_QUOTE_CALL_RE.lastIndex = 0;
+  return arg.replace(SHELL_QUOTE_CALL_RE, "").replace(STRING_LITERAL_RE, "").replace(/[\s+,]/g, "") === "";
+}
+
+const CONSTANT_CHECKED_CALLS_RE = [...EVAL_EXEC_RE, /\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(/, NODE_BARE_EXEC_RE];
+function callHasOnlyConstantCommand(lines: string[], at: number): boolean {
+  const line = lines[at] ?? "";
+  let any = false;
+  for (const re of CONSTANT_CHECKED_CALLS_RE) {
+    const g = new RegExp(re.source, "g");
+    for (const m of line.matchAll(g)) {
+      any = true;
+      // new Function(a, b, body): the code is the LAST argument, so a literal first argument says nothing about it
+      if (/^new\s+Function/.test(m[0])) return false;
+      const open = line.indexOf("(", m.index);
+      if (open < 0) return false;
+      const rest = line.slice(open + 1);
+      if (LEADING_FSTRING_RE.test(rest)) return false;
+      if (CONSTANT_FIRST_ARG_RE.test(rest)) continue;
+      const id = BARE_IDENTIFIER_ARG_RE.exec(rest);
+      if (id && variableIsConstantAt(lines, at, id[1])) continue;
+      if (commandIsLiteralsAndShellQuoted(callArgumentText(line, open))) continue;
+      return false;
+    }
+  }
+  return any;
+}
+
+function isShellExecLine(line: string, importsChildProcess: boolean): boolean {
+  return SHELL_EXEC_RE.some(r => r.test(line)) || NODE_SHELL_SPAWN_RE.test(line) || (importsChildProcess && NODE_BARE_EXEC_RE.test(line));
+}
+
+function findEvalExec(lines: string[], importsChildProcess = lines.some(l => /\bchild_process\b/.test(l))): ScanIndicator[] {
+  // `os.system("clear")`, `execSync("npm run build")`, `eval("1 + 1")`: a command or code that is a constant is not an injection, whatever
+  // the call is. (Found by DataFlowBench's negative cases: a sink fed only a literal was reported as critical remote code execution.)
+  const code = runDetector(lines, EVAL_EXEC_RE.slice(0, 2), "eval-exec", "Arbitrary Code Execution", "critical",
     "eval/exec/Function constructor — severe RCE risk", { skipComments: true });
+  // Running a shell command is command injection (CWE-78), found by RealVuln: 38 labelled command-injection cases were reported under the
+  // code-injection weakness (CWE-95) and so not matched, and spawn(..., { shell: true }) / a bare exec() were not recognised at all.
+  const shell: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || isCommentLine(lines[i])) continue;
+    if (!isShellExecLine(lines[i], importsChildProcess)) continue;
+    shell.push({ id: "command-injection", label: "Command Injection", severity: "critical", line: i + 1,
+      detail: "A shell command is run from a value that is not a constant — a shell interprets metacharacters (; | && $( ) in it. Pass the program and its arguments separately (execFile / spawn without a shell, subprocess with a list)." });
+  }
+  return [...code, ...shell].filter(f => !callHasOnlyConstantCommand(lines, (f.line ?? 1) - 1));
 }
 
 function findJwtBypass(lines: string[]): ScanIndicator[] {
@@ -3254,6 +3344,29 @@ function findPHPFileInclusion(lines: string[]): ScanIndicator[] {
 function findPrototypePollution(lines: string[]): ScanIndicator[] {
   return runDetector(lines, PROTO_POLLUTION_RE, "prototype-pollution", "Prototype Pollution", "high",
     "Unvalidated user input merged into object — may pollute Object prototype");
+}
+
+// Python: a string built character by character from the `random` module -- `"".join(random.choice(alphabet) for _ in range(n))`,
+// `random.choices(string.ascii_letters + string.digits, k=32)` -- is a token, code, password or nonce in nearly every program that writes one,
+// and `random` is a Mersenne Twister whose output can be predicted from a few observed values: use `secrets`. (Found by RealVuln: 34 labelled
+// weak-PRNG cases, caught by SonarQube's S2245, were missed because our rule needed a security word on the same line as `random.random()`.)
+const PY_RANDOM_STRING_RE = /\brandom\.(?:choice|choices|sample|SystemRandom)\b/;
+const PY_RANDOM_CHAR_BUILD_RE = /(?:\.join\s*\(\s*(?:\[\s*)?random\.(?:choice|sample)\s*\(|\brandom\.choices\s*\()/;
+const PY_RANDOM_ALPHABET_ARG_RE = /random\.(?:choice|choices|sample)\s*\(\s*(?:string\.\w+|["'][^"']{6,}["']|[A-Za-z_]\w*(?:alphabet|chars|charset|letters|digits|characters|pool|symbols)\w*|\w*(?:alphabet|charset|letters|digits|chars)\w*)/i;
+function findInsecureRandomnessPythonStrings(lines: string[], file_path: string): ScanIndicator[] {
+  if (!/\.py$/i.test(file_path)) return [];
+  const text = lines.join("\n");
+  // the stdlib `random` module, not `secrets` or random.SystemRandom
+  if (!/^\s*(?:import\s+random\b|from\s+random\s+import\b)/m.test(text)) return [];
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (isNonExecutableLine(l) || !PY_RANDOM_STRING_RE.test(l) || /random\.SystemRandom/.test(l)) continue;
+    if (!PY_RANDOM_CHAR_BUILD_RE.test(l) || !PY_RANDOM_ALPHABET_ARG_RE.test(l)) continue;
+    found.push({ id: "insecure-randomness", label: "Insecure Randomness", severity: "high", line: i + 1,
+      detail: "A string is built from the `random` module, which is predictable — if this is a token, code, password or nonce use `secrets.choice` / `secrets.token_urlsafe()`" });
+  }
+  return found;
 }
 
 function findInsecureRandomness(lines: string[]): ScanIndicator[] {
@@ -8305,7 +8418,8 @@ export function analyzeFile(
     // Ruby: input read into variables, calls without parentheses, backticks, Rails-specific sinks
     ...(lang === "ruby" ? findRubyTaintFindings(codeLines) : []),
     // calls only: in JS/TS, "eval()" inside a string (a description, a title, a sample shown in the UI) is text
-    ...findEvalExec(callOnlyLines(codeLines, tsSourceFile)),
+    // (the import is looked for in the real source: the lines passed on have their string literals blanked, `"child_process"` included)
+    ...findEvalExec(callOnlyLines(codeLines, tsSourceFile), /\bchild_process\b/.test(content)),
     ...findJwtBypass(codeLines),
     ...(lang === "typescript" || lang === "javascript" || lang === "java" || lang === "kotlin" || lang === "golang" ? findJwtDecodeWithoutVerify(codeLines) : []),
     ...findTlsVerificationDisabled(codeLines),
@@ -8346,6 +8460,7 @@ export function analyzeFile(
     ...findPHPFileInclusion(codeLines),
     ...findPrototypePollution(codeLines),
     ...findInsecureRandomness(codeLines),
+    ...findInsecureRandomnessPythonStrings(codeLines, file_path),
     ...findInsecureRandomnessGoFunc(codeLines),
     ...findInsecureRandomnessCSharpFunc(codeLines),
     ...(lang === "python" ? [...findInsecureRandomnessPython(codeLines), ...findWeakHashPython(codeLines), ...findCookieFlagsPython(codeLines)] : []),
@@ -8410,7 +8525,8 @@ export function analyzeFile(
   const engineRan = !!(tsSourceFile || pyTree || javaCst || goTree || csTree || phpTree || rubyTree || kotlinTree || rustTree || cppTree);
   const vulnIndicatorsRaw: ScanIndicator[] = [
     ...regexVulnIndicatorsRaw.filter(i => !suppressedKeys.has(`${i.id}:${i.line ?? ""}`) && !(engineRan && ENGINE_OWNED_RULES.has(i.id))),
-    ...astIndicators,
+    // The JS engine reports every direct eval(...) as code execution; one whose argument is a variable last set to a literal is not.
+    ...astIndicators.filter(i => !(i.id === "eval-exec" && callHasOnlyConstantCommand(lines, (i.line ?? 1) - 1))),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 

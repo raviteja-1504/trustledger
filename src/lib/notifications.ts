@@ -19,7 +19,9 @@ export interface Notification {
 
 const STORE_KEY  = "tl_notifications";
 const SNAP_KEY   = "tl_notif_snapshot";
-const POLL_MS    = 30_000;
+// A safety net, not the update path: live alerts arrive through Supabase Realtime (below), and a tab that becomes visible polls at once. At 30 s this
+// was one dashboard read (plus its auth and cache commands) every 30 s for every visible tab, all day: most of an idle project's Redis commands.
+export const POLL_MS = 300_000;
 const MAX_STORED = 50;
 
 // One-time cleanup of duplicates accumulated by old timestamp-based notification

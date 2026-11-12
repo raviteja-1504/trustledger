@@ -21,7 +21,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
 import { fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
-import { cached, cacheKeys } from "@/lib/cache";
+import { memoryCached, cacheKeys } from "@/lib/cache";
 import { PLAYBOOK_TEMPLATES, type IncidentType } from "./incidentPlaybooks";
 import { writeAuditLog } from "./audit";
 import { orgDataVersion, versionedKey } from "./orgDataVersion";
@@ -104,7 +104,9 @@ async function syncAutoIncidentsOnce(db: SupabaseClient<Database>, orgId: string
     const version = await orgDataVersion(db, orgId);
     const data = version == null
       ? await fetchUnattestedRiskState(orgId)
-      : await cached(versionedKey(cacheKeys.autoIncidentState(orgId), version), 12, () => fetchUnattestedRiskState(orgId));
+      // This server's memory, not Redis: the key carries the data version, so a hit is never stale, and it is only worth reusing here.
+      // As a Redis entry with a 12 s lifetime it was written and read on every call (the sidebar polls every 5 minutes) and never hit.
+      : await memoryCached(versionedKey(cacheKeys.autoIncidentState(orgId), version), 600, () => fetchUnattestedRiskState(orgId));
     const now  = new Date().toISOString();
 
     // Identity of a file-tied incident: repo AND path (the same path in two repos is two problems).

@@ -4,12 +4,15 @@ import { fetchUnattestedRiskState } from "@/lib/dashboardAggregate";
 jest.mock("@/lib/dashboardAggregate", () => ({ fetchUnattestedRiskState: jest.fn() }));
 const cacheStore = new Map<string, unknown>();
 let realCache = false;
+// the incident state is cached in this instance's memory (memoryCached), keyed by the org's data version
+const mockCachedLike = async (k: string, _t: number, fn: () => unknown) => {
+  if (!realCache) return fn();
+  if (cacheStore.has(k)) return cacheStore.get(k);
+  const v = await fn(); cacheStore.set(k, v); return v;
+};
 jest.mock("@/lib/cache", () => ({
-  cached: async (k: string, _t: number, fn: () => unknown) => {
-    if (!realCache) return fn();
-    if (cacheStore.has(k)) return cacheStore.get(k);
-    const v = await fn(); cacheStore.set(k, v); return v;
-  },
+  cached: (...a: [string, number, () => unknown]) => mockCachedLike(...a),
+  memoryCached: (...a: [string, number, () => unknown]) => mockCachedLike(...a),
   cacheKeys: { autoIncidentState: (o: string) => `a:${o}` },
 }));
 jest.mock("@/lib/audit", () => ({ writeAuditLog: jest.fn() }));

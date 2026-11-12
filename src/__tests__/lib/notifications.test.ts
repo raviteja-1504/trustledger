@@ -89,3 +89,10 @@ describe("notification diff logic", () => {
     expect(next.repos.length - prev.repos.length).toBe(1);
   });
 });
+
+describe("notification polling", () => {
+  it("is a slow safety net (live alerts come through Realtime): every 30 s per visible tab was most of an idle project's Redis commands", async () => {
+    const { POLL_MS } = await import("@/lib/notifications");
+    expect(POLL_MS).toBeGreaterThanOrEqual(300_000);
+  });
+});
