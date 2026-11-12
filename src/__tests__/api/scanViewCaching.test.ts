@@ -19,6 +19,7 @@ let engineLoads = 0;
 jest.mock("@/lib/engineWarmup", () => ({ ensureTaintEngines: async () => { engineLoads++; } }));
 // An in-memory stand-in for the cache (the real one is exercised in lib/cacheLargeValues.test.ts).
 const mem = new Map<string, string>();
+const redisCalls = { perFile: 0 };   // Redis-backed cached() calls: one read (+ one write) each
 jest.mock("@/lib/cache", () => {
   const actual = jest.requireActual("@/lib/cache");
   return {
@@ -26,6 +27,7 @@ jest.mock("@/lib/cache", () => {
     cacheGet: async (k: string) => (mem.has(k) ? JSON.parse(mem.get(k) as string) : null),
     cacheSet: async (k: string, v: unknown) => { mem.set(k, JSON.stringify(v)); },
     cached: async (k: string, _t: number, fn: () => Promise<unknown>) => {
+      redisCalls.perFile++;
       if (mem.has(k)) return JSON.parse(mem.get(k) as string);
       const r = await fn(); mem.set(k, JSON.stringify(r)); return r;
     },
@@ -61,6 +63,12 @@ beforeEach(() => {
 });
 
 describe("viewing the same scan twice", () => {
+  it("first view of a 25-file scan costs no per-file Redis commands (the re-analysis is cached as one key, not one per file)", async () => {
+    redisCalls.perFile = 0;
+    await view();
+    expect(redisCalls.perFile).toBe(0);
+  });
+
   it("serves the files and the PR history from the cache the second time", async () => {
     const first = await view();
     expect(first.files).toHaveLength(25);

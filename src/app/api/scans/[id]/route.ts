@@ -11,7 +11,7 @@ import { toStoredIndicators } from "@/lib/indicatorStorage";
 import { fetchContentByHash } from "@/lib/contentByHash";
 import { allRows } from "@/lib/allRows";
 import { filesWithCrossFileContext } from "@/lib/findingCorrelation";
-import { cached, cacheGet, cacheSet, TTL } from "@/lib/cache";
+import { memoryCached, cacheGet, cacheSet, TTL } from "@/lib/cache";
 import type { AttributionResult } from "@/lib/aiAttribution";
 import type { FileIndicator } from "@/types";
 import { CAPS } from "@/lib/limits";
@@ -53,7 +53,10 @@ const REANALYSIS_CACHE_VERSION = 2;
 // false-positive fix still reaches the page within the hour without a new
 // scan needing to run.
 async function reanalyze(filePath: string, content: string, contentHash: string): Promise<ReanalysisResult> {
-  return cached(`reanalysis:v${REANALYSIS_CACHE_VERSION}:${contentHash}`, TTL.SCAN, async () => {
+  // This instance's memory, NOT Redis: a first view of a scan re-analyses every file, and as a Redis entry each one cost a read AND a write
+  // (two commands per file: thousands for one page open). The scan-level result is cached as ONE key below (scanlive:...), which is what
+  // repeat views use; this layer only saves CPU when files repeat within one instance.
+  return memoryCached(`reanalysis:v${REANALYSIS_CACHE_VERSION}:${contentHash}`, TTL.SCAN, async () => {
     const analysis = analyzeFile(filePath, content);
     return {
       indicators: toStoredIndicators(analysis.indicators),
