@@ -1,0 +1,41 @@
+// VulnBench 2.0 probe: the production scanner (runScan) over each app fixture. Copy to src/__tests__/zzVulnBench.test.ts to run; not part of the suite.
+// Env: FIX (fixtures dir), OUT (dir): writes OUT/<fixture>.json = every finding with its type, file, line and data-flow endpoints.
+import fs from "fs";
+import path from "path";
+import { runScan } from "@/lib/scanner";
+import { cweFor } from "@/lib/cweMap";
+import { warmPythonTaintEngine } from "@/lib/astTaintPython";
+import { warmGoTaintEngine } from "@/lib/astTaintGo";
+
+jest.setTimeout(3 * 3600_000);
+beforeAll(async () => { await warmPythonTaintEngine(); await warmGoTaintEngine(); }, 120000);
+
+const EXT = /\.(py|js|jsx|ts|tsx|mjs|cjs|vue|go|java)$/;
+const SKIP = /^(?:node_modules|vendor|\.git|dist|build|\.next|venv|\.venv|__pycache__|coverage|target)$/;
+const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap(e =>
+  e.isDirectory() ? (SKIP.test(e.name) ? [] : walk(path.join(d, e.name))) : EXT.test(e.name) && !/\.min\.js$/.test(e.name) ? [path.join(d, e.name)] : []);
+
+it("vulnbench", () => {
+  const fix = process.env.FIX!, out = process.env.OUT!;
+  fs.mkdirSync(out, { recursive: true });
+  for (const name of fs.readdirSync(fix).filter(n => n.startsWith("app-project-"))) {
+    const root = path.join(fix, name, "project");
+    const t0 = Date.now();
+    const files = walk(root).filter(p => fs.statSync(p).size < 1_000_000).map(p => ({ path: path.relative(root, p).split(path.sep).join("/"), content: fs.readFileSync(p, "utf8") }));
+    const results: unknown[] = [];
+    try {
+      for (let i = 0; i < files.length; i += 100) {
+        const r = runScan({ repo: name, pr_number: 1, commit_sha: "a", branch: "main", files: files.slice(i, i + 100) });
+        for (const f of r.files) for (const ind of f.indicators) {
+          if (ind.line == null) continue;
+          const flow = (ind as { flow?: { source?: { file: string; line: number }; sink?: { file: string; line: number }; files?: string[] } }).flow;
+          results.push({ rule: ind.id, cwe: cweFor(ind.id)?.id ?? null, severity: ind.severity, file: f.file_path, line: ind.line,
+            category: (ind as { codeCategory?: string }).codeCategory ?? "application", detail: (ind.detail ?? "").slice(0, 240),
+            source: flow?.source ?? null, sink: flow?.sink ?? null, flowFiles: flow?.files ?? null });
+        }
+      }
+    } catch (e) { console.log(`ERROR ${name}: ${e instanceof Error ? e.message : e}`); }
+    fs.writeFileSync(path.join(out, `${name}.json`), JSON.stringify({ files: files.length, results }));
+    console.log(`${name} files=${files.length} findings=${results.length} ms=${Date.now() - t0}`);
+  }
+});

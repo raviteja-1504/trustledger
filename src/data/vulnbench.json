@@ -1,0 +1,4209 @@
+{
+ "benchmark": {
+  "name": "VulnBench",
+  "maintainer": "Snyk",
+  "version": "2.0.0",
+  "url": "https://vulnbench.com/releases/2.0",
+  "repo": "https://github.com/snyk-labs/snyk-vulnbench",
+  "repoCommit": "385a3751046b62f30b61f9dfadb26d6d7dfc52aa"
+ },
+ "measuredAt": "2026-11-12",
+ "engineCommit": "23da128",
+ "apps": 20,
+ "languages": [
+  "Go",
+  "JavaScript/TypeScript",
+  "Python",
+  "Java"
+ ],
+ "reference": 108,
+ "headline": {
+  "matched": 88,
+  "recall": 0.8148,
+  "macroRecall": 0.8013
+ },
+ "lenient": {
+  "matched": 93,
+  "recall": 0.8611,
+  "macroRecall": 0.8671
+ },
+ "reportedFindings": 216,
+ "precisionLowerBound": 0.4074,
+ "byType": [
+  {
+   "type": "xss",
+   "total": 19,
+   "headline": 9,
+   "lenient": 12
+  },
+  {
+   "type": "path-traversal",
+   "total": 16,
+   "headline": 15,
+   "lenient": 15
+  },
+  {
+   "type": "command-injection",
+   "total": 13,
+   "headline": 12,
+   "lenient": 12
+  },
+  {
+   "type": "sql-injection",
+   "total": 13,
+   "headline": 12,
+   "lenient": 13
+  },
+  {
+   "type": "open-redirect",
+   "total": 11,
+   "headline": 9,
+   "lenient": 9
+  },
+  {
+   "type": "ssrf",
+   "total": 9,
+   "headline": 7,
+   "lenient": 8
+  },
+  {
+   "type": "prototype-pollution",
+   "total": 6,
+   "headline": 6,
+   "lenient": 6
+  },
+  {
+   "type": "insecure-deserialization",
+   "total": 5,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "type": "template-injection",
+   "total": 4,
+   "headline": 3,
+   "lenient": 3
+  },
+  {
+   "type": "code-injection",
+   "total": 4,
+   "headline": 4,
+   "lenient": 4
+  },
+  {
+   "type": "redos",
+   "total": 3,
+   "headline": 1,
+   "lenient": 1
+  },
+  {
+   "type": "mass-assignment",
+   "total": 2,
+   "headline": 2,
+   "lenient": 2
+  },
+  {
+   "type": "improper-type-validation",
+   "total": 2,
+   "headline": 2,
+   "lenient": 2
+  },
+  {
+   "type": "idor",
+   "total": 1,
+   "headline": 1,
+   "lenient": 1
+  }
+ ],
+ "published": {
+  "source": "https://vulnbench.com/releases/2.0",
+  "copiedOn": "2026-11-12",
+  "note": "Attacker-reachable vulnerability recall as printed on the release page; we did not re-run these tools.",
+  "rows": [
+   {
+    "name": "Snyk Code",
+    "matched": 89,
+    "recall": 0.824,
+    "precisionLowerBound": 0.209
+   },
+   {
+    "name": "Claude Code /security-review, Opus 5 xhigh",
+    "matched": 85,
+    "recall": 0.793,
+    "precisionLowerBound": 0.746
+   },
+   {
+    "name": "Claude Code, Sonnet 5 xhigh",
+    "matched": 73,
+    "recall": 0.67,
+    "precisionLowerBound": 0.745
+   },
+   {
+    "name": "Codex Security, GPT-5.6 Luna",
+    "matched": 45,
+    "recall": 0.412,
+    "precisionLowerBound": 0.208
+   }
+  ]
+ },
+ "rows": [
+  {
+   "id": "app-project-ardanservice-command-injection-dnscheck-1",
+   "app": "ardanservice",
+   "type": "command-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/domain/checkapp/checkapp.go",
+     "line": 50,
+     "role": "source"
+    },
+    {
+     "file": "app/domain/checkapp/checkapp.go",
+     "line": 55,
+     "role": null
+    },
+    {
+     "file": "app/domain/checkapp/diagnostics.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "app/domain/checkapp/diagnostics.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "app/domain/checkapp/diagnostics.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The DNS diagnostic handler forwards a request-controlled hostname into a shell command assembled by the diagnostic helper (Snyk: go/CommandInjection).",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "app/domain/checkapp/checkapp.go",
+    "line": 55,
+    "detail": "Tainted expression 'hostname' is passed to @app/domain/checkapp/runHostnameDiagnostic(...), which reaches exec.Command(...) at app/domain/checkapp/diagnostics.go:10 [crosses package boundary] — real data-flow match across files, not a line-"
+   }
+  },
+  {
+   "id": "app-project-ardanservice-sql-injection-department-search-1",
+   "app": "ardanservice",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 179,
+     "role": "source"
+    },
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 184,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/department_search.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/department_search.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/department_search.go",
+     "line": 12,
+     "role": "sink"
+    }
+   ],
+   "description": "The department search endpoint concatenates a request-controlled department string into a SQL query and executes it through sqlx.QueryxContext (Snyk: go/Sqli).",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "app/domain/userapp/userapp.go",
+    "line": 184,
+    "detail": "Tainted expression 'department' is passed to @app/domain/userapp/searchUsersByDepartment(...), which reaches SQL string construction(...) at app/domain/userapp/department_search.go:10 [crosses package boundary] — real data-flow match across"
+   }
+  },
+  {
+   "id": "app-project-ardanservice-ssrf-webhooktest-1",
+   "app": "ardanservice",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 158,
+     "role": "source"
+    },
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 163,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/webhook.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/webhook.go",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The user webhook test endpoint sends a request-controlled URL to the outbound HTTP probe helper (Snyk: go/Ssrf).",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "app/domain/userapp/userapp.go",
+    "line": 163,
+    "detail": "Tainted expression 'target' is passed to @app/domain/userapp/fetchWebhookProbe(...), which reaches http.Get(...) at app/domain/userapp/webhook.go:9 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-ardanservice-open-redirect-preferences-return-1",
+   "app": "ardanservice",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 172,
+     "role": "source"
+    },
+    {
+     "file": "app/domain/userapp/userapp.go",
+     "line": 174,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/redirect.go",
+     "line": 5,
+     "role": null
+    },
+    {
+     "file": "app/domain/userapp/redirect.go",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The preferences return endpoint forwards a request-controlled return_to value to the redirect helper (Snyk: go/OR).",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "app/domain/userapp/userapp.go",
+    "line": 174,
+    "detail": "Tainted expression 'target' is passed to @app/domain/userapp/redirectToTarget(...), which reaches http.Redirect(...) at app/domain/userapp/redirect.go:9 [crosses package boundary] — real data-flow match across files, not a line-pattern gues"
+   }
+  },
+  {
+   "id": "app-project-ardanservice-path-traversal-audit-report-1",
+   "app": "ardanservice",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/domain/auditapp/auditapp.go",
+     "line": 61,
+     "role": "source"
+    },
+    {
+     "file": "app/domain/auditapp/auditapp.go",
+     "line": 66,
+     "role": null
+    },
+    {
+     "file": "app/domain/auditapp/reports.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "app/domain/auditapp/reports.go",
+     "line": 11,
+     "role": null
+    },
+    {
+     "file": "app/domain/auditapp/reports.go",
+     "line": 12,
+     "role": "sink"
+    }
+   ],
+   "description": "The audit report download joins a request-controlled report name to the exports directory before reading it (Snyk: go/PT).",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "app/domain/auditapp/auditapp.go",
+    "line": 66,
+    "detail": "Tainted expression 'name' is passed to @app/domain/auditapp/readAuditReport(...), which reaches os.ReadFile(...) at app/domain/auditapp/reports.go:12 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-xss-tooltip",
+   "app": "blanq",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/components/SharedPathTooltip.vue",
+     "line": 9,
+     "role": "source"
+    },
+    {
+     "file": "app/components/SharedPathTooltip.vue",
+     "line": 11,
+     "role": null
+    },
+    {
+     "file": "app/components/SharedPathTooltip.vue",
+     "line": 24,
+     "role": "sink"
+    }
+   ],
+   "description": "The landing-page workspace preview derives tooltip content from a URL name parameter and renders it as HTML inside a tooltip.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "app/components/SharedPathTooltip.vue",
+    "line": 24,
+    "detail": "Tainted expression '(folderPath)' flows into .innerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-xss-campaign",
+   "app": "blanq",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/composables/useCampaignMessage.ts",
+     "line": 11,
+     "role": "source"
+    },
+    {
+     "file": "app/composables/useCampaignMessage.ts",
+     "line": 12,
+     "role": null
+    },
+    {
+     "file": "app/composables/useCampaignMessage.ts",
+     "line": 16,
+     "role": "sink"
+    }
+   ],
+   "description": "The public landing-page campaign helper reads a URL value and writes it directly into a campaign banner with innerHTML.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "app/composables/useCampaignMessage.ts",
+    "line": 16,
+    "detail": "Tainted expression 'campaignMessage' flows into .innerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-xss-referral",
+   "app": "blanq",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/composables/useReferralSource.ts",
+     "line": 12,
+     "role": "source"
+    },
+    {
+     "file": "app/composables/useReferralSource.ts",
+     "line": 16,
+     "role": "sink"
+    }
+   ],
+   "description": "The public registration referral helper combines document location data with a URL fallback and writes the result into the referral banner with innerHTML.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "app/composables/useReferralSource.ts",
+    "line": 16,
+    "detail": "Tainted expression '`Referral source: ${referralSource}`' flows into .innerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-prototype-pollution-preferences",
+   "app": "blanq",
+   "type": "prototype-pollution",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 6,
+     "role": "source"
+    },
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 14,
+     "role": "sink"
+    }
+   ],
+   "description": "The public landing layout parses shared-preference URL state and uses an attacker-controlled section as a dynamic nested property on a plain object.",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "app/composables/useSharedPreferences.ts",
+    "line": 14,
+    "detail": "Tainted expression 'section' flows into preferences[section] (computed key)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-prototype-pollution-display",
+   "app": "blanq",
+   "type": "prototype-pollution",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 6,
+     "role": "source"
+    },
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "app/composables/useSharedPreferences.ts",
+     "line": 22,
+     "role": "sink"
+    }
+   ],
+   "description": "The public landing layout uses the same attacker-controlled section to select a display-preference object before assigning a display setting.",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "app/composables/useSharedPreferences.ts",
+    "line": 22,
+    "detail": "Tainted expression 'section' flows into displayPreferences[section] (computed key)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-blanq-redos-email-policy",
+   "app": "blanq",
+   "type": "redos",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "server/api/auth/email-policy.get.js",
+     "line": 5,
+     "role": "source"
+    },
+    {
+     "file": "server/api/auth/email-policy.get.js",
+     "line": 6,
+     "role": null
+    },
+    {
+     "file": "server/api/auth/email-policy.get.js",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The registration email-policy API applies a nested-quantifier regular expression to attacker-controlled email input.",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-blanq-ssrf-logo-preview",
+   "app": "blanq",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "server/api/integrations/logo-preview.get.js",
+     "line": 5,
+     "role": "source"
+    },
+    {
+     "file": "server/api/integrations/logo-preview.get.js",
+     "line": 15,
+     "role": "sink"
+    }
+   ],
+   "description": "The public logo-preview API fetches the caller-supplied URL from the server without an allowlist or private-network protection.",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-boilwater-command-injection-diagnostics",
+   "app": "boilwater",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "controllers/api.js",
+     "line": 1749,
+     "role": "source"
+    },
+    {
+     "file": "controllers/api.js",
+     "line": 1751,
+     "role": null
+    },
+    {
+     "file": "config/dns-diagnostics.js",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "config/dns-diagnostics.js",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The public DNS diagnostics endpoint passes an expected hostname from the API controller to a separate DNS diagnostic module, which embeds it in a quoted getent command before calling child_process.exec.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "controllers/api.js",
+    "line": 1751,
+    "detail": "Tainted expression 'hostname' is passed to dnsDiagnostics.resolveHostname(...), which reaches exec(...) at config/dns-diagnostics.js:9 [crosses file boundary via \"dnsDiagnostics.resolveHostname\" imported from ../config/dns-diagnostics] — re"
+   }
+  },
+  {
+   "id": "app-project-boilwater-open-redirect-query",
+   "app": "boilwater",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "controllers/api.js",
+     "line": 1767,
+     "role": "source"
+    },
+    {
+     "file": "controllers/api.js",
+     "line": 1769,
+     "role": null
+    },
+    {
+     "file": "config/redirect-handler.js",
+     "line": 1,
+     "role": "sink"
+    }
+   ],
+   "description": "The public redirect endpoint passes the attacker-controlled target query parameter to a separate redirect handler that calls Express res.redirect.",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "controllers/api.js",
+    "line": 1769,
+    "detail": "Tainted expression 'target' is passed to redirectHandler.redirectTo(...), which reaches res.redirect(...) at config/redirect-handler.js:1 [crosses file boundary via \"redirectHandler.redirectTo\" imported from ../config/redirect-handler] — re"
+   }
+  },
+  {
+   "id": "app-project-boilwater-path-traversal-download",
+   "app": "boilwater",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "controllers/api.js",
+     "line": 1777,
+     "role": "source"
+    },
+    {
+     "file": "controllers/api.js",
+     "line": 1778,
+     "role": null
+    },
+    {
+     "file": "config/document-downloads.js",
+     "line": 3,
+     "role": null
+    },
+    {
+     "file": "config/document-downloads.js",
+     "line": 4,
+     "role": null
+    },
+    {
+     "file": "config/document-downloads.js",
+     "line": 6,
+     "role": "sink"
+    }
+   ],
+   "description": "The public document download endpoint passes an attacker-controlled file parameter to a separate download module that joins it with a nominal document directory without validating containment before res.download.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "controllers/api.js",
+    "line": 1778,
+    "detail": "Tainted expression 'requestedFile' is passed to documentDownloads.download(...), which reaches res.download(...) at config/document-downloads.js:6 [crosses file boundary via \"documentDownloads.download\" imported from ../config/document-down"
+   }
+  },
+  {
+   "id": "app-project-boilwater-open-redirect-referrer",
+   "app": "boilwater",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "controllers/user.js",
+     "line": 649,
+     "role": "sink"
+    }
+   ],
+   "description": "When password-reset validation fails, the application redirects to the attacker-controlled HTTP Referrer header without validating the destination.",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "controllers/user.js",
+    "line": 649,
+    "detail": "User-controlled URL used in redirect — validate against allowlist"
+   }
+  },
+  {
+   "id": "coffeeshop-sql-injection-1",
+   "app": "coffeeshop",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/HomeController.java",
+     "line": 29,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/HomeController.java",
+     "line": 30,
+     "role": null
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/repository/SearchRepository.java",
+     "line": 24,
+     "role": null
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/repository/SearchRepository.java",
+     "line": 25,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into createNativeQuery, where it is used in an SQL query. This may result in an SQL Injection vulnerability.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/HomeController.java",
+    "line": 30,
+    "detail": "Tainted expression 'input' is passed to SearchRepository.searchProduct(...), which reaches em.createNativeQuery(...) at src/main/java/nl/scottjohnson/coffeeshop/repository/SearchRepository.java:25 [crosses file boundary via SearchRepository"
+   }
+  },
+  {
+   "id": "coffeeshop-path-traversal-1",
+   "app": "coffeeshop",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/UploadController.java",
+     "line": 31,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/UploadController.java",
+     "line": 33,
+     "role": null
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/UploadController.java",
+     "line": 34,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into java.nio.file.Files.write, where it is used as a path. This may result in a Path Traversal vulnerability and allow an attacker to write to arbitrary files.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/UploadController.java",
+    "line": 34,
+    "detail": "Tainted expression 'fileNameAndPath' flows into Files.write(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "coffeeshop-xss-1",
+   "app": "coffeeshop",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 66,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 91,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into write, where it is used to render an HTML page returned to the user. This may result in a Cross-Site Scripting attack (XSS).",
+   "foundBy": {
+    "rule": "xss",
+    "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+    "line": 91,
+    "detail": "Tainted expression 'param' flows into writer.write(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "coffeeshop-xss-2",
+   "app": "coffeeshop",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 66,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 67,
+     "role": null
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 101,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into write, where it is used to render an HTML page returned to the user. This may result in a Cross-Site Scripting attack (XSS).",
+   "foundBy": null
+  },
+  {
+   "id": "coffeeshop-template-injection-1",
+   "app": "coffeeshop",
+   "type": "template-injection",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 35,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/nl/scottjohnson/coffeeshop/controller/ProductController.java",
+     "line": 42,
+     "role": "source"
+    },
+    {
+     "file": "src/main/resources/templates/fragments/productsTable.html",
+     "line": 45,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from user controlled fields flows into the database and then outputed in an uncontrolled and unfiltered manner into an HTML template context. This may result in a Template Injection vulnerability.",
+   "foundBy": null
+  },
+  {
+   "id": "conduit-v2-sql-injection-search",
+   "app": "conduit",
+   "type": "sql-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/articles/views.py",
+     "line": 180,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 181,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 183,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/search.py",
+     "line": 13,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/search.py",
+     "line": 14,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/search.py",
+     "line": 19,
+     "role": "sink"
+    }
+   ],
+   "description": "The article-search endpoint's `q` parameter is concatenated directly into a raw SQL LIKE clause across title/description/body instead of being passed as a bound parameter. Snyk Code did not report this flow (verified by manual trace and a live PoC, not SARIF) — a genuine scanner miss, not a curation",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "conduit/articles/views.py",
+    "line": 183,
+    "detail": "Tainted expression 'q' is passed to run_search(...), which reaches db.session.execute(...) at conduit/articles/search.py:19 [crosses file boundary via \"run_search\" imported from .search] — real data-flow match across files, not a line-patte"
+   }
+  },
+  {
+   "id": "conduit-v2-path-traversal-download",
+   "app": "conduit",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/articles/views.py",
+     "line": 191,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 192,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 197,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/export.py",
+     "line": 18,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/export.py",
+     "line": 19,
+     "role": "sink"
+    }
+   ],
+   "description": "The article-download endpoint joins a request-controlled `filename` parameter onto the article's export directory with no containment check before opening it, allowing `../` sequences to escape the intended per-article folder.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "conduit/articles/views.py",
+    "line": 197,
+    "detail": "Tainted expression 'filename' is passed to read_export(...), which reaches open(...) at conduit/articles/export.py:19 [crosses file boundary via \"read_export\" imported from .export] — real data-flow match across files, not a line-pattern gu"
+   }
+  },
+  {
+   "id": "conduit-v2-command-injection-pdf-export",
+   "app": "conduit",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/articles/views.py",
+     "line": 202,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 203,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 208,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/pdf.py",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/pdf.py",
+     "line": 13,
+     "role": null
+    },
+    {
+     "file": "conduit/articles/pdf.py",
+     "line": 16,
+     "role": "sink"
+    }
+   ],
+   "description": "The article-to-PDF export endpoint passes an optional reader-chosen `label` (falling back to the article title) into a shell command string built for a PDF converter, run with shell=True and no escaping or validation.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "conduit/articles/views.py",
+    "line": 208,
+    "detail": "Tainted expression 'label or article.slug' is passed to render_pdf(...), which reaches subprocess.Popen(...) at conduit/articles/pdf.py:16 [crosses file boundary via \"render_pdf\" imported from .pdf] — real data-flow match across files, not "
+   }
+  },
+  {
+   "id": "conduit-v2-insecure-deserialization-draft-resume",
+   "app": "conduit",
+   "type": "insecure-deserialization",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/articles/views.py",
+     "line": 228,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 229,
+     "role": "sink"
+    }
+   ],
+   "description": "The \"resume my in-progress draft\" link restores a parked article draft by base64-decoding and unpickling the unauthenticated `draft` query parameter, with no integrity check.",
+   "foundBy": {
+    "rule": "insecure-deserialization",
+    "file": "conduit/articles/views.py",
+    "line": 229,
+    "detail": "Tainted expression 'base64.urlsafe_b64decode(token)' flows into pickle.loads(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "conduit-v2-code-injection-filter",
+   "app": "conduit",
+   "type": "code-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/articles/views.py",
+     "line": 234,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 235,
+     "role": "source"
+    },
+    {
+     "file": "conduit/articles/views.py",
+     "line": 244,
+     "role": "sink"
+    }
+   ],
+   "description": "The advanced article-filter endpoint evaluates the reader-supplied `expression` with Python's eval(), passing only a local-variable context dict that does not restrict access to builtins. Snyk Code did not report this flow (verified by manual trace and a live PoC, not SARIF) — a genuine scanner miss",
+   "foundBy": {
+    "rule": "eval-exec",
+    "file": "conduit/articles/views.py",
+    "line": 244,
+    "detail": "Tainted expression 'expression' flows into eval(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "conduit-v2-ssrf-avatar-url",
+   "app": "conduit",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "conduit/user/views.py",
+     "line": 58,
+     "role": "source"
+    },
+    {
+     "file": "conduit/user/views.py",
+     "line": 66,
+     "role": null
+    },
+    {
+     "file": "conduit/user/avatar.py",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "conduit/user/avatar.py",
+     "line": 8,
+     "role": "sink"
+    }
+   ],
+   "description": "Updating a profile's `image` field triggers a server-side fetch to confirm the submitted URL actually resolves to an image, with no allowlist or restriction on the target host.",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "conduit/user/views.py",
+    "line": 66,
+    "detail": "Tainted expression 'kwargs['image']' is passed to is_reachable_image(...), which reaches requests.get(...) at conduit/user/avatar.py:8 [crosses file boundary via \"is_reachable_image\" imported from .avatar] — real data-flow match across file"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-open-redirect-login-1",
+   "app": "flask-bones",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/auth/views.py",
+     "line": 36,
+     "role": "sink"
+    }
+   ],
+   "description": "The login route redirects to the unvalidated `next` query parameter with no allowlist or same-origin check. Pre-existing in the unmodified upstream app, not a planted change.",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "app/auth/views.py",
+    "line": 36,
+    "detail": "Tainted expression 'request.args.get('next') or url_for('index')' flows into redirect(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-open-redirect-verify-1",
+   "app": "flask-bones",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/auth/views.py",
+     "line": 120,
+     "role": "sink"
+    }
+   ],
+   "description": "The email-verification route extends the same unvalidated-redirect pattern used by /login, redirecting to the unvalidated `next` query parameter after marking the account active.",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "app/auth/views.py",
+    "line": 120,
+    "detail": "Tainted expression 'request.args.get('next') or url_for('auth.login')' flows into redirect(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-command-injection-diagnostics-1",
+   "app": "flask-bones",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 61,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 62,
+     "role": null
+    },
+    {
+     "file": "app/utils.py",
+     "line": 16,
+     "role": null
+    },
+    {
+     "file": "app/utils.py",
+     "line": 18,
+     "role": "sink"
+    }
+   ],
+   "description": "The nominally admin connectivity-diagnostic feature is protected only by login_required and passes the `host` form field to a helper that concatenates it directly into a `ping` shell command with shell=True, with no escaping or validation.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "app/user/views.py",
+    "line": 62,
+    "detail": "Tainted expression 'host' is passed to ping_host(...), which reaches subprocess.check_output(...) at app/utils.py:18 [crosses file boundary via \"ping_host\" imported from app.utils] — real data-flow match across files, not a line-pattern gue"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-command-injection-investigate-1",
+   "app": "flask-bones",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 71,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 72,
+     "role": null
+    },
+    {
+     "file": "app/utils.py",
+     "line": 21,
+     "role": null
+    },
+    {
+     "file": "app/utils.py",
+     "line": 23,
+     "role": "sink"
+    }
+   ],
+   "description": "The nominally admin abuse-investigation route is protected only by login_required and passes a request-controlled `host` form field (defaulting to the investigated user's stored IP) to a helper that concatenates it directly into a `host` shell command with shell=True.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "app/user/views.py",
+    "line": 72,
+    "detail": "Tainted expression 'host' is passed to reverse_dns_lookup(...), which reaches subprocess.check_output(...) at app/utils.py:23 [crosses file boundary via \"reverse_dns_lookup\" imported from app.utils] — real data-flow match across files, not "
+   }
+  },
+  {
+   "id": "app-project-flask-bones-insecure-deserialization-list-prefs-1",
+   "app": "flask-bones",
+   "type": "insecure-deserialization",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 22,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 25,
+     "role": "sink"
+    }
+   ],
+   "description": "The user-list view restores a \"remember my last sort/filter view\" preference by base64-decoding and unpickling the client-supplied `list_prefs` cookie, with no integrity check (e.g. a signed serializer) before deserializing.",
+   "foundBy": {
+    "rule": "insecure-deserialization",
+    "file": "app/user/views.py",
+    "line": 25,
+    "detail": "Tainted expression 'base64.b64decode(prefs_cookie)' flows into pickle.loads(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-insecure-deserialization-register-draft-1",
+   "app": "flask-bones",
+   "type": "insecure-deserialization",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/auth/views.py",
+     "line": 65,
+     "role": "source"
+    },
+    {
+     "file": "app/auth/views.py",
+     "line": 67,
+     "role": "sink"
+    }
+   ],
+   "description": "The registration route restores an in-progress \"finish this later\" draft by base64-decoding and unpickling the unauthenticated `draft` query parameter, with no integrity check. Unlike the app's own registration-token flow (which is itsdangerous-signed), this draft value is not signed.",
+   "foundBy": {
+    "rule": "insecure-deserialization",
+    "file": "app/auth/views.py",
+    "line": 67,
+    "detail": "Tainted expression 'base64.urlsafe_b64decode(draft_token)' flows into pickle.loads(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-path-traversal-export-1",
+   "app": "flask-bones",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 81,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 82,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 6,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The self-service activity-export route joins a request-controlled `name` query parameter onto the reports directory with no containment check before opening it, allowing `../` sequences to escape the intended per-user folder.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "app/user/views.py",
+    "line": 82,
+    "detail": "Tainted expression 'name' is passed to read_activity_report(...), which reaches open(...) at app/user/reports.py:9 [crosses file boundary via \"read_activity_report\" imported from .reports] — real data-flow match across files, not a line-pat"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-path-traversal-export-admin-1",
+   "app": "flask-bones",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 91,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 92,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 13,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 15,
+     "role": null
+    },
+    {
+     "file": "app/user/reports.py",
+     "line": 16,
+     "role": "sink"
+    }
+   ],
+   "description": "The nominally admin-facing export route is protected only by login_required and has the same unguarded `name` parameter join as the self-service export, reached through a second independent route.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "app/user/views.py",
+    "line": 92,
+    "detail": "Tainted expression 'name' is passed to read_user_report_for_admin(...), which reaches open(...) at app/user/reports.py:16 [crosses file boundary via \"read_user_report_for_admin\" imported from .reports] — real data-flow match across files, n"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-mass-assignment-user-edit-1",
+   "app": "flask-bones",
+   "type": "mass-assignment",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 96,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 99,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 100,
+     "role": null
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 102,
+     "role": "sink"
+    }
+   ],
+   "description": "The edit route accepts an attacker-selected user ID and binds the submitted EditUserForm fields, including `is_admin` and `active`, onto that user through `form.populate_obj` without an ownership or administrator authorization check.",
+   "foundBy": {
+    "rule": "mass-assignment",
+    "file": "app/user/views.py",
+    "line": 102,
+    "detail": "EditUserForm binds the submitted request form and populate_obj copies every field it declares onto 'user' — the client sets any of them; assign the editable fields explicitly"
+   }
+  },
+  {
+   "id": "app-project-flask-bones-idor-user-delete-1",
+   "app": "flask-bones",
+   "type": "idor",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "app/user/views.py",
+     "line": 111,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 114,
+     "role": "source"
+    },
+    {
+     "file": "app/user/views.py",
+     "line": 115,
+     "role": "sink"
+    }
+   ],
+   "description": "The delete route accepts an attacker-controlled numeric user ID, retrieves that user, and deletes it after checking only that the requester is authenticated; it performs no ownership or administrator authorization check.",
+   "foundBy": {
+    "rule": "bola-missing-ownership-check",
+    "file": "app/user/views.py",
+    "line": 114,
+    "detail": "Resource identifier 'id' reaches User.query.filter_by(...) with no comparison against the authenticated principal (request.user/current_user) anywhere on the path that reaches it — real per-parameter AST evidence, not a keyword-proximity gu"
+   }
+  },
+  {
+   "id": "app-project-go-sample-sql-injection-product-search-1",
+   "app": "go-sample",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "delivery/http/api.go",
+     "line": 32,
+     "role": "source"
+    },
+    {
+     "file": "delivery/http/api.go",
+     "line": 33,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 16,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 17,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 22,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 23,
+     "role": "sink"
+    }
+   ],
+   "description": "The product-picker type-ahead search endpoint at GET /products/search reads the `q` query parameter and passes it into a fmt.Sprintf-built SQL LIKE query that is executed with database/sql (Snyk: go/Sqli).",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "delivery/http/api.go",
+    "line": 33,
+    "detail": "Tainted expression 'query' is passed to @delivery/http/searchProductsByName(...), which reaches db.Query(...) at delivery/http/search.go:23 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-go-sample-sql-injection-attribute-search-1",
+   "app": "go-sample",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "delivery/http/api.go",
+     "line": 50,
+     "role": "source"
+    },
+    {
+     "file": "delivery/http/api.go",
+     "line": 51,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 45,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 46,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 51,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 52,
+     "role": "sink"
+    }
+   ],
+   "description": "The attribute-picker search endpoint at GET /attributes/search reads the `q` query parameter and passes it into a fmt.Sprintf-built SQL LIKE query that is executed with database/sql (Snyk: go/Sqli).",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "delivery/http/api.go",
+    "line": 51,
+    "detail": "Tainted expression 'query' is passed to @delivery/http/searchAttributesByName(...), which reaches db.Query(...) at delivery/http/search.go:52 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-go-sample-sql-injection-jobs-list-orderby-1",
+   "app": "go-sample",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "delivery/http/api.go",
+     "line": 78,
+     "role": "source"
+    },
+    {
+     "file": "delivery/http/api.go",
+     "line": 79,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 74,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 78,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 84,
+     "role": null
+    },
+    {
+     "file": "delivery/http/search.go",
+     "line": 85,
+     "role": "sink"
+    }
+   ],
+   "description": "The sortable recent-jobs listing at GET /jobs/list reads the `sort` query parameter and interpolates it as an ORDER BY expression through fmt.Sprintf, so the whole ORDER BY clause is attacker-controlled (Snyk: go/Sqli).",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "delivery/http/api.go",
+    "line": 79,
+    "detail": "Tainted expression 'sortColumn' is passed to @delivery/http/listJobsSorted(...), which reaches db.Query(...) at delivery/http/search.go:85 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-go-sample-xss-product-report-1",
+   "app": "go-sample",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "delivery/http/report.go",
+     "line": 24,
+     "role": "source"
+    },
+    {
+     "file": "delivery/http/report.go",
+     "line": 25,
+     "role": null
+    },
+    {
+     "file": "delivery/http/report.go",
+     "line": 27,
+     "role": null
+    },
+    {
+     "file": "delivery/http/report.go",
+     "line": 28,
+     "role": "sink"
+    }
+   ],
+   "description": "The product status report page at GET /report reads the `product` and `note` query parameters, concatenates them into an HTML document body via a same-package renderer, and streams the result with a text/html Content-Type using w.Write (Snyk: go/XSS).",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-go-sample-xss-search-preview-1",
+   "app": "go-sample",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "delivery/http/report.go",
+     "line": 36,
+     "role": "source"
+    },
+    {
+     "file": "delivery/http/report.go",
+     "line": 38,
+     "role": null
+    },
+    {
+     "file": "delivery/http/report.go",
+     "line": 39,
+     "role": "sink"
+    }
+   ],
+   "description": "The dashboard search-as-you-type widget at GET /search-preview reads the `q` query parameter, concatenates it into an HTML fragment via a same-package renderer, and writes the fragment to the response with a text/html Content-Type (Snyk: go/XSS).",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-gobase-command-injection-diagnostics-1",
+   "app": "gobase",
+   "type": "command-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 35,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 36,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 37,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/diagnostics.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/diagnostics.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/diagnostics.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace hostname diagnostic places a request-controlled hostname into a shell command assembled by the diagnostic helper (Snyk: go/CommandInjection).",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+    "line": 37,
+    "detail": "Tainted expression 'hostname' is passed to @internal/gateways/web/controllers/apiv1/workspace/runHostnameDiagnostic(...), which reaches exec.Command(...) at internal/gateways/web/controllers/apiv1/workspace/diagnostics.go:10 [crosses packag"
+   }
+  },
+  {
+   "id": "app-project-gobase-open-redirect-continue-1",
+   "app": "gobase",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 24,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 25,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 30,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/navigation.go",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/navigation.go",
+     "line": 8,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace continuation endpoint forwards a request-controlled next destination to a redirect helper (Snyk: go/OR).",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+    "line": 30,
+    "detail": "Tainted expression 'target' is passed to @internal/gateways/web/controllers/apiv1/workspace/redirectWorkspace(...), which reaches http.Redirect(...) at internal/gateways/web/controllers/apiv1/workspace/navigation.go:8 [crosses package bound"
+   }
+  },
+  {
+   "id": "app-project-gobase-path-traversal-reports-1",
+   "app": "gobase",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 47,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 48,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 49,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/reports.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/reports.go",
+     "line": 11,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/reports.go",
+     "line": 12,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace report download joins a request-controlled report name to the report directory before reading it (Snyk: go/PT).",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+    "line": 49,
+    "detail": "Tainted expression 'name' is passed to @internal/gateways/web/controllers/apiv1/workspace/readWorkspaceReport(...), which reaches os.ReadFile(...) at internal/gateways/web/controllers/apiv1/workspace/reports.go:12 [crosses package boundary]"
+   }
+  },
+  {
+   "id": "app-project-gobase-ssrf-branding-preview-1",
+   "app": "gobase",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 60,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 61,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 62,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/branding.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/branding.go",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace branding preview sends a request-controlled logo URL to the server-side HTTP client (Snyk: go/Ssrf).",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+    "line": 62,
+    "detail": "Tainted expression 'logoURL' is passed to @internal/gateways/web/controllers/apiv1/workspace/fetchBrandingPreview(...), which reaches http.Get(...) at internal/gateways/web/controllers/apiv1/workspace/branding.go:9 [crosses package boundary"
+   }
+  },
+  {
+   "id": "app-project-gobase-template-injection-preview-1",
+   "app": "gobase",
+   "type": "template-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 73,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 74,
+     "role": "source"
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+     "line": 75,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/templates.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "internal/gateways/web/controllers/apiv1/workspace/templates.go",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace notification preview parses request-controlled text as a Go template before rendering it (Snyk: go/Ssti).",
+   "foundBy": {
+    "rule": "ssti",
+    "file": "internal/gateways/web/controllers/apiv1/workspace/controller.go",
+    "line": 75,
+    "detail": "Tainted expression 'source' is passed to @internal/gateways/web/controllers/apiv1/workspace/renderWorkspaceTemplate(...), which reaches template.New(\"workspace-preview\").Parse(...) at internal/gateways/web/controllers/apiv1/workspace/templa"
+   }
+  },
+  {
+   "id": "app-project-goxygen-command-injection-diagnostics-1",
+   "app": "goxygen",
+   "type": "command-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "server/web/diagnostics_handler.go",
+     "line": 6,
+     "role": "source"
+    },
+    {
+     "file": "server/web/diagnostics_handler.go",
+     "line": 7,
+     "role": "source"
+    },
+    {
+     "file": "server/web/diagnostics.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "server/web/diagnostics.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "server/web/diagnostics.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace hostname diagnostic passes a request-controlled hostname through a shell command assembled by the diagnostics helper (Snyk: go/CommandInjection).",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "server/web/diagnostics_handler.go",
+    "line": 7,
+    "detail": "Tainted expression 'hostname' is passed to @server/web/runHostnameDiagnostic(...), which reaches exec.Command(...) at server/web/diagnostics.go:10 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-goxygen-open-redirect-continue-1",
+   "app": "goxygen",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "server/web/navigation.go",
+     "line": 6,
+     "role": "source"
+    },
+    {
+     "file": "server/web/navigation.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "server/web/navigation_redirect.go",
+     "line": 5,
+     "role": null
+    },
+    {
+     "file": "server/web/navigation_redirect.go",
+     "line": 6,
+     "role": "sink"
+    }
+   ],
+   "description": "The post-action continuation handler forwards the request-controlled next destination to a redirect helper (Snyk: go/OR).",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "server/web/navigation.go",
+    "line": 10,
+    "detail": "Tainted expression 'next' is passed to @server/web/redirectTo(...), which reaches http.Redirect(...) at server/web/navigation_redirect.go:6 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-goxygen-path-traversal-reports-1",
+   "app": "goxygen",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "server/web/reports.go",
+     "line": 8,
+     "role": "source"
+    },
+    {
+     "file": "server/web/reports.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "server/web/report_files.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "server/web/report_files.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "server/web/report_files.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The technology report download joins a request-controlled report name to the report directory before reading it (Snyk: go/PT).",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "server/web/reports.go",
+    "line": 9,
+    "detail": "Tainted expression 'reportName' is passed to @server/web/readTechnologyReport(...), which reaches os.ReadFile(...) at server/web/report_files.go:10 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-goxygen-ssrf-branding-preview-1",
+   "app": "goxygen",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "server/web/branding.go",
+     "line": 8,
+     "role": "source"
+    },
+    {
+     "file": "server/web/branding.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "server/web/branding_assets.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "server/web/branding_assets.go",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace branding preview sends a request-controlled logo URL to the server-side HTTP client (Snyk: go/Ssrf).",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "server/web/branding.go",
+    "line": 9,
+    "detail": "Tainted expression 'logoURL' is passed to @server/web/fetchRemoteLogo(...), which reaches http.Get(...) at server/web/branding_assets.go:9 [crosses package boundary] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-goxygen-xss-referral-banner-1",
+   "app": "goxygen",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "webapp/src/App.vue",
+     "line": 8,
+     "role": "source"
+    },
+    {
+     "file": "webapp/src/App.vue",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "webapp/src/App.vue",
+     "line": 48,
+     "role": "sink"
+    }
+   ],
+   "description": "The workspace referral banner derives its message from the document URL and renders it with Vue v-html (Snyk: javascript/DOMXSS).",
+   "foundBy": {
+    "rule": "xss",
+    "file": "webapp/src/App.vue",
+    "line": 48,
+    "detail": "Tainted expression '(welcomeMessage)' flows into .innerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-goxygen-prototype-pollution-preferences-1",
+   "app": "goxygen",
+   "type": "prototype-pollution",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "webapp/src/workspacePreferences.js",
+     "line": 2,
+     "role": "source"
+    },
+    {
+     "file": "webapp/src/workspacePreferences.js",
+     "line": 3,
+     "role": null
+    },
+    {
+     "file": "webapp/src/workspacePreferences.js",
+     "line": 12,
+     "role": null
+    },
+    {
+     "file": "webapp/src/workspacePreferences.js",
+     "line": 14,
+     "role": "sink"
+    }
+   ],
+   "description": "URL-restored workspace preferences use an attacker-controlled section and key in a nested write (Snyk: javascript/PrototypePollution). The polluted renderMarkup property is then consumed by the branding preview flow.",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "webapp/src/workspacePreferences.js",
+    "line": 12,
+    "detail": "Tainted expression 'section' flows into preferences[section] (computed key)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "halloween-improper-type-validation-filter-1",
+   "app": "halloween",
+   "type": "improper-type-validation",
+   "severity": "low",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 16,
+     "role": "source"
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 17,
+     "role": "sink"
+    }
+   ],
+   "description": "The query filter object's type and filter property are user-controlled without runtime type validation (Snyk: javascript/HTTPSourceWithUncheckedType, CWE-1287).",
+   "foundBy": {
+    "rule": "type-confusion",
+    "file": "src/api/user/userController.ts",
+    "line": 16,
+    "detail": "'_req.query.filter' is asserted to be a string with `as string`, which TypeScript erases — the query/body parser delivers an array or object for `?x[]=…` / `?x[k]=…`, so check `typeof _req.query.filter === \"string\"` before using it"
+   }
+  },
+  {
+   "id": "halloween-improper-type-validation-includes-1",
+   "app": "halloween",
+   "type": "improper-type-validation",
+   "severity": "low",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 11,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 21,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 22,
+     "role": "source"
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 24,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 95,
+     "role": "sink"
+    }
+   ],
+   "description": "The query includes object's type and includes property are user-controlled without runtime type validation (Snyk: javascript/HTTPSourceWithUncheckedType, CWE-1287).",
+   "foundBy": {
+    "rule": "type-confusion",
+    "file": "src/api/user/userController.ts",
+    "line": 95,
+    "detail": "Tainted expression 'name' flows into blocklist membership check(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "halloween-mass-assignment-1",
+   "app": "halloween",
+   "type": "mass-assignment",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 38,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 41,
+     "role": "source"
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 43,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 50,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userController.ts",
+     "line": 51,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userService.ts",
+     "line": 85,
+     "role": null
+    },
+    {
+     "file": "src/api/user/userService.ts",
+     "line": 87,
+     "role": "sink"
+    }
+   ],
+   "description": "Mass Assignment allows an attacker to modify the user's profile data, including sensitive information like email and role, leading to unauthorized access and data breaches.",
+   "foundBy": {
+    "rule": "mass-assignment",
+    "file": "src/api/user/userController.ts",
+    "line": 51,
+    "detail": "Tainted expression 'user' is passed to userService.saveUser(...), which reaches update().set(...) at src/api/user/userService.ts:87 [crosses file boundary via \"userService.saveUser\" imported from @/api/user/userService] — real data-flow mat"
+   }
+  },
+  {
+   "id": "app-project-iguana-command-injection-test-connection",
+   "app": "iguana",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/gitintegration/views.py",
+     "line": 121,
+     "role": "source"
+    },
+    {
+     "file": "src/gitintegration/views.py",
+     "line": 123,
+     "role": null
+    },
+    {
+     "file": "src/gitintegration/frontend.py",
+     "line": 45,
+     "role": "sink"
+    }
+   ],
+   "description": "The \"test repository connection\" endpoint reads `url` directly from `request.POST` and passes it to `Frontend.test_connection()`, which concatenates it into a `git ls-remote <url>` shell command with `shell=True`. Unlike the actual repository-create flow, this endpoint does not go through `Repositor",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "src/gitintegration/views.py",
+    "line": 123,
+    "detail": "Tainted expression 'url' is passed to Frontend.test_connection(...), which reaches subprocess.check_output(...) at src/gitintegration/frontend.py:45 [crosses file boundary via \"Frontend.test_connection\" imported from .frontend] — real data-"
+   }
+  },
+  {
+   "id": "app-project-iguana-redos-testpattern",
+   "app": "iguana",
+   "type": "redos",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/search/views.py",
+     "line": 65,
+     "role": "source"
+    },
+    {
+     "file": "src/search/views.py",
+     "line": 66,
+     "role": null
+    },
+    {
+     "file": "src/search/views.py",
+     "line": 67,
+     "role": "sink"
+    }
+   ],
+   "description": "The \"try a regex pattern\" endpoint (a preview tool for building advanced searches) runs `re.match(pattern, sample)` with both the pattern and the sample text taken directly from the request body, and no timeout or length limit. A catastrophic-backtracking pattern like `(a+)+$` matched against a craf",
+   "foundBy": {
+    "rule": "redos",
+    "file": "src/search/views.py",
+    "line": 67,
+    "detail": "Tainted expression 'pattern' flows into re.match(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-iguana-redos-search-operator",
+   "app": "iguana",
+   "type": "redos",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/search/views.py",
+     "line": 131,
+     "role": "source"
+    },
+    {
+     "file": "src/search/parser.py",
+     "line": 112,
+     "role": null
+    },
+    {
+     "file": "src/search/parser.py",
+     "line": 121,
+     "role": null
+    },
+    {
+     "file": "src/search/frontend.py",
+     "line": 133,
+     "role": "sink"
+    }
+   ],
+   "description": "The advanced search DSL's `~` comparator maps to Django's `__regex` ORM lookup (`comparatorToQExpression` in search/parser.py), so an attacker-controlled pattern such as `Issue.title ~ \"(a+)+$\"` is evaluated against every stored value of the targeted field when `SearchFrontend.query()` calls `.filte",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-iguana-sql-injection-issue-search",
+   "app": "iguana",
+   "type": "sql-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/issue/views.py",
+     "line": 422,
+     "role": "source"
+    },
+    {
+     "file": "src/issue/views.py",
+     "line": 423,
+     "role": null
+    },
+    {
+     "file": "src/issue/search.py",
+     "line": 14,
+     "role": null
+    },
+    {
+     "file": "src/issue/search.py",
+     "line": 19,
+     "role": "sink"
+    }
+   ],
+   "description": "The quick issue-search endpoint's `q` query parameter is formatted directly into a raw SQL query executed via `django.db.connection.cursor()`, instead of being passed as a bound parameter.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "src/issue/views.py",
+    "line": 423,
+    "detail": "Tainted expression 'term' is passed to search_issues(...), which reaches cursor.execute(...) at src/issue/search.py:19 [crosses file boundary via \"search_issues\" imported from .search] — real data-flow match across files, not a line-pattern"
+   }
+  },
+  {
+   "id": "app-project-iguana-code-injection-issue-filter",
+   "app": "iguana",
+   "type": "code-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/issue/views.py",
+     "line": 436,
+     "role": "source"
+    },
+    {
+     "file": "src/issue/views.py",
+     "line": 440,
+     "role": "sink"
+    }
+   ],
+   "description": "The advanced issue-filter endpoint evaluates the caller-supplied `expression` with Python's `eval()`, passing only a local-variable context dict that does not restrict access to builtins.",
+   "foundBy": {
+    "rule": "eval-exec",
+    "file": "src/issue/views.py",
+    "line": 440,
+    "detail": "Tainted expression 'expr' flows into eval(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-iguana-path-traversal-timelog-export",
+   "app": "iguana",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/project/views.py",
+     "line": 128,
+     "role": "source"
+    },
+    {
+     "file": "src/project/views.py",
+     "line": 129,
+     "role": null
+    },
+    {
+     "file": "src/project/export.py",
+     "line": 19,
+     "role": null
+    },
+    {
+     "file": "src/project/export.py",
+     "line": 21,
+     "role": "sink"
+    }
+   ],
+   "description": "The timelog-report download endpoint joins a request-controlled `filename` parameter onto the project's export directory with no containment check before opening it, allowing `../` sequences to escape the intended per-project folder.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "src/project/views.py",
+    "line": 129,
+    "detail": "Tainted expression 'filename' is passed to read_export(...), which reaches open(...) at src/project/export.py:21 [crosses file boundary via \"read_export\" imported from .export] — real data-flow match across files, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app1-path-traversal-statements-1",
+   "app": "keystonebank",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "backend/routes/bank_statements.ts",
+     "line": 18,
+     "role": "source"
+    },
+    {
+     "file": "backend/routes/bank_statements.ts",
+     "line": 25,
+     "role": null
+    },
+    {
+     "file": "backend/services/BankStatements.ts",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "backend/services/BankStatements.ts",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "backend/services/BankStatements.ts",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "backend/services/BankStatements.ts",
+     "line": 12,
+     "role": null
+    },
+    {
+     "file": "backend/services/BankStatements.ts",
+     "line": 14,
+     "role": "sink"
+    }
+   ],
+   "description": "User-controlled report_name flows into fs/promises.readFile as path (Snyk: javascript/PT, CWE-23)",
+   "foundBy": null
+  },
+  {
+   "id": "app1-prototype-pollution-memos-1",
+   "app": "keystonebank",
+   "type": "prototype-pollution",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 33,
+     "role": null
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 39,
+     "role": "source"
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 51,
+     "role": null
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 52,
+     "role": "sink"
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 63,
+     "role": null
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 66,
+     "role": null
+    },
+    {
+     "file": "backend/routes/memos.ts",
+     "line": 56,
+     "role": null
+    }
+   ],
+   "description": "Prototype pollution via recursive merge of user-controlled meta into profile object (Snyk: javascript/PrototypePollution, CWE-1321)",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "backend/routes/memos.ts",
+    "line": 52,
+    "detail": "Tainted expression 'contactMemo' flows into recursiveJSONMerge() (recursive merge)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app1-sql-injection-finchat-1",
+   "app": "keystonebank",
+   "type": "sql-injection",
+   "severity": "medium",
+   "headline": false,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/routes/finchat.ts",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "backend/routes/finchat.ts",
+     "line": 32,
+     "role": "source"
+    },
+    {
+     "file": "backend/routes/finchat.ts",
+     "line": 37,
+     "role": null
+    },
+    {
+     "file": "backend/routes/finchat.ts",
+     "line": 40,
+     "role": null
+    },
+    {
+     "file": "backend/routes/finchat.ts",
+     "line": 43,
+     "role": "sink"
+    }
+   ],
+   "description": "LLM response concatenated into SQL audit INSERT without parameterization",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "backend/routes/finchat.ts",
+    "line": 43,
+    "detail": "Tainted expression 'auditSQL' flows into db().exec(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app1-xss-bank-profile-template-1",
+   "app": "keystonebank",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 6,
+     "role": null
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 11,
+     "role": "source"
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 12,
+     "role": null
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 14,
+     "role": null
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 20,
+     "role": null
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 21,
+     "role": null
+    },
+    {
+     "file": "backend/routes/bank_profile_template.ts",
+     "line": 27,
+     "role": "sink"
+    }
+   ],
+   "description": "Unescaped profile fields interpolated into HTML sent with text/html",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-lastsaas-xss-custom-page-1",
+   "app": "lastsaas",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 554,
+     "role": "source"
+    },
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 573,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 193,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 202,
+     "role": null
+    },
+    {
+     "file": "frontend/src/api/client.ts",
+     "line": 443,
+     "role": null
+    },
+    {
+     "file": "frontend/src/pages/public/CustomPage.tsx",
+     "line": 16,
+     "role": null
+    },
+    {
+     "file": "frontend/src/pages/public/CustomPage.tsx",
+     "line": 17,
+     "role": null
+    },
+    {
+     "file": "frontend/src/pages/public/CustomPage.tsx",
+     "line": 65,
+     "role": "sink"
+    }
+   ],
+   "description": "Owner-controlled htmlBody is persisted by the branding API, returned by the public custom-page API, and rendered through React dangerouslySetInnerHTML without the original DOMPurify sanitizer.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "frontend/src/pages/public/CustomPage.tsx",
+    "line": 65,
+    "detail": "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML"
+   }
+  },
+  {
+   "id": "app-project-lastsaas-open-redirect-login-1",
+   "app": "lastsaas",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "frontend/src/pages/auth/LoginPage.tsx",
+     "line": 28,
+     "role": "source"
+    },
+    {
+     "file": "frontend/src/pages/auth/LoginPage.tsx",
+     "line": 29,
+     "role": "sink"
+    }
+   ],
+   "description": "The login continuation parameter flows from the document location directly to window.location.href after authentication (Snyk: javascript/OR).",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "frontend/src/pages/auth/LoginPage.tsx",
+    "line": 29,
+    "detail": "Tainted expression 'returnTo' flows into window.location.href(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-lastsaas-ssrf-remote-logo-1",
+   "app": "lastsaas",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 154,
+     "role": "source"
+    },
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 160,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 18,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 19,
+     "role": "sink"
+    }
+   ],
+   "description": "The owner-only branding preview passes a request URL to an outbound HTTP client (Snyk: go/Ssrf).",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "backend/internal/api/handlers/branding.go",
+    "line": 160,
+    "detail": "Tainted expression 'rawURL' is passed to @backend/internal/api/handlers/fetchRemoteBrandAsset(...), which reaches http.Get(...) at backend/internal/api/handlers/branding_assets.go:19 [crosses package boundary] — real data-flow match across "
+   }
+  },
+  {
+   "id": "app-project-lastsaas-command-injection-dns-1",
+   "app": "lastsaas",
+   "type": "command-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/internal/api/handlers/health_diagnostics.go",
+     "line": 11,
+     "role": "source"
+    },
+    {
+     "file": "backend/internal/api/handlers/health_diagnostics.go",
+     "line": 17,
+     "role": null
+    },
+    {
+     "file": "backend/internal/health/diagnostics.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "backend/internal/health/diagnostics.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "backend/internal/health/diagnostics.go",
+     "line": 11,
+     "role": "sink"
+    }
+   ],
+   "description": "The authenticated Admin → Health DNS diagnostic passes a request hostname from the handler into a shell command in the health domain helper. Snyk does not currently emit the cross-file flow.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "backend/internal/api/handlers/health_diagnostics.go",
+    "line": 17,
+    "detail": "Tainted expression 'hostname' is passed to health.RunHostnameDiagnostic(...), which reaches exec.Command(...) at backend/internal/health/diagnostics.go:11 [crosses package boundary] — real data-flow match across files, not a line-pattern gu"
+   }
+  },
+  {
+   "id": "app-project-lastsaas-path-traversal-media-1",
+   "app": "lastsaas",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 171,
+     "role": "source"
+    },
+    {
+     "file": "backend/internal/api/handlers/branding.go",
+     "line": 177,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 41,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 42,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 42,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 42,
+     "role": null
+    },
+    {
+     "file": "backend/internal/api/handlers/branding_assets.go",
+     "line": 43,
+     "role": "sink"
+    }
+   ],
+   "description": "The branding media migration download joins a request-controlled name to the media directory and reads the result (Snyk: go/PT).",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "backend/internal/api/handlers/branding.go",
+    "line": 177,
+    "detail": "Tainted expression 'name' is passed to @backend/internal/api/handlers/readBrandingMediaFile(...), which reaches os.ReadFile(...) at backend/internal/api/handlers/branding_assets.go:43 [crosses package boundary] — real data-flow match across"
+   }
+  },
+  {
+   "id": "app-project-pygmy-sql-injection-search",
+   "app": "pygmy",
+   "type": "sql-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 113,
+     "role": "source"
+    },
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 114,
+     "role": null
+    },
+    {
+     "file": "pygmy/model/search.py",
+     "line": 16,
+     "role": null
+    },
+    {
+     "file": "pygmy/model/search.py",
+     "line": 20,
+     "role": "sink"
+    }
+   ],
+   "description": "The \"search my links\" endpoint's `q` parameter is concatenated directly into a raw SQL LIKE clause instead of being passed as a bound parameter. The injection also breaks out of the surrounding `owner = ...` filter, exposing other users' links, not just bypassing the keyword match.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "pygmy/rest/user.py",
+    "line": 114,
+    "detail": "Tainted expression 'term' is passed to LinkSearchManager.search(...), which reaches db.execute(...) at pygmy/model/search.py:20 [crosses file boundary via \"LinkSearchManager.search\" imported from pygmy.model.search] — real data-flow match a"
+   }
+  },
+  {
+   "id": "app-project-pygmy-path-traversal-export",
+   "app": "pygmy",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 146,
+     "role": "source"
+    },
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 147,
+     "role": null
+    },
+    {
+     "file": "pygmy/utilities/export.py",
+     "line": 19,
+     "role": null
+    },
+    {
+     "file": "pygmy/utilities/export.py",
+     "line": 20,
+     "role": "sink"
+    }
+   ],
+   "description": "The links-export download endpoint joins a request-controlled `filename` parameter onto the user's export directory with no containment check before opening it, allowing `../` sequences to escape the intended per-user folder.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "pygmy/rest/user.py",
+    "line": 147,
+    "detail": "Tainted expression 'filename' is passed to read_export(...), which reaches open(...) at pygmy/utilities/export.py:20 [crosses file boundary via \"read_export\" imported from pygmy.utilities.export] — real data-flow match across files, not a l"
+   }
+  },
+  {
+   "id": "app-project-pygmy-command-injection-click-lookup",
+   "app": "pygmy",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "pygmy/rest/diagnostics.py",
+     "line": 14,
+     "role": "source"
+    },
+    {
+     "file": "pygmy/rest/diagnostics.py",
+     "line": 15,
+     "role": null
+    },
+    {
+     "file": "pygmy/core/network.py",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "pygmy/core/network.py",
+     "line": 8,
+     "role": "sink"
+    }
+   ],
+   "description": "The click-analytics reverse-DNS lookup tool (abuse investigation on a link's traffic) passes the `host` query parameter directly into a `host` shell command with shell=True, with no escaping or validation.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "pygmy/rest/diagnostics.py",
+    "line": 15,
+    "detail": "Tainted expression 'host' is passed to reverse_dns_lookup(...), which reaches subprocess.check_output(...) at pygmy/core/network.py:8 [crosses file boundary via \"reverse_dns_lookup\" imported from pygmy.core.network] — real data-flow match a"
+   }
+  },
+  {
+   "id": "app-project-pygmy-code-injection-filter",
+   "app": "pygmy",
+   "type": "code-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 127,
+     "role": "source"
+    },
+    {
+     "file": "pygmy/rest/user.py",
+     "line": 135,
+     "role": "sink"
+    }
+   ],
+   "description": "The advanced link-filter endpoint evaluates the caller-supplied `expression` with Python's eval(), passing only a local-variable context dict that does not restrict access to builtins.",
+   "foundBy": {
+    "rule": "eval-exec",
+    "file": "pygmy/rest/user.py",
+    "line": 135,
+    "detail": "Tainted expression 'expr' flows into eval(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-pygmy-ssrf-reachability-check",
+   "app": "pygmy",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": false,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "pygmy/rest/shorturl.py",
+     "line": 54,
+     "role": "source"
+    },
+    {
+     "file": "pygmy/rest/shorturl.py",
+     "line": 61,
+     "role": null
+    },
+    {
+     "file": "pygmy/utilities/reachability.py",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "pygmy/utilities/reachability.py",
+     "line": 8,
+     "role": "sink"
+    }
+   ],
+   "description": "Before shortening a new link, the server verifies the submitted `long_url` is reachable by making a server-side HTTP request to it, with no allowlist or restriction on the target host.",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "pygmy/rest/shorturl.py",
+    "line": 61,
+    "detail": "Tainted expression 'long_url' is passed to is_reachable(...), which reaches requests.get(...) at pygmy/utilities/reachability.py:8 [crosses file boundary via \"is_reachable\" imported from pygmy.utilities.reachability] — real data-flow match "
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-sql-injection-reports",
+   "app": "robs-awesome",
+   "type": "sql-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 52,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 56,
+     "role": null
+    },
+    {
+     "file": "backend/services/reports.py",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "backend/services/reports.py",
+     "line": 9,
+     "role": "sink"
+    }
+   ],
+   "description": "The reports search endpoint's `query` parameter is concatenated directly into a raw SQL LIKE clause in the reports service layer instead of being passed as a bound parameter.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "backend/www.py",
+    "line": 56,
+    "detail": "Tainted expression 'query' is passed to search_reports(...), which reaches session.execute(...) at backend/services/reports.py:9 [crosses file boundary via \"search_reports\" imported from backend.services.reports] — real data-flow match acro"
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-path-traversal-documents",
+   "app": "robs-awesome",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 94,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 96,
+     "role": null
+    },
+    {
+     "file": "backend/services/documents.py",
+     "line": 7,
+     "role": null
+    },
+    {
+     "file": "backend/services/documents.py",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "backend/www.py",
+     "line": 99,
+     "role": "sink"
+    }
+   ],
+   "description": "The document download endpoint accepts a multi-segment `name` path parameter and passes it to `resolve_document_path()` in the documents service layer, which joins it directly onto the documents directory with no containment check, allowing `../` sequences to escape the intended directory.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "backend/www.py",
+    "line": 99,
+    "detail": "Tainted expression 'path' flows into FileResponse(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-command-injection-dns-check",
+   "app": "robs-awesome",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 104,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 107,
+     "role": null
+    },
+    {
+     "file": "backend/www.py",
+     "line": 108,
+     "role": "sink"
+    }
+   ],
+   "description": "The integration DNS-check endpoint embeds the `hostname` parameter directly into a double-quoted shell command string and executes it with shell=True, without escaping or validating the value.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "backend/www.py",
+    "line": 108,
+    "detail": "Tainted expression 'command' flows into subprocess.run(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-ssrf-integrations-preview",
+   "app": "robs-awesome",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 115,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 118,
+     "role": null
+    },
+    {
+     "file": "backend/services/integrations.py",
+     "line": 4,
+     "role": null
+    },
+    {
+     "file": "backend/services/integrations.py",
+     "line": 6,
+     "role": "sink"
+    }
+   ],
+   "description": "The integration preview endpoint passes the `url` parameter directly to a server-side HTTP client with no allowlist or validation of the target host.",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "backend/www.py",
+    "line": 118,
+    "detail": "Tainted expression 'url' is passed to fetch_preview(...), which reaches requests.get(...) at backend/services/integrations.py:6 [crosses file boundary via \"fetch_preview\" imported from backend.services.integrations] — real data-flow match a"
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-insecure-deserialization-report-draft",
+   "app": "robs-awesome",
+   "type": "insecure-deserialization",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 77,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 80,
+     "role": null
+    },
+    {
+     "file": "backend/services/drafts.py",
+     "line": 6,
+     "role": null
+    },
+    {
+     "file": "backend/services/drafts.py",
+     "line": 8,
+     "role": "sink"
+    }
+   ],
+   "description": "The report draft resume endpoint base64-decodes and unpickles the `state` parameter with no integrity check or restriction on the unpickled type.",
+   "foundBy": {
+    "rule": "insecure-deserialization",
+    "file": "backend/www.py",
+    "line": 80,
+    "detail": "Tainted expression 'state' is passed to restore_draft(...), which reaches pickle.loads(...) at backend/services/drafts.py:8 [crosses file boundary via \"restore_draft\" imported from backend.services.drafts] — real data-flow match across file"
+   }
+  },
+  {
+   "id": "app-project-robs-awesome-open-redirect-report-open",
+   "app": "robs-awesome",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 86,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 90,
+     "role": null
+    },
+    {
+     "file": "backend/services/redirects.py",
+     "line": 4,
+     "role": null
+    },
+    {
+     "file": "backend/services/redirects.py",
+     "line": 6,
+     "role": "sink"
+    }
+   ],
+   "description": "The report-open endpoint redirects the user to the `return_to` query parameter with no validation that the target is a relative path or an allowlisted host.",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-robs-awesome-code-injection-reports-evaluate",
+   "app": "robs-awesome",
+   "type": "code-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "backend/www.py",
+     "line": 62,
+     "role": "source"
+    },
+    {
+     "file": "backend/www.py",
+     "line": 70,
+     "role": "sink"
+    }
+   ],
+   "description": "The report filter endpoint evaluates the `expression` parameter directly with Python's eval(), passing only a local-variable dict that does not restrict access to builtins.",
+   "foundBy": {
+    "rule": "eval-exec",
+    "file": "backend/www.py",
+    "line": 70,
+    "detail": "Tainted expression 'expression' flows into eval(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-kit-command-injection-dns-check",
+   "app": "saas-starter-kit",
+   "type": "command-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "cmd/web-app/handlers/integrations.go",
+     "line": 19,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/integrations.go",
+     "line": 20,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/integration_diagnostics.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/integration_diagnostics.go",
+     "line": 10,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/integration_diagnostics.go",
+     "line": 11,
+     "role": "sink"
+    }
+   ],
+   "description": "The integration DNS check places a customer-supplied hostname inside a shell command.",
+   "foundBy": {
+    "rule": "command-injection",
+    "file": "cmd/web-app/handlers/integrations.go",
+    "line": 20,
+    "detail": "Tainted expression 'hostname' is passed to @cmd/web-app/handlers/runHostnameDiagnostic(...), which reaches exec.Command(...) at cmd/web-app/handlers/integration_diagnostics.go:12 [crosses package boundary] — real data-flow match across file"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-kit-open-redirect-login-return-to",
+   "app": "saas-starter-kit",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "cmd/web-app/handlers/login_redirect.go",
+     "line": 8,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/user.go",
+     "line": 105,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/user.go",
+     "line": 108,
+     "role": "sink"
+    }
+   ],
+   "description": "The login flow restores a request-selected return-to URL after authenticating the user.",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-saas-starter-kit-path-traversal-account-report-download",
+   "app": "saas-starter-kit",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "cmd/web-app/handlers/account.go",
+     "line": 79,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/account.go",
+     "line": 80,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/account_reports.go",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/account_reports.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/account_reports.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The authenticated account report download joins an attacker-controlled report name to the static exports directory without enforcing containment.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "cmd/web-app/handlers/account.go",
+    "line": 80,
+    "detail": "Tainted expression 'reportName' is passed to @cmd/web-app/handlers/readAccountReport(...), which reaches ioutil.ReadFile(...) at cmd/web-app/handlers/account_reports.go:11 [crosses package boundary] — real data-flow match across files, not "
+   }
+  },
+  {
+   "id": "app-project-saas-starter-kit-sqli-checklist-search",
+   "app": "saas-starter-kit",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "cmd/web-api/handlers/checklist.go",
+     "line": 367,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-api/handlers/checklist.go",
+     "line": 373,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-api/handlers/checklist.go",
+     "line": 374,
+     "role": null
+    },
+    {
+     "file": "cmd/web-api/handlers/checklist.go",
+     "line": 375,
+     "role": null
+    },
+    {
+     "file": "cmd/web-api/handlers/checklist.go",
+     "line": 379,
+     "role": "sink"
+    }
+   ],
+   "description": "The integration-facing checklist search interpolates the query parameter into a raw SQL statement.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "cmd/web-api/handlers/checklist.go",
+    "line": 379,
+    "detail": "Tainted expression 'query' flows into h.DB.Query(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-kit-ssrf-account-logo-preview",
+   "app": "saas-starter-kit",
+   "type": "ssrf",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "cmd/web-app/handlers/account.go",
+     "line": 63,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/account.go",
+     "line": 64,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/account.go",
+     "line": 65,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/account_assets.go",
+     "line": 9,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/account_assets.go",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The account branding preview fetches a request-selected logo URL from the web server before an administrator saves account settings.",
+   "foundBy": {
+    "rule": "ssrf",
+    "file": "cmd/web-app/handlers/account.go",
+    "line": 65,
+    "detail": "Tainted expression 'logoURL' is passed to @cmd/web-app/handlers/fetchAccountLogo(...), which reaches http.Get(...) at cmd/web-app/handlers/account_assets.go:10 [crosses package boundary] — real data-flow match across files, not a line-patte"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-kit-ssti-notification-preview",
+   "app": "saas-starter-kit",
+   "type": "template-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "cmd/web-app/handlers/integrations.go",
+     "line": 38,
+     "role": "source"
+    },
+    {
+     "file": "cmd/web-app/handlers/integrations.go",
+     "line": 39,
+     "role": null
+    },
+    {
+     "file": "cmd/web-app/handlers/integrations.go",
+     "line": 40,
+     "role": "sink"
+    }
+   ],
+   "description": "The notification preview parses caller-supplied text as an HTML template instead of treating it as notification data.",
+   "foundBy": {
+    "rule": "ssti",
+    "file": "cmd/web-app/handlers/integrations.go",
+    "line": 40,
+    "detail": "Tainted expression 'source' flows into template.New(\"notification\").Parse(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-lite-open-redirect-continue",
+   "app": "saas-starter-lite",
+   "type": "open-redirect",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 65,
+     "role": "source"
+    },
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 66,
+     "role": "sink"
+    }
+   ],
+   "description": "The auth continuation endpoint redirects to an attacker-controlled next URL after a login or invitation flow.",
+   "foundBy": {
+    "rule": "open-redirect",
+    "file": "apps/api/src/auth/auth.controller.ts",
+    "line": 66,
+    "detail": "Tainted expression 'next || '/dashboard'' flows into NestJS @Redirect() url(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-lite-ssti-invite-preview",
+   "app": "saas-starter-lite",
+   "type": "template-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 59,
+     "role": "source"
+    },
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 60,
+     "role": "sink"
+    }
+   ],
+   "description": "The invite-preview endpoint compiles a caller-supplied Dot template instead of treating the invitation text as data.",
+   "foundBy": {
+    "rule": "ssti",
+    "file": "apps/api/src/auth/auth.controller.ts",
+    "line": 60,
+    "detail": "Tainted expression 'template' flows into dot.template(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-lite-xss-invite-response",
+   "app": "saas-starter-lite",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 54,
+     "role": "source"
+    },
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 55,
+     "role": "sink"
+    }
+   ],
+   "description": "The Nest invite-message endpoint interpolates an attacker-controlled name into a string response that is served to the Angular client.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "apps/api/src/auth/auth.controller.ts",
+    "line": 55,
+    "detail": "Tainted expression '`Welcome to SaaS Starter Lite, ${name}.`' flows into NestJS handler return (text/html)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-lite-xss-angular-render",
+   "app": "saas-starter-lite",
+   "type": "xss",
+   "severity": "high",
+   "headline": false,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "apps/api/src/auth/auth.controller.ts",
+     "line": 54,
+     "role": "source"
+    },
+    {
+     "file": "apps/web/src/app/pages/auth/register/register.ts",
+     "line": 143,
+     "role": null
+    },
+    {
+     "file": "apps/web/src/app/pages/auth/register/register.ts",
+     "line": 148,
+     "role": "sink"
+    }
+   ],
+   "description": "The Angular registration page fetches the invite-message response and marks it trusted with DomSanitizer.bypassSecurityTrustHtml before binding it to innerHTML.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "apps/web/src/app/pages/auth/register/register.ts",
+    "line": 148,
+    "detail": "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML"
+   }
+  },
+  {
+   "id": "app-project-saas-starter-lite-command-injection-export",
+   "app": "saas-starter-lite",
+   "type": "command-injection",
+   "severity": "critical",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "apps/api/src/users/users.controller.ts",
+     "line": 81,
+     "role": "source"
+    },
+    {
+     "file": "apps/api/src/users/users.service.ts",
+     "line": 36,
+     "role": null
+    },
+    {
+     "file": "apps/api/src/users/users.service.ts",
+     "line": 39,
+     "role": "sink"
+    }
+   ],
+   "description": "The admin user-export endpoint passes the requested export format into a shell command launched by the users service.",
+   "foundBy": null
+  },
+  {
+   "id": "app-project-saas-starter-lite-sql-injection-export-search",
+   "app": "saas-starter-lite",
+   "type": "sql-injection",
+   "severity": "critical",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "apps/api/src/users/users.controller.ts",
+     "line": 90,
+     "role": "source"
+    },
+    {
+     "file": "apps/api/src/users/users.service.ts",
+     "line": 55,
+     "role": "sink"
+    }
+   ],
+   "description": "The admin export search interpolates the search parameter into a raw TypeORM SQL query.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "apps/api/src/users/users.controller.ts",
+    "line": 91,
+    "detail": "Tainted expression 'search' is passed to UsersService.searchForExport(...), which reaches this.userRepo.query(...) at apps/api/src/users/users.service.ts:54 [crosses file boundary via \"UsersService.searchForExport\" imported from ./users.ser"
+   }
+  },
+  {
+   "id": "sassyapp-cross-site-scripting-1",
+   "app": "sassyreg",
+   "type": "xss",
+   "severity": "medium",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 83,
+     "role": "source"
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 85,
+     "role": null
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 87,
+     "role": "source"
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 91,
+     "role": null
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 168,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from a React useState value flows into a React dynamic 'href' attribute, where it is used to dynamically construct the HTML page on client side. This may result in a DOM Based Cross-Site Scripting attack (DOMXSS)",
+   "foundBy": {
+    "rule": "xss",
+    "file": "src/views/examples/PackageProfile.js",
+    "line": 168,
+    "detail": "Tainted expression 'twitterLink' flows into <… href={…}> (javascript: URL)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "sassyapp-cross-site-scripting-2",
+   "app": "sassyreg",
+   "type": "xss",
+   "severity": "medium",
+   "headline": false,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 114,
+     "role": null
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 116,
+     "role": null
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 118,
+     "role": "source"
+    },
+    {
+     "file": "src/views/examples/PackageProfile.js",
+     "line": 325,
+     "role": "sink"
+    }
+   ],
+   "description": "The authorScreenshotURL is not properly sanitized and flows into a React JSX element in src attribute where it is rendered as an image tag without proper sanitzation or value double quotes enclosure",
+   "foundBy": {
+    "rule": "xss",
+    "file": "src/views/examples/PackageProfile.js",
+    "line": 322,
+    "detail": "Tainted expression '` <img src=${authorUrl} alt=${cleanXSSString(authorScreensho' flows into dangerouslySetInnerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-slingshot-xss-referral",
+   "app": "slingshot",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/utils/referralSource.js",
+     "line": 3,
+     "role": "source"
+    },
+    {
+     "file": "src/components/AboutPage.js",
+     "line": 8,
+     "role": null
+    },
+    {
+     "file": "src/components/AboutPage.js",
+     "line": 14,
+     "role": "sink"
+    }
+   ],
+   "description": "The About page renders a referral source obtained from document location data as HTML through dangerouslySetInnerHTML.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "src/components/AboutPage.js",
+    "line": 14,
+    "detail": "Tainted expression '`<p>Referral source: ${referralSource}</p>`' flows into dangerouslySetInnerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-slingshot-xss-campaign",
+   "app": "slingshot",
+   "type": "xss",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/utils/campaignMessage.js",
+     "line": 2,
+     "role": "source"
+    },
+    {
+     "file": "src/utils/campaignMessage.js",
+     "line": 3,
+     "role": null
+    },
+    {
+     "file": "src/components/HomePage.js",
+     "line": 6,
+     "role": null
+    },
+    {
+     "file": "src/components/HomePage.js",
+     "line": 13,
+     "role": "sink"
+    }
+   ],
+   "description": "The home page places a campaign message from the URL into a rich HTML banner using dangerouslySetInnerHTML.",
+   "foundBy": {
+    "rule": "xss",
+    "file": "src/components/HomePage.js",
+    "line": 13,
+    "detail": "Tainted expression '`<p>${campaignMessage}</p>`' flows into dangerouslySetInnerHTML(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-slingshot-prototype-pollution-shared",
+   "app": "slingshot",
+   "type": "prototype-pollution",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 2,
+     "role": "source"
+    },
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 3,
+     "role": null
+    },
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 10,
+     "role": "sink"
+    }
+   ],
+   "description": "The shared-preferences URL loader uses an attacker-controlled section as a dynamic nested property on a plain object before storing the preference.",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "src/utils/sharedPreferences.js",
+    "line": 10,
+    "detail": "Tainted expression 'section' flows into preferences[section] (computed key)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "app-project-slingshot-prototype-pollution-display",
+   "app": "slingshot",
+   "type": "prototype-pollution",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 19,
+     "role": "source"
+    },
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 20,
+     "role": null
+    },
+    {
+     "file": "src/utils/sharedPreferences.js",
+     "line": 26,
+     "role": "sink"
+    }
+   ],
+   "description": "The display-preferences loader uses an attacker-controlled section as a dynamic object property before assigning a display setting.",
+   "foundBy": {
+    "rule": "prototype-pollution",
+    "file": "src/utils/sharedPreferences.js",
+    "line": 26,
+    "detail": "Tainted expression 'section' flows into displayPreferences[section] (computed key)(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "vinyl-marketplace-sql-injection-1",
+   "app": "vinyl-marketplace",
+   "type": "sql-injection",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 40,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 42,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/service/VinylService.java",
+     "line": 40,
+     "role": null
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/service/VinylService.java",
+     "line": 41,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into createNativeQuery, where it is used in an SQL query. This may result in an SQL Injection vulnerability.",
+   "foundBy": {
+    "rule": "sql-injection",
+    "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+    "line": 42,
+    "detail": "Tainted expression 'search' is passed to VinylService.search(...), which reaches entityManager.createNativeQuery(...) at src/main/java/io/acme/engineering/vynil_marketplace/service/VinylService.java:41 [crosses file boundary via VinylServic"
+   }
+  },
+  {
+   "id": "vinyl-marketplace-unsafe-deserialization-1",
+   "app": "vinyl-marketplace",
+   "type": "insecure-deserialization",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 81,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 86,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 87,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into java.io.ObjectInputStream, where it is used to deserialize an object. This may result in an Unsafe Deserialization vulnerability.",
+   "foundBy": {
+    "rule": "insecure-deserialization",
+    "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+    "line": 88,
+    "detail": "Tainted expression 'objectInputStream' flows into readObject(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "vinyl-marketplace-path-traversal-1",
+   "app": "vinyl-marketplace",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 113,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 126,
+     "role": null
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 127,
+     "role": null
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 128,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into java.nio.file.Files.copy, where it is used as a path. This may result in a Path Traversal vulnerability and allow an attacker to write to arbitrary files.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+    "line": 128,
+    "detail": "Tainted expression 'filePath' flows into Files.copy(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "vinyl-marketplace-path-traversal-2",
+   "app": "vinyl-marketplace",
+   "type": "path-traversal",
+   "severity": "high",
+   "headline": true,
+   "lenient": true,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 148,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 165,
+     "role": null
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 166,
+     "role": null
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 167,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from an HTTP parameter flows into java.nio.file.Files.copy, where it is used as a path. This may result in a Path Traversal vulnerability and allow an attacker to write to arbitrary files.",
+   "foundBy": {
+    "rule": "path-traversal",
+    "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+    "line": 167,
+    "detail": "Tainted expression 'filePath' flows into Files.copy(...) — real data-flow match, not a line-pattern guess"
+   }
+  },
+  {
+   "id": "vinyl-marketplace-xss-1",
+   "app": "vinyl-marketplace",
+   "type": "xss",
+   "severity": "medium",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 113,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 129,
+     "role": "source"
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 258,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 281,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 282,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 297,
+     "role": "sink"
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 319,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 330,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from a remote resource flows into innerHTML, where it is used to dynamically construct the HTML page on client side. This may result in a DOM Based Cross-Site Scripting attack (DOMXSS).",
+   "foundBy": null
+  },
+  {
+   "id": "vinyl-marketplace-xss-2",
+   "app": "vinyl-marketplace",
+   "type": "xss",
+   "severity": "medium",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 107,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 116,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 258,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 281,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 282,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 298,
+     "role": "sink"
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 319,
+     "role": null
+    },
+    {
+     "file": "src/main/resources/static/index.html",
+     "line": 331,
+     "role": "sink"
+    }
+   ],
+   "description": "Unsanitized input from a remote resource flows into innerHTML, where it is used to dynamically construct the HTML page on client side. This may result in a DOM Based Cross-Site Scripting attack (DOMXSS).",
+   "foundBy": null
+  },
+  {
+   "id": "vinyl-marketplace-xss-3",
+   "app": "vinyl-marketplace",
+   "type": "xss",
+   "severity": "medium",
+   "headline": false,
+   "lenient": false,
+   "reference": [
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 107,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 108,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 109,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 113,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 113,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 116,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 117,
+     "role": "source"
+    },
+    {
+     "file": "src/main/java/io/acme/engineering/vynil_marketplace/controller/VinylApiController.java",
+     "line": 118,
+     "role": "source"
+    }
+   ],
+   "description": "Unsanitized input from the document location flows into innerHTML, where it is used to dynamically construct the HTML page on client side. This may result in a DOM Based Cross-Site Scripting attack (DOMXSS).",
+   "foundBy": null
+  }
+ ],
+ "perApp": [
+  {
+   "app": "ardanservice",
+   "total": 5,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "app": "blanq",
+   "total": 7,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "app": "boilwater",
+   "total": 4,
+   "headline": 4,
+   "lenient": 4
+  },
+  {
+   "app": "coffeeshop",
+   "total": 5,
+   "headline": 3,
+   "lenient": 3
+  },
+  {
+   "app": "conduit",
+   "total": 6,
+   "headline": 6,
+   "lenient": 6
+  },
+  {
+   "app": "flask-bones",
+   "total": 10,
+   "headline": 10,
+   "lenient": 10
+  },
+  {
+   "app": "go-sample",
+   "total": 5,
+   "headline": 3,
+   "lenient": 3
+  },
+  {
+   "app": "gobase",
+   "total": 5,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "app": "goxygen",
+   "total": 6,
+   "headline": 6,
+   "lenient": 6
+  },
+  {
+   "app": "halloween",
+   "total": 3,
+   "headline": 3,
+   "lenient": 3
+  },
+  {
+   "app": "iguana",
+   "total": 6,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "app": "keystonebank",
+   "total": 4,
+   "headline": 1,
+   "lenient": 2
+  },
+  {
+   "app": "lastsaas",
+   "total": 5,
+   "headline": 4,
+   "lenient": 5
+  },
+  {
+   "app": "pygmy",
+   "total": 5,
+   "headline": 4,
+   "lenient": 5
+  },
+  {
+   "app": "robs-awesome",
+   "total": 7,
+   "headline": 6,
+   "lenient": 6
+  },
+  {
+   "app": "saas-starter-kit",
+   "total": 6,
+   "headline": 5,
+   "lenient": 5
+  },
+  {
+   "app": "saas-starter-lite",
+   "total": 6,
+   "headline": 4,
+   "lenient": 5
+  },
+  {
+   "app": "sassyreg",
+   "total": 2,
+   "headline": 1,
+   "lenient": 2
+  },
+  {
+   "app": "slingshot",
+   "total": 4,
+   "headline": 4,
+   "lenient": 4
+  },
+  {
+   "app": "vinyl-marketplace",
+   "total": 7,
+   "headline": 4,
+   "lenient": 4
+  }
+ ]
+}

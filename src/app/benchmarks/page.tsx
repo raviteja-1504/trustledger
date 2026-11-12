@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SitePage, Section, Card, Pill, TableWrap, BORDER, CYAN, EMERALD, ROSE, AMBER, VIOLET } from "@/components/marketing/Site";
+import { VULNBENCH as VB } from "@/lib/vulnbenchReport";
 import { BENCHMARK_REPORT as R, rates, categoryAverage, throughput, pct, engineCommits, type CorpusResult } from "@/lib/benchmarkReport";
 
 export const metadata: Metadata = {
@@ -83,6 +84,85 @@ export default function BenchmarksPage() {
       <Section id="corpora" title="Results by corpus, language and category" tone="surface"
         intro="Open a corpus to see every vulnerability category. A category with a low score is a real gap — the roadmap lists which ones we are working on.">
         <div className="space-y-3">{R.corpora.map(c => <CorpusTable key={c.id} c={c} />)}</div>
+      </Section>
+
+      <Section id="vulnbench" title="VulnBench 2.0 (Snyk): 108 attacker-reachable vulnerabilities in 20 real applications"
+        intro={<>VulnBench is Snyk&apos;s open benchmark of source-to-sink vulnerabilities in 20 open-source applications (Go, JavaScript/TypeScript, Python, Java). We ran the production scanner on all 20 applications and scored it with the benchmark&apos;s published matching rule: the finding must be the right type and land within 2 lines of the labelled source or sink. Every one of the 108 outcomes is listed below, including the {VB.reference - VB.headline.matched} we missed.</>}>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Stat label="Attacker-reachable recall" value={`${VB.headline.matched} / ${VB.reference}`} sub={`${pct(VB.headline.recall)} of the vulnerabilities; ${pct(VB.headline.macroRecall)} averaged over the 20 applications, the metric the benchmark ranks by`} color={EMERALD} />
+          <Stat label="Looser check" value={`${VB.lenient.matched} / ${VB.reference}`} sub={`${pct(VB.lenient.recall)} when any labelled location within 2 lines counts. A sensitivity check, not the headline`} color={CYAN} />
+          <Stat label="Precision lower bound" value={pct(VB.precisionLowerBound)} sub={`${VB.headline.matched} of ${VB.reportedFindings} findings of the scored types matched a labelled vulnerability; the rest may be real but unlabelled`} color={AMBER} />
+        </div>
+        <div className="mt-4 space-y-3">
+          <details className="rounded-2xl border group" style={{ borderColor: BORDER, background: "rgba(255,255,255,0.025)" }}>
+            <summary className="cursor-pointer list-none p-5 flex flex-wrap items-center gap-x-6 gap-y-2">
+              <span className="min-w-0 flex-1 font-bold text-white">Recall by vulnerability type</span>
+              <span className="text-[12px] text-white/40 group-open:hidden">show ▾</span>
+            </summary>
+            <div className="px-5 pb-5">
+              <TableWrap>
+                <table className="w-full text-[12.5px] font-mono">
+                  <thead><tr className="text-left text-white/45">{["Type", "Reference", "Matched", "Recall", "Looser"].map(h => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {VB.byType.map(t => (
+                      <tr key={t.type} className="border-t" style={{ borderColor: BORDER }}>
+                        <td className="px-3 py-1.5 text-white/85">{t.type}</td><td className="px-3 py-1.5">{t.total}</td>
+                        <td className="px-3 py-1.5 font-bold text-white">{t.headline}</td>
+                        <td className="px-3 py-1.5" style={{ color: t.headline === t.total ? EMERALD : AMBER }}>{pct(t.headline / t.total)}</td>
+                        <td className="px-3 py-1.5 text-white/60">{t.lenient}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
+            </div>
+          </details>
+
+          <details className="rounded-2xl border group" style={{ borderColor: BORDER, background: "rgba(255,255,255,0.025)" }}>
+            <summary className="cursor-pointer list-none p-5 flex flex-wrap items-center gap-x-6 gap-y-2">
+              <span className="min-w-0 flex-1 font-bold text-white">Proof: all {VB.reference} vulnerabilities, with the finding that matched each</span>
+              <span className="text-[12px] text-white/40 group-open:hidden">show ▾</span>
+            </summary>
+            <div className="px-5 pb-5 space-y-3">
+              <p className="text-[12.5px] text-white/55">Each row is one labelled vulnerability: the application, its type, the labelled source/sink location, and the rule, file and line of the TrustLedger finding that matched it. The same list is machine-readable at <a href="/benchmarks/vulnbench.json" className="underline underline-offset-2 text-white/80">/benchmarks/vulnbench.json</a>.</p>
+              <TableWrap>
+                <table className="w-full text-[12px] font-mono">
+                  <thead><tr className="text-left text-white/45">{["App", "Type", "Labelled location", "Result", "Matched by"].map(h => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {VB.rows.map(r => {
+                      const sink = r.reference.find(l => l.role === "sink") ?? r.reference[r.reference.length - 1];
+                      return (
+                        <tr key={r.id} className="border-t align-top" style={{ borderColor: BORDER }}>
+                          <td className="px-3 py-1.5 text-white/80 whitespace-nowrap">{r.app}</td>
+                          <td className="px-3 py-1.5 text-white/80 whitespace-nowrap">{r.type}</td>
+                          <td className="px-3 py-1.5 text-white/60 break-all">{sink.file}:{sink.line}</td>
+                          <td className="px-3 py-1.5 whitespace-nowrap font-bold" style={{ color: r.headline ? EMERALD : r.lenient ? AMBER : ROSE }}>{r.headline ? "found" : r.lenient ? "partly (looser rule only)" : "missed"}</td>
+                          <td className="px-3 py-1.5 text-white/60 break-all">{r.foundBy ? `${r.foundBy.rule} · ${r.foundBy.file}:${r.foundBy.line}` : "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </TableWrap>
+            </div>
+          </details>
+        </div>
+        <Card accent={CYAN}>
+          <p className="font-bold text-white mb-1.5">How this compares with what Snyk published</p>
+          <p className="text-[12.5px] text-white/60 mb-2">{VB.published.note} Source: <a href={VB.published.source} className="underline underline-offset-2 text-white/80" target="_blank" rel="noopener noreferrer">{VB.published.source}</a>, copied {VB.published.copiedOn}.</p>
+          <TableWrap>
+            <table className="w-full text-[12.5px] font-mono">
+              <thead><tr className="text-left text-white/45">{["Scanner", "Matched", "Recall (macro)", "Precision lower bound"].map(h => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
+              <tbody>
+                <tr className="border-t" style={{ borderColor: BORDER }}><td className="px-3 py-1.5 font-bold text-white">TrustLedger (this run)</td><td className="px-3 py-1.5">{VB.headline.matched}</td><td className="px-3 py-1.5" style={{ color: EMERALD }}>{pct(VB.headline.macroRecall)}</td><td className="px-3 py-1.5">{pct(VB.precisionLowerBound)}</td></tr>
+                {VB.published.rows.map(p => (
+                  <tr key={p.name} className="border-t" style={{ borderColor: BORDER }}><td className="px-3 py-1.5 text-white/80">{p.name}</td><td className="px-3 py-1.5">{p.matched}</td><td className="px-3 py-1.5">{pct(p.recall)}</td><td className="px-3 py-1.5 text-white/70">{pct(p.precisionLowerBound)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+          <p className="text-[12.5px] text-white/50 mt-3">Read this as a comparison of one run against published numbers, not a leaderboard entry. We scored with our own implementation of the published rule, not Snyk&apos;s harness; their results carry resampling intervals over the 20 applications that ours does not, and their precision figures are computed over a different set of reported findings. The scorer, the probe and the pinned corpus commit ({VB.benchmark.repoCommit.slice(0, 7)}) are in the repository under <code className="font-mono">benchmarks/</code>, so the run can be repeated. Engine commit {VB.engineCommit}, measured {fmtDate(VB.measuredAt)}.</p>
+        </Card>
       </Section>
 
       <Section id="ai-attribution" title="AI-attribution validation"

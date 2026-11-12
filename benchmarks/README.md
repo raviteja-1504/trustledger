@@ -13,6 +13,7 @@ with this repository can reproduce them.
 | NIST SARD Juliet Test Suite for C# | as distributed by SARD (the archive carries no version number) | C# | https://samate.nist.gov/SARD/test-suites |
 | NIST SARD Juliet Test Suite for C/C++ | 1.3 | C, C++ | https://samate.nist.gov/SARD/test-suites |
 | OWASP Juice Shop | 20.3.0 | TypeScript/JavaScript | https://github.com/juice-shop/juice-shop |
+| Snyk VulnBench | 2.0.0 (corpus commit 385a375) | Go, JavaScript/TypeScript, Python, Java | https://github.com/snyk-labs/snyk-vulnbench |
 
 Each corpus labels its test cases: a vulnerable case and a safe twin per vulnerability category (Juliet: a bad and
 a good region in every case; Juice Shop: the `vuln-code-snippet vuln-line` markers in its own source).
@@ -70,3 +71,20 @@ the known limitations, the comparison status and the history table — lives in 
   until they have.
 - **Kotlin / Android**: there is no public labelled corpus; the engine is tested against AndroGoat and Goatlin by
   hand and in unit tests, not scored.
+
+## VulnBench 2.0
+
+108 attacker-reachable vulnerabilities in the 20 `fixtures/app-project-*` applications. Unlike the corpora above it has no safe twins, so it
+is reported separately (recall and a precision lower bound) and is not pooled into the TPR/FPR figures.
+
+```sh
+git clone https://github.com/snyk-labs/snyk-vulnbench
+cp benchmarks/harness/vulnbench.test.ts.txt src/__tests__/zzVulnBench.test.ts
+FIX=/path/to/snyk-vulnbench/fixtures OUT=/path/to/out npx jest src/__tests__/zzVulnBench.test.ts
+python benchmarks/scorers/score_vulnbench.py /path/to/snyk-vulnbench/fixtures /path/to/out result.json
+```
+
+`score_vulnbench.py` implements the benchmark's published matching rule (type match plus the endpoint rule within 2 lines; see
+`docs/benchmark.md` in the VulnBench repository) and also reports a looser variant (any labelled location within 2 lines) as a
+sensitivity check. It is our implementation of that rule, not Snyk's harness. The per-vulnerability result is published at
+`/benchmarks/vulnbench.json` (`src/data/vulnbench.json`). Delete the copied probe afterwards.
