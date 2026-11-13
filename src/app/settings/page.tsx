@@ -1,5 +1,6 @@
 "use client";
 
+import { ApiAccessTab } from "@/components/settings/ApiAccessTab";
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
@@ -1159,247 +1160,6 @@ function TeamTab() {
   );
 }
 
-// ── Tab: API Access ───────────────────────────────────────────────────────────
-
-const API_KEY_STORE = "tl_api_keys";
-
-interface APIKey { id: string; name: string; prefix: string; created: string; lastUsed: string | null; scopes: string[] }
-
-function APIAccessTab() {
-  const { profile } = useAuth();
-  const tz = useTimezone();
-  const orgName = useOrgName();
-  const [keys,      setKeys]      = useState<APIKey[]>(() => {
-    try { return JSON.parse(localStorage.getItem(API_KEY_STORE) ?? "[]"); } catch { return []; }
-  });
-  const [newName,   setNewName]   = useState("");
-  const [newScopes, setNewScopes] = useState<string[]>(["read:scans","read:dashboard"]);
-  const [generated, setGenerated] = useState<string | null>(null);
-  const [copied,    setCopied]    = useState(false);
-  const [realKeys,  setRealKeys]  = useState<{ id:string; name:string; key_prefix:string; created_at:string; last_used:string|null; expires_at:string|null }[]>([]);
-
-  // Load real API keys on mount
-  useEffect(() => {
-    if (!profile?.org_id) return;
-    authedFetch<{ keys: typeof realKeys }>("/api/keys")
-      .then(r => setRealKeys(r.keys ?? []))
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.org_id]);
-
-  const ALL_SCOPES = [
-    { id:"read:scans",     label:"Read Scans",         desc:"GET /api/v1/scans/*" },
-    { id:"read:dashboard", label:"Read Dashboard",     desc:"GET /api/v1/dashboard" },
-    { id:"write:scans",    label:"Submit Scans",        desc:"POST /api/v1/scan" },
-    { id:"write:attest",   label:"Submit Attestations", desc:"POST /api/v1/attest" },
-    { id:"read:reports",   label:"Generate Reports",   desc:"POST /api/v1/report" },
-    { id:"admin",          label:"Admin",              desc:"All endpoints + settings" },
-  ];
-
-  async function makeKey() {
-    if (!newName.trim() || newScopes.length === 0) return;
-
-    // Real API if authenticated
-    if (profile?.org_id) {
-      try {
-        const res = await authedFetch<{ raw_key: string; id: string; key_prefix: string; created_at: string }>("/api/keys", {
-          method: "POST",
-          body:   JSON.stringify({ name: newName.trim() }),
-        });
-        setGenerated(res.raw_key);
-        setRealKeys(prev => [{ id: res.id, name: newName.trim(), key_prefix: res.key_prefix, created_at: res.created_at, last_used: null, expires_at: null }, ...prev]);
-        setNewName("");
-        setNewScopes(["read:scans","read:dashboard"]);
-        return;
-      } catch { /* fall through to localStorage */ }
-    }
-
-    // localStorage fallback (demo/seed)
-    const raw = `tl_live_${Array.from({length:40}, () => Math.floor(Math.random()*16).toString(16)).join("")}`;
-    const prefix = raw.slice(0, 16) + "…";
-    const key: APIKey = {
-      id: Date.now().toString(), name: newName.trim(), prefix,
-      created: new Date().toISOString(), lastUsed: null, scopes: newScopes,
-    };
-    const updated = [...keys, key];
-    setKeys(updated);
-    localStorage.setItem(API_KEY_STORE, JSON.stringify(updated));
-    setGenerated(raw);
-    setNewName(""); setNewScopes(["read:scans","read:dashboard"]);
-  }
-
-  async function revokeKey(id: string) {
-    // Real API
-    if (profile?.org_id) {
-      try {
-        await authedFetch("/api/keys", { method: "DELETE", body: JSON.stringify({ id }) });
-        setRealKeys(prev => prev.filter(k => k.id !== id));
-        return;
-      } catch { /* fall through */ }
-    }
-    // localStorage fallback
-    const updated = keys.filter(k => k.id !== id);
-    setKeys(updated);
-    localStorage.setItem(API_KEY_STORE, JSON.stringify(updated));
-  }
-
-  function copyKey() {
-    if (!generated) return;
-    navigator.clipboard.writeText(generated).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-
-  const toggleScope = (s: string) =>
-    setNewScopes(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
-
-  const fmtDate = (iso: string) => formatDateOnly(new Date(iso), tz);
-
-  return (
-    <div className="space-y-5">
-      {/* Generated key one-time display */}
-      {generated && (
-        <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-5 space-y-3">
-          <div className="flex items-start gap-2">
-            <svg className="shrink-0 mt-0.5 text-amber-600" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <p className="text-xs font-bold text-amber-800">Copy this key now — it will not be shown again.</p>
-          </div>
-          <div className="flex items-center gap-2 bg-white border border-amber-200 rounded-xl px-4 py-3">
-            <code className="font-mono text-xs text-gray-800 flex-1 break-all select-all">{generated}</code>
-            <button onClick={copyKey}
-              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-colors"
-              style={{ background: copied ? "#d1fae5" : "#f1f5f9", color: copied ? "#065f46" : "#374151" }}>
-              {copied ? "Copied!" : "Copy"}
-            </button>
-          </div>
-          <button onClick={() => setGenerated(null)} className="text-xs text-amber-700 hover:text-amber-900 font-semibold">
-            I've copied it — dismiss
-          </button>
-        </div>
-      )}
-
-      {/* Create key */}
-      <div className="section-card animate-fade-up p-5 space-y-4">
-        <p className="text-sm font-bold text-gray-900">Create API Key</p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 mb-1.5">Key Name</label>
-            <input value={newName} onChange={e => setNewName(e.target.value)}
-              placeholder="e.g. CI / GitHub Actions / Local Dev"
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-          </div>
-          <div>
-            <label className="block text-[10px] font-semibold text-gray-500 mb-1.5">Permissions</label>
-            <div className="flex flex-wrap gap-1.5">
-              {ALL_SCOPES.map(s => (
-                <button key={s.id} type="button" title={s.desc}
-                  onClick={() => toggleScope(s.id)}
-                  className="text-[10px] font-bold px-2 py-1 rounded-lg border transition-colors"
-                  style={newScopes.includes(s.id)
-                    ? { background:"#eef2ff", color:"#4338ca", borderColor:"#a5b4fc" }
-                    : { background:"#f8fafc", color:"#94a3b8", borderColor:"#e2e8f0" }}>
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        <button onClick={makeKey} disabled={!newName.trim() || newScopes.length === 0}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white rounded-xl disabled:opacity-40 transition-colors"
-          style={{ background:"linear-gradient(135deg,#6366f1,#7c3aed)" }}>
-          Generate Key
-        </button>
-      </div>
-
-      {/* Active keys — real API when authenticated, localStorage otherwise */}
-      <div className="section-card animate-fade-up overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-          <p className="text-sm font-bold text-gray-900">Active Keys</p>
-          <span className="text-xs text-gray-400">
-            {(profile?.org_id ? realKeys.length : keys.length)} key
-            {(profile?.org_id ? realKeys.length : keys.length) !== 1 ? "s" : ""}
-          </span>
-        </div>
-        {(profile?.org_id ? realKeys.length === 0 : keys.length === 0) ? (
-          <div className="py-10 text-center">
-            <p className="text-sm text-gray-400">No API keys yet</p>
-            <p className="text-xs text-gray-400 mt-1">Create a key above to start using the REST API</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-50">
-            {(profile?.org_id ? realKeys : keys).map(k => {
-              const isReal  = "key_prefix" in k;
-              const id      = k.id;
-              const name    = k.name;
-              const prefix  = isReal ? (k as typeof realKeys[0]).key_prefix : (k as APIKey).prefix;
-              const created = isReal ? (k as typeof realKeys[0]).created_at : (k as APIKey).created;
-              const lastUsed= isReal ? (k as typeof realKeys[0]).last_used   : (k as APIKey).lastUsed;
-              return (
-                <div key={id} className="flex items-center gap-4 px-5 py-3.5">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-bold text-gray-800">{name}</p>
-                      <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">active</span>
-                      {!isReal && (k as APIKey).scopes?.map(s => (
-                        <span key={s} className="text-[9px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">{s}</span>
-                      ))}
-                    </div>
-                    <p className="text-[10px] text-gray-400 mt-0.5 font-mono">
-                      {prefix} · Created {fmtDate(created)}
-                      {lastUsed ? ` · Last used ${fmtDate(lastUsed)}` : " · Never used"}
-                    </p>
-                  </div>
-                  <button onClick={() => revokeKey(id)}
-                    className="shrink-0 text-xs font-semibold text-rose-600 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-lg hover:bg-rose-100 transition-colors">
-                    Revoke
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Webhook endpoints */}
-      <div className="section-card animate-fade-up p-5 space-y-3">
-        <p className="text-sm font-bold text-gray-900">Webhook Endpoints</p>
-        <p className="text-xs text-gray-500">TrustLedger POSTs to these URLs for real-time event notifications.</p>
-        <div className="space-y-2">
-          {[
-            { event:"scan.completed",    url:`${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/api/webhooks/scan` },
-            { event:"policy.violation",  url:`${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/api/webhooks/policy` },
-            { event:"secret.detected",   url:`${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/api/webhooks/secret` },
-          ].map(w => (
-            <div key={w.event} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
-              <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded font-mono shrink-0">{w.event}</span>
-              <code className="text-[11px] font-mono text-gray-600 flex-1 truncate">{w.url}</code>
-              <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 shrink-0">Active</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* SDK quick-start */}
-      <div className="bg-gray-900 rounded-2xl p-5 space-y-3">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Quick Start</p>
-        <pre className="text-xs text-emerald-400 font-mono leading-relaxed overflow-x-auto whitespace-pre">{
-`# Install the TrustLedger CLI
-pip install trustledger-cli
-
-# Authenticate
-trustledger auth --token YOUR_API_KEY
-
-# Submit a scan
-trustledger scan \\
-  --repo ${orgName}/payments-api \\
-  --pr 482 \\
-  --commit abc1234`
-        }</pre>
-      </div>
-    </div>
-  );
-}
-
 // ── Tab: SSO / SAML ─────────────────────────────────────────────────────────────
 
 const IDP_GUIDES = [
@@ -2374,7 +2134,7 @@ const ALL_TABS: { key: Tab; label: string }[] = [
 ];
 
 // Held back for now (the pages and their routes are untouched): remove a key here to show its tab again.
-const HIDDEN_TABS: ReadonlySet<Tab> = new Set<Tab>(["policies", "repositories", "integrations", "webhooks", "roles", "api", "sso"]);
+const HIDDEN_TABS: ReadonlySet<Tab> = new Set<Tab>(["policies", "repositories", "integrations", "webhooks", "roles", "sso"]);
 const TABS = ALL_TABS.filter(t => !HIDDEN_TABS.has(t.key));
 
 export default function SettingsPage() {
@@ -2494,7 +2254,7 @@ export default function SettingsPage() {
         {tab === "integrations"  && <IntegrationsTab  policy={policy} setPolicy={setPolicy} />}
         {tab === "notifications" && <NotificationsTab policy={policy} setPolicy={setPolicy} />}
         {tab === "team"          && <TeamTab />}
-        {tab === "api"           && <APIAccessTab />}
+        {tab === "api"           && <ApiAccessTab />}
         {tab === "sso"           && <SSOTab />}
         {tab === "privacy"       && <PrivacyTab />}
         {tab === "webhooks"      && <WebhooksTab />}

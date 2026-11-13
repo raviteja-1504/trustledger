@@ -63,7 +63,7 @@ function GettingStarted() {
       <p>The whole product, with an allowance of {free.scans} pull-request scans a month, {free.repos} {free.repos === 1 ? "repository" : "repositories"} and {free.members} team members. Reviewer sign-offs are {free.attestations < 0 ? "unlimited" : `limited to ${free.attestations}`}. The scan count restarts on the first day of each month (UTC). Need more while you evaluate? Write to <a href={`mailto:${email}`}>{email}</a>.</p>
 
       <h2>Scanning outside a pull request</h2>
-      <p>To scan code from a CI job or a monorepo export, create an API key in Settings and send the files to <code>POST /api/scans</code>:</p>
+      <p>To scan code from a CI job or a monorepo export, an administrator creates an API key under <em>Settings → API Access</em>, and the job sends the files to <code>POST /api/scans</code>. A key can submit scans and read their results; it can never attest a file. Scans sent this way count against your plan's limits, like any other scan:</p>
       <Code>{`curl -X POST https://<your-deployment>/api/scans \\
   -H "X-TrustLedger-Key: tl_live_..." \\
   -H "Content-Type: application/json" \\

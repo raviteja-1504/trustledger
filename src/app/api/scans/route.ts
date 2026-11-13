@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { checkScanAllowed } from "@/lib/planGate";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requirePermission } from "../_middleware";
 import { runScan } from "@/lib/scanner";
@@ -154,6 +155,15 @@ export async function POST(req: NextRequest) {
   if (!validation.ok) return validation.response;
   const body = validation.data;
 
+  // The plan's limits (scans a month, repositories) apply to every way of starting a scan, not only the GitHub webhook: an API key or the
+  // dashboard's "New scan" would otherwise go past them. Fails open on a database error, like the webhook's own check.
+  if (process.env.NEXT_PUBLIC_SKIP_AUTH !== "true") {
+    const verdict = await checkScanAllowed(createServiceClient(), org_id, body.repo);
+    if (!verdict.allowed) {
+      return NextResponse.json({ error: `plan_limit_${verdict.reason}`, message: `${verdict.title}. ${verdict.summary}` }, { status: 403 });
+    }
+  }
+
   type LocalResult = { ai_percentage: number; risk_score: string; risk_indicators: string[]; content_hash: string; line_count: number; language: string };
 
   // If files have pre-computed local results, skip re-scanning
@@ -293,7 +303,7 @@ export async function POST(req: NextRequest) {
       overall_risk:        result.overall_risk,
       total_ai_percentage: result.total_ai_percentage,
       file_count:          result.files.length,
-      triggered_by:        user_id ? "api" : "webhook",
+      triggered_by:        "api",
       duration_ms:         result.duration_ms,
       // Was being computed by runScan() and then silently discarded here --
       // the PR detail page's Multi-Signal Evidence panel read this column
