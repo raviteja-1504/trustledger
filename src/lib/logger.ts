@@ -87,7 +87,8 @@ function log(level: LogLevel, message: string, rawContext?: LogContext): void {
       ? " " + JSON.stringify(context)
       : "";
     const prefix = `${colour}[${level.toUpperCase()}]${RESET} ${timestamp}`;
-    const msg    = `${prefix} ${message}${ctx}`;
+    // a CR/LF in a message must not start a second, forged log line (production output is JSON, where it is escaped)
+    const msg    = `${prefix} ${String(message).replace(/[\r\n]+/g, " ")}${ctx}`;
     if (level === "error") console.error(msg);
     else if (level === "warn") console.warn(msg);
     else console.log(msg);

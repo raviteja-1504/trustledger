@@ -13,6 +13,7 @@
  */
 
 import crypto from "crypto";
+import { isPublicHttpUrl } from "./outboundUrl";
 
 export type WebhookEventType =
   | "scan.completed"
@@ -54,6 +55,11 @@ export async function deliverWebhook(
 ): Promise<DeliveryResult> {
   if (!config.enabled || !config.url) {
     return { success: false, status_code: null, duration_ms: 0, error: "webhook_disabled" };
+  }
+
+  // A user-typed URL: never the server's own network (cloud metadata, localhost, private ranges)
+  if (!isPublicHttpUrl(config.url)) {
+    return { success: false, status_code: null, duration_ms: 0, error: "webhook_url_not_allowed" };
   }
 
   if (!config.events.includes(event.type)) {

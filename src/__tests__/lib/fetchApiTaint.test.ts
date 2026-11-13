@@ -56,3 +56,32 @@ describe("tagged-template SQL is parameterized", () => {
     expect(ids("lib/search.ts", `export async function find(prisma: any, q: string) {\n  const text = \`SELECT id FROM "Post" WHERE title ILIKE '\${q}' ORDER BY id\`;\n  return prisma.$queryRawUnsafe(text);\n}\n`)).toContain("sql-injection");
   });
 });
+
+describe("the request's own address is not a destination", () => {
+  it("redirecting to a login page built on this site is not an open redirect", () => {
+    expect(ids("middleware.ts", route(`  const pathname = req.nextUrl.pathname;
+  const loginUrl = new URL("/login", req.url);
+  loginUrl.searchParams.set("next", pathname);
+  return NextResponse.redirect(loginUrl);`))).not.toContain("open-redirect");
+  });
+  it("what the client puts INSIDE the URL still is (searchParams)", () => {
+    expect(ids("app/goto/route.ts", route(`  const url = new URL(req.url);
+  return NextResponse.redirect(url.searchParams.get("next")!);`))).toContain("open-redirect");
+  });
+});
+
+describe("a fixed-host URL held in a variable is judged by position", () => {
+  it("a ternary of fixed-host templates with a request-derived path is not SSRF", () => {
+    expect(ids("app/api/c/route.ts", route(`  const { repo, id } = await req.json();
+  const u = id ? \`https://api.github.com/repos/\${repo}/issues/comments/\${id}\` : \`https://api.github.com/repos/\${repo}/issues\`;
+  await fetch(u);
+  return NextResponse.json({ ok: true });`))).not.toContain("ssrf");
+  });
+  it("a ternary where one arm lets the request pick the host is SSRF", () => {
+    expect(ids("app/api/c/route.ts", route(`  const { host, id } = await req.json();
+  const u = id ? \`https://\${host}/a\` : \`https://api.github.com/b\`;
+  await fetch(u);
+  return NextResponse.json({ ok: true });`))).toContain("ssrf");
+  });
+});
+

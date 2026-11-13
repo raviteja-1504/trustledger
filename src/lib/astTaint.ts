@@ -188,6 +188,21 @@ export function isInsideRouteCallback(node: ts.Node): boolean {
 const SOURCE_ROOTS = new Set(["req", "request", "_req", "_request"]);
 // `url` / `nextUrl` / `searchParams`: the Fetch-API / Next.js route-handler request (`req.url`, `req.nextUrl.searchParams.get("q")`).
 const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies", "url", "originalUrl", "nextUrl", "searchParams"]);
+/** The request's OWN address (`req.url`, `req.nextUrl`): input for most sink classes, but never the destination of a redirect or a
+ * server-side request: `NextResponse.redirect(new URL("/login", req.url))` stays on this site. Only what the client puts INSIDE the
+ * URL (`searchParams`, `search`) can name another site. */
+const REQUEST_OWN_URL_PROPS = new Set(["url", "originalUrl", "nextUrl"]);
+const NOT_A_DESTINATION = SinkClass.REDIRECT | SinkClass.SSRF;
+/** `req.url`, `req.nextUrl`, `req.nextUrl.pathname`, `req.nextUrl.origin`: the request's own address, with no `searchParams` / `search` in the chain. */
+function isRequestOwnUrl(e: ts.PropertyAccessExpression): boolean {
+  let cur: ts.Expression = e;
+  while (ts.isPropertyAccessExpression(cur)) {
+    if (cur.name.text === "searchParams" || cur.name.text === "search") return false;
+    if (ts.isIdentifier(cur.expression) && SOURCE_ROOTS.has(cur.expression.text) && REQUEST_OWN_URL_PROPS.has(cur.name.text)) return true;
+    cur = cur.expression;
+  }
+  return false;
+}
 /** Fetch-API Request body readers: `await req.json()`, `req.formData()`, `req.text()`: what the client sent. */
 const REQUEST_BODY_READERS = new Set(["json", "formData", "text", "arrayBuffer"]);
 
@@ -389,6 +404,31 @@ function decomposeConcatExpr(e: ts.Expression): UrlPart<ts.Expression>[] {
     return [...decomposeConcatExpr(e.left), ...decomposeConcatExpr(e.right)];
   }
   return [{ kind: "opaque", node: e }];
+}
+
+/**
+ * assessSsrfUrl for a URL held in a variable or chosen by a ternary: `const u = ok ? `https://api.example.com/a/${id}` : `https://api.example.com/b`;
+ * fetch(u)`. A `const` identifier is replaced by its initializer; a ternary is judged by BOTH arms (vulnerable if either is).
+ */
+function assessSsrfUrlResolved(arg: ts.Expression, maskOf: (n: ts.Expression) => number): SsrfAssessment<ts.Expression> {
+  const r = resolveSsrfUrl(arg, maskOf, 0);
+  // Resolution only decides safe / vulnerable; the finding still names the argument as written (existing output is unchanged)
+  const u = unwrapExpr(arg);
+  return r.verdict === "vulnerable" && (ts.isIdentifier(u) || ts.isConditionalExpression(u)) ? { ...r, culprit: u } : r;
+}
+function resolveSsrfUrl(e: ts.Expression, maskOf: (n: ts.Expression) => number, depth: number): SsrfAssessment<ts.Expression> {
+  e = unwrapExpr(e);
+  if (depth < 4 && ts.isIdentifier(e)) {
+    const init = nearestConstInitializer(e);
+    if (init) return resolveSsrfUrl(init, maskOf, depth + 1);
+  }
+  if (depth < 4 && ts.isConditionalExpression(e)) {
+    const a = resolveSsrfUrl(e.whenTrue, maskOf, depth + 1), b = resolveSsrfUrl(e.whenFalse, maskOf, depth + 1);
+    if (a.verdict === "vulnerable") return a;
+    if (b.verdict === "vulnerable") return b;
+    return a.verdict === "safe" || b.verdict === "safe" ? (a.verdict === "no-taint" || b.verdict === "no-taint" || a.verdict === b.verdict ? { ...a, verdict: "safe" } : a) : a;
+  }
+  return assessSsrfUrl(decomposeConcatExpr(e), maskOf);
 }
 
 // spawn(cmd, [...args])/execFile(cmd, [...args])/fork(modulePath, [...args]): each ARGV ELEMENT is its own
@@ -1317,6 +1357,9 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
   let fnValueDepth = 0;
   const taintMask = (expr: ts.Expression, env: Env): number => {
     if (ts.isParenthesizedExpression(expr)) return taintMask(expr.expression, env);
+    // what the client puts inside the URL can name another site; the request's own address cannot
+    if (ts.isPropertyAccessExpression(expr) && (expr.name.text === "searchParams" || expr.name.text === "search") && taintMask(expr.expression, env) !== 0) return ALL;
+    if (ts.isPropertyAccessExpression(expr) && isRequestOwnUrl(expr)) return ALL & ~NOT_A_DESTINATION;
     if (isTaintSourceExpr(expr)) return ALL;
     if (ts.isIdentifier(expr)) {
       let m = env.get(expr.text) ?? 0;
@@ -2213,7 +2256,7 @@ function directSinkHit(
     const cls = classOf(match.id);
     let positionCleared: ts.Expression | undefined;
     if (match.id === "ssrf" && match.args[0]) {
-      const url = assessSsrfUrl(decomposeConcatExpr(match.args[0]), x => maskFn(x, env));
+      const url = assessSsrfUrlResolved(match.args[0], x => maskFn(x, env));
       if (url.verdict === "vulnerable") return { id: match.id, sinkExpr: match.sinkExpr, arg: match.args[0] };
       if (url.verdict === "safe") positionCleared = match.args[0];
     }
@@ -3959,7 +4002,7 @@ export function scanAstTaint(
       let positionCleared: ts.Expression | undefined;
       let cleared = false;
       if (match.id === "ssrf" && match.args[0]) {
-        const url: SsrfAssessment<ts.Expression> = assessSsrfUrl(decomposeConcatExpr(match.args[0]), n => taintMask(n, env));
+        const url: SsrfAssessment<ts.Expression> = assessSsrfUrlResolved(match.args[0], n => taintMask(n, env));
         if (url.verdict === "vulnerable") {
           const culprit = url.culprit!;
           emit("ssrf", call, sourceLabel(culprit), match.sinkExpr, culprit, url.encoded

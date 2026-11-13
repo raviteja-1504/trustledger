@@ -50,7 +50,7 @@ import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
+  ALL, FIXED_POINT_CAP, SHADOW, applyGuards, applySanitizer, buildBackwardTraceGeneric, classOf, combineUrlFacets, urlPrefixFacets, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared, mergeSinkFacts,
   crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -231,7 +231,8 @@ const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "c
 const REQUEST_NAME_RE = /^(?:\w+_)?(?:request|req)(?:_\w+)?$/i;
 const isRequestName = (name: string): boolean => REQUEST_NAME_RE.test(name);
 // aiohttp: `await request.post()` (form), `.json()`, `.text()`, `.read()` (raw body)
-const FLASK_CALL_SOURCES = new Set(["get_json", "get_data", "post", "json", "text", "read"]);
+// Starlette/FastAPI Request readers: `await request.body()` / `.form()` / `.stream()` (json() was already here)
+const FLASK_CALL_SOURCES = new Set(["get_json", "get_data", "post", "json", "text", "read", "body", "form", "stream"]);
 // Django's request dictionaries: query, form, cookies, uploaded files, and META (which carries every header).
 const DJANGO_DICT_SOURCES = new Set(["GET", "POST", "COOKIES", "FILES", "META", "REQUEST"]);
 const FASTAPI_DECORATOR_RE = /^@(?:\w+\.)?(?:router|app)\.(?:get|post|put|delete|patch|options|head)\s*\(/;
@@ -898,7 +899,7 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     return checked.length ? { id: "path-traversal", sinkExpr: text, args: checked } : null;
   }
   if (text === "redirect" || text === "flask.redirect" || text === "HttpResponseRedirect" ||
-      text.endsWith(".HttpResponseRedirect")) {
+      text.endsWith(".HttpResponseRedirect") || /(?:^|\.)(?:RedirectResponse|HttpResponsePermanentRedirect)$/.test(text)) {
     // The location only -- a status code picks no destination.
     const loc = first ?? keywordArgPy(args, ["location", "redirect_to", "to"]);
     return loc ? { id: "open-redirect", sinkExpr: text, args: [loc] } : null;
@@ -1802,7 +1803,15 @@ function makeTaintMaskPy(
       // a constant condition picks one arm
       const c = constEval(parts[1] ?? null);
       if (c !== NOT_CONST) return c ? (parts[0] ? taintMask(parts[0], env) : 0) : (parts[2] ? taintMask(parts[2], env) : 0);
-      return (parts[0] ? taintMask(parts[0], env) : 0) | (parts[2] ? taintMask(parts[2], env) : 0);
+      // an arm that is a variable the condition validates (a same-site path check) loses the classes the check clears
+      const gs = parts[1] ? guardsOfConditionPy(parts[1], rootOfPy(node)) : [];
+      const arm = (a: SyntaxNode | null | undefined, side: "true" | "false"): number => {
+        if (!a) return 0;
+        let m = taintMask(a, env);
+        if (m && a.type === "identifier") for (const g of gs) if (g.name === a.text && g.holds === side && g.clears && !g.facet) m = (m & ~g.clears) | ((m & g.clears & ALL) << SHADOW);
+        return m;
+      };
+      return arm(parts[0], "true") | arm(parts[2], "false");
     }
     // `a or b` / `a and b` evaluate to one of their operands.
     if (node.type === "boolean_operator") {
@@ -1964,7 +1973,8 @@ function isLiteralCollectionPy(n: SyntaxNode, root: SyntaxNode, depth = 0): bool
   return false;
 }
 
-const invertPy = (g: Guard): Guard => ({ name: g.name, holds: g.holds === "true" ? "false" : "true", clears: g.clears });
+const rootOfPy = (n: SyntaxNode): SyntaxNode => { let r = n; while (r.parent) r = r.parent; return r; };
+const invertPy = (g: Guard): Guard => ({ ...g, holds: g.holds === "true" ? "false" : "true" });
 
 /** `x` when `name = urlparse(x)` / `urlsplit(x)` (any module prefix) is assigned in the function enclosing `from`. */
 function urlParsedFromPy(from: SyntaxNode, name: string): string | null {
@@ -2115,7 +2125,10 @@ function guardsOfConditionPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
       const all = [...guardsOfConditionPy(l, root), ...guardsOfConditionPy(r, root)];
       const quoted = op === "or" ? quotedLiteralGuardPy(cond) : null;
       if (quoted) all.push(quoted);
-      return op === "and" ? all.filter(g => g.holds === "true") : op === "or" ? all.filter(g => g.holds === "false") : [];
+      // `next.startswith("/") and not next.startswith("//")`: the prefix facets combine into "a path on this site"
+      if (op === "and") return [...all.filter(g => g.holds === "true" && !g.facet), ...combineUrlFacets(all, "true")];
+      if (op === "or") return [...all.filter(g => g.holds === "false" && !g.facet), ...combineUrlFacets(all, "false")];
+      return [];
     }
     case "comparison_operator": {
       const [l, r] = cond.namedChildren;
@@ -2159,6 +2172,11 @@ function guardsOfConditionPy(cond: SyntaxNode, root: SyntaxNode): Guard[] {
         if (okType(t) || (t.type === "tuple" && t.namedChildren.length > 0 && t.namedChildren.every(c => !!c && okType(c)))) {
           return [{ name: args[0].text, holds: "true" }];
         }
+      }
+      // next.startswith("/") / ("//"): URL facets (see combineUrlFacets): together they prove a same-site path
+      if (fn?.type === "attribute" && args.length === 1 && args[0].type === "string" && isLiteralPy(args[0])) {
+        const { object, attribute } = attributeParts(fn);
+        if (object?.type === "identifier" && attribute === "startswith") return urlPrefixFacets(object.text, stringLiteralContentPy(args[0]), "starts");
       }
       if (fn?.type === "attribute" && args.length === 0) {
         const { object, attribute } = attributeParts(fn);

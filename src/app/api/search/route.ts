@@ -32,7 +32,8 @@ function rankResult(query: string, title: string, subtitle: string): number {
   if (title.toLowerCase().includes(q))             score += 50;
   if (subtitle.toLowerCase().includes(q))          score += 20;
   // Exact word match bonus
-  if (new RegExp(`\\b${q}\\b`, "i").test(title))   score += 30;
+  // The query is the user's text, not a pattern: escape it, or `(a+)+$` / `[` is a regex of their choosing (ReDoS, or a thrown SyntaxError).
+  if (new RegExp(`\\b${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(title)) score += 30;
   return score;
 }
 

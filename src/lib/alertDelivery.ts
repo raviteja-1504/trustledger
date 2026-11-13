@@ -3,6 +3,7 @@
  * Delivers P1/P2 alerts via Slack, email (SendGrid), and in-app.
  * Called from scan completion and violation SLA breach detection.
  */
+import { isPublicHttpUrl } from "./outboundUrl";
 
 export interface AlertPayload {
   alert_id:   string;
@@ -39,6 +40,7 @@ export async function sendSlackAlert(
   alert: AlertPayload,
 ): Promise<boolean> {
   if (!webhookUrl) return false;
+  if (!isPublicHttpUrl(webhookUrl)) return false;   // a user-typed URL: never the server's own network
 
   const reviewUrl = alert.scan_id
     ? `${alert.app_url}/pr/${alert.scan_id}`
@@ -197,6 +199,7 @@ export async function sendPagerDutyAlert(
 
 export async function sendTeamsAlert(webhookUrl: string, alert: AlertPayload): Promise<boolean> {
   if (!webhookUrl) return false;
+  if (!isPublicHttpUrl(webhookUrl)) return false;
   const reviewUrl = alert.scan_id
     ? `${alert.app_url}/pr/${alert.scan_id}`
     : `${alert.app_url}/alerts`;
