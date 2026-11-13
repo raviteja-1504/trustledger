@@ -15,9 +15,9 @@ export type HandleResult =
   | { ok: false; problem: HandleProblem; message: string };
 
 export const HANDLE_MESSAGE: Record<HandleProblem, string> = {
-  empty: "Enter the GitHub account name that owns your repositories, for example acme-corp.",
-  email: "That looks like an email address. Enter the GitHub account name instead: the part after github.com/ in your repository address.",
-  invalid: "GitHub account names use only letters, numbers and hyphens, up to 39 characters. Enter just the name, for example acme-corp.",
+  empty: "Enter your GitHub name: the part after github.com/ in the web address of your repositories, for example acme-corp.",
+  email: "That looks like an email address. Enter your GitHub name instead: the part after github.com/ in the web address of your repositories.",
+  invalid: "GitHub names use only letters, numbers and hyphens, up to 39 characters. Enter just the name, for example acme-corp.",
 };
 
 // GitHub allows letters, digits and single hyphens (1-39 chars); Enterprise Managed Users add an underscore, so it is allowed too.

@@ -52,7 +52,7 @@ export default function CreateOrgPage() {
       setError(code === "slug_taken"
         ? "That URL slug is already taken. Try a different one."
         : code === "github_org_invalid"
-          ? "The GitHub account name isn't valid. Enter just the name after github.com/, for example acme-corp (not an email address)."
+          ? "That isn't a valid GitHub name. Enter just the part after github.com/, for example acme-corp (not an email address)."
           : `Failed to create organisation (${code}). Please try again.`);
       setCreating(false);
     }
@@ -169,7 +169,7 @@ export default function CreateOrgPage() {
 
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-1.5">
-              GitHub account name <span className="text-gray-400 font-normal">(optional)</span>
+              GitHub name <span className="text-gray-400 font-normal">(optional)</span>
             </label>
             <div className="flex items-center gap-2 border border-gray-200 rounded-xl px-4 py-3 focus-within:ring-2 focus-within:ring-indigo-400">
               <span className="text-sm text-gray-400 shrink-0">github.com/</span>
@@ -182,8 +182,8 @@ export default function CreateOrgPage() {
               />
             </div>
             <p className="text-xs text-gray-400 mt-1">
-              The name right after github.com/ in your repository addresses (a company or your own account). Pull requests are matched to this
-              organisation by it. Not your email. You can set it later during setup.
+              The part after github.com/ in the web address of your repositories (your company name on GitHub, or your own username). Pull
+              requests are matched to this organisation by it. Not your email. You can also set it later during setup.
             </p>
           </div>
 

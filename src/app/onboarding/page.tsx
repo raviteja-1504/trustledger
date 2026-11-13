@@ -104,7 +104,6 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   const [orgHandle,   setOrgHandle]   = useState("");
   const [touched,     setTouched]     = useState(false);
   const meta = (user?.user_metadata ?? {}) as Record<string, unknown>;
-  const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? (typeof meta.user_name === "string" ? meta.user_name : ""));
   // what this organisation has linked today, and its name, from the server
   const [savedHandle, setSavedHandle] = useState<string | null>(null);
   const [orgName, setOrgName] = useState(profile?.org_name ?? "");
@@ -164,16 +163,18 @@ function GithubStep({ onNext }: { onNext: () => void }) {
     } catch (e) {
       const code = e instanceof Error ? e.message : "";
       setSaveError(code === "github_org_taken"
-        ? "That GitHub account is already linked to another TrustLedger organisation. If you have created more than one TrustLedger organisation, check which one you are signed in to (shown at the top of this page). Otherwise, ask whoever linked it to remove it first."
+        ? "That GitHub name is already linked to another TrustLedger organisation. If you have created more than one TrustLedger organisation, check which one you are signed in to (shown at the top of this page). Otherwise, ask whoever linked it to remove it first."
         : code === "github_org_invalid" || code === "github_org_required"
-          ? "That isn't a GitHub account name. Enter the part after github.com/, for example acme-corp."
+          ? "That isn't a GitHub name. Enter the part after github.com/, for example acme-corp."
           : "We couldn't save that. Please try again.");
       setSaving(false);
       return;
     }
-    // the username is optional and only for the developer view: a failure here does not stop setup
-    if (githubLogin.trim()) {
-      await authedFetch("/api/onboarding", { method: "POST", body: JSON.stringify({ action: "save_github_login", github_login: githubLogin.trim() }) }).catch(() => {});
+    // The person's own GitHub username (only for their "my pull requests" view) is not asked for here: someone who signed in with GitHub
+    // already told us, so it is saved from that, once; anyone else can set it on their profile page. A failure does not stop setup.
+    const ownLogin = typeof meta.user_name === "string" ? meta.user_name.trim() : "";
+    if (ownLogin && !profile?.github_login) {
+      await authedFetch("/api/onboarding", { method: "POST", body: JSON.stringify({ action: "save_github_login", github_login: ownLogin }) }).catch(() => {});
     }
     setSaving(false);
     onNext();
@@ -246,18 +247,18 @@ function GithubStep({ onNext }: { onNext: () => void }) {
       {/* The handle: what it is, why it matters, what will be saved */}
       <div className="space-y-3">
         <div role="note" className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 space-y-2.5">
-          <p className="text-sm font-bold text-indigo-950">What is the GitHub account name?</p>
+          <p className="text-sm font-bold text-indigo-950">What do I type here?</p>
           <p className="text-xs text-indigo-900 leading-relaxed">
-            It is the name that comes right after <span className="font-mono">github.com/</span> in your repository addresses:
+            Type the name that comes right after <span className="font-mono">github.com/</span> in the web address of your repositories:
           </p>
           <p className="rounded-lg bg-white border border-indigo-100 px-3 py-2 font-mono text-[12px] text-gray-500 break-all">
             github.com/<strong className="text-indigo-700 bg-indigo-50 px-1 rounded">acme-corp</strong>/payments-api
           </p>
           <ul className="text-xs text-indigo-900 leading-relaxed space-y-1 list-disc pl-4">
             <li>TrustLedger matches every pull request to your TrustLedger organisation{orgName ? <> (<strong>{orgName}</strong>)</> : null} by this name. <strong>If it does not match, pull requests are not scanned.</strong></li>
-            <li>It can be a company account or your own personal account: whichever owns the repositories you want scanned.</li>
+            <li>It is your company&apos;s name on GitHub, or your own username if the repositories are yours. Use whichever one the repositories you want scanned sit under.</li>
             <li>It is <strong>not</strong> your email address, your TrustLedger organisation&apos;s name or a full repository link.</li>
-            <li>One GitHub account can be linked to one TrustLedger organisation.</li>
+            <li>One GitHub name can be linked to one TrustLedger organisation.</li>
           </ul>
         </div>
 
@@ -269,16 +270,22 @@ function GithubStep({ onNext }: { onNext: () => void }) {
 
         <div>
           <label htmlFor="gh-handle" className="text-xs font-semibold text-gray-700 block mb-1.5">
-            GitHub account that owns the repositories
+            GitHub name <span className="font-normal text-gray-500">(the part after github.com/)</span>
           </label>
-          <div className={`flex items-stretch rounded-xl border bg-white focus-within:ring-2 focus-within:ring-indigo-400 ${touched && !parsed.ok ? "border-rose-300" : "border-gray-200"}`}>
-            <span className="flex items-center pl-3 pr-1 text-sm font-mono text-gray-400 select-none">github.com/</span>
+          {/* the fixed part (grey block) and the part to type (white box) are visibly different things */}
+          <div className={`flex items-stretch overflow-hidden rounded-xl border bg-white focus-within:ring-2 focus-within:ring-indigo-400 ${touched && !parsed.ok ? "border-rose-300" : "border-gray-300"}`}>
+            <span className="flex items-center border-r border-gray-200 bg-gray-100 px-3 text-sm font-mono text-gray-500 select-none" aria-hidden>github.com/</span>
             <input id="gh-handle" value={orgHandle} onChange={e => { setOrgHandle(e.target.value); setSaveError(null); }} onBlur={() => setTouched(true)}
-              placeholder="acme-corp" autoComplete="off" autoCapitalize="none" spellCheck={false}
+              placeholder="e.g. acme-corp" autoComplete="off" autoCapitalize="none" spellCheck={false}
               aria-invalid={touched && !parsed.ok} aria-describedby="gh-handle-help"
-              className="min-w-0 flex-1 text-sm rounded-r-xl pl-0 pr-4 py-2.5 focus:outline-none font-mono bg-transparent" />
+              className="min-w-0 flex-1 bg-white px-3 py-3 text-sm font-mono text-gray-900 placeholder:text-gray-400 focus:outline-none" />
           </div>
           <div id="gh-handle-help" className="mt-1.5 space-y-1.5">
+            {!orgHandle.trim() && !installedOn && (
+              <p className="text-[11px] text-gray-600 leading-snug">
+                Type just the name in the white box: <strong>no</strong> <span className="font-mono">github.com/</span>, no <span className="font-mono">@</span>, no email.
+              </p>
+            )}
             {installedOn && parsed.ok && parsed.handle === installedOn.toLowerCase() && (
               <p className="text-[11px] text-emerald-700">✓ Filled in from your GitHub installation on <span className="font-mono">{installedOn}</span>.</p>
             )}
@@ -292,7 +299,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
             {installedDiffers && (
               <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-2.5 space-y-1">
                 <p className="text-[11px] text-amber-900 leading-snug">
-                  You installed the app on <strong className="font-mono">{installedOn}</strong>, but this says <strong className="font-mono">{parsed.ok ? parsed.handle : ""}</strong>.
+                  You installed the app on <strong className="font-mono">{installedOn}</strong>, but the name above is <strong className="font-mono">{parsed.ok ? parsed.handle : ""}</strong>.
                   Pull requests are matched on this name, so repositories owned by <span className="font-mono">{installedOn}</span> would not be scanned.
                 </p>
                 <button type="button" onClick={() => setOrgHandle(installedOn!)} className="text-[11px] font-bold text-amber-900 underline underline-offset-2">
@@ -301,17 +308,6 @@ function GithubStep({ onNext }: { onNext: () => void }) {
               </div>
             )}
           </div>
-        </div>
-
-        <div>
-          <label htmlFor="gh-login" className="text-xs font-semibold text-gray-700 block mb-1.5">
-            Your own GitHub username <span className="text-gray-400 font-normal">(optional)</span>
-          </label>
-          <input id="gh-login" value={githubLogin} onChange={e => setGithubLogin(e.target.value)} placeholder="your-github-handle" autoComplete="off" autoCapitalize="none" spellCheck={false}
-            className="w-full text-sm border border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono" />
-          <p className="mt-1.5 text-[11px] text-gray-500 leading-snug">
-            You, personally. It only lets TrustLedger show you the pull requests you wrote. It can be the same as the account above if you use a personal account.
-          </p>
         </div>
       </div>
 

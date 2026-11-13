@@ -99,7 +99,7 @@ describe("setup wizard", () => {
       window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
       openGithubStep();
       expect(await screen.findByText(/GitHub App installed on acme-corp/)).toBeInTheDocument();
-      expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("acme-corp");
+      expect(screen.getByPlaceholderText("e.g. acme-corp")).toHaveValue("acme-corp");
       expect(screen.queryByRole("link", { name: /^Install on GitHub/ })).toBeNull();
     });
 
@@ -129,28 +129,28 @@ describe("setup wizard", () => {
     describe("the GitHub account name field", () => {
       it("explains what the field is, with an example, before asking for it", async () => {
         openGithubStep();
-        expect(await screen.findByText("What is the GitHub account name?")).toBeInTheDocument();
+        expect(await screen.findByText("What do I type here?")).toBeInTheDocument();
         expect(screen.getByText(/comes right after/)).toBeInTheDocument();
         expect(screen.getByText(/If it does not match, pull requests are not scanned/)).toBeInTheDocument();
         expect(screen.getByText(/your email address/)).toBeInTheDocument();
-        expect(screen.getByLabelText("GitHub account that owns the repositories")).toBeInTheDocument();
+        expect(screen.getByLabelText(/GitHub name/)).toBeInTheDocument();
       });
 
       it("is not pre-filled from the TrustLedger organisation's slug", async () => {
         openGithubStep();
-        expect(await screen.findByPlaceholderText("acme-corp")).toHaveValue("");
+        expect(await screen.findByPlaceholderText("e.g. acme-corp")).toHaveValue("");
       });
 
       it("is pre-filled with the handle already saved, and says so", async () => {
         onboardingGet = { github_org: "cyberminutetech", org_name: "CyberMinute" };
         openGithubStep();
-        await waitFor(() => expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("cyberminutetech"));
+        await waitFor(() => expect(screen.getByPlaceholderText("e.g. acme-corp")).toHaveValue("cyberminutetech"));
         expect(screen.getByText(/Currently linked/)).toHaveTextContent("github.com/cyberminutetech");
       });
 
       it("shows what will be saved and which organisation it is for", async () => {
         openGithubStep();
-        const box = await screen.findByPlaceholderText("acme-corp");
+        const box = await screen.findByPlaceholderText("e.g. acme-corp");
         fireEvent.change(box, { target: { value: "Acme-Corp" } });
         expect(screen.getByText(/will be scanned in/)).toHaveTextContent("github.com/acme-corp/…");
         expect(screen.getByText(/will be scanned in/)).toHaveTextContent("Acme Inc");
@@ -159,7 +159,7 @@ describe("setup wizard", () => {
       it("an email address is refused with a message and is not sent", async () => {
         const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
         openGithubStep();
-        const box = await screen.findByPlaceholderText("acme-corp");
+        const box = await screen.findByPlaceholderText("e.g. acme-corp");
         authedFetch.mockClear();
         fireEvent.change(box, { target: { value: "ada@acme.dev" } });
         fireEvent.blur(box);
@@ -172,7 +172,7 @@ describe("setup wizard", () => {
       it("a pasted repository address is sent as the account name", async () => {
         const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
         openGithubStep();
-        const box = await screen.findByPlaceholderText("acme-corp");
+        const box = await screen.findByPlaceholderText("e.g. acme-corp");
         fireEvent.change(box, { target: { value: "https://github.com/Acme-Corp/payments-api" } });
         expect(screen.getByText(/We tidied what you typed/)).toBeInTheDocument();
         authedFetch.mockClear();
@@ -180,14 +180,42 @@ describe("setup wizard", () => {
         await waitFor(() => expect(authedFetch).toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ body: JSON.stringify({ action: "save_github_org", github_org: "acme-corp" }) })));
       });
 
+      it("asks for one name only: no second, personal-username field", async () => {
+        openGithubStep();
+        await screen.findByPlaceholderText("e.g. acme-corp");
+        expect(screen.queryByText(/personal GitHub username/i)).toBeNull();
+        expect(screen.getAllByRole("textbox")).toHaveLength(1);
+      });
+
+      it("a person who signed in with GitHub has their own username saved for them, once", async () => {
+        const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+        authValue = { ...authValue, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "github" }, user_metadata: { user_name: "ada-codes" } } };
+        openGithubStep();
+        fireEvent.change(await screen.findByPlaceholderText("e.g. acme-corp"), { target: { value: "acme-corp" } });
+        authedFetch.mockClear();
+        fireEvent.click(screen.getByRole("button", { name: /Save and continue/ }));
+        await waitFor(() => expect(authedFetch).toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ body: JSON.stringify({ action: "save_github_login", github_login: "ada-codes" }) })));
+      });
+
+      it("one who already has a username saved is not overwritten", async () => {
+        const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+        authValue = { profile: { ...(authValue.profile as object), github_login: "ada-saved" }, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "github" }, user_metadata: { user_name: "ada-codes" } } };
+        openGithubStep();
+        fireEvent.change(await screen.findByPlaceholderText("e.g. acme-corp"), { target: { value: "acme-corp" } });
+        authedFetch.mockClear();
+        fireEvent.click(screen.getByRole("button", { name: /Save and continue/ }));
+        await waitFor(() => expect(authedFetch).toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ body: JSON.stringify({ action: "save_github_org", github_org: "acme-corp" }) })));
+        expect(authedFetch).not.toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ body: expect.stringContaining("save_github_login") }));
+      });
+
       it("warns when the name differs from the account the app was installed on, and offers the installed one", async () => {
         window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
         openGithubStep();
         await screen.findByText(/GitHub App installed on acme-corp/);
-        fireEvent.change(screen.getByPlaceholderText("acme-corp"), { target: { value: "someone-else" } });
+        fireEvent.change(screen.getByPlaceholderText("e.g. acme-corp"), { target: { value: "someone-else" } });
         expect(screen.getByText(/would not be scanned/)).toBeInTheDocument();
         fireEvent.click(screen.getByRole("button", { name: "Use acme-corp" }));
-        expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("acme-corp");
+        expect(screen.getByPlaceholderText("e.g. acme-corp")).toHaveValue("acme-corp");
         expect(screen.queryByText(/would not be scanned/)).toBeNull();
       });
     });
