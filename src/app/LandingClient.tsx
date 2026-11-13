@@ -622,7 +622,7 @@ function CTASection() {
           </Link>
         </div>
         <p className="text-[13px] text-white/50 max-w-xl mx-auto">Connecting asks for read access to pull requests and code, and write access to checks — <Link href="/trust#permissions" className="underline underline-offset-4 text-white/70">why each permission</Link>. Free to start, no credit card.</p>
-        <p className="text-sm text-white/45">Questions first? <a href={`mailto:${contactEmail("hello")}`} className="font-semibold text-white/70 hover:text-white underline underline-offset-4 decoration-white/25">Talk to us</a> — {contactEmail("hello")}</p>
+        <p className="text-sm text-white/45">Questions or pricing? <a href={`mailto:${contactEmail("sales")}`} className="font-semibold text-white/70 hover:text-white underline underline-offset-4 decoration-white/25">Talk to us</a> — {contactEmail("sales")}</p>
       </Reveal>
     </section>
   );

@@ -32,7 +32,7 @@ import ScanCountsSummary from "@/components/ScanCounts";
 import FlaggedFilesReview from "@/components/FlaggedFilesReview";
 import Tip from "@/components/Tip";
 import { ACTION_TIP, COLUMN_TIP, EVIDENCE_TIP, FILTER_TIP, OVERALL_TIP, RISK_TIP, STATUS_TIP } from "@/lib/prTooltips";
-import { computeScanCounts, listNewFindings } from "@/lib/scanCounts";
+import { computeScanCounts, listNewFindings, fileCounts } from "@/lib/scanCounts";
 import { FindingTriageContext, TriageDecisionsList, type FindingTriageContextValue } from "@/components/FindingTriage";
 import { summarize as summarizeLifecycle, type FindingStatus } from "@/lib/findingLifecycle";
 import { useRole, ROLE_LABELS } from "@/lib/roles";
@@ -590,6 +590,9 @@ function AttestReviewModal({ file, reviewerEmail, onConfirm, onClose }: {
 
 // ── File Row ──────────────────────────────────────────────────────────────────
 
+/** A security finding is an indicator with a CWE; everything else is an AI-provenance or code-hygiene signal. */
+const isSecurityIndicator = (i: { id: string; label?: string; cwe?: string }) => !!(i.cwe ?? findingMeta(i.id, i.label).cwe);
+
 const OPEN_FILE_EVENT = "tl:open-file";
 
 /** Cross-file data-flow steps link to the other file's row on this page: it expands and scrolls to the line. */
@@ -692,17 +695,27 @@ function FileRow({ file, reviewerEmail, reviewerGithub, onRequestAttest, canAtte
           </Tip>
         </td>
 
-        {/* Signals */}
+        {/* Findings: this file's security findings, counted exactly as the Security findings card counts them; other signals apart */}
         <td className="px-3 py-3.5 hidden md:table-cell">
-          {file.risk_indicators.length > 0 ? (
-            <Tip tip={STATUS_TIP.signals}>
-              <span tabIndex={0} className="cursor-help inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full ring-1 ring-indigo-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400">
-                {file.risk_indicators.length} signal{file.risk_indicators.length !== 1 ? "s" : ""}
+          {(() => {
+            const counts = Array.isArray(file.indicators) ? fileCounts(file.indicators, isSecurityIndicator) : { security: 0, other: file.risk_indicators.length };
+            const pill = "cursor-help inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400";
+            if (counts.security === 0 && counts.other === 0) return <span className="text-gray-300 text-xs">—</span>;
+            return (
+              <span className="inline-flex flex-wrap items-center gap-1">
+                {counts.security > 0 && (
+                  <Tip tip={STATUS_TIP.findings}>
+                    <span tabIndex={0} className={`${pill} text-indigo-700 bg-indigo-50 ring-indigo-100`}>{counts.security} finding{counts.security !== 1 ? "s" : ""}</span>
+                  </Tip>
+                )}
+                {counts.other > 0 && (
+                  <Tip tip={STATUS_TIP.signals}>
+                    <span tabIndex={0} className={`${pill} text-gray-500 bg-gray-50 ring-gray-200`}>{counts.security > 0 ? "+ " : ""}{counts.other} signal{counts.other !== 1 ? "s" : ""}</span>
+                  </Tip>
+                )}
               </span>
-            </Tip>
-          ) : (
-            <span className="text-gray-300 text-xs">—</span>
-          )}
+            );
+          })()}
         </td>
 
         {/* Status */}
@@ -1157,7 +1170,7 @@ function PRDetailContent() {
   });
   // The page's numbers, each in its own unit (lib/scanCounts.ts). A security finding is one with a CWE;
   // AI-provenance and hygiene signals are reported apart and never added into the finding counts.
-  const isSecurityInd = (i: { id: string; label?: string; cwe?: string }) => !!(i.cwe ?? findingMeta(i.id, i.label).cwe);
+  const isSecurityInd = isSecurityIndicator;
   const counts = useMemo(() => scan ? computeScanCounts(scan.files, {
     isSecurity: isSecurityInd,
     attestedPaths: attestedSet,
@@ -2169,7 +2182,7 @@ function PRDetailContent() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-100 bg-gray-50/60">
-                    {["File", "Lang", "AI Content", "Risk", "Signals", "Status", "Action"].map(h => (
+                    {["File", "Lang", "AI Content", "Risk", "Findings", "Status", "Action"].map(h => (
                       <th key={h} className="px-4 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-gray-400 first:pl-5 last:pr-5 last:text-right">
                         <Tip tip={COLUMN_TIP[h]}><span tabIndex={0} className="cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded">{h}</span></Tip>
                       </th>

@@ -58,7 +58,8 @@ export const STATUS_TIP = {
   verified: "A reviewer attested this file.",
   pending: "Rated High or Critical and not yet signed off.",
   ok: "Not rated High or Critical: no sign-off needed.",
-  signals: "How many different detections fired in this file: security findings and AI-provenance hints together.",
+  findings: "Security findings in this file. These are the same findings the Security findings card counts, so the numbers in this column add up to that card.",
+  signals: "AI-provenance and code-hygiene hints in this file. They are not vulnerabilities, so they are not part of the Security findings count.",
   aiContent: "An estimate of how much of this file looks AI-written, from style patterns. It is a hint, not proof of authorship.",
 } as const;
 
@@ -67,7 +68,7 @@ export const COLUMN_TIP: Record<string, string> = {
   Lang: "The language the file was analysed as.",
   "AI Content": STATUS_TIP.aiContent,
   Risk: "The file's rating, from its worst finding: Low, Medium, High or Critical.",
-  Signals: STATUS_TIP.signals,
+  Findings: STATUS_TIP.findings,
   Status: "Whether the file still needs a reviewer's sign-off.",
   Action: "Sign off the file, when it needs it and your role allows it.",
 };

@@ -1,10 +1,11 @@
 /**
  * Every limit a user can run into, in one place -- plan quotas, rate limits and the internal caps -- so the server
  * enforces and the UI shows the SAME numbers (plan limits used to be written out twice, in api/billing and
- * api/usage, and the internal caps were private constants nobody could see). Client-safe: no imports.
+ * api/usage, and the internal caps were private constants nobody could see). Client-safe: its only import is the contact address.
  *
  * A limit of -1 means unlimited.
  */
+import { contactEmail } from "./contacts";
 
 // ── Plan quotas ─────────────────────────────────────────────────────────────
 
@@ -47,10 +48,10 @@ const n = (v: number) => v.toLocaleString("en-US");
 
 /** The sentence for a limit nearing or past its cap; null while there is plenty of room. */
 export function limitMessage(noun: string, s: LimitStatus, opts: { upgrade?: boolean } = {}): string | null {
-  const up = opts.upgrade === false ? "" : " Contact us to raise it.";
+  const up = opts.upgrade === false ? "" : ` Contact us to raise it: ${contactEmail("sales")}.`;
   if (s.level === "over") return `Over the limit: ${n(s.used)} ${noun} against ${n(s.limit)} on your plan.${up}`;
   if (s.level === "full") return `At the limit: all ${n(s.limit)} ${noun} on your plan are used.${up}`;
-  if (s.level === "warn") return `${n(s.remaining ?? 0)} of ${n(s.limit)} ${noun} left on your plan.${opts.upgrade === false ? "" : " Contact us before you reach it."}`;
+  if (s.level === "warn") return `${n(s.remaining ?? 0)} of ${n(s.limit)} ${noun} left on your plan.${opts.upgrade === false ? "" : ` Contact us before you reach it: ${contactEmail("sales")}.`}`;
   return null;
 }
 

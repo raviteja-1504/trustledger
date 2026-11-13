@@ -67,6 +67,20 @@ export interface LifecycleInput {
   fixedTotal: number;
 }
 
+/**
+ * One file's numbers, in the SAME units as the page's cards: its security findings (what the "Security findings" card adds up across
+ * files) and its other signals (AI-provenance and code-hygiene hints, what the "Other signals" count adds up). A file row that showed
+ * a third number (how many different detections fired) never added up to the card.
+ */
+export function fileCounts(
+  indicators: readonly CountIndicator[] | null | undefined,
+  isSecurity: (i: { id: string; label?: string; cwe?: string }) => boolean,
+): { security: number; other: number } {
+  let security = 0, other = 0;
+  for (const i of indicators ?? []) { if (isSecurity(i)) security++; else other++; }
+  return { security, other };
+}
+
 const sevOf = (s: string | undefined): CountSeverity => (s === "critical" || s === "high" || s === "medium" ? s : "low");
 
 export function computeScanCounts(

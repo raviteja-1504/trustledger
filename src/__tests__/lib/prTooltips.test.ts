@@ -17,7 +17,7 @@ describe("PR page tooltip wording", () => {
   });
 
   it("covers the table's columns, the filters and the five evidence bars", () => {
-    expect(Object.keys(COLUMN_TIP)).toEqual(["File", "Lang", "AI Content", "Risk", "Signals", "Status", "Action"]);
+    expect(Object.keys(COLUMN_TIP)).toEqual(["File", "Lang", "AI Content", "Risk", "Findings", "Status", "Action"]);
     expect(Object.keys(FILTER_TIP).sort()).toEqual(["all", "high", "unattested"]);
     expect(Object.keys(EVIDENCE_TIP).sort()).toEqual(["baseline_evidence", "code_evidence", "git_evidence", "pr_evidence", "tool_evidence"]);
   });

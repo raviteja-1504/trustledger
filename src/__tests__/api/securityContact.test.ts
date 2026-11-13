@@ -2,14 +2,14 @@
  * @jest-environment node
  *
  * Vulnerability disclosure: /.well-known/security.txt (RFC 9116) and /security are public, and both publish the
- * contact from NEXT_PUBLIC_SECURITY_CONTACT -- falling back to an undeliverable `.example` placeholder, never to
- * a guessed real-looking domain that a stranger could own.
+ * contact from NEXT_PUBLIC_SECURITY_CONTACT -- falling back to the one primary mailbox (or security@<domain> once a
+ * contact domain is configured), never to a guessed domain that a stranger could own.
  */
 import { NextRequest } from "next/server";
 import { GET as securityTxt } from "@/app/.well-known/security.txt/route";
 import { readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
-import { securityContact, isPlaceholderSecurityContact, PLACEHOLDER_SECURITY_CONTACT, contactEmail, contactDomain, PLACEHOLDER_CONTACT_DOMAIN } from "@/lib/contacts";
+import { securityContact, PRIMARY_CONTACT, contactEmail, contactDomain } from "@/lib/contacts";
 import { OPENAPI_SPEC } from "@/lib/openapi";
 
 const saved = process.env.NEXT_PUBLIC_SECURITY_CONTACT;
@@ -20,12 +20,13 @@ afterEach(() => {
 });
 
 describe("published contact addresses", () => {
-  it("are role@trustledger.example until a domain is configured", () => {
+  it("are all the one primary mailbox until a domain is configured", () => {
     delete process.env.NEXT_PUBLIC_CONTACT_DOMAIN;
-    expect(contactDomain()).toBe(PLACEHOLDER_CONTACT_DOMAIN);
-    expect(PLACEHOLDER_CONTACT_DOMAIN.endsWith(".example")).toBe(true);
+    delete process.env.NEXT_PUBLIC_SECURITY_CONTACT;
+    expect(contactDomain()).toBeNull();
+    expect(PRIMARY_CONTACT).toBe("trustledgerapp.dev@gmail.com");
     for (const role of ["hello", "privacy", "sales", "support", "updates", "security"] as const) {
-      expect(contactEmail(role)).toBe(`${role}@trustledger.example`);
+      expect(contactEmail(role)).toBe("trustledgerapp.dev@gmail.com");
     }
   });
 
@@ -41,7 +42,8 @@ describe("published contact addresses", () => {
   it("ignores a setting that isn't a plain domain", () => {
     for (const v of ["", "acme", "acme.com/evil", "a b.com", "-acme.com", "x@acme.com"]) {
       process.env.NEXT_PUBLIC_CONTACT_DOMAIN = v;
-      expect(contactDomain()).toBe(PLACEHOLDER_CONTACT_DOMAIN);
+      expect(contactDomain()).toBeNull();
+      expect(contactEmail("sales")).toBe(PRIMARY_CONTACT);
     }
   });
 
@@ -72,15 +74,13 @@ describe("securityContact", () => {
   it("uses NEXT_PUBLIC_SECURITY_CONTACT when it is an email address", () => {
     process.env.NEXT_PUBLIC_SECURITY_CONTACT = "  security@acme-sec.io ";
     expect(securityContact()).toBe("security@acme-sec.io");
-    expect(isPlaceholderSecurityContact()).toBe(false);
   });
-  it("falls back to the .example placeholder when unset or not an address", () => {
+  it("falls back to the primary mailbox when unset or not an address", () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_DOMAIN;
     for (const v of [undefined, "", "not-an-email", "a@b", "x@y.com>evil"]) {
       if (v === undefined) delete process.env.NEXT_PUBLIC_SECURITY_CONTACT; else process.env.NEXT_PUBLIC_SECURITY_CONTACT = v;
-      expect(securityContact()).toBe(PLACEHOLDER_SECURITY_CONTACT);
+      expect(securityContact()).toBe(PRIMARY_CONTACT);
     }
-    expect(PLACEHOLDER_SECURITY_CONTACT.endsWith(".example")).toBe(true);
-    expect(isPlaceholderSecurityContact()).toBe(true);
   });
 });
 
@@ -112,9 +112,10 @@ describe("/.well-known/security.txt", () => {
     expect(expires).toBeLessThan(Date.now() + 365 * 86400_000);
   });
 
-  it("publishes the placeholder until a real contact is configured", async () => {
+  it("publishes the primary mailbox until a dedicated security contact is configured", async () => {
     delete process.env.NEXT_PUBLIC_SECURITY_CONTACT;
-    expect((await fields()).Contact).toBe(`mailto:${PLACEHOLDER_SECURITY_CONTACT}`);
+    delete process.env.NEXT_PUBLIC_CONTACT_DOMAIN;
+    expect((await fields()).Contact).toBe(`mailto:${PRIMARY_CONTACT}`);
   });
 });
 

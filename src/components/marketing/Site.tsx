@@ -72,7 +72,7 @@ export function SiteFooter() {
         <div className="max-w-xs">
           <BrandLogo height={52} className="mb-3" />
           <p className="text-xs text-white/45 leading-relaxed">Data-flow security engines, AI provenance and auditable merge decisions for every pull request.</p>
-          <p className="text-xs text-white/45 mt-3">Contact: <a href={`mailto:${contactEmail("hello")}`} className="text-white/70 hover:text-white underline underline-offset-2">{contactEmail("hello")}</a></p>
+          <p className="text-xs text-white/45 mt-3">Sales and support: <a href={`mailto:${contactEmail("sales")}`} className="text-white/70 hover:text-white underline underline-offset-2">{contactEmail("sales")}</a></p>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 text-sm">
           {FOOTER_COLUMNS.map(c => (

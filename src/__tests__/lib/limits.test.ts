@@ -36,9 +36,9 @@ describe("limitMessage", () => {
     expect(limitMessage("scans", limitStatus(1, -1))).toBeNull();
   });
   it("says how many are left when nearing the cap, and that you are at or over it", () => {
-    expect(limitMessage("scans", limitStatus(90, 100))).toBe("10 of 100 scans left on your plan. Contact us before you reach it.");
-    expect(limitMessage("scans", limitStatus(100, 100))).toBe("At the limit: all 100 scans on your plan are used. Contact us to raise it.");
-    expect(limitMessage("scans", limitStatus(1_250, 1_000))).toBe("Over the limit: 1,250 scans against 1,000 on your plan. Contact us to raise it.");
+    expect(limitMessage("scans", limitStatus(90, 100))).toBe("10 of 100 scans left on your plan. Contact us before you reach it: trustledgerapp.dev@gmail.com.");
+    expect(limitMessage("scans", limitStatus(100, 100))).toBe("At the limit: all 100 scans on your plan are used. Contact us to raise it: trustledgerapp.dev@gmail.com.");
+    expect(limitMessage("scans", limitStatus(1_250, 1_000))).toBe("Over the limit: 1,250 scans against 1,000 on your plan. Contact us to raise it: trustledgerapp.dev@gmail.com.");
   });
   it("can leave out the upgrade nudge", () => {
     expect(limitMessage("members", limitStatus(3, 3), { upgrade: false })).toBe("At the limit: all 3 members on your plan are used.");

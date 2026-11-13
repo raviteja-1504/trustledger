@@ -1,4 +1,4 @@
-import { computeScanCounts, listNewFindings, describeChanges, type CountFile, type CountIndicator } from "@/lib/scanCounts";
+import { computeScanCounts, listNewFindings, describeChanges, fileCounts, type CountFile, type CountIndicator } from "@/lib/scanCounts";
 import type { TriageDecision } from "@/lib/findingLifecycle";
 
 // A finding with a CWE is a security finding; anything else is a signal.
@@ -145,3 +145,27 @@ describe("describeChanges", () => {
     expect(describeChanges({ ...base, fixed: 100, fixedIsLowerBound: true })).toContain("100+ fixed: in the previous scan, gone now");
   });
 });
+
+describe("fileCounts: a file row is in the card's units, so the rows add up to the card", () => {
+  it("separates a file's security findings from its other signals", () => {
+    expect(fileCounts([sec(), sec({ line: 2 }), sig(), sig({ id: "ai-naming" })], isSecurity)).toEqual({ security: 2, other: 2 });
+    expect(fileCounts([sig()], isSecurity)).toEqual({ security: 0, other: 1 });
+    expect(fileCounts(undefined, isSecurity)).toEqual({ security: 0, other: 0 });
+  });
+
+  it("per-file security findings sum to the card's total, and per-file signals to its 'other' count", () => {
+    const files = [
+      file("a.cs", [sec({ severity: "critical" }), sig()], { risk_score: "CRITICAL" }),
+      file("b.go", [sec(), sec({ line: 2, severity: "critical" }), sec({ line: 3, severity: "medium" }), sig(), sig({ id: "ai-x" }), sig({ id: "ai-y" })], { risk_score: "CRITICAL" }),
+      file("c.rs", [sig()], { risk_score: "LOW" }),
+      file("d.py", [], { risk_score: "LOW" }),
+    ];
+    const card = computeScanCounts(files, { isSecurity, now: NOW });
+    const rows = files.map(f => fileCounts(f.indicators, isSecurity));
+    expect(rows.reduce((n, r) => n + r.security, 0)).toBe(card.security.total);
+    expect(rows.reduce((n, r) => n + r.other, 0)).toBe(card.otherSignals);
+    expect(card.security.total).toBe(4);
+    expect(card.security.bySeverity).toEqual({ critical: 2, high: 1, medium: 1, low: 0 });
+  });
+});
+

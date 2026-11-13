@@ -4,7 +4,7 @@
 
 Please **do not** open a public GitHub issue for security problems.
 
-Email **security@trustledger.example** with:
+Email **trustledgerapp.dev@gmail.com** with:
 
 - what you found and where (URL, API endpoint, or component);
 - steps to reproduce, and a proof of concept if you have one;
