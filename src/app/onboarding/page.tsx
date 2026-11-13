@@ -94,6 +94,50 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   );
 }
 
+// ── Why a call to the server failed ──────────────────────────────────────────
+
+/** `no_org`: signed in, but this sign-in belongs to no TrustLedger organisation (so nothing can be saved or read). `signed_out`: the session
+ * is no longer valid. Anything else is an ordinary failure, handled by the caller's own message. */
+type ApiProblem = "no_org" | "signed_out" | null;
+function apiProblemOf(e: unknown): ApiProblem {
+  const err = e as { code?: string; status?: number; message?: string } | null;
+  const code = err?.code ?? err?.message;
+  if (code === "no_org_membership") return "no_org";
+  if (code === "invalid_token" || code === "unauthorized" || err?.status === 401) return "signed_out";
+  return null;
+}
+
+/** The two situations that make every setup call fail, said plainly with what to do about each. */
+function ApiProblemBanner({ problem }: { problem: Exclude<ApiProblem, null> }) {
+  const { user, profile, signOut } = useAuth();
+  const router = useRouter();
+  const who = profile?.email || user?.email || "this account";
+  const out = async () => { await signOut?.(); router.push("/login"); };
+  if (problem === "signed_out") {
+    return (
+      <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 space-y-2">
+        <p className="text-sm font-bold text-rose-900">Your session has ended</p>
+        <p className="text-xs text-rose-800 leading-relaxed">Nothing on this page can be saved until you sign in again.</p>
+        <button type="button" onClick={out} className="text-xs font-bold text-rose-900 underline underline-offset-2">Sign in again</button>
+      </div>
+    );
+  }
+  return (
+    <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 space-y-2">
+      <p className="text-sm font-bold text-rose-900">This sign-in isn&apos;t part of a TrustLedger organisation</p>
+      <p className="text-xs text-rose-800 leading-relaxed">
+        You are signed in as <strong>{who}</strong>, but that account doesn&apos;t belong to an organisation, so nothing here can be saved.
+        If you already created an organisation, sign out and sign in <strong>the same way you did then</strong>: the same GitHub account, or the same email and password.
+        A GitHub sign-in and an email sign-in are separate accounts, even for the same person.
+      </p>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        <button type="button" onClick={out} className="text-xs font-bold text-rose-900 underline underline-offset-2">Sign out and try another account</button>
+        <a href="/create-org" className="text-xs font-bold text-rose-900 underline underline-offset-2">Create a new organisation instead</a>
+      </div>
+    </div>
+  );
+}
+
 // ── Step: GitHub ──────────────────────────────────────────────────────────────
 
 function GithubStep({ onNext }: { onNext: () => void }) {
@@ -103,6 +147,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   // handle already saved, or from the GitHub installation, below.
   const [orgHandle,   setOrgHandle]   = useState("");
   const [touched,     setTouched]     = useState(false);
+  const [apiProblem,  setApiProblem]  = useState<ApiProblem>(null);
   const meta = (user?.user_metadata ?? {}) as Record<string, unknown>;
   // what this organisation has linked today, and its name, from the server
   const [savedHandle, setSavedHandle] = useState<string | null>(null);
@@ -141,7 +186,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   const [infoFailed, setInfoFailed] = useState(false);
   const loadInfo = () => {
     setInfoFailed(false);
-    authedFetch<{ configured: boolean; install_url: string | null }>("/api/github-app/info").then(setInfo).catch(() => setInfoFailed(true));
+    authedFetch<{ configured: boolean; install_url: string | null }>("/api/github-app/info").then(setInfo).catch(e => { setInfoFailed(true); const p = apiProblemOf(e); if (p) setApiProblem(p); });
   };
   useEffect(() => { loadInfo(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -161,7 +206,9 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         body: JSON.stringify({ action: "save_github_org", github_org: parsed.ok ? parsed.handle : orgHandle.trim() }),
       });
     } catch (e) {
-      const code = e instanceof Error ? e.message : "";
+      const problem = apiProblemOf(e);
+      if (problem) { setApiProblem(problem); setSaving(false); return; }
+      const code = (e as { code?: string })?.code ?? (e instanceof Error ? e.message : "");
       setSaveError(code === "github_org_taken"
         ? "That GitHub name is already linked to another TrustLedger organisation. If you have created more than one TrustLedger organisation, check which one you are signed in to (shown at the top of this page). Otherwise, ask whoever linked it to remove it first."
         : code === "github_org_invalid" || code === "github_org_required"
@@ -190,6 +237,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         <p className="text-sm text-gray-500 mt-1">Install the TrustLedger GitHub App on the repositories you want scanned.</p>
       </div>
 
+      {apiProblem && <ApiProblemBanner problem={apiProblem} />}
       {requested && !installedOn && (
         <div role="note" className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-1">
           <p className="text-sm font-bold text-amber-900">Your install request is waiting for approval</p>
@@ -204,7 +252,7 @@ function GithubStep({ onNext }: { onNext: () => void }) {
           <p className="text-xs text-emerald-800 leading-relaxed">Check the details below and continue. Open or update a pull request on one of the repositories you selected and it will be scanned.</p>
           {info?.install_url && <a href={info.install_url} className="inline-block text-xs font-semibold text-emerald-900 underline underline-offset-2">Install on another account</a>}
         </div>
-      ) : infoFailed ? (
+      ) : infoFailed && apiProblem ? null : infoFailed ? (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
           <p className="text-sm text-amber-900">We couldn&apos;t check the GitHub connection just now.</p>
           <button type="button" onClick={loadInfo} className="text-xs font-bold text-amber-900 underline underline-offset-2">Try again</button>
@@ -554,9 +602,10 @@ function DoneStep() {
  * wrong account (a different GitHub login in the same browser) is the most common way a customer ends up with a handle on the wrong
  * organisation, so it is stated plainly, with a way out. */
 function SignedInAs() {
-  const { user, profile, signOut } = useAuth();
+  const { user, profile, signOut, loading } = useAuth();
   const router = useRouter();
   if (!user && !profile) return null;
+  const noOrg = !!user && !profile && !loading;
   const meta = (user?.user_metadata ?? {}) as Record<string, unknown>;
   const provider = (user?.app_metadata as { provider?: string } | undefined)?.provider;
   const email = profile?.email || user?.email || "";
@@ -574,6 +623,7 @@ function SignedInAs() {
         <p className="break-words text-gray-500">
           {viaGithub ? <>with GitHub{ghLogin ? <> (<span className="font-mono">@{ghLogin}</span>)</> : null}</> : provider === "email" ? "with email and password" : null}
           {profile?.org_name ? <>{viaGithub || provider === "email" ? " · " : ""}organisation <strong className="text-gray-700">{profile.org_name}</strong>{role ? ` (${role})` : ""}</> : null}
+          {noOrg ? <>{viaGithub || provider === "email" ? " · " : ""}<strong className="text-rose-700">no TrustLedger organisation</strong></> : null}
         </p>
       </div>
       {signOut && (

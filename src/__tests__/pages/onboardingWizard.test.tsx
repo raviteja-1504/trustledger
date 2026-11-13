@@ -7,11 +7,14 @@ jest.mock("@/lib/auth", () => ({ useAuth: () => authValue }));
 let onboardingGet: Record<string, unknown> = { github_org: null, org_name: "Acme Inc" };
 let githubInfo: unknown = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" };
 let githubInfoFails = false;
+let apiError: Error | null = null;   // every call fails with this, like a server that rejects the session
 let saveOrgError: string | null = null;
 jest.mock("@/lib/useRealData", () => ({
   authedFetch: jest.fn(async (url: string, opts?: { body?: string }) => {
+    if (apiError && url !== "/api/onboarding") throw apiError;
     if (url === "/api/github-app/info") { if (githubInfoFails) throw new Error("boom"); return githubInfo; }
     if (url.startsWith("/api/github-app/installation?id=")) return { login: "acme-corp" };
+    if (apiError && url === "/api/onboarding" && opts?.body) throw apiError;
     if (url === "/api/onboarding" && opts?.body?.includes("save_github_org") && saveOrgError) throw new Error(saveOrgError);
     if (url === "/api/onboarding" && !opts) return onboardingGet;
     return {};
@@ -25,6 +28,7 @@ beforeEach(() => {
   localStorage.removeItem("tl_onboarding_done"); push.mockClear();
   githubInfo = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" }; githubInfoFails = false;
   saveOrgError = null; window.history.pushState({}, "", "/onboarding");
+  apiError = null;
   onboardingGet = { github_org: null, org_name: "Acme Inc" };
   authValue = { profile: { org_id: "org-1", org_slug: "acme", org_name: "Acme Inc", role: "admin", name: "Ada", email: "ada@acme.dev" }, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "email" } } };
 });
@@ -218,6 +222,50 @@ describe("setup wizard", () => {
         expect(screen.getByPlaceholderText("e.g. acme-corp")).toHaveValue("acme-corp");
         expect(screen.queryByText(/would not be scanned/)).toBeNull();
       });
+    });
+  });
+
+  describe("when the server refuses setup calls", () => {
+    const openGithubStep = () => { localStorage.setItem("tl_onboarding_done", JSON.stringify(["welcome"])); render(<OnboardingPage />); };
+    const noOrg = () => Object.assign(new Error("no_org_membership"), { code: "no_org_membership", status: 401 });
+
+    it("a sign-in that belongs to no organisation: says so plainly and offers the way out, instead of 'couldn't check'", async () => {
+      apiError = noOrg();
+      openGithubStep();
+      expect(await screen.findByText("This sign-in isn't part of a TrustLedger organisation")).toBeInTheDocument();
+      expect(screen.getByText(/the same way you did then/)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Create a new organisation instead/ })).toHaveAttribute("href", "/create-org");
+      expect(screen.queryByText(/couldn.t check the GitHub connection/)).toBeNull();
+    });
+
+    it("saving as such a sign-in explains it, rather than 'We couldn't save that. Please try again.'", async () => {
+      openGithubStep();
+      fireEvent.change(await screen.findByPlaceholderText("e.g. acme-corp"), { target: { value: "acme-corp" } });
+      apiError = noOrg();
+      fireEvent.click(screen.getByRole("button", { name: /Save and continue/ }));
+      expect(await screen.findByText("This sign-in isn't part of a TrustLedger organisation")).toBeInTheDocument();
+      expect(screen.queryByText(/We couldn.t save that/)).toBeNull();
+      expect(screen.getByText(/Step 2 of 5/)).toBeInTheDocument();
+    });
+
+    it("an ended session says to sign in again", async () => {
+      apiError = Object.assign(new Error("invalid_token"), { code: "invalid_token", status: 401 });
+      openGithubStep();
+      expect(await screen.findByText("Your session has ended")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in again" })).toBeInTheDocument();
+    });
+
+    it("an ordinary failure keeps the plain retry notice", async () => {
+      githubInfoFails = true;
+      openGithubStep();
+      expect(await screen.findByText(/couldn.t check the GitHub connection/)).toBeInTheDocument();
+      expect(screen.queryByText(/isn't part of a TrustLedger organisation/)).toBeNull();
+    });
+
+    it("the signed-in panel says there is no organisation", async () => {
+      authValue = { user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "github" } }, profile: null, loading: false };
+      render(<OnboardingPage />);
+      expect(await screen.findByTestId("signed-in-as")).toHaveTextContent("no TrustLedger organisation");
     });
   });
 
