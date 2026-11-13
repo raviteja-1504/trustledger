@@ -74,11 +74,13 @@ async function handle(req: NextRequest) {
 
     const db = createServiceClient();
 
-    // Look up org
+    // Look up org. The handle is saved lower case (GitHub names are case-insensitive) but an older one may hold GitHub's own
+    // capitals, so both spellings of the owner are tried.
     const { data: orgRecord } = await db
       .from("organizations")
       .select("id")
-      .eq("github_org", owner)
+      .in("github_org", [...new Set([owner, owner.toLowerCase()])])
+      .limit(1)
       .maybeSingle();
 
     const orgId = orgRecord?.id ?? null;

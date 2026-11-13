@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { authedFetch } from "@/lib/useRealData";
 import { BrandMark } from "@/components/BrandLogo";
+import { normalizeGithubHandle } from "@/lib/githubHandle";
 import { clearDoneSteps, firstUnfinishedIndex, loadDoneSteps, markStepDone, type WizardStep } from "@/lib/onboardingProgress";
 
 // ── Step definitions ──────────────────────────────────────────────────────────
@@ -97,8 +98,25 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
 
 function GithubStep({ onNext }: { onNext: () => void }) {
   const { profile } = useAuth();
-  const [orgHandle,   setOrgHandle]   = useState(profile?.org_slug ?? "");
-  const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? "");
+  const { user } = useAuth();
+  // Never pre-filled from the organisation's slug (that is TrustLedger's own name for it, not a GitHub name): only from the
+  // handle already saved, or from the GitHub installation, below.
+  const [orgHandle,   setOrgHandle]   = useState("");
+  const [touched,     setTouched]     = useState(false);
+  const meta = (user?.user_metadata ?? {}) as Record<string, unknown>;
+  const [githubLogin, setGithubLogin] = useState(profile?.github_login ?? (typeof meta.user_name === "string" ? meta.user_name : ""));
+  // what this organisation has linked today, and its name, from the server
+  const [savedHandle, setSavedHandle] = useState<string | null>(null);
+  const [orgName, setOrgName] = useState(profile?.org_name ?? "");
+  useEffect(() => {
+    authedFetch<{ github_org?: string | null; org_name?: string }>("/api/onboarding")
+      .then(r => {
+        setSavedHandle(r?.github_org ?? null);
+        if (r?.org_name) setOrgName(r.org_name);
+        if (r?.github_org) setOrgHandle(h => h || r.github_org!);
+      })
+      .catch(() => {});
+  }, []);
   const [saving,  setSaving]  = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // GitHub sends the person back here after installing, with ?installation_id=...: ask GitHub which account that is
@@ -128,20 +146,28 @@ function GithubStep({ onNext }: { onNext: () => void }) {
   };
   useEffect(() => { loadInfo(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  const parsed = normalizeGithubHandle(orgHandle);
+  // The app was installed on one account and the handle names another: pull requests are matched on the handle, so say so
+  const installedDiffers = !!installedOn && parsed.ok && parsed.handle !== installedOn.toLowerCase();
+
   async function save() {
+    setTouched(true);
+    if (!parsed.ok) return;
     setSaving(true);
     setSaveError(null);
     try {
       // Linking the organisation is what makes pull requests from it scanned: if it fails, do not move on as if it worked
       await authedFetch("/api/onboarding", {
         method: "POST",
-        body: JSON.stringify({ action: "save_github_org", github_org: orgHandle.trim() }),
+        body: JSON.stringify({ action: "save_github_org", github_org: parsed.ok ? parsed.handle : orgHandle.trim() }),
       });
     } catch (e) {
       const code = e instanceof Error ? e.message : "";
       setSaveError(code === "github_org_taken"
-        ? "That GitHub organisation is already connected to another TrustLedger organisation. If it is yours, ask whoever connected it to remove it first."
-        : "We couldn't save that. Please try again.");
+        ? "That GitHub account is already linked to another TrustLedger organisation. If you have created more than one TrustLedger organisation, check which one you are signed in to (shown at the top of this page). Otherwise, ask whoever linked it to remove it first."
+        : code === "github_org_invalid" || code === "github_org_required"
+          ? "That isn't a GitHub account name. Enter the part after github.com/, for example acme-corp."
+          : "We couldn't save that. Please try again.");
       setSaving(false);
       return;
     }
@@ -217,27 +243,81 @@ function GithubStep({ onNext }: { onNext: () => void }) {
         </div>
       )}
 
-      {/* Org details */}
+      {/* The handle: what it is, why it matters, what will be saved */}
       <div className="space-y-3">
-        <div>
-          <label className="text-xs font-semibold text-gray-700 block mb-1.5">
-            Your GitHub organisation handle
-          </label>
-          <input value={orgHandle} onChange={e => setOrgHandle(e.target.value)} placeholder="acme-corp"
-            className="w-full text-sm border border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono" />
+        <div role="note" className="rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 space-y-2.5">
+          <p className="text-sm font-bold text-indigo-950">What is the GitHub account name?</p>
+          <p className="text-xs text-indigo-900 leading-relaxed">
+            It is the name that comes right after <span className="font-mono">github.com/</span> in your repository addresses:
+          </p>
+          <p className="rounded-lg bg-white border border-indigo-100 px-3 py-2 font-mono text-[12px] text-gray-500 break-all">
+            github.com/<strong className="text-indigo-700 bg-indigo-50 px-1 rounded">acme-corp</strong>/payments-api
+          </p>
+          <ul className="text-xs text-indigo-900 leading-relaxed space-y-1 list-disc pl-4">
+            <li>TrustLedger matches every pull request to your TrustLedger organisation{orgName ? <> (<strong>{orgName}</strong>)</> : null} by this name. <strong>If it does not match, pull requests are not scanned.</strong></li>
+            <li>It can be a company account or your own personal account: whichever owns the repositories you want scanned.</li>
+            <li>It is <strong>not</strong> your email address, your TrustLedger organisation&apos;s name or a full repository link.</li>
+            <li>One GitHub account can be linked to one TrustLedger organisation.</li>
+          </ul>
         </div>
+
+        {savedHandle && !installedOn && (
+          <p className="text-xs text-gray-600">
+            Currently linked: <span className="font-mono font-semibold text-gray-900">github.com/{savedHandle}</span>. Change it below if that is wrong.
+          </p>
+        )}
+
         <div>
-          <label className="text-xs font-semibold text-gray-700 block mb-1.5">
-            Your GitHub username <span className="text-gray-400 font-normal">(for developer-scoped view)</span>
+          <label htmlFor="gh-handle" className="text-xs font-semibold text-gray-700 block mb-1.5">
+            GitHub account that owns the repositories
           </label>
-          <input value={githubLogin} onChange={e => setGithubLogin(e.target.value)} placeholder="your-github-handle"
+          <div className={`flex items-stretch rounded-xl border bg-white focus-within:ring-2 focus-within:ring-indigo-400 ${touched && !parsed.ok ? "border-rose-300" : "border-gray-200"}`}>
+            <span className="flex items-center pl-3 pr-1 text-sm font-mono text-gray-400 select-none">github.com/</span>
+            <input id="gh-handle" value={orgHandle} onChange={e => { setOrgHandle(e.target.value); setSaveError(null); }} onBlur={() => setTouched(true)}
+              placeholder="acme-corp" autoComplete="off" autoCapitalize="none" spellCheck={false}
+              aria-invalid={touched && !parsed.ok} aria-describedby="gh-handle-help"
+              className="min-w-0 flex-1 text-sm rounded-r-xl pl-0 pr-4 py-2.5 focus:outline-none font-mono bg-transparent" />
+          </div>
+          <div id="gh-handle-help" className="mt-1.5 space-y-1.5">
+            {installedOn && parsed.ok && parsed.handle === installedOn.toLowerCase() && (
+              <p className="text-[11px] text-emerald-700">✓ Filled in from your GitHub installation on <span className="font-mono">{installedOn}</span>.</p>
+            )}
+            {touched && !parsed.ok && <p role="alert" className="text-[11px] text-rose-700">{parsed.message}</p>}
+            {parsed.ok && (
+              <p className="text-[11px] text-gray-600 leading-snug">
+                Pull requests in <span className="font-mono font-semibold text-gray-900">github.com/{parsed.handle}/…</span> will be scanned in {orgName ? <strong>{orgName}</strong> : "your TrustLedger organisation"}.
+                {parsed.changed && <span className="text-gray-500"> (We tidied what you typed; this is what will be saved.)</span>}
+              </p>
+            )}
+            {installedDiffers && (
+              <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-2.5 space-y-1">
+                <p className="text-[11px] text-amber-900 leading-snug">
+                  You installed the app on <strong className="font-mono">{installedOn}</strong>, but this says <strong className="font-mono">{parsed.ok ? parsed.handle : ""}</strong>.
+                  Pull requests are matched on this name, so repositories owned by <span className="font-mono">{installedOn}</span> would not be scanned.
+                </p>
+                <button type="button" onClick={() => setOrgHandle(installedOn!)} className="text-[11px] font-bold text-amber-900 underline underline-offset-2">
+                  Use {installedOn}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="gh-login" className="text-xs font-semibold text-gray-700 block mb-1.5">
+            Your own GitHub username <span className="text-gray-400 font-normal">(optional)</span>
+          </label>
+          <input id="gh-login" value={githubLogin} onChange={e => setGithubLogin(e.target.value)} placeholder="your-github-handle" autoComplete="off" autoCapitalize="none" spellCheck={false}
             className="w-full text-sm border border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 font-mono" />
+          <p className="mt-1.5 text-[11px] text-gray-500 leading-snug">
+            You, personally. It only lets TrustLedger show you the pull requests you wrote. It can be the same as the account above if you use a personal account.
+          </p>
         </div>
       </div>
 
       {saveError && <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">{saveError}</p>}
       <PrimaryBtn onClick={save} disabled={saving || !orgHandle.trim()}>
-        {saving ? "Saving…" : "I've installed the app →"}
+        {saving ? "Saving…" : "Save and continue →"}
       </PrimaryBtn>
       <SkipBtn onClick={onNext} />
     </div>
@@ -472,6 +552,44 @@ function DoneStep() {
   );
 }
 
+// ── Who is signed in ────────────────────────────────────────────────────────
+
+/** Shown on every step: which person, how they signed in and which TrustLedger organisation this setup is for. Setting up under the
+ * wrong account (a different GitHub login in the same browser) is the most common way a customer ends up with a handle on the wrong
+ * organisation, so it is stated plainly, with a way out. */
+function SignedInAs() {
+  const { user, profile, signOut } = useAuth();
+  const router = useRouter();
+  if (!user && !profile) return null;
+  const meta = (user?.user_metadata ?? {}) as Record<string, unknown>;
+  const provider = (user?.app_metadata as { provider?: string } | undefined)?.provider;
+  const email = profile?.email || user?.email || "";
+  const name = profile?.name || (typeof meta.full_name === "string" ? meta.full_name : "") || "";
+  const ghLogin = profile?.github_login || (typeof meta.user_name === "string" ? meta.user_name : "") || (typeof meta.preferred_username === "string" ? meta.preferred_username : "");
+  const viaGithub = provider === "github";
+  const initial = (name || email || "?").trim().charAt(0).toUpperCase();
+  const role = (profile?.role ?? "").replace(/_/g, " ");
+  return (
+    <div data-testid="signed-in-as" className="mb-4 flex items-center gap-3 rounded-2xl border border-gray-200 bg-white/80 px-4 py-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white" aria-hidden>{initial}</span>
+      <div className="min-w-0 flex-1 text-xs leading-snug">
+        <p className="text-gray-500">Signed in as</p>
+        <p className="truncate font-semibold text-gray-900">{name || email || "your account"}{name && email ? <span className="font-normal text-gray-500"> · {email}</span> : null}</p>
+        <p className="break-words text-gray-500">
+          {viaGithub ? <>with GitHub{ghLogin ? <> (<span className="font-mono">@{ghLogin}</span>)</> : null}</> : provider === "email" ? "with email and password" : null}
+          {profile?.org_name ? <>{viaGithub || provider === "email" ? " · " : ""}organisation <strong className="text-gray-700">{profile.org_name}</strong>{role ? ` (${role})` : ""}</> : null}
+        </p>
+      </div>
+      {signOut && (
+        <button type="button" onClick={async () => { await signOut(); router.push("/login"); }}
+          className="shrink-0 text-xs font-semibold text-gray-500 underline underline-offset-2 hover:text-gray-800">
+          Not you? Sign out
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function OnboardingPage() {
@@ -546,6 +664,8 @@ export default function OnboardingPage() {
             {done.length > 0 && step !== "done" && <span className="text-gray-400"> · {done.length} of {STEPS.length - 1} done</span>}
           </p>
         </div>
+
+        <SignedInAs />
 
         {/* Card */}
         <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8 min-h-[12rem]">

@@ -1,5 +1,5 @@
 /**
- * GET  /api/onboarding  → { complete: boolean, org_name: string, members: number, has_scans: boolean }
+ * GET  /api/onboarding  → { complete: boolean, org_name: string, github_org: string | null, members: number, has_scans: boolean }
  * POST /api/onboarding  → actions:
  *   { action: "complete" }                          → marks org onboarding_complete = true
  *   { action: "save_github_login", github_login }   → updates caller's org_members.github_login
@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
 import { verifyApiKey, requireRole } from "../_middleware";
+import { normalizeGithubHandle, escapeLike } from "@/lib/githubHandle";
 
 export async function GET(req: NextRequest) {
   const auth = await verifyApiKey(req);
@@ -17,7 +18,7 @@ export async function GET(req: NextRequest) {
   const db = createServiceClient();
   const { data: org } = await db
     .from("organizations")
-    .select("name, onboarding_complete")
+    .select("name, onboarding_complete, github_org")
     .eq("id", auth.org_id)
     .single();
 
@@ -31,6 +32,8 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     complete: org?.onboarding_complete ?? false,
     org_name: org?.name ?? "",
+    // the handle saved today (not the organisation's slug): the setup wizard shows it and pre-fills with it
+    github_org: (org as { github_org?: string | null } | null)?.github_org ?? null,
     members: members.count ?? 0,
     has_scans: (scans.count ?? 0) > 0,
   });
@@ -75,12 +78,15 @@ export async function POST(req: NextRequest) {
     const roleErr = requireRole(auth, "admin");
     if (roleErr) return NextResponse.json({ error: roleErr }, { status: 403 });
 
-    const handle = body.github_org?.trim();
-    if (!handle) return NextResponse.json({ error: "github_org_required" }, { status: 400 });
+    // What was typed is cleaned up (a pasted repository URL, an @) and checked: only an owner name is saved
+    const parsed = normalizeGithubHandle(body.github_org ?? "");
+    if (!parsed.ok) return NextResponse.json({ error: parsed.problem === "empty" ? "github_org_required" : "github_org_invalid", message: parsed.message }, { status: 400 });
+    const handle = parsed.handle;
 
     // A GitHub organisation belongs to one TrustLedger organisation (its pull requests are routed by this handle): refuse a
     // handle another organisation already holds, instead of failing quietly.
-    const { data: holder } = await db.from("organizations").select("id").eq("github_org", handle).neq("id", auth.org_id).maybeSingle();
+    // case-insensitive: GitHub names are, and a handle saved as "Acme-Corp" earlier still counts as held
+    const { data: holder } = await db.from("organizations").select("id").ilike("github_org", escapeLike(handle)).neq("id", auth.org_id).limit(1).maybeSingle();
     if (holder) return NextResponse.json({ error: "github_org_taken" }, { status: 409 });
 
     const { error: updErr } = await db

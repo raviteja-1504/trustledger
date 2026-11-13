@@ -25,7 +25,7 @@ describe("GET /api/onboarding", () => {
       org_members: [{ id: "m1", org_id: "org-1", user_id: "u1" }, { id: "m9", org_id: "org-2", user_id: "u9" }],
       scans: [{ id: "x", org_id: "org-2" }],
     });
-    expect(await get()).toEqual({ complete: false, org_name: "Acme", members: 1, has_scans: false });
+    expect(await get()).toEqual({ complete: false, org_name: "Acme", github_org: null, members: 1, has_scans: false });
   });
   it("a running organisation: other members and scans (counted for this organisation only)", async () => {
     db = fakeSupabase({
@@ -33,6 +33,6 @@ describe("GET /api/onboarding", () => {
       org_members: [{ id: "m1", org_id: "org-1" }, { id: "m2", org_id: "org-1" }, { id: "m3", org_id: "org-1" }],
       scans: [{ id: "s1", org_id: "org-1" }],
     });
-    expect(await get()).toEqual({ complete: false, org_name: "Acme", members: 3, has_scans: true });
+    expect(await get()).toEqual({ complete: false, org_name: "Acme", github_org: null, members: 3, has_scans: true });
   });
 });

@@ -26,6 +26,19 @@ class FakeQuery implements PromiseLike<unknown> {
     return this;
   }
   eq(c: string, v: unknown) { this.filters.push(r => r[c] === v); return this; }
+  /** Case-insensitive LIKE: `%` any run, `_` any one character, a backslash makes the next one literal. */
+  ilike(c: string, pattern: string) {
+    const lit = (ch: string) => ch.replace(/[^A-Za-z0-9]/g, x => "\\" + x);
+    let re = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i];
+      if (ch === "\\" && i + 1 < pattern.length) re += lit(pattern[++i]);
+      else re += ch === "%" ? ".*" : ch === "_" ? "." : lit(ch);
+    }
+    const rx = new RegExp("^" + re + "$", "i");
+    this.filters.push(r => r[c] != null && rx.test(String(r[c])));
+    return this;
+  }
   neq(c: string, v: unknown) { this.filters.push(r => r[c] != null && r[c] !== v); return this; } // SQL: NULL != x is not true
   /** PostgREST or-filter: "col.op.value,col.op.value" with op eq / neq / is (null|true|false). */
   or(expr: string) {

@@ -65,6 +65,19 @@ describe("GitHub webhook: pull_request from an installation nobody has claimed",
   });
 });
 
+describe("GitHub webhook: the owner name is matched whatever its capitals", () => {
+  it("GitHub says Acme, the organisation saved acme: scanned", async () => {
+    expect((await send(body("Acme"))).body).toMatchObject({ queued: true });
+  });
+  it("an older handle saved with GitHub's own capitals still matches", async () => {
+    db = fakeSupabase({ organizations: [{ id: "org-1", github_org: "Acme-Corp" }], webhook_deliveries: [] });
+    expect((await send(body("Acme-Corp"))).body).toMatchObject({ queued: true });
+  });
+  it("a different name is still not matched", async () => {
+    expect((await send(body("acme-corp"))).body).toMatchObject({ skipped: true, reason: "installation_not_linked" });
+  });
+});
+
 describe("GitHub webhook: the free trial's limits", () => {
   const scansThisMonth = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `s${i}`, org_id: "org-1", created_at: new Date().toISOString() }));
   const setup = (scans: number, repos: string[] = ["acme/app"]) => {

@@ -12,6 +12,7 @@ import { createServiceClient } from "@/lib/supabase";
 import { verifyJWT } from "../../_middleware";
 import { safeError } from "@/lib/errors";
 import { getJwtSessionId } from "@/lib/jwt";
+import { normalizeGithubHandle } from "@/lib/githubHandle";
 
 export async function POST(req: NextRequest) {
   const auth = await verifyJWT(req);
@@ -23,7 +24,13 @@ export async function POST(req: NextRequest) {
 
   const name       = body.name?.trim();
   const slug       = body.slug?.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
-  const github_org = body.github_org?.trim() || null;
+  // optional; when given it must be a GitHub account name (a pasted repository address or @name is cleaned up, an email refused)
+  let github_org: string | null = null;
+  if (body.github_org?.trim()) {
+    const parsed = normalizeGithubHandle(body.github_org);
+    if (!parsed.ok) return NextResponse.json({ error: "github_org_invalid", message: parsed.message }, { status: 400 });
+    github_org = parsed.handle;
+  }
 
   if (!name || !slug) {
     return NextResponse.json({ error: "name_and_slug_required" }, { status: 400 });

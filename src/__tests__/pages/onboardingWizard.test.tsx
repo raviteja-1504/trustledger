@@ -1,8 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 
 const push = jest.fn();
 jest.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: jest.fn() }), usePathname: () => "/onboarding", useSearchParams: () => new URLSearchParams() }));
-jest.mock("@/lib/auth", () => ({ useAuth: () => ({ profile: { org_id: "org-1", org_slug: "acme", role: "admin", name: "Ada" }, user: { id: "u1" } }) }));
+let authValue: Record<string, unknown> = { profile: { org_id: "org-1", org_slug: "acme", org_name: "Acme Inc", role: "admin", name: "Ada", email: "ada@acme.dev" }, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "email" } } };
+jest.mock("@/lib/auth", () => ({ useAuth: () => authValue }));
+let onboardingGet: Record<string, unknown> = { github_org: null, org_name: "Acme Inc" };
 let githubInfo: unknown = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" };
 let githubInfoFails = false;
 let saveOrgError: string | null = null;
@@ -11,6 +13,7 @@ jest.mock("@/lib/useRealData", () => ({
     if (url === "/api/github-app/info") { if (githubInfoFails) throw new Error("boom"); return githubInfo; }
     if (url.startsWith("/api/github-app/installation?id=")) return { login: "acme-corp" };
     if (url === "/api/onboarding" && opts?.body?.includes("save_github_org") && saveOrgError) throw new Error(saveOrgError);
+    if (url === "/api/onboarding" && !opts) return onboardingGet;
     return {};
   }),
   getAuthHeader: async () => ({}),
@@ -22,6 +25,8 @@ beforeEach(() => {
   localStorage.removeItem("tl_onboarding_done"); push.mockClear();
   githubInfo = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" }; githubInfoFails = false;
   saveOrgError = null; window.history.pushState({}, "", "/onboarding");
+  onboardingGet = { github_org: null, org_name: "Acme Inc" };
+  authValue = { profile: { org_id: "org-1", org_slug: "acme", org_name: "Acme Inc", role: "admin", name: "Ada", email: "ada@acme.dev" }, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "email" } } };
 });
 
 describe("setup wizard", () => {
@@ -116,9 +121,101 @@ describe("setup wizard", () => {
       window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
       openGithubStep();
       await screen.findByText(/GitHub App installed on acme-corp/);
-      screen.getByRole("button", { name: /I've installed the app/ }).click();
-      expect(await screen.findByText(/already connected to another TrustLedger organisation/)).toBeInTheDocument();
+      screen.getByRole("button", { name: /Save and continue/ }).click();
+      expect(await screen.findByText(/already linked to another TrustLedger organisation/)).toBeInTheDocument();
       expect(screen.getByText(/Step 2 of 5/)).toBeInTheDocument();
+    });
+
+    describe("the GitHub account name field", () => {
+      it("explains what the field is, with an example, before asking for it", async () => {
+        openGithubStep();
+        expect(await screen.findByText("What is the GitHub account name?")).toBeInTheDocument();
+        expect(screen.getByText(/comes right after/)).toBeInTheDocument();
+        expect(screen.getByText(/If it does not match, pull requests are not scanned/)).toBeInTheDocument();
+        expect(screen.getByText(/your email address/)).toBeInTheDocument();
+        expect(screen.getByLabelText("GitHub account that owns the repositories")).toBeInTheDocument();
+      });
+
+      it("is not pre-filled from the TrustLedger organisation's slug", async () => {
+        openGithubStep();
+        expect(await screen.findByPlaceholderText("acme-corp")).toHaveValue("");
+      });
+
+      it("is pre-filled with the handle already saved, and says so", async () => {
+        onboardingGet = { github_org: "cyberminutetech", org_name: "CyberMinute" };
+        openGithubStep();
+        await waitFor(() => expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("cyberminutetech"));
+        expect(screen.getByText(/Currently linked/)).toHaveTextContent("github.com/cyberminutetech");
+      });
+
+      it("shows what will be saved and which organisation it is for", async () => {
+        openGithubStep();
+        const box = await screen.findByPlaceholderText("acme-corp");
+        fireEvent.change(box, { target: { value: "Acme-Corp" } });
+        expect(screen.getByText(/will be scanned in/)).toHaveTextContent("github.com/acme-corp/…");
+        expect(screen.getByText(/will be scanned in/)).toHaveTextContent("Acme Inc");
+      });
+
+      it("an email address is refused with a message and is not sent", async () => {
+        const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+        openGithubStep();
+        const box = await screen.findByPlaceholderText("acme-corp");
+        authedFetch.mockClear();
+        fireEvent.change(box, { target: { value: "ada@acme.dev" } });
+        fireEvent.blur(box);
+        expect(await screen.findByText(/looks like an email address/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: /Save and continue/ }));
+        expect(authedFetch).not.toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ method: "POST" }));
+        expect(screen.getByText(/Step 2 of 5/)).toBeInTheDocument();
+      });
+
+      it("a pasted repository address is sent as the account name", async () => {
+        const { authedFetch } = jest.requireMock("@/lib/useRealData") as { authedFetch: jest.Mock };
+        openGithubStep();
+        const box = await screen.findByPlaceholderText("acme-corp");
+        fireEvent.change(box, { target: { value: "https://github.com/Acme-Corp/payments-api" } });
+        expect(screen.getByText(/We tidied what you typed/)).toBeInTheDocument();
+        authedFetch.mockClear();
+        fireEvent.click(screen.getByRole("button", { name: /Save and continue/ }));
+        await waitFor(() => expect(authedFetch).toHaveBeenCalledWith("/api/onboarding", expect.objectContaining({ body: JSON.stringify({ action: "save_github_org", github_org: "acme-corp" }) })));
+      });
+
+      it("warns when the name differs from the account the app was installed on, and offers the installed one", async () => {
+        window.history.pushState({}, "", "/onboarding?installation_id=123&setup_action=install");
+        openGithubStep();
+        await screen.findByText(/GitHub App installed on acme-corp/);
+        fireEvent.change(screen.getByPlaceholderText("acme-corp"), { target: { value: "someone-else" } });
+        expect(screen.getByText(/would not be scanned/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Use acme-corp" }));
+        expect(screen.getByPlaceholderText("acme-corp")).toHaveValue("acme-corp");
+        expect(screen.queryByText(/would not be scanned/)).toBeNull();
+      });
+    });
+  });
+
+  describe("who is signed in", () => {
+    it("shows the person, how they signed in and the organisation, on every step", async () => {
+      render(<OnboardingPage />);
+      const box = await screen.findByTestId("signed-in-as");
+      expect(box).toHaveTextContent("Ada");
+      expect(box).toHaveTextContent("ada@acme.dev");
+      expect(box).toHaveTextContent("with email and password");
+      expect(box).toHaveTextContent("Acme Inc");
+    });
+
+    it("a GitHub sign-in shows the GitHub username", async () => {
+      authValue = { ...authValue, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "github" }, user_metadata: { user_name: "ada-codes" } } };
+      render(<OnboardingPage />);
+      expect(await screen.findByTestId("signed-in-as")).toHaveTextContent("with GitHub (@ada-codes)");
+    });
+
+    it("'Not you? Sign out' signs out and returns to the login page", async () => {
+      const signOut = jest.fn(async () => undefined);
+      authValue = { ...authValue, signOut };
+      render(<OnboardingPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "Not you? Sign out" }));
+      await waitFor(() => expect(push).toHaveBeenCalledWith("/login"));
+      expect(signOut).toHaveBeenCalled();
     });
   });
 });
