@@ -27,9 +27,11 @@ export const SITE_LINKS = [
   { label: "Blog", href: "/blog" },
 ];
 
-export function SiteNav({ active }: { active?: string }) {
+export function SiteNav({ active, banner }: { active?: string; banner?: React.ReactNode }) {
   return (
-    <header className="fixed top-0 inset-x-0 z-50 border-b" style={{ borderColor: BORDER, background: "rgba(5,8,16,0.86)", backdropFilter: "blur(16px) saturate(160%)" }}>
+    <div className="fixed top-0 inset-x-0 z-50" style={banner ? { background: "rgba(5,8,16,0.9)", backdropFilter: "blur(16px) saturate(160%)" } : undefined}>
+    {banner}
+    <header className="border-b" style={{ borderColor: BORDER, background: banner ? "transparent" : "rgba(5,8,16,0.86)", backdropFilter: banner ? undefined : "blur(16px) saturate(160%)" }}>
       <div className="max-w-6xl mx-auto px-5 h-14 flex items-center justify-between gap-4">
         <Link href="/" aria-label="TrustLedger home" className="flex items-center shrink-0">
           <BrandWordmark height={32} />
@@ -55,6 +57,7 @@ export function SiteNav({ active }: { active?: string }) {
         ))}
       </nav>
     </header>
+    </div>
   );
 }
 

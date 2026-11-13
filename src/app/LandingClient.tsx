@@ -7,6 +7,7 @@ import { contactEmail } from "@/lib/contacts";
 import { planLimits } from "@/lib/limits";
 import { LANGUAGE_ENGINES, type LanguageEngine } from "@/lib/publicCoverage";
 import { SiteNav, SiteFooter } from "@/components/marketing/Site";
+import { EarlyAccessBanner } from "@/components/marketing/EarlyAccessBanner";
 import { IAC_FORMATS } from "@/lib/siteContent";
 
 /** Figures computed server-side (app/page.tsx) from the published benchmark report and the engine registries. */
@@ -359,7 +360,7 @@ function TraceVisual() {
 
 function HeroSection({ evidence }: { evidence: LandingEvidence }) {
   return (
-    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-28 lg:pt-36 pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 55% at 50% 0%, ${CYAN}16, transparent 58%), ${INK}` }}>
+    <section className="relative flex flex-col items-center justify-center text-center px-5 pt-[9.5rem] lg:pt-[11.5rem] pb-16 overflow-hidden" style={{ background: `radial-gradient(ellipse 90% 55% at 50% 0%, ${CYAN}16, transparent 58%), ${INK}` }}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute -top-40 -left-24 w-[30rem] h-[30rem] rounded-full blur-[140px]" style={{ background: CYAN, opacity: 0.08 }} />
         <div className="absolute -top-24 -right-24 w-[26rem] h-[26rem] rounded-full blur-[140px]" style={{ background: VIOLET, opacity: 0.06 }} />
@@ -834,7 +835,7 @@ export default function LandingClient({ evidence }: { evidence: LandingEvidence 
   return (
     <div className="tl-landing" style={{ background: INK }}>
       <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
-      <SiteNav active="/" />
+      <SiteNav active="/" banner={<EarlyAccessBanner />} />
       <HeroSection evidence={evidence} />
       <Divider />
       <FoundingUsersSection />

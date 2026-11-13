@@ -62,6 +62,27 @@ describe("homepage", () => {
   });
 });
 
+describe("early-access banner", () => {
+  it("sits at the top of the homepage, above the navigation, and states the offer from the plan itself", () => {
+    render(<LandingClient evidence={evidence} />);
+    const banner = screen.getByRole("region", { name: "Free early access" });
+    const f = PLAN_LIMITS.free;
+    expect(banner).toHaveTextContent("No credit card");
+    expect(banner).toHaveTextContent(`${f.repos} repository`);
+    expect(banner).toHaveTextContent(`${f.scans} scans a month`);
+    expect(within(banner).getByRole("link", { name: /Start free/ })).toHaveAttribute("href", "/login?mode=signup");
+    // the first thing in the fixed top bar, before the site header
+    const bar = banner.parentElement!;
+    expect(bar.firstElementChild).toBe(banner);
+    expect(banner.nextElementSibling?.tagName).toBe("HEADER");
+  });
+
+  it("is only on the homepage: other site pages keep the plain navigation", () => {
+    render(<ContactPage />);
+    expect(screen.queryByRole("region", { name: "Free early access" })).toBeNull();
+  });
+});
+
 describe("contact and feedback page", () => {
   it("offers each kind of message as a prefilled email to the one address", () => {
     render(<ContactPage />);
