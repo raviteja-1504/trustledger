@@ -61,7 +61,7 @@ export function SiteNav({ active }: { active?: string }) {
 const FOOTER_COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
   { title: "Product", links: [{ label: "Overview", href: "/" }, { label: "Live demo", href: "/demo" }, { label: "Dashboard", href: "/dashboard" }, { label: "Pricing & sign up", href: "/login?mode=signup" }] },
   { title: "Evidence", links: [{ label: "Benchmark report", href: "/benchmarks" }, { label: "Coverage matrix", href: "/docs/coverage" }, { label: "Changelog", href: "/changelog" }, { label: "Roadmap", href: "/roadmap" }] },
-  { title: "Resources", links: [{ label: "Documentation", href: "/docs" }, { label: "API reference", href: "/docs/api" }, { label: "Blog", href: "/blog" }, { label: "System status", href: "/status" }] },
+  { title: "Resources", links: [{ label: "Documentation", href: "/docs" }, { label: "API reference", href: "/docs/api" }, { label: "Blog", href: "/blog" }, { label: "System status", href: "/status" }, { label: "Contact and feedback", href: "/contact" }] },
   { title: "Trust", links: [{ label: "Trust Center", href: "/trust" }, { label: "Verify a report", href: "/verify" },{ label: "Security & disclosure", href: "/security" }, { label: "Privacy", href: "/privacy" }, { label: "Terms", href: "/terms" }] },
 ];
 

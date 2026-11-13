@@ -64,6 +64,38 @@ function CorpusTable({ c }: { c: CorpusResult }) {
   );
 }
 
+/** One row per labelled corpus, best recall first: the pooled number hides how much the languages differ, so the spread is shown first. */
+function ByCorpusGlance() {
+  const rows = R.corpora.map(c => ({ c, r: rates(c.categories) })).sort((a, b) => b.r.tpr - a.r.tpr);
+  if (rows.length < 2) return null;
+  const best = rows[0], worst = rows[rows.length - 1];
+  return (
+    <div className="mt-6 rounded-2xl border p-5" style={{ borderColor: BORDER, background: "rgba(255,255,255,0.025)" }}>
+      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-white/45 font-mono">At a glance: it is not the same in every language</p>
+      <p className="text-[13.5px] text-white/65 mt-2 leading-relaxed">
+        The pooled recall above averages very different results. It ranges from <strong className="text-white">{pct(worst.r.tpr)}</strong> ({worst.c.name}, {worst.c.languages.join(", ")})
+        to <strong className="text-white">{pct(best.r.tpr)}</strong> ({best.c.name}, {best.c.languages.join(", ")}). Read the row for the language you use, not only the headline.
+      </p>
+      <TableWrap>
+        <table className="w-full text-[12.5px] font-mono mt-3">
+          <thead><tr className="text-left text-white/45">{["Corpus", "Languages", "Samples", "Recall (TPR)", "False-positive rate"].map(h => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}</tr></thead>
+          <tbody>
+            {rows.map(({ c, r }) => (
+              <tr key={c.name} className="border-t" style={{ borderColor: BORDER }}>
+                <td className="px-3 py-1.5 text-white/85">{c.name}</td>
+                <td className="px-3 py-1.5 text-white/60">{c.languages.join(", ")}</td>
+                <td className="px-3 py-1.5 text-white/60">{r.cases.toLocaleString()}</td>
+                <td className="px-3 py-1.5 font-bold" style={{ color: EMERALD }}>{pct(r.tpr)}</td>
+                <td className="px-3 py-1.5" style={{ color: r.fpr > 0.1 ? ROSE : "rgba(255,255,255,0.7)" }}>{pct(r.fpr)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableWrap>
+    </div>
+  );
+}
+
 export default function BenchmarksPage() {
   const all = rates(R.corpora.flatMap(c => c.categories));
   const timed = R.corpora.filter(c => throughput(c) !== null);
@@ -79,6 +111,7 @@ export default function BenchmarksPage() {
           <Stat label="Scan throughput" value={totalMs ? `${Math.round(totalFiles / (totalMs / 1000))} files/s` : "—"} sub={`${totalFiles.toLocaleString()} files across the timed runs. ${R.environment}`} color={VIOLET} />
         </div>
         <p className="text-[12px] text-white/45 mt-3">Pooled numbers weight large corpora more heavily; per-corpus and per-category results are below. Precision is not a single meaningful number across corpora with different positive/negative ratios, so each table lists TP, FN, FP and TN for you to compute it.</p>
+        <ByCorpusGlance />
       </Section>
 
       <Section id="corpora" title="Results by corpus, language and category" tone="surface"

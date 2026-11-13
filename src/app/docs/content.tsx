@@ -8,25 +8,70 @@ import { BENCHMARK_REPORT } from "@/lib/benchmarkReport";
 import { FINDING_CATALOG } from "@/lib/findingCatalog";
 import { SCANNER_FEATURES, PIPELINE_STAGES, AI_FACTS, ENGINE_FACTS, IAC_FORMATS, CLOUD_API_GROUPS } from "@/lib/siteContent";
 import type { DocsSlug } from "./docsNav";
+import { planLimits } from "@/lib/limits";
+import { contactEmail } from "@/lib/contacts";
 
 const Code = ({ children }: { children: string }) => <pre><code>{children}</code></pre>;
 
 function GettingStarted() {
+  const free = planLimits("free");
+  const email = contactEmail("sales");
   return (
     <>
-      <h2>1. Connect a repository</h2>
-      <p>Sign up, create your organisation, and install the TrustLedger GitHub App on the repositories you want scanned (GitLab and Bitbucket are also supported). The app asks for read access to pull requests and repository contents, and write access to checks and commit statuses — the <Link href="/trust#permissions">Trust Center</Link> explains each permission.</p>
-      <h2>2. Open a pull request</h2>
-      <p>Every pull request opened or updated in a connected repository is scanned automatically. There is nothing to add to your CI pipeline and no configuration file. On GitHub the result appears as a check run named <code>TrustLedger AI Governance</code>, with inline annotations on the flagged lines; on GitLab and Bitbucket as a commit status. Every result is also in the dashboard.</p>
-      <h2>3. Review and attest</h2>
-      <p>Open the scan in the dashboard to see each finding&apos;s source-to-sink trace and fix. A reviewer either fixes the code or attests the file; with the default policy, files at CRITICAL or HIGH risk hold the merge until one of the two happens.</p>
-      <h2>Submitting a scan through the API</h2>
-      <p>To scan code outside a pull request (a CI job, a monorepo export), create an API key in Settings and send the files to <code>POST /api/scans</code>:</p>
+      <p>Five steps take you from nothing to a scanned pull request. It takes about five minutes. Nothing is added to your CI pipeline and no configuration file is needed.</p>
+
+      <h2>1. Create your account</h2>
+      <p>Go to <Link href="/login?mode=signup">Sign up</Link>. Use an email and password (confirm the email we send), or choose <em>Continue with GitHub</em>.</p>
+      <ul>
+        <li><strong className="text-white">GitHub sign-in uses the GitHub account your browser is signed in to.</strong> It does not ask which one. If you have several GitHub accounts, check the avatar at the top right of github.com first, or use a separate browser profile for each account.</li>
+        <li>The setup screens show <em>Signed in as</em> at the top: your name, how you signed in and your TrustLedger organisation. Check it reads what you expect before you continue.</li>
+        <li>You can be signed in on one device at a time: signing in on a second device signs the first one out.</li>
+      </ul>
+
+      <h2>2. Connect GitHub</h2>
+      <p>On the <em>Connect GitHub</em> setup step, click <em>Install on GitHub</em> and install the TrustLedger GitHub App.</p>
+      <ul>
+        <li>Choose the account that owns your repositories: your company, or your own account if the repositories are yours. GitHub installs on the account you are signed in to in this browser.</li>
+        <li>Select the repositories you want scanned. One is enough to start. The app asks for read access to pull requests and code, and write access to checks (see the <Link href="/trust#permissions">Trust Center</Link>).</li>
+        <li>GitHub sends you back to TrustLedger, which shows <em>GitHub App installed on &lt;name&gt;</em> and fills in your GitHub name.</li>
+        <li>If you install on a company account you do not own, GitHub asks an owner to approve it first. Nothing is scanned until they do.</li>
+      </ul>
+      <h3>Your GitHub name</h3>
+      <p>This is the one field people get wrong. It is the name that comes right after <code>github.com/</code> in your repository addresses: in <code>github.com/acme-corp/payments-api</code> it is <code>acme-corp</code>.</p>
+      <ul>
+        <li>TrustLedger matches every pull request to your organisation by this name. <strong className="text-white">If it does not match, the pull request is not scanned</strong> and no check appears.</li>
+        <li>It is not your email address, your TrustLedger organisation&apos;s name or a full repository link. Capital letters do not matter.</li>
+        <li>One GitHub name can be linked to one TrustLedger organisation.</li>
+      </ul>
+
+      <h2>3. Select your repository</h2>
+      <p>The free early-access plan covers {free.repos} {free.repos === 1 ? "repository" : "repositories"}. The first repository that receives a scan is connected automatically, so you pick it by opening a pull request in it. You can see and manage connected repositories in the dashboard under <em>Repositories</em>. A second repository is not scanned on the free plan: the check on its pull request says so, and you can ask us for more at <a href={`mailto:${email}`}>{email}</a>.</p>
+
+      <h2>4. Run your first scan</h2>
+      <p>Open a pull request, or push a commit to an existing one, in the connected repository. Within a minute or two a check named <em>TrustLedger AI Governance</em> appears on the pull request, first as in progress and then with a result. Large pull requests take longer because scans run from a queue.</p>
+      <p>No pull request handy? Try the <Link href="/demo">live demo</Link> first: it scans a sample in your browser.</p>
+
+      <h2>5. Review the findings</h2>
+      <p>Open the scan from the check&apos;s <em>Details</em> link or from the dashboard.</p>
+      <ul>
+        <li>The <em>Security findings</em> card counts vulnerabilities by severity. In the file list, the <em>Findings</em> column shows each file&apos;s share of that count; AI-provenance and code-hygiene hints are shown apart as <em>signals</em> and are not vulnerabilities.</li>
+        <li>Open a finding to see its <em>Data flow</em>: where untrusted input enters, each step it passes through (including other files) and the dangerous call it reaches, with a suggested fix.</li>
+        <li>Fix the code, or attest the file: a named reviewer signs it off. With the default policy, files at CRITICAL or HIGH risk block the merge until they are fixed or attested. A finding that is not real can be marked a false positive, or accepted as a risk with a reason and an optional expiry.</li>
+      </ul>
+
+      <h2>What the free early-access plan includes</h2>
+      <p>The whole product, with an allowance of {free.scans} pull-request scans a month, {free.repos} {free.repos === 1 ? "repository" : "repositories"} and {free.members} team members. Reviewer sign-offs are {free.attestations < 0 ? "unlimited" : `limited to ${free.attestations}`}. The scan count restarts on the first day of each month (UTC). Need more while you evaluate? Write to <a href={`mailto:${email}`}>{email}</a>.</p>
+
+      <h2>Scanning outside a pull request</h2>
+      <p>To scan code from a CI job or a monorepo export, create an API key in Settings and send the files to <code>POST /api/scans</code>:</p>
       <Code>{`curl -X POST https://<your-deployment>/api/scans \\
   -H "X-TrustLedger-Key: tl_live_..." \\
   -H "Content-Type: application/json" \\
   -d '{"repo":"acme/api","pr_number":482,"commit_sha":"<sha>","files":[{"path":"src/db/users.ts","content":"..."}]}'`}</Code>
-      <p>See the <Link href="/docs/api">API reference</Link> for every field. Want to see what a scan reports first? Try the <Link href="/demo">live demo</Link>.</p>
+      <p>See the <Link href="/docs/api">API reference</Link> for every field. GitLab and Bitbucket are also supported.</p>
+
+      <h2>Stuck?</h2>
+      <p>Start with <Link href="/docs/troubleshooting">Troubleshooting</Link>. Anything else, or a false positive or missed vulnerability to report, goes through <Link href="/contact">Contact and feedback</Link>.</p>
     </>
   );
 }
@@ -198,25 +243,51 @@ function Attestation() {
 }
 
 function Troubleshooting() {
+  const free = planLimits("free");
+  const email = contactEmail("sales");
   return (
     <>
       <h2>A pull request was not scanned</h2>
+      <p>Work down this list; the first two cause most cases.</p>
       <ul>
-        <li>Check the app is installed on that repository (installation settings on GitHub) and that the repository is connected in TrustLedger.</li>
+        <li><strong className="text-white">Your GitHub name does not match.</strong> TrustLedger matches pull requests to your organisation by the GitHub name saved in setup: the part after <code>github.com/</code> in the repository address. If it is missing, misspelt (for example <code>acme</code> instead of <code>acme-corp</code>) or belongs to another TrustLedger organisation, the pull request is ignored and no check appears. Open <code>/onboarding</code>, go to <em>Connect GitHub</em> and correct it. Capital letters do not matter.</li>
+        <li><strong className="text-white">The app is not installed on that repository.</strong> In GitHub, open the installation settings for the TrustLedger app and check the repository is selected, and that it is installed on the account that owns the repository.</li>
         <li>Check webhook deliveries in the GitHub App settings: a 401 means the webhook secret does not match, so the signature check rejected it.</li>
         <li>Scans run from a queue, so a result can take a little while on a large pull request. Pushing a new commit queues a fresh scan.</li>
       </ul>
+
+      <h2>The check says &ldquo;Plan limit reached&rdquo;</h2>
+      <p>The free early-access plan includes {free.scans} pull-request scans a month and {free.repos} {free.repos === 1 ? "repository" : "repositories"}. When either is used up, TrustLedger does not scan the pull request and says so on the check instead of failing silently. Existing scans can still be viewed and attested. The scan count restarts on the first day of the month (UTC). Need more now? Write to <a href={`mailto:${email}`}>{email}</a>.</p>
+
+      <h2>Setup shows the wrong account or organisation</h2>
+      <ul>
+        <li>Check <em>Signed in as</em> at the top of the setup screens. GitHub sign-in uses whichever GitHub account the browser is signed in to, so a different GitHub login in the same browser signs you in as someone else. Use <em>Not you? Sign out</em>, sign out of github.com, and sign in again, or use a separate browser profile for each account.</li>
+        <li>The GitHub name can belong to only one TrustLedger organisation. &ldquo;Already linked to another TrustLedger organisation&rdquo; means a different one holds it: sign in as the account that created that organisation, or contact us.</li>
+      </ul>
+
+      <h2>I was signed out on one device after signing in on another</h2>
+      <p>One session is active per person at a time. Signing in on a second device ends the first. This protects the account; sign in again where you want to work.</p>
+
+      <h2>The numbers on the pull request page do not match</h2>
+      <p>The <em>Security findings</em> card and the <em>Findings</em> column count the same thing: vulnerabilities. <em>Signals</em> are AI-provenance and code-hygiene hints and are never added into the finding counts. A file&apos;s risk rating comes from its worst finding, so a CRITICAL file can also hold lower-severity findings.</p>
+
       <h2>No check run on the pull request</h2>
       <p>On GitHub the app needs <em>Checks: write</em>. If permissions were changed after installation, accept the updated permissions in the installation settings. GitLab and Bitbucket report a commit status instead of a check run.</p>
-      <h2>A file was not analysed by its language engine</h2>
+
+      <h2>Known limitations</h2>
       <ul>
+        <li><strong className="text-white">Detection is not equal in every language.</strong> The <Link href="/benchmarks">benchmark report</Link> shows recall and false-positive rate per corpus and language. Read the row for your language, not only the headline.</li>
         <li>Generated, minified and vendored files are skipped or treated as third-party code.</li>
         <li>Files over 5,000 lines, or with syntax nested over 1,000 levels deep, are covered by line-level detectors only.</li>
+        <li>Flows through code outside the files in the pull request, and through frameworks or libraries the engines do not model, can be missed. See each language&apos;s <Link href="/docs/languages">known limitations</Link>.</li>
+        <li>TrustLedger is not yet SOC 2 or ISO 27001 certified and has not had an independent penetration test. The <Link href="/trust">Trust Center</Link> says exactly what is and is not in place.</li>
       </ul>
-      <h2>A finding looks wrong</h2>
-      <p>Read its trace: every data-flow finding shows how the value got from the source to the sink. If a step is wrong (for example a validation the engine did not recognise), mark the finding a false positive (it stays suppressed across pushes) or attest the file, and tell us — the false-positive examples in the <Link href="/benchmarks#failures">benchmark report</Link> show the kinds of cases we already know about.</p>
-      <h2>A vulnerability was not reported</h2>
-      <p>Check the <Link href="/docs/coverage">coverage matrix</Link> for the rule and language, and the language&apos;s <Link href="/docs/languages">known limitations</Link>. Flows through code outside the scan (another repository, a compiled library) cannot be followed.</p>
+
+      <h2>A finding looks wrong, or a vulnerability was not reported</h2>
+      <p>Read the finding&apos;s data flow: every data-flow finding shows how the value got from the source to the sink. If a step is wrong (for example a validation the engine did not recognise), mark the finding a false positive with a reason. Check the <Link href="/docs/coverage">coverage matrix</Link> for the rule and language before reporting a miss. Then tell us through <Link href="/contact">Contact and feedback</Link>: false positives and missed vulnerabilities are the most useful feedback we get.</p>
+
+      <h2>A file was not analysed by its language engine</h2>
+      <p>See the known limitations above: generated, minified, vendored and very large files get line-level detectors only.</p>
     </>
   );
 }

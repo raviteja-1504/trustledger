@@ -14,7 +14,7 @@ const IS_PROD    = process.env.NODE_ENV === "production";
 
 const PUBLIC_PATHS = new Set(["/login", "/auth/callback", "/api/webhook", "/changelog", "/docs", "/status", "/healthz", "/privacy", "/terms", "/security", "/.well-known/security.txt", "/.well-known/trustledger-export-signing-key",
   // the public site: live demo, benchmark report, Trust Center, roadmap, blog
-  "/demo", "/benchmarks", "/benchmarks/report.json", "/trust", "/roadmap", "/blog",
+  "/demo", "/benchmarks", "/benchmarks/report.json", "/trust", "/roadmap", "/blog", "/contact",
   // auditors verify a report's evidence record here without an account
   "/verify"]);
 

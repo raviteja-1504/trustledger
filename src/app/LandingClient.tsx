@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandLogo";
 import { contactEmail } from "@/lib/contacts";
+import { planLimits } from "@/lib/limits";
 import { LANGUAGE_ENGINES, type LanguageEngine } from "@/lib/publicCoverage";
 import { SiteNav, SiteFooter } from "@/components/marketing/Site";
 import { IAC_FORMATS } from "@/lib/siteContent";
@@ -368,27 +369,26 @@ function HeroSection({ evidence }: { evidence: LandingEvidence }) {
 
       <div className="relative w-full max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-[1.12fr_1fr] gap-12 lg:gap-12 xl:gap-16 items-center">
         <Reveal className="min-w-0 space-y-6 lg:text-left">
-          <Eyebrow><span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />One platform for everything that touches a PR</Eyebrow>
+          <Eyebrow><span className="w-1.5 h-1.5 rounded-full" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />One platform for application security, code provenance and AI governance</Eyebrow>
           <h1 className="text-[2.6rem] min-[400px]:text-5xl sm:text-6xl lg:text-[3.25rem] xl:text-[3.85rem] font-black text-white tracking-tight leading-[1.05]" style={{ textShadow: "0 4px 40px rgba(0,0,0,0.7)" }}>
-            AI provenance.<br />
-            <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Real vulnerabilities.</span><br />
-            One risk score.
+            Secure Every Pull Request.<br />
+            <span style={{ background: `linear-gradient(90deg, ${CYAN}, #67e8f9, #a5f3fc)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Establish Trust in Every Release.</span>
           </h1>
           <p className="text-lg sm:text-xl text-white/65 max-w-xl mx-auto lg:mx-0 leading-relaxed">
-            Every pull request scored for AI-generated code, real vulnerabilities traced across files in ten languages, leaked secrets, reachable vulnerable dependencies and cloud misconfigurations — and held until a named reviewer signs off.
+            Discover vulnerabilities, trace real attack paths across files, detect exposed secrets and govern AI-generated code.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-3 pt-1">
-            <Link href="/demo" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
+            <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
               style={{ background: `linear-gradient(135deg, #67e8f9, ${CYAN})`, boxShadow: `0 6px 32px ${CYAN}66` }}
               onMouseEnter={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(-2px)"; el.style.boxShadow = `0 10px 40px ${CYAN}88`; }}
               onMouseLeave={e => { const el = e.currentTarget as HTMLElement; el.style.transform = "translateY(0)"; el.style.boxShadow = `0 6px 32px ${CYAN}66`; }}>
-              Try the live demo <ArrowRightIcon size={15} />
+              Try TrustLedger Free <ArrowRightIcon size={15} />
             </Link>
-            <Link href="/login?mode=signup" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm transition-all border hover:text-white/95"
+            <Link href="/demo" className="flex items-center gap-2 px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm transition-all border hover:text-white/95"
               style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.32)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.18)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.06)"; }}>
-              <GitHubIcon size={15} /> Connect a repository
+              Watch Product Demo
             </Link>
           </div>
           <p className="text-[12.5px] text-white/50">
@@ -598,6 +598,79 @@ function HowItWorksSection() {
   );
 }
 
+// ── Founding Users Program ───────────────────────────────────────────────
+
+/** What a founding user gets and how they start. The allowance comes from the plan itself (lib/limits.ts), so this can never promise
+ * more than the free plan enforces. */
+function FoundingUsersSection() {
+  const free = planLimits("free");
+  const n = (v: number, one: string, many: string) => v < 0 ? `unlimited ${many}` : `${v} ${v === 1 ? one : many}`;
+  const RECEIVE = [
+    { title: "The whole product, free", text: "Ten language engines with cross-file tracing, secrets, dependency and infrastructure-as-code checks, AI provenance and signed reviewer attestations. No feature is held back." },
+    { title: "A real allowance", text: `${n(free.scans, "pull-request scan", "pull-request scans")} a month on ${n(free.repos, "repository", "repositories")} for ${n(free.members, "team member", "team members")}, with ${free.attestations < 0 ? "unlimited" : free.attestations} reviewer sign-offs. No credit card.` },
+    { title: "A direct line to the team", text: "Report a false positive, a missed vulnerability or a feature you need and it goes straight to the people building it." },
+    { title: "More room when you need it", text: "Need more scans, repositories or teammates while you evaluate? Ask us." },
+  ];
+  const STEPS = [
+    { title: "Create a free account", text: "Email or GitHub sign-in. No credit card." },
+    { title: "Install the GitHub App on one repository", text: "About two minutes. It asks for read access to pull requests and code, and write access to checks." },
+    { title: "Enter your GitHub name", text: "The part after github.com/ in your repository address, so your pull requests are matched to your account." },
+    { title: "Open a pull request", text: "The result appears as a check on the pull request and in your dashboard, with each finding's source-to-sink trace." },
+  ];
+  return (
+    <section id="early-access" className="py-20 px-5" style={{ background: `radial-gradient(ellipse 70% 55% at 50% 0%, ${EMERALD}12, transparent 65%), ${SURFACE}` }}>
+      <div className="max-w-6xl mx-auto">
+        <Reveal className="text-center space-y-4 max-w-3xl mx-auto">
+          <Eyebrow color={EMERALD}>Founding Users Program</Eyebrow>
+          <h2 className="text-3xl sm:text-4xl font-black text-white tracking-tight" style={{ textWrap: "balance" }}>Join the Founding Users Program: free early access.</h2>
+          <p className="text-white/65 text-base sm:text-lg leading-relaxed">
+            TrustLedger is in early access. Teams that join now use the full product for free while we shape it with their feedback.
+          </p>
+        </Reveal>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-10">
+          <Reveal className="rounded-2xl border p-6" style={{ borderColor: `${EMERALD}33`, background: `${EMERALD}0a` }}>
+            <p className="text-[11px] font-bold uppercase tracking-[0.14em] font-mono mb-4" style={{ color: EMERALD }}>What you receive</p>
+            <ul className="space-y-4">
+              {RECEIVE.map(r => (
+                <li key={r.title} className="flex gap-3">
+                  <span className="mt-1 shrink-0" style={{ color: EMERALD }} aria-hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg></span>
+                  <span className="min-w-0"><span className="block font-bold text-white text-[15px]">{r.title}</span><span className="block text-[13.5px] text-white/60 leading-relaxed mt-0.5">{r.text}</span></span>
+                </li>
+              ))}
+            </ul>
+          </Reveal>
+          <Reveal className="rounded-2xl border p-6" style={{ borderColor: "rgba(255,255,255,0.10)", background: "rgba(255,255,255,0.03)" }}>
+            <p className="text-[11px] font-bold uppercase tracking-[0.14em] font-mono mb-4 text-white/50">How to start</p>
+            <ol className="space-y-4">
+              {STEPS.map((s, i) => (
+                <li key={s.title} className="flex gap-3">
+                  <span className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[12px] font-black text-[#050810]" style={{ background: CYAN }} aria-hidden>{i + 1}</span>
+                  <span className="min-w-0"><span className="block font-bold text-white text-[15px]">{s.title}</span><span className="block text-[13.5px] text-white/60 leading-relaxed mt-0.5">{s.text}</span></span>
+                </li>
+              ))}
+            </ol>
+          </Reveal>
+        </div>
+
+        <Reveal className="flex flex-col sm:flex-row items-center justify-center gap-3 mt-9">
+          <Link href="/login?mode=signup" className="flex items-center gap-2 px-7 py-3.5 rounded-xl font-bold text-sm transition-all active:scale-[0.98] text-[#050810]"
+            style={{ background: `linear-gradient(135deg, #6ee7b7, ${EMERALD})`, boxShadow: `0 6px 30px ${EMERALD}55` }}>
+            Join the Founding Users Program <ArrowRightIcon size={15} />
+          </Link>
+          <a href={`mailto:${contactEmail("sales")}?subject=${encodeURIComponent("Founding Users Program")}`} className="px-6 py-3.5 rounded-xl text-white/80 font-semibold text-sm border hover:text-white/95"
+            style={{ borderColor: "rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)" }}>
+            Ask about the program
+          </a>
+        </Reveal>
+        <p className="text-center text-[12.5px] text-white/45 mt-4">
+          Questions first? <Link href="/contact" className="underline underline-offset-2 text-white/65 hover:text-white">Contact the team</Link> or read the <Link href="/docs/getting-started" className="underline underline-offset-2 text-white/65 hover:text-white">getting started guide</Link>.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 // ── CTASection ───────────────────────────────────────────────────────────────
 
 function CTASection() {
@@ -763,6 +836,8 @@ export default function LandingClient({ evidence }: { evidence: LandingEvidence 
       <style>{`.tl-landing h1, .tl-landing h2, .tl-landing h3 { text-shadow: 0 2px 20px rgba(0,0,0,0.55); }`}</style>
       <SiteNav active="/" />
       <HeroSection evidence={evidence} />
+      <Divider />
+      <FoundingUsersSection />
       <Divider />
       <PillarsSection />
       <Divider />

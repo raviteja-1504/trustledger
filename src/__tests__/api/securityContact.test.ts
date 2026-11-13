@@ -127,7 +127,7 @@ describe("public without a session", () => {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon";
     ({ middleware } = await import("@/middleware"));
   });
-  it.each(["/security", "/.well-known/security.txt"])("%s is not redirected to login", async path => {
+  it.each(["/security", "/.well-known/security.txt", "/contact"])("%s is not redirected to login", async path => {
     const res = await middleware(new NextRequest(new URL(path, "https://app.example")));
     expect(res.headers.get("location")).toBeNull();
   });
