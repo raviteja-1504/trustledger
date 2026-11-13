@@ -22,6 +22,9 @@ export interface FlowStep {
   kind: TraceStep["kind"];
   kindLabel: string;
   text: string;
+  /** The step in words ("calls findUserByEmail(...) in src/db/users.ts") and the code itself, shown apart on the PR page. */
+  label?: string;
+  snippet?: string;
   line?: number;
   /** Set only when the step is in a different file from the one being viewed. */
   otherFile?: string;
@@ -116,6 +119,8 @@ export function buildFindingEvidence(ind: FileIndicator, filePath: string, sibli
       kind: s.kind,
       kindLabel: KIND_LABEL[s.kind] ?? s.kind,
       text: stepText(s),
+      label: (s.label || s.snippet || "").replace(/\s+/g, " ").trim(),
+      snippet: (s.snippet || "").replace(/\s+/g, " ").trim(),
       line: s.line,
       otherFile: s.file && s.file !== filePath ? s.file : undefined,
     }))

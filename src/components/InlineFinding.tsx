@@ -41,14 +41,6 @@ const URGENCY_STYLE: Record<string, string> = {
   backlog:   "bg-amber-400/10 text-amber-100 ring-amber-400/30",
   monitor:   "bg-slate-500/15 text-slate-400 ring-slate-500/30",
 };
-const STEP_DOT: Record<FlowStep["kind"], string> = {
-  source: "bg-sky-400 ring-sky-400/25", assignment: "bg-slate-400 ring-slate-400/15", call: "bg-slate-300 ring-slate-300/15",
-  sanitizer: "bg-amber-400 ring-amber-400/25", "cross-file": "bg-violet-400 ring-violet-400/25", parameter: "bg-violet-300 ring-violet-300/25",
-  sink: "bg-rose-500 ring-rose-500/30",
-};
-const STEP_LABEL_TONE: Partial<Record<FlowStep["kind"], string>> = {
-  source: "text-sky-300", sink: "text-rose-300", "cross-file": "text-violet-300", parameter: "text-violet-300", sanitizer: "text-amber-300",
-};
 const CHIP = "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 whitespace-nowrap";
 const JS_LANGS = new Set(["javascript", "typescript", "js", "ts", "jsx", "tsx"]);
 const FLOW_PREVIEW = 6;
@@ -214,7 +206,12 @@ function FlowRibbon({ flow, filePath, onJump, nav }: { flow: FlowStep[]; filePat
   );
 }
 
-/** Every step of the path, grouped by the file it happens in. */
+/** The colour of each kind of step on the path's rail: where it starts, what it passes through, where it ends. */
+const STEP_COLOR: Record<FlowStep["kind"], string> = {
+  source: "#22d3ee", assignment: "#94a3b8", call: "#a78bfa", sanitizer: "#34d399", "cross-file": "#fbbf24", parameter: "#fbbf24", sink: "#fb7185",
+};
+
+/** Every step of the path as one timeline: what happens (in words), where (file:line, a link), and the code itself. */
 function FlowPath({ flow, filePath, fromEndpointsOnly, onJump, nav }: {
   flow: FlowStep[]; filePath: string; fromEndpointsOnly: boolean; onJump?: (line: number) => void; nav?: FileNavigation;
 }) {
@@ -222,56 +219,44 @@ function FlowPath({ flow, filePath, fromEndpointsOnly, onJump, nav }: {
   // Always keep the origin and the sink; elide the middle of a long path until asked.
   const hidden = !all && flow.length > FLOW_PREVIEW ? flow.length - FLOW_PREVIEW : 0;
   const shown = hidden ? [...flow.slice(0, FLOW_PREVIEW - 1), flow[flow.length - 1]] : flow;
-  const groups = groupByFile(shown, filePath);
-  let n = 0;
   return (
     <div className="space-y-2.5">
-      {groups.map((g, gi) => {
-        const here = g.file === filePath;
-        return (
-          <div key={`${g.file}-${gi}`} className={`rounded-lg ring-1 ${here ? "bg-white/[0.025] ring-white/[0.07]" : "bg-violet-500/[0.05] ring-violet-400/15"}`}>
-            <div className="flex items-center gap-1.5 border-b border-white/[0.06] px-2.5 py-1.5">
-              <Icon d={ICON.file} size={11} className={here ? "text-slate-500" : "text-violet-300"} />
-              {(() => {
-                const first = g.steps.find(s => s.line != null)?.line;
-                const cls = `truncate font-mono text-[10.5px] ${here ? "text-slate-300" : "text-violet-200"}`;
-                if (!here && first != null && nav?.canOpenFile(g.file)) {
-                  return <button type="button" onClick={() => nav.openFile(g.file, first)} title={`Open ${g.file} at line ${first}`}
-                    className={`${cls} hover:underline focus:outline-none focus-visible:underline`}>{g.file}</button>;
-                }
-                return <span className={cls} title={g.file}>{g.file || "this file"}</span>;
-              })()}
-              {here && <span className="ml-auto text-[9.5px] font-semibold uppercase tracking-wider text-slate-500">this file</span>}
-            </div>
-            <ol className="space-y-2 px-2.5 py-2">
-              {g.steps.map((s, i) => {
-                n++;
-                const lastInGroup = i === g.steps.length - 1;
-                const elidedAfter = hidden > 0 && n === FLOW_PREVIEW - 1;
-                return (
-                  <li key={`${s.kind}-${s.line}-${i}`} className="relative flex gap-2.5">
-                    {!lastInGroup && <span className="absolute left-[3.5px] top-3.5 bottom-[-10px] w-px bg-gradient-to-b from-slate-500/60 to-slate-600/30" aria-hidden />}
-                    <span className={`relative mt-[5px] h-2 w-2 shrink-0 rounded-full ring-4 ${STEP_DOT[s.kind]}`} aria-hidden />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-[10px] font-bold uppercase tracking-wider ${STEP_LABEL_TONE[s.kind] ?? "text-slate-400"}`}>{s.kindLabel}</span>
-                        {s.line != null && <LineRef line={s.line} file={s.otherFile} filePath={filePath} onJump={onJump} nav={nav} emphasis={s.kind === "sink"} />}
-                      </div>
-                      <p className="mt-0.5 font-mono text-[11px] leading-relaxed text-slate-200 break-words">{s.text}</p>
-                      {elidedAfter && (
-                        <button type="button" onClick={() => setAll(true)}
-                          className="mt-1.5 text-[10.5px] font-semibold text-sky-300 hover:text-sky-200 focus:outline-none focus-visible:underline">
-                          … {hidden} more step{hidden === 1 ? "" : "s"}
-                        </button>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
-          </div>
-        );
-      })}
+      <ol className="space-y-4">
+        {shown.map((s, i) => {
+          const color = STEP_COLOR[s.kind] ?? "#94a3b8";
+          const last = i === shown.length - 1;
+          const file = s.otherFile ?? filePath;
+          const prevFile = i > 0 ? (shown[i - 1].otherFile ?? filePath) : null;
+          const showFile = file !== prevFile;           // name the file where the path enters it, not on every step
+          const title = s.label || s.text;
+          const code = s.snippet && s.snippet !== title ? s.snippet : "";
+          const elidedAfter = hidden > 0 && i === FLOW_PREVIEW - 2;
+          return (
+            <li key={`${s.kind}-${s.line}-${i}`} className="relative flex gap-3">
+              {!last && <span className="absolute left-[4.5px] top-4 bottom-[-16px] w-px bg-gradient-to-b from-white/25 to-white/10" aria-hidden />}
+              <span className="relative mt-[3px] h-[10px] w-[10px] shrink-0 rounded-full" style={{ background: color, boxShadow: `0 0 9px ${color}` }} aria-hidden />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px]">
+                  <span className="font-bold uppercase tracking-wider" style={{ color }}>{s.kindLabel}</span>
+                  {showFile && (s.otherFile && s.line != null && nav?.canOpenFile(file)
+                    ? <button type="button" onClick={() => nav.openFile(file, s.line!)} title={`Open ${file} at line ${s.line}`}
+                        className="truncate text-violet-300/90 hover:underline focus:outline-none focus-visible:underline">{file}</button>
+                    : <span className={`truncate ${s.otherFile ? "text-violet-300/90" : "text-slate-500"}`} title={file}>{file}</span>)}
+                  {s.line != null && <LineRef line={s.line} file={s.otherFile} filePath={filePath} onJump={onJump} nav={nav} emphasis={s.kind === "sink"} />}
+                </div>
+                <p className="mt-0.5 break-words text-[13px] leading-snug text-slate-100">{title}</p>
+                {code && <code className="mt-0.5 block break-all font-mono text-[12px] leading-relaxed text-slate-400">{code}</code>}
+                {elidedAfter && (
+                  <button type="button" onClick={() => setAll(true)}
+                    className="mt-2 text-[11px] font-semibold text-sky-300 hover:text-sky-200 focus:outline-none focus-visible:underline">
+                    … {hidden} more step{hidden === 1 ? "" : "s"}
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
       {fromEndpointsOnly && (
         <p className="text-[11px] text-slate-500">Only the start and end of this flow were recorded; intermediate steps aren’t available for this finding.</p>
       )}
