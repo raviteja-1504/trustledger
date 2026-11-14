@@ -499,30 +499,47 @@ function TeamStep({ onNext }: { onNext: () => void }) {
 
 // ── Step: Policy ──────────────────────────────────────────────────────────────
 
-type Preset = "standard" | "strict" | "custom";
+type Preset = "standard" | "strict";
 
 const PRESETS: Record<Preset, { label: string; desc: string; ai: number; sla: number; blockCrit: boolean; blockHigh: boolean }> = {
   standard: { label: "Standard", desc: "Block CRITICAL only. Warn on HIGH. 24h attestation SLA.",              ai: 0.80, sla: 24, blockCrit: true,  blockHigh: false },
   strict:   { label: "Strict",   desc: "Block CRITICAL + HIGH. 12h SLA. Designed for financial/healthcare.",   ai: 0.70, sla: 12, blockCrit: true,  blockHigh: true  },
-  custom:   { label: "Custom",   desc: "Apply now then fine-tune anytime in Settings → Org Policy.",            ai: 0.80, sla: 24, blockCrit: true,  blockHigh: false },
 };
+
+/** The reason a policy could not be saved, in words. */
+function policyErrorText(e: unknown): string {
+  const code = (e as { code?: string })?.code ?? (e instanceof Error ? e.message : "");
+  if (code === "insufficient_permissions") return "Only an administrator can set the policy. You can carry on with the current policy and ask an administrator to change it.";
+  return "We couldn't save the policy. Please try again, or carry on and set it later.";
+}
 
 function PolicyStep({ onNext }: { onNext: () => void }) {
   const [preset, setPreset] = useState<Preset>("standard");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [problem, setProblem] = useState<ApiProblem>(null);
 
   async function save() {
     setSaving(true);
+    setError(null);
     const cfg = PRESETS[preset];
-    await authedFetch("/api/settings", {
-      method: "PATCH",
-      body: JSON.stringify({
-        ai_threshold:      cfg.ai,
-        attest_sla_hours:  cfg.sla,
-        block_on_critical: cfg.blockCrit,
-        block_on_high:     cfg.blockHigh,
-      }),
-    }).catch(() => {});
+    try {
+      await authedFetch("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          ai_threshold:      cfg.ai,
+          attest_sla_hours:  cfg.sla,
+          block_on_critical: cfg.blockCrit,
+          block_on_high:     cfg.blockHigh,
+        }),
+      });
+    } catch (e) {
+      // Stay on this step: moving on would let the person believe the policy was applied
+      const p = apiProblemOf(e);
+      if (p) setProblem(p); else setError(policyErrorText(e));
+      setSaving(false);
+      return;
+    }
     setSaving(false);
     onNext();
   }
@@ -552,9 +569,16 @@ function PolicyStep({ onNext }: { onNext: () => void }) {
         ))}
       </div>
 
+      {problem && <ApiProblemBanner problem={problem} />}
+      {error && <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">{error}</p>}
       <PrimaryBtn onClick={save} disabled={saving}>
         {saving ? "Saving…" : "Apply policy →"}
       </PrimaryBtn>
+      {(error || problem) && (
+        <button type="button" onClick={onNext} className="w-full py-2 rounded-2xl font-semibold text-gray-500 text-sm hover:text-gray-700 transition-colors">
+          Continue without saving
+        </button>
+      )}
     </div>
   );
 }

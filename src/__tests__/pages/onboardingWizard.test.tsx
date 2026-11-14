@@ -7,7 +7,8 @@ jest.mock("@/lib/auth", () => ({ useAuth: () => authValue }));
 let onboardingGet: Record<string, unknown> = { github_org: null, org_name: "Acme Inc" };
 let githubInfo: unknown = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" };
 let githubInfoFails = false;
-let apiError: Error | null = null;   // every call fails with this, like a server that rejects the session
+let apiError: Error | null = null;
+let settingsError: (Error & { code?: string; status?: number }) | null = null;   // the policy save fails with this   // every call fails with this, like a server that rejects the session
 let saveOrgError: string | null = null;
 jest.mock("@/lib/useRealData", () => ({
   authedFetch: jest.fn(async (url: string, opts?: { body?: string }) => {
@@ -16,6 +17,7 @@ jest.mock("@/lib/useRealData", () => ({
     if (url.startsWith("/api/github-app/installation?id=")) return { login: "acme-corp" };
     if (apiError && url === "/api/onboarding" && opts?.body) throw apiError;
     if (url === "/api/onboarding" && opts?.body?.includes("save_github_org") && saveOrgError) throw new Error(saveOrgError);
+    if (url === "/api/settings" && settingsError) throw settingsError;
     if (url === "/api/onboarding" && !opts) return onboardingGet;
     return {};
   }),
@@ -29,6 +31,7 @@ beforeEach(() => {
   githubInfo = { configured: true, install_url: "https://github.com/apps/trustledger/installations/new" }; githubInfoFails = false;
   saveOrgError = null; window.history.pushState({}, "", "/onboarding");
   apiError = null;
+  settingsError = null;
   onboardingGet = { github_org: null, org_name: "Acme Inc" };
   authValue = { profile: { org_id: "org-1", org_slug: "acme", org_name: "Acme Inc", role: "admin", name: "Ada", email: "ada@acme.dev" }, user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "email" } } };
 });
@@ -266,6 +269,57 @@ describe("setup wizard", () => {
       authValue = { user: { id: "u1", email: "ada@acme.dev", app_metadata: { provider: "github" } }, profile: null, loading: false };
       render(<OnboardingPage />);
       expect(await screen.findByTestId("signed-in-as")).toHaveTextContent("no TrustLedger organisation");
+    });
+  });
+
+  describe("Set your policy step", () => {
+    const openPolicyStep = () => { localStorage.setItem("tl_onboarding_done", JSON.stringify(["welcome", "github", "team"])); render(<OnboardingPage />); };
+
+    it("offers Standard and Strict only: no 'Custom' that points at a Settings screen that is not there", async () => {
+      openPolicyStep();
+      expect(await screen.findByText("Set your policy")).toBeInTheDocument();
+      expect(screen.getByText("Standard")).toBeInTheDocument();
+      expect(screen.getByText("Strict")).toBeInTheDocument();
+      expect(screen.queryByText("Custom")).toBeNull();
+      expect(document.body.textContent).not.toMatch(/Org Policy/);
+    });
+
+    it("a saved policy moves on to the last step", async () => {
+      openPolicyStep();
+      fireEvent.click(await screen.findByRole("button", { name: /Apply policy/ }));
+      expect(await screen.findByText(/all set/)).toBeInTheDocument();
+    });
+
+    it("a policy that could not be saved says so and stays on the step, instead of carrying on as if it worked", async () => {
+      settingsError = Object.assign(new Error("save_failed"), { code: "save_failed" });
+      openPolicyStep();
+      fireEvent.click(await screen.findByRole("button", { name: /Apply policy/ }));
+      expect(await screen.findByText(/We couldn.t save the policy/)).toBeInTheDocument();
+      expect(screen.getByText(/Step 4 of 5/)).toBeInTheDocument();
+      expect(screen.queryByText(/all set/)).toBeNull();
+    });
+
+    it("a non-administrator is told only an administrator can set it", async () => {
+      settingsError = Object.assign(new Error("insufficient_permissions"), { code: "insufficient_permissions", status: 403 });
+      openPolicyStep();
+      fireEvent.click(await screen.findByRole("button", { name: /Apply policy/ }));
+      expect(await screen.findByText(/Only an administrator can set the policy/)).toBeInTheDocument();
+    });
+
+    it("the person can still carry on without saving, on purpose", async () => {
+      settingsError = Object.assign(new Error("save_failed"), { code: "save_failed" });
+      openPolicyStep();
+      fireEvent.click(await screen.findByRole("button", { name: /Apply policy/ }));
+      fireEvent.click(await screen.findByRole("button", { name: "Continue without saving" }));
+      expect(await screen.findByText(/all set/)).toBeInTheDocument();
+    });
+
+    it("a sign-in with no organisation gets the plain explanation, not a silent success", async () => {
+      settingsError = Object.assign(new Error("no_org_membership"), { code: "no_org_membership", status: 401 });
+      openPolicyStep();
+      fireEvent.click(await screen.findByRole("button", { name: /Apply policy/ }));
+      expect(await screen.findByText("This sign-in isn't part of a TrustLedger organisation")).toBeInTheDocument();
+      expect(screen.getByText(/Step 4 of 5/)).toBeInTheDocument();
     });
   });
 
