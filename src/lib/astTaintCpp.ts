@@ -1497,16 +1497,31 @@ function memberClassOf(fn: SyntaxNode, declarator: SyntaxNode | null): string | 
   return null;
 }
 
+// function/lambda node -> variable name -> declared class, built by ONE walk of the function (declaredClassOf used to walk the whole function again for every receiver it was asked about)
+const declaredClassesCache = new NodeCache<Map<string, string>>();
+function declaredClassesIn(fn: SyntaxNode): Map<string, string> {
+  const hit = declaredClassesCache.get(fn);
+  if (hit) return hit;
+  const out = new Map<string, string>();
+  for (const d of [...findAllNodes(fn, "parameter_declaration"), ...findAllNodes(fn, "declaration")]) {
+    const t = field(d, "type")?.text.replace(/^(?:const|struct|class)\s+/, "").replace(/<.*$/, "").split("::").pop();
+    if (!t || !/^[A-Za-z_]\w*$/.test(t)) continue;
+    const declarators = d.type === "parameter_declaration" ? [field(d, "declarator")] : named(d).filter(c => c !== field(d, "type"));
+    for (const x of declarators) {
+      const n = x ? declaredName(x.type === "init_declarator" ? field(x, "declarator") : x) : null;
+      if (n && !out.has(n)) out.set(n, t);   // the first declaration wins, as the per-lookup scan did
+    }
+  }
+  declaredClassesCache.set(fn, out);
+  return out;
+}
+
 /** The declared class of variable `name` where `site` is: a parameter or a local declared `T x` / `T* x` / `T& x`. */
 function declaredClassOf(name: string, site: SyntaxNode): string | null {
   for (let cur: SyntaxNode | null = site; cur; cur = cur.parent) {
     if (cur.type !== "function_definition" && cur.type !== "lambda_expression") continue;
-    for (const d of [...findAllNodes(cur, "parameter_declaration"), ...findAllNodes(cur, "declaration")]) {
-      const declarators = d.type === "parameter_declaration" ? [field(d, "declarator")] : named(d).filter(c => c !== field(d, "type"));
-      if (!declarators.some(x => x && declaredName(x.type === "init_declarator" ? field(x, "declarator") : x) === name)) continue;
-      const t = field(d, "type")?.text.replace(/^(?:const|struct|class)\s+/, "").replace(/<.*$/, "").split("::").pop();
-      if (t && /^[A-Za-z_]\w*$/.test(t)) return t;
-    }
+    const t = declaredClassesIn(cur).get(name);
+    if (t) return t;
     if (cur.type === "function_definition") break;
   }
   return null;

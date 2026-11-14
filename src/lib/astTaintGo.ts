@@ -318,6 +318,74 @@ function isFrameworkCtxGo(name: string): boolean {
   return goCtx.frameworkCtxVars.has(name) || (FRAMEWORK_CTX_RE.test(name) && !goCtx.otherTypedVars.has(name));
 }
 
+// function node -> parameter / receiver name -> its declared type (the first one of that name), and file root -> package-level `var` name -> its first spec:
+// both used to be searched again, from the top, on every declaredTypeGo call
+const goParamTypesCache = new NodeCache<Map<string, string | null>>();
+function goParamTypesIn(fn: SyntaxNode): Map<string, string | null> {
+  const hit = goParamTypesCache.get(fn);
+  if (hit) return hit;
+  const out = new Map<string, string | null>();
+  for (const list of [fn.childForFieldName("parameters"), fn.childForFieldName("receiver")]) {
+    for (const prm of list?.namedChildren ?? []) {
+      if (prm?.type !== "parameter_declaration") continue;
+      for (const nm of prm.childrenForFieldName("name")) if (nm && !out.has(nm.text)) out.set(nm.text, prm.childForFieldName("type")?.text ?? null);
+    }
+  }
+  goParamTypesCache.set(fn, out);
+  return out;
+}
+const goPackageVarsCache = new NodeCache<Map<string, { typeText: string | null; value: SyntaxNode | null }>>();
+function goPackageVarsIn(root: SyntaxNode): Map<string, { typeText: string | null; value: SyntaxNode | null }> {
+  const hit = goPackageVarsCache.get(root);
+  if (hit) return hit;
+  const out = new Map<string, { typeText: string | null; value: SyntaxNode | null }>();
+  for (const decl of root.namedChildren) {
+    if (decl?.type !== "var_declaration") continue;
+    for (const spec of findAllNodesGo(decl, "var_spec")) {
+      const entry = { typeText: spec.childForFieldName("type")?.text ?? null, value: spec.childForFieldName("value")?.namedChildren[0] ?? null };
+      for (const nm of spec.childrenForFieldName("name")) if (nm && !out.has(nm.text)) out.set(nm.text, entry);
+    }
+  }
+  goPackageVarsCache.set(root, out);
+  return out;
+}
+
+// function node -> variable name -> its bindings (`var x T`, `x := v`) in source order, built by ONE walk of the body. declaredTypeGo used to walk the
+// whole function again for every variable it was asked about. `lits` are the closures (inside the body) a binding sits in: it is only visible from code inside all of them.
+interface GoBinding { pos: number; lits: Array<[number, number]>; typeText: string | null; value: SyntaxNode | null }
+const goBindingsCache = new NodeCache<Map<string, GoBinding[]>>();
+function goBindingsIn(fn: SyntaxNode): Map<string, GoBinding[]> {
+  const hit = goBindingsCache.get(fn);
+  if (hit) return hit;
+  const out = new Map<string, GoBinding[]>();
+  const add = (name: string, b: GoBinding) => { const l = out.get(name); if (l) l.push(b); else out.set(name, [b]); };
+  const lits: Array<[number, number]> = [];
+  const visit = (n: SyntaxNode) => {
+    const isLit = n.type === "func_literal";
+    if (isLit) lits.push([n.startIndex, n.endIndex]);
+    if (n.type === "var_spec") {
+      const typeText = n.childForFieldName("type")?.text ?? null;
+      const value = n.childForFieldName("value")?.namedChildren[0] ?? null;
+      for (const nm of n.childrenForFieldName("name")) if (nm) add(nm.text, { pos: n.startIndex, lits: [...lits], typeText, value });
+    } else if (n.type === "short_var_declaration") {
+      const names = n.childForFieldName("left")?.namedChildren ?? [];
+      const r = n.childForFieldName("right");
+      const seen = new Set<string>();
+      names.forEach((x, i) => {
+        if (!x || seen.has(x.text)) return;
+        seen.add(x.text);
+        add(x.text, { pos: n.startIndex, lits: [...lits], typeText: null, value: r?.namedChildren[i] ?? null });
+      });
+    }
+    for (const c of n.namedChildren) if (c) visit(c);
+    if (isLit) lits.pop();
+  };
+  const body = fn.childForFieldName("body");
+  if (body) visit(body);
+  goBindingsCache.set(fn, out);
+  return out;
+}
+
 /**
  * The declared type of `name` as seen from `at`: the nearest enclosing function (closures walk outward) that binds it
  * as a parameter / receiver, `var x T`, `x := T{}` / `&T{}` / `new(T)` / `T(v)` / `v.(T)` / `f()` of a function with one declared
@@ -346,37 +414,21 @@ function declaredTypeGo(name: string, at: SyntaxNode, depth = 0): string | null 
     return null;
   };
   for (let fn: SyntaxNode | null = enclosingFnGo(at); fn; fn = fn.parent ? enclosingFnGo(fn.parent) : null) {
-    for (const list of [fn.childForFieldName("parameters"), fn.childForFieldName("receiver")]) {
-      for (const prm of list?.namedChildren ?? []) {
-        if (prm?.type === "parameter_declaration" && prm.childrenForFieldName("name").some(nm => nm?.text === name)) return prm.childForFieldName("type")?.text ?? null;
+    const params = goParamTypesIn(fn);
+    if (params.has(name)) return params.get(name)!;
+    // the last binding of `name` in this function that comes before `at` and is visible from it (a binding inside a closure that does not enclose `at` is not)
+    const bindings = goBindingsIn(fn).get(name);
+    if (bindings) {
+      for (let i = bindings.length - 1; i >= 0; i--) {
+        const b = bindings[i];
+        if (b.pos >= at.startIndex) continue;
+        if (!b.lits.every(([s, e]) => s <= at.startIndex && at.endIndex <= e)) continue;
+        return b.typeText ?? infer(b.value);
       }
     }
-    let best: { pos: number; type: string | null } | null = null;
-    const visit = (n: SyntaxNode) => {
-      if (n.startIndex >= at.startIndex) return;
-      if (n.type === "func_literal" && !(n.startIndex <= at.startIndex && at.endIndex <= n.endIndex)) return;
-      if (n.type === "var_spec" && n.childrenForFieldName("name").some(nm => nm?.text === name)) {
-        const t = n.childForFieldName("type")?.text ?? infer(n.childForFieldName("value")?.namedChildren[0]);
-        best = { pos: n.startIndex, type: t };
-      } else if (n.type === "short_var_declaration" || n.type === "assignment_statement") {
-        const l = n.childForFieldName("left"), r = n.childForFieldName("right");
-        const names = l?.namedChildren ?? [];
-        const i = names.findIndex(x => x?.text === name);
-        if (i >= 0 && n.type === "short_var_declaration") best = { pos: n.startIndex, type: infer(r?.namedChildren[i] ?? null) };
-      }
-      for (const c of n.namedChildren) if (c) visit(c);
-    };
-    const body = fn.childForFieldName("body");
-    if (body) visit(body);
-    if (best) return (best as { pos: number; type: string | null }).type;
   }
-  for (const decl of rootOf(at).namedChildren) {
-    if (decl?.type !== "var_declaration") continue;
-    for (const spec of findAllNodesGo(decl, "var_spec")) {
-      if (spec.childrenForFieldName("name").some(nm => nm?.text === name)) return spec.childForFieldName("type")?.text ?? infer(spec.childForFieldName("value")?.namedChildren[0]);
-    }
-  }
-  return null;
+  const pkgVar = goPackageVarsIn(rootOf(at)).get(name);
+  return pkgVar ? pkgVar.typeText ?? infer(pkgVar.value) : null;
 }
 
 /** Is this expression an HTTP response writer *by type* (not by name)? A framework context's `c.Writer` counts. */
