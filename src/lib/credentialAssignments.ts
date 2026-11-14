@@ -70,7 +70,7 @@ export function plausibleCredentialValue(value: string, keyName: string, o: Cred
   // an identifier is made of words of 3+ letters (ResetPassword, someVariableName); a random mixed-case run (vhZsvokmid) has pieces that are not words
   if (/^[a-z]{3,}\d*(?:[A-Z]{1,3}[a-z]{2,})+$/.test(value) || /^(?:[A-Z]{1,4}[a-z]{2,}){2,}$/.test(value)) return false;
   if (/^[A-Za-z]+$/.test(value) && value.length < minAlpha) return false;
-  if (/^[A-Za-z]+(?:[-_][A-Za-z]+)+$/.test(value)) return false;                           // words joined: base64-encoded, sentinel_specific_pass
+  if (/^_*[A-Za-z]+(?:[-_]+[A-Za-z]+)+_*$/.test(value)) return false;                      // words joined: base64-encoded, sentinel_specific_pass
   if (/^[A-Za-z_]+\.[a-z]{2,4}$/.test(value)) return false;                                 // a file name: make.bat
   // styling and labels, which sit beside names like "pass" or "secret" in status and category maps:
   if (/^#[0-9a-fA-F]{3,8}$/.test(value)) return false;                                      // a colour: "#dc2626"

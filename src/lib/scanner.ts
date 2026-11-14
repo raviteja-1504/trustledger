@@ -491,7 +491,7 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // identical to a real Vault token by shape alone; a real token value is
   // never itself a function call, and every Go method/function call requires
   // "(" even with zero arguments, so this exclusion is safe.
-  { re: /(?<![\w.])s\.[A-Za-z0-9]{24,}(?![.\w(])/,                             label: "HashiCorp Vault token",       severity: "critical" },
+  { re: /(?<![\w.])s\.(?!(?:[A-Z][a-z]{2,}){2,}(?![A-Za-z0-9]))[A-Za-z0-9]{24,}(?![.\w(])/,                             label: "HashiCorp Vault token",       severity: "critical" },
   { re: /xkeysib-[a-f0-9]{64}-[A-Za-z0-9_-]+/,                                label: "Brevo API key",               severity: "critical" },
   { re: /key-[a-f0-9]{32}/,                                                     label: "Mailgun API key",             severity: "critical" },
   { re: /shpat_[A-Za-z0-9]{32}/,                                                label: "Shopify access token",        severity: "critical" },
@@ -558,7 +558,7 @@ function looksLikeRealSecret(value: string): boolean {
   // A name, not a secret: a config key path (session.secret), snake_case words (paypal_express_token), CamelCase words
   // (KDFKeySecret, base64EncodedKey), or a build-time template (%PUBLIC_URL%, @VERSION@).
   if (/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(value)) return false;
-  if (/^[a-z]+(?:_[a-z]+)+$/.test(value)) return false;
+  if (/^_*[a-z]+(?:_+[a-z]+)+_*$/.test(value)) return false;
   if (/^(?:[A-Z]{1,4}[a-z]{2,}){2,}$/.test(value) || /^[a-z]{3,}\d*(?:[A-Z]{1,3}[a-z]{2,}){1,}$/.test(value)) return false;
   if (/^(?:%[A-Za-z0-9_]+%|@[A-Z0-9_]+@|<%.*%>)$/.test(value)) return false;
   const hasUpper  = /[A-Z]/.test(value);
@@ -957,7 +957,8 @@ const SQL_INJECTION_RE = [
 ];
 
 const EVAL_EXEC_RE = [
-  /\beval\s*\(/,
+  // the global eval, not a METHOD called eval (`condition.eval(context)`, `model.eval()`, `def eval(self, ...)`): only the global object's own eval counts
+  /(?<![\w$.])(?<!\b(?:def|function|fn|func)\s+)eval\s*\(|\b(?:window|globalThis|global|self)\.eval\s*\(/,
   /new\s+Function\s*\(/,
   /subprocess\.(?:call|run|Popen)\s*\([^)]*shell\s*=\s*True/,
   /os\.system\s*\(/,
@@ -1172,9 +1173,10 @@ const SSRF_RE = [
 ];
 
 const PATH_TRAVERSAL_RE = [
-  /path\.(?:join|resolve)\s*\([^)]*(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
-  /fs\.(?:readFile|writeFile|readdir|stat|unlink|createReadStream|createWriteStream)\s*\([^)]*(?:req\.|params\.|body\.|query\.)\w+/i,
-  /__dirname\s*\+\s*(?:req\.|params\.|body\.|query\.)\w+/i,
+  // (the request word must start a name: `root-params.d.ts` is a file name, not `params.d`)
+  /path\.(?:join|resolve)\s*\([^)]*(?<![\w$-])(?:req\.|request\.|body\.|params\.|query\.)\w+/i,
+  /fs\.(?:readFile|writeFile|readdir|stat|unlink|createReadStream|createWriteStream)\s*\([^)]*(?<![\w$-])(?:req\.|params\.|body\.|query\.)\w+/i,
+  /__dirname\s*\+\s*(?<![\w$-])(?:req\.|params\.|body\.|query\.)\w+/i,
   // a '..' segment AND a variable last argument (`path.join(base, '..', name)`); constant segments are ordinary relative paths
   /path\.join\s*\([^)]*['"]\.\.['"][^)]*,\s*(?!['"`])[A-Za-z_$][\w$.]*\s*\)/,
   // Java/Kotlin — File/Paths/Files built from a request-derived path segment
@@ -2384,6 +2386,8 @@ function findSQLInjectionGoSprintf(lines: string[]): ScanIndicator[] {
  * a backtick string with no `${`): followed by `,` or `)`, not by `+`, `%`, `.format(` or a template. Nothing attacker-controlled can reach it. */
 const CONSTANT_FIRST_ARG_RE = /^\s*(?:"(?:[^"\\$]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`$\\]*`)\s*[,)]/;
 const LEADING_FSTRING_RE = /^\s*[fF]["']/;
+// a whole line that is one string literal, its closing parenthesis on a later line (execSync( newline 'npm run build' newline ))
+const CONSTANT_LINE_ARG_RE = /^\s*(?:"(?:[^"\\$]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`$\\]*`)\s*,?\s*$/;
 const BARE_IDENTIFIER_ARG_RE = /^\s*([A-Za-z_$][\w$]*)\s*[,)]/;
 const CONSTANT_LITERAL_RHS_RE = /^(?:"(?:[^"\\$]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`$\\]*`)\s*;?\s*(?:#.*|\/\/.*)?$/;
 const indentOf = (l: string) => l.length - l.trimStart().length;
@@ -2435,7 +2439,16 @@ function callHasOnlyConstantCommand(lines: string[], at: number): boolean {
       if (/^new\s+Function/.test(m[0])) return false;
       const open = line.indexOf("(", m.index);
       if (open < 0) return false;
-      const rest = line.slice(open + 1);
+      let rest = line.slice(open + 1);
+      // the argument on the NEXT line (`execSync(\n  'npm run build'\n)`): judge that line
+      if (rest.trim() === "") {
+        const next = lines.slice(at + 1, at + 4).find(l => l.trim() !== "");
+        if (next === undefined) return false;
+        rest = next;
+        if (LEADING_FSTRING_RE.test(rest)) return false;
+        if (CONSTANT_FIRST_ARG_RE.test(rest) || CONSTANT_LINE_ARG_RE.test(rest)) continue;
+        return false;
+      }
       if (LEADING_FSTRING_RE.test(rest)) return false;
       if (CONSTANT_FIRST_ARG_RE.test(rest)) continue;
       const id = BARE_IDENTIFIER_ARG_RE.exec(rest);
