@@ -187,7 +187,53 @@ export function isInsideRouteCallback(node: ts.Node): boolean {
 // (`_req`: the underscore convention for a parameter a linter thought unused -- still the request when it is read)
 const SOURCE_ROOTS = new Set(["req", "request", "_req", "_request"]);
 // `url` / `nextUrl` / `searchParams`: the Fetch-API / Next.js route-handler request (`req.url`, `req.nextUrl.searchParams.get("q")`).
-const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies", "url", "originalUrl", "nextUrl", "searchParams"]);
+// `payload`: the Hapi request body (`request.payload`)
+const SOURCE_PROPS = new Set(["query", "body", "params", "headers", "cookies", "url", "originalUrl", "nextUrl", "searchParams", "payload"]);
+// Koa: the context holds the request (`ctx.query`, `ctx.params`, `ctx.request.body`, `ctx.req.headers`); `ctx.body` is the RESPONSE, so it is not here
+const CTX_ROOTS = new Set(["ctx", "_ctx"]);
+const ANGULAR_ROUTE_PROPS = new Set(["queryParams", "params", "queryParamMap", "paramMap", "fragment"]);
+const ANGULAR_ROUTE_RE = /(?:^|\.)(?:\w*[rR]oute|activatedRoute)(?:\.snapshot)?$/;
+// Hono: `c.req.query('x')`, `await c.req.json()`, `c.req.param('id')`, `c.req.header('x')`, `c.req.parseBody()`
+const HONO_REQ_METHODS = new Set(["query", "queries", "param", "header", "json", "text", "parseBody", "formData", "valid", "arrayBuffer"]);
+const HONO_CTX_RE = /^(?:c|ctx|context)$/;
+const CTX_REQUEST_PROPS = new Set(["query", "querystring", "params", "headers", "search"]);
+// Methods that read the request: Express/Sails `req.param('id')`, `req.allParams()`; Adonis `request.input('x')`, `request.qs()`, `request.all()`, `request.body()`
+const REQUEST_READ_METHODS = new Set(["param", "allParams", "input", "qs", "all", "only", "header", "cookie", "body", "params", "query"]);
+// h3 / Nuxt server routes: `getQuery(event)`, `await readBody(event)`, `getRouterParam(event, 'id')`, `getHeader(event, 'x')`, `getCookie(event, 'x')`
+const H3_SOURCE_FNS = new Set(["getQuery", "getValidatedQuery", "readBody", "readValidatedBody", "readRawBody", "readFormData", "readMultipartFormData", "getRouterParam", "getRouterParams", "getHeader", "getHeaders", "getRequestHeader", "getRequestHeaders", "getCookie", "parseCookies"]);
+const H3_EVENT_NAME_RE = /^(?:event|e|ev|evt|h3Event|reqEvent)$/;
+const SOCKET_RECEIVER_RE = /^(?:socket|sock|client|conn|connection|ws|webSocket|ioSocket)$/i;
+const SOCKET_LIFECYCLE_EVENTS = new Set(["connect", "connection", "disconnect", "disconnecting", "error", "connect_error", "close", "open", "newListener", "removeListener"]);
+const ACK_PARAM_RE = /^(?:ack|callback|cb|done|fn|reply|respond|next)$/i;
+
+/**
+ * Parameters of a handler that receive what a CLIENT sent, in frameworks with no request object to name:
+ *  - Meteor: the arguments of a method (`Meteor.methods({ run(dir) { ... } })`) and of a publication (`Meteor.publish('x', function (q) { ... })`)
+ *  - Socket.IO / ws: the event data (`socket.on('run', (data, ack) => ...)`; not `connect` / `disconnect` / `error`, not the acknowledgement callback)
+ */
+function frameworkClientParams(f: ts.FunctionLikeDeclaration): string[] {
+  const names = f.parameters.filter(p => ts.isIdentifier(p.name)).map(p => (p.name as ts.Identifier).text);
+  if (names.length === 0) return [];
+  const methodsObject = (n: ts.Node | undefined): boolean => {
+    const call = n && ts.isObjectLiteralExpression(n) ? n.parent : undefined;
+    return !!call && ts.isCallExpression(call) && call.expression.getText() === "Meteor.methods";
+  };
+  const holder = ts.isMethodDeclaration(f) ? f.parent : f.parent && ts.isPropertyAssignment(f.parent) ? f.parent.parent : undefined;
+  if (methodsObject(holder)) return names;
+  const call = f.parent;
+  if (!call || !ts.isCallExpression(call)) return [];
+  const callee = call.expression;
+  if (ts.isPropertyAccessExpression(callee) && callee.getText() === "Meteor.publish" && call.arguments[call.arguments.length - 1] === f) return names;
+  // this.route.queryParams.subscribe(p => ...) / this.route.paramMap.subscribe(...)
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === "subscribe" && call.arguments[0] === f && ts.isPropertyAccessExpression(callee.expression) &&
+      ANGULAR_ROUTE_PROPS.has(callee.expression.name.text) && ANGULAR_ROUTE_RE.test(callee.expression.expression.getText())) return names;
+  if (ts.isPropertyAccessExpression(callee) && (callee.name.text === "on" || callee.name.text === "once") && SOCKET_RECEIVER_RE.test(callee.expression.getText())) {
+    const evt = call.arguments[0];
+    if (!evt || !ts.isStringLiteralLike(evt) || SOCKET_LIFECYCLE_EVENTS.has(evt.text) || call.arguments[call.arguments.length - 1] !== f) return [];
+    return names.filter((n, i) => !(i === names.length - 1 && i > 0 && ACK_PARAM_RE.test(n)));
+  }
+  return [];
+}
 /** The request's OWN address (`req.url`, `req.nextUrl`): input for most sink classes, but never the destination of a redirect or a
  * server-side request: `NextResponse.redirect(new URL("/login", req.url))` stays on this site. Only what the client puts INSIDE the
  * URL (`searchParams`, `search`) can name another site. */
@@ -198,7 +244,7 @@ function isRequestOwnUrl(e: ts.PropertyAccessExpression): boolean {
   let cur: ts.Expression = e;
   while (ts.isPropertyAccessExpression(cur)) {
     if (cur.name.text === "searchParams" || cur.name.text === "search") return false;
-    if (ts.isIdentifier(cur.expression) && SOURCE_ROOTS.has(cur.expression.text) && REQUEST_OWN_URL_PROPS.has(cur.name.text)) return true;
+    if (ts.isIdentifier(cur.expression) && (SOURCE_ROOTS.has(cur.expression.text) || cur.expression.text === "Astro") && REQUEST_OWN_URL_PROPS.has(cur.name.text)) return true;
     cur = cur.expression;
   }
   return false;
@@ -234,6 +280,15 @@ function isTaintSourceExpr(node: ts.Expression): boolean {
     if (ts.isIdentifier(node.expression) && SOURCE_ROOTS.has(node.expression.text) && SOURCE_PROPS.has(node.name.text)) {
       return true;
     }
+    // Astro pages and endpoints: `Astro.params`, `Astro.request.headers`
+    if (ts.isIdentifier(node.expression) && node.expression.text === "Astro" && node.name.text === "params") return true;
+    if (ts.isPropertyAccessExpression(node.expression) && node.expression.getText() === "Astro.request" && SOURCE_PROPS.has(node.name.text)) return true;
+    // Angular: what ActivatedRoute holds is the address the visitor typed (`this.route.snapshot.queryParams['x']`, `route.paramMap`, `route.fragment`)
+    if (ANGULAR_ROUTE_PROPS.has(node.name.text) && ANGULAR_ROUTE_RE.test(node.expression.getText())) return true;
+    // Koa: `ctx.query`, `ctx.params`, `ctx.headers`; `ctx.request.body`, `ctx.req.headers`
+    if (ts.isIdentifier(node.expression) && CTX_ROOTS.has(node.expression.text) && CTX_REQUEST_PROPS.has(node.name.text)) return true;
+    if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression) && CTX_ROOTS.has(node.expression.expression.text) &&
+        /^(?:request|req)$/.test(node.expression.name.text) && SOURCE_PROPS.has(node.name.text)) return true;
     // the request kept on an object: `this.req.query` / `this.request.body` (a class built around the request)
     if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
         SOURCE_ROOTS.has(node.expression.name.text) && SOURCE_PROPS.has(node.name.text)) {
@@ -271,7 +326,8 @@ function isNestRouteMethod(f: ts.Node | undefined): f is ts.MethodDeclaration {
 }
 
 const RESPONSE_PARAM_NAMES = new Set(["res", "response", "reply"]);
-const REQUEST_TYPE_RE = /^(?:express\.)?(?:Request|FastifyRequest|IncomingMessage|NextApiRequest)\b/;
+// RequestEvent: SvelteKit; APIContext / APIRoute: Astro; LoaderFunctionArgs / ActionFunctionArgs (LoaderArgs / ActionArgs): Remix and React Router
+const REQUEST_TYPE_RE = /^(?:express\.)?(?:Request|FastifyRequest|IncomingMessage|NextApiRequest|RequestEvent|APIContext|LoaderFunctionArgs|ActionFunctionArgs|LoaderArgs|ActionArgs)\b/;
 
 /**
  * A handler whose request parameter is destructured -- `({ query }: Request, res) => ...`,
@@ -291,7 +347,7 @@ function destructuredRequestSources(f: ts.FunctionLikeDeclaration): Map<string, 
       : ts.isIdentifier(el.name) ? el.name.text : null;
     if (!prop || !SOURCE_PROPS.has(prop)) continue;
     // `{ query }` binds the whole container; `{ query: { cmd } }` / `{ query: { cmd: c, ...rest } }` bind members of it
-    for (const leaf of bindingLeafNames(el.name)) out.set(leaf, ALL);
+    for (const leaf of bindingLeafNames(el.name)) out.set(leaf, REQUEST_OWN_URL_PROPS.has(prop) ? ALL & ~NOT_A_DESTINATION : ALL);
   }
   return out;
 }
@@ -340,7 +396,8 @@ const FS_SINK_NAMES = new Set([
   "createReadStream", "createWriteStream", "unlink", "unlinkSync", "stat", "statSync",
 ]);
 // Prisma's raw-string entry points ($queryRaw`...` as a tagged template is parameterized and is not a call, so it never reaches here)
-const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare", "$queryRawUnsafe", "$executeRawUnsafe"]);
+// sendNativeQuery: Sails; rawQuery: Adonis Lucid `Database.rawQuery`
+const DB_SINK_METHODS = new Set(["query", "execute", "run", "prepare", "$queryRawUnsafe", "$executeRawUnsafe", "sendNativeQuery", "rawQuery"]);
 const SQLITE_SINK_METHODS = new Set(["exec", "all", "get", "each"]);
 const DB_ACCESSOR_RE = /^(?:get)?(?:db|database|sqlite|pool|conn|connection|knex)$/i;
 
@@ -775,6 +832,17 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
   if (orm) return orm;
   const confused = blocklistMembershipCheck(call);
   if (confused) return confused;
+  // Angular: the DomSanitizer calls that switch sanitising OFF for a value (`this.sanitizer.bypassSecurityTrustHtml(x)`). A constant, or a value run
+  // through the sanitizer first, is fine. Matched on the method name: the receiver is `this.sanitizer`, which has no plain callee text.
+  if (ts.isPropertyAccessExpression(callee) && /^bypassSecurityTrust(?:Html|Script|Url|ResourceUrl)$/.test(callee.name.text) && call.arguments[0]) {
+    return { id: "xss", sinkExpr: callee.getText(), args: [call.arguments[0]] };
+  }
+  // TypeORM: QueryBuilder where / andWhere / orWhere / having take SQL text (their `:name` parameters go in the second argument). The receiver is
+  // a call chain (`repo.createQueryBuilder('t').where(...)`), which has no plain callee text either.
+  if (ts.isPropertyAccessExpression(callee) && /^(?:where|andWhere|orWhere|having|andHaving|orHaving)$/.test(callee.name.text) && call.arguments[0] &&
+      /createQueryBuilder|QueryBuilder|\bqb\b/.test(callee.expression.getText())) {
+    return { id: "sql-injection", sinkExpr: callee.getText().replace(/^[\s\S]*\.(?=\w+$)/, ""), args: [call.arguments[0]] };
+  }
   const domText = calleeText(callee);
   // DOM-based redirect, ahead of the name-based rules below (`window.open` is no file open)
   if (domText && (/^(?:(?:window|document|self|top)\.)?location\.(?:assign|replace)$/.test(domText) || domText === "window.open")) {
@@ -837,6 +905,20 @@ function matchSink(call: ts.CallExpression, importMap: Map<string, string>): Sin
     // NextResponse.redirect(url[, status]): the destination is the first argument
     return call.arguments[0] ? { id: "open-redirect", sinkExpr: text, args: [call.arguments[0]] } : null;
   }
+  // Remix / React Router / SvelteKit / Next / Astro: redirect(url[, init]) and SvelteKit's redirect(status, location). A numeric status is never tainted.
+  if (text === "redirect" || text === "permanentRedirect") return call.arguments.length ? { id: "open-redirect", sinkExpr: text, args: [...call.arguments] } : null;
+  // Hono: c.redirect(location[, status]); c.html(markup)
+  if (text === "c.redirect") return call.arguments[0] ? { id: "open-redirect", sinkExpr: text, args: [call.arguments[0]] } : null;
+  if (text === "c.html") return call.arguments[0] ? { id: "xss", sinkExpr: text, args: [call.arguments[0]] } : null;
+  // Drizzle: sql.raw(text) splices text into the query (the sql`...` tag binds its values)
+  if (text === "sql.raw" && call.arguments[0]) return { id: "sql-injection", sinkExpr: text, args: [call.arguments[0]] };
+  // h3 / Nuxt: sendRedirect(event, location[, code])
+  if (text === "sendRedirect") return call.arguments[1] ? { id: "open-redirect", sinkExpr: text, args: [call.arguments[1]] } : null;
+  // Meteor's HTTP package: HTTP.get(url, ...) / HTTP.call(method, url, ...)
+  if (/^(?:Meteor\.)?HTTP\.(?:get|post|put|patch|del|delete)$/.test(text) && call.arguments[0]) return { id: "ssrf", sinkExpr: text, args: [call.arguments[0]] };
+  if (/^(?:Meteor\.)?HTTP\.call$/.test(text) && call.arguments[1]) return { id: "ssrf", sinkExpr: text, args: [call.arguments[1]] };
+  // res.redirect / Koa ctx.redirect / Fastify reply.redirect / Hapi h.redirect / Adonis response.redirect
+  if (/^(?:response|reply|ctx|h|resp)\.redirect$/.test(text)) return call.arguments.length ? { id: "open-redirect", sinkExpr: text, args: [...call.arguments] } : null;
   if (text === "res.redirect" || text === "res.location") {
     // res.redirect([status,] url): the location is the LAST argument; a status code picks no destination.
     const loc = call.arguments[call.arguments.length - 1];
@@ -1457,6 +1539,11 @@ function makeTaintMask(propagating: Map<string, ParamShape[]>, sticky?: Map<stri
       const c = expr.expression;
       if (ts.isPropertyAccessExpression(c) && REQUEST_BODY_READERS.has(c.name.text) && expr.arguments.length === 0 &&
           ts.isIdentifier(c.expression) && SOURCE_ROOTS.has(c.expression.text)) return ALL;
+      if (ts.isPropertyAccessExpression(c) && REQUEST_READ_METHODS.has(c.name.text) && ts.isIdentifier(c.expression) && SOURCE_ROOTS.has(c.expression.text)) return ALL;
+      if (ts.isPropertyAccessExpression(c) && HONO_REQ_METHODS.has(c.name.text) && ts.isPropertyAccessExpression(c.expression) && c.expression.name.text === "req" &&
+          ts.isIdentifier(c.expression.expression) && HONO_CTX_RE.test(c.expression.expression.text)) return ALL;
+      if (ts.isPropertyAccessExpression(c) && REQUEST_BODY_READERS.has(c.name.text) && expr.arguments.length === 0 && c.expression.getText() === "Astro.request") return ALL;
+      if (ts.isIdentifier(c) && H3_SOURCE_FNS.has(c.text) && expr.arguments[0] && ts.isIdentifier(expr.arguments[0]) && H3_EVENT_NAME_RE.test(expr.arguments[0].text)) return ALL;
       return callMask(expr, env);
     }
     if (ts.isAsExpression(expr) || ts.isNonNullExpression(expr) || ts.isTypeAssertionExpression(expr) || ts.isSatisfiesExpression(expr)) {
@@ -1937,6 +2024,7 @@ function createWalker(h: WalkerHooks) {
     f.parameters.forEach((prm, i) => { if (ts.isIdentifier(prm.name)) fenv.set(prm.name.text, seeds?.[i] ?? 0); });
     for (const [name, mask] of destructuredRequestSources(f)) fenv.set(name, mask);
     for (const name of nestRequestParams(f)) fenv.set(name, ALL);
+    for (const name of frameworkClientParams(f)) fenv.set(name, ALL);   // (also an Angular route subscription)
     if (ts.isBlock(f.body)) walkNode(f.body, fenv);
     else handleExpr(f.body, fenv);
   };
@@ -4254,6 +4342,13 @@ export function scanAstTaint(
         const m = taintMask(node.right, env);
         if (m & classOf("open-redirect")) emit("open-redirect", node, sourceLabel(node.right), target, node.right);
         else if (wasCleared(m, classOf("open-redirect"))) suppressedOut?.push({ id: "open-redirect", line: lineOf(node) });
+        return;
+      }
+      // Koa: a string BUILT from a request value and assigned to the response body is served as HTML when it starts with `<`
+      if (target === "ctx.body" && (ts.isTemplateExpression(node.right) || (ts.isBinaryExpression(node.right) && node.right.operatorToken.kind === ts.SyntaxKind.PlusToken))) {
+        const m = taintMask(node.right, env);
+        if (m & classOf("xss")) emit("xss", node, sourceLabel(node.right), target, node.right);
+        else if (wasCleared(m, classOf("xss"))) suppressedOut?.push({ id: "xss", line: lineOf(node) });
         return;
       }
       if (!ts.isPropertyAccessExpression(node.left)) return;

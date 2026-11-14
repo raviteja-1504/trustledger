@@ -923,7 +923,7 @@ const SQL_INJECTION_RE = [
   /db\.query\s*\(\s*(?:`[^`]*\$\{|['"][^?][^'"]*\+)/i,
   /(?:execute|query)\s*\(\s*["'].*\+\s*\w/i,
   // a TAGGED template (sql`...`, Prisma.sql`...`, $queryRaw`...`: drizzle, postgres.js, slonik) binds each ${} as a parameter; only an untagged one splices text
-  /^(?!.*\b(?:sql|\$queryRaw|\$executeRaw)\s*`)(?=[\s\S]*?(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{)/i,
+  /^(?!.*(?:\bsql|\$queryRaw|\$executeRaw)\s*`)(?=[\s\S]*?(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\$\{)/i,
   /knex\.raw\s*\(`[^`]*\$\{/i,
   /sequelize\.query\s*\(\s*`[^`]*\$\{/i,
   // Ruby/Rails ActiveRecord — .where()/.find_by_sql() etc. accept a raw SQL
@@ -1583,15 +1583,16 @@ const XSS_RE = [
   /\.innerHTML\s*=\s*`[^`]*\$\{/,
   /document\.write\s*\(\s*(?!["'])/,
   /document\.writeln\s*\(\s*(?!["'])/,
-  /dangerouslySetInnerHTML\s*=\s*\{\s*\{[^}]*__html\s*:/,
+  // not a CONSTANT string (`__html: '<b>Hi</b>'`), and not a value passed through a sanitizer (`__html: DOMPurify.sanitize(html)`)
+  /dangerouslySetInnerHTML\s*=\s*\{\s*\{[^}]*__html\s*:(?!\s*(?:"[^"$]*"|'[^'$]*'|`[^`$]*`)\s*[,}])(?!\s*(?:\w+\.)*(?:sanitize\w*|purify\w*)\s*\()/,
   /\.outerHTML\s*=\s*\w/,
   /\$\([^)]+\)\.html\s*\(\s*\w+\s*\)/,
   /\.insertAdjacentHTML\s*\([^,]+,\s*\w+/,
-  /\bbypassSecurityTrustHtml\s*\(/i,
+  /\bbypassSecurityTrustHtml\s*\((?!\s*(?:"[^"$]*"|'[^'$]*'|`[^`$]*`)\s*\))(?!\s*(?:\w+\.)*(?:sanitize\w*|purify\w*)\s*\()/i,
   // Angular's other trust bypasses that run or load code: a script, a resource URL (iframe/script src) or a URL
   // (javascript: links). A constant argument -- embedding a fixed video URL -- is the common safe use. Style is
   // left out: CSS injection, not script execution.
-  /\bbypassSecurityTrust(?:Script|ResourceUrl|Url)\s*\(\s*(?!["'`][^"'`]*["'`]\s*\))/,
+  /\bbypassSecurityTrust(?:Script|ResourceUrl|Url)\s*\((?!\s*["'`][^"'`]*["'`]\s*\))(?!\s*(?:\w+\.)*(?:sanitize\w*|purify\w*)\s*\()/,
   // C# Razor — Html.Raw()/@Html.Raw() and Response.Write() are the only two
   // dangerous escape hatches in a template engine that auto-encodes output
   // by default. Deliberately NOT a broad interpolation-based pattern like
@@ -1972,9 +1973,17 @@ function findHighEntropySecrets(lines: string[], file_path: string): ScanIndicat
   return found;
 }
 
+/** `<script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }} />`: structured data in a JSON script block, the
+ * pattern the Next.js docs show. (JSON.stringify in an HTML context is still reported.) */
+function isJsonScriptBlock(lines: string[], idx: number): boolean {
+  if (!/__html\s*:\s*JSON\.stringify\s*\(/.test(lines[idx] ?? "")) return false;
+  return /type\s*=\s*\{?\s*["']application\/(?:ld\+)?json["']/.test(lines.slice(Math.max(0, idx - 4), idx + 1).join("\n"));
+}
+
 function findXSS(lines: string[]): ScanIndicator[] {
   return runDetector(lines, XSS_RE, "xss", "Cross-Site Scripting (XSS)", "critical",
-    "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML");
+    "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML")
+    .filter(f => !isJsonScriptBlock(lines, (f.line ?? 1) - 1));
 }
 
 /**
@@ -2422,7 +2431,9 @@ const STRING_LITERAL_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
 /** `"echo " + shlex.quote(arg)`: string literals joined by `+`, with every non-literal piece wrapped in the shell-quoting function: the quoted value can
  * only be one shell word, which is exactly what the quoting is for. */
 function commandIsLiteralsAndShellQuoted(arg: string): boolean {
-  if (!arg || !SHELL_QUOTE_CALL_RE.test(arg)) return false;
+  if (!arg) return false;
+  // string literals joined by + and nothing else (`'ls ' + 'src'`): a constant, however it is written
+  if (!SHELL_QUOTE_CALL_RE.test(arg)) return STRING_LITERAL_RE.test(arg) && arg.replace(STRING_LITERAL_RE, "").replace(/[\s+,]/g, "") === "";
   SHELL_QUOTE_CALL_RE.lastIndex = 0;
   return arg.replace(SHELL_QUOTE_CALL_RE, "").replace(STRING_LITERAL_RE, "").replace(/[\s+,]/g, "") === "";
 }

@@ -89,13 +89,13 @@ export const SINK_MODELS: readonly SinkModel[] = [
   // JS/TS: fetch and Node's http/https, axios, and the HTTP client packages. The URL is the first argument, or an
   // options object's url / host / path / proxy (requestTargetArgs).
   { id: "js:fetch-http", langs: ["js"], framework: "node", rule: "ssrf", role: HTTP_URL,
-    match: { kind: "callee", names: ["fetch", "http.get", "http.request", "https.get", "https.request"] }, args: { positions: [0], select: "request-target" } },
+    match: { kind: "callee", names: ["fetch", "http.get", "http.request", "https.get", "https.request", "$fetch", "ofetch"] }, args: { positions: [0], select: "request-target" } },
   { id: "js:axios", langs: ["js"], framework: "axios", rule: "ssrf", role: HTTP_URL,
     match: { kind: "prefix", prefix: "axios" }, args: { positions: [0], select: "request-target" } },
   ...(["http", "https"] as const).map((module): SinkModel => ({ id: `js:${module}-module`, langs: ["js"], framework: "node", rule: "ssrf", role: HTTP_URL,
     match: { kind: "module", module, methods: ["get", "post", "put", "delete", "patch", "request"], importedOnly: true }, args: { positions: [0], select: "request-target" } })),
   // needle("get", url) / superagent("GET", url): a method name may come first
-  ...(["needle", "got", "request", "superagent", "node-fetch", "undici", "cross-fetch"] as const).map((module): SinkModel => ({ id: `js:${module}`, langs: ["js"], framework: module, rule: "ssrf", role: HTTP_URL,
+  ...(["needle", "got", "request", "superagent", "node-fetch", "undici", "cross-fetch", "ky", "ofetch"] as const).map((module): SinkModel => ({ id: `js:${module}`, langs: ["js"], framework: module, rule: "ssrf", role: HTTP_URL,
     match: { kind: "module", module, methods: ["get", "post", "put", "delete", "patch", "request", "head", "fetch"], importedOnly: true, bare: true },
     args: { positions: [0], select: "request-target-method-first" } })),
 

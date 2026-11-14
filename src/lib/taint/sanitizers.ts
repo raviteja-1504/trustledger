@@ -32,6 +32,8 @@ export const NUMERIC_CLEARS = NUMERIC;
 const TABLES: Record<SanitizerLang, Table> = {
   js: {
     exact: {
+      // Angular's DomSanitizer.sanitize(SecurityContext.HTML, value)
+      "this.sanitizer.sanitize": XSS, "this.domSanitizer.sanitize": XSS, "sanitizer.sanitize": XSS, "domSanitizer.sanitize": XSS,
       "DOMPurify.sanitize": XSS, "sanitizeHtml": XSS, "he.encode": XSS, "he.escape": XSS,
       "escapeHtml": XSS, "xss": XSS, "validator.escape": XSS, "_.escape": XSS, "lodash.escape": XSS,
       "encodeURIComponent": URL_SAFE, "encodeURI": C.REDIRECT | C.HEADER,
