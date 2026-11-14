@@ -43,10 +43,19 @@ export interface CredentialOptions {
   isPlaceholder?: (value: string) => boolean;
 }
 
+/** Is `value` just the name again ("secrets": "secrets", token = "tokens")? A mapping of names to names, not a secret. */
+function valueRepeatsName(value: string, keyName: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const v = norm(value), k = norm(keyName.split(/[.\[]/).pop() ?? keyName);
+  if (!v || !k) return false;
+  return v === k || (Math.abs(v.length - k.length) <= 2 && (v.startsWith(k) || k.startsWith(v)));   // plural / singular
+}
+
 /** Whether `value`, assigned to the name `keyName`, can be a credential. */
 export function plausibleCredentialValue(value: string, keyName: string, o: CredentialOptions = {}): boolean {
   const minPw = o.minQuotedPassword ?? 6, minOther = o.minOther ?? 8, minAlpha = o.minAlphabetic ?? 7;
   if (NOT_A_CREDENTIAL_KEY_RE.test(keyName) || /__/.test(keyName)) return false;   // a Django lookup is password__startswith
+  if (valueRepeatsName(value, keyName)) return false;
   if (value.length < (PASSWORD_LIKE_RE.test(keyName) ? minPw : minOther)) return false;
   if (/\s/.test(value)) return false;
   if (/^(?:anonymous|use-credentials|same-origin|include|omit)$/i.test(value)) return false;   // fetch / CORS credential modes

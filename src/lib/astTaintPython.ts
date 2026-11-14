@@ -946,6 +946,12 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     if (parser?.type === "identifier" && xxeEnabledParserPy(call, parser.text)) return { id: "xxe", sinkExpr: text, args: [first] };
   }
   if (text === "yaml.load" || (resolvedModule === "yaml" && tail === "load")) {
+    // `yaml = YAML()` / `ruamel.yaml.YAML(typ="safe")` / `yaml = make_loader(...)`: here `yaml` is a VARIABLE holding a parser object (ruamel's
+    // default and "safe" modes build plain data), not PyYAML's module whose bare load() was unsafe. Only `typ="unsafe"` keeps it a sink.
+    if (text === "yaml.load" && !importMap.has("yaml")) {
+      const bound = parserObjectBoundToNamePy(call, "yaml");
+      if (bound && !/typ\s*=\s*["']unsafe["']/.test(bound.text)) return null;
+    }
     const loader = keywordArg(args, "Loader") ?? positional[1] ?? null;
     if (loader && /Safe/.test(loader.text)) return null;
     return first ? { id: "insecure-deserialization", sinkExpr: text, args: [first] } : null;
@@ -1038,11 +1044,13 @@ interface LocalFn {
   deco?: "static" | "class";
 }
 
-const namespaceLocalsCache = new WeakMap<SyntaxNode, Set<string>>();
+// Keyed by the parse TREE, not by a node: web-tree-sitter hands out a NEW JS object each time a node is reached (`.parent`, `.namedChildren`), so
+// a WeakMap keyed by a node never hit, and this walked the whole file again for every call: a 765-line file took 220 s.
+const namespaceLocalsCache = new WeakMap<SyntaxNode["tree"], Set<string>>();
 /** Local names bound to a whole imported module (`import pkg.mod as m`, `from pkg import mod`). */
 function namespaceLocalsOfPy(root: SyntaxNode): Set<string> {
-  let s = namespaceLocalsCache.get(root);
-  if (!s) { s = new Set(namespaceLocalsPy(root)); namespaceLocalsCache.set(root, s); }
+  let s = namespaceLocalsCache.get(root.tree);
+  if (!s) { s = new Set(namespaceLocalsPy(root)); namespaceLocalsCache.set(root.tree, s); }
   return s;
 }
 
@@ -2641,11 +2649,36 @@ function constructedClassPy(n: SyntaxNode | null | undefined): string | null {
   const f = n.childForFieldName("function");
   return f?.type === "identifier" && PY_CLASS_NAME_RE.test(f.text) ? f.text : null;
 }
+/**
+ * What a variable called `name` is assigned from, when that is a CALL (`yaml = YAML()`), looking outward from `at` through the enclosing
+ * functions to the module. null when it is never assigned a call there, so an imported module of that name is still treated as the module.
+ */
+function parserObjectBoundToNamePy(at: SyntaxNode, name: string): SyntaxNode | null {
+  for (let scope: SyntaxNode | null = at.parent; scope; scope = scope.parent) {
+    if (scope.type !== "function_definition" && scope.type !== "module") continue;
+    let found: SyntaxNode | null = null;
+    const visit = (n: SyntaxNode) => {
+      if (found) return;
+      if (n.id !== scope!.id && (n.type === "function_definition" || n.type === "class_definition")) return;
+      if (n.type === "assignment" && n.childForFieldName("left")?.text === name) {
+        const right = n.childForFieldName("right");
+        if (right?.type === "call") { found = right; return; }
+      }
+      for (const c of n.namedChildren) if (c) visit(c);
+    };
+    visit(scope);
+    if (found) return found;
+  }
+  return null;
+}
 /** `C` from a parameter annotation `x: C`. */
 function annotatedClassPy(param: SyntaxNode): string | null {
   const t = param.childForFieldName("type");
   return t && PY_CLASS_NAME_RE.test(t.text) ? t.text : null;
 }
+/** `name = C(...)` assignments found in a scope, remembered per (tree, scope, name): a call site used to re-walk its whole enclosing function. */
+const classInScopeCache = new WeakMap<SyntaxNode["tree"], Map<string, string | null>>();
+
 /** The class a local name holds in `scope`: an annotated parameter, or an assignment `name = C(...)`. */
 function classOfNamePy(name: string, from: SyntaxNode): string | null {
   for (let cur: SyntaxNode | null = from.parent; cur; cur = cur.parent) {
@@ -2656,13 +2689,21 @@ function classOfNamePy(name: string, from: SyntaxNode): string | null {
       }
     }
     if (cur.type === "function_definition" || cur.type === "module") {
-      let found: string | null = null;
-      const visit = (n: SyntaxNode) => {
-        if (found || (n !== cur && (n.type === "function_definition" || n.type === "class_definition"))) return;
-        if (n.type === "assignment" && n.childForFieldName("left")?.text === name) found = constructedClassPy(n.childForFieldName("right"));
-        for (const c of n.namedChildren) if (c) visit(c);
-      };
-      visit(cur);
+      let perTree = classInScopeCache.get(cur.tree);
+      if (!perTree) { perTree = new Map(); classInScopeCache.set(cur.tree, perTree); }
+      const key = `${cur.id}|${name}`;
+      let found: string | null | undefined = perTree.get(key);
+      if (found === undefined) {
+        found = null;
+        const scope = cur;
+        const visit = (n: SyntaxNode) => {
+          if (found || (n.id !== scope.id && (n.type === "function_definition" || n.type === "class_definition"))) return;
+          if (n.type === "assignment" && n.childForFieldName("left")?.text === name) found = constructedClassPy(n.childForFieldName("right"));
+          for (const c of n.namedChildren) if (c) visit(c);
+        };
+        visit(scope);
+        perTree.set(key, found);
+      }
       if (found) return found;
     }
   }
@@ -2674,9 +2715,16 @@ function classOfSelfFieldPy(field: string, from: SyntaxNode): string | null {
   let cls: SyntaxNode | null = from.parent;
   while (cls && cls.type !== "class_definition") cls = cls.parent;
   if (!cls) return null;
+  // one walk of the class per field, not one per call site (see classInScopeCache)
+  let perTree = classInScopeCache.get(cls.tree);
+  if (!perTree) { perTree = new Map(); classInScopeCache.set(cls.tree, perTree); }
+  const cacheKey = `self|${cls.id}|${field}`;
+  const cached = perTree.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const classNode = cls;
   let found: string | null = null;
   const visit = (n: SyntaxNode) => {
-    if (found || n.type === "class_definition" && n !== cls) return;
+    if (found || n.type === "class_definition" && n.id !== classNode.id) return;
     if (n.type === "assignment" && n.childForFieldName("left")?.text === `self.${field}`) {
       const right = n.childForFieldName("right");
       found = constructedClassPy(right);
@@ -2691,6 +2739,7 @@ function classOfSelfFieldPy(field: string, from: SyntaxNode): string | null {
     for (const c of n.namedChildren) if (c) visit(c);
   };
   visit(cls);
+  perTree.set(cacheKey, found);
   return found;
 }
 

@@ -1952,6 +1952,8 @@ function findHighEntropySecrets(lines: string[], file_path: string): ScanIndicat
     while ((m = ENTROPY_STRING_RE.exec(line)) !== null) {
       const s = m[1];
       if (s.length < 20 || /\s/.test(s) || /^https?:\/\//.test(s)) continue;
+      // A name made of capitalised words ('UploadSubprojectSymbolAnalysisParams', 'readUploadSubprojectParams') is an identifier, never a random key
+      if (/^(?:[A-Z]{1,4}[a-z]{2,}){3,}$/.test(s) || /^[a-z]{3,}(?:[A-Z]{1,3}[a-z]{2,}){2,}$/.test(s)) continue;
       // Skip if already caught by known patterns
       if (SECRET_PATTERNS.some(p => p.re.test(line))) continue;
       const e = shannonEntropy(s);
@@ -1973,10 +1975,24 @@ function findXSS(lines: string[]): ScanIndicator[] {
     "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML");
 }
 
+/**
+ * `yaml = YAML()` / `yaml = ruamel.yaml.YAML(typ="safe")` / `yaml = make_loader(...)` and no `import yaml`: here `yaml` is a variable holding a
+ * parser object (ruamel's default and "safe" modes build plain data), so `yaml.load(fd)` is not PyYAML's unsafe module-level load. A
+ * `typ="unsafe"` assignment keeps it a sink.
+ */
+function yamlNameIsParserObject(lines: string[]): boolean {
+  const assigned = lines.filter(l => /^\s*yaml\s*=\s*(?:[\w.]+\.)?\w+\(/.test(l));
+  if (assigned.length === 0) return false;
+  if (assigned.some(l => /typ\s*=\s*["']unsafe["']/.test(l))) return false;
+  return !lines.some(l => /^\s*import\s+yaml\b|^\s*from\s+\S+\s+import\s+[^#\n]*\byaml\b/.test(l));
+}
+
 function findInsecureDeserialization(lines: string[]): ScanIndicator[] {
-  return runDetector(lines, INSECURE_DESERIAL_RE, "insecure-deserialization",
+  const found = runDetector(lines, INSECURE_DESERIAL_RE, "insecure-deserialization",
     "Insecure Deserialization", "critical",
     "Deserializing untrusted data — can lead to RCE (use json.loads or SafeLoader)");
+  if (found.length === 0 || !yamlNameIsParserObject(lines)) return found;
+  return found.filter(f => !/\byaml\.load\s*\(/.test(lines[(f.line ?? 0) - 1] ?? ""));
 }
 
 // Go two-step: dec := gob.NewDecoder(r.Body); ... ; dec.Decode(&x) -- the
@@ -2153,12 +2169,17 @@ function findPIIInLogs(lines: string[]): ScanIndicator[] {
 
 // A format string that labels a secret field (`token={}`, `password=%s`, `secret: {x}`) inside a log call -- the call
 // may open on this line or up to two lines above (`audit_log(&format!(\n "login token={} ...", t))`).
-const SECRET_FORMAT_FIELD_RE = /"[^"\n]*\b(?:password|passwd|token|secret|api_?key|ssn)\s*[=:]\s*(?:\{[\w:?]*\}|%[sdv])/i;
+const SECRET_FORMAT_FIELD_RE = /"[^"\n]*\b(?:password|passwd|token|secret|api_?key|ssn)\s*[=:]\s*(?:\{([\w:?]*)\}|%[sdv])/i;
+// What fills the placeholder when it is not the secret: `f"Invalid token: {e}"` logs the ERROR about a token, not the token.
+const NOT_THE_SECRET_PLACEHOLDER_RE = /^(?:e|ex|exc|err|error|errors|exception|msg|message|reason|status|code|detail|details|why)(?::.*)?$/i;
 const LOG_CALL_OPEN_RE = /\b(?:info|warn|error|debug|trace|e?println|e?print)!\s*\(|\b\w*log\w*\s*\(|\b(?:logger|log|console)\.\w+\s*\(/i;
 function findSecretInLogFormat(lines: string[]): ScanIndicator[] {
   const found: ScanIndicator[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (isNonExecutableLine(lines[i]) || !SECRET_FORMAT_FIELD_RE.test(lines[i])) continue;
+    if (isNonExecutableLine(lines[i])) continue;
+    const field = SECRET_FORMAT_FIELD_RE.exec(lines[i]);
+    if (!field) continue;
+    if (field[1] !== undefined && NOT_THE_SECRET_PLACEHOLDER_RE.test(field[1])) continue;
     if (PII_LOG_RE.some(r => r.test(lines[i]))) continue;   // the single-line rules already report it
     if (!lines.slice(Math.max(0, i - 2), i + 1).some(l => LOG_CALL_OPEN_RE.test(l))) continue;
     found.push({ id: "pii-in-logs", label: "Secret in Logs", severity: "high", line: i + 1,
