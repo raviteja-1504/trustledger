@@ -66,6 +66,7 @@ import {
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { NodeCache } from "./taint/nodeCache";
 import { anchoredPatternClears } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -329,7 +330,7 @@ function collectClassFieldNamesCS(root: SyntaxNode): Set<string> {
   return names;
 }
 
-const localNamesCacheCS = new WeakMap<SyntaxNode, Set<string>>();
+const localNamesCacheCS = new NodeCache<Set<string>>();
 /** Parameters and locals declared inside a method / lambda / local function (nested functions' own locals excluded). */
 function localNamesOfCS(fn: SyntaxNode): Set<string> {
   const cached = localNamesCacheCS.get(fn);
@@ -797,7 +798,7 @@ function csFitsParamType(arg: string | undefined, param: string | undefined): bo
   return true;                                                                                  // class types: subtyping unknown
 }
 
-const csHierarchyCache = new WeakMap<SyntaxNode, Map<string, string[]>>();
+const csHierarchyCache = new NodeCache<Map<string, string[]>>();
 /** type simple name -> the simple names in its base list. */
 function csSupersOf(root: SyntaxNode): Map<string, string[]> {
   let out = csHierarchyCache.get(root);
@@ -877,7 +878,7 @@ function resolveCalleesCS(fn: SyntaxNode | null | undefined, args: readonly Synt
 
 /** Declared types visible inside `m`: its class's fields / properties / primary-constructor parameters, then its parameters. */
 const csMethodTypeEnvCache = new WeakMap<LocalMethod, Map<string, string>>();
-const csClassMemberTypesCache = new WeakMap<SyntaxNode, Map<string, Map<string, string>>>();
+const csClassMemberTypesCache = new NodeCache<Map<string, Map<string, string>>>();
 function classMemberTypesCS(root: SyntaxNode, cls: string | undefined): Map<string, string> {
   let byClass = csClassMemberTypesCache.get(root);
   if (!byClass) {

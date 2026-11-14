@@ -29,7 +29,6 @@ import { addedLinesByPath, markIntroduced } from "@/lib/prDiff";
 import { securityRegression, regressionMarkdown } from "@/lib/securityRegression";
 import { loadTriage } from "@/lib/findingTriageStore";
 import { unsuppressed, type TriageDecision } from "@/lib/findingLifecycle";
-import { buildCheckAnnotations } from "@/lib/checkAnnotations";
 import { collectFindingReports } from "@/lib/findingReport";
 import type { FileIndicator } from "@/types";
 import { toStoredIndicators } from "@/lib/indicatorStorage";
@@ -62,6 +61,9 @@ import { logger } from "@/lib/logger";
 // this to the account's actual plan maximum regardless of what's set here,
 // so this is safe to set at the originally-intended value either way.
 export const maxDuration = 300;
+// Share of maxDuration the data-flow stage may use, counted from the worker's start (the rest: post-passes, saving, GitHub).
+const SCAN_BUDGET_MS = Number(process.env.SCAN_BUDGET_MS) > 0 ? Number(process.env.SCAN_BUDGET_MS) : 240_000;
+const MIN_ANALYSIS_BUDGET_MS = 30_000;
 
 const DASHBOARD_CACHE_DAYS = [7, 30, 90];
 
@@ -369,7 +371,12 @@ async function handle(req: NextRequest) {
     const warm = await ensureTaintEngines();
     if (!warm.ready) logger.warn("Data-flow engines not all ready; scan health will report it", { engines_warm_ms: warm.ms });
 
+    // The function is killed at maxDuration with nothing saved. Keep the data-flow stage inside SCAN_BUDGET_MS of the worker's
+    // start (fetching already used part of it) so the post-passes, persistence and the GitHub check update still fit; files the
+    // budget did not reach get pattern checks only and are listed in scan health.
+    const timeBudgetMs = Math.max(MIN_ANALYSIS_BUDGET_MS, SCAN_BUDGET_MS - (Date.now() - startedAt));
     const result = runScan({
+      time_budget_ms: timeBudgetMs,
       repo: repoFullName, pr_number: prNumber, commit_sha: headSha, branch,
       missing_content_paths: unreadPaths,
       pr_metadata:         prMeta,
@@ -805,7 +812,6 @@ async function handle(req: NextRequest) {
       ...inheritedFiles.map(f => ({ file_path: f.file_path, indicators: unsuppressed(Array.isArray(f.indicators) ? f.indicators as FileIndicator[] : [], triage) })),
     ];
     const fixesById = new Map(getFixSuggestions(evidenceFiles.flatMap<{ id: string }>(f => f.indicators ?? [])).map(fix => [fix.vuln_id, fix]));
-    const reviewUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? "https://app.trustledger.dev"}/pr/${result.scan_id}`;
 
     // Re-check supersession before finalizing -- the scan itself (fetch +
     // analyze + persist) can take tens of seconds, long enough for another
@@ -857,6 +863,12 @@ async function handle(req: NextRequest) {
         // Unapproved AI tools in this PR: a warning section only -- never changes the conclusion.
         summary += shadowAiCheckMarkdown(unapproved, process.env.NEXT_PUBLIC_APP_URL ? `${process.env.NEXT_PUBLIC_APP_URL}/shadow-ai` : "");
       }
+      // Files the time budget cut to pattern checks were not fully analysed: say so rather than let the check read as a full pass.
+      const cutByBudget = result.health?.gap_counts?.["time-budget"] ?? 0;
+      if (cutByBudget > 0) summary += `
+
+### ⏱️ Analysis hit the time limit
+${cutByBudget} file${cutByBudget === 1 ? "" : "s"} got pattern checks only. Push a commit or re-run the check to analyse ${cutByBudget === 1 ? "it" : "them"} fully.`;
       // Files that couldn't be read weren't scanned: the check can't pass on them.
       if (unreadPaths.length > 0) {
         if (conclusion === "success") conclusion = "action_required";
@@ -864,7 +876,7 @@ async function handle(req: NextRequest) {
       }
       await updateCheckRun(token, owner, repoName, checkRunId, {
         name: "TrustLedger AI Governance", status: "completed", conclusion,
-        output: { title, summary, annotations: buildCheckAnnotations(evidenceFiles, { fixesById, reviewUrl }) },
+        output: { title, summary },
       });
       void recordEvent({ kind: "checkrun.updated", data: { check_run_id: checkRunId, conclusion, title } });
     }

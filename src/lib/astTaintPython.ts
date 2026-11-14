@@ -54,6 +54,7 @@ import {
   crossFileTrace, displayFnName, factStepsFromTrace, forwardedFactSteps,
   type Branch, type Guard, type ParamSinkFact, type StoredProvenanceIO, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { NodeCache } from "./taint/nodeCache";
 import { sanitizerClears } from "./taint/sanitizers";
 import { propagatorNames } from "./taint/models/propagators";
 import { sinkModelFor } from "./taint/models/sinks";
@@ -1171,7 +1172,7 @@ function bindingIdentifiersPy(n: SyntaxNode | null): string[] {
   return n.namedChildren.flatMap(c => bindingIdentifiersPy(c));
 }
 
-const localNamesCachePy = new WeakMap<SyntaxNode, Set<string>>();
+const localNamesCachePy = new NodeCache<Set<string>>();
 /** Names local to a function (parameters and anything assigned in it), minus `global` declarations. */
 function localNamesOfPy(fn: SyntaxNode): Set<string> {
   const cached = localNamesCachePy.get(fn);
@@ -1227,13 +1228,20 @@ function assignmentsInPy(scope: SyntaxNode): Array<{ name: string; position: num
   visit(scope);
   return out;
 }
-const pyTraceResolverCache = new WeakMap<SyntaxNode, TraceResolver<SyntaxNode>>();
+const pyTraceResolverCache = new NodeCache<TraceResolver<SyntaxNode>>();
 /** The trace resolver for one file, with the interprocedural hooks (callers, callees' returns) over its functions. */
 function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
   const cached = pyTraceResolverCache.get(root);
   if (cached) return cached;
   const lineOf = (n: SyntaxNode) => n.startPosition.row + 1;
-  const defs = (): SyntaxNode[] => { const out: SyntaxNode[] = []; const v = (n: SyntaxNode) => { if (n.type === "function_definition") out.push(n); for (const c of n.namedChildren) if (c) v(c); }; v(root); return out; };
+  let callSitesByName: Map<string, Array<{ scope: SyntaxNode | null; position: number; line: number; text: string }>> | null = null;
+  const functionInfoMemo = new Map<string, ReturnType<NonNullable<TraceResolver<SyntaxNode>["functionInfo"]>>>();
+  let defsMemo: SyntaxNode[] | null = null;   // walked once per file: every call into functionInfo walked the whole tree again
+  const defs = (): SyntaxNode[] => {
+    if (defsMemo) return defsMemo;
+    const out: SyntaxNode[] = []; const v = (n: SyntaxNode) => { if (n.type === "function_definition") out.push(n); for (const c of n.namedChildren) if (c) v(c); }; v(root);
+    return (defsMemo = out);
+  };
   // positional parameters a call binds: `self` / `cls` of a method is the receiver, not an argument
   const params = (fn: SyntaxNode) => { const ps = paramNamesOf(fn); return ps[0] === "self" || ps[0] === "cls" ? ps.slice(1) : ps; };
   const resolver: TraceResolver<SyntaxNode> = {
@@ -1250,6 +1258,8 @@ function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
       return p ? lineOf(p) : null;
     },
     functionInfo: name => {
+      if (functionInfoMemo.has(name)) return functionInfoMemo.get(name)!;
+      const answer = (() => {
       // a class of this file: constructing it "returns" what its __init__ keeps in fields (`self.metadata = {...}`)
       const init = defs().find(d => d.childForFieldName("name")?.text === "__init__" && enclosingClassNamePy(d) === name);
       const initBody = init?.childForFieldName("body");
@@ -1269,23 +1279,34 @@ function pyTraceResolverFor(root: SyntaxNode): TraceResolver<SyntaxNode> {
       };
       v(body);
       return { scope: fn, params: params(fn), line: lineOf(fn), returns };
+      })();
+      functionInfoMemo.set(name, answer);
+      return answer;
     },
     callSitesOf: name => {
-      const out: Array<{ scope: SyntaxNode | null; position: number; line: number; text: string }> = [];
-      const v = (n: SyntaxNode) => {
-        if (n.type === "call") {
-          const f = n.childForFieldName("function");
-          const called = f?.type === "identifier" ? f.text : f?.type === "attribute" ? f.childForFieldName("attribute")?.text : null;
-          // a module-level call's scope is the module; on a receiver that is itself a call (`Fetcher().fetch(target)`),
-          // the text is the method call alone -- the trace reads the arguments of the text's first call
-          const receiverCalls = f?.type === "attribute" && f.childForFieldName("object")?.type === "call";
-          const text = receiverCalls ? `${called}${n.childForFieldName("arguments")?.text ?? "()"}` : n.text;
-          if (called === name) out.push({ scope: enclosingFunctionPy(n) ?? root, position: n.startIndex, line: lineOf(n), text });
-        }
-        for (const c of n.namedChildren) if (c) v(c);
-      };
-      v(root);
-      return out;
+      // every call site of the file, grouped by the name called, from ONE walk (it used to walk the whole tree for each name asked)
+      if (!callSitesByName) {
+        const bySite = new Map<string, Array<{ scope: SyntaxNode | null; position: number; line: number; text: string }>>();
+        const v = (n: SyntaxNode) => {
+          if (n.type === "call") {
+            const f = n.childForFieldName("function");
+            const called = f?.type === "identifier" ? f.text : f?.type === "attribute" ? f.childForFieldName("attribute")?.text : null;
+            if (called) {
+              // a module-level call's scope is the module; on a receiver that is itself a call (`Fetcher().fetch(target)`),
+              // the text is the method call alone -- the trace reads the arguments of the text's first call
+              const receiverCalls = f?.type === "attribute" && f.childForFieldName("object")?.type === "call";
+              const text = receiverCalls ? `${called}${n.childForFieldName("arguments")?.text ?? "()"}` : n.text;
+              const list = bySite.get(called) ?? [];
+              list.push({ scope: enclosingFunctionPy(n) ?? root, position: n.startIndex, line: lineOf(n), text });
+              bySite.set(called, list);
+            }
+          }
+          for (const c of n.namedChildren) if (c) v(c);
+        };
+        v(root);
+        callSitesByName = bySite;
+      }
+      return (callSitesByName.get(name) ?? []).map(x => ({ ...x }));
     },
     // a read of a module-level container (`STATE.get(key)`, `STATE[key]`): the writes into it made inside functions
     // (`STATE[key] = value`, `STATE.setdefault(k, v)`, `STATE.append(v)`), whose value it hands back
@@ -1401,10 +1422,14 @@ const NOT_CONST: unique symbol = Symbol("not-const");
 type ConstPy = number | string | boolean | null;
 type ConstResult = ConstPy | typeof NOT_CONST;
 
+// function (or module) node id -> name -> its assignments' right-hand sides (null: rebound some other way), kept per parse tree: an evaluator is
+// built afresh at some call sites, and each used to walk the whole scope again for every name it looked up.
+const constBindingsByTree = new WeakMap<SyntaxNode["tree"], Map<number, Map<string, Array<SyntaxNode | null>>>>();
+
 function makeConstEvalPy() {
-  // function (or module) node id -> name -> its assignments' right-hand sides (null: rebound some other way)
-  const bindings = new Map<number, Map<string, Array<SyntaxNode | null>>>();
   const bindingsOf = (scope: SyntaxNode) => {
+    let bindings = constBindingsByTree.get(scope.tree);
+    if (!bindings) { bindings = new Map(); constBindingsByTree.set(scope.tree, bindings); }
     let m = bindings.get(scope.id);
     if (m) return m;
     m = new Map();

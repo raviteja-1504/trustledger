@@ -8258,6 +8258,8 @@ export function analyzeFile(
   crossFileCpp?: { tree?: RustSyntaxNode; facts: ReadonlyMap<string, readonly ParamSinkFact[]> },
   // Python methods that, wherever in the batch they are defined, return what they are given (collectPassMethodsPy).
   crossFilePyPassMethods?: PassMethodsPy,
+  // The scan ran out of its time budget (ScanInput.time_budget_ms): this file gets the pattern layer only, no data-flow engine.
+  dataFlowOff = false,
 ): FileAnalysis {
   const lang     = detectLanguage(file_path);
   const fileMeta = getFileTypeMeta(file_path);
@@ -8316,28 +8318,28 @@ export function analyzeFile(
   // here rather than parsing again. Parsed at most once and reused below for
   // both the taint scan and the exploitability reachability resolver.
   const tsSourceFile: ts.SourceFile | null =
-    presparsedTs ?? (shouldAstParse(content, file_path) ? parseSourceFile(content, file_path) : null);
+    dataFlowOff ? null : presparsedTs ?? (shouldAstParse(content, file_path) ? parseSourceFile(content, file_path) : null);
   // Python AST parse (Phase 2 -- see astTaintPython.ts). isPythonParserReady()
   // gates on the WASM parser's async warm-up having completed already --
   // if not, this silently falls back to regex-only for this one file, same
   // "no regression" contract as the JS/TS cap above.
   const pyTree: PySyntaxNode | null =
     presparsedPy ??
-    (lang === "python" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
+    (lang === "python" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isPythonParserReady()
       ? parsePythonSourceSync(content, file_path)
       : null);
   // Java AST parse (Phase 3 -- see astTaintJava.ts). No readiness gate
   // needed, unlike pyTree above: java-parser is pure JS and synchronous,
   // there is nothing to warm up.
   const javaCst: JavaCstNode | null =
-    lang === "java" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP
+    lang === "java" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP
       ? (crossFileJava?.cst ?? parseJavaSource(content))
       : null;
   // Go AST parse (Phase 4 -- see astTaintGo.ts). isGoParserReady() gates on
   // the WASM parser's async warm-up having completed already -- same
   // "no regression, fall back to regex-only" contract as pyTree above.
   const goTree: GoSyntaxNode | null =
-    lang === "golang" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isGoParserReady()
+    lang === "golang" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isGoParserReady()
       ? (crossFileGo?.tree ?? parseGoSourceSync(content, file_path))
       : null;
   // C# AST parse -- see astTaintCSharp.ts. Same tree-sitter warm-cache
@@ -8350,7 +8352,7 @@ export function analyzeFile(
   // scope.
   const csTree: CSharpSyntaxNode | null =
     lang === "csharp" && !file_path.toLowerCase().endsWith(".cshtml")
-    && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
+    && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
       ? (crossFileCSharp?.tree ?? parseCSharpSourceSync(content, file_path))
       : null;
   // PHP AST parse -- see astTaintPHP.ts. Same tree-sitter warm-cache
@@ -8359,25 +8361,25 @@ export function analyzeFile(
   // probing, not a Laravel Blade/WordPress mixed-HTML variant, matching
   // this phase's own documented scope.
   const phpTree: PhpSyntaxNode | null =
-    lang === "php" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isPhpParserReady()
+    lang === "php" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isPhpParserReady()
       ? (crossFilePhp?.tree ?? parsePhpSourceSync(content, file_path))
       : null;
   // Ruby AST parse (astTaintRuby.ts) -- same contract as the other tree-sitter engines above.
   const rubyTree: RubySyntaxNode | null =
-    lang === "ruby" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRubyParserReady()
+    lang === "ruby" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isRubyParserReady()
       ? (crossFileRuby?.tree ?? parseRubySourceSync(content, file_path))
       : null;
   const kotlinTree: KotlinSyntaxNode | null =
-    lang === "kotlin" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isKotlinParserReady()
+    lang === "kotlin" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isKotlinParserReady()
       ? (crossFileKotlin?.tree ?? parseKotlinSourceSync(content, file_path))
       : null;
   const rustTree: RustSyntaxNode | null =
-    lang === "rust" && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isRustParserReady()
+    lang === "rust" && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isRustParserReady()
       ? (crossFileRust?.tree ?? parseRustSourceSync(content, file_path))
       : null;
   // C and C++ share tree-sitter-cpp (astTaintCpp.ts).
   const cppTree: RustSyntaxNode | null =
-    (lang === "c" || lang === "cpp") && !looksMinified && lineCount <= AST_TAINT_LINE_CAP && isCppParserReady()
+    (lang === "c" || lang === "cpp") && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isCppParserReady()
       ? (crossFileCpp?.tree ?? parseCppSourceSync(content, file_path))
       : null;
 
@@ -8918,6 +8920,10 @@ export interface ScanInput {
   developer_baseline?: DeveloperBaseline;      // author's historical PR patterns (Phase 3)
   // Paths the caller meant to scan but could not fetch content for -- reported in ScanOutput.health.
   missing_content_paths?: string[];
+  // Wall-clock budget for the whole scan, in ms. Once spent, files not yet analysed get the pattern layer only (no data-flow
+  // engine) and are reported in health as "time-budget" gaps, instead of the host killing the scan at its time limit and
+  // returning nothing. Unset = no budget (tests, local runs).
+  time_budget_ms?: number;
 }
 
 /** The analysis engine a scan ran with: changes whenever cached results must not be reused (see
@@ -9965,6 +9971,8 @@ export function runScan(input: ScanInput): ScanOutput {
   let skipped_unchanged = 0;
   const perFileStart = Date.now();
   const fileTimings = new Map<string, number>();
+  const deadline = input.time_budget_ms && input.time_budget_ms > 0 ? start + input.time_budget_ms : Infinity;
+  const budgetSkipped = new Set<string>();
   // (the cross-file pass's syntax trees are freed in the finally below, once every file has been analysed)
   let files: FileAnalysis[];
   try {
@@ -9985,7 +9993,10 @@ export function runScan(input: ScanInput): ScanOutput {
         : pySourceFiles.has(f.path) ? `pysrc:${crypto.createHash("sha256").update(pySourceFnsDigest).digest("hex")}` : undefined,
     });
     const cached = input.prev_results?.[f.path];
-    const analysis = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path
+    const reusable = cached && cached.cache_key === cache_key && cached.analysis?.file_path === f.path;
+    const overBudget = !reusable && Date.now() > deadline;
+    if (overBudget) budgetSkipped.add(f.path);
+    const analysis = reusable
       ? (skipped_unchanged++, cloneAnalysis(cached.analysis))
       : analyzeFile(
           f.path, f.content, prPriorBias, crossFilePropagatingByFile.get(f.path), jsSourceFiles.get(f.path),
@@ -10001,12 +10012,14 @@ export function runScan(input: ScanInput): ScanOutput {
           pySourceFiles.has(f.path) ? pySourceFns : undefined,
           cppTrees.has(f.path) ? { tree: cppTrees.get(f.path), facts: cppFacts } : undefined,
           pySourceFiles.has(f.path) && pyPassMethods.size ? pyPassMethods : undefined,
+          overBudget,
         );
     // Snapshot BEFORE the PR-level post-passes below mutate `analysis` (they append cross-file-taint-exposure
     // / blast-radius indicators and re-derive risk_score): caching the post-pass state would make a reused
     // file receive those indicators a second time, since the post-passes re-run over the full set each scan.
     // (a file whose parse or analysis FAILED is not cached: its empty result must not be replayed as a clean one)
-    if (!engineFailureSince(f.path, start)) file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
+    // (nor one cut short by the time budget: its pattern-only result must not be replayed as a full analysis next scan)
+    if (!overBudget && !engineFailureSince(f.path, start)) file_cache[f.path] = { cache_key, analysis: cloneAnalysis(analysis) };
     fileTimings.set(f.path, Date.now() - t0);
     return analysis;
   });
@@ -10323,6 +10336,12 @@ export function runScan(input: ScanInput): ScanOutput {
   const gaps: CoverageGap[] = [
     ...allFiles.flatMap(f => { const g = coverageGapFor(f.path, f.content); return g ? [g] : []; }),
     ...(input.missing_content_paths ?? []).map(p => ({ file: p, language: detectLanguage(p), reason: "content-unavailable" as const })),
+    // files the time budget cut to pattern checks (only those a data-flow engine would otherwise have covered)
+    ...[...budgetSkipped].flatMap(p => {
+      const content = allFiles.find(f => f.path === p)?.content ?? "";
+      const lang = detectLanguage(p);
+      return AST_ENGINE_LANGS.has(lang) && !coverageGapFor(p, content) ? [{ file: p, language: lang, reason: "time-budget" as const }] : [];
+    }),
     // an engine that threw returns no findings, which would read as clean: report the file instead
     ...allFiles.flatMap(f => { const k = engineFailureSince(f.path, start); return k ? [{ file: f.path, language: detectLanguage(f.path), reason: k }] : []; }),
   ];

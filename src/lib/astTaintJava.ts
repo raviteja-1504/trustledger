@@ -3144,7 +3144,17 @@ function drainSeededParamsJava(ctx: EngineCtx, localMethods: Map<string, LocalMe
  * ctx.varTypes, which is a single flat map populated across the ENTIRE file
  * with no per-method clearing (an accepted imprecision for the existing
  * deserialization check that must not be extended to this new feature). */
+// One walk of a method body per body, not one per lookup: a caller resolving a variable's initializer ran this for every variable it met, so a
+// long method (an MD5 implementation, 730 lines) was walked thousands of times. CST nodes are stable objects, so the body itself is the key.
+const localDeclInfoCache = new WeakMap<CstNode, { types: Map<string, string>; inits: Map<string, CstNode> }>();
 function collectLocalDeclInfo(body: CstNode): { types: Map<string, string>; inits: Map<string, CstNode> } {
+  const cached = localDeclInfoCache.get(body);
+  if (cached) return cached;
+  const info = computeLocalDeclInfo(body);
+  localDeclInfoCache.set(body, info);
+  return info;
+}
+function computeLocalDeclInfo(body: CstNode): { types: Map<string, string>; inits: Map<string, CstNode> } {
   const types = new Map<string, string>();
   const inits = new Map<string, CstNode>();
   for (const decl of findAllNodes(body, "localVariableDeclaration")) {

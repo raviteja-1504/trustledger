@@ -42,6 +42,7 @@ import {
   mergeSinkFacts, dropOnPathDuplicates, crossFileTrace, displayFnName, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { NodeCache } from "./taint/nodeCache";
 import { sanitizerClears } from "./taint/sanitizers";
 import { propagatorNames } from "./taint/models/propagators";
 import { sinkLabel, sinkModelsFor } from "./taint/models/sinks";
@@ -588,7 +589,7 @@ function groupMask(name: string, env: Env, ctx: EngineCtx, ownOnly = false): num
   return m | (env.get(name) ?? 0) | fields;
 }
 
-const definitionCounts = new WeakMap<SyntaxNode, Map<string, number>>();
+const definitionCounts = new NodeCache<Map<string, number>>();
 function definitionCount(root: SyntaxNode, name: string): number {
   let counts = definitionCounts.get(root);
   if (!counts) {

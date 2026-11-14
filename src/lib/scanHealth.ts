@@ -14,7 +14,7 @@
  * Client-safe: no imports.
  */
 
-export type CoverageGapReason = "engine-unavailable" | "content-unavailable" | "parse-failed" | "analysis-failed" | "too-large" | "minified-or-generated";
+export type CoverageGapReason = "engine-unavailable" | "content-unavailable" | "parse-failed" | "analysis-failed" | "too-large" | "minified-or-generated" | "time-budget";
 
 export interface CoverageGap { file: string; language: string; reason: CoverageGapReason }
 
@@ -46,7 +46,7 @@ export interface ScanTelemetry {
 }
 
 export const MAX_GAPS = 50;
-const DEGRADING: ReadonlySet<CoverageGapReason> = new Set(["engine-unavailable", "content-unavailable", "parse-failed", "analysis-failed"]);
+const DEGRADING: ReadonlySet<CoverageGapReason> = new Set(["engine-unavailable", "content-unavailable", "parse-failed", "analysis-failed", "time-budget"]);
 
 export function summarizeHealth(gaps: readonly CoverageGap[], engineVersion: string): ScanHealth {
   const gap_counts: Partial<Record<CoverageGapReason, number>> = {};
@@ -68,6 +68,7 @@ export const GAP_REASON_TEXT: Record<CoverageGapReason, string> = {
   "analysis-failed": "data-flow analysis failed on this file",
   "too-large": "over the data-flow size limit",
   "minified-or-generated": "minified or generated code",
+  "time-budget": "the scan's time budget ran out before data-flow analysis reached this file",
 };
 
 /** One sentence for a banner. */
@@ -81,6 +82,7 @@ export function describeHealth(h: Pick<ScanHealth, "status" | "gap_counts" | "en
   if (n("analysis-failed")) parts.push(`data-flow analysis failed on ${n("analysis-failed")} file${n("analysis-failed") === 1 ? "" : "s"} (an empty result there is not a clean result)`);
   if (n("too-large")) parts.push(`${n("too-large")} file${n("too-large") === 1 ? " is" : "s are"} over the data-flow size limit`);
   if (n("minified-or-generated")) parts.push(`${n("minified-or-generated")} minified or generated file${n("minified-or-generated") === 1 ? "" : "s"} were checked with patterns only`);
+  if (n("time-budget")) parts.push(`the scan ran out of time, so ${n("time-budget")} file${n("time-budget") === 1 ? "" : "s"} got pattern checks only (rescan to cover ${n("time-budget") === 1 ? "it" : "them"})`);
   return parts.join("; ") + ".";
 }
 

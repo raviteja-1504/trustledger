@@ -207,8 +207,8 @@ function AiAttribution() {
 function PrIntegration() {
   return (
     <>
-      <h2>Check run and annotations</h2>
-      <p>On GitHub, each scan posts a check run named <code>TrustLedger AI Governance</code> to the pull request; on GitLab and Bitbucket the result is posted as a commit or build status. Findings of medium severity and above are attached as annotations on the flagged lines in the &quot;Files changed&quot; view — up to 50 per check run, most important first; the full trace and the &quot;why this was flagged&quot; checklist are in the check run&apos;s raw output.</p>
+      <h2>Check run</h2>
+      <p>On GitHub, each scan posts a check run named <code>TrustLedger AI Governance</code> to the pull request; on GitLab and Bitbucket the result is posted as a commit or build status. The check run&apos;s summary lists the files by risk, and the pull-request comment and the review page carry each finding with its line, trace and suggested fix.</p>
       <h2>Merge gate</h2>
       <p>The merge gate decides which unattested files block the merge. Organisations choose in Settings whether CRITICAL files, HIGH files, or both block; by default both do. It fails closed: if the setting cannot be read, files block. Files that do not block still need review — their findings stay open, they just do not hold the merge. To enforce it, make the check a required status check in your branch protection rules.</p>
       <h2>Clearing a block</h2>

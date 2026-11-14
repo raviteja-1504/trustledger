@@ -57,6 +57,7 @@ import {
   combineUrlFacets, urlPartFacet, urlPrefixFacets,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { NodeCache } from "./taint/nodeCache";
 import { sanitizerClears } from "./taint/sanitizers";
 import { propagatorNames } from "./taint/models/propagators";
 import { sinkModelFor } from "./taint/models/sinks";
@@ -435,7 +436,7 @@ function rootIdentGo(n: SyntaxNode | null | undefined): SyntaxNode | null {
   return null;
 }
 
-const localNamesCacheGo = new WeakMap<SyntaxNode, Set<string>>();
+const localNamesCacheGo = new NodeCache<Set<string>>();
 /** Names bound inside a function (params, :=, var, range, type-switch alias). Nested function bodies excluded. */
 function localNamesOfGo(fn: SyntaxNode): Set<string> {
   const cached = localNamesCacheGo.get(fn);

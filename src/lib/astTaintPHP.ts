@@ -86,6 +86,7 @@ import {
   ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   KIND_POSITION_SENSITIVE, combineUrlFacets, urlPrefixFacets, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
+import { NodeCache } from "./taint/nodeCache";
 import { anchoredPatternClears, delimitedPatternBody } from "./taint/charClass";
 import { constLocalsFromText, evalConstExpr, recordPrunedArm, type ConstVal } from "./taint/constEval";
 import { sanitizerClears, NUMERIC_CLEARS } from "./taint/sanitizers";
@@ -823,7 +824,7 @@ function extractFuncInfo(decl: SyntaxNode): LocalFunction | null {
 }
 
 interface NsRegion { start: number; end: number; ns: string; uses: Map<string, string> }
-const nsRegionsCache = new WeakMap<SyntaxNode, NsRegion[]>();
+const nsRegionsCache = new NodeCache<NsRegion[]>();
 const lowerFqn = (s: string) => s.replace(/^\\+/, "").toLowerCase();
 
 /** The namespace regions of a file (`namespace A;` runs to the next declaration, `namespace A { }` to its brace), each with its `use` imports (lower-cased alias -> lower-cased FQN). */
