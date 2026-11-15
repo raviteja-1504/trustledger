@@ -122,6 +122,14 @@ const TABLES: Record<SanitizerLang, Table> = {
       htmlspecialchars: XSS, htmlentities: XSS, strip_tags: XSS,
       escapeshellarg: C.CMD, escapeshellcmd: C.CMD,
       mysqli_real_escape_string: C.SQL,
+      // WordPress: output escapers, the text sanitizer (strips tags and line breaks), esc_sql (a string-literal escaper), absint (a number)
+      esc_html: XSS, esc_attr: XSS, esc_textarea: XSS, esc_js: XSS, esc_url: XSS, esc_html__: XSS, esc_attr__: XSS, wp_kses: XSS, wp_kses_post: XSS,
+      wp_strip_all_tags: XSS, sanitize_text_field: XSS, sanitize_textarea_field: XSS,
+      sanitize_key: XSS | C.PATH | C.INCLUDE, sanitize_title: XSS | C.PATH | C.INCLUDE, sanitize_file_name: XSS | C.PATH | C.INCLUDE,
+      esc_sql: C.SQL, absint: NUMERIC,
+      // Drupal 7, CodeIgniter 3 / 4, CakePHP, Yii, Laravel
+      check_plain: XSS, filter_xss: XSS, filter_xss_admin: XSS, html_escape: XSS, esc: XSS, h: XSS, e: XSS,
+      "Xss::filter": XSS, "Xss::filterAdmin": XSS, "Html::escape": XSS, "SafeMarkup::checkPlain": XSS, "Html::encode": XSS, "HtmlPurifier::process": XSS,
       // the last path segment: no directory, so it can't climb out of (or include from outside) its directory
       basename: C.PATH | C.INCLUDE,
       // an existing local file's absolute path (or false) -- never a URL or stream wrapper, so it fetches nothing
@@ -154,7 +162,12 @@ const TABLES: Record<SanitizerLang, Table> = {
       },
     },
     // Receiver-style sanitizers: mysqli->real_escape_string, PDO->quote.
-    tail: { real_escape_string: C.SQL, quote: C.SQL },
+    tail: {
+      real_escape_string: C.SQL, quote: C.SQL,
+      // Magento / Laminas escapers, CodeIgniter's xss_clean, CI / Joomla database escaping (a string-literal escaper: safe inside quotes)
+      escapeHtml: XSS, escapeHtmlAttr: XSS, escapeJs: XSS, escapeUrl: XSS, escapeCss: XSS, xss_clean: XSS,
+      escape: C.SQL, escape_str: C.SQL, escapeString: C.SQL, qstr: C.SQL, quoteName: C.SQL,
+    },
   },
   // Ruby: function-style calls only. Method-on-receiver conversions (x.to_i, x.shellescape) are modelled in
   // astTaintRuby.ts, where the receiver -- not an argument -- is the value being cleared.
@@ -175,7 +188,7 @@ const TABLES: Record<SanitizerLang, Table> = {
     },
     // connection.quote / ActiveRecord::Base.connection.quote / conn.quote_string
     tail: {
-      quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL,
+      quote: C.SQL, quote_string: C.SQL, quote_column_name: C.SQL, quote_table_name: C.SQL, sanitize_sql_like: C.SQL, sanitize_sql_for_order: C.SQL,
       // s.gsub(/[\r\n]/, "_") / s.delete("\r\n"): no line break left -- one header line, one log entry
       gsub: (_callee, args) => {
         // s.gsub('<', '<') / ('<', '&lt;'): no tag can open, in HTML or inside a <script> (json_escape's chain)

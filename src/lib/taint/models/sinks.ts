@@ -210,6 +210,12 @@ export const SINK_MODELS: readonly SinkModel[] = [
   // C/C++: libcurl's URL option
   { id: "cpp:curl-url", langs: ["cpp"], framework: "libcurl", rule: "ssrf", role: HTTP_URL, label: "curl_easy_setopt(CURLOPT_URL)",
     match: { kind: "callee", names: ["curl_easy_setopt"] }, args: { positions: [2], whenArg: { index: 1, pattern: "CURLOPT_URL" } } },
+  { id: "cpp:curl-proxy", langs: ["cpp"], framework: "libcurl", rule: "ssrf", role: "the proxy or address override", label: "curl_easy_setopt(CURLOPT_PROXY)",
+    match: { kind: "callee", names: ["curl_easy_setopt"] }, args: { positions: [2], whenArg: { index: 1, pattern: "CURLOPT_(?:PROXY|CONNECT_TO|RESOLVE)\\b" } } },
+  { id: "cpp:curl-url-set", langs: ["cpp"], framework: "libcurl", rule: "ssrf", role: HTTP_URL, label: "curl_url_set(CURLUPART_URL)",
+    match: { kind: "callee", names: ["curl_url_set"] }, args: { positions: [2], whenArg: { index: 1, pattern: "CURLUPART_(?:URL|HOST)" } } },
+  { id: "cpp:resolve-host", langs: ["cpp"], framework: "libc", rule: "ssrf", role: "the host name resolved", label: "getaddrinfo",
+    match: { kind: "callee", names: ["getaddrinfo", "gethostbyname", "gethostbyname2"] }, args: { positions: [0] } },
 ];
 
 export interface SinkLookup { model: SinkModel; positions: number[] }

@@ -376,6 +376,84 @@ function isIncomingIntent(recv: SyntaxNode | null, ctx: EngineCtx): boolean {
   return recv.type === "call_expression" && callParts(recv).name === "getIntent";
 }
 
+/**
+ * Javalin / Vert.x / http4k / Micronaut: the handler is given a context or request object (`ctx`, `req`, `request`) that is read through accessor calls
+ * (`ctx.queryParam("q")`, `ctx.request().getParam("q")`, `req.query("q")`, `request.parameters`). Judged by the object's declared type, or -- for an
+ * untyped lambda parameter -- by the usual names, in a file that uses one of those frameworks.
+ */
+const INPUT_CTX_TYPE_RE = /^(?:Context|RoutingContext|HttpRequest|MutableHttpRequest|Request)$/;
+const INPUT_CTX_NAME_RE = /^(?:ctx|context|rc|routingContext|req|request)$/;
+const INPUT_CTX_CALLS = new Set([
+  // Javalin
+  "queryParam", "queryParams", "queryParamMap", "queryParamAsClass", "pathParam", "pathParamMap", "body", "bodyAsClass", "bodyAsBytes", "bodyInputStream",
+  "bodyValidator", "formParam", "formParams", "formParamMap", "formParamAsClass", "header", "headerMap", "cookie", "cookieMap", "uploadedFile", "uploadedFiles",
+  "queryString", "url", "fullUrl", "path", "host", "userAgent", "splat",
+  // Vert.x
+  "getParam", "params", "getHeader", "getFormAttribute", "formAttributes", "getCookie", "bodyAsString", "bodyAsJson", "bodyAsJsonObject", "getBodyAsString",
+  "getBodyAsJson", "getBody", "asString", "asJsonObject", "asJsonArray", "uri", "absoluteURI", "query", "getHeaders",
+  // http4k
+  "queries", "headers", "bodyString", "form", "cookies",
+  // Micronaut
+  "getParameters", "getUri", "getPath",
+]);
+const INPUT_CTX_PROPS = new Set(["uri", "parameters", "headers", "cookies", "path", "body", "bodyString", "queryString", "query", "params"]);
+const FRAMEWORK_CTX_RE = /\bio\.javalin\b|\bio\.vertx\b|\borg\.http4k\b|\bio\.micronaut\b/;
+/** `Query.string().required("c")` / `Header.optional("x")` / `Body.auto<T>().toLens()`: an http4k lens, applied to a request as `lens(req)`. */
+const HTTP4K_LENS_RE = /^(?:Query|Header|Path|Body|FormField|Cookies|WebForm|Multipart|Form)\b/;
+/** Compose: the callbacks a text field / search bar calls with what the user typed. */
+const COMPOSE_INPUT_CALLBACKS = new Set(["onValueChange", "onQueryChange", "onSearch", "onTextChange", "onTextChanged", "onInputChange"]);
+/** JAX-RS verbs: an unannotated parameter of such a method is the request entity. */
+const JAXRS_VERBS = new Set(["POST", "PUT", "PATCH", "DELETE", "GET"]);
+const NON_ENTITY_PARAM_TYPE_RE = /^(?:UriInfo|HttpHeaders|SecurityContext|Request|HttpServletRequest|HttpServletResponse|ContainerRequestContext|ResourceInfo|Providers|Application|Configuration|Sse|SseEventSink|AsyncResponse)\b/;
+
+/** The extension receiver type of the function a node is in (`fun ApplicationCall.cmd()` -> "ApplicationCall"), or "". */
+function enclosingExtReceiver(node: SyntaxNode): string {
+  let fn: SyntaxNode | null = node.parent;
+  while (fn && fn.type !== "function_declaration") fn = fn.parent;
+  if (!fn) return "";
+  const kids = named(fn);
+  const nameIdx = kids.findIndex(k => k.type === "simple_identifier");
+  const recvType = kids.slice(0, nameIdx).find(k => k.type === "user_type" || k.type === "nullable_type");
+  return recvType ? bareType(typeNameOf(recvType)) : "";
+}
+/** Is `call` here a parameter of the enclosing function, typed as Ktor's call (`fun handle(call: ApplicationCall)`)? */
+function callParamIsApplicationCall(node: SyntaxNode): boolean {
+  let fn: SyntaxNode | null = node.parent;
+  while (fn && fn.type !== "function_declaration") fn = fn.parent;
+  const ps = fn ? childOfType(fn, "function_value_parameters") : null;
+  return childrenOfType(ps, "parameter").some(p => childOfType(p, "simple_identifier")?.text === "call" && /ApplicationCall|RoutingCall|PipelineContext/.test(p.text));
+}
+/** The root identifier of a chain of navigations / calls / index reads (`ctx.request().getParam("x")` -> ctx). */
+function chainRoot(n: SyntaxNode | null): SyntaxNode | null {
+  let cur: SyntaxNode | null = n;
+  for (let i = 0; cur && i < 14; i++) {
+    if (cur.type === "simple_identifier" || cur.type === "this_expression") return cur;
+    if (cur.type === "navigation_expression" || cur.type === "call_expression" || cur.type === "indexing_expression" || cur.type === "parenthesized_expression") cur = named(cur)[0] ?? null;
+    else return null;
+  }
+  return null;
+}
+const chainRootNode = (n: SyntaxNode | null): SyntaxNode | null => chainRoot(n);
+function isInputCtxChain(recv: SyntaxNode | null, ctx: EngineCtx): boolean {
+  if (!recv || !ctx.frameworkCtx) return false;
+  const root = chainRoot(recv);
+  if (!root) return false;
+  if (root.type === "this_expression") return INPUT_CTX_TYPE_RE.test(enclosingExtReceiver(root));
+  const t = ctx.varTypes.get(root.text);
+  return t ? INPUT_CTX_TYPE_RE.test(bareType(t)) : INPUT_CTX_NAME_RE.test(root.text);
+}
+/** `val x by inject<T>()` / `by inject()` / `get<T>()`: the injected type, or null. */
+function delegateInjectType(pd: SyntaxNode): string | null {
+  const dl = childOfType(pd, "property_delegate");
+  const call = dl ? named(dl)[0] : null;
+  if (call?.type !== "call_expression") return null;
+  const nm = callParts(call).name;
+  if (!/^(?:inject|get|getKoin|injectOrNull|lazy)$/.test(nm)) return null;
+  const targs = findAllNodes(call, "type_arguments")[0];
+  const ut = targs ? findAllNodes(targs, "user_type")[0] : null;
+  return ut ? typeNameOf(ut) : null;
+}
+
 /** Ktor: `call.<member>` members that are what the client sent. */
 const KTOR_INPUT_MEMBERS = new Set(["parameters", "request", "receive", "receiveText", "receiveParameters", "receiveMultipart", "receiveNullable", "receiveOrNull", "receiveChannel", "receiveStream"]);
 
@@ -391,7 +469,7 @@ const OPAQUE_RESULT_METHODS = new Set([
   "isEmpty", "isNotEmpty", "isBlank", "isNotBlank", "isNullOrEmpty", "isNullOrBlank", "contains", "containsKey", "containsValue",
   "startsWith", "endsWith", "equals", "equalsIgnoreCase", "contentEquals", "matches", "hashCode", "count", "compareTo", "any",
   "all", "none", "indexOf", "lastIndexOf", "isPresent", "isEmpty", "exists", "hasNext", "size", "length", "isDigit", "isLetter",
-  "isLetterOrDigit", "isWhitespace", "isInitialized", "containsMatchIn", "toByteArray",
+  "isLetterOrDigit", "isWhitespace", "isInitialized", "containsMatchIn",
 ]);
 const OPAQUE_PROPS = new Set(["size", "length", "indices", "lastIndex", "isEmpty", "isNotEmpty", "javaClass", "hashCode", "class"]);
 /** Methods on a value whose ARGUMENTS also flow into the result. */
@@ -411,7 +489,7 @@ const ELEMENT_LAMBDAS = new Set([
   "let", "also", "takeIf", "takeUnless", "forEach", "forEachIndexed", "map", "mapNotNull", "flatMap", "mapIndexed", "filter",
   "filterNot", "onEach", "any", "all", "none", "first", "firstOrNull", "last", "lastOrNull", "find", "use", "sortedBy",
   "sortedByDescending", "distinctBy", "associate", "associateWith", "associateBy", "groupBy", "partition", "sumOf", "count",
-  "mapValues", "mapKeys", "filterIndexed", "ifPresent", "subscribe", "doOnNext", "flatMapMany", "collect", "fold", "reduce",
+  "mapValues", "mapKeys", "filterIndexed", "ifPresent", "subscribe", "doOnNext", "flatMapMany", "collect", "fold", "reduce", "forEachPart", "forEachIndexed",
 ]);
 /** Receiver-is-`this` scope functions: inside the lambda, bare member names read the receiver. */
 const THIS_SCOPE_LAMBDAS = new Set(["run", "apply", "with"]);
@@ -505,6 +583,12 @@ function constValueKt(node: SyntaxNode | null | undefined, ctx: EngineCtx): Cons
 }
 
 interface EngineCtx {
+  /** the file uses Javalin / Vert.x / http4k / Micronaut (see INPUT_CTX_CALLS) */
+  frameworkCtx?: boolean;
+  /** http4k lens variables (`val cmd = Query.string().required("c")`) */
+  lensVars: Set<string>;
+  /** property names every declaration of which (in this file) has a number / date type */
+  numericFields: Set<string>;
   filePath: string;
   content: string;
   lines: string[];
@@ -577,6 +661,8 @@ function isShadowed(name: string, env: Env, ctx: EngineCtx): boolean {
 }
 
 function isRequestReceiver(recv: SyntaxNode | null, env: Env, ctx: EngineCtx): boolean {
+  // `this.getParameter("c")` inside `fun HttpServletRequest.cmd()`
+  if (recv?.type === "this_expression") return REQUEST_TYPE_RE.test(enclosingExtReceiver(recv));
   if (!recv || recv.type !== "simple_identifier") return false;
   const t = ctx.varTypes.get(recv.text);
   if (t) return REQUEST_TYPE_RE.test(bareType(t));
@@ -591,7 +677,12 @@ function isKtorInput(node: SyntaxNode, env: Env): boolean {
     if (cur.type === "navigation_expression") first = memberOf(cur);
     cur = named(cur)[0] ?? null;
   }
-  return !!cur && cur.type === "simple_identifier" && cur.text === "call" && !env.has("call") && KTOR_INPUT_MEMBERS.has(first);
+  if (!!cur && cur.type === "simple_identifier" && cur.text === "call" && (!env.has("call") || callParamIsApplicationCall(cur)) && KTOR_INPUT_MEMBERS.has(first)) return true;
+  // inside `fun ApplicationCall.cmd()` the call is the implicit receiver: bare `request.queryParameters[...]` / `parameters[...]`
+  if (!!cur && cur.type === "simple_identifier" && /^(?:request|parameters)$/.test(cur.text) && !env.has(cur.text)) {
+    return /^(?:ApplicationCall|RoutingCall|RoutingContext|PipelineContext)$/.test(enclosingExtReceiver(cur)) && (cur.text === "parameters" || KTOR_INPUT_MEMBERS.has(first) || first === "queryParameters");
+  }
+  return false;
 }
 
 function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
@@ -602,6 +693,8 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
   };
 
   const mask = (node: SyntaxNode, env: Env): number => {
+    // an extension function's receiver, seeded from the call site (`q.runIt()` -> `this` is q)
+    if (node.type === "this_expression") return env.get("this") ?? 0;
     if (ZERO_TYPES.has(node.type)) return 0;
     switch (node.type) {
       case "simple_identifier": case "interpolated_identifier":
@@ -614,9 +707,12 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         if (recv.type === "callable_reference" || OPAQUE_PROPS.has(member)) return 0;
         if (recv.type === "this_expression") return ident(member, env);
         if (SERVLET_SOURCE_PROPS.has(member) && isRequestReceiver(recv, env, ctx)) return ALL;
+        if (INPUT_CTX_PROPS.has(member) && isInputCtxChain(recv, ctx)) return ALL;
         if (member === "text" && recv.type === "simple_identifier" && ANDROID_INPUT_VIEW_RE.test(bareType(ctx.varTypes.get(recv.text) ?? ""))) return ALL;
         if (INTENT_INPUT_PROPS.has(member) && isIncomingIntent(recv, ctx)) return ALL;
         const rm = mask(recv, env);
+        // a property this file declares with a number / date type holds no injection payload
+        if (ctx.numericFields.has(member) && !(recv.type === "this_expression")) return applyClears(rm, NUMERIC_CLEARS);
         // File(x).name / Paths.get(x).fileName: only the last path segment is left
         if (NAME_ONLY_MEMBERS.has(member)) return applyClears(rm, SinkClass.PATH);
         return rm;
@@ -718,6 +814,15 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
 
     if (isKtorInput(node, env)) return ALL;
     if (recv && SERVLET_SOURCE_CALLS.has(name) && isRequestReceiver(recv, env, ctx)) return ALL;
+    if (recv && INPUT_CTX_CALLS.has(name) && isInputCtxChain(recv, ctx)) return ALL;
+    // `fun HttpServletRequest.cmd() = getParameter("c")`: the request is the implicit receiver
+    if (!recv && SERVLET_SOURCE_CALLS.has(name) && REQUEST_TYPE_RE.test(enclosingExtReceiver(node))) return ALL;
+    // http4k lens applied to a request: `val cmd = Query.string().required("c")` ... `cmd(req)`
+    if (!recv && ctx.lensVars.has(name) && args[0] && isInputCtxChain(chainRootNode(args[0].expr), ctx)) return ALL;
+    // the process's own input
+    if (ct === "System.getenv" || ct === "getenv") return ALL;
+    if (!recv && /^(?:readLine|readln|readlnOrNull)$/.test(name)) return ALL;
+    if (recv && /^(?:readLine|readText|readLines|nextLine|next)$/.test(name) && /System\.`?in`?|stdin/i.test(recv.text)) return ALL;
     if (recv && INTENT_INPUT_CALLS.has(name) && isIncomingIntent(recv, ctx)) return ALL;
 
     if (recv) {
@@ -763,7 +868,7 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     }
     // a method of a class of this file called on an object (`p.name()` on a `Params(request)`): its summary, plus the
     // receiver's own taint below
-    const methods = recv ? resolveLocalKt(ctx, node).filter(f => !!f.body && !!f.className) : [];
+    const methods = recv ? resolveLocalKt(ctx, node).filter(f => !!f.body && (!!f.className || !!f.receiverType)) : [];
     let own = 0;
     for (const method of methods) {
       own |= ctx.intrinsic.get(fnIdKt(method)) ?? 0;
@@ -1156,7 +1261,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (nm) {
         env.set(nm, m);
         const declared = named(vd).find(k => k.type === "user_type" || k.type === "nullable_type");
-        const t = declared ? typeNameOf(declared) : value ? constructedClass(value) ?? viewLookupType(value) : null;
+        const t = declared ? typeNameOf(declared) : value ? constructedClass(value) ?? viewLookupType(value) : delegateInjectType(pd);
         if (t) ctx.varTypes.set(nm, t);
       }
     }
@@ -1172,9 +1277,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       case "function_declaration": case "class_declaration": case "object_declaration": case "companion_object":
       case "anonymous_function": case "object_literal":
         return false;   // walked separately, each in its own scope
-      case "lambda_literal":
+      case "lambda_literal": {
+        // `TextField(onValueChange = { cmd = it })`: the callback is handed what the user typed, and writes the state the screen reads back
+        const arg = node.parent?.type === "value_argument" ? node.parent : null;
+        const argName = arg && named(arg)[0]?.type === "simple_identifier" && named(arg)[0] !== node ? named(arg)[0].text : "";
+        if (opts.descendLambdas && COMPOSE_INPUT_CALLBACKS.has(argName)) { walkLambda(node, ALL, env); return false; }
         if (opts.descendLambdas) walkLambda(node, 0, cloneEnv(env));
         return false;
+      }
       case "statements": case "control_structure_body": case "function_body": case "parenthesized_expression":
         return walkSeq(named(node), env);
       case "property_declaration":
@@ -1414,6 +1524,19 @@ function provenConstantKt(node: SyntaxNode, ctx: EngineCtx, depth = 0): boolean 
   if (n.type === "string_literal") return named(n).every(c => c.type !== "interpolated_expression" || (!!named(c)[0] && provenConstantKt(named(c)[0], ctx, depth + 1)));
   if (/^(?:integer|long|real|boolean|character)_literal$/.test(n.type)) return true;
   if (n.type === "additive_expression") return named(n).every(s => provenConstantKt(s, ctx, depth + 1));
+  // `when (x) { "ls" -> "ls"; "pwd" -> "pwd"; else -> return }` / `if (c) "a" else "b"`: every arm yields a constant or leaves
+  if (n.type === "when_expression") {
+    const entries = childrenOfType(n, "when_entry");
+    return entries.length > 0 && entries.every(e => {
+      const body = named(e).filter(k => k.type !== "when_condition" && k.type !== "control_structure_body" ? true : k.type === "control_structure_body")[named(e).length - 1] ?? named(e)[named(e).length - 1];
+      const v = body?.type === "control_structure_body" ? named(body)[0] : body;
+      return !!v && (v.type === "jump_expression" || provenConstantKt(v, ctx, depth + 1));
+    });
+  }
+  if (n.type === "if_expression") {
+    const bodies = childrenOfType(n, "control_structure_body");
+    return bodies.length === 2 && bodies.every(b => { const v = named(b)[0]; return !!v && (v.type === "jump_expression" || provenConstantKt(v, ctx, depth + 1)); });
+  }
   if (n.type === "simple_identifier") {
     const scope = enclosingScope(n);
     if (!scope) return false;
@@ -1561,7 +1684,10 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   const sqlCall = (recv && (SQL_UNAMBIGUOUS.has(name) || (SQL_GATED.has(name) && isDbReceiver(recv, ctx))))
     || DSL_SQL_CALLS.has(ct)
     || (!recv && name === "exec" && insideLambdaOf(node, c => /^(?:transaction|newSuspendedTransaction|suspendedTransactionAsync)$/.test(callParts(c).name)));
-  if (sqlCall && arg0) {
+  const criteriaArg = !!arg0 && (/^(?:CriteriaQuery|CriteriaBuilder|CriteriaUpdate|CriteriaDelete)$/.test(bareType(ctx.varTypes.get(chainRoot(arg0)?.text ?? "") ?? ""))
+    || /^(?:cq|cb|cu|cd|criteria\w*)$/i.test(chainRoot(arg0)?.text ?? ""));
+  if (sqlCall && criteriaArg) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
+  if (sqlCall && arg0 && !criteriaArg) {
     const verdict = assessSqlInjection(decomposeString(arg0), n => mask(n, env));
     if (verdict.verdict === "vulnerable" && verdict.escaped) {
       emit(ctx, "sql-injection", node, verdict.culprit!.text, ct, `Escaped value '${verdict.culprit!.text}' is placed outside a quoted SQL string literal — string-escaping only protects a value inside quotes`);
@@ -1609,7 +1735,7 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     if (a) {
       const elems = listElements(a);
       if (elems) checkArgv(ctx, node, elems, env, mask, "Runtime.exec");
-      else fireOn(ctx, "command-injection", node, a, mask(a, env), "Runtime.exec");
+      else if (!fireOn(ctx, "command-injection", node, a, mask(a, env), "Runtime.exec") && provenConstantKt(a, ctx)) ctx.suppressed?.push({ id: "command-injection", line: lineOf(node) });
     }
   }
   if (ctor === "ProcessBuilder" || (recv && name === "command" && (/ProcessBuilder/.test(recvText) || recvType === "ProcessBuilder" || /ProcessExecutor/.test(recvText)))) {
@@ -1680,6 +1806,44 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     }
   }
 
+  // ── Javalin / Vert.x / http4k / Micronaut / JAX-RS / Compose ──
+  {
+    const onCtx = isInputCtxChain(recv, ctx);
+    // ctx.html(x) / ctx.redirect(x) / ctx.render(template, model)
+    if (recv && onCtx && name === "html" && pos[0]) fireOn(ctx, "xss", node, pos[0], mask(pos[0], env), "ctx.html");
+    if (recv && onCtx && name === "redirect" && pos[0]) checkRedirectTarget(ctx, node, pos[0], env, mask, "ctx.redirect");
+    if (recv && onCtx && name === "render" && pos[0] && stringValue(pos[0]) === null) fireOn(ctx, "ssti", node, pos[0], mask(pos[0], env), "ctx.render");
+    // ctx.response().end("<h1>" + x) with an HTML content type; ctx.response().sendFile(x)
+    if (recv && name === "end" && pos[0] && /response/i.test(recvText) && (/text\/html|TEXT_HTML/.test(recvText) || htmlLiteralWithTaint(pos[0], env, mask))) fireOn(ctx, "xss", node, pos[0], mask(pos[0], env), "response.end (HTML)");
+    if (recv && name === "sendFile" && pos[0] && /response/i.test(recvText)) fireOn(ctx, "path-traversal", node, pos[0], mask(pos[0], env), "response.sendFile");
+    if (recv && /^(?:readFile|readFileBlocking|writeFile|writeFileBlocking|delete|deleteBlocking|deleteRecursive|exists|open|openBlocking|props|readDir|mkdir|mkdirs|createFile|copy|move|truncate|chmod)$/.test(name) && /fileSystem/.test(recvText) && pos[0]) {
+      fireOn(ctx, "path-traversal", node, pos[0], mask(pos[0], env), `fileSystem.${name}`);
+    }
+    if (recv && name === "putHeader" && pos.length >= 2 && /^location$/i.test(stringValue(pos[0]) ?? "")) checkRedirectTarget(ctx, node, pos[1], env, mask, "putHeader(Location)");
+    // Vert.x WebClient: getAbs(url) / postAbs(url) / requestAbs(method, url)
+    if (recv && /^(?:getAbs|postAbs|putAbs|deleteAbs|headAbs|patchAbs)$/.test(name) && pos[0]) checkSsrfArg(ctx, node, pos[0], env, mask, `WebClient.${name}`);
+    if (recv && name === "requestAbs" && pos[1]) checkSsrfArg(ctx, node, pos[1], env, mask, "WebClient.requestAbs");
+    // Micronaut: client.toBlocking().retrieve(url) / exchange(url) and HttpRequest.GET(url)
+    if (recv && /^(?:retrieve|exchange|jsonStream|dataStream|exchangeStream)$/.test(name) && pos[0] && /(?:^|[^\w])(?:client|http\w*)\b/i.test(recvText) && FRAMEWORK_CTX_RE.test(ctx.content)) {
+      if (!pos[0].text.startsWith("HttpRequest")) checkSsrfArg(ctx, node, pos[0], env, mask, `HttpClient.${name}`);
+    }
+    if (recv && /^HttpRequest$/.test(recvText) && /^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$/.test(name) && pos[0]) checkSsrfArg(ctx, node, pos[0], env, mask, `HttpRequest.${name}`);
+    // http4k: Request(Method.GET, url)
+    if (ctor === "Request" && /org\.http4k/.test(ctx.content) && pos[1]) checkSsrfArg(ctx, node, pos[1], env, mask, "Request(GET, url)");
+    // Micronaut / JAX-RS responses that redirect
+    if (recv && /^(?:HttpResponse|Response)$/.test(recvText) && /^(?:redirect|seeOther|temporaryRedirect|permanentRedirect|found|movedPermanently)$/.test(name) && pos[0]) checkRedirectTarget(ctx, node, pos[0], env, mask, `${recvText}.${name}`);
+    // Panache: User.list("name = '$x'") / find / count / delete / update take an HQL fragment
+    if (recv && /^(?:list|find|count|delete|update|stream)$/.test(name) && pos[0] && /panache/i.test(ctx.content) && pos[0].type !== "lambda_literal") {
+      const sqlText = pos[0];
+      fireOn(ctx, "sql-injection", node, sqlText, mask(sqlText, env), `Panache.${name}`);
+    }
+    // Compose Multiplatform / desktop: opening what the user typed
+    if (recv && name === "openUri" && pos[0]) checkRedirectTarget(ctx, node, pos[0], env, mask, "uriHandler.openUri");
+    if (recv && name === "browse" && pos[0] && /Desktop/.test(recvText)) checkSsrfArg(ctx, node, pos[0], env, mask, "Desktop.browse");
+    // WebView.loadData(html, ...) / loadDataWithBaseURL(baseUrl, html, ...): the HTML is rendered
+    if (name === "loadDataWithBaseURL" && pos[1]) fireOn(ctx, "xss", node, pos[1], mask(pos[1], env), "WebView.loadDataWithBaseURL");
+  }
+
   // ── Redirect ──
   if (recv && name === "sendRedirect" && pos[0]) checkRedirectTarget(ctx, node, pos[0], env, mask, "sendRedirect");
   if (recv && name === "respondRedirect" && (namedArg(node, "url") ?? pos[0])) checkRedirectTarget(ctx, node, (namedArg(node, "url") ?? pos[0])!, env, mask, "call.respondRedirect");
@@ -1705,13 +1869,16 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── Deserialization ──
-  if (recv && (name === "readObject" || name === "readUnshared") && (/ObjectInputStream/.test(recvText) || recvType === "ObjectInputStream" || /ObjectInputStream\(/.test(recv.text))) {
+  if (recv && (name === "readObject" || name === "readUnshared") && (/ObjectInputStream|XMLDecoder/.test(recvText) || /^(?:ObjectInputStream|XMLDecoder)$/.test(recvType) || /(?:ObjectInputStream|XMLDecoder)\(/.test(recv.text))) {
     fireOn(ctx, "insecure-deserialization", node, recv, mask(recv, env), "ObjectInputStream.readObject");
   }
   if (recv && name === "fromXML" && pos[0]) fireOn(ctx, "insecure-deserialization", node, pos[0], mask(pos[0], env), "XStream.fromXML");
-  if (recv && /^(?:load|loadAs|loadAll)$/.test(name) && pos[0] && (recvType === "Yaml" || /^Yaml\(/.test(recv.text))) {
+  // SnakeYAML's default Constructor builds any class; SafeConstructor builds plain data only
+  if (recv && /^(?:load|loadAs|loadAll)$/.test(name) && pos[0] && (recvType === "Yaml" || /(?:^|\.)Yaml\(/.test(recv.text)) && !/SafeConstructor/.test(recv.text + (resolveVar(recv).text ?? ""))) {
     fireOn(ctx, "insecure-deserialization", node, pos[0], mask(pos[0], env), "Yaml.load");
   }
+  // Kryo reads the class name from the data
+  if (recv && /^readClassAndObject$/.test(name) && pos[0]) fireOn(ctx, "insecure-deserialization", node, pos[0], mask(pos[0], env), "Kryo.readClassAndObject");
   if ((ct === "SerializationUtils.deserialize") && pos[0]) fireOn(ctx, "insecure-deserialization", node, pos[0], mask(pos[0], env), ct);
   if (recv && name === "readValue" && pos[0] && /enableDefaultTyping|activateDefaultTyping|JsonTypeInfo\.Id\.CLASS/.test(ctx.content)) {
     fireOn(ctx, "insecure-deserialization", node, pos[0], mask(pos[0], env), "ObjectMapper.readValue (default typing)");
@@ -1851,7 +2018,7 @@ function checkReturnValue(value: SyntaxNode, env: Env, ctx: EngineCtx, mask: Tai
     return;
   }
   if (returnsBody(fn)) {
-    if (htmlLiteralWithTaint(value, env, mask) || fn.annotations.some(a => /produces\s*=.*html/i.test(a.text))) {
+    if (htmlLiteralWithTaint(value, env, mask) || fn.annotations.some(a => /produces\s*=.*html|@Produces\s*\(.*html/i.test(a.text))) {
       fireOn(ctx, "xss", value, value, mask(value, env), `${fn.name}() response body (HTML)`);
     }
     return;
@@ -1869,8 +2036,9 @@ function returnTypeOf(fn: LocalFn): string {
   const t = kids.slice(params + 1).find(k => k.type === "user_type" || k.type === "nullable_type");
   return t ? typeNameOf(t) : "";
 }
+const HANDLER_ANNOTATIONS = new Set([...MAPPING_ANNOTATIONS, "GET", "POST", "PUT", "DELETE", "PATCH", "Get", "Post", "Put", "Delete", "Patch"]);
 function isHandler(fn: LocalFn): boolean {
-  return fn.annotations.some(a => MAPPING_ANNOTATIONS.has(annotationName(a)));
+  return fn.annotations.some(a => HANDLER_ANNOTATIONS.has(annotationName(a)));
 }
 /** @RestController class or @ResponseBody handler: the return value is the HTTP body, not a view name. */
 function returnsBody(fn: LocalFn): boolean {
@@ -1896,10 +2064,19 @@ function checkTimingCompare(node: SyntaxNode, l: SyntaxNode, r: SyntaxNode, env:
 
 function seedLocalFn(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   const { recv } = callParts(node);
-  if (recv && recv.type !== "this_expression") return;
+  // a call through a receiver runs a function of this file only when the receiver's type says which (an injected service, a constructed object, an object / companion)
+  if (recv && recv.type !== "this_expression") {
+    const typed = recv.type === "simple_identifier" ? ctx.varTypes.has(recv.text) || /^[A-Z]/.test(recv.text) : !!constructedClass(recv);
+    if (!typed) return;
+  }
   for (const callee of resolveLocalKt(ctx, node)) {
     if (!callee.body) continue;
     const tainted = new Map<number, number>();
+    // an extension function's receiver is its `this`
+    if (callee.receiverType && recv && recv.type !== "this_expression") {
+      const rm = mask(recv, env) & ALL;
+      if (rm) tainted.set(-1, rm);
+    }
     for (const p of callee.params) {
       const m = bindArgument(callee, node, p.index).reduce((acc, a) => acc | (mask(a, env) & ALL), 0);
       if (m) tainted.set(p.index, m);
@@ -1931,7 +2108,7 @@ function resolveLocalKt(ctx: EngineCtx, call: SyntaxNode): LocalFn[] {
   let type: string | null = null;
   if (recv.type === "simple_identifier") type = ctx.varTypes.get(recv.text) ?? (/^[A-Z]/.test(recv.text) ? recv.text : null);
   else type = constructedClass(recv);
-  if (type) { const t = bareType(type); return cands.filter(f => f.className === t); }
+  if (type) { const t = bareType(type); return cands.filter(f => f.className === t || (!!f.receiverType && bareType(f.receiverType) === t)); }
   return cands.length === 1 ? cands : [];
 }
 
@@ -2336,8 +2513,25 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
   const varTypes = new Map<string, string>();
   for (const [n, t] of fieldTypes) if (t) varTypes.set(n, t);
   for (const f of all) for (const p of f.params) if (!varTypes.has(p.name) && p.type) varTypes.set(p.name, p.type);
+  const typesByField = new Map<string, Set<string>>();
+  for (const cp of findAllNodes(root, "class_parameter")) {
+    if (!childOfType(cp, "binding_pattern_kind")) continue;
+    const nm = childOfType(cp, "simple_identifier")?.text;
+    const ty = named(cp).find(k => k.type === "user_type" || k.type === "nullable_type");
+    if (nm) typesByField.set(nm, new Set([...(typesByField.get(nm) ?? []), bareType(typeNameOf(ty))]));
+  }
+  const numericFields = new Set([...typesByField].filter(([, ts]) => [...ts].every(x => SAFE_SCALAR_TYPE_RE.test(x.replace(/\?$/, "")))).map(([n]) => n));
+  const lensVars = new Set<string>();
+  for (const pd of findAllNodes(root, "property_declaration")) {
+    const nm = childOfType(childOfType(pd, "variable_declaration"), "simple_identifier")?.text;
+    const init = propertyValue(pd);
+    if (nm && init && /org\.http4k/.test(content) && HTTP4K_LENS_RE.test(init.text.replace(/\s+/g, ""))) lensVars.add(nm);
+    const injected = delegateInjectType(pd);
+    if (nm && injected && !varTypes.has(nm)) varTypes.set(nm, injected);
+  }
   const ctx: EngineCtx = {
     filePath, content, lines: content.split("\n"), root, fns, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
+    frameworkCtx: FRAMEWORK_CTX_RE.test(content), lensVars, numericFields,
     suppressed, findings: [], seen: new Set(), fields: new Set(fieldTypes.keys()), sticky: new Map(), stickyDirty: false, varTypes,
     crossFileFacts, localKeys: new Set(all.map(f => f.key).filter((k): k is string => !!k)), current: null,
   };
@@ -2360,6 +2554,14 @@ function isContentProviderEntry(fn: LocalFn): boolean {
   return /:\s*(?:[\w.]+\.)?(?:ContentProvider|DocumentsProvider|FileProvider)\s*\(/.test(header);
 }
 
+function isJaxRsEntityParam(fn: LocalFn, p: ParamShape): boolean {
+  if (!fn.classDecl || !/\bjavax\.ws\.rs\b|\bjakarta\.ws\.rs\b/.test(root0(fn.decl).text.slice(0, 4000))) return false;
+  const verbs = fn.annotations.map(annotationName).filter(n => JAXRS_VERBS.has(n));
+  if (verbs.length === 0 || NON_ENTITY_PARAM_TYPE_RE.test(bareType(p.type))) return false;
+  return !verbs.includes("GET") || false;
+}
+function root0(n: SyntaxNode): SyntaxNode { let r = n; while (r.parent) r = r.parent; return r; }
+
 function entryEnv(fn: LocalFn, seedEntryPoints: boolean): Env {
   const env: Env = new Map();
   const provider = isContentProviderEntry(fn);
@@ -2367,6 +2569,10 @@ function entryEnv(fn: LocalFn, seedEntryPoints: boolean): Env {
     let m = 0;
     if (p.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) m = SAFE_SCALAR_TYPE_RE.test(bareType(p.type)) ? applyClears(ALL, NUMERIC_CLEARS) : ALL;
     else if (provider && /^(?:Uri|String|ContentValues|Bundle)\??$/.test(bareType(p.type))) m = ALL;
+    // fun main(args: Array<String>): the command line
+    else if (fn.name === "main" && p.index === 0 && /^Array</.test(p.type.replace(/\s+/g, ""))) m = ALL;
+    // JAX-RS: the one parameter with no annotation of a resource method is the request entity
+    else if (p.annotations.length === 0 && isJaxRsEntityParam(fn, p)) m = SAFE_SCALAR_TYPE_RE.test(bareType(p.type)) ? applyClears(ALL, NUMERIC_CLEARS) : ALL;
     else if (seedEntryPoints && p.annotations.length === 0 && STRINGY_TYPE_RE.test(p.type.replace(/\s+/g, " "))) m = ALL;
     env.set(p.name, m);
   }
@@ -2411,7 +2617,7 @@ function runScan(ctx: EngineCtx, withEntryPoints: boolean): AstTaintKotlinFindin
   }
   // top-level script statements (.kts) -- function bodies were walked above
   for (const child of named(ctx.root)) {
-    if (["function_declaration", "class_declaration", "object_declaration", "property_declaration", "import_list", "package_header", "import_header"].includes(child.type)) continue;
+    if (["function_declaration", "class_declaration", "object_declaration", "import_list", "package_header", "import_header"].includes(child.type)) continue;
     walkMain(child, new Map(), ctx);
   }
   drainSeeded(ctx);
@@ -2442,6 +2648,7 @@ function drainSeeded(ctx: EngineCtx) {
       walked.add(sig);
       changed = true;
       const env: Env = new Map();
+      if (idx.has(-1)) env.set("this", idx.get(-1)!);
       for (const p of f.params) env.set(p.name, idx.get(p.index) ?? 0);
       const prev = ctx.current;
       ctx.current = f;

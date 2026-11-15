@@ -242,7 +242,7 @@ function collectMacros(root: SyntaxNode): Map<string, string> {
   return out;
 }
 const STRING_MACRO_RE = /^(?:[LuU8]*"(?:[^"\\]|\\.)*"\s*)+$/;
-const normalizeApi = (n: string) => n.replace(/^(?:_|std::)/, "").replace(/(?<=[a-z_])[AW]$/, "");
+const normalizeApi = (n: string) => n.replace(/^(?:_|std::)/, "").replace(/^.*::/, "").replace(/(?<=[a-z_])[AW]$/, "");
 /** APIs some check models (sources, sinks, copies, allocators) -- see baseApi. */
 let KNOWN_APIS: ReadonlySet<string> | null = null;
 const knownApis = (): ReadonlySet<string> => KNOWN_APIS ??= new Set([
@@ -489,9 +489,27 @@ const cppTraceResolver: TraceResolver<SyntaxNode> = {
 const OUT_PARAM_SOURCES: Record<string, number> = {
   fgets: 0, fgetws: 0, gets: 0, gets_s: 0, read: 1, recv: 1, recvfrom: 1, fread: 0, ReadFile: 1, getline: 0, getdelim: 0,
   scanf: -1, wscanf: -1, fscanf: -2, fwscanf: -2, sscanf: -3, swscanf: -3, scanf_s: -1, fscanf_s: -2,
+  // TLS / BIO streams (OpenSSL), Apache httpd request bodies and buckets, FastCGI, WinInet, positional reads
+  SSL_read: 1, SSL_peek: 1, SSL_read_ex: 1, SSL_peek_ex: 1, BIO_read: 1, BIO_read_ex: 1, BIO_gets: 1, ap_get_client_block: 1, apr_bucket_read: 1,
+  FCGX_GetStr: 0, FCGX_GetLine: 0, X509_NAME_oneline: 1, InternetReadFile: 1, pread: 1,
+  // Boost.Asio sockets: `sock.read_some(buffer(b))` / `boost::asio::read(sock, buffer(b))` (the `read` entry above)
+  read_some: 0, receive: 0, receive_from: 0, async_read_some: 0, async_receive: 0, async_receive_from: 0,
   getcwd: -9, // not a source: placeholder so the trace resolver doesn't treat it as one (see isSource below)
 };
+/** `boost::asio::buffer(b)` / `asio::buffer(b, n)` wraps the buffer a read fills: the buffer is its first argument. */
+function unwrapBufferArg(a: SyntaxNode | null | undefined): SyntaxNode | null {
+  if (!a) return null;
+  if (a.type === "call_expression") {
+    const ci = callInfo(a);
+    if (/^(?:buffer|const_buffer|mutable_buffer)$/.test(ci.name.split("::").pop() ?? "") && ci.args[0]) return ci.args[0];
+  }
+  return a;
+}
 const RETURN_SOURCES = new Set(["getenv", "wgetenv","secure_getenv", "GetCommandLine", "readline",
+  // Qt's environment, HTTP request accessors of libevent / libmicrohttpd / FastCGI / Wt / POCO
+  "qgetenv", "qEnvironmentVariable", "evhttp_request_get_uri", "evhttp_find_header", "evhttp_uri_get_path", "evhttp_uri_get_query", "evhttp_decode_uri",
+  "MHD_lookup_connection_value", "FCGX_GetParam", "getCgiValue", "getParameter", "getParameterValues", "headerValue", "clientFileName", "internalPath",
+  "mg_http_get_header",
   // an archive member's name is whatever its author wrote ("../../etc/cron.d/x"): libarchive, libzip
   "archive_entry_pathname", "archive_entry_pathname_w", "archive_entry_pathname_utf8", "zip_get_name"]);
 /** Copies: destination argument index 0 takes the taint of the listed source arguments. */
@@ -502,6 +520,57 @@ const COPY_INTO: Record<string, number[]> = {
   vsprintf: [1, 2], vsnprintf: [2, 3], vsnwprintf: [2, 3],
   strcpy_s: [2], strcat_s: [2], strncpy_s: [2], memcpy_s: [2], wcscpy_s: [2],
 };
+/**
+ * Calls that fill an out-parameter from another argument: API -> [destination index, source indexes]. Apache's `ap_args_to_table(r, &GET)`,
+ * `ap_parse_form_data(r, NULL, &pairs, ...)`, `apr_brigade_flatten(bb, buf, &len)`; POCO's `StreamCopier::copyToString(in, out)`.
+ */
+const FILL_OUT: Record<string, [number, number[]]> = {
+  ap_args_to_table: [1, [0]], ap_parse_form_data: [2, [0]], apr_brigade_flatten: [1, [0]], copyToString: [1, [0]], copyStream: [1, [0]], copyStreamUnbuffered: [1, [0]],
+};
+/** Calls whose result carries the taint of ANY argument (a pool comes first in Apache's: `apr_pstrcat(r->pool, "ls ", r->args, NULL)`). */
+const ANY_ARG_PASSTHROUGH = new Set([
+  "apr_pstrcat", "apr_pstrdup", "apr_pstrndup", "apr_psprintf", "apr_pstrmemdup", "apr_table_get", "apr_table_getm", "ap_getword", "ap_getword_nc", "ap_getword_white",
+  "ap_getword_white_nc", "ap_getword_conf", "ap_getword_conf_nc", "apr_array_pop", "apr_array_pstrcat", "ap_make_dirstr_parent", "ap_make_full_path",
+  "load", "parse", "QString", "QByteArray", "QUrl", "QVariant", "make_address", "make_address_v4", "make_address_v6", "endpoint",
+]);
+/**
+ * Classes whose objects hold what a client sent (a request, a socket, a form, a text widget, a parsed command line): any string a method returns
+ * is input. Matched on the last segment of the declared type.
+ */
+const INPUT_CLASSES = new Set([
+  "request", "Request", "HTTPServerRequest", "HttpRequest", "HttpRequestPtr", "HTTPRequest", "QHttpServerRequest", "request_rec", "evhttp_request", "FCGX_Request",
+  "mg_http_message", "WEnvironment", "HTMLForm", "variables_map", "QTcpSocket", "QSslSocket", "QAbstractSocket", "QUdpSocket", "QNetworkReply", "QWebSocket", "QLineEdit",
+  "QTextEdit", "QPlainTextEdit", "QUrlQuery", "WLineEdit", "WTextArea", "WTextEdit", "WFileUpload", "WebRequest", "HttpServerRequest",
+]);
+/** Methods of such an object that return no client text (a length, a flag, a status) -- everything else is input. */
+const INPUT_NON_DATA_RE = /^(?:size|length|empty|count|has\w*|contains|find|begin|end|method|version|error\w*|isValid|isOpen|is\w+|write\w*|close|state|bytesAvailable|atEnd|port|status\w*|keepAlive|setHeader|set\w+|disconnect\w*)$/;
+/** Conversions that keep a string's content: carry the receiver's (or first argument's) taint through. */
+const STRING_CARRY_METHODS = new Set([
+  "asString", "toStdString", "toUtf8", "toLatin1", "toLocal8Bit", "constData", "trimmed", "simplified", "toString", "getQuery", "getPath", "getHost", "getFragment",
+  "getPathEtc", "getPathAndQuery", "first", "second", "left", "right", "mid", "toLower", "toUpper", "queryItemValue", "text", "fromUtf8", "fromLatin1", "fromLocal8Bit",
+  "fromStdString", "fromEncoded", "fromRawData", "u8string", "generic_string", "native", "string_view", "get", "as", "s", "path",
+]);
+/** Constructors of a type that runs, opens or connects to what it is given: declared type -> [class, argument index, message]. */
+const CTOR_SINKS: Array<[RegExp, AstTaintCppId, number]> = [
+  [/^(?:QFile|QDir|QFileInfo|QSaveFile|QDirIterator|QTemporaryFile)$/, "path-traversal", 0],
+  [/^(?:File|FileInputStream|FileOutputStream|Path|DirectoryIterator)$/, "path-traversal", 0],
+  [/^(?:QLibrary|QPluginLoader)$/, "eval-exec", 0],
+  [/^(?:HTTPClientSession|HTTPSClientSession|SocketAddress|StreamSocket|SecureStreamSocket|WebSocket)$/, "ssrf", 0],
+  [/^(?:QNetworkRequest|QWebSocket)$/, "ssrf", 0],
+  [/^(?:child)$/, "command-injection", 0],
+  [/^(?:Statement)$/, "sql-injection", 1],
+];
+/** Receivers' methods that run a statement / command / connection, by the declared class of the receiver: class -> [method regex, rule, argument index]. */
+const METHOD_SINKS: Array<[RegExp, RegExp, AstTaintCppId, number]> = [
+  [/^QSqlQuery$|^QSqlDatabase$/, /^(?:exec|prepare|exec_)$/, "sql-injection", 0],
+  [/^(?:Database|Statement|Session|DbClient)$/, /^(?:exec|execAndGet|execute|execSqlSync|execSqlAsync|execSqlAsyncFuture|prepare)$/, "sql-injection", 0],
+  [/^QProcess$/, /^(?:start|startCommand|setProgram)$/, "command-injection", 0],
+  [/^(?:resolver|tcp_resolver)$/, /^(?:resolve|async_resolve)$/, "ssrf", 0],
+  [/^(?:socket|tcp_socket|stream|basic_stream_socket|QTcpSocket|QSslSocket|QAbstractSocket)$/, /^(?:connect|async_connect|connectToHost|connectToHostEncrypted)$/, "ssrf", 0],
+  [/^(?:QNetworkRequest)$/, /^setUrl$/, "ssrf", 0],
+  [/^(?:QLibrary)$/, /^setFileName$/, "eval-exec", 0],
+  [/^(?:File)$/, /^(?:remove|copyTo|moveTo|renameTo|createFile|list)$/, "path-traversal", 0],
+];
 /** Unbounded copies: writing attacker data through these overflows the destination. */
 const UNBOUNDED_COPY = new Set(["strcpy", "strcat", "wcscpy", "wcscat", "sprintf", "swprintf", "vsprintf", "lstrcpy", "lstrcat"]);
 const RETURN_PASSTHROUGH = propagatorNames("cpp", "call-args");
@@ -516,13 +585,14 @@ const FORMAT_ARG: Record<string, number> = {
   printf: 0, vprintf: 0, wprintf: 0, vwprintf: 0, fprintf: 1, vfprintf: 1, fwprintf: 1, vfwprintf: 1, dprintf: 1,
   sprintf: 1, vsprintf: 1, swprintf: 2, vswprintf: 2, snprintf: 2, vsnprintf: 2, snwprintf: 2, vsnwprintf: 2,
   syslog: 1, vsyslog: 1, err: 1, warn: 0, warnx: 0, errx: 1,
+  ap_rprintf: 1, ap_log_rerror: 5,
 };
 const SQL_ARG: Record<string, number> = {
-  sqlite3_exec: 1, sqlite3_prepare: 1, sqlite3_prepare_v2: 1, sqlite3_prepare_v3: 1, sqlite3_prepare16: 1,
+  sqlite3_get_table: 1, sqlite3_exec: 1, sqlite3_prepare: 1, sqlite3_prepare_v2: 1, sqlite3_prepare_v3: 1, sqlite3_prepare16: 1,
   mysql_query: 1, mysql_real_query: 1, PQexec: 1, PQsendQuery: 1, SQLExecDirect: 1, SQLPrepare: 1,
 };
 const PATH_ARG: Record<string, number> = {
-  fopen: 0, freopen: 0, wfopen: 0, open: 0, openat: 1, creat: 0, CreateFile: 0, remove: 0, unlink: 0, rmdir: 0, rename: 0,
+  apr_file_open: 1, apr_dir_open: 1, apr_stat: 1, fopen: 0, freopen: 0, wfopen: 0, open: 0, openat: 1, creat: 0, CreateFile: 0, remove: 0, unlink: 0, rmdir: 0, rename: 0,
   mkdir: 0, chmod: 0, chown: 0, opendir: 0, truncate: 0, ifstream: 0, ofstream: 0, fstream: 0,
 };
 const LDAP_FILTER_ARG: Record<string, number> = { ldap_search: 3, ldap_search_s: 3, ldap_search_ext: 3, ldap_search_ext_s: 3, ldap_search_st: 3 };
@@ -600,10 +670,45 @@ function definitionCount(root: SyntaxNode, name: string): number {
   return counts.get(name) ?? 0;
 }
 
+/** The variable a receiver chain starts at: `req.url_params`, `request.query()`, `(*j)["c"]`, `p->first`. */
+function receiverRoot(e: SyntaxNode | null): string | null {
+  let cur: SyntaxNode | null = e;
+  for (let i = 0; cur && i < 12; i++) {
+    switch (cur.type) {
+      case "identifier": return cur.text;
+      case "call_expression": cur = field(cur, "function"); break;
+      case "field_expression": case "subscript_expression": case "pointer_expression": cur = field(cur, "argument"); break;
+      case "parenthesized_expression": cur = named(cur)[0] ?? null; break;
+      default: return null;
+    }
+  }
+  return null;
+}
+
 function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
   const { name, recv, args } = callInfo(call);
   const api = baseApi(name);
   if (RETURN_SOURCES.has(api)) return ALL;
+  // `req->getParameter("n")`, `request.query().get("n")`, `form.get("c")`, `socket->readAll()`: a method of a request / socket / form object returns what the client sent
+  if (recv && !INPUT_NON_DATA_RE.test(api)) {
+    const root = receiverRoot(recv);
+    const cls = root ? declaredClassOf(root, call) : null;
+    if (cls && INPUT_CLASSES.has(cls)) return ALL;
+  }
+  // Apache / Qt / Boost plumbing: the result keeps what any argument holds
+  if (ANY_ARG_PASSTHROUGH.has(api)) return args.reduce((acc, a) => acc | mask(a, env, ctx), 0);
+  // sqlite3_mprintf("... '%s'", x): a statement built from x -- unless every substitution is %q / %Q / %w (SQLite's own quoting)
+  if (api === "sqlite3_mprintf" || api === "sqlite3_vmprintf") {
+    const fmt = stringValue(args[0] ?? null);
+    const quoted = fmt !== null && /%[qQw]/.test(fmt) && !/%(?:\d+)?[sSdxXcf]/.test(fmt);
+    const m = args.slice(1).reduce((acc, a) => acc | mask(a, env, ctx), 0);
+    return quoted ? applySanitizer(m, SinkClass.SQL) : m;
+  }
+  // a conversion that keeps the text (`.toStdString()`, `.asString()`, `QString::fromUtf8(x)`, `.trimmed()`)
+  if (STRING_CARRY_METHODS.has(api) && (recv || args.length > 0)) {
+    const carried = recv ? mask(recv, env, ctx) : mask(args[0] ?? null, env, ctx);
+    if (carried) return carried;
+  }
   // the shared sanitizer table (taint/sanitizers.ts, the model registry's sanitizer models): atoi/strtol/stoi...
   const clears = sanitizerClears("cpp", api);
   if (clears !== null) return applySanitizer(mask(args[0] ?? null, env, ctx), clears);
@@ -639,6 +744,8 @@ function guardsOf(cond: SyntaxNode | null, ctx: EngineCtx): Guard[] {
   if (e.type !== "binary_expression") return [];
   const op = operatorOf(e);
   if (op === "&&") return [...guardsOf(field(e, "left"), ctx), ...guardsOf(field(e, "right"), ctx)].filter(g => g.holds === "true");
+  // `if (n < 0 || n > MAX) return;`: where the condition is false BOTH operands are, so each one's false-arm bound holds
+  if (op === "||") return [...guardsOf(field(e, "left"), ctx), ...guardsOf(field(e, "right"), ctx)].filter(g => g.holds === "false");
   const l = field(e, "left"), r = field(e, "right");
   const ln = l?.type === "identifier" ? l.text : null, rn = r?.type === "identifier" ? r.text : null;
   const isBound = (n: SyntaxNode | null) => !!n && (n.type === "number_literal" || n.type === "sizeof_expression" || /^[A-Z_][A-Z0-9_]*$/.test(n.text)
@@ -859,7 +966,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     // sources that fill a buffer
     const slot = OUT_PARAM_SOURCES[api];
     if (slot !== undefined && slot > -9) {
-      const targets = slot >= 0 ? [args[slot]] : args.slice(-slot);
+      const targets = slot >= 0 ? [unwrapBufferArg(args[slot])] : args.slice(-slot);
       for (const t of targets) { const nm = rootName(t ?? null); if (nm) taintBuffer(nm, ALL, env); }
       if (api === "gets" && !opts.quiet) emit(ctx, "buffer-overflow", call, "stdin", "gets", "gets() reads an unbounded line into a fixed buffer — any input longer than the buffer overflows it (removed from C11); use fgets");
       // scanf("%s", buf): an unbounded %s conversion
@@ -868,6 +975,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (fmt && /%s|%\[/.test(fmt) && !opts.quiet) emit(ctx, "buffer-overflow", call, "input", api, `${api}("${fmt.slice(0, 20)}") reads a string with no field width into a fixed buffer — bound it (%99s) or use fgets`);
     }
     if (api === "getline" && args.length === 2 && args[1]) { const nm = rootName(args[1]); if (nm) taintBuffer(nm, ALL, env); } // std::getline(cin, s)
+
+    // out-parameter filled from another argument (ap_args_to_table(r, &GET), StreamCopier::copyToString(in, out))
+    const fill = FILL_OUT[api];
+    if (fill && args[fill[0]]) {
+      const src = fill[1].reduce((acc, i) => acc | (argM[i] ?? 0), 0);
+      const dest = rootName(unwrapBufferArg(args[fill[0]]));
+      if (dest && src) taintBuffer(dest, src, env);
+    }
 
     // copies: the destination takes the source's taint
     const from = COPY_INTO[api];
@@ -900,6 +1015,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     // command execution
     // WinExec(cmdLine, show) runs a command line, like system()
     if (/^(?:system|wsystem|popen|wpopen|WinExec)$/.test(api) && args[0]) fireOn(ctx, "command-injection", call, args[0], argM[0] ?? 0, api);
+    // apr_proc_create(&proc, program, args, env, attr, pool): the program (and, run through a shell, its arguments)
+    if (api === "apr_proc_create" && args[1]) fireOn(ctx, "command-injection", call, args[1], argM[1] ?? 0, api);
     // exec*(path, ...) / spawn*(mode, path, ...): a tainted program, or tainted text after a shell's -c / /c
     const progIdx = /^w?exec(?:l|lp|le|v|vp|ve|vpe)$/.test(api) ? 0 : /^w?spawn(?:l|lp|le|v|vp|ve|vpe)$/.test(api) ? 1 : -1;
     if (progIdx >= 0 && args[progIdx]) {
@@ -926,6 +1043,19 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       const when = model.args.whenArg;
       if (when && !new RegExp(when.pattern).test(args[when.index]?.text ?? "")) continue;
       for (const p of positions) if (args[p]) fireOn(ctx, model.rule as AstTaintCppId, call, args[p], argM[p] ?? 0, sinkLabel(model, api));
+    }
+    // Qt / POCO / Boost / Apache: a command, statement, path or address the call is given (by the receiver's declared class, or the written class)
+    {
+      const fnText = (field(call, "function")?.text ?? "").replace(/\s+/g, "");
+      if (/^(?:Poco::)?Process::launch$|^QProcess::(?:start|startDetached|execute)$|^(?:boost::)?process::system$/.test(fnText) && args[0]) fireOn(ctx, "command-injection", call, args[0], argM[0] ?? 0, fnText);
+      if (/^QNetworkRequest$|^QDesktopServices::openUrl$/.test(fnText) && args[0]) fireOn(ctx, "ssrf", call, args[0], argM[0] ?? 0, fnText);
+      if (recv) {
+        const root = receiverRoot(recv);
+        const cls = root ? declaredClassOf(root, call) : null;
+        if (cls) for (const [clsRe, methodRe, id, idx] of METHOD_SINKS) {
+          if (clsRe.test(cls) && methodRe.test(api) && args[idx]) fireOn(ctx, id, call, args[idx], argM[idx] ?? 0, `${cls}.${api}`);
+        }
+      }
     }
     // loading a library the caller names
     if (/^(?:dlopen|LoadLibrary|LoadLibraryEx)$/.test(api) && args[0]) fireOn(ctx, "eval-exec", call, args[0], argM[0] ?? 0, name);
@@ -1150,6 +1280,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
           const ma = env.get(a) ?? 0, mb = env.get(b) ?? 0;
           setVar(a, mb, env, false); setVar(b, ma, env, false);
         }
+        // an asynchronous read fills its buffer before the completion handler (a lambda argument) runs
+        if (/^async_/.test(name.split("::").pop() ?? "")) {
+          const slot0 = OUT_PARAM_SOURCES[baseApi(name)];
+          const buf = slot0 !== undefined && slot0 >= 0 ? rootName(unwrapBufferArg(args[slot0])) : null;
+          if (buf) taintBuffer(buf, ALL, env);
+        }
         const lam = fnNode?.type === "lambda_expression" ? fnNode : fnNode?.type === "identifier" ? ctx.lambdas.get(fnNode.text) : undefined;
         if (lam) walkLambda(lam, args.map(a => m(a, env)), env);
         for (const [i, a] of args.entries()) {
@@ -1205,6 +1341,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       case "pointer_expression": {
         walkExpr(field(e, "argument"), env);
         if (operatorOf(e) === "*" && field(e, "argument")?.type === "identifier") touchVar(field(e, "argument")!.text, e, env, true);
+        // *(base + i) / *(base - i): a read or write at an attacker-chosen offset from a pointer
+        const inner = operatorOf(e) === "*" ? field(e, "argument") : null;
+        const sum = inner?.type === "parenthesized_expression" ? named(inner)[0] : null;
+        if (sum?.type === "binary_expression" && /^[-+]$/.test(operatorOf(sum)) && !opts.quiet) {
+          const off = field(sum, "right");
+          if (off && off.type !== "number_literal") fireOn(ctx, "buffer-overflow", e, off, m(off, env), "pointer offset", SinkClass.CONTROL,
+            `Attacker-controlled offset '${off.text.slice(0, 40)}' is added to a pointer that is then dereferenced, with no bound check — it reads or writes outside the object`);
+        }
         return;
       }
       case "subscript_expression": case "field_expression": {
@@ -1212,6 +1356,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         if (e.type === "subscript_expression") for (const c of named(field(e, "indices"))) walkExpr(c, env);
         const base = field(e, "argument");
         if (base?.type === "identifier") touchVar(base.text, e, env, e.type === "subscript_expression" || e.text.includes("->"));
+        // tbl[i] on an array of known size with an attacker-chosen, unchecked index
+        if (e.type === "subscript_expression" && base?.type === "identifier" && ctx.capacity.has(base.text) && !opts.quiet) {
+          const idx = named(field(e, "indices"))[0];
+          if (idx && idx.type !== "number_literal" && idx.type !== "string_literal") fireOn(ctx, "buffer-overflow", e, idx, m(idx, env), `${base.text}[...]`, SinkClass.CONTROL,
+            `Attacker-controlled index '${idx.text.slice(0, 40)}' is used on '${base.text}' with no bound check — an out-of-range index reads or writes outside the array`);
+        }
         return;
       }
       case "binary_expression": {
@@ -1228,6 +1378,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         while (head?.type === "binary_expression" && /^(?:<<|>>)$/.test(operatorOf(head))) head = field(head, "left");
         const stream = head?.type === "identifier" && /stringstream$/.test(declaredClassOf(head.text, e) ?? "") ? head.text : null;
         if (stream && operatorOf(e) === "<<") { const v = m(field(e, "right"), env); if (v) taintBuffer(stream, v, env); }
+        // POCO Data: `session << "DELETE ... " + n, now;` builds a statement from the right operand (use(x) binds, so a call is judged by its own sink)
+        if (operatorOf(e) === "<<" && !opts.quiet) {
+          const left = field(e, "left");
+          const lroot = left?.type === "identifier" ? left.text : null;
+          const lcls = lroot ? declaredClassOf(lroot, e) : null;
+          const right = field(e, "right");
+          if (lcls && /^(?:Session|Statement)$/.test(lcls) && right && right.type !== "call_expression") fireOn(ctx, "sql-injection", e, right, m(right, env), `${lcls} <<`);
+        }
         if (stream && operatorOf(e) === ">>") { const nm = rootName(field(e, "right")); const v = groupMask(stream, env, ctx); if (nm && v) taintBuffer(nm, v, env); }
         return;
       }
@@ -1254,10 +1412,22 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       // "parameter" is a bare name the function already has, it is a constructor call with those arguments
       if (target?.type === "function_declarator") {
         const ps = named(field(target, "parameters"));
-        const argNames = ps.map(p => (named(p).length === 1 && named(p)[0].type === "type_identifier" && env.has(p.text) ? p.text : null));
+        const argNames = ps.map(p => {
+          const kids = named(p);
+          const id = kids[0];
+          // a bare name, or one subscripted (`req["X-U"]` reads as a type with an array declarator)
+          return id?.type === "type_identifier" && env.has(id.text) && kids.slice(1).every(k => /^abstract_/.test(k.type)) ? id.text : null;
+        });
         if (ps.length && argNames.every(Boolean)) {
           const am = argNames.reduce((acc, a) => acc | groupMask(a!, env, ctx), 0);
           env.set(nm, am);
+          // QFile f(p) / QLibrary lib(name) / HTTPClientSession s(host) / process::child c(cmd) / SQLite::Statement q(db, sql)
+          if (!opts.quiet) {
+            const cls = classOfTypeText(typeText);
+            for (const [re, id, idx] of CTOR_SINKS) {
+              if (re.test(cls) && argNames[idx]) { fireOn(ctx, id, d, ps[idx], groupMask(argNames[idx]!, env, ctx), typeText); break; }
+            }
+          }
           if (/(?:^|::)(?:i|o)?fstream$/.test(typeText) && !opts.quiet) fireOn(ctx, "path-traversal", d, ps[0], groupMask(argNames[0]!, env, ctx), typeText);
           // `boost::archive::text_iarchive ia(is);` (parsed the same way) over a stream holding request data
           if (INPUT_ARCHIVE_RE.test(typeText.replace(/<.*$/, "")) && (am & ALL) && !opts.quiet) {
@@ -1277,6 +1447,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (arr && v) setLen(nm, strLenOfName(v));
       walkExpr(v, env);
       env.set(nm, m(v, env));
+      // `struct mg_http_message *hm = (struct mg_http_message *) ev_data;`: an object of a request class holds what the client sent
+      if (v && INPUT_CLASSES.has(classOfTypeText(typeText))) env.set(nm, (env.get(nm) ?? 0) | ALL);
       if (v?.type === "lambda_expression") ctx.lambdas.set(nm, v);
       // `int *raw = up.get();` with up a unique_ptr: raw lives only as long as up holds its object
       if (v?.type === "call_expression" && callInfo(v).name === "get" && callInfo(v).recv?.type === "identifier" && isUniquePtr(callInfo(v).recv!.text, d)) {
@@ -1311,6 +1483,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       // std::ifstream f(path) / std::fstream f(path, mode)
       if (v?.type === "argument_list" && /(?:^|::)(?:i|o)?fstream$/.test(typeText) && named(v)[0] && !opts.quiet) {
         fireOn(ctx, "path-traversal", d, named(v)[0], m(named(v)[0], env), typeText);
+      }
+      // QFile f(path) / QLibrary lib(name) / HTTPClientSession s(host) / SQLite::Statement q(db, sql) / process::child c(cmd): the constructor acts on its argument
+      if (v?.type === "argument_list" && !opts.quiet) {
+        const cls = classOfTypeText(typeText);
+        for (const [re, id, idx] of CTOR_SINKS) {
+          const a = named(v)[idx];
+          if (re.test(cls) && a) { fireOn(ctx, id, d, a, m(a, env), typeText); break; }
+        }
       }
     }
   };
@@ -1351,6 +1531,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       const decl = field(lam, "declarator");
       const params = named(decl ? field(decl, "parameters") : null).filter(p => /parameter_declaration/.test(p.type));
       params.forEach((p, i) => { const nm = declaredName(field(p, "declarator")); if (nm) inner.set(nm, (sameForAll ? paramMasks[0] : paramMasks[i]) ?? 0); });
+      for (const nm of inputParamNames(params, "", lam)) inner.set(nm, ALL);
       walk(field(lam, "body"), inner);
     } finally {
       ctx.lambdaStack.delete(lam.id);
@@ -1749,9 +1930,13 @@ function buildSummaries(ctx: EngineCtx) {
   }
 }
 
+/** Functions registered as libcurl's write / header callback: their first parameter is the response bytes. */
+let curlCallbackNames: ReadonlySet<string> = new Set();
+
 function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
   crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
   MACROS = collectMacros(root);
+  curlCallbackNames = new Set([...content.matchAll(/CURLOPT_(?:WRITE|HEADER|READ)FUNCTION\s*,\s*&?\s*([A-Za-z_]\w*)/g)].map(mm => mm[1]));
   // every function under its own identity (two classes' `process` are two summaries and two bodies)
   const fns = new Map<string, LocalFn>();
   const byName = new Map<string, LocalFn[]>();
@@ -1770,10 +1955,53 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
   return ctx;
 }
 
+/** The last segment of a declared type, without qualifiers, pointers, references and template arguments: `const Poco::Net::HTTPServerRequest &` -> HTTPServerRequest. */
+function classOfTypeText(typeText: string): string {
+  return typeText.replace(/<[^<>]*(?:<[^<>]*>[^<>]*)*>/g, "").replace(/\b(?:const|struct|class|volatile|typename)\b|[&*\s]/g, "").split("::").pop() ?? "";
+}
+const STRINGISH_PARAM_RE = /(?:^|[\s:])(?:string|wstring|string_view|QString|QByteArray|QStringView)\b|\bchar\s*\*|\bchar\s*const\s*\*/;
+const NUMERIC_PARAM_RE = /\b(?:int|long|short|unsigned|size_t|bool|double|float|u?int\d+_t|qint\d+|quint\d+)\b/;
+
+/**
+ * Which parameters of a function / lambda are request data, from their declared types: a request object, a socket, a form or a text widget; the
+ * route arguments a framework hands after its request (Drogon: after the `HttpRequestPtr` and the callback); the `url` / `upload_data` of a
+ * libmicrohttpd handler; the first parameter of a libcurl write callback; a Qt message slot's text; a route lambda's string parameters (Crow, QHttpServer).
+ */
+function inputParamNames(params: SyntaxNode[], fnName: string, lam: SyntaxNode | null): string[] {
+  const info = params.map(p => ({ name: declaredName(field(p, "declarator")) ?? "", type: field(p, "type")?.text ?? "", full: p.text }));
+  const out: string[] = [];
+  const hasRequest = info.some(p => /HttpRequestPtr|HttpRequest\b/.test(p.type));
+  let seenRequest = false;
+  for (const [i, p] of info.entries()) {
+    if (!p.name) continue;
+    if (INPUT_CLASSES.has(classOfTypeText(p.type))) { out.push(p.name); seenRequest = seenRequest || /HttpRequestPtr|HttpRequest\b/.test(p.type); continue; }
+    // Drogon: handler(const HttpRequestPtr &req, std::function<void(const HttpResponsePtr &)> &&cb, std::string name): the trailing parameters are path values
+    if (hasRequest && seenRequest && STRINGISH_PARAM_RE.test(p.full) && !/function\s*</.test(p.full)) out.push(p.name);
+    if (info.some(q => /MHD_Connection/.test(q.type)) && /^(?:url|upload_data|method|version)$/.test(p.name)) out.push(p.name);
+    if (i === 0 && curlCallbackNames.has(fnName)) out.push(p.name);
+    if (/(?:Text|Binary)?Message(?:Received)?$|^on(?:Text|Binary|Message)/.test(fnName) && /QString|QByteArray/.test(p.type)) out.push(p.name);
+  }
+  // CROW_ROUTE(app, "/f/<string>")([](const std::string &name) {...}) / server.route("/f/<arg>", [](const QString &name) {...})
+  if (lam) {
+    const call = lam.parent?.type === "argument_list" ? lam.parent.parent : null;
+    const callee = call ? field(call, "function") : null;
+    const routeName = callee?.type === "call_expression" ? field(callee, "function")?.text : callee?.text;
+    if (routeName && /(?:^|[.:>-])(?:CROW_ROUTE|CROW_BP_ROUTE|route|registerHandler|addRoute)$/.test(routeName.replace(/\s+/g, ""))) {
+      for (const p of info) if (p.name && STRINGISH_PARAM_RE.test(p.full) && !NUMERIC_PARAM_RE.test(p.type) && !INPUT_CLASSES.has(classOfTypeText(p.type))) out.push(p.name);
+    }
+  }
+  return out;
+}
+
 /** Parameters that are input at a function's entry: main/wmain's argv, WinMain's command line. */
 function entryEnv(fn: LocalFn, seedEntry: boolean): Env {
   const env: Env = new Map();
   for (const p of fn.params) env.set(p.name, 0);
+  {
+    let d = field(fn.decl, "declarator");
+    while (d && d.type !== "function_declarator") d = field(d, "declarator");
+    for (const nm of inputParamNames(named(field(d, "parameters")).filter(p => /parameter_declaration/.test(p.type)), fn.name, null)) env.set(nm, ALL);
+  }
   if (/^(?:main|wmain|_tmain)$/.test(fn.name) && fn.params[1]) env.set(fn.params[1].name, ALL);
   if (/^(?:WinMain|wWinMain)$/.test(fn.name) && fn.params[2]) env.set(fn.params[2].name, ALL);
   if (seedEntry) for (const p of fn.params) if (p.name) env.set(p.name, ALL);

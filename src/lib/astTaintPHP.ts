@@ -373,7 +373,103 @@ const PHP_PASSTHROUGH = propagatorNames("php", "call-args");
 const PHP_DECODERS = propagatorNames("php", "decoder");
 const PHP_SECRET_NAME_RE = /secret|token|password|passwd|apikey|api_key|hmac|signature/i;
 
+/**
+ * Accessors of a request object, whichever framework it comes from: Laravel / Symfony / Slim / PSR-7, CodeIgniter 4, Yii, CakePHP, Phalcon,
+ * Magento, Laminas, Drupal. They are only sources on a RECEIVER that is a request (isRequestReceiverPHP): `->get()` alone is far too common.
+ * The sanitized getters (getInt, getAlpha, getDigits, getBoolean) are deliberately absent.
+ */
+const REQUEST_ACCESSORS_PHP = new Set([
+  "get", "post", "input", "query", "all", "param", "params", "getParam", "getParams", "getQuery", "getPost", "getPostValue", "getQueryParam", "getQueryParams",
+  "getBodyParam", "getBodyParams", "getParsedBody", "getData", "getCookie", "getCookieParams", "getCookies", "getHeader", "getHeaderLine", "getHeaders", "getServer",
+  "getServerParams", "getJSON", "getJson", "getJsonRawBody", "getRawBody", "getRawInput", "getContent", "getGet", "getGetPost", "getVar", "getPut", "getPatch",
+  "getFiles", "getUploadedFiles", "getAttribute", "getAttributes", "getPathInfo", "getRequestUri", "getQueryString", "getRequestString", "getBody", "getUserAgent",
+  "cookie", "header", "file", "json", "route", "bodyStr", "only", "except", "string", "str", "getFile", "getRequestParam", "getArgument", "getArguments",
+]);
+/** `$request->query->get('x')`, `->request->get`, `->cookies->get`, `->headers->get`, `->attributes->get`, `->server->get` (Symfony, Drupal, Yii's headers / cookies). */
+const REQUEST_BAGS_PHP = new Set(["query", "request", "cookies", "headers", "attributes", "files", "server"]);
+const REQUEST_BAG_METHODS_PHP = new Set(["get", "all", "getIterator", "keys", "getValue", "getString"]);
+/** CodeIgniter 3 `$this->input->get('x')` and Joomla `$app->input->get('x')` / `$jinput->getString('x')`. */
+const INPUT_OBJECT_METHODS_PHP = new Set([
+  "get", "post", "get_post", "post_get", "cookie", "server", "request_headers", "get_request_header", "raw_input_stream", "input_stream",
+  "getString", "getRaw", "getHtml", "getArray", "getVar", "getUsername", "getPath", "getBase64", "getStringArray",
+]);
+const INPUT_BAGS_PHP = new Set(["post", "get", "server", "cookie", "files", "json", "env", "request"]);
+const CI3_URI_METHODS_PHP = new Set(["segment", "rsegment", "uri_string", "ruri_string", "segment_array", "slash_segment", "assoc_to_uri"]);
+const LAMINAS_PARAMS_METHODS_PHP = new Set(["fromQuery", "fromPost", "fromRoute", "fromHeader", "fromFiles"]);
+/** Request properties read as arrays (CakePHP 2/3: `$this->request->query['f']`, `->data`, `->params`). */
+const REQUEST_PROP_RE_PHP = /(?:^|->)(?:_?request|req)->(?:query|data|params|post|get|cookies|files|server)$/;
+const REQUEST_CALL_NAMES_PHP = new Set(["getRequest", "getCurrentRequest", "request", "getMasterRequest", "getMainRequest", "getInput"]);
+
+/** Is `recv` a request: a typed parameter / `$request`, `->request`, `->getRequest()`, `Yii::$app->request`, `\Drupal::request()`, `request()`. */
+function isRequestReceiverPHP(recv: SyntaxNode | null | undefined, at: SyntaxNode): boolean {
+  if (!recv) return false;
+  if (recv.type === "variable_name") {
+    const name = variableBareName(recv);
+    if (!name) return false;
+    const type = paramTypeOfPHP(name, at);
+    if (type) return REQUEST_TYPE_RE_PHP.test(type);
+    if (REQUEST_VAR_NAME_RE_PHP.test(name)) return true;
+    // `$r = Yii::$app->request;` / `$in = $this->getRequest();`
+    const def = lastAssignmentPHP(name, at);
+    return !!def && def.type !== "variable_name" && isRequestReceiverPHP(def, at);
+  }
+  if (recv.type === "member_access_expression") return /^_?(?:request|req)$/.test(recv.childForFieldName("name")?.text ?? "");
+  if (recv.type === "member_call_expression" || recv.type === "scoped_call_expression" || recv.type === "function_call_expression") {
+    const nm = recv.type === "function_call_expression" ? recv.childForFieldName("function")?.text.replace(/^.*\\/, "") : recv.childForFieldName("name")?.text;
+    if (nm && REQUEST_CALL_NAMES_PHP.has(nm)) return true;
+    // service('request')
+    return recv.type === "function_call_expression" && nm === "service" && /['"]request['"]/.test(recv.text);
+  }
+  return false;
+}
+
+/**
+ * A call that returns what the client sent, through a framework's request API: the mask it carries (ALL, or ALL less the classes the call's own
+ * options already neutralise), or null when it is not one.
+ */
+function frameworkInputMaskPHP(node: SyntaxNode): number | null {
+  if (node.type !== "member_call_expression") return null;
+  const method = node.childForFieldName("name")?.text;
+  const recv = node.namedChildren[0];
+  if (!method || !recv) return null;
+  if (isRequestReceiverPHP(recv, node)) return REQUEST_ACCESSORS_PHP.has(method) ? ALL : null;
+  const recvName = recv.type === "member_access_expression" ? recv.childForFieldName("name")?.text ?? "" : "";
+  const recvBase = recv.type === "member_access_expression" ? recv.namedChildren[0] : null;
+  // $request->query->get('x')
+  if (REQUEST_BAGS_PHP.has(recvName) && REQUEST_BAG_METHODS_PHP.has(method) && isRequestReceiverPHP(recvBase, node)) return ALL;
+  // $this->input->get('x') (CodeIgniter 3, Joomla) and $app->input->post->get('x')
+  const isInputObj = recvName === "input" || (recv.type === "variable_name" && /^\$?(?:jinput|input)$/.test(recv.text))
+    || (INPUT_BAGS_PHP.has(recvName) && recvBase?.type === "member_access_expression" && recvBase.childForFieldName("name")?.text === "input");
+  if (isInputObj && INPUT_OBJECT_METHODS_PHP.has(method)) {
+    const args = argListOfPHP(node);
+    // CodeIgniter's get('x', TRUE) runs xss_clean; Joomla's getHtml filters markup
+    if (method === "getHtml" || /^TRUE$/i.test(args[1]?.text ?? "")) return ALL & ~SinkClass.XSS;
+    return ALL;
+  }
+  if (recvName === "uri" && CI3_URI_METHODS_PHP.has(method)) return ALL;
+  // Laminas: $this->params()->fromQuery('x')
+  if (recv.type === "member_call_expression" && recv.childForFieldName("name")?.text === "params" && LAMINAS_PARAMS_METHODS_PHP.has(method)) return ALL;
+  return null;
+}
+/** `JRequest::getVar('x')` / `Input::get('x')` / `Request::input('x')` (Joomla 2-3, Laravel facades). */
+function frameworkStaticInputPHP(node: SyntaxNode): boolean {
+  if (node.type !== "scoped_call_expression") return false;
+  const cls = (node.childForFieldName("scope")?.text ?? "").replace(/^.*\\/, "");
+  const method = node.childForFieldName("name")?.text ?? "";
+  if (cls === "JRequest") return /^(?:getVar|getString|get|getRaw|getArray|getHtml|getWord)$/.test(method);
+  if (cls === "Input" || cls === "Request") return /^(?:get|input|post|query|all|cookie|header|file|json|only|except|string)$/.test(method);
+  return false;
+}
+/** Functions that return client input without an argument naming a superglobal. */
+const INPUT_FUNCTIONS_PHP = new Set(["get_query_var", "getallheaders", "apache_request_headers", "filter_input_array"]);
+
 function isTaintSourceExprPHP(node: SyntaxNode): boolean {
+  // $this->request->query['f'] (CakePHP): a request property read through a subscript
+  if (node.type === "subscript_expression") {
+    const b = node.namedChildren[0];
+    if (b?.type === "member_access_expression" && REQUEST_PROP_RE_PHP.test(b.text.replace(/\s+/g, ""))) return true;
+  }
+  if (node.type === "member_access_expression" && REQUEST_PROP_RE_PHP.test(node.text.replace(/\s+/g, ""))) return true;
   if (node.type !== "subscript_expression") return false;
   const base = node.namedChildren[0];
   if (!base || base.type !== "variable_name") return false;
@@ -431,6 +527,8 @@ interface ParamShape {
 }
 interface LocalFunction {
   name: string;
+  /** Parameters the framework fills from the request: route / action arguments of a controller method, Slim's `$args`. */
+  sourceParams?: string[];
   paramShapes: ParamShape[];
   resourceIdParamNames: Set<string>;
   authMeta: FuncAuthMeta;
@@ -616,7 +714,9 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         }
       }
       // filter_input(...) -- itself a source call, regardless of args.
-      if (fnName === "filter_input") return ALL;
+      if (fnName === "filter_input" || (fnName && INPUT_FUNCTIONS_PHP.has(fnName))) return ALL;
+      // Laravel's request('name') helper returns the input value
+      if (fnName === "request" && args.length > 0) return ALL;
       // file_get_contents("php://input") -- reads the raw request body, attacker-controlled
       // regardless of args being a literal string.
       if (fnName === "file_get_contents" && /php:\/\/input/i.test(args[0]?.text ?? "")) return ALL;
@@ -637,6 +737,14 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       }
       return 0;
     }
+    if (node.type === "scoped_call_expression") {
+      if (frameworkStaticInputPHP(node)) return ALL;
+      const cls = (node.childForFieldName("scope")?.text ?? "").replace(/^.*\\/, "");
+      const method = node.childForFieldName("name")?.text ?? "";
+      const sargs = argListOfPHP(node);
+      const sclears = sanitizerClears("php", `${cls}::${method}`, sargs.map(a => a.text));
+      if (sclears !== null) return sargs[0] ? applySanitizer(taintMask(sargs[0], env), sclears) : 0;
+    }
     if (node.type === "member_call_expression") {
       const methodName = node.childForFieldName("name")?.text;
       if (methodName) {
@@ -644,8 +752,12 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
         const clears = sanitizerClears("php", calleeTextPHP(node) ?? methodName, args.map(a => a.text));
         // PDO::quote() returns a complete quoted literal, safe in any SQL position -- unlike an escaper,
         // whose output is only safe once placed inside quotes.
-        if (clears !== null) return args[0] ? (methodName === "quote" ? applyClears : applySanitizer)(taintMask(args[0], env), clears) : 0;
+        // quote() / qstr() / CodeIgniter's $this->db->escape() return a complete quoted literal, safe in any SQL position
+        const quotes = methodName === "quote" || methodName === "qstr" || methodName === "quoteName" || (methodName === "escape" && /->db$/.test((node.namedChildren[0]?.text ?? "").replace(/\s+/g, "")));
+        if (clears !== null) return args[0] ? (quotes ? applyClears : applySanitizer)(taintMask(args[0], env), clears) : 0;
       }
+      const fwMask = frameworkInputMaskPHP(node);
+      if (fwMask !== null) return fwMask;
       if (methodName && LARAVEL_REQUEST_METHODS.has(methodName) && isLaravelRequestReceiverPHP(node.namedChildren[0], node)) return ALL;
       if (methodName && TYPED_REQUEST_METHODS.has(methodName)) {
         const recv = node.namedChildren[0];
@@ -809,6 +921,43 @@ function paramShapesOf(paramList: SyntaxNode | undefined): ParamShape[] {
   return shapes;
 }
 
+/** Set while walking a WordPress add_shortcode callback: its return value is page HTML. */
+let inShortcodeCallbackPHP = false;
+/** `function ($request, $response, array $args)`: Slim route arguments (the third parameter). */
+function slimArgsParamPHP(names: readonly string[]): string[] {
+  return names.length >= 3 && names[2] === "args" && /^(?:response|res|resp|rsp)$/i.test(names[1]) ? ["args"] : [];
+}
+const CONTROLLER_BASE_RE_PHP = /\b(?:Controller|AbstractController|ControllerBase|CI_Controller|BaseController|ResourceController|AbstractActionController|AbstractRestfulController|Action|Resource|ApiController|RestController|Page)\b/;
+const NON_INPUT_PARAM_NAME_RE_PHP = /^(?:request|req|response|res|resp|rsp|em|db|conn|connection|logger|container|app|di|session|cache|config|form|view|next|handler|args|e|ex|exception|event)$/i;
+/** The parameters of a controller action that the framework binds from the route / query: untyped or string-typed, never a DI service or number. */
+function actionSourceParamsPHP(decl: SyntaxNode): string[] {
+  const list = decl.childForFieldName("parameters");
+  if (!list) return [];
+  const params = list.namedChildren.filter((p): p is SyntaxNode => !!p).map(p => ({
+    name: variableBareName(p.childForFieldName("name") as SyntaxNode) ?? "",
+    type: (p.childForFieldName("type")?.text ?? "").replace(/^\?/, ""),
+  })).filter(p => p.name);
+  const slim = slimArgsParamPHP(params.map(p => p.name));
+  if (decl.type !== "method_declaration") return slim;
+  let cls: SyntaxNode | null = decl.parent;
+  while (cls && cls.type !== "class_declaration") cls = cls.parent;
+  if (!cls) return slim;
+  const mods = decl.namedChildren.filter(c => c?.type === "visibility_modifier").map(c => c!.text);
+  if (mods.length > 0 && !mods.includes("public")) return slim;
+  const method = decl.childForFieldName("name")?.text ?? "";
+  if (/^_|^(?:before|after|initialize|onConstruct|boot|setUp|tearDown|index_?)$/i.test(method) && !/^actions?/i.test(method)) return slim;
+  const className = cls.childForFieldName("name")?.text ?? "";
+  const bases = cls.namedChildren.find(c => c?.type === "base_clause")?.text ?? "";
+  if (!/(?:Controller|Actions?)$/.test(className) && !CONTROLLER_BASE_RE_PHP.test(bases)) return slim;
+  const out = new Set(slim);
+  for (const p of params) {
+    if (NON_INPUT_PARAM_NAME_RE_PHP.test(p.name)) continue;
+    if (p.type && !/^(?:string|array|mixed)$/i.test(p.type)) continue;
+    out.add(p.name);
+  }
+  return [...out];
+}
+
 function extractFuncInfo(decl: SyntaxNode): LocalFunction | null {
   const nameNode = decl.childForFieldName("name");
   if (!nameNode) return null;
@@ -818,7 +967,7 @@ function extractFuncInfo(decl: SyntaxNode): LocalFunction | null {
   const verbTier: "read" | "write" = READ_NAME_RE.test(nameNode.text) ? "read" : "write";
   const body = decl.childForFieldName("body") ?? null;
   return {
-    name: nameNode.text, paramShapes, resourceIdParamNames, body,
+    name: nameNode.text, paramShapes, resourceIdParamNames, body, sourceParams: actionSourceParamsPHP(decl),
     authMeta: { hasResourceIdParam: resourceIdParamNames.size > 0, verbTier },
   };
 }
@@ -917,9 +1066,13 @@ function enclosingTypeNamePHP(n: SyntaxNode): string | null {
  */
 function collectLocalFunctions(root: SyntaxNode): Map<string, LocalFunction> {
   const functions = new Map<string, LocalFunction>();
+  // add_shortcode('tag', 'callback_name'): callback_name's ($atts, $content) are post-author input
+  const shortcodeCallbacks = new Set<string>();
+  if (root.text.includes("add_shortcode")) for (const m of root.text.matchAll(/add_shortcode\s*\(\s*['"][^'"]*['"]\s*,\s*['"]([A-Za-z_]\w*)['"]/g)) shortcodeCallbacks.add(m[1]);
   for (const decl of [...findAllNodes(root, "function_definition"), ...findAllNodes(root, "method_declaration")]) {
     const info = extractFuncInfo(decl);
     if (!info) continue;
+    if (decl.type === "function_definition" && shortcodeCallbacks.has(info.name)) info.sourceParams = [...(info.sourceParams ?? []), ...info.paramShapes.slice(0, 2).map(p => p.name)];
     const owner = decl.type === "method_declaration" ? enclosingTypeNamePHP(decl) : null;
     const ns = nsRegionAtPHP(decl).ns;
     const key = ((ns ? ns + "\\" : "") + (owner ? `${owner}::${info.name}` : info.name)).toLowerCase();
@@ -1042,6 +1195,25 @@ function recordGlobalStickyPHP(name: string | null, mask: number, ctx: EngineCtx
 // ── Sink checks ──────────────────────────────────────────────────────────
 
 const SQL_CALL_TAILS = new Set(["query", "exec", "prepare"]);
+/** Methods whose first argument is a whole SQL / DQL statement, on any receiver: Joomla, wpdb, Doctrine, Yii, CodeIgniter, Magento (Zend DB), Laminas. */
+const SQL_TEXT_METHODS_PHP = new Set([
+  "setQuery", "get_results", "get_var", "get_row", "get_col", "createQuery", "createNativeQuery", "createCommand", "findBySql", "executeQuery", "executeStatement",
+  "executeUpdate", "executeCacheQuery", "fetchAll", "fetchAssoc", "fetchArray", "fetchColumn", "fetchOne", "fetchAllAssociative", "fetchAssociative", "fetchNumeric",
+  "fetchAllNumeric", "fetchFirstColumn", "fetchAllKeyValue", "fetchPairs", "fetchRow", "fetchCol", "simpleQuery", "rawQuery", "selectRaw", "whereRaw", "orWhereRaw",
+  "havingRaw", "orderByRaw", "groupByRaw", "fromRaw", "joinRaw", "createSQLQuery", "getSqlQuery",
+]);
+/** Query-builder methods whose argument is a SQL fragment (a condition, an ordering, a grouping) -- a keyed array binds its values, a list entry is raw SQL. */
+const SQL_FRAGMENT_METHODS_PHP = new Set([
+  "where", "andWhere", "orWhere", "having", "andHaving", "orHaving", "orderBy", "addOrderBy", "order", "order_by", "group", "groupBy", "group_by", "addGroupBy",
+  "join", "innerJoin", "leftJoin", "rightJoin", "joinWhere", "where_in_raw", "or_where", "select", "addSelect", "from", "addExpression",
+]);
+/** Methods that read or serve a file by the path they are given: Yii sendFile, Symfony file(), Laravel response()->file() / download(). */
+const FILE_SERVE_METHODS_PHP = new Set(["sendFile", "file", "download", "attachment", "serveFile", "readFile"]);
+const STORAGE_METHODS_PHP = new Set(["get", "put", "delete", "download", "exists", "readStream", "path", "move", "copy", "putFile", "prepend", "append", "size", "lastModified",
+  "mimeType", "files", "allFiles", "directories", "makeDirectory", "deleteDirectory", "response", "url", "missing"]);
+const STATIC_NOT_A_MODEL_PHP = new Set(["Arr", "Str", "Collection", "Route", "Validator", "Cache", "Config", "Log", "Session", "Auth", "Gate", "Event", "Lang", "App", "Hash"]);
+const HTTP_VERBS_PHP = new Set(["get", "post", "put", "patch", "delete", "head", "options", "getAsync", "postAsync", "putAsync", "deleteAsync", "sendRequest"]);
+const REDIRECT_METHODS_PHP = new Set(["redirect", "_redirect", "setUrl", "toUrl", "away", "setRedirect", "redirectUrl", "setLocation"]);
 // Reads that also accept a URL (allow_url_fopen): a path or a request, depending on what precedes the value.
 /** Builtins that call a callable they are given, by the callable's argument position. */
 const CALLABLE_ARG_PHP = new Map<string, number>([
@@ -1071,7 +1243,12 @@ function leadingLiteralPHP(node: SyntaxNode): string {
   }
   return "";
 }
-const SQL_FUNCTIONS = new Set(["mysqli_query", "mysql_query", "pg_query"]);
+const SQL_FUNCTIONS = new Set(["mysqli_query", "mysql_query", "pg_query", "mysqli_multi_query", "mysqli_real_query", "mysqli_prepare", "mysqli_execute_query",
+  "pg_send_query", "db_query", "db_query_range", "sqlite_query", "odbc_exec", "sqlsrv_query", "mssql_query"]);
+/** The query text is the FIRST argument of these (the connection, when there is one, is optional / last); every other SQL function takes the link first. */
+const SQL_TEXT_FIRST_PHP = new Set(["mysql_query", "db_query", "db_query_range", "sqlite_query", "mssql_query"]);
+/** Fetch a URL on the server: WordPress's HTTP API (the wp_safe_* variants refuse internal addresses and are not listed). */
+const SSRF_FUNCTIONS_PHP = new Set(["wp_remote_get", "wp_remote_post", "wp_remote_head", "wp_remote_request", "get_headers", "simplexml_load_file"]);
 const CMD_FUNCTIONS = new Set(["shell_exec", "system", "passthru", "popen", "proc_open", "exec"]);
 // MongoDB-driver-shaped array-query calls. Deliberately overlaps with
 // BOLA_LOOKUP_TAILS's own "find"/"get" entries below -- the two checks run
@@ -1253,11 +1430,25 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
       "The upload is stored under the client's own file name — any extension (a .php the server then runs) and, unless cleaned, any directory; generate the name server-side and allowlist the type");
   }
 
-  if (SQL_FUNCTIONS.has(fnName)) {
+  if (SSRF_FUNCTIONS_PHP.has(fnName)) {
+    fireArg("ssrf", 0);
+  } else if (fnName === "response" && args[0] && args[0].type !== "array_creation_expression" && !/^\\?(?:json_encode|wp_json_encode)\s*\(/.test(args[0].text)) {
+    // Laravel response($content): served as text/html
+    fireArg("xss", 0);
+  } else if (fnName === "wp_redirect" || fnName === "redirect") {
+    // wp_redirect($url) / CodeIgniter / Laravel `redirect($url)`: the Location the client is sent to (an array is a route spec)
+    if (args[0]?.type !== "array_creation_expression") fireArg("open-redirect", 0);
+  } else if (fnName === "printf" || fnName === "vprintf") {
+    // printf("<b>%s</b>", $x): the values are written into the page
+    const m = argMasks.slice(1).reduce((a, x) => a | x, 0);
+    const cls = classOf("xss");
+    if (m & cls) emit(ctx, "xss", node, args[argMasks.findIndex((x, i) => i > 0 && (x & cls))].text, fnName);
+    else if (wasCleared(m, cls)) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+  } else if (SQL_FUNCTIONS.has(fnName)) {
     const culprit = escapedSqlInWrongPositionPHP(node, args, argMasks, taintMask, env);
     // mysqli_query($link, $sql) / pg_query([$conn,] $sql) / mysql_query($sql[, $link])
     if (culprit) emit(ctx, "sql-injection", node, culprit.text, fnName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
-    else fireArg("sql-injection", fnName === "mysql_query" || args.length < 2 ? 0 : 1);
+    else fireArg("sql-injection", SQL_TEXT_FIRST_PHP.has(fnName) || args.length < 2 ? 0 : 1);
   } else if (CMD_FUNCTIONS.has(fnName)) {
     // exec($cmd, &$output, &$code) / popen($cmd, $mode) / proc_open($cmd, $spec, &$pipes): the command only. proc_open
     // with an ARRAY runs the program directly (no shell parses it): a request value is then an argument, not a command.
@@ -1380,6 +1571,19 @@ function isTemplateEnginePHP(receiver: SyntaxNode | null | undefined, ctx: Engin
   return /(?:^|\\)(?:Twig\\Environment|Twig_Environment|Latte\\Engine|Smarty|Mustache_Engine|Mustache\\Engine|League\\Plates\\Engine)$/.test(cls);
 }
 
+/** A builder fragment is injectable when it is tainted text, or an array with a tainted entry that has no key (a raw condition) or a tainted key (a column). */
+function sqlFragmentTaintedPHP(arg: SyntaxNode, taintMask: TaintMaskFnPHP, env: Env): boolean {
+  const cls = classOf("sql-injection");
+  if (arg.type !== "array_creation_expression") return (taintMask(arg, env) & cls) !== 0;
+  for (const el of arg.namedChildren) {
+    if (el?.type !== "array_element_initializer") continue;
+    const parts = el.namedChildren.filter((c): c is SyntaxNode => !!c);
+    if (parts.length === 1 && (taintMask(parts[0], env) & cls)) return true;
+    if (parts.length === 2 && (taintMask(parts[0], env) & cls)) return true;
+  }
+  return false;
+}
+
 function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const methodName = node.childForFieldName("name")?.text;
   if (!methodName) return;
@@ -1419,6 +1623,31 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
       if (culprit) emit(ctx, "sql-injection", node, culprit.text, methodName, undefined, ESCAPED_SQL_DETAIL_PHP(culprit.text));
       else fireArg("sql-injection", 0);
     }
+  } else if (SQL_TEXT_METHODS_PHP.has(methodName) && args[0]) {
+    fireArg("sql-injection", 0);
+  } else if (SQL_FRAGMENT_METHODS_PHP.has(methodName) && args[0] && sqlFragmentTaintedPHP(args[0], taintMask, env)) {
+    emit(ctx, "sql-injection", node, args[0].text, methodName);
+  } else if (FILE_SERVE_METHODS_PHP.has(methodName) && args[0] && /response|this|controller|result|sendfile/i.test(node.namedChildren[0]?.text ?? "")) {
+    fireArg("path-traversal", 0);
+  } else if (methodName === "execute" && args[0] && args[0].type !== "array_creation_expression" && /conn|db|adapter|database|pdo/i.test(node.namedChildren[0]?.text ?? "")) {
+    // $connection->execute($sql) (CakePHP, Laminas): a statement; a prepared statement's ->execute() takes its bound values (an array)
+    fireArg("sql-injection", 0);
+  } else if (REDIRECT_METHODS_PHP.has(methodName) && args[0] && args[0].type !== "array_creation_expression"
+             || methodName === "to" && args[0] && /redirect/i.test(node.namedChildren[0]?.text ?? "")) {
+    fireArg("open-redirect", 0);
+  } else if (methodName === "withHeader" && /^['"]location['"]$/i.test(args[0]?.text ?? "") && args[1]) {
+    fireArg("open-redirect", 1);
+  } else if ((methodName === "setContent" || methodName === "setContents" || methodName === "setBody") && /response|result|raw/i.test(node.namedChildren[0]?.text ?? "") && args[0]) {
+    fireArg("xss", 0);
+  } else if (methodName === "write" && /getBody\(\)$/.test((node.namedChildren[0]?.text ?? "").replace(/\s+/g, "")) && args[0]
+             && !/^\\?(?:json_encode|wp_json_encode)\s*\(/.test(args[0].text)) {
+    // Slim / PSR-7 `$response->getBody()->write($html)`
+    fireArg("xss", 0);
+  } else if ((HTTP_VERBS_PHP.has(methodName) || methodName === "request" || methodName === "requestAsync") && args.length > 0
+             && (/(?:client|guzzle|http)\w*(?:\(\))?$/i.test((node.namedChildren[0]?.text ?? "").replace(/\s+/g, ""))
+                 || /Client$/.test(ctx.varTypes.get(variableBareName(node.namedChildren[0] as SyntaxNode) ?? "") ?? ""))) {
+    // Guzzle / Symfony HttpClient / Drupal::httpClient(): get($url) / request($method, $url)
+    fireArg("ssrf", methodName === "request" || methodName === "requestAsync" ? 1 : 0);
   } else if (PHP_LOG_METHODS.has(methodName) && /^\$?(?:this->)?_?(?:\w*logger|log)$/i.test(node.namedChildren[0]?.text ?? "")) {
     // $logger->warning("login failed for " . $user) (PSR-3 / Monolog): the message; a context array is structured
     fireArg("log-injection", 0);
@@ -1450,6 +1679,43 @@ function checkMemberCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintM
 function checkResponseFactorySinkPHP(node: SyntaxNode, ctx: EngineCtx, taintMask: TaintMaskFnPHP, env: Env) {
   const cls = node.namedChildren[0]?.text ?? "";
   const method = node.childForFieldName("name")?.text ?? "";
+  const sargs = argListOfPHP(node);
+  const cname = cls.replace(/^.*\\/, "");
+  const fire = (id: AstTaintPHPId, idx: number, label: string) => {
+    const a = sargs[idx];
+    if (!a) return;
+    const m = taintMask(a, env);
+    if (m & classOf(id)) emit(ctx, id, node, a.text, label);
+    else if (wasCleared(m, classOf(id))) ctx.suppressed?.push({ id, line: lineOf(node) });
+  };
+  // Phalcon models: Users::find("name = '$n'") / findFirst(["conditions" => "..."]) -- the string (or its conditions entry) is the WHERE clause
+  if (/Phalcon/.test(ctx.content) && /^(?:find|findFirst|count|sum|average|maximum|minimum)$/.test(method) && sargs[0]) {
+    const a = sargs[0];
+    if (a.type !== "array_creation_expression") fire("sql-injection", 0, `${cname}::${method}`);
+    else {
+      for (const el of a.namedChildren) {
+        const parts = el?.namedChildren.filter((c): c is SyntaxNode => !!c) ?? [];
+        const key = parts.length === 2 ? phpStringValue(parts[0]) : "0";
+        const val = parts[parts.length - 1];
+        if (val && (key === "conditions" || key === "0" || key === "order" || key === "group" || key === "having") && (taintMask(val, env) & classOf("sql-injection"))) {
+          emit(ctx, "sql-injection", node, val.text, `${cname}::${method}`);
+        }
+      }
+    }
+  }
+  // Drupal: Markup::create($html) / FormattableMarkup / SafeMarkup::format: the string is rendered as already-safe HTML
+  if (/^(?:Markup|SafeMarkup)$/.test(cname) && /^(?:create|format)$/.test(method)) fire("xss", 0, `${cname}::${method}`);
+  // Eloquent / Yii / Doctrine statics: User::whereRaw("..."), User::findBySql("..."), User::orderBy($col), DB::select("..."), DB::statement(...), DB::raw(...)
+  if (sargs[0] && !STATIC_NOT_A_MODEL_PHP.has(cname)) {
+    if (cname === "DB" || cname === "Db") {
+      if (/^(?:select|selectOne|statement|unprepared|raw|insert|update|delete|affectingStatement|scalar|cursor|selectFromWriteConnection)$/.test(method)) fire("sql-injection", 0, `${cname}::${method}`);
+    } else if (SQL_TEXT_METHODS_PHP.has(method)) fire("sql-injection", 0, `${cname}::${method}`);
+    else if (SQL_FRAGMENT_METHODS_PHP.has(method) && sqlFragmentTaintedPHP(sargs[0], taintMask, env)) emit(ctx, "sql-injection", node, sargs[0].text, `${cname}::${method}`);
+  }
+  if (cname === "Storage" && STORAGE_METHODS_PHP.has(method)) fire("path-traversal", 0, `Storage::${method}`);
+  // Laravel facades: Http::get($url), Redirect::to($url), DB::select("...")
+  if (cname === "Http" && /^(?:get|post|put|patch|delete|head)$/.test(method)) fire("ssrf", 0, `Http::${method}`);
+  if (cname === "Redirect" && /^(?:to|away|secure)$/.test(method)) fire("open-redirect", 0, `Redirect::${method}`);
   if (!/Response$/.test(cls)) return;
   const id: AstTaintPHPId | null = /^html$/i.test(method) ? "xss" : /^redirect(?:To)?$/i.test(method) ? "open-redirect" : null;
   const arg = argListOfPHP(node)[0];
@@ -2035,8 +2301,16 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       const use = fn.namedChildren.find(c => c?.type === "anonymous_function_use_clause");
       for (const name of variableNamesIn(use)) if (env.has(name)) fenv.set(name, env.get(name)!);
     }
-    for (const p of paramNamesOfPHP(fn)) fenv.set(p, 0);
-    walk(body, fenv);
+    const closureParams = paramNamesOfPHP(fn);
+    for (const p of closureParams) fenv.set(p, 0);
+    // add_shortcode('tag', function ($atts, $content) { ... }): the attributes are whatever the post author (any contributor) typed
+    const isShortcode = fn.parent?.parent?.parent?.type === "function_call_expression" && fn.parent.parent.parent.childForFieldName("function")?.text === "add_shortcode";
+    if (isShortcode) for (const p of closureParams.slice(0, 2)) fenv.set(p, ALL);
+    for (const p of slimArgsParamPHP(closureParams)) fenv.set(p, ALL);
+    // a shortcode callback RETURNS the HTML WordPress puts in the page
+    const wasShortcode = inShortcodeCallbackPHP;
+    inShortcodeCallbackPHP = isShortcode;
+    try { walk(body, fenv); } finally { inShortcodeCallbackPHP = wasShortcode; }
   };
 
   /** Bind every variable in an assignment/foreach target from `mask`. */
@@ -2269,6 +2543,11 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       case "return_statement": {
         for (const c of node.namedChildren) if (c) walk(c, env);
         const v = node.namedChildren[0];
+        if (v && inShortcodeCallbackPHP) {
+          const m = taintMask(v, env);
+          if (m & classOf("xss")) emit(ctx, "xss", node, v.text, "shortcode return");
+          else if (wasCleared(m, classOf("xss"))) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+        }
         if (v) opts.onReturn?.(v, env, taintMask);
         return true;
       }
@@ -2284,6 +2563,13 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       }
 
       case "expression_statement": {
+        // `<?= $x ?>`: a short echo tag is an echo whose statement follows the tag
+        if (node.parent && (() => { const sib = node.parent!.children; const i = sib.findIndex(c => c?.id === node.id); return i > 0 && sib[i - 1]?.type === "php_tag" && sib[i - 1]!.text === "<?="; })()) {
+          const e = node.namedChildren[0];
+          const m = e ? taintMask(e, env) : 0;
+          if (e && (m & classOf("xss"))) emit(ctx, "xss", node, e.text, "<?=");
+          else if (wasCleared(m, classOf("xss"))) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+        }
         for (const c of node.namedChildren) if (c) walk(c, env);
         return statementTerminatesPHP(node);
       }
@@ -2369,8 +2655,8 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
           // the exact same technique collectBolaFindings' own
           // object_creation_expression loop already uses below.
           if (right?.type === "object_creation_expression") {
-            const classNameNode = right.namedChildren.find(c => c && c.type === "name");
-            if (classNameNode) ctx.varTypes.set(varName, classNameNode.text);
+            const classNameNode = right.namedChildren.find(c => c && (c.type === "name" || c.type === "qualified_name"));
+            if (classNameNode) ctx.varTypes.set(varName, classNameNode.text.replace(/^.*\\/, ""));
           }
         }
       } else if (left?.type === "member_access_expression") {
@@ -2459,6 +2745,22 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
       }
     }
 
+    // `ls $dir` between backticks runs a shell command
+    if (node.type === "shell_command_expression") {
+      for (const part of node.namedChildren) {
+        if (part && (taintMask(part, env) & classOf("command-injection"))) { emit(ctx, "command-injection", node, part.text, "`...`"); break; }
+      }
+    }
+    // Drupal render arrays: ['#markup' => $html] / '#prefix' / '#suffix' / '#value' are output unescaped (Xss::filter admin tags only)
+    if (node.type === "array_element_initializer" && node.namedChildren.length === 2) {
+      const key = phpStringValue(node.namedChildren[0]!);
+      const val = node.namedChildren[1];
+      if (val && key && /^#(?:markup|prefix|suffix|value|children)$/.test(key)) {
+        const m = taintMask(val, env);
+        if (m & classOf("xss")) emit(ctx, "xss", node, val.text, key);
+        else if (wasCleared(m, classOf("xss"))) ctx.suppressed?.push({ id: "xss", line: lineOf(node) });
+      }
+    }
     if (node.type === "echo_statement" || node.type === "print_statement") {
       const cls = classOf("xss");
       let cleared = false;
@@ -2516,6 +2818,19 @@ function createWalkerPHP(ctx: EngineCtx, opts: WalkOptsPHP) {
     // made through the Reflection API (the object is then instantiated or invoked)
     // new SplFileObject($path) / new DirectoryIterator($path) / new FilesystemIterator / RecursiveDirectoryIterator / SplFileInfo-free
     // readers: constructing one OPENS (or lists) the path it is given
+    if (node.type === "object_creation_expression") {
+      const cname = node.namedChildren.find(c => c && (c.type === "name" || c.type === "qualified_name"))?.text.replace(/^.*\\/, "");
+      const a0 = argListOfPHP(node)[0];
+      // new SoapClient($wsdl) fetches it; new RedirectResponse($url) / TrustedRedirectResponse sends the client there; new Response($html) / HtmlResponse serves it as HTML
+      const sink: AstTaintPHPId | null = !a0 ? null : cname === "SoapClient" ? "ssrf"
+        : cname === "RedirectResponse" || cname === "TrustedRedirectResponse" ? "open-redirect"
+        : cname === "Response" || cname === "HtmlResponse" ? "xss" : null;
+      if (sink && a0) {
+        const m = taintMask(a0, env);
+        if (m & classOf(sink)) emit(ctx, sink, node, a0.text, `new ${cname}`);
+        else if (wasCleared(m, classOf(sink))) ctx.suppressed?.push({ id: sink, line: lineOf(node) });
+      }
+    }
     if (node.type === "object_creation_expression") {
       const fsCls = node.namedChildren.find(c => c && (c.type === "name" || c.type === "qualified_name"))?.text.replace(/^.*\\/, "");
       if (fsCls && /^(?:SplFileObject|SplTempFileObject|DirectoryIterator|FilesystemIterator|RecursiveDirectoryIterator|GlobIterator)$/.test(fsCls) && fsCls !== "SplTempFileObject") {
@@ -3165,6 +3480,7 @@ export function scanAstTaintPHP(
       for (const [, fn] of localFunctions) {
         if (!fn.body) continue;
         const env: Env = new Map();
+        for (const p of fn.sourceParams ?? []) env.set(p, ALL);
         walkForDeclarationsAndSinks(fn.body, env, ctx);
         if (structural) {
           collectBolaFindings([fn.body], fn.resourceIdParamNames, fn.authMeta, ctx);

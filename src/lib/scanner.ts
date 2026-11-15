@@ -8601,7 +8601,9 @@ export function analyzeFile(
   const vulnIndicatorsRaw: ScanIndicator[] = [
     ...regexVulnIndicatorsRaw.filter(i => !suppressedKeys.has(`${i.id}:${i.line ?? ""}`) && !(engineRan && ENGINE_OWNED_RULES.has(i.id))),
     // The JS engine reports every direct eval(...) as code execution; one whose argument is a variable last set to a literal is not.
-    ...astIndicators.filter(i => !(i.id === "eval-exec" && callHasOnlyConstantCommand(lines, (i.line ?? 1) - 1))),
+    // (a PHP double-quoted string with `$name` / `{$expr}` in it interpolates: `eval("return $c;")` is not constant)
+    ...astIndicators.filter(i => !(i.id === "eval-exec" && callHasOnlyConstantCommand(lines, (i.line ?? 1) - 1)
+      && !(phpTree && /"[^"\n]*(?:\$[A-Za-z_]|\{\$)[^"\n]*"/.test(lines[(i.line ?? 1) - 1] ?? "")))),
   ];
   const vulnIndicators = attachEvidence(vulnIndicatorsRaw, fileCategory);
 

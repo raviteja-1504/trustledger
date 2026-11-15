@@ -259,6 +259,13 @@ const REQUEST_INPUT_MEMBERS = new Set([
  * plus the common accessor names of request wrappers. */
 const RACK_REQUEST_MEMBERS = new Set([...REQUEST_INPUT_MEMBERS, "param", "post", "post_data", "cookie", "header", "get_header", "body_str", "file", "files", "[]"]);
 const RACK_REQUEST_NAME_RE = /^(?:req|request|rack_request)$/;
+/** The micro-frameworks this file is written for (their request / route-block conventions differ): Roda `r`, Cuba `req`, Grape `headers`. */
+const rbFile = { roda: false, cuba: false, grape: false };
+/** Rack env keys that carry what the client sent. */
+const RACK_ENV_INPUT_KEY_RE = /^(?:HTTP_[A-Z_]+|QUERY_STRING|PATH_INFO|REQUEST_URI|REQUEST_PATH|rack\.input|rack\.request\.\w+|action_dispatch\.request\.\w+)$/;
+const ROUTE_BLOCK_VERBS = new Set(["get", "post", "put", "patch", "delete", "head", "options", "link", "unlink"]);
+/** Roda's route-tree methods: the block parameters are the matched URL segments. */
+const RODA_MATCH_METHODS = new Set(["on", "is", "get", "post", "put", "patch", "delete", "head", "options", "root", "all"]);
 const RACK_REQUEST_CTOR_RE = /^(?:::)?(?:Rack::Request|ActionDispatch::Request|Sinatra::Request|Rack::Request::Helpers)\.new$/;
 const PARAMS_SOURCE = "params";
 const COOKIES_SOURCE = "cookies";
@@ -339,7 +346,7 @@ const FILE_CALL_RE = /^(?:::)?(?:File|IO|Dir|FileUtils)\.\w+[?!]?$/;
 const FILE_SAFE_METHODS = new Set(["basename", "extname", "dirname", "join", "expand_path", "absolute_path", "split", "fnmatch", "fnmatch?", "path", "pwd", "home", "tmpdir"]);
 const PATH_RECEIVER_SINKS = new Set(["read", "binread", "readlines", "write", "binwrite", "open", "each_line", "delete", "unlink", "rmtree", "children", "entries", "opendir"]);
 /** The HTTP client classes whose instances' request methods are sinks (models/sinks.ts rb:http-client). */
-const HTTP_CLIENT_CLASS_RE = /^(?:::)?(?:Patron::Session|Async::HTTP::Internet|HTTPClient|Net::HTTP|Faraday::Connection|HTTPX::Session)$/;
+const HTTP_CLIENT_CLASS_RE = /^(?:::)?(?:Patron::Session|Async::HTTP::Internet|HTTPClient|Net::HTTP|Faraday(?:::Connection)?|HTTPX::Session)$/;
 const DESERIAL_CALL_RE = /^(?:::)?(?:Marshal\.(?:load|restore)|YAML\.(?:load|unsafe_load|load_file|unsafe_load_file|load_stream)|Psych\.(?:load|unsafe_load|load_stream)|Oj\.(?:load|object_load)|JSON\.load|Ox\.load)$/;
 const SSTI_CALL_RE = /^(?:::)?(?:ERB\.new|Erubi::Engine\.new|Erubis::Eruby\.new|Haml::Engine\.new|Haml::Template\.new|Slim::Template\.new|Tilt::\w+\.new|Mustache\.render)$/;
 const REFLECTION_METHODS = new Set(["send", "public_send", "__send__", "try", "try!", "instance_variable_get", "instance_variable_set", "method", "public_method", "const_get", "class_variable_get", "class_variable_set"]);
@@ -557,6 +564,15 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
         const obj = node.childForFieldName("object");
         if (!obj) return 0;
         if (obj.type === "identifier" && obj.text === COOKIES_SOURCE && !env.has(COOKIES_SOURCE)) return ALL;
+        // env['HTTP_X'] / env['QUERY_STRING'] / env['rack.input'] (a Rack app's env, Grape's env); Grape's `headers['X']`
+        if (obj.type === "identifier") {
+          // (the `env` of a Rack app is a parameter, so it is in scope as an untainted name: judge it by its keys)
+          if (obj.text === "env") {
+            const key = named(node).filter(c => c.id !== obj.id).map(c => stringValue(c))[0];
+            if (key != null && RACK_ENV_INPUT_KEY_RE.test(key)) return ALL;
+          }
+          if (obj.text === "headers" && rbFile.grape && !env.has("headers")) return ALL;
+        }
         return mask(obj, env);
       }
       case "binary": {
@@ -723,14 +739,16 @@ function bindArgument(method: LocalMethod, call: SyntaxNode, index: number): Syn
 
 /** `req` / `request` as a parameter of the enclosing method, or a local bound to `Rack::Request.new(env)`. */
 function isRackRequestRb(id: SyntaxNode): boolean {
-  if (!RACK_REQUEST_NAME_RE.test(id.text)) return false;
+  // Roda's route block hands over `r`; Cuba's handlers read the `req` the framework provides
+  const framework = (rbFile.roda && (id.text === "r" || id.text === "request")) || (rbFile.cuba && id.text === "req");
+  if (!RACK_REQUEST_NAME_RE.test(id.text) && !framework) return false;
   const def = lastAssignment(id.text, id);
   if (def) return def.type === "call" && RACK_REQUEST_CTOR_RE.test(calleeTextRuby(def) ?? "");
   for (let cur = id.parent; cur; cur = cur.parent) {
     if (cur.type !== "method" && cur.type !== "singleton_method") continue;
-    return named(cur.childForFieldName("parameters")).some(p => (p.type === "identifier" ? p.text : p.childForFieldName("name")?.text) === id.text);
+    return framework || named(cur.childForFieldName("parameters")).some(p => (p.type === "identifier" ? p.text : p.childForFieldName("name")?.text) === id.text);
   }
-  return false;
+  return framework;
 }
 
 function enclosingClassName(n: SyntaxNode): string | null {
@@ -1390,6 +1408,10 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         if (t) ctx.varTypes.set(left.text, t); else ctx.varTypes.delete(left.text);
       }
       if (left?.type === "element_reference") { ctx.refine = (src, cls) => culpritOf(src, cls, env, mask, ctx); checkHeaderWrite(left, right, m, ctx, node); }
+      // response.body = "<b>#{x}</b>"
+      if (left?.type === "call" && right && methodNameOf(left) === "body" && /^(?:res|response|resp)$/.test(receiverOf(left)?.text ?? "") && looksHtmlRb(right)) {
+        fireOn(ctx, "xss", node, right, m, "response.body=");
+      }
       return false;
     }
     if (node.type === "operator_assignment") {
@@ -1423,16 +1445,36 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       // a bare `proc { }` / `lambda { }` / `Proc.new { }` builds a value; its block runs when the value is called
       if (block && deferredLiteral(node)) return false;
       if (block) {
-        const elementMask = recv && ITERATOR_METHODS.has(name) ? mask(recv, env) : 0;
+        let elementMask = recv && ITERATOR_METHODS.has(name) ? mask(recv, env) : 0;
         const firstArg = argsOf(node)[0];
-        const route = !!ctx.sinatra && !recv && SINATRA_ROUTE_VERBS.has(name) && !!firstArg && /^["']\//.test(firstArg.text);
+        const route = (!!ctx.sinatra && !recv && SINATRA_ROUTE_VERBS.has(name) && !!firstArg && /^["']\//.test(firstArg.text))
+          || (rbFile.roda && recv?.type === "identifier" && recv.text === "r" && RODA_MATCH_METHODS.has(name));
+        // the URL segments a route matched: Sinatra / Padrino `get '/a/:id' do |id|`, Roda `r.is String do |name|`, Cuba `on get, param('q') do |q|`
+        const hasBlockParams = !!block.childForFieldName("parameters");
+        if (hasBlockParams && (
+          (!recv && ROUTE_BLOCK_VERBS.has(name) && !!firstArg) ||
+          (rbFile.roda && recv?.type === "identifier" && recv.text === "r" && RODA_MATCH_METHODS.has(name)) ||
+          (rbFile.cuba && !recv && name === "on"))) elementMask = ALL;
         walkBlock(block, elementMask, env, route);
       }
       return statementTerminates(node);
     }
 
+    if (node.type === "array") {
+      const kids = named(node);
+      const status = kids[0]?.type === "integer" ? Number(kids[0].text) : 0;
+      if (kids.length === 3 && status >= 200 && status < 300 && kids[1].type === "hash" && kids[2].type === "array"
+          && !/json|text\/plain|javascript|xml|octet|csv/i.test(kids[1].text)) {
+        for (const body of named(kids[2])) if (looksHtmlRb(body)) fireOn(ctx, "xss", body, body, mask(body, env), "Rack response body");
+      }
+    }
     if (node.type === "element_reference") {
       const obj = node.childForFieldName("object");
+      // DB["SELECT * FROM t WHERE n = '#{x}'"]: Sequel runs a String index as SQL
+      if (obj && /^(?:DB|db|database|DATABASE|@db|@database)$/.test(obj.text)) {
+        const idx = named(node).find(c => c.id !== obj.id);
+        if (idx?.type === "string") fireOn(ctx, "sql-injection", node, idx, mask(idx, env), `${obj.text}[...]`);
+      }
       if (obj?.type === "identifier" && lambdaVars.has(obj.text)) {
         const argMasks = named(node).filter(c => c.id !== obj.id).map(a => mask(a, env));
         for (const c of named(node)) walk(c, env);
@@ -1560,6 +1602,12 @@ const resolveUnguarded = (n: SyntaxNode, cls: number, env: Env, mask: TaintMaskF
 
 /** A SQL argument in Rails' safe forms: keyword-hash / hash conditions, or a placeholder template with no
  * interpolation (`"name = ?"`, `["name = ?", x]`). Returns the node that actually holds SQL text, or null if none. */
+/** A string (or concatenation) with literal markup in it: written into a page it is HTML. */
+function looksHtmlRb(n: SyntaxNode): boolean {
+  if (n.type !== "string" && n.type !== "binary") return false;
+  return findAllNodes(n, "string_content").some(c => /<[A-Za-z!\/]/.test(c.text));
+}
+
 function sqlTextArg(call: SyntaxNode): SyntaxNode | null {
   const pos = positionalArgs(call);
   let first = pos[0] ?? null;
@@ -1632,6 +1680,8 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const sqlNode = sqlTextArg(node);
     if (sqlNode) {
       const m = mask(sqlNode, env);
+      // where("name LIKE ?", "%#{x}%"): the statement is fixed and the tainted values are bound -- the regex layer's interpolation match is wrong
+      if (!(m & ALL) && pos.slice(1).some(a => mask(a, env) !== 0)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
       const parts = decomposeString(resolveVar(sqlNode), ctx);
       const verdict = assessSqlInjection(parts, n => mask(n, env));
       if (verdict.verdict === "vulnerable" && verdict.escaped) {
@@ -1656,7 +1706,8 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
         // a single string runs through the shell; Kernel#open with "|cmd" runs a command too
         fireOn(ctx, "command-injection", node, first, mask(first, env), sinkName);
       }
-      // system("ls", dir) -- argv form, no shell: not command injection
+      // system("ls", dir) -- argv form, no shell: not command injection (the regex layer is told so)
+      else if (!viaShell && args.slice(1).some(a => (mask(a, env) & ALL) !== 0)) ctx.suppressed?.push({ id: "command-injection", line: lineOf(node) });
     }
   }
 
@@ -1715,7 +1766,7 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   }
 
   // ── Redirect ──
-  if (!recv && (name === "redirect_to" || name === "redirect")) {
+  if ((!recv || /^(?:r|res|response|resp)$/.test(recv.text)) && (name === "redirect_to" || name === "redirect")) {
     const explicitlyInternal = keywordArg(node, "allow_other_host")?.type === "false";
     const first = pos[0];
     const pairs = argsOf(node).filter(a => a.type === "pair" && !/^(?:status|notice|alert|flash|allow_other_host|turbolinks)$/.test(pairKeyText(a) ?? ""));
@@ -1743,6 +1794,15 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     const loadsFile = /^(?:require|require_relative|load|autoload|Kernel\.load|Kernel\.require)$/.test(name) || /(?:^|\.)(?:require|load)$/.test(sinkName);
     if (a) fireOn(ctx, loadsFile ? "file-inclusion" : "eval-exec", node, a, mask(a, env), sinkName,
       loadsFile ? `Request input '${a.text.slice(0, 60)}' picks the Ruby file that ${name} runs — load from a fixed allow-list of names` : undefined);
+  }
+  if (!recv && (name === "send" || name === "public_send" || name === "__send__") && pos[0]) {
+    fireOn(ctx, "unsafe-reflection", node, pos[0], mask(pos[0], env), name, `Request input '${pos[0].text.slice(0, 60)}' picks which method runs (${name}) — map input to an explicit allow-list`);
+  }
+  if (recv && /^(?:class_eval|module_eval|instance_eval)$/.test(name) && pos[0]) fireOn(ctx, "eval-exec", node, pos[0], mask(pos[0], env), `.${name}`);
+  // URI.parse(url).open / URI(url).read (open-uri): the URL is fetched
+  if (recv?.type === "call" && (name === "open" || name === "read") && /^(?:::)?URI(?:\.(?:parse|join))?$/.test(calleeTextRuby(recv) ?? "")) {
+    const u = positionalArgs(recv)[0];
+    if (u) fireOn(ctx, "ssrf", node, u, mask(u, env), `URI.${name}`);
   }
   if (recv && (REFLECTION_METHODS.has(name) || name === "define_method")) {
     const a = pos[0];
@@ -1772,6 +1832,14 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     }
   }
 
+  // erb params[:t] / haml / slim / liquid (Sinatra): a String argument is the template SOURCE (a symbol names a view file)
+  if (!recv && ctx.sinatra && /^(?:erb|haml|slim|liquid|erubis|mustache|markaby|builder|nokogiri)$/.test(name) && pos[0] && pos[0].type !== "simple_symbol" && pos[0].type !== "hash") {
+    fireOn(ctx, "ssti", node, pos[0], mask(pos[0], env), name);
+  }
+  // res.write "<b>#{x}</b>" (Cuba / Rack::Response / Hanami): the string is served as the HTML body
+  if (recv && /^(?:res|response|resp)$/.test(recv.text) && (name === "write" || name === "<<") && pos[0] && looksHtmlRb(pos[0])) {
+    fireOn(ctx, "xss", node, pos[0], mask(pos[0], env), `${recv.text}.${name}`);
+  }
   // ── XSS ──
   if (recv && (name === "html_safe" || name === "safe_concat")) {
     const src = name === "html_safe" ? recv : pos[0];
@@ -1836,7 +1904,7 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
 
 /** Relation methods with no Enumerable/Array namesake. */
 const UNAMBIGUOUS_SQL_METHODS = new Set([
-  "where", "rewhere", "order", "reorder", "having", "joins", "left_joins", "left_outer_joins", "update_all", "delete_all",
+  "with_sql", "with_sql_all", "with_sql_first", "with_sql_single_value", "where", "rewhere", "order", "reorder", "having", "joins", "left_joins", "left_outer_joins", "update_all", "delete_all",
   "destroy_all", "delete_by", "destroy_by", "find_by_sql", "count_by_sql", "find_or_create_by", "find_or_initialize_by", "reselect", "in_order_of",
 ]);
 /** A receiver chain rooted at a model class (`User`, `Admin::User`) or already a relation (`...where(...)...`). */
@@ -1933,7 +2001,33 @@ function constructedClass(right: SyntaxNode): string | null {
 
 // ── Same-file helpers (re-walk with seeded parameters) ────────────────────────────────────────────────────
 
+const JOB_ENQUEUE_METHODS = new Set(["perform_async", "perform_in", "perform_at", "perform_later", "perform_now"]);
+function seedJobPerform(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn): boolean {
+  const name = methodNameOf(node);
+  const recv = receiverOf(node);
+  if (!JOB_ENQUEUE_METHODS.has(name) || !recv || (recv.type !== "constant" && recv.type !== "scope_resolution")) return false;
+  const cls = recv.text.replace(/^::/, "");
+  const cands = (ctx.byName.get("perform") ?? []).filter(m => !m.singleton && !!m.className && (m.className === cls || m.className.endsWith(`::${cls}`)));
+  if (cands.length !== 1 || !cands[0].body) return true;
+  const callee = cands[0];
+  // perform_in(interval, *args) / perform_at(time, *args): the first argument is the delay
+  const pos = positionalArgs(node).slice(name === "perform_in" || name === "perform_at" ? 1 : 0);
+  const tainted = new Map<number, number>();
+  for (const p of callee.params) {
+    if (p.keyword) continue;
+    const a = pos[p.index];
+    const m = a ? mask(a, env) & ALL : 0;
+    if (m) tainted.set(p.index, m);
+  }
+  if (tainted.size === 0) return true;
+  const existing = ctx.seeded.get(methodId(callee)) ?? new Map<number, number>();
+  for (const [i, m] of tainted) existing.set(i, (existing.get(i) ?? 0) | m);
+  ctx.seeded.set(methodId(callee), existing);
+  return true;
+}
+
 function seedLocalMethod(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
+  if (seedJobPerform(node, env, ctx, mask)) return;
   // only a call that runs exactly one method of this file -- its own class's, or a receiver's known class's
   const resolved = resolveLocal(ctx, methodNameOf(node), receiverOf(node), node);
   const callee = resolved.length === 1 ? resolved[0] : null;
@@ -2217,6 +2311,9 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
     wholeHashVars: new Set(),
     sinatra: /^\s*require\s+["']sinatra["']|<\s*Sinatra::(?:Base|Application)\b/m.test(content),
   };
+  rbFile.roda = /<\s*Roda\b|\brequire\s+["']roda["']/.test(content);
+  rbFile.cuba = /\bCuba\b/.test(content);
+  rbFile.grape = /\bGrape::API\b/.test(content);
   buildSummaries(ctx);
   return ctx;
 }

@@ -58,7 +58,7 @@ export type AstTaintRustId =
   | "sql-injection" | "command-injection" | "argument-injection" | "path-traversal" | "ssrf" | "open-redirect" | "xss"
   | "ssti" | "eval-exec" | "redos" | "nosql-injection" | "ldap-injection" | "timing-attack" | "jwt-none-alg" | "weak-crypto"
   | "bola-missing-ownership-check" | "mass-assignment" | "insecure-deserialization" | "xpath-injection" | "header-injection"
-  | "log-injection" | "arithmetic-overflow" | "buffer-overflow" | "integer-overflow" | "insecure-file-upload";
+  | "log-injection" | "arithmetic-overflow" | "buffer-overflow" | "integer-overflow" | "insecure-file-upload" | "format-string";
 
 export interface AstTaintRustFinding {
   id:         AstTaintRustId;
@@ -84,6 +84,7 @@ const SEVERITY: Record<AstTaintRustId, "critical" | "high" | "medium"> = {
   "log-injection": "medium",
   // overflow panics in debug builds and silently wraps in release; out-of-bounds raw access in `unsafe` is UB
   "arithmetic-overflow": "medium", "buffer-overflow": "critical", "integer-overflow": "high", "insecure-file-upload": "high",
+  "format-string": "high",
 };
 const LABEL: Record<AstTaintRustId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "argument-injection": "Argument Injection",
@@ -95,7 +96,7 @@ const LABEL: Record<AstTaintRustId, string> = {
   "mass-assignment": "Mass Assignment", "insecure-deserialization": "Insecure Deserialization",
   "xpath-injection": "XPath Injection", "header-injection": "HTTP Header Injection", "log-injection": "Log Injection",
   "arithmetic-overflow": "Integer Overflow / Truncation", "buffer-overflow": "Out-of-Bounds Memory Access", "integer-overflow": "Uncontrolled Size",
-  "insecure-file-upload": "Unrestricted File Upload",
+  "insecure-file-upload": "Unrestricted File Upload", "format-string": "Format String",
 };
 export function astTaintRustSeverity(id: AstTaintRustId): "critical" | "high" | "medium" { return SEVERITY[id]; }
 export function astTaintRustLabel(id: AstTaintRustId): string { return LABEL[id]; }
@@ -277,7 +278,12 @@ function coreType(t: SyntaxNode | null): string {
 function outerType(t: SyntaxNode | null): string {
   if (!t) return "";
   if (t.type === "reference_type") return outerType(field(t, "type"));
-  if (t.type === "generic_type") return (pathText(field(t, "type")) ?? "").split("::").pop() ?? "";
+  if (t.type === "generic_type") {
+    const outer = (pathText(field(t, "type")) ?? "").split("::").pop() ?? "";
+    // Rocket's request body `Data<'r>` (a lifetime argument) is not actix's `web::Data<State>` application state
+    if (outer === "Data" && named(field(t, "type_arguments"))[0]?.type === "lifetime") return "RocketData";
+    return outer;
+  }
   return (pathText(t) ?? t.text).split("::").pop() ?? "";
 }
 const typeArg = (t: SyntaxNode | null): SyntaxNode | null => (t?.type === "generic_type" ? named(field(t, "type_arguments"))[0] ?? null : null);
@@ -289,6 +295,8 @@ const EXTRACTOR_TYPES = new Set([
   "Path", "Query", "Json", "Form", "RawQuery", "HeaderMap", "TypedHeader", "Bytes", "Multipart", "Payload", "RawForm",
   "OriginalUri", "Uri", "Host", "RawPathParams", "Cookies", "CookieJar", "MsgPack", "Protobuf", "Xml", "QsQuery", "WithRejection",
   "ValidatedJson", "ValidatedQuery", "LenientForm",
+  // Salvo's oapi extractors, Rocket's `Data<'r>` request body (see outerType)
+  "QueryParam", "PathParam", "HeaderParam", "CookieParam", "JsonBody", "FormBody", "RocketData",
 ]);
 /** Scalar payloads: attacker-chosen (CONTROL) but not an injection vector. */
 const SCALAR_TYPE_RE = /^(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|Uuid|NaiveDate|NaiveDateTime|DateTime|ObjectId)$/;
@@ -300,6 +308,8 @@ const REQUEST_INPUT_METHODS = new Set([
   "into_inner", "get_ref", "get_mut", "metadata", "into_parts",
   // lambda_http's RequestExt
   "payload", "query_string_parameters", "path_parameters", "query_string_parameters_ref", "path_parameters_ref", "raw_http_path",
+  // Salvo's Request
+  "parse_json", "parse_form", "parse_queries", "parse_headers", "parse_cookies", "parse_body", "extract", "form", "form_or_query", "queries", "first_file", "file",
 ]);
 const REQUEST_INPUT_HELPER_RE = /^(?:query|header|param|form|cookie|path_param)_(?:get|value|param|str|string|opt)$/;
 
@@ -370,7 +380,7 @@ function namesClientFile(arg: SyntaxNode, at: SyntaxNode): boolean {
 }
 const FS_TWO_ARGS =/(?:^|::)fs::(?:copy|rename|hard_link|soft_link|symlink)$/;
 const HTTP_CLIENT_TYPE_RE = /^(?:Client|ClientWithMiddleware|Agent|HttpClient)$/;
-const REDIRECT_FNS = /(?:^|::)Redirect::(?:to|temporary|permanent|see_other|found|moved)$/;
+const REDIRECT_FNS = /(?:^|::)Redirect::(?:to|new|temporary|permanent|see_other|other|found|moved)$|(?:^|::)warp::redirect(?:::\w+)?$/;
 const SECRET_NAME_RE = /secret|token|password|passwd|api_?key|apikey|hmac|signature|digest/i;
 const HTML_TAG_RE = /(?<![\w\]>])<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?\/?>/;
 const NON_ENTRY_FN_RE = /^(?:main|new|default|fmt|from|into|clone|eq|hash|drop|deref|try_from|from_str|as_ref|borrow|build|run|call|next|poll|serialize|deserialize|visit_\w+|test_\w+)$/;
@@ -426,6 +436,8 @@ interface EngineCtx {
   moduleName: string;
   /** Functions a warp filter chain hands its extracted values to (`.and_then(handler)`), by name. */
   warpHandlers: Set<string>;
+  /** variables holding a warp filter that extracts request data (see closureSourceMask) */
+  warpVars?: Set<string>;
   /** Request-body variable -> the struct it was deserialized into (mass assignment). */
   bodyTypes: Map<string, string>;
 }
@@ -689,6 +701,12 @@ function makeTaintMask(ctx: EngineCtx): TaintMaskFn {
     const argsMask = () => args.reduce((m, a) => m | mask(a, env), 0);
     const fullPath = path ? resolvePath(path, ctx) : null;
 
+    // hyper::body::to_bytes(req) / aggregate(req): the whole request, body included
+    if (fullPath && /(?:^|::)(?:to_bytes|aggregate)$/.test(fullPath) && args[0] && isRequestValue(args[0], env, ctx)) return ALL;
+    // the process's own input: command line and environment
+    if (fullPath && /(?:^|::)env::(?:args|args_os|var|var_os)$/.test(fullPath)) return ALL;
+    // `stdin().lines()` / `BufReader::new(stream).lines()`: what a peer or the terminal sent
+    if (recv && /^(?:lines|read_line|next_line)$/.test(name) && isNetworkReader(recv, ctx)) return ALL;
     // request accessors: req.headers() / req.match_info() / request.uri()
     // an app's own request type read through `query_get` / `header_value` / `form_param`-style helpers too
     if (recv && (REQUEST_INPUT_METHODS.has(name) || REQUEST_INPUT_HELPER_RE.test(name)) && isRequestValue(recv, env, ctx)) return ALL;
@@ -797,6 +815,49 @@ function isRequestValue(recv: SyntaxNode, env: Env, ctx: EngineCtx): boolean {
   const t = ctx.varTypes.get(base.text);
   // an app's own request wrapper (`ApiRequest`, `BenchmarkRequest`) read through the same accessor names
   return !!t && (REQUEST_TYPES.has(t) || /^[A-Z]\w*Request$/.test(t)) && !env.has(`!shadow:${base.text}`);
+}
+
+const NETWORK_TYPE_RE = /^(?:TcpStream|UdpSocket|UnixStream|UnixDatagram|TlsStream|SslStream|Stdin|StdinLock|ReadHalf|OwnedReadHalf|WebSocketStream|TcpListener)$/;
+/** Is `recv` something a peer or the terminal writes to: `stdin()`, a `TcpStream` / `UdpSocket` (by declared type or the usual names), or a reader wrapped around one? */
+function isNetworkReader(recv: SyntaxNode, ctx: EngineCtx): boolean {
+  const text = recv.text;
+  if (/\bstdin\s*\(\s*\)|\bStdin\b/.test(text)) return true;
+  for (const id of findAllNodes(recv, "identifier")) {
+    if (NETWORK_TYPE_RE.test(ctx.varTypes.get(id.text) ?? "")) return true;
+    if (/^(?:stream|socket|sock|tcp|udp|conn|peer)$/i.test(id.text)) return true;
+  }
+  return false;
+}
+/** Names a closure's typed parameters bring in as request data (`|req: Request<Body>|`, `|Query(q): Query<Q>|`), recording their types. */
+function typedClosureSources(cl: SyntaxNode, ctx: EngineCtx): string[] {
+  const out: string[] = [];
+  for (const p of named(field(cl, "parameters"))) {
+    if (p.type !== "parameter") continue;
+    const ty = field(p, "type");
+    const core = coreType(ty), outer = outerType(ty);
+    if (!REQUEST_TYPES.has(core) && !EXTRACTOR_TYPES.has(outer)) continue;
+    for (const id of findAllNodes(field(p, "pattern") ?? p, "identifier")) {
+      if (isTypePosition(id)) continue;
+      out.push(id.text);
+      ctx.varTypes.set(id.text, core);
+    }
+  }
+  return out;
+}
+const WARP_COMBINATORS = /^(?:and_then|map|then|and|or_else|map_async|untuple_one|recover)$/;
+/** The mask a closure argument's parameters carry: warp hands them what the filter chain before it extracted. */
+function closureSourceMask(call: SyntaxNode, ctx: EngineCtx, base: number): number {
+  const { name, recv } = callParts(call);
+  if (!recv || !WARP_COMBINATORS.test(name) || !/\bwarp::/.test(ctx.content)) return base;
+  if (!ctx.warpVars) {
+    ctx.warpVars = new Set<string>();
+    for (const l of findAllNodes(ctx.root, "let_declaration")) {
+      const p = field(l, "pattern"), v = field(l, "value");
+      if (p?.type === "identifier" && v && WARP_INPUT_RE.test(v.text)) ctx.warpVars.add(p.text);
+    }
+  }
+  const chain = recv.text;
+  return WARP_INPUT_RE.test(chain) || [...ctx.warpVars].some(v => new RegExp(`\\b${v}\\b`).test(chain)) ? ALL : base;
 }
 
 function closureParams(cl: SyntaxNode): string[] {
@@ -1375,8 +1436,10 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   const walkClosure = (cl: SyntaxNode, paramMask: number, env: Env) => {
     const params = closureParams(cl);
     const saved = new Map(params.map(p => [p, env.get(p)]));
+    const typedSources = typedClosureSources(cl, ctx);
     walkLoop(env, (e) => {
       for (const p of params) e.set(p, paramMask);
+      for (const p of typedSources) e.set(p, ALL);
       const body = field(cl, "body");
       if (body) walk(body, e);
       return false;
@@ -1458,6 +1521,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         const r = field(node, "right"), l = field(node, "left");
         if (r) walk(r, env);
         if (node.type === "compound_assignment_expr") checkNumericSinks(node, env, ctx, mask);
+        // `*buf.as_mut_ptr().offset(o) = 1`: the calls on the left are evaluated too (an attacker-chosen offset is a sink there)
+        if (l && l.type !== "identifier") for (const c of findAllNodes(l, "call_expression")) checkNumericSinks(c, env, ctx, mask);
         if (l && r) assignTo(l, mask(r, env), env, node.type === "compound_assignment_expr");
         return false;
       }
@@ -1541,6 +1606,14 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         for (const a of argNodes(node)) if (a.type !== "closure_expression") walk(a, env);
         checkCallSink(node, env, ctx, mask);
         checkNumericSinks(node, env, ctx, mask);
+        // `stream.read(&mut buf)` / `stdin().read_line(&mut s)` / `sock.recv_from(&mut buf)`: the buffer now holds what the peer sent
+        if (recv && /^(?:read|read_line|read_to_string|read_to_end|read_exact|read_buf|read_until|recv|recv_from|peek|peek_from|try_read|try_recv_from)$/.test(name) && isNetworkReader(recv, ctx)) {
+          for (const a of argNodes(node)) {
+            const inner = a.type === "reference_expression" ? named(a).filter(c => c.type !== "mutable_specifier").pop() : a;
+            const target = inner ? unwrapExpr(inner) : null;
+            if (target?.type === "identifier") assignTo(target, ALL, env, true);
+          }
+        }
         seedLocalFn(node, env, ctx, mask);
         checkCrossFileCall(node, env, ctx, mask);
         const kc = recv && name === "insert" && argNodes(node).length === 2 ? literalKeyCall(node) : null;
@@ -1558,8 +1631,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         argNodes(node).forEach((a, i) => {
           if (a.type === "closure_expression") {
             if (calleeIgnores(node, i)) return;               // a function of this file that never uses it
-            if (recv && LAZY_ADAPTORS.has(name) && lazyIteratorDropped(node)) return;   // an iterator nothing drives
-            walkClosure(a, elemMask(), env);
+            if (recv && LAZY_ADAPTORS.has(name) && lazyIteratorDropped(node) && closureSourceMask(node, ctx, 0) === 0) return;   // an iterator nothing drives (a warp filter is run by the server)
+            walkClosure(a, closureSourceMask(node, ctx, elemMask()), env);
           } else if (a.type === "identifier" && closureVars.has(a.text)) {
             if (calleeIgnores(node, i)) return;
             invokeClosure(closureVars.get(a.text)!, elemMask(), env);   // handed to something that may call it
@@ -1828,6 +1901,11 @@ function checkNumericSinks(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: Tai
     fire("buffer-overflow", memArg, `${recv ? "." : ""}${path ?? name}`, `Request-chosen integer '${memArg.text.slice(0, 60)}' sizes or offsets raw memory access (${path ?? name}) with no bounds check — undefined behaviour out of bounds; check it against the buffer's len() first`);
     return;
   }
+  // String::from_utf8_unchecked(request bytes) / mem::transmute(request bytes): invalid data is undefined behaviour, not an error
+  if (!recv && /^(?:from_utf8_unchecked|from_utf8_unchecked_mut|transmute|transmute_copy)$/.test(tail) && args[0] && insideUnsafe(node) && (m(args[0]) & ALL & ~SinkClass.CONTROL)) {
+    fire("buffer-overflow", args[0], tail, `Request bytes '${args[0].text.slice(0, 60)}' are reinterpreted by ${tail} with no validation — bytes that are not valid for the target type are undefined behaviour; use the checked conversion (from_utf8, try_from)`);
+    return;
+  }
   const alloc = (path && /(?:^|::)(?:Vec|String|VecDeque|HashMap|BytesMut)::with_capacity$/.test(path)) || (recv && /^(?:reserve|reserve_exact)$/.test(name)) ? args[0] : undefined;
   // sized by a value already in memory (`String::with_capacity(s.len())`, `s.len() + 16`, `s.len() * 2`): no amplification
   // beyond what was received
@@ -1969,6 +2047,28 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
         if ((m & SinkClass.CONTROL) && (m & SinkClass.CMD)) { emit(ctx, "argument-injection", node, culpritOf(a, ALL, env, mask).text, "Command.arg", `Request input '${a.text.slice(0, 60)}' is passed as an argument to ${program ?? "a command"} — no shell runs, but a value starting with '-' becomes an option; put "--" before it or validate it`); break; }
       }
     }
+  }
+
+  // ── FFI: libc / an `extern "C"` function the file declares ──
+  {
+    const ffiName = (path ?? name).split("::").pop() ?? name;
+    const viaLibc = !recv && (/^(?:libc|nix::libc|libc::unix|ffi|sys)::/.test(path ?? "") || (!(path ?? "").includes("::") && /extern\s*"C"/.test(ctx.content)));
+    if (viaLibc) {
+      const a = (i: number) => args[i];
+      if (/^(?:system|popen|execl|execlp|execle|execv|execvp|execve|WinExec)$/.test(ffiName) && a(0)) fireOn(ctx, "command-injection", node, a(0), mask(a(0), env), ffiName);
+      if (/^(?:strcpy|strcat|wcscpy|wcscat|sprintf|vsprintf)$/.test(ffiName) && a(1)) {
+        fireOn(ctx, "buffer-overflow", node, a(1), mask(a(1), env), ffiName, `Request input '${a(1).text.slice(0, 60)}' is copied by ${ffiName} with no length limit — input longer than the destination overflows it; use a bounded copy`);
+      }
+      if (/^(?:memcpy|memmove|memset|strncpy|strncat)$/.test(ffiName) && a(2)) {
+        fireOn(ctx, "buffer-overflow", node, a(2), mask(a(2), env), `${ffiName} length`, `Request-chosen length '${a(2).text.slice(0, 60)}' is passed to ${ffiName} with no bound check against the destination's size`);
+      }
+      if (/^(?:dlopen|LoadLibrary|LoadLibraryA|LoadLibraryW)$/.test(ffiName) && a(0)) fireOn(ctx, "eval-exec", node, a(0), mask(a(0), env), ffiName);
+      const fmtAt = /^(?:printf|vprintf|syslog)$/.test(ffiName) ? 0 : /^(?:fprintf|dprintf|vfprintf)$/.test(ffiName) ? 1 : /^snprintf$/.test(ffiName) ? 2 : /^sprintf$/.test(ffiName) ? 1 : -1;
+      if (fmtAt >= 0 && a(fmtAt)) fireOn(ctx, "format-string", node, a(fmtAt), mask(a(fmtAt), env), ffiName,
+        `Request input '${a(fmtAt).text.slice(0, 60)}' is used as the format string of ${ffiName} — %n writes memory and %s / %x read the stack; pass it as an argument ("%s", value)`);
+    }
+    // libloading: Library::new(path) loads and runs a library the request names
+    if (full && /(?:^|::)Library::(?:new|open)$/.test(full) && /libloading/.test(ctx.content) && args[0]) fireOn(ctx, "eval-exec", node, args[0], mask(args[0], env), "Library::new");
   }
 
   // ── Path ──
