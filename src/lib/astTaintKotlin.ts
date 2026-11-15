@@ -47,7 +47,7 @@ import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
+  ALL, FIXED_POINT_CAP, INJECTION, SHADOW, SinkClass, applyClears, applySanitizer, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv,
   crossFileTrace, displayFnName, dropOnPathDuplicates, factStepsFromTrace, mergeSinkFacts, walkIfChain, walkLoop, walkSwitch, walkTry,
   wasCleared, type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -1088,11 +1088,24 @@ function guardsOf(cond: SyntaxNode, root: SyntaxNode): Guard[] {
     if (guardName(r) && isLiteral(l)) return [{ name: guardName(r)!, holds }];
     return [];
   }
+  // n < 4096 / n <= MAX / 4096 > n: an upper bound -- no longer an arbitrary request-chosen size
+  if (c.type === "comparison_expression") {
+    const [l, r] = named(c);
+    const op = operatorOf(c);
+    const isCap = (b: SyntaxNode) => b.type === "integer_literal" || b.type === "long_literal" || /^[A-Z][A-Z0-9_]{2,}$/.test(b.text) || /\.(?:size|length)$/.test(b.text.replace(/\s+/g, ""));
+    if (l && r && guardName(l) && isCap(r)) return [{ name: guardName(l)!, holds: op === "<" || op === "<=" ? "true" : "false", clears: SinkClass.CONTROL }];
+    if (l && r && guardName(r) && isCap(l)) return [{ name: guardName(r)!, holds: op === ">" || op === ">=" ? "true" : "false", clears: SinkClass.CONTROL }];
+    return [];
+  }
   if (c.type === "check_expression") {
     const [l, r] = named(c);
     const op = operatorOf(c);
     const n = guardName(l);
     if (!n) return [];
+    // n in 0..4096 / n !in 0..MAX: the range's upper end bounds it
+    if ((op === "in" || op === "!in") && r?.type === "range_expression" && named(r).length === 2 && (named(r)[1].type === "integer_literal" || /^[A-Z][A-Z0-9_]{2,}$/.test(named(r)[1].text))) {
+      return [{ name: n, holds: op === "in" ? "true" : "false", clears: SinkClass.CONTROL }];
+    }
     if ((op === "in" || op === "!in") && r && isLiteralCollection(r, root)) return [{ name: n, holds: op === "in" ? "true" : "false" }];
     if ((op === "is" || op === "!is") && NUMERIC_TYPE_RE.test(c.text.split(/\s+/).pop() ?? "")) return [{ name: n, holds: op === "is" ? "true" : "false" }];
     return [];
@@ -1129,7 +1142,7 @@ function whenConditionIsLiteral(c: SyntaxNode, root: SyntaxNode): boolean {
 function guarded(env: Env, guards: readonly Guard[]): Env {
   if (guards.length === 0) return env;
   const e = cloneEnv(env);
-  applyGuards(e, guards.map(g => g.name));
+  for (const g of guards) applyGuards(e, [g.name], g.clears ?? undefined);
   return e;
 }
 
@@ -1669,6 +1682,9 @@ function insideLambdaOf(node: SyntaxNode, test: (call: SyntaxNode) => boolean): 
 }
 const insideUnsafeHtml = (n: SyntaxNode) => insideLambdaOf(n, c => callParts(c).name === "unsafe");
 
+const isSizeTaint = (m: number) => (m & SinkClass.CONTROL) !== 0 && (m & INJECTION) === 0;
+const SIZED_CTORS_KT = /^(?:ByteArray|ShortArray|IntArray|LongArray|FloatArray|DoubleArray|CharArray|BooleanArray|UByteArray|UIntArray|arrayOfNulls|ArrayList|ArrayDeque|HashMap|LinkedHashMap|HashSet|LinkedHashSet|StringBuilder|StringBuffer|ByteArrayOutputStream|MutableList|List|Array)$/;
+
 function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   ctx.refine = (src, cls) => culpritOf(src, cls, env, mask);
   const { name, recv } = callParts(node);
@@ -1709,6 +1725,14 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
     : recv && name === "appendWhere" && isBuilder ? [0] : null;
   if (androidSqlIdx) {
     for (const i of androidSqlIdx) if (pos[i] && fireOn(ctx, "sql-injection", node, pos[i], mask(pos[i], env), `${recvText}.${name}`)) break;
+  }
+
+  // ── allocation sizes: ByteArray(n) / IntArray(n) / ArrayList<T>(n) / StringBuilder(n) / "x".repeat(n) / ByteBuffer.allocate(n) ──
+  const sizeArg = (!recv && SIZED_CTORS_KT.test(name)) ? pos[0]
+    : (recv && /^(?:repeat|ensureCapacity|readNBytes)$/.test(name)) || (recv && /^(?:allocate|allocateDirect)$/.test(name) && /Buffer$/.test(recvText)) ? pos[0]
+    : undefined;
+  if (sizeArg && isSizeTaint(mask(sizeArg, env))) {
+    emit(ctx, "integer-overflow", node, sizeArg.text, ct, `Attacker-controlled size '${sizeArg.text.slice(0, 60)}' is handed to ${ct}(...) with no upper bound checked first — one request can exhaust the heap (or overflow to a negative size); cap it (if (n > MAX) ...) or use coerceAtMost`);
   }
 
   // ── WebView ──

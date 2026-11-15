@@ -2286,6 +2286,17 @@ function dropShapeDuplicates(findings: AstTaintRustFinding[]): AstTaintRustFindi
 function checkMacroSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMaskFn) {
   const name = macroName(node);
   if (name === "format") checkFormatShape(node, env, ctx, mask);
+  // vec![0u8; n] / vec![0u8; n * 4]: the count after the `;` is the allocation size (the token tree isn't expression-shaped, so read its identifiers)
+  if (name === "vec") {
+    const tt = named(node).find(c => c.type === "token_tree");
+    const semi = tt?.children.find(c => !!c && !c.isNamed && c.type === ";");
+    if (tt && semi) {
+      const countText = tt.text.slice(semi.startIndex - tt.startIndex + 1);
+      const hit = /\.(?:min|clamp|saturating_\w+)\s*\(|\.len\s*\(\s*\)/.test(countText) ? undefined
+        : findAllNodes(tt, "identifier").find(i => i.startIndex > semi.startIndex && numericTaint(mask(i, env)));
+      if (hit) emit(ctx, "integer-overflow", node, hit.text, "vec![_; n]", `Request-chosen size '${hit.text.slice(0, 60)}' sizes vec![_; n] with no upper bound — one request can allocate gigabytes (or overflow the multiplication); cap it first`);
+    }
+  }
   if (LOG_MACROS.has(name)) {
     const { args, captures } = macroArgs(node);
     for (const a of [...args, ...captures.values()]) if (fireOn(ctx, "log-injection", node, a, mask(a, env), `${name}!`)) break;

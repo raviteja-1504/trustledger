@@ -1546,6 +1546,8 @@ function makeTaintMaskGo(localFns: Map<string, LocalFn>, propagating: Propagatin
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
       if (op === "+" && left && right) return taintMask(left, env) | taintMask(right, env);
+      // `n * 4` / `n << 2`: still a size the request chose; comparisons and bitwise tests yield nothing
+      if (left && right && op && /^(?:\*|-|\/|%|<<|>>)$/.test(op)) return (taintMask(left, env) | taintMask(right, env)) & SinkClass.CONTROL;
       return 0;
     }
     if (node.type === "call_expression") return callMask(node, env);

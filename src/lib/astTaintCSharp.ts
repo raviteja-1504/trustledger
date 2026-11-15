@@ -62,7 +62,7 @@ import { recordEngineFailure } from "./taint/engineFailures";
 import type { Node as SyntaxNode, Language as LanguageT, Parser as ParserT } from "web-tree-sitter";
 import { ensureTreeSitterInit, rootIfShallowEnough } from "./treeSitterRuntime";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, INJECTION, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -91,7 +91,7 @@ export type AstTaintCSharpId =
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "header-injection" | "nosql-injection" | "mass-assignment" | "redos" | "timing-attack" | "jwt-none-alg"
   | "eval-exec" | "ssti" | "argument-injection"
-  | "bola-missing-ownership-check" | "log-injection";
+  | "bola-missing-ownership-check" | "log-injection" | "integer-overflow";
 
 export interface AstTaintCSharpFinding {
   id:         AstTaintCSharpId;
@@ -618,7 +618,7 @@ const SEVERITY: Record<AstTaintCSharpId, "critical" | "high" | "medium"> = {
   "ldap-injection": "critical", "xpath-injection": "critical", "open-redirect": "medium",
   "header-injection": "high", "nosql-injection": "critical", "mass-assignment": "high", "redos": "high",
   "timing-attack": "medium", "jwt-none-alg": "critical", "eval-exec": "critical", "ssti": "critical",
-  "argument-injection": "high", "log-injection": "medium",
+  "argument-injection": "high", "log-injection": "medium", "integer-overflow": "high",
   // Fallback only -- collectBolaFindings always passes a severityOverride
   // (medium for read endpoints, high for write/unknown).
   "bola-missing-ownership-check": "high",
@@ -631,7 +631,7 @@ const LABEL: Record<AstTaintCSharpId, string> = {
   "header-injection": "HTTP Header Injection", "nosql-injection": "NoSQL Injection", "mass-assignment": "Mass Assignment",
   "redos": "ReDoS — Regex DoS", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "eval-exec": "Arbitrary Code Execution", "ssti": "Server-Side Template Injection",
-  "argument-injection": "Argument Injection", "log-injection": "Log Injection",
+  "argument-injection": "Argument Injection", "log-injection": "Log Injection", "integer-overflow": "Uncontrolled Size",
   "bola-missing-ownership-check": "Broken Object Level Authorization (AST-verified)",
 };
 
@@ -666,6 +666,8 @@ interface LocalMethod {
   decl: SyntaxNode;
   paramShapes: ParamShape[];
   sourceParamNames: Set<string>;      // [FromRoute]/[FromQuery]/[FromBody]/[FromHeader]/[FromForm]
+  /** Bound number / bool / Guid parameters: no injection payload, but the request chose the value (an allocation size). */
+  numericParamNames: Set<string>;
   resourceIdParamNames: Set<string>;  // [FromRoute]/[FromQuery] subset -- "which resource" (BOLA)
   authMeta: MethodAuthMeta;
   body: SyntaxNode | null;
@@ -1013,6 +1015,8 @@ function makeTaintMaskCSharp(ctx: EngineCtx): TaintMaskFnCS {
       const left = node.childForFieldName("left");
       const right = node.childForFieldName("right");
       if ((op === "+" || op === "??") && left && right) return taintMask(left, env) | taintMask(right, env);
+      // `n * 4` / `n << 2`: still a size the request chose (and no longer a string); comparisons and bitwise tests yield nothing
+      if (left && right && op && /^(?:\*|-|\/|%|<<|>>)$/.test(op)) return (taintMask(left, env) | taintMask(right, env)) & SinkClass.CONTROL;
       return 0;
     }
     if (node.type === "conditional_expression") {
@@ -1302,6 +1306,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   const paramList = methodDecl.childForFieldName("parameters");
   const paramShapes: ParamShape[] = [];
   const sourceParamNames = new Set<string>();
+  const numericParamNames = new Set<string>();
   const resourceIdParamNames = new Set<string>();
   if (paramList) {
     let index = 0;
@@ -1321,6 +1326,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       // a number / bool / Guid / date cannot carry SQL, a command, a URL or a path: it is an id (BOLA, below), not injectable text
       const isNumericParam = NON_TEXT_PARAM_TYPE_RE_CS.test(param.childForFieldName("type")?.text.replace(/\s+/g, "") ?? "");
       if (hasExplicitSource && !isNumericParam) sourceParamNames.add(pName.text);
+      if (hasExplicitSource && isNumericParam) numericParamNames.add(pName.text);
       if ((attrs.includes("FromRoute") || attrs.includes("FromQuery")) && RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
       // Implicit ASP.NET Core model binding (see CSHARP_SIMPLE_TYPE_RE's
       // docblock): only applies to a genuinely unattributed simple-type
@@ -1331,6 +1337,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
         const typeText = param.childForFieldName("type")?.text;
         if (typeText && (CSHARP_SIMPLE_TYPE_RE.test(typeText) || isBoundComplexTypeCS(typeText))) {
           if (!isNumericParam) sourceParamNames.add(pName.text);
+          else numericParamNames.add(pName.text);
           if (RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
         }
       }
@@ -1340,7 +1347,7 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
   const body = methodDecl.childForFieldName("body") ?? methodDecl.namedChildren.find(c => c?.type === "arrow_expression_clause") ?? null;
   return {
     name: nameNode.text, key: nameNode.text, isStatic: modifiersOf(methodDecl).includes("static"), decl: methodDecl,
-    paramShapes, sourceParamNames, resourceIdParamNames, authMeta, body: body ?? null,
+    paramShapes, sourceParamNames, numericParamNames, resourceIdParamNames, authMeta, body: body ?? null,
   };
 }
 
@@ -1682,6 +1689,12 @@ function checkCallSink(
   const owner = parts.length >= 2 ? parts[parts.length - 2] : "";
   const sinkModel = sinkModelFor("cs", owner ? `${owner}.${tail}` : tail);
   const argMasks = args.map(a => taintMask(a, env));
+  // ArrayPool.Shared.Rent(n) / GC.AllocateUninitializedArray<T>(n) / Array.CreateInstance(T, n) / Enumerable.Repeat(x, n) / s.PadLeft(n)
+  const sizeAtCS = /^(?:Rent|AllocateUninitializedArray|AllocateArray|PadLeft|PadRight)$/.test(tail) ? 0
+    : (tail === "CreateInstance" && owner === "Array") || (tail === "Repeat" && owner === "Enumerable") || (tail === "Resize" && owner === "Array") ? 1 : -1;
+  if (sizeAtCS >= 0 && args[sizeAtCS] && isSizeTaint(argMasks[sizeAtCS])) {
+    emit(ctx, "integer-overflow", node, args[sizeAtCS].text, text, undefined, sizeDetailCS(args[sizeAtCS].text, `${text}(...)`));
+  }
   const combined = argMasks.reduce((m, x) => m | x, 0);
   const firstIdx = argMasks.findIndex(m => (m & ALL) !== 0);
   const sourceExpr = firstIdx >= 0 ? args[firstIdx].text : text;
@@ -1860,12 +1873,23 @@ function checkProcessArgsCS(
 
 /** `new ClassName(taintedArg)` -- the constructor-call-itself-is-the-sink
  * shape, mirroring astTaintGo.ts's checkNewExpressionSink. */
+const isSizeTaint = (m: number) => (m & SinkClass.CONTROL) !== 0 && (m & INJECTION) === 0;
+/** What a request-chosen size does when it reaches an allocator. */
+function sizeDetailCS(src: string, sink: string): string {
+  return `Attacker-controlled size '${src.slice(0, 60)}' is handed to ${sink} with no upper bound checked first — one request can exhaust memory (or overflow to a negative size); cap it (if (n > Max) ...) or use Math.Min`;
+}
+
 function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS) {
   const typeNode = node.childForFieldName("type");
   const className = typeNode ? stripGenerics(typeNode.text).split(".").pop() ?? null : null;
   if (!className) return;
   const args = argListOfCSharp(node);
   const argMasks = args.map(a => taintMask(a, env));
+  // new List<T>(n) / new StringBuilder(n) / new MemoryStream(n) / new string('x', n): the request picks the allocation size
+  const sizeIdxNew = /^(?:List|Dictionary|HashSet|Queue|Stack|StringBuilder|MemoryStream|ArrayList|SortedSet|BitArray)$/.test(className) ? 0 : className === "string" || className === "String" ? 1 : -1;
+  if (sizeIdxNew >= 0 && args[sizeIdxNew] && isSizeTaint(argMasks[sizeIdxNew])) {
+    emit(ctx, "integer-overflow", node, args[sizeIdxNew].text, `new ${className}`, undefined, sizeDetailCS(args[sizeIdxNew].text, `new ${className}(...)`));
+  }
   // command text built only from constants: the regex layer's "input near a query" heuristic is wrong here
   if (CS_SQL_COMMAND_TYPES.has(className) && args[0] && provenConstantCS(args[0], node)) ctx.suppressed?.push({ id: "sql-injection", line: lineOf(node) });
   if (ctx.proof && CS_SQL_COMMAND_TYPES.has(className) && args[0] && !(argMasks[0] & ALL)) recordProofCS(ctx, "sql-injection", node, [args[0]]);
@@ -2135,6 +2159,14 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       if (!l || !r) return [];
       if (op === "&&") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "true");
       if (op === "||") return [...guardsOfConditionCS(l, root), ...guardsOfConditionCS(r, root)].filter(g => g.holds === "false");
+      // n < 4096 / n <= MAX / 4096 > n: an upper bound -- no longer an arbitrary request-chosen size
+      if (op === "<" || op === "<=" || op === ">" || op === ">=") {
+        const isCap = (b: SyntaxNode) => b.type === "integer_literal" || /^[A-Z][A-Z0-9_]{2,}$/.test(b.text) || /\.(?:Count|Length)$/.test(b.text);
+        const ln = guardedIdentifierCS(l), rn = guardedIdentifierCS(r);
+        if (ln && isCap(r)) return [{ name: ln, holds: op === "<" || op === "<=" ? "true" : "false", clears: SinkClass.CONTROL }];
+        if (rn && isCap(l)) return [{ name: rn, holds: op === ">" || op === ">=" ? "true" : "false", clears: SinkClass.CONTROL }];
+        return [];
+      }
       if (op === "==" || op === "!=") {
         const holdsWhenEqual: "true" | "false" = op === "==" ? "true" : "false";
         // `parsed != null` after `parsed = int.Parse(data)` (in a try whose catch leaves it null): data is a number
@@ -2723,6 +2755,13 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
     }
     if (node.type === "object_creation_expression") {
       checkNewExpressionSink(node, env, ctx, taintMask);
+    }
+    // new byte[n] / new int[n, m]: the rank specifier is the size
+    if (node.type === "array_creation_expression") {
+      for (const rank of node.descendantsOfType("array_rank_specifier")) {
+        const dim = rank?.namedChildren.find(c => c && isSizeTaint(taintMask(c, env)));
+        if (dim) { emit(ctx, "integer-overflow", node, dim.text, "new array", undefined, sizeDetailCS(dim.text, "an array allocation")); break; }
+      }
     }
 
     for (const child of node.namedChildren) if (child) walk(child, env);
@@ -3398,6 +3437,7 @@ export function scanAstTaintCSharp(
         if (!method.body) continue;
         const env: Env = new Map();
         method.sourceParamNames.forEach(p => env.set(p, ALL));
+        method.numericParamNames.forEach(p => { if (!env.has(p)) env.set(p, SinkClass.CONTROL); });
         ctx.sourceMembers?.forEach(p => { if (!env.has(p)) env.set(p, ALL); });
         enterMethodCS(ctx, method);
         walkForDeclarationsAndSinks(method.body, env, ctx);

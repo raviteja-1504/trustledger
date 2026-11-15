@@ -59,6 +59,8 @@ export const INDICATOR_CWE_MAP: Record<string, CweEntry> = {
   "ssti":                       { id: "CWE-1336", title: "Template Engine Injection" },
   "xpath-injection":            { id: "CWE-643",  title: "XPath Injection" },
   "csrf-protection-disabled":   { id: "CWE-352",  title: "Cross-Site Request Forgery" },
+  "authentication-disabled":    { id: "CWE-306",  title: "Missing Authentication for Critical Function" },
+  "hardcoded-credential-check": { id: "CWE-798",  title: "Use of Hard-coded Credentials" },
   "pii-in-logs":                { id: "CWE-532",  title: "Insertion of Sensitive Information into Log File" },
   "mass-assignment":            { id: "CWE-915",  title: "Improperly Controlled Modification of Object Attributes" },
   "jwt-none-alg":                { id: "CWE-347",  title: "Improper Verification of Cryptographic Signature" },

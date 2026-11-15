@@ -45,7 +45,7 @@ import { recordEngineFailure } from "./taint/engineFailures";
 import { parse } from "java-parser";
 import type { CstNode, IToken, CstElement } from "java-parser";
 import {
-  ALL, FIXED_POINT_CAP, SHADOW, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
+  ALL, FIXED_POINT_CAP, INJECTION, SHADOW, SinkClass, applyClears, applyGuards, buildBackwardTraceGeneric, classOf, cloneEnv, walkIfChain, walkLoop, walkSwitch, walkTry, wasCleared,
   mergeSinkFacts, crossFileTrace, displayFnName, factStepsFromTrace, dropOnPathDuplicates, splitCallArgs,
   type Branch, type Guard, type ParamSinkFact, type SuppressedSink, type TaintEnv, type TraceResolver, type TraceStep,
 } from "./taint/taintCore";
@@ -61,7 +61,7 @@ export type AstTaintJavaId =
   | "open-redirect" | "insecure-deserialization" | "ldap-injection" | "xpath-injection"
   | "bola-missing-ownership-check"
   | "header-injection" | "redos" | "ssti" | "mass-assignment" | "timing-attack" | "jwt-none-alg" | "argument-injection"
-  | "weak-crypto" | "eval-exec" | "nosql-injection" | "trust-boundary" | "log-injection" | "xxe";
+  | "weak-crypto" | "eval-exec" | "nosql-injection" | "trust-boundary" | "log-injection" | "xxe" | "integer-overflow";
 
 export interface AstTaintJavaFinding {
   id:         AstTaintJavaId;
@@ -576,7 +576,7 @@ const SEVERITY: Record<AstTaintJavaId, "critical" | "high" | "medium"> = {
   "bola-missing-ownership-check": "high",
   "header-injection": "high", "redos": "high", "ssti": "critical", "mass-assignment": "high", "timing-attack": "medium",
   "jwt-none-alg": "critical", "weak-crypto": "high", "eval-exec": "critical", "nosql-injection": "critical",
-  "argument-injection": "high", "trust-boundary": "medium", "log-injection": "medium", "xxe": "critical",
+  "argument-injection": "high", "trust-boundary": "medium", "log-injection": "medium", "xxe": "critical", "integer-overflow": "high",
 };
 const LABEL: Record<AstTaintJavaId, string> = {
   "sql-injection": "SQL Injection", "command-injection": "Command Injection", "xss": "Reflected XSS",
@@ -588,7 +588,7 @@ const LABEL: Record<AstTaintJavaId, string> = {
   "mass-assignment": "Mass Assignment", "timing-attack": "Timing Attack", "jwt-none-alg": "JWT Signature Not Verified",
   "weak-crypto": "Weak Cryptography", "eval-exec": "Arbitrary Code Execution", "nosql-injection": "NoSQL Injection",
   "argument-injection": "Argument Injection", "trust-boundary": "Trust Boundary Violation", "log-injection": "Log Injection",
-  "xxe": "XML External Entity (XXE)",
+  "xxe": "XML External Entity (XXE)", "integer-overflow": "Uncontrolled Size",
 };
 
 // lowercase tag names only, and not glued to an identifier: `Map<String, Object>` is a generic, not markup
@@ -1147,7 +1147,7 @@ function walkPrimaryChain(
       // re-tainted by one of those in this same call. Still reports the call
       // (onCall) for sink-matching/seeding consistency, but skips every
       // taint-increasing branch below.
-      const clears = sanitizerClears("java", calleeName || tail) ?? (ctx.htmlEscapers.has(tail) ? classOf("xss") : null);
+      const clears = sanitizerClears("java", calleeName || tail, args.map(a => tokensText(a))) ?? (ctx.htmlEscapers.has(tail) ? classOf("xss") : null);
       if (clears !== null) {
         chainTaint = applyClears(chainTaintBefore | anyArgMask, clears);
         onCall?.({ calleeName, tail, rootVar, args, chainTaintBefore, node: suffix, isNewURL, isNewOf: isNewExprOf, receiverName: receiverOf(), prefix });
@@ -1365,7 +1365,10 @@ function taintMask(node: CstNode, env: Env, ctx: EngineCtx): number {
       // chain). Only a present, non-"+" operator (comparison, instanceof,
       // bitwise) should block propagation -- no operator at all means this
       // is just a wrapper and MUST still recurse into its one operand.
-      if (ops.length > 0 && !ops.some(t => t.image === "+")) return 0;
+      // arithmetic (`n * 4`, `n << 2`, `n - 1`) keeps only "the request chose this number"; a comparison / bitwise / instanceof yields nothing
+      if (ops.length > 0 && !ops.some(t => t.image === "+")) {
+        return ops.every(t => /^(?:\*|-|\/|%|<<|>>|>>>)$/.test(t.image)) ? operands.reduce((m, o) => m | (taintMask(o, env, ctx) & SinkClass.CONTROL), 0) : 0;
+      }
       return operands.reduce((m, o) => m | taintMask(o, env, ctx), 0);
     }
     case "literal":
@@ -1876,6 +1879,13 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     if (ctx.proof && !(mask & ALL)) recordProofJava(id, present.map(i => args[i]), node, ctx);
   };
 
+  // ByteBuffer.allocate(n) / "x".repeat(n) / Arrays.copyOf(a, n) / Collections.nCopies(n, x) / Array.newInstance(T, n) / list.ensureCapacity(n) / in.readNBytes(n)
+  const sizeAt = (/^(?:allocate|allocateDirect)$/.test(tail) && /Buffer\.\w+$/.test(calleeName)) || /^(?:repeat|ensureCapacity|readNBytes)$/.test(tail) || (tail === "nCopies" && rootVar === "Collections") ? 0
+    : (/^(?:copyOf|copyOfRange)$/.test(tail) && rootVar === "Arrays") || (tail === "newInstance" && rootVar === "Array") ? 1 : -1;
+  if (sizeAt >= 0 && args[sizeAt] && isSizeTaint(argMasks[sizeAt])) {
+    emit(ctx, "integer-overflow", node, culpritText(args[sizeAt], env, ctx), calleeName, undefined, sizeDetailJava(culpritText(args[sizeAt], env, ctx), `${calleeName}(...)`));
+  }
+
   const sinkModel = sinkModelFor("java", rootVar ? `${rootVar}.${tail}` : tail);
   if ((tail === "executeQuery" || tail === "executeUpdate" || tail === "execute") && receiverMayBe(info, ctx, SQL_RECEIVER_TYPE_RE)) {
     fireArgs("sql-injection", [0]);
@@ -2091,9 +2101,25 @@ function checkProcessBuilderArgs(
 }
 
 /** `new ProcessBuilder(...)`/`new File(...)`/`new FileInputStream(...)`/`new FileOutputStream(...)` -- the constructor call itself is the sink, no chained method needed. */
+const isSizeTaint = (m: number) => (m & SinkClass.CONTROL) !== 0 && (m & INJECTION) === 0;
+/** What a request-chosen size does when it reaches an allocator: one request can exhaust memory (or wrap negative). */
+function sizeDetailJava(src: string, sink: string): string {
+  return `Attacker-controlled size '${src.slice(0, 60)}' is handed to ${sink} with no upper bound checked first — one request can exhaust the heap (or overflow to a negative size); cap it (if (n > MAX) ...) or use Math.min`;
+}
+const SIZED_CONSTRUCTORS_JAVA = /^(?:ArrayList|Vector|ArrayDeque|HashMap|LinkedHashMap|HashSet|LinkedHashSet|ConcurrentHashMap|StringBuilder|StringBuffer|ByteArrayOutputStream|CharArrayWriter|PriorityQueue|BitSet)$/;
+
 function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, primaryNode: CstNode) {
   const newExpr = firstNode(prefix, "newExpression");
   if (!newExpr) return;
+  // new byte[n] / new int[a][b]: the dimension is the size
+  const arrayNew = firstNode(newExpr, "arrayCreationExpression");
+  if (arrayNew) {
+    for (const dim of findAllNodes(arrayNew, "dimExpr")) {
+      const e = firstNode(dim, "expression");
+      if (e && isSizeTaint(taintMask(e, env, ctx))) { emit(ctx, "integer-overflow", primaryNode, culpritText(e, env, ctx), "new array", undefined, sizeDetailJava(culpritText(e, env, ctx), "an array allocation")); break; }
+    }
+    return;
+  }
   const uc = firstNode(newExpr, "unqualifiedClassInstanceCreationExpression");
   if (!uc) return;
   const className = extractInstantiatedClassName(uc);
@@ -2105,6 +2131,9 @@ function checkNewExpressionSink(prefix: CstNode, env: Env, ctx: EngineCtx, prima
   // sanitized must still reach `fire` so the suppression gets recorded.
   const firstIdx = argMasks.findIndex(m => m !== 0);
   if (firstIdx < 0) return;
+  if (SIZED_CONSTRUCTORS_JAVA.test(className) && args.length >= 1 && isSizeTaint(argMasks[0])) {
+    emit(ctx, "integer-overflow", primaryNode, culpritText(args[0], env, ctx), `new ${className}`, undefined, sizeDetailJava(culpritText(args[0], env, ctx), `new ${className}(...)`));
+  }
   // `idxs` = the constructor arguments that can be exploited (all of them when omitted).
   const fire = (id: AstTaintJavaId, sink: string, idxs?: readonly number[]) => {
     const cls = classOf(id);
@@ -2522,7 +2551,7 @@ function segmentSides<T extends { holds: "true" | "false" }>(seg: CondItem[], h:
     return operands.length === 1 && ops.length === 0 ? h.instanceOf(operands[0], typeNode) : [];
   }
   if (ops.length === 0 && operands.length === 1) return unarySides(operands[0], h);
-  if (ops.length === 1 && operands.length === 2 && (ops[0].tok!.image === "==" || ops[0].tok!.image === "!=")) {
+  if (ops.length === 1 && operands.length === 2 && /^(?:==|!=|<=?|>=?)$/.test(ops[0].tok!.image)) {
     return h.compare(operands[0], ops[0].tok!.image, operands[1]);
   }
   return [];
@@ -2573,6 +2602,13 @@ function guardHandlersJava(root: CstNode): CondHandlers<Guard> {
     compare(l, op, r) {
       const holds: "true" | "false" = op === "==" ? "true" : "false";
       const lName = bareIdentifierOf(l), rName = bareIdentifierOf(r);
+      // n < 4096 / n <= MAX / 4096 > n: an upper bound -- the value can no longer be an arbitrary request-chosen size
+      if (op !== "==" && op !== "!=") {
+        const isCap = (b: CstNode) => isLiteralExprJava(b) || /^[A-Z][A-Z0-9_]{2,}$/.test(tokensText(b).trim()) || /\.(?:length|size\(\))$/.test(tokensText(b).replace(/\s+/g, ""));
+        if (lName && isCap(r)) return [{ name: lName, holds: op === "<" || op === "<=" ? "true" : "false", clears: SinkClass.CONTROL }];
+        if (rName && isCap(l)) return [{ name: rName, holds: op === ">" || op === ">=" ? "true" : "false", clears: SinkClass.CONTROL }];
+        return [];
+      }
       if (lName && isLiteralExprJava(r)) return [{ name: lName, holds }];
       if (rName && isLiteralExprJava(l)) return [{ name: rName, holds }];
       return [];
@@ -3445,7 +3481,7 @@ function ownershipDominatesJava(
   localInits: Map<string, CstNode>, ctx: EngineCtx,
 ): AuthzKind | null {
   const make = (resolve: boolean): CondHandlers<OwnSide> => ({
-    compare: (l, op, r) => (comparisonSuppresses(l, r, idNames, principalNames) ? [{ holds: op === "==" ? "true" : "false", kind: "ownership" }] : []),
+    compare: (l, op, r) => ((op === "==" || op === "!=") && comparisonSuppresses(l, r, idNames, principalNames) ? [{ holds: op === "==" ? "true" : "false", kind: "ownership" }] : []),
     instanceOf: () => [],
     call: (primary) => {
       let hit: OwnSide | null = null;

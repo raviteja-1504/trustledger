@@ -63,6 +63,8 @@ const ID_TO_CLASS: Record<string, number> = {
   "bola-missing-ownership-check": SinkClass.CONTROL,
   "argument-injection": SinkClass.CONTROL,
   "type-confusion": SinkClass.CONTROL,
+  // an attacker-chosen size handed to an allocator: not an injection, the number itself is the payload
+  "integer-overflow": SinkClass.CONTROL,
 };
 
 /** Sink class for a finding id. Unknown ids (e.g. authorization findings,

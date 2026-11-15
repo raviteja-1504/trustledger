@@ -116,6 +116,8 @@ export const FINDING_CATALOG: Record<string, CatalogEntry> = {
   "insecure-randomness":      { title: "Insecure Randomness",            description: "Non-cryptographic random number generator used for a security-sensitive value.", cwe: "CWE-330" },
   "verbose-error":            { title: "Verbose Error Exposure",         description: "Stack trace or internal error details returned to the client.", cwe: "CWE-209" },
   "csrf-protection-disabled": { title: "CSRF Protection Disabled",       description: "Cross-site request forgery protection explicitly turned off.", cwe: "CWE-352" },
+  "authentication-disabled":  { title: "Authentication Disabled",        description: "Every request is permitted without authentication (anyRequest().permitAll() or a \"/**\" permit-all).", cwe: "CWE-306" },
+  "hardcoded-credential-check": { title: "Hardcoded Credential Comparison", description: "A password, token or API key from the request is compared with a literal embedded in the source.", cwe: "CWE-798" },
   "sensitive-url-data":       { title: "Sensitive Data in URL",          description: "Credential or sensitive value sent in a URL query string.", cwe: "CWE-598" },
   "php-missing-session-guard": { title: "Missing Authentication Check",  description: "Sensitive PHP endpoint reachable without a session/authentication guard.", cwe: "CWE-306" },
   "cross-file-taint-exposure": { title: "Cross-file Taint",              description: "Tainted data from an imported module may reach a sensitive sink in this file." },

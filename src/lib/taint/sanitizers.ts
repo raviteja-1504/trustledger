@@ -29,6 +29,9 @@ const NUMERIC = ALL & ~C.CONTROL; // coercion to a number/bool/uuid neutralizes 
 /** Exported for engines that model numeric CASTS (C# `(int)x`, PHP `(int)$x`) rather than calls. */
 export const NUMERIC_CLEARS = NUMERIC;
 
+/** `Math.min(n, 4096)` / `n.coerceAtMost(4096)`: one operand is a literal cap, so the size no longer comes from the request (CONTROL cleared). */
+const CAPPED: Clears = (_callee, args) => args.some(a => /^\s*\(?\s*-?\d[\d_]*[LlUu]?\s*\)?\s*$/.test(a) || /^[A-Z][A-Z0-9_]{2,}$/.test(a.trim())) ? C.CONTROL : 0;
+
 const TABLES: Record<SanitizerLang, Table> = {
   js: {
     exact: {
@@ -216,8 +219,10 @@ const TABLES: Record<SanitizerLang, Table> = {
       "FilenameUtils.getName": C.PATH, "StringUtils.cleanPath": 0,
       "Jsoup.clean": XSS, "HtmlUtils.htmlEscape": XSS, "StringEscapeUtils.escapeHtml4": XSS, "Encode.forHtml": XSS,
       "Regex.escape": 0, "Pattern.quote": 0,
+      "minOf": CAPPED,
     },
     tail: {
+      coerceAtMost: CAPPED, coerceIn: CAPPED,
       forHtml: XSS, forHtmlAttribute: XSS, forHtmlContent: XSS, forJavaScript: XSS,
       forUriComponent: URL_SAFE, encodeForHTML: XSS, encodeForJavaScript: XSS,
       escapeHtml4: XSS, escapeHtml3: XSS, htmlEscape: XSS, escapeXml10: XSS, escapeXml11: XSS,

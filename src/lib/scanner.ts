@@ -1416,6 +1416,32 @@ const CSRF_DISABLED_RE = [
   /@csrf_exempt/i,                                 // Django
   /CSRF_ENABLED\s*=\s*False/i,                     // Flask-WTF
   /protect_from_forgery\s+with:\s*:null_session/i, // Rails, common misconfiguration
+  /\.csrf\s*\(\s*(?:\(?\s*\w+\s*\)?\s*->\s*\w+\s*\.\s*disable\s*\(\s*\)|AbstractHttpConfigurer\s*::\s*disable)\s*\)/, // Spring Security 6: http.csrf(c -> c.disable()) / csrf(AbstractHttpConfigurer::disable)
+  /\bcsrf\s*(?:\(\s*\))?\s*\{\s*(?:it\.|this\.)?disable\s*\(\s*\)\s*\}/,       // Kotlin DSL: http.csrf { it.disable() } / csrf { disable() }
+  /\bskip_before_action\s*\(?\s*:verify_authenticity_token\b|\bskip_forgery_protection\b|\ballow_forgery_protection\s*=\s*false\b/, // Rails
+  /\[\s*IgnoreAntiforgeryToken\b|\bnew\s+IgnoreAntiforgeryTokenAttribute\b/,   // ASP.NET Core
+  /\$except\s*=\s*\[\s*['"]\*['"]\s*\]/,                                        // Laravel VerifyCsrfToken: every route exempt
+  /['"]csrf_protection['"]\s*(?:=>|:)\s*false\b/,                               // Symfony form option
+  /@csrf\.exempt\b|\bcsrf\.exempt\s*\(|\bWTF_CSRF_(?:ENABLED|CHECK_DEFAULT)['"\]\s]*=\s*False\b/, // Flask-WTF
+];
+
+// Authentication switched off, or a credential compared against a literal -- positive patterns only (a MISSING
+// check can't be told apart from middleware another file installs).
+const AUTH_DISABLED_RE = [
+  /\.anyRequest\s*\(\s*\)\s*\.\s*permitAll\s*\(\s*\)/,                                    // Spring Security: every request unauthenticated
+  /\bauthorize\s*\(\s*anyRequest\s*,\s*permitAll\s*\)/,                                   // Spring Security Kotlin DSL
+  /\b(?:antMatchers|mvcMatchers|requestMatchers)\s*\(\s*["']\/\*\*["']\s*\)\s*\.\s*permitAll\s*\(/, // "/**" permitAll
+  /\.(?:web)?[Ii]gnoring\s*\(\s*\)\s*\.\s*(?:antMatchers|requestMatchers)\s*\(\s*["']\/\*\*["']/, // WebSecurity.ignoring() everything
+];
+const CRED_WORD = String.raw`(?:password|passwd|pwd|passcode|api_?key|apikey|secret|auth_?token|access_?token)`;
+const HARDCODED_CRED_CHECK_RE = [
+  // request.form['password'] == 'admin123' / params[:password] == 'x' / r.FormValue("password") == "x" / password === "x"
+  new RegExp(`${CRED_WORD}\\b['"\\])\\s]*(?:===?|!==?)\\s*(["'])(?!(?:password|passwd|secret|token|apikey|api_key|true|false|null|undefined|none)\\1)(?![^"'\\s]*(?:dev|default|chang|example|placeholder|sample|test|todo|your|xxx)[^"'\\s]*\\1)[^"'\\s]{4,}\\1`, "i"),
+  // password.equals("x") / getParameter("password").equals("x") / "x".equals(password)
+  new RegExp(`${CRED_WORD}\\b[^\\n]{0,40}?\\)\\s*\\.\\s*equals(?:IgnoreCase)?\\s*\\(\\s*"[^"\\s]{4,}"\\s*\\)`, "i"),
+  new RegExp(`"[^"\\s]{4,}"\\s*\\.\\s*equals(?:IgnoreCase)?\\s*\\([^\\n)]{0,40}${CRED_WORD}`, "i"),
+  // strcmp(password, "x") == 0
+  new RegExp(`\\bstrn?(?:case)?cmp\\s*\\([^\\n,]*${CRED_WORD}[^\\n,]*,\\s*"[^"\\s]{4,}"[^\\n)]*\\)\\s*==\\s*0`, "i"),
 ];
 
 // Sensitive data exposed in URL query string
@@ -4424,6 +4450,18 @@ function findIDOR(lines: string[]): ScanIndicator[] {
 function findXPathInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, XPATH_INJECT_RE, "xpath-injection", "XPath Injection", "critical",
     "User input concatenated into an XPath expression — use XPath variable binding instead of string concatenation");
+}
+
+function findAuthDisabled(lines: string[]): ScanIndicator[] {
+  return runDetector(lines, AUTH_DISABLED_RE, "authentication-disabled", "Authentication Disabled", "high",
+    "Every request is permitted without authentication (anyRequest().permitAll() / \"/**\") — require .authenticated() as the default and permit only the public paths explicitly");
+}
+
+// a secret read from the environment / config compared with a placeholder (`process.env.X !== "dev-secret"`) is the check FOR a default, not a hardcoded credential
+const ENV_READ_RE = /process\.env\b|os\.environ|\bgetenv\s*\(|\bENV\s*\[|GetEnvironmentVariable|System\.getenv|\bEnvironment\b/;
+function findHardcodedCredentialCheck(lines: string[]): ScanIndicator[] {
+  return runDetector(lines.map(l => ENV_READ_RE.test(l) ? "" : l), HARDCODED_CRED_CHECK_RE, "hardcoded-credential-check", "Hardcoded Credential Comparison", "high",
+    "A password / token / API key is compared with a literal in the source — anyone with the code (or the binary) has the credential; compare against a salted hash or a secret held in the environment, with a constant-time comparison");
 }
 
 function findCSRFDisabled(lines: string[]): ScanIndicator[] {
@@ -8583,6 +8621,8 @@ export function analyzeFile(
     ...findLDAPInjection(codeLines),
     ...findXPathInjection(codeLines),
     ...findCSRFDisabled(codeLines),
+    ...findAuthDisabled(codeLines),
+    ...findHardcodedCredentialCheck(codeLines),
     ...findInsecureFileUpload(codeLines),
     ...findInsecureFileUploadCSharp(codeLines),
     ...findTOCTOU(codeLines),
