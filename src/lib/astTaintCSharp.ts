@@ -3247,8 +3247,7 @@ function makeCSharpCtx(
     requestNames: new Set([...content.matchAll(REQUEST_DECL_RE)].map(m => m[1])),
     sourceMembers: collectSourceMembersCS(root),
     facts: {
-      flurl: /\bFlurl\b/.test(content), ormlite: /\bOrmLite\b/.test(content), npoco: /\b(?:NPoco|Umbraco)\b/.test(content),
-      dynLinq: /System\.Linq\.Dynamic/.test(content), nhibernate: /\bNHibernate\b/.test(content),
+      flurl: /\bFlurl\b/.test(content), ormlite: /\bOrmLite\b/.test(content),      dynLinq: /System\.Linq\.Dynamic/.test(content), nhibernate: /\bNHibernate\b/.test(content),
     },
     responseNames: new Set([...content.matchAll(RESPONSE_DECL_RE)].map(m => m[1])),
   };
