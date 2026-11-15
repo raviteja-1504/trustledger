@@ -2327,11 +2327,15 @@ function walkMethodBody(body: SyntaxNode, env: Env, ctx: EngineCtx) {
   walkMain(body, env, ctx);
 }
 
+const HANAMI_ACTION_RE = /\binclude\s+(?:[A-Z]\w*::)*Action\b/;
+
 function scanMethods(ctx: EngineCtx, structural: boolean) {
   for (const [, m] of ctx.methods) {
     if (!m.body) continue;
     const env: Env = new Map();
     for (const p of m.params) env.set(p.name, 0);   // parameters shadow sources (a `params` argument is not request input)
+    // ...except a Hanami 1 action's entry point: `class Show; include Web::Action; def call(params)` -- params IS the request's
+    if (m.name === "call" && HANAMI_ACTION_RE.test(ctx.root.text)) for (const p of m.params) if (p.name === "params") env.set(p.name, ALL);
     walkMethodBody(m.body, env, ctx);
     if (structural) collectBola(m, ctx, makeTaintMask(ctx));
   }

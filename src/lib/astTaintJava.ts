@@ -1157,7 +1157,8 @@ function walkPrimaryChain(
       }
 
       // Servlet API source: request.getParameter/getHeader/getParameterValues/getQueryString.
-      if (isRequestVar(rootVar, ctx) && SERVLET_SOURCE_CALLS.has(tail)) {
+      // Struts: `ServletActionContext.getRequest().getParameter("c")` -- the request comes from the action context, not a variable
+      if ((isRequestVar(rootVar, ctx) || (rootVar === "ServletActionContext" && calls >= 1)) && SERVLET_SOURCE_CALLS.has(tail)) {
         chainTaint = ALL;
       }
       // Vert.x (`ctx.request().getParam("x")`, `ctx.queryParam("x")`, `ctx.body().asString()`), JAX-RS UriInfo / HttpHeaders, Wicket request parameters
