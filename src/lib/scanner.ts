@@ -318,7 +318,7 @@ const LANG_MAP: Record<string, string> = {
   py: "python",   ts: "typescript", tsx: "typescript",
   js: "javascript", jsx: "javascript",
   rb: "ruby",     go: "golang",     rs: "rust",
-  java: "java",   kt: "kotlin",     kts: "kotlin",  cs: "csharp",   cshtml: "csharp",
+  java: "java",   kt: "kotlin",     kts: "kotlin",  cs: "csharp",   cshtml: "csharp", razor: "csharp",
   php: "php",     cpp: "cpp",       c:   "c",
   cc: "cpp",      cxx: "cpp",       hpp: "cpp",     hh: "cpp",      h: "c",
   swift: "swift", yaml: "yaml",     yml: "yaml",
@@ -953,7 +953,7 @@ const SQL_INJECTION_RE = [
   // it as literal raw SQL). Nothing about the $"..." syntax itself
   // distinguishes safe from unsafe -- only the wrapping method name does,
   // hence the leading negative lookahead rather than a syntax-level check.
-  /^(?!.*(?:FromSqlInterpolated|ExecuteSqlInterpolated)).*\$["'][^"']*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\{/i,
+  /^(?!.*(?:FromSqlInterpolated|ExecuteSqlInterpolated|\b(?:FromSql|ExecuteSql(?:Command)?)(?:Async)?\s*\(\s*\$["'])).*\$["'][^"']*\b(?:select\b[\s\S]*?\bfrom\b|insert\s+into\b|update\s+\w+\s+set\b|delete\s+from\b)[\s\S]*\{/i,
 ];
 
 const EVAL_EXEC_RE = [
@@ -1599,6 +1599,10 @@ const XSS_RE = [
   // the JS entries above, which would misfire on completely safe,
   // auto-encoded @Model.Name-style Razor output.
   /(?:@?Html\.Raw|Response\.Write)\s*\([^)]*Request\.(?:Query|Form)\b/i,
+  // Razor Html.Raw of what a controller / the URL put in the view (ViewBag, ViewData, TempData, Context.Request), and Blazor's `(MarkupString)value` cast (razor markup the C# engine does not parse; `new MarkupString(x)` in .cs is traced by it):
+  // both write the string into the page unencoded. A literal argument is the safe use.
+  /@?Html\.Raw\s*\(\s*(?:ViewBag|ViewData|TempData|Context\.Request|HttpContext\.Request)\b/,
+  /\(\s*MarkupString\s*\)\s*[A-Za-z_@(]/,
   // PHP -- echo/print of an unescaped $_GET/$_POST/$_REQUEST/$_COOKIE
   // value is PHP's classic reflected-XSS shape. Guarded via a negative
   // lookahead against htmlspecialchars()/htmlentities() ANYWHERE on the
@@ -2283,9 +2287,32 @@ function findMassAssignmentCSharp(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+/**
+ * `"SELECT ... WHERE id = " + id` where every spliced-in name is declared a number / boolean / UUID in the lines above (`@RequestParam int id`,
+ * `long accountId`, `id: int`): such a value cannot carry SQL text, so the concatenation is not an injection. Only names are judged: any call or
+ * expression among the operands (`+ name.trim()`, `+ String.valueOf(x)`) keeps the finding.
+ */
+function sqlConcatOnlyNumbers(lines: string[], idx: number): boolean {
+  // Go: `+ strconv.Itoa(id)` / `strconv.FormatInt(id, 10)` print a number: judge `id` itself
+  const line = (lines[idx] ?? "").replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""')
+    .replace(/\bstrconv\.(?:Itoa|FormatInt|FormatUint|FormatFloat|FormatBool)\(\s*([A-Za-z_]\w*)\s*(?:,[^()]*)?\)/g, "$1");
+  const operands = [...line.matchAll(/\+\s*([A-Za-z_]\w*)\s*(?=[+),;]|$)/g)].map(m => m[1]);
+  if (operands.length === 0) return false;
+  // a call or member access on an operand is something other than a plain numeric name
+  if (/\+\s*[A-Za-z_]\w*\s*[.(\[]/.test(line)) return false;
+  const NUMERIC = String.raw`(?:int|long|short|byte|float|double|boolean|Integer|Long|Short|Byte|Float|Double|Boolean|UUID|BigDecimal|BigInteger|bool|Guid|decimal|DateTime)`;
+  const from = Math.max(0, idx - 40);
+  const window = lines.slice(from, idx + 1).join("\n");
+  const GO_NUMERIC = String.raw`(?:u?int(?:8|16|32|64)?|float(?:32|64)|bool)`;      // Go declares the type after the name: `id int64`
+  // Go: `id, err := strconv.Atoi(s)` / `id, _ := c.GetInt("id")` bind a number
+  const GO_NUMERIC_CALL = String.raw`[\w.]*\.(?:Atoi|ParseInt|ParseUint|ParseFloat|ParseBool|Get(?:Int|Int8|Int16|Int32|Int64|Uint8|Uint16|Uint32|Uint64|Float|Bool)|(?:Query|Param|Params|Form|PostForm|URLParam)(?:Int|Int64|Uint|Float|Bool)\w*)\(`;
+  return operands.every(name => new RegExp(String.raw`\b${NUMERIC}\s+${name}\b|\b${name}\s*:\s*${NUMERIC}\b|\b${name}\s+${GO_NUMERIC}\b|\b${name}\b[^:\n]*:=\s*${GO_NUMERIC_CALL}`).test(window));
+}
+
 function findSQLInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, SQL_INJECTION_RE, "sql-injection", "SQL Injection", "critical",
-    "Query built with string interpolation — use parameterised queries");
+    "Query built with string interpolation — use parameterised queries")
+    .filter(f => !sqlConcatOnlyNumbers(lines, (f.line ?? 1) - 1));
 }
 
 // PHP-specific: unlike JS/Python, PHP interpolates a bare $var or {$var}
@@ -8375,7 +8402,7 @@ export function analyzeFile(
   // (findNamedTaintXSSCSharp etc), matching this phase's own documented
   // scope.
   const csTree: CSharpSyntaxNode | null =
-    lang === "csharp" && !file_path.toLowerCase().endsWith(".cshtml")
+    lang === "csharp" && !/\.(?:cshtml|razor)$/i.test(file_path)
     && !looksMinified && !dataFlowOff && lineCount <= AST_TAINT_LINE_CAP && isCSharpParserReady()
       ? (crossFileCSharp?.tree ?? parseCSharpSourceSync(content, file_path))
       : null;
@@ -8960,7 +8987,7 @@ const AST_ENGINE_LANGS = new Set(["javascript", "typescript", "python", "java", 
  * no data-flow engine). Mirrors analyzeFile's own gates exactly. */
 function coverageGapFor(path: string, content: string): CoverageGap | null {
   const language = detectLanguage(path);
-  if (!AST_ENGINE_LANGS.has(language) || (language === "csharp" && path.toLowerCase().endsWith(".cshtml"))) return null;
+  if (!AST_ENGINE_LANGS.has(language) || (language === "csharp" && /\.(?:cshtml|razor)$/i.test(path))) return null;
   const lineCount = content.split("\n").length;
   const meta = getFileTypeMeta(path);
   if (meta.isGenerated || (lineCount < 30 && content.length / Math.max(1, lineCount) > 400)) return { file: path, language, reason: "minified-or-generated" };
@@ -9910,7 +9937,7 @@ export function runScan(input: ScanInput): ScanOutput {
   const csTrees = new Map<string, CSharpSyntaxNode>();
   if (isCSharpParserReady()) {
     for (const f of allFiles) {
-      if (detectLanguage(f.path) !== "csharp" || f.path.toLowerCase().endsWith(".cshtml") || getFileTypeMeta(f.path).isGenerated) continue;
+      if (detectLanguage(f.path) !== "csharp" || /\.(?:cshtml|razor)$/i.test(f.path) || getFileTypeMeta(f.path).isGenerated) continue;
       if (f.content.split("\n").length > AST_TAINT_LINE_CAP) continue;
       const tree = parseCSharpSourceSync(f.content, f.path);
       if (tree) csTrees.set(f.path, tree);

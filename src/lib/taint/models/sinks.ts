@@ -102,11 +102,26 @@ export const SINK_MODELS: readonly SinkModel[] = [
   // Java: Spring RestTemplate, java.net.URL connections, java.net.http, name resolution, raw sockets, and auth0
   // jwks-rsa (fetches signing keys from the URL it is given -- fed from a token's own `jku`, the attacker picks the keys)
   { id: "java:resttemplate", langs: ["java"], framework: "spring", rule: "ssrf", role: HTTP_URL,
-    match: { kind: "method", methods: ["getForObject", "postForObject", "exchange"] }, args: { positions: [0] } },
+    match: { kind: "method", methods: ["getForObject", "postForObject", "exchange", "getForEntity", "postForEntity", "patchForObject", "postForLocation", "headForHeaders", "optionsForAllow"] }, args: { positions: [0] } },
+  { id: "java:resttemplate-verbs", langs: ["java"], framework: "spring", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "receiver", receiver: "(?:rest|http|client|template)", methods: ["put", "delete", "execute"] }, args: { positions: [0] } },
+  // Spring WebClient / RestClient `.uri(url)`, java.net.http `HttpRequest.newBuilder(uri)` (also fully qualified), OkHttp `new Request.Builder().url(url)`,
+  // Apache HttpClient `new HttpGet(url)`, Jsoup.connect(url)
+  // (`.uri` only on a client / request-spec receiver, and `.url` only bare or on a builder: a generic `builder.uri(...)` is no request)
+  { id: "java:uri", langs: ["java"], framework: "webclient", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "receiver", receiver: `${ci("client")}|^wc$|${ci("spec")}`, methods: ["uri"] }, args: { positions: [0] } },
+  { id: "java:okhttp-url", langs: ["java"], framework: "okhttp", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "callee", names: ["url"] }, args: { positions: [0] } },
+  { id: "java:okhttp-builder-url", langs: ["java"], framework: "okhttp", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "receiver", receiver: "(?:^|\.)[bB]uilder$", methods: ["url"] }, args: { positions: [0] } },
+  { id: "java:apache-http", langs: ["java"], framework: "apache", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "constructor", classes: ["HttpGet", "HttpPost", "HttpPut", "HttpDelete", "HttpHead", "HttpPatch", "HttpOptions", "HttpTrace"] }, args: { positions: [0] } },
+  { id: "java:jsoup", langs: ["java"], framework: "jsoup", rule: "ssrf", role: HTTP_URL,
+    match: { kind: "callee", names: ["Jsoup.connect"] }, args: { positions: [0] } },
   { id: "java:url-connection", langs: ["java"], framework: "java.net", rule: "ssrf", role: "the URL the connection opens",
     match: { kind: "method", methods: ["openConnection", "openStream"] }, args: { positions: [0], select: "url-receiver" } },
   { id: "java:http-request", langs: ["java"], framework: "java.net.http", rule: "ssrf", role: HTTP_URL,
-    match: { kind: "receiver", receiver: "^HttpRequest$", methods: ["uri", "newBuilder"] }, args: { positions: [0], select: "all-arguments" } },
+    match: { kind: "receiver", receiver: "(?:^|\\.)HttpRequest$", methods: ["uri", "newBuilder"] }, args: { positions: [0], select: "all-arguments" } },
   { id: "java:inetaddress", langs: ["java"], framework: "java.net", rule: "ssrf", role: "the host name resolved",
     match: { kind: "receiver", receiver: "^InetAddress$", methods: ["getByName"] }, args: { positions: [0], select: "all-arguments" } },
   { id: "java:socket", langs: ["java"], framework: "java.net", rule: "ssrf", role: "the host connected to",
@@ -208,6 +223,10 @@ export function sinkModelFor(lang: ModelLang, callee: string, module?: string | 
 }
 
 /** Every sink model for a call, in registry order -- for engines that judge each matching sink on its own. */
+// compiled once: a model's receiver / pattern regex used to be rebuilt on every call whose method name matched
+const MODEL_REGEX = new Map<string, RegExp>();
+const modelRegex = (src: string): RegExp => { let re = MODEL_REGEX.get(src); if (!re) { re = new RegExp(src); MODEL_REGEX.set(src, re); } return re; };
+
 export function sinkModelsFor(lang: ModelLang, callee: string, module?: string | null): SinkLookup[] {
   const parts = callee.split(".");
   const tail = parts[parts.length - 1];
@@ -224,8 +243,8 @@ export function sinkModelsFor(lang: ModelLang, callee: string, module?: string |
             : m.kind === "module" ? (module === m.module || (!m.importedOnly && parts[0] === m.module))
               && ((parts.length === 1 && !!m.bare) || m.methods.includes(tail))
               : m.kind === "method" ? m.methods.includes(tail)
-                : m.kind === "pattern" ? new RegExp(m.pattern).test(callee)
-                  : m.methods.includes(tail) && new RegExp(m.receiver).test(receiver);
+                : m.kind === "pattern" ? modelRegex(m.pattern).test(callee)
+                  : m.methods.includes(tail) && modelRegex(m.receiver).test(receiver);
     if (hit) hits.push({ model, positions: model.args.byMethod?.[tail] ?? model.args.positions });
   }
   return hits;

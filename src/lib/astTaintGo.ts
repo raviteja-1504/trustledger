@@ -247,26 +247,52 @@ function argListOfGo(call: SyntaxNode): SyntaxNode[] {
 const GIN_ECHO_FIBER_SOURCE_METHODS = new Set([
   "Param", "Params", "Query", "QueryParam", "QueryParams", "PostForm", "PostFormArray", "DefaultQuery", "DefaultPostForm", "FormFile",
   "GetHeader", "Cookie", "FormValue", "FormParams", "GetRawData", "Body",
+  // gin
+  "GetQuery", "GetPostForm", "QueryMap", "QueryArray", "PostFormMap", "GetQueryArray", "GetQueryMap", "GetPostFormArray", "GetPostFormMap",
+  // iris
+  "URLParam", "URLParamDefault", "URLParamTrim", "URLParamEscape", "URLParams", "PostValue", "PostValueDefault", "PostValueTrim", "PostValues",
+  "FormValueDefault", "FormValues", "GetCookie", "GetBody",
 ]);
+/** Accessors only fiber's Ctx has under these names (`c.Get` on gin / echo reads a value a middleware stored, `c.Path()` the route pattern). */
+const FIBER_ONLY_SOURCE_METHODS = new Set(["Get", "Cookies", "Hostname", "OriginalURL", "Path", "BaseURL", "BodyRaw", "GetReqHeaders", "Queries", "AllParams", "Subdomains"]);
+/**
+ * What a beego / revel controller's own receiver reads: `c.GetString("n")`, `c.Input().Get("n")`, `c.Ctx.Input.Query("n")`,
+ * `c.Params.Get("n")`, `c.Params.Query.Get("n")`, `c.Request.FormValue("n")` ... (the receiver is stripped before matching).
+ */
+const CONTROLLER_SOURCE_CALL_RE_GO = new RegExp(String.raw`^(?:GetString|GetStrings|GetFile|GetFiles|Input\(\)\.(?:Get|Query)|Ctx\.Input\.(?:Query|Param|Header|Cookie|Refer|UserAgent|URI|URL|Host|Site|Domain|Params)|Ctx\.GetCookie|Ctx\.Request\.(?:FormValue|PostFormValue|Header\.(?:Get|Values)|Cookie|Referer|UserAgent|URL\.Query\(\)\.Get)|Params\.(?:Get|GetAll|Query\.Get|Form\.Get|Route\.Get|Values)|Request\.(?:GetHttpHeader|GetQuery|GetForm|GetBody|GetPath|GetRequestURI|GetReferer|GetUserAgent|GetHost|FormValue|PostFormValue|Header\.(?:Get|Values)|Cookie|URL\.Query\(\)\.Get))\s*\(`);
+const CONTROLLER_SOURCE_SELECTOR_RE_GO = /^(?:Ctx\.Input\.RequestBody|Params\.(?:Query|Form|Route|Values|Files|Fixed)|Request\.(?:Form|PostForm|URL\.(?:Path|RawQuery)|Header|Body|Host|RequestURI))$/;
+/** `ctx.Params().Get("n")`, `ctx.Cookies().Get("n")` ... : a call in the middle of the chain, so no dotted callee name resolves. */
+const CHAINED_CTX_SOURCE_RE_GO = new RegExp(String.raw`^([A-Za-z_]\w*)\.(?:Params\(\)\.(?:Get|GetString|GetTrim|GetEscape|GetStringDefault)|QueryParams\(\)\.Get|Cookies\(\)\.Get|Input\(\)\.(?:Get|Query))\(`);
 
 function isTaintSourceExprGo(node: SyntaxNode): boolean {
   if (node.type === "call_expression") {
     if (goSourceCallRe.test(node.text)) return true;
     const fn = node.childForFieldName("function");
     const text = fn ? calleeTextGo(fn) : null;
-    if (!text) return /^mux\.Vars\s*\(/.test(node.text);
+    if (!text) {
+      if (/^mux\.Vars\s*\(/.test(node.text)) return true;
+      const chained = CHAINED_CTX_SOURCE_RE_GO.exec(node.text.replace(/\s+/g, ""));
+      return !!chained && (isFrameworkCtxGo(chained[1]) || goCtx.controllerVars.has(chained[1]));
+    }
     // chi.URLParam(r, "id")
-    if (text === "chi.URLParam" || text.endsWith(".URLParam")) return true;
+    if (text === "chi.URLParam" || text === "chi.URLParamFromCtx" || text.endsWith(".URLParam")) return true;
     if (text === "mux.Vars") return true;
     // gin/echo/fiber: c.Param("id") / ctx.Query("id") / ec.QueryParam("id") / c.PostForm("id") on the handler's context
     const dot = text.indexOf(".");
     if (dot > 0 && text.indexOf(".", dot + 1) < 0 && isFrameworkCtxGo(text.slice(0, dot))) {
       const method = text.slice(dot + 1);
       if (GIN_ECHO_FIBER_SOURCE_METHODS.has(method) || GIN_ECHO_FIBER_METHODS.has(method)) return true;
+      if (FIBER_ONLY_SOURCE_METHODS.has(method) && isFiberCtxGo(text.slice(0, dot), node)) return true;
     }
+    if (dot > 0 && goCtx.controllerVars.has(text.slice(0, dot)) && CONTROLLER_SOURCE_CALL_RE_GO.test(`${text.slice(dot + 1)}(`)) return true;
     return false;
   }
-  if (node.type === "selector_expression") return goSourceSelectorRe.test(node.text.replace(/\s+/g, ""));
+  if (node.type === "selector_expression") {
+    const flat = node.text.replace(/\s+/g, "");
+    if (goSourceSelectorRe.test(flat)) return true;
+    const dot = flat.indexOf(".");
+    return dot > 0 && goCtx.controllerVars.has(flat.slice(0, dot)) && CONTROLLER_SOURCE_SELECTOR_RE_GO.test(flat.slice(dot + 1));
+  }
   if (node.type === "index_expression") {
     const operand = node.childForFieldName("operand");
     // mux.Vars(r)["id"] -- operand is itself a call_expression, not a
@@ -305,13 +331,28 @@ interface GoScanCtx {
   varStructTypes: Map<string, string>; // variable -> declared struct type name
   frameworkCtxVars: Set<string>;   // parameters typed as a gin / echo / fiber handler context, whatever their name
   otherTypedVars: Set<string>;     // parameters of any other declared type (a `c Cfg` is not a framework context)
+  fiberPkgs: Set<string>;          // import names of the fiber package (its Ctx has header / cookie / path accessors the others lack)
+  controllerVars: Set<string>;     // receivers of methods on a beego / revel controller type (a struct embedding the framework's Controller)
+  ormKinds: Set<string>;           // the query-builder libraries this file imports: gorm, pop, beegoorm, ent
 }
 const emptyGoCtx = (): GoScanCtx => ({
   writerVars: new Set(["w"]), frameworkPkgs: new Set(), pluginVars: new Set(), gobVars: new Set(), htmlEscapers: new Set(),
   sensitiveStructs: new Set(), varStructTypes: new Map(), frameworkCtxVars: new Set(), otherTypedVars: new Set(),
+  fiberPkgs: new Set(), controllerVars: new Set(), ormKinds: new Set(),
 });
-// gin, echo, fiber (also aliased: `g "github.com/gin-gonic/gin"` then `ctx *g.Context`)
-const FRAMEWORK_IMPORT_RE_GO = /(?:^|\/)(?:gin-gonic\/gin|labstack\/echo(?:\/v\d+)?|gofiber\/fiber(?:\/v\d+)?)$/;
+// gin, echo, fiber, iris, buffalo (also aliased: `g "github.com/gin-gonic/gin"` then `ctx *g.Context`)
+const FRAMEWORK_IMPORT_RE_GO = /(?:^|\/)(?:gin-gonic\/gin|labstack\/echo(?:\/v\d+)?|gofiber\/fiber(?:\/v\d+)?|kataras\/iris(?:\/v\d+)?(?:\/context)?|gobuffalo\/buffalo)$/;
+const FIBER_IMPORT_RE_GO = /(?:^|\/)gofiber\/fiber(?:\/v\d+)?$/;
+const FRAMEWORK_TYPE_PKG_RE_GO = /^(?:gin|echo|fiber|iris|buffalo)$/;
+/** A struct that embeds a framework controller is a handler set: its methods' receivers read the request. */
+const CONTROLLER_EMBED_RE_GO = /^\*?(?:[A-Za-z_]\w*\.)?Controller$/;
+/** The query-builder libraries whose condition / ordering / grouping methods take SQL text. */
+const ORM_IMPORTS_GO: Array<[RegExp, string]> = [
+  [/(?:^|\/)(?:gorm\.io\/gorm|jinzhu\/gorm|go-xorm\/xorm|xorm\.io\/xorm|uptrace\/bun)(?:\/|$)/, "gorm"],
+  [/(?:^|\/)gobuffalo\/pop(?:\/|$)/, "gorm"],
+  [/(?:^|\/)(?:beego\/beego(?:\/v\d+)?\/client\/orm|astaxie\/beego\/orm)(?:\/|$)/, "beegoorm"],
+  [/(?:^|\/)entgo\.io\/ent\/dialect\/sql(?:\/|$)|(?:^|\/)facebook\/ent\/dialect\/sql(?:\/|$)/, "ent"],
+];
 
 /** A handler's framework context: a parameter typed as one, or -- with no declared type seen -- the usual `c`. */
 function isFrameworkCtxGo(name: string): boolean {
@@ -435,6 +476,11 @@ function declaredTypeGo(name: string, at: SyntaxNode, depth = 0): string | null 
 function isResponseWriterGo(expr: SyntaxNode, at: SyntaxNode): boolean {
   const e = expr.type === "unary_expression" && expr.child(0)?.text === "&" ? expr.namedChildren[0] : expr;
   if (!e) return false;
+  // echo / buffalo `c.Response()`: the response the handler writes to
+  if (e.type === "call_expression") {
+    const m = /^([A-Za-z_]\w*)\.Response\(\)$/.exec(e.text.replace(/\s+/g, ""));
+    return !!m && isFrameworkCtxAtGo(m[1], at);
+  }
   if (e.type === "identifier") return /(?:^|[*.])ResponseWriter$/.test(declaredTypeGo(e.text, at) ?? "");
   if (e.type === "selector_expression") {
     const op = e.childForFieldName("operand");
@@ -445,19 +491,27 @@ function isResponseWriterGo(expr: SyntaxNode, at: SyntaxNode): boolean {
 /** isFrameworkCtxGo, but judged from the declaration visible at `at` when there is one. */
 function isFrameworkCtxAtGo(name: string, at: SyntaxNode): boolean {
   const t = declaredTypeGo(name, at);
-  if (t) { const m = /^\*?([A-Za-z_]\w*)\.(?:Context|Ctx)$/.exec(t); return !!m && (/^(?:gin|echo|fiber)$/.test(m[1]) || goCtx.frameworkPkgs.has(m[1])); }
+  if (t) { const m = /^\*?([A-Za-z_]\w*)\.(?:Context|Ctx)$/.exec(t); return !!m && (FRAMEWORK_TYPE_PKG_RE_GO.test(m[1]) || goCtx.frameworkPkgs.has(m[1])); }
   return isFrameworkCtxGo(name);
+}
+/** Is `name` a fiber handler's context (judged from its declared type)? */
+function isFiberCtxGo(name: string, at: SyntaxNode): boolean {
+  const m = /^\*?([A-Za-z_]\w*)\.Ctx$/.exec(declaredTypeGo(name, at) ?? "");
+  return !!m && (m[1] === "fiber" || goCtx.fiberPkgs.has(m[1]));
 }
 // Per-scan facts. Scans are synchronous, so a module-level slot set at scan start is safe.
 let goCtx: GoScanCtx = emptyGoCtx();
 let goSourceCallRe = /^(?:r|req|request|c\.Request)\.(?:URL\.Query\(\)|(?:Header\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\s*\()/;
 let goSourceSelectorRe = /^(?:r|req|request|c\.Request)\.(?:URL\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$/;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function setGoRequestVars(names: Iterable<string>, fields: Iterable<string> = []): void {
+function setGoRequestVars(names: Iterable<string>, fields: Iterable<string> = [], ctxNames: Iterable<string> = []): void {
   const alt = ["r", "req", "request", ...names].map(escapeRe).join("|");
+  // a framework context's request: gin / revel `c.Request`, echo / buffalo / iris `c.Request()`, beego `c.Ctx.Request`
+  const ctxAlt = ["c", "ctx", "context", "ec", "gc", ...ctxNames].map(escapeRe).join("|");
+  const reqOfCtx = `(?:c\\.Request|(?:${ctxAlt})\\.(?:Ctx\\.)?Request(?:\\(\\))?)`;
   // a struct field holding the request (`type Req struct { r *http.Request }`), read through any receiver: `q.r.URL...`
   const fieldList = [...fields].map(escapeRe);
-  const root = fieldList.length ? `(?:${alt}|c\\.Request|(?:[A-Za-z_]\\w*\\.)+(?:${fieldList.join("|")}))` : `(?:${alt}|c\\.Request)`;
+  const root = fieldList.length ? `(?:${alt}|${reqOfCtx}|(?:[A-Za-z_]\\w*\\.)+(?:${fieldList.join("|")}))` : `(?:${alt}|${reqOfCtx})`;
   goSourceCallRe = new RegExp(`^${root}\\.(?:URL\\.Query\\(\\)|(?:Header\\.(?:Get|Values)|FormValue|PostFormValue|FormFile|Cookie|Referer|UserAgent|BasicAuth|PathValue)\\s*\\()`);
   goSourceSelectorRe = new RegExp(`^${root}\\.(?:URL\\.(?:Path|RawQuery|RawPath|Fragment)|Form|PostForm|MultipartForm|Body|Host|RequestURI|Header|Trailer)$`);
 }
@@ -548,6 +602,11 @@ function findOutParamGo(call: SyntaxNode, env: TaintEnv, mask: (n: SyntaxNode, e
     const r = rootOf(args[1]);
     return r && (m & ALL) ? { root: r, mask: m } : null;
   }
+  // chi's render.Bind(r, &v) / render.Decode(r, &v) / render.DecodeJSON(r.Body, &v): the request body decoded into v
+  if (text && /^render\.(?:Bind|Decode|DecodeJSON|DecodeXML|DecodeForm)$/.test(text) && args[1]) {
+    const r = rootOf(args[1]);
+    return r ? { root: r, mask: ALL } : null;
+  }
   if (fn.type === "selector_expression") {
     const field = fn.childForFieldName("field")?.text ?? "";
     const operand = fn.childForFieldName("operand");
@@ -556,7 +615,10 @@ function findOutParamGo(call: SyntaxNode, env: TaintEnv, mask: (n: SyntaxNode, e
       const r = rootOf(args[0]);
       return r && (m & ALL) ? { root: r, mask: m } : null;
     }
-    if (/^(?:ShouldBind\w*|Bind\w*|BodyParser|QueryParser|ParamsParser|ReqHeaderParser)$/.test(field) && args[0] && /^(?:c|ctx|context)$/.test(operand?.text ?? "")) {
+    const opText = operand?.text ?? "";
+    // gin / echo / fiber / iris / buffalo: c.ShouldBindJSON(&v), c.Bind(&v), c.BodyParser(&v), ctx.ReadJSON(&v) ...; beego: c.ParseForm(&v)
+    if (/^(?:ShouldBind\w*|Bind\w*|BodyParser|QueryParser|ParamsParser|ReqHeaderParser|Read(?:JSON|Query|Form|Body|Params|URL|XML|YAML|MsgPack|Protobuf)|ParseForm)$/.test(field) && args[0] &&
+        (/^(?:c|ctx|context)$/.test(opText) || goCtx.frameworkCtxVars.has(opText) || goCtx.controllerVars.has(opText))) {
       const r = rootOf(args[0]);
       return r ? { root: r, mask: ALL } : null;
     }
@@ -662,7 +724,32 @@ function isStringTypedGo(n: SyntaxNode, depth = 0): boolean {
 
 // The conventional names of a gin/echo/fiber handler's context parameter.
 const FRAMEWORK_CTX_RE = /^(?:c|ctx|context|gc|ec)$/;
-const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download"]);
+const FRAMEWORK_FILE_TAILS = new Set(["File", "FileAttachment", "Attachment", "Inline", "SendFile", "Download", "ServeFile", "ServeFileWithRate"]);
+/** Query-builder methods whose argument is SQL text (a condition, an ordering, a grouping, a column) rather than a bound value. */
+const ORM_FRAGMENT_TAILS_GO = new Set(["Where", "Or", "Not", "Having", "Joins", "Select", "Order", "Group", "Table", "Distinct", "Pluck", "Update", "UpdateColumn", "RawQuery"]);
+const BEEGO_ORM_TAILS_GO = new Set(["Where", "And", "Or", "OrderBy", "GroupBy", "Having", "From", "InnerJoin", "LeftJoin", "RightJoin", "Select"]);
+const ENT_SELECTOR_TAILS_GO = new Set(["OrderBy", "GroupBy", "Select", "Having", "From"]);
+/** First / Find / Take / Last / Delete(dest, cond, args...): `cond` is SQL text. */
+const ORM_COND_TAILS_GO = new Set(["First", "Find", "Take", "Last", "Delete"]);
+
+/** The arguments of a query-builder call that carry SQL text, or null when the call is not one. A struct / map condition is bound by the library, never text. */
+function ormSqlArgsGo(call: SyntaxNode, tail: string, args: SyntaxNode[], text: string): SyntaxNode[] | null {
+  const kinds = goCtx.ormKinds;
+  const isStructured = (a: SyntaxNode | undefined) => !a || a.type === "composite_literal" || (a.type === "unary_expression" && a.namedChildren[0]?.type === "composite_literal");
+  if (kinds.has("ent")) {
+    if (/^sql\.(?:ExprP|Expr|Raw)$/.test(text) && args[0]) return [args[0]];
+    const fnNode = call.childForFieldName("function");
+    const recv = fnNode?.type === "selector_expression" ? fnNode.childForFieldName("operand") : null;
+    if (tail === "WriteString" && recv?.type === "identifier" && /(?:^|[*.])sql\.Builder$/.test(declaredTypeGo(recv.text, call) ?? "") && args[0]) return [args[0]];
+    if (ENT_SELECTOR_TAILS_GO.has(tail) && recv?.type === "identifier" && /(?:^|[*.])sql\.Selector$/.test(declaredTypeGo(recv.text, call) ?? "")) return args;
+  }
+  if (kinds.has("gorm")) {
+    if (ORM_FRAGMENT_TAILS_GO.has(tail) && args[0] && !isStructured(args[0]) && !(tail === "Select" && args[0].type === "unary_expression")) return [args[0]];
+    if (ORM_COND_TAILS_GO.has(tail) && args.length >= 2 && !isStructured(args[1])) return [args[1]];
+  }
+  if (kinds.has("beegoorm") && BEEGO_ORM_TAILS_GO.has(tail) && args.length > 0) return args.filter(a => !isStructured(a));
+  return null;
+}
 const FS_SINKS_GO = new Set([
   "Open", "Create", "OpenFile", "ReadFile", "WriteFile", "Remove", "RemoveAll", "Mkdir", "MkdirAll", "Rename", "Stat",
   "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown", "Readlink", "Chtimes", "Lchown", "CopyFS",
@@ -746,6 +833,11 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   // Post's content type and body, PostForm's values, are sent TO it
   const modelled = sinkModelFor("go", text);
   if (modelled) return { id: modelled.model.rule as AstTaintGoId, sinkExpr: text, args: modelled.positions.map(i => args[i]).filter((a): a is SyntaxNode => !!a) };
+  // c := &http.Client{}; c.Get(u): the receiver is a client by its declared type, whatever it is called
+  if (/^(?:Get|Post|Head|PostForm)$/.test(tail) && args[0] && fnNode.type === "selector_expression" && fnNode.childForFieldName("operand")?.type === "identifier" &&
+      /^\*?http\.Client$/.test(declaredTypeGo(receiverText, call) ?? "")) {
+    return { id: "ssrf", sinkExpr: text, args: [args[0]] };
+  }
   if ((head === "os" && FS_SINKS_GO.has(tail)) || (head === "ioutil" && (tail === "ReadFile" || tail === "WriteFile" || tail === "ReadDir")) ||
       /^filepath\.Walk(?:Dir)?$/.test(text) || text === "os.DirFS") {
     // os.Rename(old, new) / os.Link / os.Symlink(target, link): both arguments name a path (a request-chosen
@@ -767,6 +859,16 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
       return target ? { id: "open-redirect", sinkExpr: text, args: [target] } : null;
     }
   }
+  // beego / revel controllers: c.Redirect(url), c.Ctx.Redirect(code, url), c.Ctx.WriteString(html), c.Ctx.Output.Body(html), c.RenderHTML(html), c.RenderFileName(path)
+  if (goCtx.controllerVars.has(head) && parts.length >= 2) {
+    const rest = parts.slice(1).join(".");
+    if (rest === "Redirect" && args[0]) return { id: "open-redirect", sinkExpr: text, args: [args[0]] };
+    if (rest === "Ctx.Redirect" && args[1]) return { id: "open-redirect", sinkExpr: text, args: [args[1]] };
+    if ((rest === "Ctx.WriteString" || rest === "Ctx.Output.Body" || rest === "RenderHTML") && args[0]) return { id: "xss", sinkExpr: text, args: [args[0]] };
+    if ((rest === "Ctx.Output.Download" || rest === "RenderFileName" || rest === "Ctx.Output.Download") && args[0]) return { id: "path-traversal", sinkExpr: text, args: [args[0]] };
+  }
+  // chi's render.HTML(w, r, html)
+  if (text === "render.HTML" && args[2]) return { id: "xss", sinkExpr: text, args: [args[2]] };
   if (text === "http.Redirect") {
     // http.Redirect(w, r, target, code) -- target is the 3rd positional arg.
     return args[2] ? { id: "open-redirect", sinkExpr: text, args: [args[2]] } : null;
@@ -782,7 +884,11 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   if ((tail === "Write" || tail === "WriteString") && fnNode.type === "selector_expression" && isResponseWriterGo(fnNode.childForFieldName("operand")!, call)) {
     return { id: "xss", sinkExpr: text, args };
   }
-  if ((tail === "String" || tail === "HTML" || tail === "SendString" || tail === "Send") && /^(?:c|ctx)$/.test(receiverText) && args.length > 0) {
+  if (/^(?:String|HTML|SendString|Send|WriteString|Write|Data)$/.test(tail) && parts.length === 2 && (/^(?:c|ctx)$/.test(receiverText) || isFrameworkCtxGo(receiverText)) && args.length > 0) {
+    // gin c.HTML(200, "page.html", data) renders a named template, which escapes its data; echo c.HTML(200, html) and iris ctx.HTML(html) write it raw
+    if (tail === "HTML" && args.length >= 3 && /^(?:\d+|http\.Status\w+)$/.test(args[0].text)) return null;
+    // gin c.Data(200, "text/html", body): raw bytes under the content type the handler names
+    if (tail === "Data") return args.length >= 3 && /html/i.test(args[1].text) ? { id: "xss", sinkExpr: text, args: [args[2]] } : null;
     return { id: "xss", sinkExpr: text, args: args.slice(-1) };
   }
   if (/^template\.(?:HTML|JS|JSStr|URL|CSS|HTMLAttr)$/.test(text) && args[0]) return { id: "xss", sinkExpr: text, args: [args[0]] };
@@ -818,6 +924,11 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
   }
   if ((tail === "Select" || tail === "Get") && args.length >= 2 && /(?:^|\.)(?:db|tx|DB|sqlx)$/.test(receiverText)) {
     return { id: "sql-injection", sinkExpr: text, args: [args[1]] };
+  }
+  // gorm / pop / xorm / bun / beego orm / ent: the condition, order, group and column arguments are SQL text
+  if (goCtx.ormKinds.size > 0 && parts.length > 1 || goCtx.ormKinds.has("ent") && /^sql\./.test(text)) {
+    const sqlArgs = ormSqlArgsGo(call, tail, args, text);
+    if (sqlArgs && sqlArgs.length > 0) return { id: "sql-injection", sinkExpr: text, args: sqlArgs };
   }
   // user-controlled regular expression
   if (/^regexp\.(?:MustCompile|Compile|MatchString|Match|MustCompilePOSIX|CompilePOSIX)$/.test(text) && args[0]) {
@@ -2719,11 +2830,40 @@ export function scanAstTaintGo(
     goCtx = emptyGoCtx();
     // import local name of a web framework package (gin / echo / fiber), aliases included
     const frameworkPkgs = goCtx.frameworkPkgs;
+    const controllerPkgs = new Set<string>();
     for (const spec of findAllNodesGo(root, "import_spec")) {
       const path = goStringLiteralValue(spec.childForFieldName("path") ?? spec) ?? "";
-      if (!FRAMEWORK_IMPORT_RE_GO.test(path)) continue;
+      for (const [re, kind] of ORM_IMPORTS_GO) if (re.test(path)) goCtx.ormKinds.add(kind);
       const alias = spec.childForFieldName("name");
-      frameworkPkgs.add(alias?.type === "package_identifier" ? alias.text : path.split("/").filter(s => !/^v\d+$/.test(s)).pop() ?? "");
+      const local = alias?.type === "package_identifier" ? alias.text : path.split("/").filter(s => !/^v\d+$/.test(s)).pop() ?? "";
+      if (/(?:^|\/)(?:beego\/beego(?:\/v\d+)?(?:\/server\/web)?|astaxie\/beego|revel\/revel)$/.test(path)) controllerPkgs.add(local);
+      if (FIBER_IMPORT_RE_GO.test(path)) goCtx.fiberPkgs.add(local);
+      if (!FRAMEWORK_IMPORT_RE_GO.test(path)) continue;
+      frameworkPkgs.add(local);
+    }
+    // structs that embed a framework controller (beego.Controller, *revel.Controller), directly or through a base controller of this file
+    const controllerTypes = new Set<string>();
+    if (controllerPkgs.size > 0) {
+      const specs = findAllNodesGo(root, "type_spec");
+      for (let pass = 0; pass < 3; pass++) {
+        for (const ts of specs) {
+          const nm = ts.childForFieldName("name")?.text;
+          const st = ts.childForFieldName("type");
+          if (!nm || st?.type !== "struct_type" || controllerTypes.has(nm)) continue;
+          for (const fd of findAllNodesGo(st, "field_declaration")) {
+            if (fd.childrenForFieldName("name").length > 0) continue;
+            const ft = (fd.childForFieldName("type")?.text ?? "").replace(/^\*/, "");
+            const q = /^([A-Za-z_]\w*)\.Controller$/.exec(ft);
+            if ((q && controllerPkgs.has(q[1])) || controllerTypes.has(ft)) controllerTypes.add(nm);
+          }
+        }
+      }
+      for (const md of findAllNodesGo(root, "method_declaration")) {
+        const rp = md.childForFieldName("receiver")?.namedChildren.find(x => x?.type === "parameter_declaration");
+        const rt = (rp?.childForFieldName("type")?.text ?? "").replace(/^\*/, "");
+        const nm = rp?.childForFieldName("name")?.text;
+        if (nm && controllerTypes.has(rt)) goCtx.controllerVars.add(nm);
+      }
     }
     const requestVars: string[] = [];
     const requestFields: string[] = [];
@@ -2735,7 +2875,7 @@ export function scanAstTaintGo(
         if (/http\.ResponseWriter$/.test(type)) for (const nm of names) goCtx.writerVars.add(nm);
         // the package's default name counts too (a file whose imports aren't all in view)
         const fw = /^\*?([A-Za-z_]\w*)\.(?:Context|Ctx)$/.exec(type);
-        const isFw = !!fw && (frameworkPkgs.has(fw[1]) || /^(?:gin|echo|fiber)$/.test(fw[1]));
+        const isFw = !!fw && (frameworkPkgs.has(fw[1]) || FRAMEWORK_TYPE_PKG_RE_GO.test(fw[1]));
         for (const nm of names) (isFw ? goCtx.frameworkCtxVars : goCtx.otherTypedVars).add(nm);
         const q = /^\*?([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(type);
         if (q && importedPkgs.has(q[1])) for (const nm of names) { qualifiedVarTypes.set(nm, `${importedPkgs.get(q[1])}.${q[2]}`); qualifierOfVar.set(nm, q[1]); }
@@ -2780,7 +2920,7 @@ export function scanAstTaintGo(
       for (const c of n.namedChildren) if (c) findDecls(c);
     };
     findDecls(root);
-    setGoRequestVars(requestVars, requestFields);
+    setGoRequestVars(requestVars, requestFields, [...goCtx.frameworkCtxVars, ...goCtx.controllerVars]);
 
     const localFns = collectLocalFunctionsGo(root);
     const propagating = buildPropagatingMapGo(localFns, root);

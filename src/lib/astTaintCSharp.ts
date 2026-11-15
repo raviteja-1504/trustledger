@@ -526,7 +526,26 @@ function interpolatedPartsCS(n: SyntaxNode): Array<{ lit?: string; expr?: Syntax
 
 // ── Taint sources ────────────────────────────────────────────────────────
 
-const ASP_SOURCE_ATTRIBUTES = new Set(["FromRoute", "FromQuery", "FromBody", "FromHeader", "FromForm"]);
+const ASP_SOURCE_ATTRIBUTES = new Set(["FromRoute", "FromQuery", "FromBody", "FromHeader", "FromForm", "FromUri"]);
+/** Properties the framework fills from the request: MVC / Razor Pages model binding and Blazor query / form parameters. */
+const SOURCE_MEMBER_ATTRS_CS = new Set(["SupplyParameterFromQuery", "SupplyParameterFromForm", "BindProperty", "FromQuery", "FromRoute", "FromForm", "FromHeader", "FromUri"]);
+/** What this file is about, read once per parse: types it declares and the web libraries it uses. */
+const csFile = { localTypes: new Set<string>(), serviceStack: false, nancy: false };
+/** Types a model-bound parameter is never: injected services and framework objects. */
+const SERVICE_TYPE_RE_CS = /(?:Service|Repository|Repo|Context|Options|Settings|Config|Configuration|Logger|Manager|Provider|Factory|Client|Handler|Mediator|Accessor|Helper|Store|Cache|Hub)$/;
+/** A bound parameter that is not a scalar: a DTO this file declares (or a collection of scalars / DTOs) is filled from the request body, form or query. */
+function isBoundComplexTypeCS(typeText: string): boolean {
+  const base = typeText.replace(/\s+/g, "").replace(/\?$/, "").replace(/\[\]$/, "");
+  const m = /^(?:List|IList|IEnumerable|ICollection|IReadOnlyList|HashSet|Dictionary)<(?:string,)?([\w.]+)>$/.exec(base);
+  const inner = m ? m[1] : base;
+  return CSHARP_SIMPLE_TYPE_RE.test(inner) || (csFile.localTypes.has(inner) && !SERVICE_TYPE_RE_CS.test(inner));
+}
+function readCsFile(root: SyntaxNode): void {
+  const text = root.text;
+  csFile.localTypes = new Set([...text.matchAll(/\b(?:class|record|struct)\s+([A-Z]\w*)/g)].map(m => m[1]));
+  csFile.serviceStack = /\bServiceStack\b/.test(text);
+  csFile.nancy = /\bNancy\b/.test(text);
+}
 // A bound parameter is only a RESOURCE id -- the thing a BOLA check must own -- when its name looks like
 // one. Without this, `[FromQuery] string person`, an implicitly-bound `int destId`-shaped-but-unrelated
 // param, etc. were all treated as object identifiers, matching any Map access or `new X(...)` that took
@@ -540,6 +559,7 @@ const RESOURCE_ID_NAME_RE = /^(?:id|ID|pk|.*_id|.*Id)$/;
 // type safe" check -- a complex type with no attribute is NOT covered by
 // this convention and is deliberately left untainted (out of scope, see
 // astTaintCSharp.ts's own docblock).
+const NON_TEXT_PARAM_TYPE_RE_CS = /^(?:int|long|short|byte|sbyte|uint|ulong|ushort|bool|double|float|decimal|Guid|DateTime|DateTimeOffset|TimeSpan)\??$/;
 const CSHARP_SIMPLE_TYPE_RE = /^(?:string|int|long|short|byte|bool|double|float|decimal|char|Guid|DateTime|byte\[\])\??$/;
 // Raw HttpContext/HttpRequest access -- the ASP.NET Core Servlet-API analog.
 // System.Web's Params / ServerVariables merge query, form, cookies and server variables.
@@ -548,7 +568,14 @@ const RAW_SOURCE_MEMBER_TAILS = new Set(["Query", "Form", "Headers", "Cookies", 
 const REQUEST_DECL_RE = /\b(?:HttpRequest|HttpRequestBase|HttpRequestWrapper)\s+([A-Za-z_]\w*)\s*[,)=;]/g;
 const RESPONSE_DECL_RE = /\b(?:HttpResponse|HttpResponseBase|HttpResponseWrapper)\s+([A-Za-z_]\w*)\s*[,)=;]/g;
 
+const REQUEST_READ_CALL_RE_CS = /^(?:[\w.]*\.)?Request\.(?:Content\.ReadAs\w+|GetQueryNameValuePairs|ReadFormAsync|ReadFromJsonAsync)$/;
 function isTaintSourceExprCSharp(node: SyntaxNode, requestNames?: ReadonlySet<string>): boolean {
+  // `await Request.Content.ReadAsStringAsync()` (Web API), `Request.ReadFormAsync()`, `Request.ReadFromJsonAsync<T>()`, `Request.GetQueryNameValuePairs()`
+  if (node.type === "invocation_expression") {
+    const f = node.childForFieldName("function");
+    const ft = f ? calleeTextCSharp(f) : null;
+    return !!ft && REQUEST_READ_CALL_RE_CS.test(ft.replace(/<[^>]*>/g, ""));
+  }
   // The receiver: the Web Forms / controller `Request` property, or a name declared as a request
   const isRequest = (text: string): boolean => {
     const parts = text.split(".");
@@ -566,6 +593,8 @@ function isTaintSourceExprCSharp(node: SyntaxNode, requestNames?: ReadonlySet<st
     const expr = node.childForFieldName("expression") ?? node.namedChildren[0];
     const text = expr ? calleeTextCSharp(expr) : null;
     if (!text) return false;
+    // MVC 5 `Request["name"]`: the merged query / form / cookie collection
+    if (text === "Request" || !!requestNames?.has(text)) return true;
     const tail = text.split(".").pop() ?? "";
     return RAW_SOURCE_MEMBER_TAILS.has(tail) && isRequest(text);
   }
@@ -674,6 +703,10 @@ interface EngineCtx {
   classFieldNames: Set<string>;
   /** Names declared with a request type (`HttpRequest req`): their QueryString / Form / Params / Cookies are input. */
   requestNames?: Set<string>;
+  /** Properties bound from the request (see collectSourceMembersCS). */
+  sourceMembers?: Set<string>;
+  /** Libraries this file uses (the model is only applied where the library is imported). */
+  facts?: { flurl: boolean; ormlite: boolean; dynLinq: boolean; nhibernate: boolean };
   /** Names declared with a response type (`HttpResponse resp`): Write / AddHeader / StatusDescription are sinks. */
   responseNames?: Set<string>;
   /** method start offset -> its single-assignment constant locals (see constValueCS) */
@@ -1285,7 +1318,9 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       });
       const attrs = attributeNamesOf(param);
       const hasExplicitSource = attrs.some(a => ASP_SOURCE_ATTRIBUTES.has(a));
-      if (hasExplicitSource) sourceParamNames.add(pName.text);
+      // a number / bool / Guid / date cannot carry SQL, a command, a URL or a path: it is an id (BOLA, below), not injectable text
+      const isNumericParam = NON_TEXT_PARAM_TYPE_RE_CS.test(param.childForFieldName("type")?.text.replace(/\s+/g, "") ?? "");
+      if (hasExplicitSource && !isNumericParam) sourceParamNames.add(pName.text);
       if ((attrs.includes("FromRoute") || attrs.includes("FromQuery")) && RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
       // Implicit ASP.NET Core model binding (see CSHARP_SIMPLE_TYPE_RE's
       // docblock): only applies to a genuinely unattributed simple-type
@@ -1294,8 +1329,8 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
       // this deliberately does NOT apply file-wide.
       if (!hasExplicitSource && attrs.length === 0 && (authMeta.isEndpoint || isConventionalActionCS(methodDecl, attrNames))) {
         const typeText = param.childForFieldName("type")?.text;
-        if (typeText && CSHARP_SIMPLE_TYPE_RE.test(typeText)) {
-          sourceParamNames.add(pName.text);
+        if (typeText && (CSHARP_SIMPLE_TYPE_RE.test(typeText) || isBoundComplexTypeCS(typeText))) {
+          if (!isNumericParam) sourceParamNames.add(pName.text);
           if (RESOURCE_ID_NAME_RE.test(pName.text)) resourceIdParamNames.add(pName.text);
         }
       }
@@ -1317,15 +1352,44 @@ function extractMethodInfo(methodDecl: SyntaxNode): LocalMethod | null {
 function isConventionalActionCS(methodDecl: SyntaxNode, attrNames: readonly string[]): boolean {
   if (attrNames.includes("NonAction")) return false;
   const mods = methodDecl.namedChildren.filter(c => c?.type === "modifier").map(c => c!.text);
-  if (!mods.includes("public") || mods.includes("static") || mods.includes("abstract")) return false;
+  if (!mods.includes("public") || mods.includes("static") || mods.includes("abstract") || mods.includes("override")) return false;
   const cls = methodDecl.parent?.parent;
   if (!cls || cls.type !== "class_declaration") return false;
   const name = cls.childForFieldName("name")?.text ?? "";
   const bases = cls.namedChildren.find(c => c?.type === "base_list")?.text ?? "";
-  return /Controller$/.test(name) && /\b(?:Controller|ControllerBase)\b/.test(bases);
+  const methodName = methodDecl.childForFieldName("name")?.text ?? "";
+  if (/Controller$/.test(name) && /\b(?:Controller|ControllerBase)\b/.test(bases)) return true;
+  // MVC 5 / Web API 2 / Umbraco controllers, whatever the class is called
+  if (/\b(?:ApiController|Controller|ControllerBase|UmbracoApiController\w*|UmbracoAuthorized\w*Controller|SurfaceController|RenderController|UmbracoController|UmbracoPageController)\b/.test(bases)) return true;
+  // SignalR: every public hub method is invocable by any connected client
+  if (/\b(?:Hub|DynamicHub)\b/.test(bases)) return true;
+  // Razor Pages handlers
+  if (/\bPageModel\b/.test(bases)) return /^On(?:Get|Post|Put|Delete|Patch)/.test(methodName);
+  // ServiceStack: Get / Post / Any ... take the request DTO
+  if (csFile.serviceStack && /\bService\b/.test(bases)) return /^(?:Get|Post|Put|Delete|Patch|Any|Options|Head)(?:Async)?$/.test(methodName);
+  return false;
+}
+
+/** Names of properties the framework fills from the request (see SOURCE_MEMBER_ATTRS_CS): every method of the class reads them as input. */
+function collectSourceMembersCS(root: SyntaxNode): Set<string> {
+  const out = new Set<string>();
+  for (const p of findAllNodes(root, "property_declaration")) {
+    const attrs = attributeNamesOf(p);
+    if (attrs.length === 0) continue;
+    let hit = attrs.some(a => SOURCE_MEMBER_ATTRS_CS.has(a));
+    if (!hit && attrs.includes("Parameter")) {
+      let cls: SyntaxNode | null = p.parent;
+      while (cls && cls.type !== "class_declaration") cls = cls.parent;
+      hit = /\b(?:ComponentBase|LayoutComponentBase|IComponent)\b/.test(cls?.namedChildren.find(c => c?.type === "base_list")?.text ?? "");
+    }
+    const nm = p.childForFieldName("name")?.text;
+    if (hit && nm) out.add(nm);
+  }
+  return out;
 }
 
 function collectLocalMethods(root: SyntaxNode): Map<string, LocalMethod> {
+  readCsFile(root);
   const methods = new Map<string, LocalMethod>();
   for (const decl of findAllNodes(root, "method_declaration")) {
     const info = extractMethodInfo(decl);
@@ -1588,6 +1652,19 @@ function reflectionLookupSourceCS(lookup: SyntaxNode, at: SyntaxNode): string | 
   return argListOfCSharp(lookup)[0]?.text;
 }
 
+const FLURL_TAILS_CS = new Set(["GetAsync", "GetStringAsync", "GetJsonAsync", "GetBytesAsync", "GetStreamAsync", "PostAsync", "PostJsonAsync", "PostStringAsync",
+  "PostUrlEncodedAsync", "PutAsync", "PutJsonAsync", "PatchJsonAsync", "DeleteAsync", "HeadAsync", "DownloadFileAsync", "SendAsync"]);
+const DYNAMIC_LINQ_TAILS_CS = new Set(["Where", "OrderBy", "ThenBy", "Select", "SelectMany", "GroupBy", "Any", "All", "Count", "Sum", "Min", "Max", "Average"]);
+const ORMLITE_TAILS_CS = new Set(["Select", "SelectLazy", "Single", "Exists", "Count", "SqlList", "SqlColumn", "SqlScalar", "ExecuteSql", "Scalar", "Column", "Lookup", "Dictionary"]);
+
+/** `new XmlSerializer(typeof(T))` (also DataContract*): the type is fixed in the code, the payload cannot choose one. */
+function typedSerializerCS(receiver: SyntaxNode | null, at: SyntaxNode): boolean {
+  const def = receiver?.type === "identifier" ? lastAssignmentCS(receiver.text, at) : receiver;
+  if (def?.type !== "object_creation_expression") return false;
+  const type = stripGenerics(def.childForFieldName("type")?.text ?? "").split(".").pop() ?? "";
+  return /^(?:XmlSerializer|DataContractSerializer|DataContractJsonSerializer)$/.test(type) && /^typeof\s*\(/.test(argListOfCSharp(def)[0]?.text ?? "");
+}
+
 function checkCallSink(
   fn: SyntaxNode, args: SyntaxNode[], node: SyntaxNode, env: Env, ctx: EngineCtx, taintMask: TaintMaskFnCS,
 ) {
@@ -1637,9 +1714,35 @@ function checkCallSink(
   // SqlCommand receiver-tainted (tracked via env at the SqlCommand-typed
   // local declaration site, mirroring astTaintJava.ts's ObjectInputStream
   // readObject pattern).
-  if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw" || tail === "ExecuteSqlRawAsync" || tail === "SqlQueryRaw") {
+  if (ctx.facts?.flurl && receiver && FLURL_TAILS_CS.has(tail)) {
+    // Flurl extends string: `url.GetStringAsync()` -- the receiver is the URL requested
+    fire("ssrf", taintMask(receiver, env), receiver.text);
+  } else if (tail === "FromSqlRaw" || tail === "ExecuteSqlRaw" || tail === "ExecuteSqlRawAsync" || tail === "SqlQueryRaw") {
     // (sql, params object[] parameters): the parameters are bound, the parameterised form is the safe one.
     fireArgs("sql-injection", [0]);
+  } else if (ctx.facts?.dynLinq && DYNAMIC_LINQ_TAILS_CS.has(tail) && args[0] && args[0].type !== "lambda_expression") {
+    // System.Linq.Dynamic.Core: the string is a query expression, parsed and run
+    fireArgs("sql-injection", [0]);
+  } else if (ctx.facts?.nhibernate && /^(?:Restrictions|Expression|Projections)$/.test(owner) && /^(?:Sql|SqlProjection|SqlGroupProjection)$/.test(tail) && args[0]) {
+    fireArgs("sql-injection", [0]);
+  } else if (ctx.facts?.ormlite && ORMLITE_TAILS_CS.has(tail) && /^(?:db|_db|dbConn|conn|connection)$/i.test(owner) && args[0] && args[0].type !== "lambda_expression") {
+    fireArgs("sql-injection", [0]);
+  } else if (tail === "AddMarkupContent" && args[1]) {
+    // Blazor RenderTreeBuilder.AddMarkupContent(sequence, markup): raw HTML
+    fireArgs("xss", [1]);
+  } else if (tail === "Create" && (owner === "MvcHtmlString" || owner === "HtmlString")) {
+    fireArgs("xss", [0]);
+  } else if ((tail === "InvokeVoidAsync" || tail === "InvokeAsync") && args[0]) {
+    // Blazor JS interop: a tainted function name runs any JS; eval / Function / setTimeout run their text argument
+    const fnName = csStringValue(args[0]);
+    if (fnName === null) fireArgs("eval-exec", [0]);
+    else if (/^(?:window\.)?(?:eval|Function|setTimeout|setInterval)$/.test(fnName)) fireArgs("eval-exec", [1]);
+  } else if (tail === "RenderStringAsync" && args[0]) {
+    // OrchardCore ILiquidTemplateManager.RenderStringAsync(template, ...)
+    fireArgs("ssti", [0]);
+  } else if ((tail === "DeserializeObject" || tail === "Deserialize") && receiver?.type === "identifier" && /SimpleTypeResolver/.test(lastAssignmentCS(receiver.text, node)?.text ?? "")) {
+    // JavaScriptSerializer with a SimpleTypeResolver instantiates the type named in the payload
+    fireArgs("insecure-deserialization", [0]);
   } else if ((tail === "ExecuteReader" || tail === "ExecuteNonQuery" || tail === "ExecuteScalar" || tail === "ExecuteReaderAsync"
               || tail === "ExecuteNonQueryAsync" || tail === "ExecuteScalarAsync" || tail === "Fill")
              && CS_SQL_COMMAND_TYPES.has(ctx.varTypes.get(rootVar) ?? "")) {
@@ -1663,7 +1766,7 @@ function checkCallSink(
   } else if (tail === "CompileAssemblyFromSource" || tail === "CompileAssemblyFromDom") {
     // CodeDomProvider.CompileAssemblyFromSource(parameters, source...): the source is compiled and run
     fireArgs("eval-exec", args.map((_, i) => i).slice(1));
-  } else if (tail === "Content" || (owner === "Results" && tail === "Text")) {
+  } else if ((tail === "Content" || (owner === "Results" && tail === "Text")) && (() => { const ct = args[1] ? csStringValue(args[1]) : null; return ct === null || /html|xml|svg/i.test(ct); })()) {
     // ControllerBase.Content(html, contentType) -- ASP.NET Core's
     // return-raw-HTML helper. Bare call (no rootVar prefix beyond
     // "Content" itself); the common real shape is a concatenated HTML
@@ -1686,12 +1789,12 @@ function checkCallSink(
     // Path static-class checks above (an instance-method call with no
     // meaningful rootVar of its own).
     fireArgs("path-traversal", [0]);
-  } else if (tail === "Deserialize" && !/^(?:System\.Text\.Json\.)?JsonSerializer$/.test(owner)) {
+  } else if (tail === "Deserialize" && !/^(?:System\.Text\.Json\.)?JsonSerializer$/.test(owner) && !typedSerializerCS(receiver, node)) {
     // (System.Text.Json's static JsonSerializer binds to the declared type only -- no type names in the payload)
     fireArgs("insecure-deserialization", [0]);
   } else if ((tail === "DeserializeObject" || tail === "PopulateObject") && args.some(a => /TypeNameHandling\s*\.\s*(?:All|Auto|Objects|Arrays)/.test(a.text))) {
     fire("insecure-deserialization", argMasks[0] ?? 0, args[0]?.text ?? sourceExpr);
-  } else if (tail === "Redirect" || tail === "RedirectPermanent") {
+  } else if (tail === "Redirect" || tail === "RedirectPermanent" || tail === "AsRedirect" || tail === "NavigateTo") {
     fireArgs("open-redirect", [0]);
   } else if ((tail === "Compile" && owner === "XPathExpression") || tail === "SelectNodes" || tail === "SelectSingleNode"
              || tail === "XPathSelectElements" || tail === "XPathSelectElement" || tail === "XPathEvaluate") {
@@ -1783,7 +1886,9 @@ function checkNewExpressionSink(node: SyntaxNode, env: Env, ctx: EngineCtx, tain
   // new HttpRequestMessage(method, url) (models/sinks.ts)
   else if (sinkModel && sinkModel.positions.every(p => p < args.length)) { for (const p of sinkModel.positions) fire(sinkModel.model.rule as AstTaintCSharpId, p); }
   else if (className === "RedirectResult") fire("open-redirect", 0);
-  else if (className === "HtmlString") fire("xss", 0);
+  else if (className === "HtmlString" || className === "MarkupString") fire("xss", 0);
+  else if (className === "RestClient" || className === "FlurlClient") fire("ssrf", 0);
+  else if (className === "StringContent" && args.slice(1).some(a => /html/i.test(a.text))) fire("xss", 0);
   else if (className === "Regex") fire("redos", 0);
   else if (className === "DirectorySearcher" || className === "SearchRequest") fire("ldap-injection", 0);
   // new HttpCookie(name, value): both go into a Set-Cookie header -- a CR/LF splits the response
@@ -2082,6 +2187,8 @@ function guardsOfConditionCS(cond: SyntaxNode, root: SyntaxNode | undefined): Gu
       if (name === "Contains" && args.length === 1 && a0 && isLiteralCollectionCS(recv, root)) {
         return [{ name: a0, holds: "true" }];
       }
+      // Url.IsLocalUrl(x): a path on this site, not an absolute or protocol-relative URL
+      if (name === "IsLocalUrl" && args[0]?.type === "identifier") return [{ name: args[0].text, holds: "true", clears: SinkClass.REDIRECT }];
       // Regex.IsMatch(x, @"^[a-z0-9]+$") / re.IsMatch(x) with re = new Regex(@"...")
       if (name === "IsMatch" && args.length >= 1) {
         const subject = args[0];
@@ -2178,6 +2285,22 @@ function minimalApiBoundParamsCS(fn: SyntaxNode): string[] {
   return out;
 }
 
+/** Nancy: `Get("/a/{id}", p => ...)` / `Get["/a/{id}"] = p => ...` -- the lambda's parameter is the dynamic route values. */
+function nancyRouteParamsCS(fn: SyntaxNode): string[] {
+  if (!csFile.nancy || fn.type !== "lambda_expression") return [];
+  const parent = fn.parent;
+  let verb: string | undefined;
+  if (parent?.type === "argument") {
+    const call = parent.parent?.parent;
+    const callee = call?.type === "invocation_expression" ? call.childForFieldName("function") : null;
+    verb = callee?.type === "member_access_expression" ? callee.childForFieldName("name")?.text : callee?.text;
+  } else if (parent?.type === "assignment_expression") {
+    const left = parent.childForFieldName("left");
+    if (left?.type === "element_access_expression") verb = (left.childForFieldName("expression") ?? left.namedChildren[0])?.text.split(".").pop();
+  }
+  return verb && /^(?:Get|Post|Put|Delete|Patch|Head|Options)$/.test(verb) ? paramNamesOfCS(fn) : [];
+}
+
 function paramNamesOfCS(fn: SyntaxNode): string[] {
   const names: string[] = [];
   const body = fn.childForFieldName("body");
@@ -2220,6 +2343,7 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
     const fenv = cloneEnv(env);
     for (const p of paramNamesOfCS(fn)) fenv.set(p, 0);
     for (const p of minimalApiBoundParamsCS(fn)) fenv.set(p, ALL);
+    for (const p of nancyRouteParamsCS(fn)) fenv.set(p, ALL);
     walk(body, fenv);
   };
 
@@ -2484,6 +2608,7 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
           // cmd.CommandText = tainted, psi.FileName / psi.Arguments = tainted: property-setter sinks
           const setterRoot = rootId?.text ?? "";
           const setterSink = key.endsWith(".CommandText") ? "sql-injection" as const
+            : key.endsWith(".BaseAddress") ? "ssrf" as const
             // resp.StatusDescription = "..." + input: rendered on the error page as HTML
             : key.endsWith(".StatusDescription") && (setterRoot === "Response" || !!ctx.responseNames?.has(setterRoot)) ? "xss" as const
             : ((key.endsWith(".FileName") || key.endsWith(".Arguments")) && rootId &&
@@ -2519,6 +2644,17 @@ function createWalkerCS(ctx: EngineCtx, opts: WalkOptsCS) {
         const callees = resolveCalleesCS(fn, args, ctx);
         const localName = callees.length > 0;
         if (localName) seedLocalMethodParams(callees, args, env, ctx);
+        // `Request.Headers.TryGetValue("X", out var v)`: the out variable holds what the (tainted) collection held
+        if (!localName && fn.type === "member_access_expression" && fn.childForFieldName("name")?.text === "TryGetValue") {
+          const recvMask = taintMask(fn.childForFieldName("expression")!, env);
+          if (recvMask & ALL) {
+            for (const a of args) {
+              const isOut = a.type === "declaration_expression" || /^out\s/.test(a.parent?.text ?? "");
+              const id = a.type === "declaration_expression" ? a.namedChildren[a.namedChildren.length - 1] : a;
+              if (isOut && id?.type === "identifier") env.set(id.text, recvMask);
+            }
+          }
+        }
         // proof pass: `memStream.Write(tainted, ...)` -- what a local object is given, it may hand back later
         if (ctx.proof && !localName && fn.type === "member_access_expression") {
           const recvId = fn.childForFieldName("expression");
@@ -3109,6 +3245,11 @@ function makeCSharpCtx(
     sticky: new Map(), stickyDirty: false, recordSticky: false, classFieldNames: collectClassFieldNamesCS(root),
     crossFileFacts,
     requestNames: new Set([...content.matchAll(REQUEST_DECL_RE)].map(m => m[1])),
+    sourceMembers: collectSourceMembersCS(root),
+    facts: {
+      flurl: /\bFlurl\b/.test(content), ormlite: /\bOrmLite\b/.test(content), npoco: /\b(?:NPoco|Umbraco)\b/.test(content),
+      dynLinq: /System\.Linq\.Dynamic/.test(content), nhibernate: /\bNHibernate\b/.test(content),
+    },
     responseNames: new Set([...content.matchAll(RESPONSE_DECL_RE)].map(m => m[1])),
   };
   return { ctx, localMethods };
@@ -3258,6 +3399,7 @@ export function scanAstTaintCSharp(
         if (!method.body) continue;
         const env: Env = new Map();
         method.sourceParamNames.forEach(p => env.set(p, ALL));
+        ctx.sourceMembers?.forEach(p => { if (!env.has(p)) env.set(p, ALL); });
         enterMethodCS(ctx, method);
         walkForDeclarationsAndSinks(method.body, env, ctx);
         if (structural) {
@@ -3268,6 +3410,13 @@ export function scanAstTaintCSharp(
       }
     };
     scanMethods(true);
+    // Nancy declares its routes in the module's constructor: `Get("/a/{id}", p => ...)`
+    if (csFile.nancy) {
+      for (const ctor of findAllNodes(root, "constructor_declaration")) {
+        const body = ctor.childForFieldName("body");
+        if (body) walkForDeclarationsAndSinks(body, new Map(), ctx);
+      }
+    }
     // Top-level statements (Program.cs) are one implicit Main: walk them in order. This is where minimal-API
     // endpoints are declared, so their handler lambdas are only reached from here.
     const topLevel = root.namedChildren.filter((c): c is SyntaxNode => c?.type === "global_statement");

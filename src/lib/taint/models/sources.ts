@@ -35,11 +35,12 @@ const src = (langs: ModelLang[], framework: string, kind: SourceKind, matchKind:
 
 export const SOURCE_MODELS: readonly SourceModel[] = [
   // Spring MVC / JAX-RS: parameters bound to request data
-  ...src(JVM, "spring", "http.query", "param-annotation", ["RequestParam", "QueryParam"]),
-  ...src(JVM, "spring", "http.path", "param-annotation", ["PathVariable", "PathParam", "MatrixVariable", "MatrixParam"]),
-  ...src(JVM, "spring", "http.header", "param-annotation", ["RequestHeader", "HeaderParam"]),
-  ...src(JVM, "spring", "http.cookie", "param-annotation", ["CookieValue", "CookieParam"]),
-  ...src(JVM, "spring", "http.body", "param-annotation", ["RequestBody", "FormParam", "ModelAttribute", "BeanParam", "RequestPart"]),
+  // (+ Quarkus RESTEasy Reactive: @RestQuery / @RestPath / @RestHeader / @RestCookie / @RestForm; Micronaut: @QueryValue / @Header / @Body / @Part)
+  ...src(JVM, "spring", "http.query", "param-annotation", ["RequestParam", "QueryParam", "RestQuery", "QueryValue"]),
+  ...src(JVM, "spring", "http.path", "param-annotation", ["PathVariable", "PathParam", "MatrixVariable", "MatrixParam", "RestPath"]),
+  ...src(JVM, "spring", "http.header", "param-annotation", ["RequestHeader", "HeaderParam", "RestHeader", "Header"]),
+  ...src(JVM, "spring", "http.cookie", "param-annotation", ["CookieValue", "CookieParam", "RestCookie"]),
+  ...src(JVM, "spring", "http.body", "param-annotation", ["RequestBody", "FormParam", "ModelAttribute", "BeanParam", "RequestPart", "Body", "RestForm", "Part"]),
 
   // Servlet API: methods on the request
   ...src(JVM, "servlet", "http.query", "request-call", ["getParameter", "getParameterValues", "getParameterMap", "getParameterNames", "getQueryString"]),

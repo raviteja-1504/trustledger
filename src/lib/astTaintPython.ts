@@ -227,13 +227,18 @@ export function findEnclosingFunctionNamePy(node: SyntaxNode): string {
 
 // ... plus the raw request line: query_string (bytes of everything after "?"), full_path, url
 // aiohttp: request.query / match_info (path segments) / rel_url
-const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body", "query_string", "full_path", "url", "query", "match_info", "rel_url"]);
+// Pyramid: request.params / matchdict / json_body; Bottle: request.forms; Falcon: req.params / req.media; Tornado: self.request.arguments
+const FLASK_ATTR_SOURCES = new Set(["args", "form", "json", "data", "values", "cookies", "headers", "view_args", "files", "query_params", "path_params", "body", "query_string", "full_path", "url", "query", "match_info", "rel_url",
+  "params", "matchdict", "json_body", "forms", "media", "arguments"]);
+// Tornado RequestHandler readers: self.get_argument('x'), self.get_query_argument, self.get_body_argument, self.get_cookie ...
+const TORNADO_SELF_SOURCES = new Set(["get_argument", "get_arguments", "get_query_argument", "get_query_arguments", "get_body_argument", "get_body_arguments", "get_cookie", "get_secure_cookie"]);
 /** `request`, `req`, `request_obj`, `http_request`, ... -- a request object passed as a parameter is as attacker-controlled as the Flask global. */
 const REQUEST_NAME_RE = /^(?:\w+_)?(?:request|req)(?:_\w+)?$/i;
 const isRequestName = (name: string): boolean => REQUEST_NAME_RE.test(name);
 // aiohttp: `await request.post()` (form), `.json()`, `.text()`, `.read()` (raw body)
 // Starlette/FastAPI Request readers: `await request.body()` / `.form()` / `.stream()` (json() was already here)
-const FLASK_CALL_SOURCES = new Set(["get_json", "get_data", "post", "json", "text", "read", "body", "form", "stream"]);
+// (Falcon: req.get_param('x'), req.get_media(), req.get_header('x'))
+const FLASK_CALL_SOURCES = new Set(["get_json", "get_data", "post", "json", "text", "read", "body", "form", "stream", "get_param", "get_param_as_list", "get_param_as_json", "get_media", "get_header"]);
 // Django's request dictionaries: query, form, cookies, uploaded files, and META (which carries every header).
 const DJANGO_DICT_SOURCES = new Set(["GET", "POST", "COOKIES", "FILES", "META", "REQUEST"]);
 const FASTAPI_DECORATOR_RE = /^@(?:\w+\.)?(?:router|app)\.(?:get|post|put|delete|patch|options|head)\s*\(/;
@@ -408,6 +413,7 @@ function isTaintSourceExprPy(node: SyntaxNode, inDjangoRequestFn: boolean): bool
       if (isRequestObjectPy(object) && attribute && FLASK_CALL_SOURCES.has(attribute)) {
         return true;
       }
+      if (object?.type === "identifier" && object.text === "self" && attribute && TORNADO_SELF_SOURCES.has(attribute)) return true;
       // Django's dict-.get() convenience form: request.GET.get("x") /
       // request.POST.get("x") -- same scoping as the subscript form below.
       if (inDjangoRequestFn && attribute === "get" && object?.type === "attribute") {
@@ -792,6 +798,49 @@ function xxeEnabledParserPy(call: SyntaxNode, parserName: string): boolean {
   return !!ctor && /\b(?:resolve_entities\s*=\s*True|no_network\s*=\s*False|load_dtd\s*=\s*True)\b/.test(ctor[1]);
 }
 
+const HTTP_VERBS_PY = new Set(["get", "post", "put", "patch", "delete", "head", "options", "request", "ws_connect", "stream"]);
+interface FileFactsPy { tornado: boolean; httpLib: boolean; httpClients: Set<string> }
+const fileFactsCache = new NodeCache<FileFactsPy>();
+/** Facts read once per file: whether it uses Tornado / an HTTP client library, and the names it binds to an HTTP client session
+ * (`s = requests.Session()`, `self.client = httpx.AsyncClient()`, `async with aiohttp.ClientSession() as s`). */
+function fileFactsPy(at: SyntaxNode): FileFactsPy {
+  let root = at;
+  while (root.parent) root = root.parent;
+  const hit = fileFactsCache.get(root);
+  if (hit) return hit;
+  const text = root.text;
+  const httpClients = new Set<string>();
+  const ctor = String.raw`(?:[\w.]+\.)?(?:Session|ClientSession|AsyncClient|Client|AsyncSession)\s*\(`;
+  for (const m of text.matchAll(new RegExp(String.raw`\b(?:self\.)?(\w+)\s*=\s*${ctor}`, "g"))) httpClients.add(m[1]);
+  for (const m of text.matchAll(new RegExp(String.raw`${ctor}[^)]*\)\s+as\s+(\w+)`, "g"))) httpClients.add(m[1]);
+  const facts = { tornado: /\btornado\b/.test(text), httpLib: /\b(?:import|from)\s+(?:aiohttp|httpx|requests)\b/.test(text), httpClients };
+  fileFactsCache.set(root, facts);
+  return facts;
+}
+
+/** Flask / Bottle route path parameters that carry request text: `@app.route('/f/<name>')`, `<path:p>`, `<name:path>`. A converter that
+ * validates (`int`, `float`, `uuid`) leaves a value that cannot hold a payload. */
+function routePathParams(fn: SyntaxNode): Set<string> {
+  const out = new Set<string>();
+  if (fn.parent?.type !== "decorated_definition") return out;
+  for (const d of fn.parent.namedChildren) {
+    if (d?.type !== "decorator") continue;
+    const route = /^@\s*[\w.]+\.(?:route|get|post|put|delete|patch)\s*\(\s*(?:rule\s*=\s*)?["']([^"']*)["']/.exec(d.text);
+    if (!route) continue;
+    for (const m of route[1].matchAll(/<([^<>]+)>/g)) {
+      const spec = m[1];
+      const [a, b] = spec.includes(":") ? spec.split(":") : [spec, ""];
+      // Flask: <converter:name>; Bottle: <name:converter>. A bare <name> is a string.
+      const flaskStyle = /^(?:string|path|any|int|float|uuid)$/.test(a) && b;
+      const name = flaskStyle ? b : a;
+      const conv = flaskStyle ? a : b;
+      if (/^(?:int|float|uuid)$/.test(conv.replace(/\(.*$/, ""))) continue;
+      if (/^\w+$/.test(name)) out.add(name);
+    }
+  }
+  return out;
+}
+
 function matchSinkPy(call: SyntaxNode, importMap: Map<string, string>, evalAliases?: ReadonlySet<string>): SinkMatch | null {
   const fnNode = call.childForFieldName("function");
   if (!fnNode) return null;
@@ -898,6 +947,28 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     const kw = keywordArgPy(args, ["file", "path", "src", "dst", "filename_or_fp", "path_or_file"]);
     const checked = paths.length ? paths : kw ? [kw] : [];
     return checked.length ? { id: "path-traversal", sinkExpr: text, args: checked } : null;
+  }
+  // Tornado: self.redirect(url); self.write(html) / self.finish(html) in a file that imports tornado
+  if (text === "self.redirect") {
+    const loc = first ?? keywordArgPy(args, ["url"]);
+    return loc ? { id: "open-redirect", sinkExpr: text, args: [loc] } : null;
+  }
+  if ((text === "self.write" || text === "self.finish") && fileFactsPy(call).tornado) {
+    return first ? { id: "xss", sinkExpr: text, args: [first] } : null;
+  }
+  // aiohttp / Pyramid / Falcon: the redirect is an exception or response class carrying the location
+  if (/(?:^|\.)HTTP(?:Found|SeeOther|MovedPermanently|TemporaryRedirect|PermanentRedirect|MultipleChoices)$/.test(text)) {
+    const loc = first ?? keywordArgPy(args, ["location"]);
+    return loc ? { id: "open-redirect", sinkExpr: text, args: [loc] } : null;
+  }
+  // HTTP client SESSIONS: `session = aiohttp.ClientSession()` / `async with ClientSession() as s` / `client = httpx.AsyncClient()`, then `s.get(url)`
+  if (parts.length >= 2 && HTTP_VERBS_PY.has(tail) && fileFactsPy(call).httpLib) {
+    const holder = parts.slice(0, -1).join(".").replace(/^self\./, "");
+    if (fileFactsPy(call).httpClients.has(holder)) {
+      const url = tail === "request" ? positional[1] : first;
+      const target = url ?? keywordArgPy(args, ["url"]);
+      return target ? { id: "ssrf", sinkExpr: text, args: [target] } : null;
+    }
   }
   if (text === "redirect" || text === "flask.redirect" || text === "HttpResponseRedirect" ||
       text.endsWith(".HttpResponseRedirect") || /(?:^|\.)(?:RedirectResponse|HttpResponsePermanentRedirect)$/.test(text)) {
@@ -2292,7 +2363,9 @@ function createWalkerPy(h: WalkHooksPy) {
     const seeded = isFastApiHandler(fn);
     const webargs = new Set(webargsParams(fn));
     const fastapi = seeded ? fastApiTaintedParams(fn) : null;
-    for (const prm of paramNamesOf(fn)) fenv.set(prm, (fastapi ? fastapi.has(prm) : false) || webargs.has(prm) ? ALL : 0);
+    const celery = celeryTaskParams(fn);
+    const routeParams = routePathParams(fn);
+    for (const prm of paramNamesOf(fn)) fenv.set(prm, (fastapi ? fastapi.has(prm) : false) || webargs.has(prm) || celery.has(prm) || routeParams.has(prm) ? ALL : 0);
     for (const [field, mask] of decoratorSelfFields(fn, maskFor(django))) fenv.set(`self.${field}`, mask);
     walk(body, fenv, django);
   };
@@ -3875,6 +3948,20 @@ function fastApiTaintedParams(fn: SyntaxNode): Set<string> {
     if (FASTAPI_INJECTED_TYPES.test(type.replace(/^.*\./, "")) || FASTAPI_SAFE_SCALARS.test(type)) continue;
     out.add(name);
   }
+  return out;
+}
+
+/**
+ * Celery tasks (`@app.task`, `@shared_task`, `@celery.task(bind=True)`): the arguments a task runs with are whatever its producer queued, which is
+ * routinely a request's data, so they are untrusted input to the task body. With `bind=True` the first parameter is the task itself.
+ */
+function celeryTaskParams(fn: SyntaxNode): Set<string> {
+  const out = new Set<string>();
+  if (fn.parent?.type !== "decorated_definition") return out;
+  const deco = fn.parent.namedChildren.find(c => c?.type === "decorator" && /^@\s*(?:[\w.]+\.)?(?:task|shared_task|periodic_task)\b/.test(c.text));
+  if (!deco) return out;
+  const bound = /\bbind\s*=\s*True\b/.test(deco.text);
+  paramNamesOf(fn).forEach((name, i) => { if (name !== "self" && name !== "cls" && !(bound && i === 0)) out.add(name); });
   return out;
 }
 

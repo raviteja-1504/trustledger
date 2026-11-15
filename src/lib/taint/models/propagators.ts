@@ -92,7 +92,7 @@ export const PROPAGATOR_MODELS: readonly PropagatorModel[] = [
   { id: "cs:call-args", lang: "cs", kind: "call-args", engineSet: "astTaintCSharp.CS_PASSTHROUGH",
     names: [
     "string.Join", "String.Join", "string.Concat", "String.Concat", "string.Format", "String.Format", "string.Copy", "String.Copy",
-    "Path.Combine", "Path.GetFullPath", "Path.GetDirectoryName", "Path.ChangeExtension", "Path.GetRelativePath",
+    "Server.MapPath", "HostingEnvironment.MapPath", "Path.Combine", "Path.GetFullPath", "Path.GetDirectoryName", "Path.ChangeExtension", "Path.GetRelativePath",
     "WebUtility.UrlDecode", "HttpUtility.UrlDecode", "Uri.UnescapeDataString", "WebUtility.HtmlDecode", "HttpUtility.HtmlDecode",
     "Convert.FromBase64String", "Convert.ToBase64String", "Convert.ToString",
     "JsonConvert.SerializeObject", "JsonConvert.DeserializeObject", "JsonSerializer.Serialize", "JsonSerializer.Deserialize",

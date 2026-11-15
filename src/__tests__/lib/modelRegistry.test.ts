@@ -63,8 +63,10 @@ describe("JVM source models", () => {
       "awaitBody", "awaitBodyOrNull", "awaitFormData", "awaitMultipartData"].sort());
     expect(sorted(sourceNames("kt", "request-property"))).toEqual(["body", "cookies", "headerNames", "headers", "inputStream", "parameterMap",
       "parameterNames", "parts", "pathInfo", "queryParams", "queryString", "reader", "requestURI", "requestURL", "uri"]);
-    const annotations = ["BeanParam", "CookieParam", "CookieValue", "FormParam", "HeaderParam", "MatrixParam", "MatrixVariable",
-      "ModelAttribute", "PathParam", "PathVariable", "QueryParam", "RequestBody", "RequestHeader", "RequestParam", "RequestPart"];
+    // (+ Quarkus RESTEasy Reactive and Micronaut parameter annotations)
+    const annotations = ["BeanParam", "Body", "CookieParam", "CookieValue", "FormParam", "Header", "HeaderParam", "MatrixParam", "MatrixVariable",
+      "ModelAttribute", "Part", "PathParam", "PathVariable", "QueryParam", "QueryValue", "RequestBody", "RequestHeader", "RequestParam", "RequestPart",
+      "RestCookie", "RestForm", "RestHeader", "RestPath", "RestQuery"];
     expect(sorted(sourceNames("java", "param-annotation"))).toEqual(annotations);
     expect(sorted(sourceNames("kt", "param-annotation"))).toEqual(annotations);
     expect(sourceNames("py", "request-call").size).toBe(0);   // not migrated yet

@@ -186,6 +186,12 @@ function stringLiteralValue(node: CstNode): string | null {
 // Spring/JAX-RS parameter annotations and Servlet request methods: shared JVM source models (taint/models/sources.ts)
 const SPRING_SOURCE_ANNOTATIONS = sourceNames("java", "param-annotation");
 const SERVLET_SOURCE_CALLS = sourceNames("java", "request-call");
+// Vert.x web: RoutingContext / HttpServerRequest readers. JAX-RS: UriInfo.getQueryParameters(), HttpHeaders.getHeaderString(). Wicket: Request.getRequestParameters().
+const VERTX_SOURCE_CALLS = new Set(["getParam", "queryParam", "queryParams", "pathParam", "pathParams", "getBodyAsString", "getBodyAsJson", "getBodyAsJsonArray", "getBody",
+  "asString", "asJsonObject", "asJsonArray", "getFormAttribute", "formAttributes", "getQueryParameters", "getPathParameters", "getHeaderString", "getRequestHeader", "getRequestHeaders"]);
+const VERTX_CONTEXT_RE = /^(?:ctx|rc|routingContext|context|req|request|uriInfo|headers)$/;
+const VERTX_CONTEXT_TYPE_RE = /^(?:RoutingContext|HttpServerRequest|UriInfo|HttpHeaders|RequestBody)$/;
+const WICKET_SOURCE_CALLS = new Set(["getRequestParameters", "getParameterValue", "getParameterValues", "getQueryParameters", "getPostParameters"]);
 
 // ── Sanitizer/de-taint recognition ──────────────────────────────────────
 // Matched by method-name TAIL alone, same permissive-by-design posture as
@@ -381,6 +387,7 @@ function paramInfo(fp: CstNode): { name: string; annotations: string[]; isRest: 
   return null;
 }
 
+const CONVERTED_PARAM_TYPE_RE = /^(?:int|long|short|byte|float|double|boolean|char|Integer|Long|Short|Byte|Float|Double|Boolean|Character|UUID|BigDecimal|BigInteger|LocalDate|LocalDateTime|LocalTime|Instant|OffsetDateTime|ZonedDateTime|Duration)$/;
 function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
   const header = firstNode(methodDecl, "methodHeader");
   if (!header) return null;
@@ -399,7 +406,8 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
       const info = paramInfo(fp);
       if (!info) continue;
       paramShapes.push({ name: info.name, index, isRest: info.isRest, type: info.type, annotated: info.annotations.length > 0 });
-      if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a))) springParamNames.add(info.name);
+      // (a parameter the framework converts to a number, boolean, UUID or date before the method runs cannot carry a payload)
+      if (info.annotations.some(a => SPRING_SOURCE_ANNOTATIONS.has(a)) && !CONVERTED_PARAM_TYPE_RE.test(info.type.replace(/\s+/g, ""))) springParamNames.add(info.name);
       // jjwt key resolution runs BEFORE the signature is verified, so the header/claims it is handed are
       // whatever the caller put in the token (the `kid` header lookup is the classic injection point).
       if (JWT_KEY_RESOLVER_METHODS.has(nameTok.image) && JWT_UNVERIFIED_PARAM_TYPE_RE.test(info.type)) springParamNames.add(info.name);
@@ -1152,6 +1160,12 @@ function walkPrimaryChain(
       if (isRequestVar(rootVar, ctx) && SERVLET_SOURCE_CALLS.has(tail)) {
         chainTaint = ALL;
       }
+      // Vert.x (`ctx.request().getParam("x")`, `ctx.queryParam("x")`, `ctx.body().asString()`), JAX-RS UriInfo / HttpHeaders, Wicket request parameters
+      if (rootVar && VERTX_SOURCE_CALLS.has(tail) && (isRequestVar(rootVar, ctx) || VERTX_CONTEXT_RE.test(rootVar) || VERTX_CONTEXT_TYPE_RE.test(ctx.varTypes.get(rootVar) ?? ""))) {
+        chainTaint = ALL;
+      }
+      if (WICKET_SOURCE_CALLS.has(tail) && /\borg\.apache\.wicket\b/.test(ctx.content)) chainTaint = ALL;
+      if ((tail === "get" || tail === "getValues" || tail === "getNamedKeys") && rootVar && ctx.varTypes.get(rootVar) === "PageParameters") chainTaint = ALL;
       // HTTP session attributes outlive the method: what one request stores (session.setAttribute("k", v)) another
       // reads back (session.getAttribute("k")). Kept like a field -- sticky, the file re-walked when it grows.
       if ((tail === "setAttribute" || tail === "getAttribute") && isSessionHolder(rootVar, calleeName, ctx)) {
@@ -1879,6 +1893,9 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     } else {
       fireArgs("command-injection", [0]);
     }
+  } else if (tail === "setEscapeModelStrings" && args.length === 1 && /^\s*false\s*$/.test(tokensText(args[0])) && (chainTaintBefore & classOf("xss"))) {
+    // Wicket: a Label / component whose model holds request input, with the HTML escaping of its markup switched off
+    fire("xss", chainTaintBefore, "component model", `${calleeName}(false)`);
   } else if (tail === "sendRedirect") {
     fireArgs("open-redirect", [0]);
   } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "")) {
@@ -2842,6 +2859,10 @@ function createWalkerJava(ctx: EngineCtx, opts: WalkOptsJava) {
         if (expr) {
           walk(expr, env);
           opts.onReturn?.(expr, env, mask);
+          // Spring MVC: a returned view name of "redirect:" + value sends the browser wherever the value says
+          if (/^\s*"redirect:/.test(tokensText(expr)) && (mask(expr, env) & classOf("open-redirect"))) {
+            emit(ctx, "open-redirect", node, nodeText(expr), "return \"redirect:\" + ...");
+          }
           // a method that builds HTML and returns it hands attacker markup to whoever renders the string
           if (ctx.currentBody && methodHasHtmlEvidence(ctx.currentBody) && (mask(expr, env) & classOf("xss"))) {
             emit(ctx, "xss", node, nodeText(expr), "returned HTML string", undefined,
@@ -3762,6 +3783,13 @@ function makeJavaCtx(
   // Field types, lowest precedence: an injected service -- `@Autowired UserService users;` or a
   // constructor-injected `private final UserService users;` -- is how a controller reaches the service layer.
   for (const [name, type] of collectClassFieldTypes(cst)) if (!ctx.varTypes.has(name)) ctx.varTypes.set(name, type);
+  // Struts2: the framework fills an action's properties from the request through their setters, so a field with a `setX(String)` is request input
+  if (/\bextends\s+(?:[\w.]+\.)?ActionSupport\b/.test(content) || (/\b(?:struts|xwork)/i.test(content) && /\bimplements\s+(?:[\w.]+\s*,\s*)*(?:[\w.]+\.)?Action\b/.test(content))) {
+    for (const m of content.matchAll(/\bvoid\s+set([A-Z]\w*)\s*\(\s*(?:final\s+)?(?:String|String\s*\[\s*\]|List<String>)\s+\w+\s*\)/g)) {
+      const prop = m[1][0].toLowerCase() + m[1].slice(1);
+      if (ctx.classFieldNames.has(prop)) ctx.sticky.set(prop, ALL);
+    }
+  }
   const propagating = buildPropagatingMapJava(localMethods, ctx);
   for (const [name, idx] of propagating) ctx.propagatingParams.set(name, idx);
   return { ctx, localMethods };
