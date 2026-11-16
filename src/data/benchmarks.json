@@ -1643,7 +1643,8 @@
     "Throughput is measured in batch on a developer workstation, on the corpora scanned in a single pass. It is not end-to-end pull-request latency.",
     "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label.",
     "Many Rust cases, and some PHP and Ruby ones, call a function defined in the same file that only imitates a library call (simulated_reqwest_get, aes_ecb_encrypt, native_tls_danger). We scan the code as written and do not treat a locally defined function as a library sink because of its name, so those cases count as misses; this is the main reason Rust's recall is low, and it says little about code that calls the real libraries.",
-    "Only the sast-benchmark corpora were re-run on 2026-11-16. The OWASP, Juliet and Juice Shop corpora were not available for that run, so each of them keeps the engine commit named against it rather than being presented as measured on today's engine."
+    "The sast-benchmark and Juliet C/C++ corpora were re-run on 2026-11-16. The OWASP Benchmark (Java, Python), Juliet C# and Juice Shop corpora were not available for that run, so each of them keeps the engine commit named against it rather than being presented as measured on today's engine.",
+    "Juliet C/C++: cases that call virtual methods through a base class defined in another file, and the paired cases whose bad and good paths depend on two independent calls of the same random-looking condition, are not detected; we do not tune for the second kind because a path-insensitive analysis cannot tell it from its safe twin."
   ],
   "comparison": {
     "status": "not-run",
@@ -1768,6 +1769,13 @@
       "corpus": "SAST Benchmark — Rust",
       "score": 39.7,
       "note": "Category average; unchanged -- the missed cases call same-file stand-ins for library functions (see limitations)"
+    },
+    {
+      "commit": "528472b+",
+      "date": "2026-11-16",
+      "corpus": "NIST Juliet (C/C++)",
+      "score": 84,
+      "note": "Category average (TPR minus FPR); pointer state through helpers, references, members, globals and other files (double free, mismatched deallocation, NULL dereference, use after free, buffer capacity), cross-file taint through returns, out-parameters and globals, and constant-expression bounds"
     }
   ]
 }
