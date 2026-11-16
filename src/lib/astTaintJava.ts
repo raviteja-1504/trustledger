@@ -1909,6 +1909,10 @@ function checkCallSink(info: CallInfo, env: Env, ctx: EngineCtx) {
     fire("xss", chainTaintBefore, "component model", `${calleeName}(false)`);
   } else if (tail === "sendRedirect") {
     fireArgs("open-redirect", [0]);
+  } else if (tail === "getRequestDispatcher" && args.length === 1) {
+    // request.getRequestDispatcher(target).forward(...): a server-side redirect whose target the request chooses -- it reaches
+    // pages and resources the client could not request directly (WEB-INF/*, admin views). Same family as sendRedirect.
+    fireArgs("open-redirect", [0]);
   } else if (tail === "header" && args.length >= 2 && /^location$/i.test(stringLiteralValue(args[0]) ?? "")) {
     // Spring's fluent ResponseEntity.status(...).header("Location", next).build()
     // -- a modern REST idiom for redirects, distinct from the classic

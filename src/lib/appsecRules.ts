@@ -8,7 +8,7 @@
  */
 import type { ScanIndicator } from "./scanner";
 
-export type AppsecDomain = "kubernetes" | "cloud" | "container" | "api";
+export type AppsecDomain = "kubernetes" | "cloud" | "container" | "api" | "mobile";
 type Sev = ScanIndicator["severity"];
 
 export interface AppsecRule {
@@ -53,6 +53,8 @@ const CWE_TITLES: Record<string, string> = {
   "CWE-1021": "Improper Restriction of Rendered UI Layers or Frames",
   "CWE-1104": "Use of Unmaintained Third Party Components",
   "CWE-16": "Configuration",
+  "CWE-530": "Exposure of Backup File to an Unauthorized Control Sphere",
+  "CWE-926": "Improper Export of Android Application Components",
 };
 
 type RuleInput = Omit<AppsecRule, "cweTitle">;
@@ -183,6 +185,17 @@ export const APPSEC_RULES: Record<string, AppsecRule> = {
   "api-endpoint-missing-auth": r({ domain: "api", severity: "high", cwe: "CWE-862",
     title: "Endpoint Missing the Auth Its Siblings Have", description: "Other endpoints in this file require authentication, but this one does not -- the classic forgotten-middleware bug.",
     fix: { title: "Apply the same auth", description: "Add the same auth middleware/decorator/attribute the neighbouring endpoints use, or mark the endpoint as public explicitly (e.g. [AllowAnonymous]) if that is intended.", effort: "low" } }),
+
+  // ── Mobile (Android) ─────────────────────────────────────────────────────
+  "android-exported-component": r({ domain: "mobile", severity: "high", cwe: "CWE-926",
+    title: "Exported Android Component Without a Permission", description: "A content provider, service or receiver is exported (android:exported=\"true\") with no permission guarding it, so any app on the device can call it -- including a provider's query, which is a direct line into its database.",
+    fix: { title: "Don't export it, or require a permission", description: "Set android:exported=\"false\" unless another app must reach it; otherwise guard it with a signature-level android:permission (and readPermission/writePermission for a provider).", code_before: "<provider android:name=\".NotesProvider\" android:exported=\"true\" />", code_after: "<provider android:name=\".NotesProvider\" android:exported=\"false\" />", effort: "low" } }),
+  "android-backup-enabled": r({ domain: "mobile", severity: "medium", cwe: "CWE-530",
+    title: "Android Backup Enabled", description: "android:allowBackup=\"true\" lets anyone with adb access (or a cloud restore) copy the app's private data -- databases, shared preferences, tokens -- off the device.",
+    fix: { title: "Turn backup off, or limit what it includes", description: "Set android:allowBackup=\"false\", or keep it on and exclude sensitive files with android:fullBackupContent / dataExtractionRules.", code_before: "android:allowBackup=\"true\"", code_after: "android:allowBackup=\"false\"", effort: "low" } }),
+  "android-cleartext-traffic": r({ domain: "mobile", severity: "medium", cwe: "CWE-319",
+    title: "Android Cleartext Traffic", description: "The app talks to its server over http:// (or the manifest allows cleartext traffic), so credentials and data can be read or altered on the network.",
+    fix: { title: "Use HTTPS only", description: "Build the base URL with https://, and set android:usesCleartextTraffic=\"false\" (or a network security config that forbids cleartext).", code_before: "\"http://$host:$port\"", code_after: "\"https://$host\"", effort: "low" } }),
 };
 
 export function appsecRule(id: string): AppsecRule | undefined {

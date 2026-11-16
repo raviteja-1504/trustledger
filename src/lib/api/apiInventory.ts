@@ -293,6 +293,7 @@ export function extractEndpoints(file: string, content: string): ApiEndpoint[] {
   return [];
 }
 
+const ADMIN_PATH_RE = /(?:^|\/)(?:admin|administrator|manage|management|internal|backoffice|superuser|staff)(?:\/|$)/i;
 const isWrite = (m: string) => m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE";
 
 /** Endpoints with no auth whose siblings in the same file have it (see the module docblock). */
@@ -301,11 +302,16 @@ export function inconsistentAuth(endpoints: readonly ApiEndpoint[]): ApiEndpoint
   const protectedEps = endpoints.filter(e => e.auth === "required");
   // The file's convention must be "protected": at least two protected endpoints and more protected than
   // open ones. In a mostly-public route file (registration, feedback, catalogue), an open write is normal.
-  if (protectedEps.length < 2 || protectedEps.length <= candidates.length) return [];
+  if (protectedEps.length < 2) return [];
+  // An administrative route (/admin/..., /internal/...) with no visible check is out of place in ANY file that protects some of its
+  // routes, however many open ones sit beside it: the open ones being in the majority says the file is mixed, not that the admin
+  // pages are meant to be public.
+  const adminOpen = candidates.filter(e => ADMIN_PATH_RE.test(e.path));
+  if (protectedEps.length <= candidates.length) return adminOpen;
   const protectedReads = protectedEps.filter(e => !isWrite(e.method)).length;
   const openReads = candidates.filter(e => !isWrite(e.method)).length;
   // A read is only out of place when the protected siblings include reads too.
-  return candidates.filter(e => isWrite(e.method) || (protectedReads >= 2 && protectedReads > openReads));
+  return candidates.filter(e => isWrite(e.method) || (protectedReads >= 2 && protectedReads > openReads) || ADMIN_PATH_RE.test(e.path));
 }
 
 export function findEndpointMissingAuth(file: string, content: string): ScanIndicator[] {

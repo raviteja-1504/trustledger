@@ -398,8 +398,29 @@ function isRequestObjectPy(o: SyntaxNode | null): boolean {
   return object?.type === "identifier" && object.text === "self" && !!attribute && isRequestName(attribute);
 }
 
+// stdlib http.server: inside a (Base|Simple|CGI)HTTPRequestHandler subclass `self.path` (the request line's target, query string
+// included), `self.headers` and `self.rfile` (the body) are the request. Matched only there: `self.path` on any other class is
+// just a field. (`self.headers.get(..)` / `self.rfile.read(..)` are reads on a source, so they carry its taint without a rule.)
+const HTTP_SERVER_SELF_ATTRS = new Set(["path", "headers", "rfile", "requestline", "raw_requestline"]);
+const HTTP_SERVER_BASE_RE = /\b(?:Base|Simple|CGI)HTTPRequestHandler\b/;
+function inHttpServerHandlerPy(node: SyntaxNode): boolean {
+  for (let n: SyntaxNode | null = node.parent; n; n = n.parent) {
+    if (n.type === "class_definition") {
+      const bases = n.childForFieldName("superclasses");
+      if (bases && HTTP_SERVER_BASE_RE.test(bases.text)) return true;
+    }
+  }
+  return false;
+}
+const isHttpServerSelfAttrPy = (n: SyntaxNode | null): boolean => {
+  if (!n || n.type !== "attribute") return false;
+  const { object, attribute } = attributeParts(n);
+  return object?.type === "identifier" && object.text === "self" && !!attribute && HTTP_SERVER_SELF_ATTRS.has(attribute) && inHttpServerHandlerPy(n);
+};
+
 function isTaintSourceExprPy(node: SyntaxNode, inDjangoRequestFn: boolean): boolean {
   if (node.type === "attribute") {
+    if (isHttpServerSelfAttrPy(node)) return true;
     const { object, attribute } = attributeParts(node);
     if (isRequestObjectPy(object) && attribute && FLASK_ATTR_SOURCES.has(attribute)) {
       return true;
@@ -689,6 +710,15 @@ function buildImportMapPy(root: SyntaxNode): Map<string, string> {
   };
   visit(root);
   return map;
+}
+
+// One import map per parsed tree: walkers are created per function and per parameter while summaries are built, and each
+// would otherwise walk the whole tree again for the same answer.
+const importMapByRoot = new WeakMap<object, Map<string, string>>();
+function importMapOfRootPy(root: SyntaxNode): Map<string, string> {
+  let m = importMapByRoot.get(root);
+  if (!m) { m = buildImportMapPy(root); importMapByRoot.set(root, m); }
+  return m;
 }
 
 function argListOf(call: SyntaxNode): SyntaxNode[] {
@@ -1043,6 +1073,10 @@ function matchCalleePy(call: SyntaxNode, fnNode: SyntaxNode, args: SyntaxNode[],
     // make_response((body, headers)) / make_response((body, status, headers)): only the body is HTML
     const body = first?.type === "tuple" ? first.namedChildren[0] ?? null : first;
     return body ? { id: "xss", sinkExpr: text, args: [body] } : null;
+  }
+  // stdlib http.server: the handler writes the response body itself. JSON bodies are not HTML.
+  if (text === "self.wfile.write" && first && inHttpServerHandlerPy(call) && !/\bjson\.dumps\b/.test(first.text)) {
+    return { id: "xss", sinkExpr: text, args: [first] };
   }
   // logging.info / logger.warning / app.logger.error: a CR/LF in a logged string forges a separate log entry
   // (a dict argument is structured context, rendered with its strings quoted)
@@ -1800,6 +1834,7 @@ function makeTaintMaskPy(
   sticky?: Map<string, number>, crossFileShapes?: Map<string, ParamShape[]>, storedProvenance?: StoredProvenanceIO,
   sourceCall?: (call: SyntaxNode) => number,
   passMethods?: PassMethodsPy,
+  importAliases?: Map<string, string>,
 ) {
   let fnValueDepth = 0;
   const constEval = makeConstEvalPy();
@@ -1953,6 +1988,10 @@ function makeTaintMaskPy(
     }
     const calleeName = fn ? calleeTextPy(fn) : null;
     if (calleeName) {
+      // `import urllib.parse as urlparse` -> `urlparse.urlparse(x)` is `urllib.parse.urlparse`: the models are keyed by the full name
+      const dot = calleeName.indexOf(".");
+      const aliased = dot > 0 ? importAliases?.get(calleeName.slice(0, dot)) : undefined;
+      if (aliased && PY_PASSTHROUGH.has(`${aliased}${calleeName.slice(dot)}`)) return argsMask(args, env);
       // Known sanitizer: the argument's taint passes THROUGH minus only
       // the classes it actually neutralizes; opaque calls stay untainted.
       const clears = sanitizerClears("py", calleeName);
@@ -2335,9 +2374,10 @@ interface WalkHooksPy {
 function createWalkerPy(h: WalkHooksPy) {
   const constEval = makeConstEvalPy();
   const masks = new Map<boolean, TaintMaskFnPy>();
+  const importAliases = () => importMapOfRootPy(h.root);
   const maskFor = (django: boolean): TaintMaskFnPy => {
     let m = masks.get(django);
-    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance, h.sourceCall, h.passMethods); masks.set(django, m); }
+    if (!m) { m = makeTaintMaskPy(h.localFns, h.propagating, django, h.sticky, h.crossFileShapes, h.storedProvenance, h.sourceCall, h.passMethods, importAliases()); masks.set(django, m); }
     return m;
   };
 
@@ -2661,6 +2701,9 @@ function computeReturnTaintPropagatingPy(
 ): Map<number, number> {
   // param index -> sink classes that still survive to the return value
   const propagatingIdx = new Map<number, number>();
+  // a helper that takes the framework request object (`def _get(request): return request.GET.get("q")`) reads it as
+  // input, exactly as a view does: the intrinsic walk below (nothing seeded) must treat `request.*` as a source too
+  const takesRequest = fn.paramShapes.some(p => isRequestName(p.name));
   for (const shape of fn.paramShapes) {
     let surviving = 0;
     const walker = createWalkerPy({
@@ -2678,7 +2721,7 @@ function computeReturnTaintPropagatingPy(
   // returns input whatever it is passed -- recorded under index -1
   let intrinsic = 0;
   createWalkerPy({ localFns, propagating, root, descendFunctions: false, crossFileShapes, onReturn: (expr, env, mask) => { intrinsic |= mask(expr, env); } })
-    .walk(fn.body, new Map(), false);
+    .walk(fn.body, new Map(), takesRequest);
   if (intrinsic & ALL) propagatingIdx.set(-1, intrinsic & ALL);
   return propagatingIdx;
 }
@@ -4298,11 +4341,26 @@ export function scanAstTaintPython(
       if (n.type === "attribute") return attributeParts(n).attribute;
       return null;
     };
+    // Flask views registered without a decorator: `bp.add_url_rule("/x", "x", _view)` / `add_url_rule(..., view_func=_view)`
+    const registeredViews = new Set<string>();
+    const collectRegisteredViews = (n: SyntaxNode) => {
+      if (n.type === "call") {
+        const f = n.childForFieldName("function");
+        if (f?.type === "attribute" && attributeParts(f).attribute === "add_url_rule") {
+          const args = argListOf(n);
+          const viaKeyword = args.find(a => a.type === "keyword_argument" && a.childForFieldName("name")?.text === "view_func")?.childForFieldName("value");
+          const third = args.filter(a => a.type !== "keyword_argument")[2];
+          for (const v of [viaKeyword, third]) if (v?.type === "identifier") registeredViews.add(v.text);
+        }
+      }
+      for (const c of n.namedChildren) if (c) collectRegisteredViews(c);
+    };
+    collectRegisteredViews(root);
     const isRequestHandler = (fn: SyntaxNode): boolean => {
       const deco = fn.parent?.type === "decorated_definition"
         ? fn.parent.namedChildren.filter(c => c?.type === "decorator").map(c => c!.text) : [];
       if (deco.some(t => FASTAPI_DECORATOR_RE.test(t))) return false; // FastAPI serializes returns as JSON
-      return deco.some(t => /^@\s*\w+(?:\.\w+)*\.route\s*\(/.test(t)) || paramNamesOf(fn).some(isRequestName);
+      return deco.some(t => /^@\s*\w+(?:\.\w+)*\.route\s*\(/.test(t)) || paramNamesOf(fn).some(isRequestName) || registeredViews.has(fn.childForFieldName("name")?.text ?? "");
     };
     const NON_HTML_RETURNS = new Set([
       "dictionary", "list", "tuple", "set", "list_comprehension", "dictionary_comprehension", "set_comprehension",

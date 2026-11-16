@@ -179,6 +179,8 @@ export const PROPAGATOR_MODELS: readonly PropagatorModel[] = [
     "resolve", "resolveSibling", "decode", "encode", "encodeToString", "decodeToString", "requireNonNull",
     // Commons Codec's Base64: the encoded form keeps "/" (not path-safe), and decoding gives the input back
     "encodeBase64", "encodeBase64String", "encodeBase64URLSafe", "encodeBase64URLSafeString", "decodeBase64",
+    // javax.xml.bind.DatatypeConverter (JAXB): the same Base64 / hex round trip
+    "parseBase64Binary", "printBase64Binary", "parseHexBinary", "printHexBinary",
     "requireNonNullElse", "copyOf", "singletonList", "unmodifiableList", "unmodifiableSet", "unmodifiableMap",
     "orElse", "getOrDefault", "create", "toURI", "normalize", "strip", "trim",
     ] },

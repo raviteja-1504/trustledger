@@ -11,6 +11,7 @@ import { scanTerraformCloud, scanCloudFormation, scanArmTemplate, scanBicep, sca
 import { findDockerfileEolBaseImage, findDockerfileBuildRisks, findComposeRuntimeRisks } from "./containerHardening";
 import { scanOpenApiSpec } from "./api/openapiSpec";
 import { findEndpointMissingAuth } from "./api/apiInventory";
+import { findAndroidManifestRisks, findAndroidCleartextBaseUrl } from "./mobile/androidManifest";
 
 const CONFIG_LANGS = new Set(["yaml", "json"]);
 const SOURCE_LANGS = new Set(["typescript", "javascript", "python", "java", "kotlin", "csharp", "golang", "php"]);
@@ -47,6 +48,11 @@ detectorRegistry.register({
 detectorRegistry.register({
   id: "appsec-openapi-spec", category: "security",
   scan: ctx => CONFIG_LANGS.has(ctx.language) && /\b(?:openapi|swagger)\b/.test(ctx.content.slice(0, 4000)) ? scanOpenApiSpec(ctx.content) : [],
+});
+detectorRegistry.register({
+  id: "appsec-android-manifest", category: "security",
+  scan: ctx => ctx.language === "xml" ? findAndroidManifestRisks(ctx.file_path, ctx.content)
+    : ctx.language === "kotlin" || ctx.language === "java" ? findAndroidCleartextBaseUrl(ctx.content) : [],
 });
 detectorRegistry.register({
   id: "appsec-endpoint-auth", category: "security",

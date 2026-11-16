@@ -1563,6 +1563,10 @@ const XXE_RE = [
   /LIBXML_NOENT/,
   /^(?!.*LIBXML_NONET).*LIBXML_DTDLOAD/,
   /->(?:substituteEntities|resolveExternals)\s*=\s*true\b|libxml_disable_entity_loader\s*\(\s*false\s*\)/,
+  // Python: the parser is switched to resolve entities -- lxml `XMLParser(resolve_entities=True | load_dtd=True)` and the SAX/pulldom
+  // `setFeature(<external-general|parameter-entities>, True)`. A configuration fact, so no taint is needed; the safe forms say False.
+  /\bXMLParser\s*\([^)]*\b(?:resolve_entities|load_dtd)\s*=\s*True\b/,
+  /\.setFeature\s*\(\s*(?:["']http:\/\/xml\.org\/sax\/features\/external-(?:general|parameter)-entities["']|(?:xml\.sax\.handler\.)?feature_external_(?:ges|pes))\s*,\s*True\s*\)/,
 ];
 
 // LDAP injection (filter construction with user input)
@@ -1637,12 +1641,21 @@ const XSS_RE = [
   // flagged. Mirrors the escapeshellarg-guard/FromSqlInterpolated-guard
   // precision discipline established elsewhere in this phase.
   /\b(?:echo|print)\b(?![^;]*\b(?:htmlspecialchars|htmlentities)\s*\()[^;]*\$_(?:GET|POST|REQUEST|COOKIE)\b/i,
+  // Rails ERB -- `raw` / `.html_safe` switch the view's HTML escaping off for that value. Request data (params / cookies / the
+  // request) written that way is reflected XSS; a user-authored text attribute of a model (`current_user.first_name.html_safe`,
+  // `raw @post.body`) is stored XSS. `sanitize(...)` / `h(...)` / `ERB::Util` wrapped around it keep the line quiet.
+  /<%==?\s*raw\b(?![^%]*\b(?:sanitize|strip_tags|ERB::Util|h)\s*\()[^%]*\b(?:params|cookies|request\.\w+|session)\b/,
+  /<%==?(?![^%]*\b(?:sanitize|strip_tags|ERB::Util|h)\s*\()[^%]*\b(?:params|cookies|request\.\w+)\b[^%]*\.html_safe\b/,
+  /<%==?\s*raw\s+(?![^%]*\b(?:sanitize|strip_tags|ERB::Util|h)\s*\()@?\w+(?:\.\w+)*\.(?:first_name|last_name|full_name|username|user_name|nickname|display_name|email|comment|message|body|bio|about|title|description|content|text)\b/i,
+  /<%==?\s*(?![^%]*\b(?:sanitize|strip_tags|ERB::Util|h)\s*\()@?\w+(?:\.\w+)*\.(?:first_name|last_name|full_name|username|user_name|nickname|display_name|email|comment|message|body|bio|about|title|description|content|text)\.html_safe\b/i,
 ];
 
 // Insecure deserialization
 const INSECURE_DESERIAL_RE = [
   /pickle\.loads?\s*\(\s*(?!b["'])/,
   /yaml\.load\s*\([^,)]+\)(?!\s*,\s*Loader\s*=\s*yaml\.(?:Safe|Full)Loader)/,
+  // PyYAML's unsafe loaders named outright: yaml.Loader / yaml.UnsafeLoader (and the C builds) construct arbitrary Python objects
+  /\byaml\.load(?:_all)?\s*\([^)\n]*\bLoader\s*=\s*yaml\.(?:C)?(?:Unsafe)?Loader\b/,
   /jsonpickle\.decode\s*\(/,
   /unserialize\s*\(\s*\$_(?:POST|GET|REQUEST|COOKIE)/i,
   /Marshal\.load\s*\(\s*(?:params|request|body)/,
@@ -1679,6 +1692,8 @@ const WEAK_CRYPTO_RE = [
   // PHP — bare global md5()/sha1() functions, same password-context gate
   // as the Python hashlib entry above (PHP variables carry a $ sigil).
   /\b(?:md5|sha1)\s*\(\s*\$(?:password|passwd|pwd)/i,
+  // JS/Ruby/Python helper packages (`const md5 = require('md5')`, `md5(password)`) -- same password-context gate as above
+  /(?<![\w.$])(?:md5|sha1)\s*\(\s*(?:password|passwd|pwd|pass)\b/i,
   /(?:MD5|SHA1|SHA128)\.new\s*\(/,
   // Python PyCryptodome / PyCrypto: broken ciphers, and any cipher in ECB mode
   /\b(?:DES|DES3|ARC2|ARC4|Blowfish|CAST)\.new\s*\(/,
@@ -1721,6 +1736,9 @@ const PII_LOG_RE = [
   /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.(?:creditCard|ccNum|cvv|cardNumber)\b[^)]*\)/i,
   /(?:console|logger|log)\.\w+\s*\([^)]*[\w\])]\.phone(?:Number)?\b[^)]*\)/i,
   /(?:console|logger|log)\.\w+\s*\([^)]*\$\{[^}]*\b(?:email|password|token|secret|ssn|phone|creditCard|cvv)\b[^}]*\}[^)]*\)/i,
+  // the WHOLE request body logged (`console.log(req.body)` / `JSON.stringify(req.body)`): whatever the client posted -- the login
+  // password, card numbers -- lands in the log. A single named field (`req.body.name`, `req.body["id"]`) is judged by the entries above.
+  /\b(?:console|logger|log)\.\w+\s*\([^)\n]*\b(?:req|request)\.body\b(?!\s*(?:\.|\[|\?\.))[^)\n]*\)/i,
   /logging\.(?:info|debug|warning|error)\s*\([^)]*[\w\])]\.(?:password|email|token|ssn)\b[^)]*\)/i,
   // Go — log.Printf("... password=%s ...", password): sensitive data
   // appears as a labeled %verb in the format string, not a .propertyName
@@ -4464,6 +4482,95 @@ function findHardcodedCredentialCheck(lines: string[]): ScanIndicator[] {
     "A password / token / API key is compared with a literal in the source — anyone with the code (or the binary) has the credential; compare against a salted hash or a secret held in the environment, with a constant-time comparison");
 }
 
+/**
+ * Rails: `# protect_from_forgery with: :exception` -- the protection written and then switched off by commenting it out (the usual way
+ * it is lost). Needs the raw lines, which still hold the comment, and the comment-free ones to be sure no live call remains.
+ */
+function findRailsForgeryProtectionCommentedOut(rawLines: string[], codeLines: string[], filePath: string): ScanIndicator[] {
+  if (!/\.rb$/i.test(filePath) || !rawLines.some(l => /\bclass\s+\w*Controller\s*<\s*(?:ActionController::(?:Base|API)|\w*Controller)\b/.test(l))) return [];
+  // a live call (the comment-free view may still carry `#` lines for Ruby, so the comment prefix is checked here too)
+  if ([...codeLines, ...rawLines].some(l => !/^\s*#/.test(l) && /\bprotect_from_forgery\b/.test(l))) return [];
+  const found: ScanIndicator[] = [];
+  rawLines.forEach((l, i) => {
+    if (/^\s*#+\s*protect_from_forgery\b/.test(l)) {
+      found.push({ id: "csrf-protection-disabled", label: "CSRF Protection Disabled", severity: "high", line: i + 1,
+        detail: "protect_from_forgery is commented out in this controller, so state-changing requests carry no CSRF token check — restore it (`protect_from_forgery with: :exception`)" });
+    }
+  });
+  return found;
+}
+
+/**
+ * Groovy and Perl have no taint engine here, so the idioms that matter are matched by shape, gated on the file extension:
+ *  - Groovy: a GString with an interpolation run as a command (`"cmd /c ${x}".execute()`), literal credentials handed to
+ *    `Sql.newInstance(url, user, "password", driver)`, and a Spark route handing a request parameter back inside HTML.
+ *  - Perl (CGI): `print "<h1>Hello, $name</h1>"` where `$name` was read from `param(...)` a few lines up and never escaped.
+ */
+const GROOVY_EXECUTE_RE = /"[^"\n]*\$\{?[A-Za-z_]\w*[^"\n]*"\s*\.execute\s*\(\s*\)/;
+const GROOVY_SQL_CREDS_RE = /\bSql\.newInstance\s*\(\s*"[^"\n]+"\s*,\s*"[^"\n]+"\s*,\s*"[^"\s$]{4,}"/;
+const GROOVY_REQ_ASSIGN_RE = /\b(\w+)\s*=\s*(?:req|request)\.(?:queryParams|queryParamsValues|params|body|cookie|headers)\s*\(/;
+const PERL_PARAM_ASSIGN_RE = /\bmy\s+\$(\w+)\s*=\s*(?:\$\w+\s*->\s*)?param\s*\(/;
+
+function findGroovyPerlIdioms(lines: string[], filePath: string): ScanIndicator[] {
+  const isGroovy = /\.groovy$/i.test(filePath);
+  const isPerl = /\.(?:pl|pm|cgi)$/i.test(filePath);
+  if (!isGroovy && !isPerl) return [];
+  const found: ScanIndicator[] = [];
+  const add = (id: string, label: string, severity: ScanIndicator["severity"], line: number, detail: string) =>
+    found.push({ id, label, severity, line, detail, confidence: 80 });
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(?:\/\/|\*|\/\*|#)/.test(line)) continue;
+    if (isGroovy) {
+      if (GROOVY_EXECUTE_RE.test(line)) {
+        add("command-injection", "Command Injection", "critical", i + 1,
+          "A GString with an interpolated value is run as a command (\"...${x}\".execute()) — pass the program and arguments as a list instead of one shell string");
+      }
+      if (GROOVY_SQL_CREDS_RE.test(line)) {
+        add("hardcoded-secret", "Hardcoded Secret", "critical", i + 1,
+          "A literal database password is passed to Sql.newInstance — read it from the environment or a secrets manager");
+      }
+      const html = /\breturn\s+"[^"\n]*<[^"\n]*\$\{?([A-Za-z_]\w*)/.exec(line);
+      if (html) {
+        const name = html[1];
+        const recent = lines.slice(Math.max(0, i - 8), i);
+        if (recent.some(l => { const m = GROOVY_REQ_ASSIGN_RE.exec(l); return m?.[1] === name; }) && !/\b(?:escapeHtml|encodeForHTML|StringEscapeUtils|escapeXml)\b/.test(line)) {
+          add("xss", "Cross-Site Scripting (XSS)", "critical", i + 1,
+            `Request parameter '${name}' is returned inside an HTML string without escaping — escape it (StringEscapeUtils.escapeHtml4) before writing it into markup`);
+        }
+      }
+    } else {
+      const m = /\bprint\s+(?:\$\w+\s*->\s*)?(?:"[^"\n]*<[^"\n]*\$(\w+)|qq[({][^)}\n]*<[^)}\n]*\$(\w+))/.exec(line);
+      const name = m?.[1] ?? m?.[2];
+      if (name && !/\b(?:escapeHTML|encode_entities|HTML::Entities)\b/.test(line)) {
+        const recent = lines.slice(Math.max(0, i - 8), i);
+        if (recent.some(l => PERL_PARAM_ASSIGN_RE.exec(l)?.[1] === name)) {
+          add("xss", "Cross-Site Scripting (XSS)", "critical", i + 1,
+            `CGI parameter '$${name}' is printed inside HTML without escaping — use CGI::escapeHTML / HTML::Entities::encode_entities`);
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * JSP scriptlets get no data-flow engine, so the deserialization sink is matched by shape: an ObjectInputStream built over bytes in a
+ * page that reads the request (the "serialized view state" pattern), with no ObjectInputFilter / class allow-list anywhere in the page.
+ */
+function findJspDeserialization(lines: string[], filePath: string): ScanIndicator[] {
+  if (!/\.(?:jsp|jspx|tag)$/i.test(filePath)) return [];
+  if (lines.some(l => /\b(?:ObjectInputFilter|setObjectInputFilter|resolveClass|ValidatingObjectInputStream|SerialKiller)\b/.test(l))) return [];
+  const found: ScanIndicator[] = [];
+  lines.forEach((l, i) => {
+    if (!/\bnew\s+ObjectInputStream\s*\(/.test(l) || /^\s*(?:\/\/|\*|\/\*)/.test(l)) return;
+    if (!lines.slice(Math.max(0, i - 60), i).some(w => /\brequest\.(?:getParameter|getInputStream|getReader|getCookies|getHeader)\s*\(/.test(w))) return;
+    found.push({ id: "insecure-deserialization", label: "Insecure Deserialization", severity: "critical", line: i + 1, confidence: 85,
+      detail: "An ObjectInputStream reads bytes this page took from the request, with no class allow-list (ObjectInputFilter) — a gadget chain runs during readObject(); use a data format (JSON) or sign and filter the stream" });
+  });
+  return found;
+}
+
 function findCSRFDisabled(lines: string[]): ScanIndicator[] {
   return runDetector(lines, CSRF_DISABLED_RE, "csrf-protection-disabled", "CSRF Protection Disabled", "high",
     "Framework-level CSRF protection explicitly disabled — re-enable it or add explicit token validation for state-changing endpoints");
@@ -4602,6 +4709,27 @@ function findInsecureFileUploadCSharp(lines: string[]): ScanIndicator[] {
     if (window.some(l => CSHARP_FILE_UPLOAD_VALIDATION_RE.test(l))) continue;
     found.push({ id:"insecure-file-upload", label:"Insecure File Upload", severity:"high", line:i+1,
       detail:"IFormFile saved to disk with no visible file-extension/content-type validation nearby — validate against an allowlist of extensions/MIME types and store outside the web root with a generated filename" });
+  }
+  return found;
+}
+
+// Java servlet uploads (Commons FileUpload `FileItem.write`, Servlet 3 `Part.write`): the stored file keeps the CLIENT's name and
+// extension, with nothing nearby that checks either. Same windowed shape as the C# rule, for the same reason: the check is almost
+// always on a different line from the save.
+const JAVA_UPLOAD_SINK_RE = /\b\w+\.write\s*\(\s*(?!")[\w.()"+\s]+\)\s*;/;
+const JAVA_UPLOAD_CONTEXT_RE = /\b(?:FileItem|ServletFileUpload|DiskFileItemFactory|getPart|getParts)\b/;
+const JAVA_UPLOAD_CLIENT_NAME_RE = /\b\w+\.(?:getName|getSubmittedFileName)\s*\(\s*\)/;
+const JAVA_UPLOAD_VALIDATION_RE = /\b(?:UUID|randomUUID|allowedExtensions|ALLOWED_EXT\w*|getExtension|getContentType|isAllowed\w*|whitelist|allowlist|allowedTypes|createTempFile)\b|\.endsWith\s*\(\s*"\./i;
+
+function findInsecureFileUploadJava(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !JAVA_UPLOAD_SINK_RE.test(lines[i])) continue;
+    const window = lines.slice(Math.max(0, i - 25), i + 1);
+    if (!window.some(l => JAVA_UPLOAD_CONTEXT_RE.test(l)) || !window.some(l => JAVA_UPLOAD_CLIENT_NAME_RE.test(l))) continue;
+    if (window.some(l => JAVA_UPLOAD_VALIDATION_RE.test(l))) continue;
+    found.push({ id:"insecure-file-upload", label:"Insecure File Upload", severity:"high", line:i+1,
+      detail:"Uploaded file written under the name the client sent, with no extension or content-type check nearby — an uploaded .jsp/.war or a path-shaped name becomes code or overwrites a file; generate the stored name and allow-list the type" });
   }
   return found;
 }
@@ -8621,10 +8749,14 @@ export function analyzeFile(
     ...findLDAPInjection(codeLines),
     ...findXPathInjection(codeLines),
     ...findCSRFDisabled(codeLines),
+    ...findRailsForgeryProtectionCommentedOut(lines, codeLines, file_path),
+    ...findGroovyPerlIdioms(codeLines, file_path),
+    ...findJspDeserialization(codeLines, file_path),
     ...findAuthDisabled(codeLines),
     ...findHardcodedCredentialCheck(codeLines),
     ...findInsecureFileUpload(codeLines),
     ...findInsecureFileUploadCSharp(codeLines),
+    ...findInsecureFileUploadJava(codeLines),
     ...findTOCTOU(codeLines),
     ...findTOCTOUOtherLangs(codeLines, lang),
     ...findCookieInsecurity(codeLines),
@@ -8663,8 +8795,16 @@ export function analyzeFile(
   // Dedup by id+line, preserving which detector(s) independently flagged the
   // same finding (spec: "multiple regexes may identify the same
   // vulnerability... deduplicate... store primaryDetector/supportingDetectors").
+  // A documentation file (README, docs/*.md) quotes vulnerable code to explain it -- a `eval(...)` in a fenced block is not a
+  // vulnerability in the project. A leaked credential in a doc is still one, so only the secret detectors apply to it.
+  const isDocFile = lang === "markdown" || /\.(?:mdx|rst|adoc|asciidoc|txt)$/i.test(file_path);
+  // Python XXE: a parser configured to resolve entities is reported on its own (config fact, no taint needed). When the data-flow
+  // engine has already proven a flow into such a parser in this file, that finding is the same issue with more evidence: keep it alone.
+  const pyXxeFlowProven = lang === "python" && rawIndicators.some(i => i.id === "xxe" && !!i.sourceExpr);
+  const flowDeduped = pyXxeFlowProven ? rawIndicators.filter(i => !(i.id === "xxe" && !i.sourceExpr)) : rawIndicators;
+  const scoped = isDocFile ? flowDeduped.filter(i => /secret|credential|private-key|api-key|token|password/i.test(i.id)) : flowDeduped;
   const byKey = new Map<string, ScanIndicator>();
-  for (const i of rawIndicators) {
+  for (const i of scoped) {
     const k = `${i.id}:${i.line ?? ""}`;
     const existing = byKey.get(k);
     if (!existing) { byKey.set(k, i); continue; }

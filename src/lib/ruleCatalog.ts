@@ -36,6 +36,7 @@ const DOMAIN_FORMATS: Record<AppsecDomain, string[]> = {
   cloud: ["Terraform", "CloudFormation / SAM", "ARM", "Bicep", "Serverless"],
   container: ["Dockerfile", "Docker Compose"],
   api: ["OpenAPI / Swagger", "JavaScript/TypeScript", "Python", "Java", "C#", "Go", "PHP"],
+  mobile: ["Android manifest", "Kotlin", "Java"],
 };
 const LEGACY_FORMATS: Array<[RegExp, string[]]> = [
   [/^iac-(?:s3|open-ingress|unencrypted|iam|public-db)/, ["Terraform"]],
