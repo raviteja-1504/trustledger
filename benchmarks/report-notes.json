@@ -27,6 +27,20 @@
       "rule": "ssrf",
       "title": "An https-only check is labelled safe",
       "explanation": "The corpus treats a request URL as safe once its scheme is https. Restricting the scheme does not stop a request to an internal host (https://169.254.169.254/, an internal service), so we keep reporting it. A deliberate disagreement with the label."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest01128",
+      "rule": "weak-signing-secret",
+      "title": "A signing-method check does not make a literal key safe",
+      "explanation": "The test checks that the token uses an HMAC method and then verifies it with the key []byte(\"supersecret\"). The corpus labels it safe because the algorithm is pinned; we still report it, because a key written in the source lets anyone mint a token the parser accepts."
+    },
+    {
+      "corpus": "SAST Benchmark — PHP",
+      "caseId": "BenchmarkTest00985",
+      "rule": "insecure-deserialization",
+      "title": "An instanceof check after unserialize is too late",
+      "explanation": "A request value is passed to igbinary_unserialize and the result is then checked with instanceof. The corpus labels it safe; we report it, because the object is already built (and its destructors and wakeup methods run) before the check, so a gadget chain does not need the type to match."
     }
   ],
   "falseNegatives": [
@@ -64,6 +78,20 @@
       "rule": "weak-crypto",
       "title": "A weak password hash behind a helper in another file",
       "explanation": "models/user.ts stores security.hash(password), and the weak MD5 hash lives in lib/insecurity.ts. The weak hash itself is reported there, but not the use of it for passwords in the model. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest00250",
+      "rule": "insecure-deserialization",
+      "title": "yaml.Unmarshal into interface{} is labelled vulnerable",
+      "explanation": "The corpus files decoding a request body with gopkg.in/yaml.v3 into an interface{} under deserialization. Go's YAML decoder builds plain maps, slices and scalars and runs no code, so there is no gadget to reach; we do not report it, and score it as a miss rather than change the label."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00060",
+      "rule": "insecure-deserialization",
+      "title": "A same-file function named like a deserializer",
+      "explanation": "The test calls deserialize_object(body.as_bytes()), a function defined a few lines below that returns a constant. Nothing in the file reads or builds an object, and we do not treat a locally defined function as a library sink because of its name, so the case counts as a miss."
     }
   ],
   "limitations": [
@@ -74,25 +102,133 @@
     "The internal cross-file suite was written by us. It is included because no public corpus targets cross-file flows, but it is less independent than the public corpora.",
     "The AI-attribution check uses 10 labelled TypeScript/JavaScript files: a regression check, not a statistically strong evaluation.",
     "Throughput is measured in batch on a developer workstation, on the corpora scanned in a single pass. It is not end-to-end pull-request latency.",
-    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label."
+    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label.",
+    "Many Rust cases, and some PHP and Ruby ones, call a function defined in the same file that only imitates a library call (simulated_reqwest_get, aes_ecb_encrypt, native_tls_danger). We scan the code as written and do not treat a locally defined function as a library sink because of its name, so those cases count as misses; this is the main reason Rust's recall is low, and it says little about code that calls the real libraries.",
+    "Only the sast-benchmark corpora were re-run on 2026-11-16. The OWASP, Juliet and Juice Shop corpora were not available for that run, so each of them keeps the engine commit named against it rather than being presented as measured on today's engine."
   ],
   "comparison": {
     "status": "not-run",
     "note": "We have not yet run CodeQL or Semgrep on these corpora under identical conditions, so we publish no comparison numbers. We will add one when we have run both tools on the same corpus versions, with their default security rules, scored by the same scripts."
   },
   "history": [
-    { "commit": "b73e12f", "date": "2026-10-24", "corpus": "OWASP Benchmark (Python)", "score": 95, "note": "From 12 before this commit (recorded in the commit message)" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "OWASP Benchmark (Java)", "score": 65.4, "note": "Test cases only; helper classes not scanned" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Go", "score": 35, "note": "Category average" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — PHP", "score": 42, "note": "Category average" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Ruby", "score": 36, "note": "Category average" },
-    { "commit": "bbe15dd", "date": "2026-10-29", "corpus": "SAST Benchmark — Rust", "score": 25, "note": "Category average" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "OWASP Benchmark (Java)", "score": 87.5, "note": "Category average; helper classes scanned alongside" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Go", "score": 55, "note": "Category average" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — PHP", "score": 56, "note": "Category average" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Ruby", "score": 52, "note": "Category average" },
-    { "commit": "756c80d", "date": "2026-11-01", "corpus": "SAST Benchmark — Rust", "score": 39, "note": "Category average" },
-    { "commit": "0e73164", "date": "2026-11-03", "corpus": "OWASP Benchmark (Java)", "score": 93.5, "note": "Category average; constant-returning methods of other classes and cross-file pass-through methods in local helpers" },
-    { "commit": "b4505ab+", "date": "2026-11-02", "corpus": "OWASP Benchmark (Python)", "score": 98.8, "note": "Category average; measured on b4505ab plus the uncommitted Python changes of that day" }
+    {
+      "commit": "b73e12f",
+      "date": "2026-10-24",
+      "corpus": "OWASP Benchmark (Python)",
+      "score": 95,
+      "note": "From 12 before this commit (recorded in the commit message)"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 65.4,
+      "note": "Test cases only; helper classes not scanned"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Go",
+      "score": 35,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 42,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 36,
+      "note": "Category average"
+    },
+    {
+      "commit": "bbe15dd",
+      "date": "2026-10-29",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 25,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 87.5,
+      "note": "Category average; helper classes scanned alongside"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Go",
+      "score": 55,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 56,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 52,
+      "note": "Category average"
+    },
+    {
+      "commit": "756c80d",
+      "date": "2026-11-01",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 39,
+      "note": "Category average"
+    },
+    {
+      "commit": "0e73164",
+      "date": "2026-11-03",
+      "corpus": "OWASP Benchmark (Java)",
+      "score": 93.5,
+      "note": "Category average; constant-returning methods of other classes and cross-file pass-through methods in local helpers"
+    },
+    {
+      "commit": "b4505ab+",
+      "date": "2026-11-02",
+      "corpus": "OWASP Benchmark (Python)",
+      "score": 98.8,
+      "note": "Category average; measured on b4505ab plus the uncommitted Python changes of that day"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Go",
+      "score": 58.1,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 60.5,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 56.6,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 39.7,
+      "note": "Category average; unchanged -- the missed cases call same-file stand-ins for library functions (see limitations)"
+    }
   ]
 }

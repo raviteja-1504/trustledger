@@ -720,6 +720,9 @@ function makeTaintMaskPHP(ctx: EngineCtx): TaintMaskFnPHP {
       // file_get_contents("php://input") -- reads the raw request body, attacker-controlled
       // regardless of args being a literal string.
       if (fnName === "file_get_contents" && /php:\/\/input/i.test(args[0]?.text ?? "")) return ALL;
+      // the contents of an uploaded file are as attacker-controlled as the request body: file_get_contents($_FILES['f']['tmp_name'])
+      if ((fnName === "file_get_contents" || fnName === "file" || fnName === "stream_get_contents") &&
+          /\$_FILES\s*\[[^\]]+\]\s*\[\s*['"]tmp_name['"]\s*\]/.test(args[0]?.text ?? "")) return ALL;
       if (fnName || userCall) {
         const m = localReturnMask(calleeKeysPHP(node, ctx), args, env);
         if (m) return m;
@@ -1460,7 +1463,7 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
       const prog = progEl?.namedChildren[progEl.namedChildren.length - 1];
       if (prog && (taintMask(prog, env) & classOf("command-injection"))) emit(ctx, "command-injection", node, prog.text, fnName);
     } else fireArg("command-injection", 0);
-  } else if (fnName === "unserialize") {
+  } else if (fnName === "unserialize" || fnName === "igbinary_unserialize") {
     // ['allowed_classes' => false] / [...a list]: no object of an arbitrary class can be built -- no gadget chain. A
     // payload whose HMAC was checked with hash_equals() first came from this server.
     if (/['"]allowed_classes['"]\s*=>\s*(?:false|\[|array\s*\()/i.test(args[1]?.text ?? "") || hmacVerifiedBeforePHP(node, args[0])) {
@@ -1510,12 +1513,14 @@ function checkFunctionCallSink(node: SyntaxNode, ctx: EngineCtx, taintMask: Tain
   } else if (fnName === "error_log" || fnName === "syslog") {
     // error_log($msg) / syslog($priority, $msg): a CR/LF in the message forges a separate log entry
     fireArg("log-injection", fnName === "syslog" ? 1 : 0);
-  } else if (fnName === "ldap_search") {
-    // ldap_search($link, $base_dn, $filter) -- confirmed 3-arg positional
-    // signature; the filter is args[2], not just "any tainted arg" (the
-    // $link/$base_dn args could themselves be tainted in a contrived case
-    // without that being the real vulnerability).
+  } else if (fnName === "ldap_search" || fnName === "ldap_list" || fnName === "ldap_read") {
+    // ldap_search / ldap_list / ldap_read ($link, $base_dn, $filter): the filter is args[2]; a request value spliced into the base DN
+    // (`"ou=$ou,dc=example,dc=com"`) is DN injection and chooses which subtree is searched.
     if (args.length >= 3) fire("ldap-injection", argMasks[2], args[2].text);
+    if (args.length >= 2 && (argMasks[1] & classOf("ldap-injection"))) fire("ldap-injection", argMasks[1], args[1].text);
+  } else if (/^ldap_(?:bind|add|modify|mod_replace|mod_add|mod_del|modify_batch|delete|compare|rename)$/.test(fnName)) {
+    // ($link, $dn, ...): the entry the operation acts on (or binds as) is named by the DN
+    if (args.length >= 2 && (argMasks[1] & classOf("ldap-injection"))) fire("ldap-injection", argMasks[1], args[1].text);
   } else if (fnName === "eval" || fnName === "assert") {
     // assert("<string>") evaluates its argument as PHP (before PHP 8)
     fireArg("eval-exec", 0);

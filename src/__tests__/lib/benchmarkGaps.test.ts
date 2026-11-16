@@ -495,6 +495,150 @@ Export the key before running:
 `],
 ];
 
+// ── 0llino/sast-benchmark (Go, PHP, Ruby) ──────────────────────────────────────────────────────────────────────
+const GO = (imports: string, body: string) => `package testcode
+import (
+	"net/http"
+${imports}
+)
+func H(w http.ResponseWriter, r *http.Request) {
+${body}
+}
+`;
+const RB = (body: string) => `class A < ApplicationController
+  def show
+${body}
+  end
+end
+`;
+const sbCases: Array<[string, string, string, string]> = [
+  ["go aliased text/template Parse of request text", "t/a.go", "ssti", GO(`	text_template "text/template"`, `	src := r.URL.Query().Get("tmpl")
+	t, err := text_template.New("t").Parse(src)
+	if err != nil { return }
+	t.Execute(w, nil)`)],
+  ["go aliased html/template ParseFiles of a request path", "t/a.go", "ssti", GO(`	tpl "html/template"`, `	p := r.URL.Query().Get("page")
+	t, _ := tpl.ParseFiles(p)
+	t.Execute(w, nil)`)],
+  ["go aliased template with a constant stays quiet", "t/a.go", "!ssti", GO(`	text_template "text/template"`, `	t, _ := text_template.New("t").Parse("Hello {{.User}}")
+	t.Execute(w, map[string]string{"User": r.URL.Query().Get("u")})`)],
+  ["go jwt.Parse keyfunc returning an empty key", "t/a.go", "weak-signing-secret", GO(`	"github.com/golang-jwt/jwt/v5"`, `	tok, _ := jwt.Parse(r.Header.Get("Authorization"), func(t *jwt.Token) (interface{}, error) {
+		return []byte(""), nil
+	})
+	_ = tok`)],
+  ["go jwt.ParseWithClaims keyfunc returning a literal key", "t/a.go", "weak-signing-secret", GO(`	"github.com/golang-jwt/jwt/v5"`, `	tok, _ := jwt.ParseWithClaims(r.Header.Get("Authorization"), jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		return []byte("super-secret"), nil
+	})
+	_ = tok`)],
+  ["go jwt.Parse keyfunc reading the key from the environment stays quiet", "t/a.go", "!weak-signing-secret", GO(`	"os"
+	"github.com/golang-jwt/jwt/v5"`, `	tok, _ := jwt.Parse(r.Header.Get("Authorization"), func(t *jwt.Token) (interface{}, error) {
+		return []byte(os.Getenv("JWT_KEY")), nil
+	})
+	_ = tok`)],
+  ["php PDO with a literal password", "t/a.php", "hardcoded-secret", `<?php
+function f() {
+    $dsn = 'mysql:host=localhost;dbname=app';
+    $pdo = new PDO($dsn, "root", "s3cr3t_p4ss");
+    return $pdo->query("SELECT id FROM users")->fetchAll();
+}
+`],
+  ["php mysqli_connect with a literal password", "t/a.php", "hardcoded-secret", `<?php
+function f() {
+    return mysqli_connect('localhost', 'app', 'Tr0ub4dor&3', 'appdb');
+}
+`],
+  ["php PDO with the password from the environment stays quiet", "t/a.php", "!hardcoded-secret", `<?php
+function f() {
+    $pdo = new PDO('mysql:host=localhost;dbname=app', getenv('DB_USER'), getenv('DB_PASS'));
+    return $pdo;
+}
+`],
+  ["php PDO with an empty or placeholder password stays quiet", "t/a.php", "!hardcoded-secret", `<?php
+function f() {
+    return new PDO('sqlite::memory:', 'root', '');
+}
+function g() {
+    return new PDO('mysql:host=localhost', 'app', 'changeme');
+}
+`],
+  ["php mysqli with a one-character stand-in password stays quiet", "t/a.php", "!hardcoded-secret", `<?php
+$db = new mysqli("localhost", "u", "p", "d");
+`],
+  ["php ldap_list with a request value in the base DN", "t/a.php", "ldap-injection", `<?php
+function f() {
+    $conn = ldap_connect('ldap://localhost');
+    $ou = $_GET['ou'];
+    return ldap_list($conn, "ou=$ou,dc=example,dc=com", '(objectClass=*)');
+}
+`],
+  ["php ldap_modify naming a request-chosen DN", "t/a.php", "ldap-injection", `<?php
+function f() {
+    $conn = ldap_connect('ldap://localhost');
+    $uid = $_POST['uid'];
+    return ldap_modify($conn, "uid=" . $uid . ",ou=users,dc=example,dc=com", ['mail' => 'x@example.com']);
+}
+`],
+  ["php ldap_list with an escaped DN part stays quiet", "t/a.php", "!ldap-injection", `<?php
+function f() {
+    $conn = ldap_connect('ldap://localhost');
+    $ou = ldap_escape($_GET['ou'], '', LDAP_ESCAPE_DN);
+    return ldap_list($conn, "ou=$ou,dc=example,dc=com", '(objectClass=*)');
+}
+`],
+  ["ruby Kernel.load of a request path", "t/a.rb", "file-inclusion", RB(`    Kernel.load(params[:path])`)],
+  ["ruby eval of a file the request names", "t/a.rb", "file-inclusion", RB(`    eval(File.read(params[:script]))`)],
+  ["ruby autoload from a request-chosen file", "t/a.rb", "file-inclusion", RB(`    Object.autoload(:Plugin, params[:file])`)],
+  ["ruby Kernel.load of a fixed file stays quiet", "t/a.rb", "!file-inclusion", RB(`    Kernel.load("/app/extensions/base.rb")
+    eval(File.read("templates/base.rb"))`)],
+  ["php igbinary_unserialize of a request value", "t/a.php", "insecure-deserialization", `<?php
+function f() {
+    $obj = igbinary_unserialize(base64_decode($_POST['payload']));
+    return get_class($obj);
+}
+`],
+  ["php unserialize of the contents of an uploaded file", "t/a.php", "insecure-deserialization", `<?php
+function f() {
+    $content = file_get_contents($_FILES['import']['tmp_name']);
+    $data = unserialize($content);
+    return count($data);
+}
+`],
+  ["php unserialize of a constant stays quiet", "t/a.php", "!insecure-deserialization", `<?php
+function f() {
+    $data = unserialize(file_get_contents(__DIR__ . '/cache.bin'));
+    return count($data);
+}
+`],
+  ["ruby Net::LDAP search with a request value in the base DN", "t/a.rb", "ldap-injection", RB(`    ldap = Net::LDAP.new(host: 'ldap.example.com')
+    ldap.search(base: "ou=#{params[:ou]},dc=example,dc=com", filter: '(objectClass=*)')`)],
+  ["ruby Net::LDAP bind as a request-chosen DN", "t/a.rb", "ldap-injection", RB(`    ldap = Net::LDAP.new(host: 'ldap.example.com')
+    ldap.bind(method: :simple, username: "uid=#{params[:user]},dc=example,dc=com", password: params[:password])`)],
+  ["ruby Net::LDAP with a fixed base DN stays quiet", "t/a.rb", "!ldap-injection", RB(`    ldap = Net::LDAP.new(host: 'ldap.example.com')
+    ldap.search(base: "ou=people,dc=example,dc=com", filter: '(objectClass=*)')`)],
+  ["ruby regex with identical alternatives under +", "t/a.rb", "redos", RB(`    matched = params[:text].match(/(a|a)+$/)`)],
+  ["ruby regex with two adjacent unbounded wildcards", "t/a.rb", "redos", RB(`    matched = params[:text].match(/(.*)(.*)/)`)],
+  ["ruby regex with an alternation branch that overlaps the other under +", "t/a.rb", "redos", RB(`    matched = params[:text].match(/(a|\\w)+$/)`)],
+  ["ruby anchored linear regex stays quiet", "t/a.rb", "!redos", RB(`    matched = params[:text].match(/\\A(?:a|b)\\z/)
+    other = params[:text].match(/(a|b)+/)`)],
+  ["ruby PG.connect with a literal password", "t/a.rb", "hardcoded-secret", `require 'pg'
+def conn
+  PG.connect(host: 'db', dbname: 'app', user: 'app', password: 'hunter2-prod')
+end
+`],
+  ["ruby PG.connect with the password from ENV stays quiet", "t/a.rb", "!hardcoded-secret", `require 'pg'
+def conn
+  PG.connect(host: 'db', dbname: 'app', user: 'app', password: ENV['DB_PASSWORD'])
+end
+`],
+];
+
+describe("sast-benchmark gaps", () => {
+  it.each(sbCases)("%s", (_name, path, rule, content) => {
+    const got = ids(path, content);
+    if (rule.startsWith("!")) { for (const r of rule.slice(1).split("|")) expect(got).not.toContain(r); }
+    else expect(rule.split("|").some(r => got.includes(r))).toBe(true);
+  });
+});
+
 describe("one issue, one finding", () => {
   it("a Python XXE flow into a parser that is also configured unsafely is reported once, on the flow", () => {
     const got = ids("t/a.py", `from flask import request

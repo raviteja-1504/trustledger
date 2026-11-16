@@ -1082,6 +1082,54 @@ function findWeakSigningSecretPHPHmac(lines: string[]): ScanIndicator[] {
   return found;
 }
 
+/**
+ * A PHP database connection opened with a literal password, handed over positionally: `new PDO($dsn, "root", "s3cr3t")` /
+ * `mysqli_connect($h, "u", "p")` / `new mysqli($h, "u", "p", $db)`. The generic `password = "..."` patterns need the word `password` next to
+ * an assignment or key (which is how the Ruby drivers' `password: "..."` option is already caught); these pass the value by position.
+ */
+const DB_PASSWORD_PLACEHOLDER = /^(?:|your[\w-]*|change[\w-]*|example\w*|xxx+|\*+|<[^>]*>|password|passwd|secret|test|todo)$/i;
+const PHP_DB_CONNECT_RES: RegExp[] = [
+  /\bnew\s+PDO\s*\(\s*[^,()]+(?:\([^)]*\))?[^,()]*,\s*(?:"[^"$\n]*"|'[^'\n]*')\s*,\s*(?:"([^"$\n]*)"|'([^'\n]*)')\s*[,)]/,
+  // mysqli_connect($host, $user, $password, $db) / new mysqli(...): the password is the THIRD argument
+  /\b(?:mysqli_connect|new\s+mysqli)\s*\(\s*(?:\$[\w>-]+|"[^"\n]*"|'[^'\n]*')\s*,\s*(?:"[^"$\n]*"|'[^'\n]*'|\$\w+)\s*,\s*(?:"([^"$\n]*)"|'([^'\n]*)')\s*[,)]/,
+];
+function findDbConnectLiteralPassword(lines: string[], filePath: string): ScanIndicator[] {
+  if (!/\.php\d?$/i.test(filePath)) return [];
+  const found: ScanIndicator[] = [];
+  lines.forEach((l, i) => {
+    if (isNonExecutableLine(l)) return;
+    const m = PHP_DB_CONNECT_RES.map(re => re.exec(l)).find(x => !!x);
+    if (!m) return;
+    const value = m[1] ?? m[2] ?? "";
+    // an empty value, a template word, or a one-to-three character stand-in (`"p"`, `"pw"`) is not a real credential
+    if (DB_PASSWORD_PLACEHOLDER.test(value.trim()) || value.trim().length < 4) return;
+    found.push({ id: "hardcoded-secret", label: "Hardcoded Secret", severity: "high", line: i + 1, confidence: 85,
+      detail: "A database connection is opened with a password written in the source — move it to an environment variable or secrets manager" });
+  });
+  return found;
+}
+
+/**
+ * Go (golang-jwt / dgrijalva): `jwt.Parse(token, func(t *jwt.Token) (interface{}, error) { return []byte("literal"), nil })` -- the key the
+ * parser verifies with is a string baked into the source (an empty string included), so anyone can sign a token it accepts. The callback
+ * spans lines, so the next few lines after the call are searched for the literal return.
+ */
+const GO_JWT_PARSE_RE = /\bjwt\.(?:Parse|ParseWithClaims)\s*\(/;
+const GO_JWT_LITERAL_KEY_RE = /\breturn\s+\[\]byte\s*\(\s*"[^"\n]*"\s*\)\s*,\s*nil\b/;
+function findGoJwtLiteralKey(lines: string[]): ScanIndicator[] {
+  const found: ScanIndicator[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isNonExecutableLine(lines[i]) || !GO_JWT_PARSE_RE.test(lines[i])) continue;
+    for (let j = i; j < Math.min(lines.length, i + 8); j++) {
+      if (isNonExecutableLine(lines[j]) || !GO_JWT_LITERAL_KEY_RE.test(lines[j])) continue;
+      found.push({ id: "weak-signing-secret", label: "Hardcoded JWT/Session Signing Secret", severity: "critical", line: j + 1,
+        detail: "The key this JWT parser verifies with is a literal in the source (or an empty string) — anyone can mint a token it accepts; load the key from configuration and pin the expected signing method" });
+      break;
+    }
+  }
+  return found;
+}
+
 function findWeakSigningSecret(lines: string[]): ScanIndicator[] {
   return runDetector(lines, WEAK_SIGNING_SECRET_RE, "weak-signing-secret", "Hardcoded JWT/Session Signing Secret", "critical",
     "Signing key is a literal committed to source control — anyone with repo access can forge valid tokens; load it from an environment variable or secrets manager");
@@ -1247,6 +1295,12 @@ const REDOS_RE = [
   // Requires the quantifier to follow the group's closing paren directly, so
   // ordinary regex literals like /(?:pub\s+)?struct\s+\w+/ don't match.
   /\/\([^)]*[+*][^)]*\)[+*]/,
+  // Overlapping alternation under a quantifier -- both branches match the same text, so every extra character can be split
+  // two ways: `(a|a)+$`, `(x|.)+`
+  /\/\((?:\?:)?([^|()\\]+)\|\1\)[+*]/,
+  /\/\((?:\?:)?[^|()\\]+\|(?:\.|\\w|\\S|\\D)\)[+*]/,
+  // Two adjacent unbounded wildcards: `(.*)(.*)` -- quadratic on a non-matching input
+  /\/\(\.[*+]\)\(\.[*+]\)/,
 ];
 
 const OPEN_REDIRECT_RE = [
@@ -8681,6 +8735,8 @@ export function analyzeFile(
     ...findWebViewInsecureSettings(codeLines),
     ...findHardcodedCredentialCompare(codeLines),
     ...findWeakSigningSecret(codeLines),
+    ...findGoJwtLiteralKey(codeLines),
+    ...findDbConnectLiteralPassword(codeLines, file_path),
     ...findWeakSigningSecretPHPHmac(codeLines),
     ...findWeakSigningSecretSplitLine(codeLines),
     ...findCommandInjection(codeLines),

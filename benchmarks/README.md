@@ -64,6 +64,26 @@ names the engine commit and, per corpus, the metadata, the TSV, the scorer argum
 wall-clock time. Curated content — the false-positive and false-negative examples (each citing a corpus case id),
 the known limitations, the comparison status and the history table — lives in `report-notes.json`.
 
+## Refreshing only the sast-benchmark corpora
+
+The other corpora need downloads (NIST SARD, OWASP, Snyk), so when only 0llino/sast-benchmark was re-run, patch just its four
+corpora and leave everything else in `src/data/benchmarks.json` untouched. Run the directory probe once per language, keep each
+probe's findings file and console log under `<dir>/<lang>.tsv` and `<dir>/<lang>.log`, then:
+
+```sh
+node benchmarks/refresh-sast-benchmark.mjs /path/to/sast-benchmark <dir> <engine commit>[+] [YYYY-MM-DD]
+```
+
+The counts come from `scorers/score_sb.js` (JSON_OUT), the same way `build-report.mjs` gets them. Add the matching history
+points and any new false-positive / false-negative examples to `report-notes.json`, then run the tests (`publicEvidence`
+checks the report's consistency).
+
+Two kinds of "miss" in this suite are not engine gaps, and are explained in the report rather than tuned away: cases that call a
+function defined in the same file which only imitates a library call (`simulated_reqwest_get`, `aes_ecb_encrypt`), and cases
+where the corpus label disagrees with the library's real behaviour (Nokogiri's default parse, `yaml.Unmarshal` into `interface{}`).
+Likewise a case the corpus calls safe but that keeps a bypassable guard (`start_with?("/")` on a redirect target, a literal JWT key
+behind an algorithm check) is reported by the scanner and listed as a false positive.
+
 ## What is not measured yet
 
 - **Trace accuracy**: no public corpus labels the expected source-to-sink path.

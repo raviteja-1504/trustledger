@@ -350,7 +350,7 @@ const HTTP_CLIENT_CLASS_RE = /^(?:::)?(?:Patron::Session|Async::HTTP::Internet|H
 const DESERIAL_CALL_RE = /^(?:::)?(?:Marshal\.(?:load|restore)|YAML\.(?:load|unsafe_load|load_file|unsafe_load_file|load_stream)|Psych\.(?:load|unsafe_load|load_stream)|Oj\.(?:load|object_load)|JSON\.load|Ox\.load)$/;
 const SSTI_CALL_RE = /^(?:::)?(?:ERB\.new|Erubi::Engine\.new|Erubis::Eruby\.new|Haml::Engine\.new|Haml::Template\.new|Slim::Template\.new|Tilt::\w+\.new|Mustache\.render)$/;
 const REFLECTION_METHODS = new Set(["send", "public_send", "__send__", "try", "try!", "instance_variable_get", "instance_variable_set", "method", "public_method", "const_get", "class_variable_get", "class_variable_set"]);
-const EVAL_FUNCTIONS = new Set(["eval", "instance_eval", "class_eval", "module_eval", "binding.eval", "Kernel.eval", "require", "load", "require_relative", "autoload"]);
+const EVAL_FUNCTIONS = new Set(["eval", "instance_eval", "class_eval", "module_eval", "binding.eval", "Kernel.eval", "require", "load", "require_relative", "autoload", "Kernel.load", "Kernel.require", "Kernel.require_relative", "Kernel.autoload", "Object.autoload"]);
 /** Model writes that accept an attributes hash. */
 const MASS_ASSIGN_METHODS = new Set([
   "new", "create", "create!", "build", "update", "update!", "assign_attributes", "attributes=", "update_attributes",
@@ -1789,11 +1789,21 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
 
   // ── Code execution / reflection ──
   if ((!recv && EVAL_FUNCTIONS.has(name)) || EVAL_FUNCTIONS.has(sinkName)) {
-    const a = pos[0];
     // load / require of a request-built path runs that file (file inclusion); eval runs the text itself
-    const loadsFile = /^(?:require|require_relative|load|autoload|Kernel\.load|Kernel\.require)$/.test(name) || /(?:^|\.)(?:require|load)$/.test(sinkName);
+    const loadsFile = /^(?:require|require_relative|load|autoload|Kernel\.load|Kernel\.require)$/.test(name) || /(?:^|\.)(?:require|require_relative|load|autoload)$/.test(sinkName);
+    // autoload(:Const, path): the file is the SECOND argument
+    const a = /(?:^|\.)autoload$/.test(sinkName) ? pos[1] : pos[0];
     if (a) fireOn(ctx, loadsFile ? "file-inclusion" : "eval-exec", node, a, mask(a, env), sinkName,
       loadsFile ? `Request input '${a.text.slice(0, 60)}' picks the Ruby file that ${name} runs — load from a fixed allow-list of names` : undefined);
+    // eval(File.read(path)) / instance_eval(IO.read(path)): the file the request names is run as Ruby code
+    if (!loadsFile && a && a.type === "call") {
+      const readCallee = a.childForFieldName("receiver")?.text + "." + (a.childForFieldName("method")?.text ?? "");
+      const readArg = argsOf(a)[0];
+      if (/^(?:File|IO|Pathname)\.(?:read|binread)$/.test(readCallee) && readArg) {
+        fireOn(ctx, "file-inclusion", node, readArg, mask(readArg, env), sinkName,
+          `Request input '${readArg.text.slice(0, 60)}' names the file whose contents ${name} runs as Ruby — read from a fixed allow-list of names`);
+      }
+    }
   }
   if (!recv && (name === "send" || name === "public_send" || name === "__send__") && pos[0]) {
     fireOn(ctx, "unsafe-reflection", node, pos[0], mask(pos[0], env), name, `Request input '${pos[0].text.slice(0, 60)}' picks which method runs (${name}) — map input to an explicit allow-list`);
@@ -1817,6 +1827,14 @@ function checkCallSink(node: SyntaxNode, env: Env, ctx: EngineCtx, mask: TaintMa
   if (recv && /^(?:search|bind_as|search_subschema_entry)$/.test(name) && /ldap/i.test(recv.text)) {
     const f = keywordArg(node, "filter");
     if (f) fireOn(ctx, "ldap-injection", node, f, mask(f, env), `${recv.text}.${name}(filter:)`);
+    // the base DN picks the subtree that is searched: a request value spliced into it is DN injection
+    const base = keywordArg(node, "base");
+    if (base) fireOn(ctx, "ldap-injection", node, base, mask(base, env), `${recv.text}.${name}(base:)`);
+  }
+  // ldap.bind(username: "uid=#{user},...") / ldap.add|modify|delete|rename(dn: "uid=#{user},..."): the DN names the account bound as / the entry changed
+  if (recv && /^(?:bind|add|modify|delete|rename|replace_attribute|add_attribute|delete_attribute)$/.test(name) && /ldap/i.test(recv.text)) {
+    const dn = keywordArg(node, name === "bind" ? "username" : "dn");
+    if (dn) fireOn(ctx, "ldap-injection", node, dn, mask(dn, env), `${recv.text}.${name}(${name === "bind" ? "username" : "dn"}:)`);
   }
   if (/^(?:::)?Net::LDAP::Filter\.(?:construct|from_rfc2254|from_rfc4515)$/.test(callee) && pos[0]) {
     fireOn(ctx, "ldap-injection", node, pos[0], mask(pos[0], env), sinkName);

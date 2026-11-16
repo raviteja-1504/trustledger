@@ -334,11 +334,12 @@ interface GoScanCtx {
   fiberPkgs: Set<string>;          // import names of the fiber package (its Ctx has header / cookie / path accessors the others lack)
   controllerVars: Set<string>;     // receivers of methods on a beego / revel controller type (a struct embedding the framework's Controller)
   ormKinds: Set<string>;           // the query-builder libraries this file imports: gorm, pop, beegoorm, ent
+  templatePkgs: Set<string>;       // local names of text/template and html/template, aliases included (`text_template "text/template"`)
 }
 const emptyGoCtx = (): GoScanCtx => ({
   writerVars: new Set(["w"]), frameworkPkgs: new Set(), pluginVars: new Set(), gobVars: new Set(), htmlEscapers: new Set(),
   sensitiveStructs: new Set(), varStructTypes: new Map(), frameworkCtxVars: new Set(), otherTypedVars: new Set(),
-  fiberPkgs: new Set(), controllerVars: new Set(), ormKinds: new Set(),
+  fiberPkgs: new Set(), controllerVars: new Set(), ormKinds: new Set(), templatePkgs: new Set(),
 });
 // gin, echo, fiber, iris, buffalo (also aliased: `g "github.com/gin-gonic/gin"` then `ctx *g.Context`)
 const FRAMEWORK_IMPORT_RE_GO = /(?:^|\/)(?:gin-gonic\/gin|labstack\/echo(?:\/v\d+)?|gofiber\/fiber(?:\/v\d+)?|kataras\/iris(?:\/v\d+)?(?:\/context)?|gobuffalo\/buffalo)$/;
@@ -755,6 +756,12 @@ const FS_SINKS_GO = new Set([
   "Lstat", "ReadDir", "Chmod", "Chdir", "Truncate", "Symlink", "Link", "Chown", "Readlink", "Chtimes", "Lchown", "CopyFS",
 ]);
 const TWO_PATH_FS_GO = new Set(["os.Rename", "os.Link", "os.Symlink"]);
+/** `text_template.New("t").Parse(src)` / `tpl.ParseFiles(path)` where the package was imported under another name. */
+function templateParseViaAliasGo(rawText: string): boolean {
+  if (goCtx.templatePkgs.size === 0) return false;
+  const heads = [...goCtx.templatePkgs].map(a => a.replace(/[^\w]/g, "")).filter(Boolean).join("|");
+  return !!heads && new RegExp("^(?:" + heads + ")\\.(?:(?:New|Must)\\b[\\s\\S]*\\.)?(?:Parse|ParseFiles|ParseGlob)$").test(rawText);
+}
 const TEMPLATE_PARSE_RE_GO = /^(?:text\/)?template\.(?:New|Must)\b[\s\S]*\.(?:Parse|ParseFiles|ParseGlob)$/;
 const SENSITIVE_FIELD_RE_GO = /^(?:role|roles|admin|is_?admin|permissions?|privileges?|scope|scopes|is_?staff|superuser|is_?superuser|groups?)$/i;
 const SECRET_NAME_RE_GO = /^(?:[A-Za-z_]*(?:secret|token|password|passwd|apikey|api_key|hmac|signature)[A-Za-z_0-9]*)$/i;
@@ -935,7 +942,7 @@ function matchSinkGo(call: SyntaxNode): SinkMatch | null {
     return { id: "redos", sinkExpr: text, args: [args[0]] };
   }
   // template text controlled by the caller
-  if (TEMPLATE_PARSE_RE_GO.test(rawText) && args[0]) return { id: "ssti", sinkExpr: text, args: [args[0]] };
+  if ((TEMPLATE_PARSE_RE_GO.test(rawText) || templateParseViaAliasGo(rawText)) && args[0]) return { id: "ssti", sinkExpr: text, args: [args[0]] };
   // dynamic code / reflection
   if (text === "plugin.Open" && args[0]) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
   if (tail === "Lookup" && goCtx.pluginVars.has(receiverText) && args[0]) return { id: "eval-exec", sinkExpr: text, args: [args[0]] };
@@ -2838,6 +2845,7 @@ export function scanAstTaintGo(
       for (const [re, kind] of ORM_IMPORTS_GO) if (re.test(path)) goCtx.ormKinds.add(kind);
       const alias = spec.childForFieldName("name");
       const local = alias?.type === "package_identifier" ? alias.text : path.split("/").filter(s => !/^v\d+$/.test(s)).pop() ?? "";
+      if (path === "text/template" || path === "html/template") goCtx.templatePkgs.add(local);
       if (/(?:^|\/)(?:beego\/beego(?:\/v\d+)?(?:\/server\/web)?|astaxie\/beego|revel\/revel)$/.test(path)) controllerPkgs.add(local);
       if (FIBER_IMPORT_RE_GO.test(path)) goCtx.fiberPkgs.add(local);
       if (!FRAMEWORK_IMPORT_RE_GO.test(path)) continue;

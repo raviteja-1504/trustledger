@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-03T07:55:15.162Z",
+  "generatedAt": "2026-11-16T05:19:52.661Z",
   "engineCommit": "756c80d",
   "environment": "Measured in batch on a Windows developer workstation (single Node.js process, Jest harness) — a throughput figure, not end-to-end pull-request latency.",
   "corpora": [
@@ -12,16 +12,16 @@
         "Go"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-11-01T08:18:20.3834124Z",
-      "files": 1353,
-      "wallMs": 96294,
+      "runAt": "2026-11-16T12:00:00.000Z",
+      "files": 1352,
+      "wallMs": 77225,
       "categories": [
         {
           "name": "authnfailure",
-          "tp": 5,
-          "fn": 20,
-          "fp": 0,
-          "tn": 25
+          "tp": 11,
+          "fn": 14,
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "authzfailure",
@@ -32,15 +32,15 @@
         },
         {
           "name": "cmdi",
-          "tp": 21,
-          "fn": 9,
-          "fp": 7,
-          "tn": 23
+          "tp": 22,
+          "fn": 8,
+          "fp": 8,
+          "tn": 22
         },
         {
           "name": "codeinj",
-          "tp": 8,
-          "fn": 17,
+          "tp": 20,
+          "fn": 5,
           "fp": 0,
           "tn": 25
         },
@@ -62,8 +62,8 @@
           "name": "fileupload",
           "tp": 15,
           "fn": 10,
-          "fp": 3,
-          "tn": 22
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "hardcodedcreds",
@@ -81,8 +81,8 @@
         },
         {
           "name": "inputval",
-          "tp": 8,
-          "fn": 17,
+          "tp": 9,
+          "fn": 16,
           "fp": 0,
           "tn": 25
         },
@@ -111,13 +111,13 @@
           "name": "pathtraver",
           "tp": 27,
           "fn": 3,
-          "fp": 1,
-          "tn": 29
+          "fp": 5,
+          "tn": 25
         },
         {
           "name": "race_condition",
-          "tp": 7,
-          "fn": 18,
+          "tp": 8,
+          "fn": 17,
           "fp": 0,
           "tn": 25
         },
@@ -137,15 +137,15 @@
         },
         {
           "name": "sqli",
-          "tp": 53,
-          "fn": 12,
+          "tp": 56,
+          "fn": 9,
           "fp": 3,
           "tn": 62
         },
         {
           "name": "ssrf",
-          "tp": 18,
-          "fn": 7,
+          "tp": 17,
+          "fn": 8,
           "fp": 3,
           "tn": 22
         },
@@ -191,7 +191,8 @@
           "fp": 4,
           "tn": 21
         }
-      ]
+      ],
+      "engineCommit": "7b67b01+"
     },
     {
       "id": "sast-benchmark-php",
@@ -202,14 +203,14 @@
         "PHP"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-11-01T08:20:50.0791757Z",
+      "runAt": "2026-11-16T12:00:00.000Z",
       "files": 1251,
-      "wallMs": 57932,
+      "wallMs": 17530,
       "categories": [
         {
           "name": "cmdi",
-          "tp": 17,
-          "fn": 8,
+          "tp": 18,
+          "fn": 7,
           "fp": 1,
           "tn": 24
         },
@@ -217,8 +218,8 @@
           "name": "codeinj",
           "tp": 21,
           "fn": 4,
-          "fp": 3,
-          "tn": 22
+          "fp": 1,
+          "tn": 24
         },
         {
           "name": "csrf",
@@ -229,10 +230,10 @@
         },
         {
           "name": "deserial",
-          "tp": 16,
-          "fn": 9,
-          "fp": 1,
-          "tn": 24
+          "tp": 18,
+          "fn": 7,
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "extract",
@@ -243,10 +244,10 @@
         },
         {
           "name": "fileinclusion",
-          "tp": 20,
-          "fn": 5,
-          "fp": 1,
-          "tn": 24
+          "tp": 22,
+          "fn": 3,
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "fileupload",
@@ -257,8 +258,8 @@
         },
         {
           "name": "hardcodedcreds",
-          "tp": 13,
-          "fn": 12,
+          "tp": 16,
+          "fn": 9,
           "fp": 0,
           "tn": 25
         },
@@ -271,8 +272,8 @@
         },
         {
           "name": "ldapi",
-          "tp": 14,
-          "fn": 11,
+          "tp": 23,
+          "fn": 2,
           "fp": 1,
           "tn": 24
         },
@@ -280,64 +281,64 @@
           "name": "massassign",
           "tp": 14,
           "fn": 11,
+          "fp": 2,
+          "tn": 23
+        },
+        {
+          "name": "pathtraver",
+          "tp": 21,
+          "fn": 4,
           "fp": 5,
           "tn": 20
         },
         {
-          "name": "pathtraver",
-          "tp": 22,
-          "fn": 3,
-          "fp": 3,
-          "tn": 22
-        },
-        {
           "name": "redirect",
-          "tp": 18,
-          "fn": 7,
+          "tp": 19,
+          "fn": 6,
           "fp": 4,
           "tn": 21
         },
         {
           "name": "securecookie",
-          "tp": 8,
-          "fn": 17,
+          "tp": 11,
+          "fn": 14,
           "fp": 0,
           "tn": 25
         },
         {
           "name": "sqli",
-          "tp": 23,
-          "fn": 2,
+          "tp": 24,
+          "fn": 1,
           "fp": 2,
           "tn": 23
         },
         {
           "name": "ssrf",
-          "tp": 15,
-          "fn": 10,
-          "fp": 7,
-          "tn": 18
+          "tp": 20,
+          "fn": 5,
+          "fp": 10,
+          "tn": 15
         },
         {
           "name": "ssti",
-          "tp": 13,
-          "fn": 12,
+          "tp": 12,
+          "fn": 13,
           "fp": 1,
           "tn": 24
         },
         {
           "name": "typejuggling",
-          "tp": 4,
-          "fn": 21,
+          "tp": 6,
+          "fn": 19,
           "fp": 0,
           "tn": 25
         },
         {
           "name": "unsafereflect",
-          "tp": 18,
-          "fn": 7,
-          "fp": 4,
-          "tn": 21
+          "tp": 21,
+          "fn": 4,
+          "fp": 2,
+          "tn": 23
         },
         {
           "name": "variablevars",
@@ -369,8 +370,8 @@
         },
         {
           "name": "xss",
-          "tp": 23,
-          "fn": 2,
+          "tp": 24,
+          "fn": 1,
           "fp": 2,
           "tn": 23
         },
@@ -381,7 +382,8 @@
           "fp": 3,
           "tn": 22
         }
-      ]
+      ],
+      "engineCommit": "7b67b01+"
     },
     {
       "id": "sast-benchmark-ruby",
@@ -392,9 +394,9 @@
         "Ruby"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-11-01T08:22:00.5898269Z",
+      "runAt": "2026-11-16T12:00:00.000Z",
       "files": 1351,
-      "wallMs": 44472,
+      "wallMs": 22221,
       "categories": [
         {
           "name": "authnfailure",
@@ -419,8 +421,8 @@
         },
         {
           "name": "codeinj",
-          "tp": 16,
-          "fn": 9,
+          "tp": 21,
+          "fn": 4,
           "fp": 2,
           "tn": 23
         },
@@ -447,8 +449,8 @@
         },
         {
           "name": "fileinclusion",
-          "tp": 14,
-          "fn": 11,
+          "tp": 23,
+          "fn": 2,
           "fp": 2,
           "tn": 23
         },
@@ -461,8 +463,8 @@
         },
         {
           "name": "hardcodedcreds",
-          "tp": 12,
-          "fn": 13,
+          "tp": 15,
+          "fn": 10,
           "fp": 0,
           "tn": 25
         },
@@ -475,15 +477,15 @@
         },
         {
           "name": "ldapi",
-          "tp": 12,
-          "fn": 13,
+          "tp": 21,
+          "fn": 4,
           "fp": 0,
           "tn": 25
         },
         {
           "name": "loginjection",
-          "tp": 17,
-          "fn": 8,
+          "tp": 18,
+          "fn": 7,
           "fp": 3,
           "tn": 22
         },
@@ -498,8 +500,8 @@
           "name": "pathtraver",
           "tp": 22,
           "fn": 3,
-          "fp": 4,
-          "tn": 21
+          "fp": 5,
+          "tn": 20
         },
         {
           "name": "redirect",
@@ -510,8 +512,8 @@
         },
         {
           "name": "regex",
-          "tp": 13,
-          "fn": 12,
+          "tp": 15,
+          "fn": 10,
           "fp": 3,
           "tn": 22
         },
@@ -533,20 +535,20 @@
           "name": "ssrf",
           "tp": 19,
           "fn": 6,
-          "fp": 7,
-          "tn": 18
+          "fp": 5,
+          "tn": 20
         },
         {
           "name": "ssti",
-          "tp": 13,
-          "fn": 12,
+          "tp": 14,
+          "fn": 11,
           "fp": 0,
           "tn": 25
         },
         {
           "name": "unsafereflect",
-          "tp": 22,
-          "fn": 3,
+          "tp": 21,
+          "fn": 4,
           "fp": 3,
           "tn": 22
         },
@@ -585,7 +587,8 @@
           "fp": 0,
           "tn": 25
         }
-      ]
+      ],
+      "engineCommit": "7b67b01+"
     },
     {
       "id": "sast-benchmark-rust",
@@ -596,9 +599,9 @@
         "Rust"
       ],
       "scoring": "Each test case is one file labelled vulnerable or safe for a category; a case is flagged when a finding of that category's rules is in its file.",
-      "runAt": "2026-11-01T08:22:56.3009482Z",
+      "runAt": "2026-11-16T12:00:00.000Z",
       "files": 1251,
-      "wallMs": 48733,
+      "wallMs": 35073,
       "categories": [
         {
           "name": "authnfailure",
@@ -651,8 +654,8 @@
         },
         {
           "name": "hardcodedcreds",
-          "tp": 14,
-          "fn": 11,
+          "tp": 15,
+          "fn": 10,
           "fp": 0,
           "tn": 25
         },
@@ -665,8 +668,8 @@
         },
         {
           "name": "inputval",
-          "tp": 0,
-          "fn": 25,
+          "tp": 1,
+          "fn": 24,
           "fp": 0,
           "tn": 25
         },
@@ -714,8 +717,8 @@
         },
         {
           "name": "race_condition",
-          "tp": 0,
-          "fn": 25,
+          "tp": 3,
+          "fn": 22,
           "fp": 0,
           "tn": 25
         },
@@ -775,7 +778,8 @@
           "fp": 5,
           "tn": 20
         }
-      ]
+      ],
+      "engineCommit": "7b67b01+"
     },
     {
       "id": "owasp-benchmark-java",
@@ -1561,6 +1565,20 @@
       "rule": "ssrf",
       "title": "An https-only check is labelled safe",
       "explanation": "The corpus treats a request URL as safe once its scheme is https. Restricting the scheme does not stop a request to an internal host (https://169.254.169.254/, an internal service), so we keep reporting it. A deliberate disagreement with the label."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest01128",
+      "rule": "weak-signing-secret",
+      "title": "A signing-method check does not make a literal key safe",
+      "explanation": "The test checks that the token uses an HMAC method and then verifies it with the key []byte(\"supersecret\"). The corpus labels it safe because the algorithm is pinned; we still report it, because a key written in the source lets anyone mint a token the parser accepts."
+    },
+    {
+      "corpus": "SAST Benchmark — PHP",
+      "caseId": "BenchmarkTest00985",
+      "rule": "insecure-deserialization",
+      "title": "An instanceof check after unserialize is too late",
+      "explanation": "A request value is passed to igbinary_unserialize and the result is then checked with instanceof. The corpus labels it safe; we report it, because the object is already built (and its destructors and wakeup methods run) before the check, so a gadget chain does not need the type to match."
     }
   ],
   "falseNegatives": [
@@ -1598,6 +1616,20 @@
       "rule": "weak-crypto",
       "title": "A weak password hash behind a helper in another file",
       "explanation": "models/user.ts stores security.hash(password), and the weak MD5 hash lives in lib/insecurity.ts. The weak hash itself is reported there, but not the use of it for passwords in the model. Engine gap."
+    },
+    {
+      "corpus": "SAST Benchmark — Go",
+      "caseId": "BenchmarkTest00250",
+      "rule": "insecure-deserialization",
+      "title": "yaml.Unmarshal into interface{} is labelled vulnerable",
+      "explanation": "The corpus files decoding a request body with gopkg.in/yaml.v3 into an interface{} under deserialization. Go's YAML decoder builds plain maps, slices and scalars and runs no code, so there is no gadget to reach; we do not report it, and score it as a miss rather than change the label."
+    },
+    {
+      "corpus": "SAST Benchmark — Rust",
+      "caseId": "BenchmarkTest00060",
+      "rule": "insecure-deserialization",
+      "title": "A same-file function named like a deserializer",
+      "explanation": "The test calls deserialize_object(body.as_bytes()), a function defined a few lines below that returns a constant. Nothing in the file reads or builds an object, and we do not treat a locally defined function as a library sink because of its name, so the case counts as a miss."
     }
   ],
   "limitations": [
@@ -1608,7 +1640,9 @@
     "The internal cross-file suite was written by us. It is included because no public corpus targets cross-file flows, but it is less independent than the public corpora.",
     "The AI-attribution check uses 10 labelled TypeScript/JavaScript files: a regression check, not a statistically strong evaluation.",
     "Throughput is measured in batch on a developer workstation, on the corpora scanned in a single pass. It is not end-to-end pull-request latency.",
-    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label."
+    "Where we disagree with a corpus label we keep the label in the score and explain the disagreement in the examples above, rather than changing the label.",
+    "Many Rust cases, and some PHP and Ruby ones, call a function defined in the same file that only imitates a library call (simulated_reqwest_get, aes_ecb_encrypt, native_tls_danger). We scan the code as written and do not treat a locally defined function as a library sink because of its name, so those cases count as misses; this is the main reason Rust's recall is low, and it says little about code that calls the real libraries.",
+    "Only the sast-benchmark corpora were re-run on 2026-11-16. The OWASP, Juliet and Juice Shop corpora were not available for that run, so each of them keeps the engine commit named against it rather than being presented as measured on today's engine."
   ],
   "comparison": {
     "status": "not-run",
@@ -1705,6 +1739,34 @@
       "corpus": "OWASP Benchmark (Python)",
       "score": 98.8,
       "note": "Category average; measured on b4505ab plus the uncommitted Python changes of that day"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Go",
+      "score": 58.1,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — PHP",
+      "score": 60.5,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Ruby",
+      "score": 56.6,
+      "note": "Category average; Go template aliases and JWT key callbacks, PHP/Ruby LDAP DNs and PHP database passwords, Ruby file inclusion and overlapping-alternation ReDoS"
+    },
+    {
+      "commit": "7b67b01+",
+      "date": "2026-11-16",
+      "corpus": "SAST Benchmark — Rust",
+      "score": 39.7,
+      "note": "Category average; unchanged -- the missed cases call same-file stand-ins for library functions (see limitations)"
     }
   ]
 }
