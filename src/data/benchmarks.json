@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-16T05:19:52.661Z",
+  "generatedAt": "2026-11-16T15:50:08.713Z",
   "engineCommit": "756c80d",
   "environment": "Measured in batch on a Windows developer workstation (single Node.js process, Jest harness) — a throughput figure, not end-to-end pull-request latency.",
   "corpora": [
@@ -1125,49 +1125,49 @@
         "C++"
       ],
       "scoring": "Every case has a vulnerable (bad) and a safe (good) function; a case counts as detected when a finding of its CWE's rules lands in a bad function, and as a false positive when one lands in a good function.",
-      "runAt": "2026-11-01T12:07:26.9313335Z",
-      "files": null,
-      "wallMs": null,
+      "runAt": "2026-11-16T15:50:08.713Z",
+      "files": 52291,
+      "wallMs": 1737150,
       "categories": [
         {
           "name": "CWE78_OS_Command_Injection",
-          "tp": 3800,
-          "fn": 1000,
+          "tp": 4400,
+          "fn": 400,
           "fp": 0,
           "tn": 4800
         },
         {
           "name": "CWE134_Uncontrolled_Format_String",
-          "tp": 2340,
-          "fn": 540,
+          "tp": 2640,
+          "fn": 240,
           "fp": 0,
           "tn": 2880
         },
         {
           "name": "CWE23_Relative_Path_Traversal",
-          "tp": 1665,
-          "fn": 735,
+          "tp": 2100,
+          "fn": 300,
           "fp": 0,
           "tn": 2400
         },
         {
           "name": "CWE36_Absolute_Path_Traversal",
-          "tp": 1665,
-          "fn": 735,
+          "tp": 2100,
+          "fn": 300,
           "fp": 0,
           "tn": 2400
         },
         {
           "name": "CWE90_LDAP_Injection",
-          "tp": 380,
-          "fn": 100,
+          "tp": 440,
+          "fn": 40,
           "fp": 0,
           "tn": 480
         },
         {
           "name": "CWE114_Process_Control",
-          "tp": 380,
-          "fn": 196,
+          "tp": 440,
+          "fn": 136,
           "fp": 0,
           "tn": 576
         },
@@ -1187,61 +1187,62 @@
         },
         {
           "name": "CWE415_Double_Free",
-          "tp": 460,
-          "fn": 502,
+          "tp": 880,
+          "fn": 82,
           "fp": 0,
           "tn": 962
         },
         {
           "name": "CWE416_Use_After_Free",
-          "tp": 380,
-          "fn": 79,
+          "tp": 438,
+          "fn": 21,
           "fp": 0,
           "tn": 459
         },
         {
           "name": "CWE690_NULL_Deref_From_Return",
-          "tp": 386,
-          "fn": 574,
+          "tp": 820,
+          "fn": 140,
           "fp": 0,
           "tn": 960
         },
         {
           "name": "CWE762_Mismatched_Memory_Management_Routines",
-          "tp": 1554,
-          "fn": 2010,
+          "tp": 3182,
+          "fn": 382,
           "fp": 0,
           "tn": 3564
         },
         {
           "name": "CWE789_Uncontrolled_Mem_Alloc",
-          "tp": 608,
-          "fn": 352,
+          "tp": 672,
+          "fn": 288,
           "fp": 0,
           "tn": 960
         },
         {
           "name": "CWE680_Integer_Overflow_to_Buffer_Overflow",
-          "tp": 296,
-          "fn": 280,
+          "tp": 336,
+          "fn": 240,
           "fp": 0,
           "tn": 576
         },
         {
           "name": "CWE121_Stack_Based_Buffer_Overflow",
-          "tp": 1216,
-          "fn": 3728,
-          "fp": 12,
-          "tn": 4932
+          "tp": 3210,
+          "fn": 1734,
+          "fp": 0,
+          "tn": 4944
         },
         {
           "name": "CWE122_Heap_Based_Buffer_Overflow",
-          "tp": 1927,
-          "fn": 3995,
-          "fp": 16,
-          "tn": 5906
+          "tp": 3756,
+          "fn": 2166,
+          "fp": 0,
+          "tn": 5922
         }
-      ]
+      ],
+      "engineCommit": "528472b+"
     },
     {
       "id": "trustledger-cross-file",

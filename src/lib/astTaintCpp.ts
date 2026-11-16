@@ -258,7 +258,8 @@ const knownApis = (): ReadonlySet<string> => KNOWN_APIS ??= new Set([
 const baseApi = (name: string) => {
   const defs = (MACRO_DEFS.get(name) ?? []).filter(d => /^[A-Za-z_]\w*$/.test(d));
   const real = defs.find(d => knownApis().has(normalizeApi(d))) ?? defs[0] ?? name;
-  return normalizeApi(real);
+  // `ALLOCA` is the usual spelling of alloca where the platform header that maps it is not in the scanned file
+  return real === "ALLOCA" ? "alloca" : normalizeApi(real);
 };
 
 function stringValue(n: SyntaxNode | null | undefined): string | null {
@@ -275,6 +276,37 @@ function stringValue(n: SyntaxNode | null | undefined): string | null {
 // ── Engine state ───────────────────────────────────────────────────────────────────────────────────────────
 
 type Env = TaintEnv;
+
+/** A declared type whose objects hold elements the engine tracks as one slot (`vector<int *>`, `std::list<char *>`, `map<int, int *>`). */
+const CONTAINER_TYPE_RE = /(?:^|::|\b)(?:vector|list|deque|map|unordered_map|set|unordered_set|queue|stack)\s*</;
+/** Union types of the file being scanned: every member of a union object shares one slot. */
+let UNION_TYPES: ReadonlySet<string> = new Set();
+function collectUnionTypes(root: SyntaxNode): Set<string> {
+  const names = new Set<string>();
+  for (const u of findAllNodes(root, "union_specifier")) {
+    const n = field(u, "name")?.text;
+    if (n) names.add(n);
+    const par = u.parent;
+    if (par?.type === "type_definition") for (const d of named(par)) if (d !== u && (d.type === "type_identifier" || d.type === "primitive_type")) names.add(d.text);
+  }
+  return names;
+}
+
+/** What one pointer variable is known to be: how it was allocated (ALLOC_*), whether it was released, whether it may be NULL unchecked. */
+interface MemState {
+  alloc: number; freed: number; unchecked: number;
+  /** bytes the pointer's buffer holds, when known (`malloc(50)`, `char buf[50]`) */
+  cap?: number;
+  /** characters of the string it holds, when known (filled with memset / strcpy of a literal) */
+  len?: number;
+  /** an out-parameter reached through a pointer (`int **p`, `&data` at the call), not a reference */
+  viaPtr?: boolean;
+}
+/** What a function leaves behind: the pointer it returns, what it stores through out-parameters, and how many bytes it
+ * writes into each buffer it was handed (a constant-size memcpy / strcpy / loop), keyed like freesParam. */
+interface MemSummary { ret?: MemState; outs: Map<number, MemState>; writes: Map<string, number> }
+const MEM_KINDS = ["alloc", "freed", "unchecked"] as const;
+const memEmpty = (s: MemState | undefined): boolean => !s || (!s.alloc && !s.freed && !s.unchecked && s.cap === undefined && s.len === undefined);
 
 /** `out`: a parameter the caller's object is reached through -- a C++ reference (`char *&data`), or a pointer the
  * function never re-points (`char *buf`, `char **p`) so its writes land in the caller's buffer. */
@@ -321,7 +353,7 @@ interface EngineCtx {
   /** fn -> (param index -> memory state at some call site: "alloc" kind, "unchecked") */
   seededMem: Map<string, Map<number, Map<string, number>>>;
   /** fn -> indices of the pointer parameters it frees (free(p) / delete p, directly or through another local fn) */
-  freesParam: Map<string, Map<number, Release>>;
+  freesParam: Map<string, Map<string, Release>>;
   /** per walk: alias group -> characters in the string the buffer holds, when known */
   strLen: Map<string, number>;
   /** per walk: local function pointer -> the function it was initialised with */
@@ -335,6 +367,14 @@ interface EngineCtx {
   /** per walk: C++ reference -> the variable it is bound to (`char *&dataRef = data;`), for good. Every write to
    * one of them is made to all (setVar / taintBuffer), so a read of either sees the object's value. */
   refs: Map<string, string>;
+  /** per walk: `*pp` -> the variable a pointer-to-pointer points at (`int **pp = &data;`), so a write or read through pp is data's */
+  slots: Map<string, string>;
+  /** fn id -> the memory state it leaves behind: what it returns, and what it stores through each out-parameter */
+  memSum: Map<string, MemSummary>;
+  /** fn id -> memory state of file-scope pointers at a call site (`badData = data; badSink();`): the callee is walked in it */
+  seededGlobals: Map<string, Map<string, MemState>>;
+  /** while a function is summarised: bytes it writes into each named buffer (see MemSummary.writes) */
+  writeObs?: Map<string, number>;
   /** fn -> (out-parameter index -> (source -> classes it stores there)); source -1 is input the fn reads itself,
    * j >= 0 is its parameter j (`copy(dst, src)` wrapping strcpy) */
   fills: Map<string, Map<number, Map<number, number>>>;
@@ -727,6 +767,18 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
     }
     return m;
   }
+  // a function in another file of the batch: what its return carries (input it reads itself; what flows through from an argument)
+  if (!recv) {
+    const aux = ctx.crossFileFacts?.get(AUX_PREFIX + target);
+    if (aux) {
+      let far = 0;
+      for (const f of aux) {
+        if (f.id === "taint-ret") far |= f.sinkClass;
+        else if (f.id === "taint-prop") far |= mask(args[f.index] ?? null, env, ctx) & f.sinkClass;
+      }
+      return far;
+    }
+  }
   return 0;
 }
 
@@ -748,8 +800,15 @@ function guardsOf(cond: SyntaxNode | null, ctx: EngineCtx): Guard[] {
   if (op === "||") return [...guardsOf(field(e, "left"), ctx), ...guardsOf(field(e, "right"), ctx)].filter(g => g.holds === "false");
   const l = field(e, "left"), r = field(e, "right");
   const ln = l?.type === "identifier" ? l.text : null, rn = r?.type === "identifier" ? r.text : null;
-  const isBound = (n: SyntaxNode | null) => !!n && (n.type === "number_literal" || n.type === "sizeof_expression" || /^[A-Z_][A-Z0-9_]*$/.test(n.text)
-    || (n.type === "identifier" && !!ctx.current && !ctx.current.params.some(p => p.name === n.text)));
+  // a literal, sizeof, a constant-looking name or a local -- or arithmetic over those: `(10)`, `sizeof(b) / sizeof(b[0])`, `N - 1`
+  const isBound = (n: SyntaxNode | null): boolean => {
+    if (!n) return false;
+    if (n.type === "parenthesized_expression") return isBound(named(n)[0] ?? null);
+    if (n.type === "binary_expression") return isBound(field(n, "left")) && isBound(field(n, "right"));
+    if (n.type === "cast_expression") return isBound(field(n, "value"));
+    return n.type === "number_literal" || n.type === "sizeof_expression" || /^[A-Z_][A-Z0-9_]*$/.test(n.text)
+      || (n.type === "identifier" && !!ctx.current && !ctx.current.params.some(p => p.name === n.text));
+  };
   const SIZE = SinkClass.CONTROL;
   // n < K / n <= K: bounded where true; n > K / n >= K: bounded where false; K > n / K >= n mirror
   if (ln && isBound(r)) {
@@ -828,13 +887,112 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   };
   /** `char *copy = data;`: the copy is the same allocation, in the same state. */
   const copyMemory = (to: string, from: SyntaxNode | null, env: Env) => {
-    let s = from;
-    while (s && (s.type === "cast_expression" || s.type === "parenthesized_expression")) s = s.type === "cast_expression" ? field(s, "value") : named(s)[0] ?? null;
-    if (s?.type !== "identifier" || s.text === to) return;
+    const src = slotOf(from);
+    if (!src || src === to) return;
     for (const k of ["freed", "alloc", "unchecked"]) {
-      const v = env.get(KIND_KEY(k, s.text));
+      const v = env.get(KIND_KEY(k, src));
       if (v) env.set(KIND_KEY(k, to), v);
     }
+    const cap = ctx.capacity.get(src);
+    if (cap !== undefined) ctx.capacity.set(to, cap);
+    const len = ctx.strLen.get(groupKey(src));
+    if (len !== undefined) ctx.strLen.set(groupKey(to), len);
+  };
+  const unwrapValue = (v: SyntaxNode | null): SyntaxNode | null => {
+    let s = v;
+    while (s && (s.type === "cast_expression" || s.type === "parenthesized_expression")) s = s.type === "cast_expression" ? field(s, "value") : named(s)[0] ?? null;
+    return s;
+  };
+  /** The variable whose memory state a pointer-valued expression reads: `p`; `dataRef` (a reference names the variable it was
+   * bound to, however that is reassigned later -- an assignment drops it from its alias group, the reference stays); `*pp`
+   * (what a pointer-to-pointer points at: the variable it was set to, else the slot `*pp` itself); a member or element
+   * (see memberSlot). */
+  const slotOf = (v: SyntaxNode | null): string | null => {
+    const s = unwrapValue(v);
+    if (!s) return null;
+    if (s.type === "identifier") return ctx.refs.get(s.text) ?? s.text;
+    if (s.type === "pointer_expression" && s.text.startsWith("*")) {
+      const o = unwrapValue(field(s, "argument") ?? named(s)[0] ?? null);
+      if (o?.type === "identifier") return ctx.slots.get(`*${o.text}`) ?? `*${o.text}`;
+    }
+    return memberSlot(s);
+  };
+  /** The slot a member or element of `base` is tracked under: a union's members share one (`u.*`), a container's elements share one (`c[*]`). */
+  const slotFor = (base: string | null, suffix: string): string | null => {
+    if (!base) return null;
+    if (suffix === "") return base;
+    if (suffix.startsWith(".")) return ctx.slots.has(`u:${base}`) ? `${base}.*` : `${base}${suffix}`;
+    if (suffix.startsWith("[")) return ctx.slots.has(`c:${base}`) ? `${base}[*]` : suffix === "[*]" ? null : `${base}${suffix}`;
+    return null;
+  };
+  /** `s.f`, `p->f`, `arr[2]`, `vec[i]`, `vec.back()`: the member / element of a variable that a pointer is stored in or read from. */
+  const memberSlot = (s: SyntaxNode | null): string | null => {
+    if (!s) return null;
+    if (s.type === "field_expression") {
+      const b = unwrapValue(field(s, "argument")), f = field(s, "field")?.text;
+      return b?.type === "identifier" && f ? slotFor(b.text, `.${f}`) : null;
+    }
+    if (s.type === "subscript_expression") {
+      const b = unwrapValue(field(s, "argument"));
+      if (b?.type !== "identifier") return null;
+      if (ctx.slots.has(`c:${b.text}`)) return slotFor(b.text, "[*]");
+      const idx = (named(field(s, "indices"))[0] ?? field(s, "index"))?.text ?? "";
+      return /^\d+$/.test(idx) ? slotFor(b.text, `[${idx}]`) : null;
+    }
+    if (s.type === "call_expression") {
+      const ci = callInfo(s);
+      return ci.recv?.type === "identifier" && ctx.slots.has(`c:${ci.recv.text}`) && /^(?:back|front|at|top)$/.test(ci.name) ? slotFor(ci.recv.text, "[*]") : null;
+    }
+    return null;
+  };
+  /** The variable an out-argument names: `data`, or `&data`. */
+  const argSlot = (a: SyntaxNode | null): string | null => {
+    const s = unwrapValue(a);
+    if (s?.type === "pointer_expression" && s.text.startsWith("&")) return slotOf(field(s, "argument") ?? named(s)[0] ?? null);
+    return s?.type === "identifier" ? slotOf(s) : null;
+  };
+  /** What a pointer argument points at: `&data` -> data; a pointer-to-pointer variable `pp` -> what it was set to. */
+  const pointeeSlot = (a: SyntaxNode | null): string | null => {
+    const s = unwrapValue(a);
+    if (s?.type === "pointer_expression" && s.text.startsWith("&")) return slotOf(field(s, "argument") ?? named(s)[0] ?? null);
+    return s?.type === "identifier" ? ctx.slots.get(`*${s.text}`) ?? `*${s.text}` : null;
+  };
+  /** The caller-side slot a summary key (`0`, `0*`, `0.f`, `0[2]`, `g:name`) names at this call, and the argument it came through. */
+  const keyTarget = (key: string, args: SyntaxNode[]): { slot: string; arg: SyntaxNode | null } | null => {
+    const km = /^(?:(\d+)|g:(\w+))(.*)$/.exec(key);
+    if (!km) return null;
+    const [, idx, gname, suffix] = km;
+    if (idx !== undefined) {
+      const a = args[Number(idx)];
+      if (!a) return null;
+      const slot = suffix === "" ? argSlot(a) : suffix === "*" ? pointeeSlot(a) : slotFor(argSlot(a), suffix);
+      return slot ? { slot, arg: a } : null;
+    }
+    const slot = suffix === "" ? gname : suffix === "*" ? ctx.slots.get(`*${gname}`) ?? `*${gname}` : slotFor(gname, suffix);
+    return slot ? { slot, arg: null } : null;
+  };
+  const readState = (name: string, env: Env): MemState => ({
+    alloc: env.get(KIND_KEY("alloc", name)) ?? 0, freed: env.get(KIND_KEY("freed", name)) ?? 0, unchecked: env.get(KIND_KEY("unchecked", name)) ?? 0,
+    cap: ctx.capacity.get(name), len: ctx.strLen.get(groupKey(name)),
+  });
+  const writeState = (name: string, st: MemState, env: Env) => {
+    for (const k of MEM_KINDS) { if (st[k]) env.set(KIND_KEY(k, name), st[k]); else env.delete(KIND_KEY(k, name)); }
+    if (st.cap !== undefined) ctx.capacity.set(name, st.cap); else ctx.capacity.delete(name);
+    if (st.len !== undefined) ctx.strLen.set(groupKey(name), st.len); else ctx.strLen.delete(groupKey(name));
+  };
+  /** The state a call's result is in, from the callee's summary (a function in this file, or one in another file of the batch). */
+  const retStateOf = (v: SyntaxNode | null): MemState | undefined => {
+    const e = unwrapValue(v);
+    if (e?.type !== "call_expression") return undefined;
+    const ci = callInfo(e);
+    const own = resolveLocalFns(e, ctx.fnAlias.get(ci.name) ?? ci.name, ci.recv, ctx);
+    if (own.length === 1) return ctx.memSum.get(own[0].id)?.ret;
+    if (own.length === 0 && !ci.recv) return crossFileMem(ctx.fnAlias.get(ci.name) ?? ci.name)?.ret;
+    return undefined;
+  };
+  const crossFileMem = (fn: string): MemSummary | undefined => {
+    const facts = ctx.crossFileFacts?.get(AUX_PREFIX + fn);
+    return facts ? decodeMemFacts(facts) : undefined;
   };
   const ALLOC_MALLOC = 1, ALLOC_NEW = 2, ALLOC_NEW_ARRAY = 4;
   const allocKindOf = (v: SyntaxNode | null): number => {
@@ -880,7 +1038,12 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     if (seeded) ctx.seeded.set(f.id, seeded);
   };
   const recordAlloc = (name: string, value: SyntaxNode | null, env: Env) => {
+    // `int *data = *dataPtr;` / `data = dataRef;` where that names the very variable being assigned: its state stands
+    if (slotOf(value) === name) return;
     resetMemory(name, env);
+    // `data = badSource(data)`: the callee returns an allocation (or one already released, or one never NULL-checked)
+    const ret = retStateOf(value);
+    if (ret && !memEmpty(ret)) writeState(name, ret, env);
     let g = value;
     while (g && (g.type === "cast_expression" || g.type === "parenthesized_expression")) g = g.type === "cast_expression" ? field(g, "value") : named(g)[0] ?? null;
     if (g?.type === "call_expression" && /^w?(?:tmpnam|tempnam|mktemp)$/.test(baseApi(callInfo(g).name))) env.set(KIND_KEY("tmpname", name), 1);
@@ -997,7 +1160,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         if (culprit) fireOn(ctx, "buffer-overflow", call, culprit, argM[from[from.findIndex(i => args[i] === culprit)]] ?? 0, api, STRINGY,
           `Attacker-controlled '${culprit.text.slice(0, 60)}' is copied by ${api} with no length limit — input longer than the destination overflows it; use a bounded copy (snprintf, strlcpy) and check the length`);
       }
-      if (!opts.quiet) checkConstantOverflow(call, api, args, env);
+      checkConstantOverflow(call, api, args, env);
     }
     // tainted copy length (memcpy/strncpy/...) with no bound check
     if (/^(?:memcpy|memmove|wmemcpy|wmemmove|strncpy|strncat|wcsncpy|wcsncat|memset)$/.test(api) && args[2] && !opts.quiet) {
@@ -1094,8 +1257,9 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       // callee frees is already judged at this call (freeVar), so it is not seeded twice.
       const frees = ctx.freesParam.get(target);
       for (const [i, a] of args.entries()) {
-        if (a.type !== "identifier" || !fn.params[i] || frees?.has(i)) continue;
-        for (const k of ["alloc", "unchecked"]) {
+        if (a.type !== "identifier" || !fn.params[i]) continue;
+        // a parameter the callee frees: its allocation kind is judged at this call, but whether it may be NULL still travels
+        for (const k of frees?.has(String(i)) ? ["unchecked"] : ["alloc", "unchecked"]) {
           const v = env.get(KIND_KEY(k, a.text));
           if (!v) continue;
           const perFn = ctx.seededMem.get(target) ?? new Map<number, Map<string, number>>();
@@ -1143,11 +1307,15 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
   };
 
   /** memcpy(dest[50], src, 100) / strcpy(dest[50], src) with a 99-char src / snprintf(dest[50], strlen(src), ...). */
+  const observeWrite = (dest: string, bytes: number) => {
+    if (ctx.writeObs && bytes > (ctx.writeObs.get(dest) ?? 0)) ctx.writeObs.set(dest, bytes);
+  };
   const checkConstantOverflow = (call: SyntaxNode, api: string, args: SyntaxNode[], env: Env) => {
     void env;
     const dest = rootName(args[0] ?? null);
-    const cap = dest && !dest.includes(".") ? ctx.capacity.get(dest) : undefined;
-    if (cap === undefined) return;
+    if (!dest || dest.includes(".")) return;
+    const cap = ctx.capacity.get(dest);
+    if (cap === undefined && !ctx.writeObs) return;
     const elem = /^(?:w|lstrcpyW)/.test(api) ? 4 : 1;
     let need: number | undefined;
     const lenArg = /^(?:memcpy|memmove|strncpy|strncat|wmemcpy|wmemmove|wcsncpy|wcsncat)$/.test(api) ? args[2]
@@ -1163,7 +1331,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       const n = strLenOf(args[1], elem);
       if (n !== undefined) need = ((ctx.strLen.get(groupKey(dest!)) ?? 0) + n + 1) * elem;
     }
-    if (need !== undefined && need > cap) {
+    if (need !== undefined) observeWrite(dest, need);
+    if (need !== undefined && cap !== undefined && need > cap && !opts.quiet) {
       emit(ctx, "buffer-overflow", call, args[1]?.text ?? api, api, `${api} writes up to ${need} bytes into '${dest}', which holds ${cap} — a constant overflow of the destination`);
     }
   };
@@ -1198,7 +1367,8 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       if (idx?.text !== iv.text || buf?.type !== "identifier") continue;
       const cap = ctx.capacity.get(buf.text);
       const elem = elemSizeOf(buf.text, loop);
-      if (cap === undefined || !elem || (lastIndex + 1) * elem <= cap) continue;
+      if (elem) observeWrite(buf.text, (lastIndex + 1) * elem);
+      if (cap === undefined || !elem || (lastIndex + 1) * elem <= cap || opts.quiet) continue;
       emit(ctx, "buffer-overflow", a, iv.text, `${buf.text}[${iv.text}]`,
         `The loop writes '${buf.text}[${iv.text}]' up to index ${lastIndex}, but '${buf.text}' holds ${Math.floor(cap / elem)} elements — the last iterations write past its end`);
       return;
@@ -1237,6 +1407,16 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
             if (rn && (ctx.capacity.has(rn) || ctx.aliases.has(rn))) alias(nm, rn);
           }
         } else {
+          // *pp = data: the variable pp points at now holds that allocation (`*dataPtr = (int *)malloc(...)`)
+          if (op === "=" && l?.type === "pointer_expression" && l.text.startsWith("*")) {
+            const slot = slotOf(l);
+            if (slot) { recordAlloc(slot, r, env); copyMemory(slot, r, env); }
+          }
+          // s.f = data / arr[2] = data / vec[i] = data: the member or element holds that allocation
+          if (op === "=" && l && (l.type === "field_expression" || l.type === "subscript_expression")) {
+            const ms = memberSlot(l);
+            if (ms) { recordAlloc(ms, r, env); copyMemory(ms, r, env); }
+          }
           // *p = x / p[i] = x / s.f = x: writing through the variable
           const base = nm.split(".")[0];
           touchVar(base, l!, env, true);
@@ -1300,14 +1480,45 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
         // (the one same-file function the call runs, by identity -- see resolveLocalFns)
         const own = resolveLocalFns(e, ctx.fnAlias.get(name) ?? name, recv, ctx);
         const ownId = own.length === 1 ? own[0].id : undefined;
-        const frees = ownId ? ctx.freesParam.get(ownId) : undefined;
+        const farFacts = own.length === 0 && !recv ? ctx.crossFileFacts?.get(AUX_PREFIX + (ctx.fnAlias.get(name) ?? name)) : undefined;
+        const frees = ownId ? ctx.freesParam.get(ownId) : farFacts ? crossFileReleases(farFacts) : undefined;
+        const farUses = farFacts ? crossFileUses(farFacts) : [];
         if (/^(?:free|cfree|kfree|g_free)$/.test(api) && args[0]) { const nm = rootName(args[0]); if (nm && args[0].type === "identifier") freeVar(nm, e, "free", env); }
         else for (const [i, a] of args.entries()) {
           const nm = a.type === "identifier" ? a.text : null;
           if (!nm) continue;
           const dIdx = DEREF_ARGS[api];
-          const how = frees?.get(i);
-          if (how) freeVar(nm, e, how, env); else touchVar(nm, a, env, dIdx === -1 || dIdx === i);
+          const how = frees?.get(String(i));
+          // a callee in another file that dereferences the pointer before freeing it: an unchecked allocation is used there
+          if (how && env.get(KIND_KEY("unchecked", nm)) && !env.get(KIND_KEY("freed", nm)) && farUses.some(u => u.state === "unchecked" && u.key === String(i))) touchVar(nm, a, env, true);
+          if (how) freeVar(nm, e, how, env); else touchVar(nm, a, env, dIdx === -1 || dIdx === i || farUses.some(u => u.state === "unchecked" && u.key === String(i)));
+        }
+        // a callee in another file that dereferences / reads, through a pointer-to-pointer, a member or an element, a pointer
+        // that is unchecked or already freed here
+        for (const u of farUses) {
+          const km = /^(\d+)(.+)$/.exec(u.key);
+          if (!km) continue;
+          const a = args[Number(km[1])];
+          if (!a) continue;
+          const t = km[2] === "*" ? pointeeSlot(a) : slotFor(argSlot(a), km[2]);
+          if (!t) continue;
+          // a pointer that is already freed is a use-after-free, whatever else is said about its NULL check
+          if (u.state === "unchecked" && env.get(KIND_KEY("freed", t))) continue;
+          touchVar(t, a, env, u.state === "unchecked");
+        }
+        // what the callee releases beyond the argument itself: what it points at (`badSink(&data)` freeing `*dataPtr`), a
+        // member or element of it (`myStruct.first`, `dataArray[2]`), and file-scope pointers (`badData`)
+        if (frees) for (const [key, how] of frees) {
+          const km = /^(?:(\d+)|g:(\w+))(.*)$/.exec(key);
+          if (!km || (km[1] !== undefined && km[3] === "")) continue;
+          const [, idx, gname, suffix] = km;
+          let target: string | null = null;
+          if (idx !== undefined) {
+            const a = args[Number(idx)];
+            if (!a) continue;
+            target = suffix === "*" ? pointeeSlot(a) : slotFor(argSlot(a), suffix);
+          } else target = suffix === "" ? gname : suffix === "*" ? ctx.slots.get(`*${gname}`) ?? `*${gname}` : slotFor(gname, suffix);
+          if (target) freeVar(target, e, how, env);
         }
         if (recv?.type === "identifier") touchVar(recv.text, recv, env, fnNode?.text.includes("->") ?? false);
         checkCall(e, env);
@@ -1320,6 +1531,48 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
           let v = 0;
           for (const [j, cls] of sources) v |= j < 0 ? cls : m(args[j] ?? null, env) & cls;
           if (v) taintBuffer(nm, v, env);
+        }
+        // c.push_back(data) / c.insert(c.end(), 1, data): an element of the container is that allocation
+        if (recv?.type === "identifier" && ctx.slots.has(`c:${recv.text}`) && /^(?:push_back|push_front|push|emplace_back|emplace_front|insert|emplace)$/.test(api) && args.length > 0) {
+          const slot = slotFor(recv.text, "[*]");
+          if (slot) copyMemory(slot, args[args.length - 1], env);
+        }
+        // an out-parameter a function in another file fills with input it read (or copied from another argument)
+        if (farFacts) for (const f of farFacts) {
+          if (f.id !== "taint-fill") continue;
+          const nm = rootName(args[f.index] ?? null);
+          if (!nm) continue;
+          const j = Number(f.sinkExpr.split("|")[0]);
+          const v = j < 0 ? f.sinkClass : m(args[j] ?? null, env) & f.sinkClass;
+          if (v) taintBuffer(nm, v, env);
+        }
+        // what the callee leaves in a pointer the caller passed by reference (`void fill(int *&data)`, `fill(&data)`),
+        // and the allocations file-scope pointers hold when it runs
+        {
+          const msum = ownId ? ctx.memSum.get(ownId) : own.length === 0 && !recv ? crossFileMem(ctx.fnAlias.get(name) ?? name) : undefined;
+          // the callee writes N bytes into a buffer (an argument, what it points at, a member, a global) whose capacity is known here
+          if (msum) for (const [key, bytes] of msum.writes) {
+            const t = keyTarget(key, args);
+            if (!t) continue;
+            observeWrite(t.slot, bytes);   // while a summary is being built: this function writes it too
+            const cap = ctx.capacity.get(t.slot);
+            if (!opts.quiet && cap !== undefined && bytes > cap) {
+              emit(ctx, "buffer-overflow", e, t.arg?.text ?? t.slot, name, `${name}() writes up to ${bytes} bytes into '${t.slot}', which holds ${cap} — the callee overflows the destination`);
+            }
+          }
+          if (msum) for (const [i, st] of msum.outs) { const slot = st.viaPtr ? pointeeSlot(args[i] ?? null) : argSlot(args[i] ?? null); if (slot) writeState(slot, st, env); }
+          if (ownId && !opts.quiet) {
+            for (const g of ctx.globalNames) {
+              const st = readState(g, env);
+              if (memEmpty(st)) continue;
+              // a global the callee releases is judged at this call (freeVar); whether it may be NULL still travels
+              const seed: MemState = ctx.freesParam.get(ownId)?.has(`g:${g}`) ? { alloc: 0, freed: 0, unchecked: st.unchecked } : st;
+              if (memEmpty(seed)) continue;
+              const per = ctx.seededGlobals.get(ownId) ?? new Map<string, MemState>();
+              per.set(g, seed);
+              ctx.seededGlobals.set(ownId, per);
+            }
+          }
         }
         // what the call leaves in its destination buffer (after checkCall, which sizes the copy by the old length)
         const dst = args[0]?.type === "identifier" ? args[0].text : null;
@@ -1400,7 +1653,15 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       const target = d.type === "init_declarator" ? field(d, "declarator") : d;
       const nm = declaredName(target);
       if (!nm) continue;
-      resetMemory(nm, env);
+      // `int *data = *dataPtr;` re-declares the variable it reads: its allocation state carries over
+      if (!(d.type === "init_declarator" && slotOf(field(d, "value")) === nm)) resetMemory(nm, env);
+      if (CONTAINER_TYPE_RE.test(typeText)) ctx.slots.set(`c:${nm}`, "1");
+      else if (UNION_TYPES.has(typeText.replace(/\b(?:const|struct|union|volatile)\b|[\s*&]/g, ""))) ctx.slots.set(`u:${nm}`, "1");
+      // `int **pp = &data;`: a write or read through pp is data's
+      if (d.type === "init_declarator" && /\*\s*\*/.test(`${typeText}${target?.text ?? ""}`.replace(/\s+/g, ""))) {
+        const iv = unwrapValue(field(d, "value"));
+        if (iv?.type === "pointer_expression" && iv.text.startsWith("&")) { const t = slotOf(field(iv, "argument") ?? named(iv)[0] ?? null); if (t) ctx.slots.set(`*${nm}`, t); }
+      }
       // `void (*funcPtr)(char *) = badSink;`: calls through funcPtr go to badSink
       if (target?.type === "function_declarator" && d.type === "init_declarator") {
         const v = field(d, "value");
@@ -1462,7 +1723,9 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       recordAlloc(nm, v, env);
       copyMemory(nm, v, env);
       noteMemoryEffects(nm, v, d, env);
-      const vn = v?.type === "identifier" ? v.text : null;
+      // `char *data = dataRef;` names what the reference is bound to (its own alias group went stale when that variable was re-pointed)
+      const vn0 = v?.type === "identifier" ? v.text : null;
+      const vn = vn0 ? ctx.refs.get(vn0) ?? vn0 : null;
       if (vn && (ctx.capacity.has(vn) || ctx.aliases.has(vn) || /\*/.test(target?.text ?? ""))) alias(nm, vn);
       if (v?.type === "argument_list") {
         const cargs = named(v);
@@ -1596,7 +1859,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
       }
       case "for_statement": case "for_range_loop": {
         for (const k of ["initializer", "condition", "right"]) { const c = field(node, k); if (c) { if (c.type === "declaration") declare(c, env); else walkExpr(c, env); } }
-        if (node.type === "for_statement" && !opts.quiet) checkConstantLoopOverflow(node);
+        if (node.type === "for_statement") checkConstantLoopOverflow(node);
         const body = field(node, "body");
         const update = field(node, "update");
         // `for (T *x : items)`: x is a fresh element each iteration (a `delete x` in two such loops is two objects)
@@ -1640,7 +1903,7 @@ function createWalker(ctx: EngineCtx, opts: WalkOpts) {
     if (!t) flushGlobals(env);
     return t;
   };
-  return { walk: walkBody, checkCall };
+  return { walk: walkBody, checkCall, kindOf: allocKindOf, slotOf, readState, unwrapValue };
 }
 
 // ── Functions, summaries and entry points ──────────────────────────────────────────────────────────────────
@@ -1757,29 +2020,122 @@ function outKind(declarator: SyntaxNode | null, name: string, body: SyntaxNode |
 }
 
 type Release = "free" | "delete" | "delete[]";
-function collectFreesParam(fns: ReadonlyMap<string, LocalFn>): Map<string, Map<number, Release>> {
-  const out = new Map<string, Map<number, Release>>();
+/**
+ * freesParam keys name what a function releases: `"0"` its parameter 0 (`free(p)`), `"0*"` what the parameter points at
+ * (`int *data = *dataPtr; free(data);`), `"0.f"` a member (`myStruct.structFirst`), `"0[2]"` / `"0[*]"` an element of an
+ * array / any element of a container, and `"g:name"` (+ the same suffixes) a file-scope variable it frees.
+ */
+function accessPath(v: SyntaxNode | null, alias: ReadonlyMap<string, string>): string | null {
+  const unwrap = (x: SyntaxNode | null): SyntaxNode | null => {
+    let e = x;
+    while (e && (e.type === "cast_expression" || e.type === "parenthesized_expression")) e = e.type === "cast_expression" ? field(e, "value") : named(e)[0] ?? null;
+    return e;
+  };
+  const e = unwrap(v);
+  if (!e) return null;
+  if (e.type === "identifier") return alias.get(e.text) ?? null;
+  if (e.type === "pointer_expression" && e.text.startsWith("*")) {
+    const o = unwrap(field(e, "argument") ?? named(e)[0] ?? null);
+    return o?.type === "identifier" && alias.get(o.text) === "" ? "*" : null;
+  }
+  if (e.type === "field_expression") {
+    const b = unwrap(field(e, "argument")), f = field(e, "field")?.text;
+    return b?.type === "identifier" && f && alias.get(b.text) === "" ? `.${f}` : null;
+  }
+  if (e.type === "subscript_expression") {
+    const b = unwrap(field(e, "argument"));
+    const idx = (named(field(e, "indices"))[0] ?? field(e, "index"))?.text ?? "";
+    return b?.type === "identifier" && alias.get(b.text) === "" && /^\d+$/.test(idx) ? `[${idx}]` : null;
+  }
+  if (e.type === "call_expression") {
+    const ci = callInfo(e);
+    return ci.recv?.type === "identifier" && alias.get(ci.recv.text) === "" && /^(?:back|front|at|top)$/.test(ci.name) ? "[*]" : null;
+  }
+  return null;
+}
+
+/** Every name that holds `root` or something reached from it, with how it is reached (see accessPath). */
+function aliasPaths(pairs: ReadonlyArray<[string, SyntaxNode | null]>, root: string): Map<string, string> {
+  const alias = new Map<string, string>([[root, ""]]);
+  for (let pass = 0; pass < 3; pass++) {
+    for (const [n, v] of pairs) {
+      if (alias.has(n)) continue;
+      const path = accessPath(v, alias);
+      if (path !== null) alias.set(n, path);
+    }
+  }
+  return alias;
+}
+/** What the memory analyses read of a function body, found in one traversal and shared: its declarations and plain
+ * assignments as (name, value) pairs, its `delete`s and its calls. */
+interface BodyShape { pairs: Array<[string, SyntaxNode | null]>; deletes: SyntaxNode[]; calls: SyntaxNode[] }
+const SHAPE_TYPES: ReadonlySet<string> = new Set(["init_declarator", "assignment_expression", "delete_expression", "call_expression"]);
+const shapeCache = new WeakMap<SyntaxNode, BodyShape>();
+function bodyShape(body: SyntaxNode): BodyShape {
+  const hit = shapeCache.get(body);
+  if (hit) return hit;
+  const shape: BodyShape = { pairs: [], deletes: [], calls: [] };
+  for (const n of findAllNodes(body, SHAPE_TYPES)) {
+    if (n.type === "init_declarator") { const name = declaredName(field(n, "declarator")); if (name) shape.pairs.push([name, field(n, "value")]); }
+    else if (n.type === "assignment_expression") { const l = field(n, "left"); if (l?.type === "identifier" && operatorOf(n) === "=") shape.pairs.push([l.text, field(n, "right")]); }
+    else if (n.type === "delete_expression") shape.deletes.push(n);
+    else shape.calls.push(n);
+  }
+  shapeCache.set(body, shape);
+  return shape;
+}
+/** The file-scope names a function's text mentions (a superset is fine: each is verified by the alias analysis). */
+function mentionedGlobals(fn: LocalFn, globals: ReadonlySet<string>): string[] {
+  const text = fn.decl.text;
+  return [...globals].filter(g => text.includes(g));
+}
+
+function collectFreesParam(fns: ReadonlyMap<string, LocalFn>, globals: ReadonlySet<string>, far?: ReadonlyMap<string, readonly ParamSinkFact[]>): Map<string, Map<string, Release>> {
+  const out = new Map<string, Map<string, Release>>();
+  const calleeMap = (n: string): Map<string, Release> | undefined => out.get(n) ?? (far?.has(AUX_PREFIX + n) ? crossFileReleases(far.get(AUX_PREFIX + n)) : undefined);
+  // one pass over each body: its declarations, assignments, deletes, calls and the file-scope names it mentions
+  const shape = new Map<string, BodyShape & { globals: string[] }>();
+  for (const [name, f] of fns) {
+    if (!f.body) continue;
+    shape.set(name, { ...bodyShape(f.body), globals: globals.size ? mentionedGlobals(f, globals) : [] });
+  }
   for (let round = 0; round < 4; round++) {
     let changed = false;
     for (const [name, f] of fns) {
-      if (!f.body) continue;
-      const map = out.get(name) ?? new Map<number, Release>();
+      const sh = shape.get(name);
+      if (!f.body || !sh) continue;
+      const map = out.get(name) ?? new Map<string, Release>();
       const before = map.size;
-      for (const p of f.params) {
-        if (!p.name || map.has(p.index)) continue;
-        const del = findAllNodes(f.body, "delete_expression").find(d => named(d).some(c => c.type === "identifier" && c.text === p.name));
-        let how: Release | undefined = del ? (/\[\s*\]/.test(del.text) ? "delete[]" : "delete") : undefined;
-        if (!how) for (const c of findAllNodes(f.body, "call_expression")) {
-          const ci = callInfo(c);
-          if (/^(?:free|cfree|kfree|g_free)$/.test(baseApi(ci.name))) {
-            if (ci.args[0]?.type === "identifier" && ci.args[0].text === p.name) { how = "free"; break; }
-            continue;
+      const roots: Array<[string, string]> = [...f.params.filter(p => p.name).map(p => [String(p.index), p.name] as [string, string]), ...sh.globals.map(g => [`g:${g}`, g] as [string, string])];
+      for (const [rootKey, root] of roots) {
+        // every name that holds the root or something reached from it, with how it is reached
+        const alias = aliasPaths(sh.pairs, root);
+        const byPath = new Map<string, Set<string>>();
+        for (const [n, path] of alias) byPath.set(path, (byPath.get(path) ?? new Set()).add(n));
+        for (const [path, names] of byPath) {
+          const key = `${rootKey}${path}`;
+          if (map.has(key)) continue;
+          const del = sh.deletes.find(d => named(d).some(c => c.type === "identifier" && names.has(c.text)));
+          let how: Release | undefined = del ? (/\[\s*\]/.test(del.text) ? "delete[]" : "delete") : undefined;
+          if (!how) for (const c of sh.calls) {
+            const ci = callInfo(c);
+            if (/^(?:free|cfree|kfree|g_free)$/.test(baseApi(ci.name))) {
+              if (ci.args[0]?.type === "identifier" && names.has(ci.args[0].text)) { how = "free"; break; }
+              continue;
+            }
+            const callee = calleeMap(ci.name);
+            if (!callee) continue;
+            // forwarded as argument k to a function that releases that parameter (or what it points at)
+            for (const [k, a] of ci.args.entries()) {
+              if (a.type !== "identifier" || !names.has(a.text)) continue;
+              const direct = callee.get(String(k));
+              if (direct) { how = direct; break; }
+              if (path === "") { const via = callee.get(`${k}*`); if (via) { map.set(`${rootKey}*`, via); changed = true; } }
+            }
+            if (how) break;
           }
-          const callee = out.get(ci.name);
-          const i = callee ? ci.args.findIndex((a, k) => callee.has(k) && a.type === "identifier" && a.text === p.name) : -1;
-          if (i >= 0) { how = callee!.get(i); break; }
+          if (how) map.set(key, how);
         }
-        if (how) map.set(p.index, how);
       }
       if (map.size !== before) { out.set(name, map); changed = true; }
     }
@@ -1806,7 +2162,7 @@ function collectGlobals(root: SyntaxNode): Set<string> {
   return out;
 }
 
-function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); ctx.refs = new Map(); ctx.lambdas = new Map(); ctx.borrows = new Map(); ctx.views = new Map(); }
+function freshWalkState(ctx: EngineCtx) { ctx.aliases = new Map(); ctx.capacity = new Map(); ctx.strLen = new Map(); ctx.fnAlias = new Map(); ctx.refs = new Map(); ctx.slots = new Map(); ctx.lambdas = new Map(); ctx.borrows = new Map(); ctx.views = new Map(); }
 
 /** `class Bad : public Base, private Mixin { ... }` -> Bad: [Base, Mixin]. */
 function collectBases(root: SyntaxNode): Map<string, string[]> {
@@ -1904,6 +2260,147 @@ function mergeFills(ctx: EngineCtx, fn: string, source: number, outs: ReadonlyMa
   return grew;
 }
 
+// ── Memory-state facts: what a function in another file does to a pointer, carried as pseudo sink facts ──────────
+// id "mem-state": index -1 = the returned pointer, index i = the pointer left in parameter i (sinkExpr "alloc,freed,unchecked");
+// "mem-releases": a parameter / global / member is released (sinkExpr `free|key`); "mem-uses": one is touched while it is in a state
+// (`unchecked|key`: dereferenced before any NULL check; `freed|key`: read after being freed) -- keys as in freesParam
+// before any NULL check. They ride in the same cross-file map as the taint facts (so the batch digest covers them)
+// and never match a taint class (sinkClass 0).
+function decodeMemFacts(facts: readonly ParamSinkFact[]): MemSummary {
+  const sum: MemSummary = { outs: new Map(), writes: new Map() };
+  for (const f of facts) {
+    if (f.id === "mem-writes") { const [bytes, key] = f.sinkExpr.split("|"); if (key) sum.writes.set(key, Number(bytes) || 0); continue; }
+    if (f.id !== "mem-state") continue;
+    const [alloc, freed, unchecked, via, cap, len] = f.sinkExpr.split(",");
+    const st: MemState = { alloc: Number(alloc) || 0, freed: Number(freed) || 0, unchecked: Number(unchecked) || 0, viaPtr: via === "p", cap: cap ? Number(cap) : undefined, len: len ? Number(len) : undefined };
+    if (f.index < 0) sum.ret = st; else sum.outs.set(f.index, st);
+  }
+  return sum;
+}
+function crossFileReleases(facts: readonly ParamSinkFact[] | undefined): Map<string, Release> {
+  const out = new Map<string, Release>();
+  for (const f of facts ?? []) if (f.id === "mem-releases") { const [how, key] = f.sinkExpr.split("|"); if (key) out.set(key, how as Release); }
+  return out;
+}
+/** Auxiliary per-function facts (memory state, taint through returns and out-parameters) are keyed `m:<fn>` so they
+ * never compete with the function's taint-sink facts for its capped list; a file-scope variable some function taints
+ * is keyed `g:<name>`. */
+const AUX_PREFIX = "m:";
+const GLOBAL_PREFIX = "g:";
+function crossFileUses(facts: readonly ParamSinkFact[] | undefined): Array<{ state: "unchecked" | "freed"; key: string }> {
+  const out: Array<{ state: "unchecked" | "freed"; key: string }> = [];
+  for (const f of facts ?? []) if (f.id === "mem-uses") { const [state, key] = f.sinkExpr.split("|"); if (key && (state === "unchecked" || state === "freed")) out.push({ state, key }); }
+  return out;
+}
+
+/** Keep a flag only when every path agrees on it (a function that frees on one path and not another leaves it unknown). */
+function agreeState(states: readonly MemState[]): MemState | undefined {
+  if (states.length === 0) return undefined;
+  const out: MemState = { alloc: states[0].alloc, freed: states[0].freed, unchecked: states[0].unchecked, cap: states[0].cap, len: states[0].len, viaPtr: states[0].viaPtr };
+  for (const st of states) {
+    for (const k of MEM_KINDS) if (st[k] !== out[k]) out[k] = 0;
+    if (st.cap !== out.cap) out.cap = undefined;
+    if (st.len !== out.len) out.len = undefined;
+  }
+  return memEmpty(out) ? undefined : out;
+}
+
+/** What `fn` leaves in memory-state terms: the pointer it returns, and what each reference / pointer-to-pointer
+ * parameter holds when it returns -- each walked with nothing known about its parameters. */
+function summarizeMem(fn: LocalFn, ctx: EngineCtx): MemSummary {
+  const saved = { findings: ctx.findings, seen: ctx.seen, suppressed: ctx.suppressed, seeded: ctx.seeded, seededMem: ctx.seededMem, seededGlobals: ctx.seededGlobals, writeObs: ctx.writeObs, aliases: ctx.aliases, capacity: ctx.capacity, strLen: ctx.strLen, fnAlias: ctx.fnAlias, refs: ctx.refs, slots: ctx.slots, current: ctx.current, speculative: ctx.speculative };
+  ctx.findings = []; ctx.seen = new Set(); ctx.suppressed = undefined; ctx.seeded = new Map(); ctx.seededMem = new Map(); ctx.seededGlobals = new Map(); ctx.current = fn;
+  ctx.speculative = true;
+  freshWalkState(ctx);
+  const env: Env = new Map();
+  for (const p of fn.params) env.set(p.name, 0);
+  const rets: MemState[] = [];
+  const outs = new Map<number, MemState[]>();
+  const collectOuts = (en: Env, w: ReturnType<typeof createWalker>) => {
+    for (const p of fn.params) {
+      if (!p.out) continue;
+      const st = w.readState(p.out === "ref" ? p.name : `*${p.name}`, en);
+      outs.set(p.index, [...(outs.get(p.index) ?? []), { ...st, viaPtr: p.out === "ptr" }]);
+    }
+  };
+  const w: ReturnType<typeof createWalker> = createWalker(ctx, {
+    quiet: true,
+    onReturn: (e, en) => {
+      collectOuts(en, w);
+      const v = w.unwrapValue(e);
+      if (!v || /^(?:NULL|nullptr|null|0)$/.test(v.text)) return;
+      const slot = w.slotOf(v);
+      if (slot) rets.push(w.readState(slot, en));
+      else if (v.type === "new_expression" || v.type === "call_expression") { const k = w.kindOf(v); rets.push({ alloc: k, freed: 0, unchecked: 0 }); }
+      else rets.push({ alloc: 0, freed: 0, unchecked: 0 });
+    },
+  });
+  ctx.writeObs = new Map();
+  const ended = w.walk(fn.body!, env);
+  if (!ended) collectOuts(env, w);
+  // bytes written into each buffer the function was handed: a parameter, what it points at, a member / element of it, a global
+  const writes = new Map<string, number>();
+  const pairs = bodyShape(fn.body!).pairs;
+  const roots: Array<[string, string]> = [...fn.params.filter(p => p.name).map(p => [String(p.index), p.name] as [string, string]), ...mentionedGlobals(fn, ctx.globalNames).map(g => [`g:${g}`, g] as [string, string])];
+  for (const [rootKey, root] of roots) {
+    const alias = aliasPaths(pairs, root);
+    for (const [n, bytes] of ctx.writeObs) {
+      const path = observedPath(n, alias);
+      if (path === null) continue;
+      const key = `${rootKey}${path}`;
+      if (bytes > (writes.get(key) ?? 0)) writes.set(key, bytes);
+    }
+  }
+  ctx.writeObs = undefined;
+  Object.assign(ctx, saved);
+  const sum: MemSummary = { ret: agreeState(rets), outs: new Map(), writes };
+  for (const [i, list] of outs) { const a = agreeState(list); if (a) sum.outs.set(i, a); }
+  return sum;
+}
+
+/** How a buffer name seen in a function body is reached from one of its roots: an alias of it, `*pp`, `s.f`, `a[2]`. */
+function observedPath(name: string, alias: ReadonlyMap<string, string>): string | null {
+  const direct = alias.get(name);
+  if (direct !== undefined) return direct;
+  const deref = /^\*(\w+)$/.exec(name);
+  if (deref) return alias.get(deref[1]) === "" ? "*" : null;
+  const member = /^(\w+)(\.\w+|\[\d+\]|\[\*\])$/.exec(name);
+  return member && alias.get(member[1]) === "" ? member[2] : null;
+}
+
+/** Can the function leave anything behind a summary records? It takes a parameter, returns a pointer or touches a file-scope variable. */
+function mayHaveMemSummary(fn: LocalFn, ctx: EngineCtx): boolean {
+  if (fn.params.some(p => p.name)) return true;
+  const text = fn.decl.text;
+  const header = text.slice(0, Math.max(text.indexOf("{"), 0));
+  if (header.includes("*")) return true;
+  for (const g of ctx.globalNames) if (text.includes(g)) return true;
+  return false;
+}
+
+/** `exported`: also summarise functions nothing in this file calls -- their summaries are published for the other files of the batch. */
+function buildMemSummaries(ctx: EngineCtx, exported: boolean) {
+  const todo = new Map<string, LocalFn>();
+  // used here: called by name, or referenced some other way (`void (*fp)(char *) = sink; fp(data);`) -- its name occurs again
+  const usedHere = (name: string) => { const first = ctx.content.indexOf(name); return first >= 0 && ctx.content.indexOf(name, first + name.length) >= 0; };
+  for (const [id, f] of ctx.fns) if (f.body && (exported || usedHere(f.name)) && mayHaveMemSummary(f, ctx)) todo.set(id, f);
+  // who calls whom, so a later round re-summarises only the callers of a function whose summary changed
+  const callees = new Map<string, Set<string>>();
+  for (const [id, f] of todo) callees.set(id, new Set(bodyShape(f.body!).calls.map(c => callInfo(c).name)));
+  let dirty: ReadonlySet<string> = new Set(todo.keys());
+  for (let round = 0; round < 3 && dirty.size > 0; round++) {
+    const changed = new Set<string>();
+    for (const id of dirty) {
+      const f = todo.get(id)!;
+      const sum = summarizeMem(f, ctx);
+      const key = (x: MemSummary | undefined) => x ? JSON.stringify([x.ret ?? null, [...x.outs], [...x.writes]]) : "";
+      if (key(sum) !== key(ctx.memSum.get(id))) { ctx.memSum.set(id, sum); changed.add(f.name); }
+    }
+    dirty = new Set([...todo.keys()].filter(id => [...callees.get(id)!].some(n => changed.has(n))));
+  }
+  for (const [id, sum] of [...ctx.memSum]) if (!sum.ret && sum.outs.size === 0 && sum.writes.size === 0) ctx.memSum.delete(id);
+}
+
 function buildSummaries(ctx: EngineCtx) {
   const globalsSig = () => [...ctx.globalTaint].map(([k, v]) => `${k}=${v}`).join(",");
   for (let round = 0; round < FIXED_POINT_CAP; round++) {
@@ -1934,8 +2431,9 @@ function buildSummaries(ctx: EngineCtx) {
 let curlCallbackNames: ReadonlySet<string> = new Set();
 
 function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed?: SuppressedSink[],
-  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>): EngineCtx {
+  crossFileFacts?: ReadonlyMap<string, readonly ParamSinkFact[]>, exportSummaries = false): EngineCtx {
   MACROS = collectMacros(root);
+  UNION_TYPES = collectUnionTypes(root);
   curlCallbackNames = new Set([...content.matchAll(/CURLOPT_(?:WRITE|HEADER|READ)FUNCTION\s*,\s*&?\s*([A-Za-z_]\w*)/g)].map(mm => mm[1]));
   // every function under its own identity (two classes' `process` are two summaries and two bodies)
   const fns = new Map<string, LocalFn>();
@@ -1947,11 +2445,18 @@ function makeCtx(content: string, filePath: string, root: SyntaxNode, suppressed
   }
   const ctx: EngineCtx = {
     filePath, content, lines: content.split("\n"), root, fns, byName, propagating: new Map(), intrinsic: new Map(), seeded: new Map(),
-    suppressed, findings: [], seen: new Set(), crossFileFacts, aliases: new Map(), capacity: new Map(), strLen: new Map(), fnAlias: new Map(), freesParam: collectFreesParam(fns), seededMem: new Map(),
+    suppressed, findings: [], seen: new Set(), crossFileFacts, aliases: new Map(), capacity: new Map(), strLen: new Map(), fnAlias: new Map(), freesParam: collectFreesParam(fns, collectGlobals(root), crossFileFacts), seededMem: new Map(),
     globalNames: collectGlobals(root), globalTaint: new Map(), speculative: false, current: null,
-    refs: new Map(), fills: new Map(), lambdas: new Map(), borrows: new Map(), views: new Map(), bases: collectBases(root),
+    refs: new Map(), slots: new Map(), memSum: new Map(), seededGlobals: new Map(), fills: new Map(), lambdas: new Map(), borrows: new Map(), views: new Map(), bases: collectBases(root),
   };
+  // a file-scope variable another file taints (`extern char *badData;` read here)
+  for (const name of ctx.globalNames) {
+    let cls = 0;
+    for (const f of crossFileFacts?.get(GLOBAL_PREFIX + name) ?? []) if (f.id === "taint-global") cls |= f.sinkClass;
+    if (cls) ctx.globalTaint.set(name, cls);
+  }
   buildSummaries(ctx);
+  buildMemSummaries(ctx, exportSummaries);
   return ctx;
 }
 
@@ -2039,12 +2544,14 @@ function drainSeeded(ctx: EngineCtx) {
   const walked = new Set<string>();
   for (let round = 0; round < FIXED_POINT_CAP; round++) {
     let changed = false;
-    for (const name of new Set([...ctx.seeded.keys(), ...ctx.seededMem.keys()])) {
+    for (const name of new Set([...ctx.seeded.keys(), ...ctx.seededMem.keys(), ...ctx.seededGlobals.keys()])) {
       const f = ctx.fns.get(name);
       if (!f?.body) continue;
       const idx = ctx.seeded.get(name) ?? new Map<number, number>();
       const mem = ctx.seededMem.get(name) ?? new Map<number, Map<string, number>>();
+      const globals = ctx.seededGlobals.get(name);
       const sig = `${name}:${[...idx].sort((a, b) => a[0] - b[0]).map(([i, v]) => `${i}=${v}`).join(",")}`
+        + `|${[...(globals ?? [])].sort().map(([g, st]) => `${g}${st.alloc}${st.freed}${st.unchecked}`).join(",")}`
         + `|${[...mem].sort((a, b) => a[0] - b[0]).map(([i, ks]) => `${i}=${[...ks].map(([k, v]) => `${k}${v}`).join("+")}`).join(",")}`;
       if (walked.has(sig)) continue;
       walked.add(sig);
@@ -2054,6 +2561,7 @@ function drainSeeded(ctx: EngineCtx) {
         env.set(p.name, idx.get(p.index) ?? 0);
         for (const [k, v] of mem.get(p.index) ?? []) env.set(KIND_KEY(k, p.name), v);
       }
+      for (const [g, st] of globals ?? []) for (const k of MEM_KINDS) if (st[k]) env.set(KIND_KEY(k, g), st[k]);
       const prev = ctx.current;
       ctx.current = f;
       freshWalkState(ctx);
@@ -2105,9 +2613,13 @@ export function computeCppFnSinkFacts(
 ): Map<string, ParamSinkFact[]> {
   const out = new Map<string, ParamSinkFact[]>();
   try {
-    const ctx = makeCtx(content, filePath, root, undefined, incoming);
+    const ctx = makeCtx(content, filePath, root, undefined, incoming, true);
     ctx.speculative = true;
     const all = [...ctx.fns.values()];
+    for (const [name, cls] of ctx.globalTaint) {
+      if (!(cls & ALL)) continue;
+      out.set(GLOBAL_PREFIX + name, [{ index: -2, isRest: false, id: "taint-global", sinkClass: cls & ALL, sinkExpr: `${name}|${cls & ALL}`, file: filePath, line: 1, via: [name] }]);
+    }
     const ranges = all.map(f => ({ name: f.name, start: f.decl.startPosition.row + 1, end: f.decl.endPosition.row + 1 }));
     const run = (f: LocalFn, env: Env): AstTaintCppFinding[] => {
       ctx.findings = []; ctx.seen = new Set(); ctx.seeded = new Map(); ctx.seededMem = new Map(); ctx.current = f;
@@ -2118,9 +2630,63 @@ export function computeCppFnSinkFacts(
       return ctx.findings;
     };
     for (const f of all) {
-      if (!f.body || f.isStatic || f.params.length === 0 || /^(?:main|wmain)$/.test(f.name)) continue;
+      if (!f.body || f.isStatic || /^(?:main|wmain)$/.test(f.name)) continue;
+      // what the function does to a pointer (returns an allocation, frees a parameter, dereferences it unchecked)
+      const mem: ParamSinkFact[] = [];
+      const memFact = (index: number, id: string, sinkExpr: string, sinkClass = 0): ParamSinkFact => ({ index, isRest: false, id, sinkClass, sinkExpr, file: filePath, line: f.decl.startPosition.row + 1, via: [f.name] });
+      const sum = ctx.memSum.get(f.id);
+      if (sum?.ret) mem.push(memFact(-1, "mem-state", `${sum.ret.alloc},${sum.ret.freed},${sum.ret.unchecked},r,${sum.ret.cap ?? ""},${sum.ret.len ?? ""}`));
+      for (const [key, bytes] of sum?.writes ?? []) mem.push(memFact(Number(/^\d+/.exec(key)?.[0] ?? -2), "mem-writes", `${bytes}|${key}`));
+      for (const [i, st] of sum?.outs ?? []) mem.push(memFact(i, "mem-state", `${st.alloc},${st.freed},${st.unchecked},${st.viaPtr ? "p" : "r"},${st.cap ?? ""},${st.len ?? ""}`));
+      for (const [key, how] of ctx.freesParam.get(f.id) ?? []) mem.push(memFact(Number(/^\d+/.exec(key)?.[0] ?? -2), "mem-releases", `${how}|${key}`));
       const zero = () => { const e: Env = new Map(); for (const p of f.params) e.set(p.name, 0); return e; };
-      const baseline = new Set(run(f, zero()).map(x => `${x.id}:${x.line}`));
+      const baseline = f.params.length > 0 ? new Set(run(f, zero()).map(x => `${x.id}:${x.line}`)) : new Set<string>();
+      if (f.params.length > 0) {
+        // the parameter itself and everything the body reads out of it (`*p`, `p.f`, `p[2]`), each seeded in the state to
+        // test; every name the body holds it under is recorded, so a finding on an alias is attributed to its parameter
+        const pairs = bodyShape(f.body).pairs;
+        const cands: Array<{ idx: number; path: string; slot: string; names: ReadonlyMap<string, string> }> = [];
+        for (const p of f.params) {
+          if (!p.name) continue;
+          const names = aliasPaths(pairs, p.name);
+          for (const path of new Set(names.values())) {
+            const slot = path === "" ? p.name : path === "*" ? `*${p.name}` : path === "[*]" ? "" : `${p.name}${path}`;
+            if (slot) cands.push({ idx: p.index, path, slot, names });
+          }
+        }
+        // One walk with every candidate seeded: unchecked (a dereference there is a NULL dereference) and, for what a
+        // parameter reaches, freed (any touch is a use-after-free) -- the two findings do not depend on each other. A
+        // parameter used while freed is already caught at the call (any use of a freed argument), so only what it reaches
+        // needs a fact.
+        if (cands.length > 0) {
+          const env = zero();
+          for (const c of cands) {
+            env.set(KIND_KEY("unchecked", c.slot), 1);
+            if (c.path !== "") env.set(KIND_KEY("freed", c.slot), 1);
+          }
+          const done = new Set<string>();
+          for (const x of run(f, env)) {
+            const state = x.id === "null-dereference" ? "unchecked" : x.id === "use-after-free" ? "freed" : null;
+            if (!state || baseline.has(`${x.id}:${x.line}`)) continue;
+            for (const c of cands) {
+              if (state === "freed" && c.path === "") continue;
+              if (c.names.get(x.sourceExpr) !== c.path && x.sourceExpr !== c.slot) continue;
+              const key = `${state}|${c.idx}${c.path}`;
+              if (done.has(key)) continue;
+              done.add(key);
+              mem.push(memFact(c.idx, "mem-uses", key));
+            }
+          }
+        }
+      }
+      // what it does to its arguments' taint: the classes its return carries (from input it reads itself, or from a parameter)
+      // and what it stores in out-parameters; kept beside the memory facts, under their own key
+      const intrinsic = (ctx.intrinsic.get(f.id) ?? 0) & ALL;
+      if (intrinsic) mem.push(memFact(-1, "taint-ret", String(intrinsic), intrinsic));
+      for (const [i, cls] of ctx.propagating.get(f.id) ?? []) if (cls & ALL) mem.push(memFact(i, "taint-prop", String(cls & ALL), cls & ALL));
+      for (const [i, bySource] of ctx.fills.get(f.id) ?? []) for (const [j, cls] of bySource) if (cls & ALL) mem.push(memFact(i, "taint-fill", `${j}|${cls & ALL}`, cls & ALL));
+      if (mem.length > 0) { const list = out.get(AUX_PREFIX + f.name) ?? []; mergeSinkFacts(list, mem); out.set(AUX_PREFIX + f.name, list); }
+      if (f.params.length === 0) continue;
       const facts: ParamSinkFact[] = [];
       for (const p of f.params) {
         const env = zero();
