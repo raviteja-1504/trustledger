@@ -311,7 +311,7 @@ const memEmpty = (s: MemState | undefined): boolean => !s || (!s.alloc && !s.fre
 /** `out`: a parameter the caller's object is reached through -- a C++ reference (`char *&data`), or a pointer the
  * function never re-points (`char *buf`, `char **p`) so its writes land in the caller's buffer. */
 interface LocalFn {
-  name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number; out?: "ref" | "ptr" }>; isStatic: boolean;
+  name: string; decl: SyntaxNode; body: SyntaxNode | null; params: Array<{ name: string; index: number; out?: "ref" | "ptr"; bufLike: boolean }>; isStatic: boolean;
   /** the class a member function belongs to: its class body, or the `T::` of an out-of-line definition; null when free */
   cls: string | null;
   /** identity: `Class::name` for a member function, the name for a free one (see resolveLocalFns) */
@@ -1916,7 +1916,7 @@ function collectFns(root: SyntaxNode): LocalFn[] {
     const params = named(field(d, "parameters")).filter(p => /parameter_declaration/.test(p.type))
       .map((p, index) => {
         const name = declaredName(field(p, "declarator")) ?? "";
-        return { name, index, out: name ? outKind(field(p, "declarator"), name, body) : undefined };
+        return { name, index, out: name ? outKind(field(p, "declarator"), name, body) : undefined, bufLike: BUFFER_PARAM_RE.test(p.text) };
       });
     const name = functionName(f) ?? "";
     const cls = memberClassOf(f, d);
@@ -2286,6 +2286,13 @@ function crossFileReleases(facts: readonly ParamSinkFact[] | undefined): Map<str
  * never compete with the function's taint-sink facts for its capped list; a file-scope variable some function taints
  * is keyed `g:<name>`. */
 const AUX_PREFIX = "m:";
+/** The taint classes that cross a file boundary at a return, an out-parameter or a global: all of them. What is restricted is
+ * WHICH parameters can carry it (see BUFFER_PARAM_RE). */
+const CROSS_FILE_TAINT = ALL;
+/** A parameter that can hold bytes the caller handed over: `char *`, `uint8_t *`, `void *`, `wchar_t buf[]`, a string. A struct
+ * pointer or a scalar cannot: when `init(q, size)` writes `size` into `*q`, that does not make every `q` in every other file
+ * attacker data (it did on curl: its connection structs became "tainted" and every size check after them a finding). */
+const BUFFER_PARAM_RE = /\b(?:u?char|wchar_t|TCHAR|CHAR|WCHAR|u?int8_t|byte|BYTE|void|string|string_view|String|LPC?[TW]?STR|QString|QByteArray)\b[^()]*(?:[*\[]|\bstring(?:_view)?\b)|\bstd::(?:w?string|string_view)\b/;
 const GLOBAL_PREFIX = "g:";
 function crossFileUses(facts: readonly ParamSinkFact[] | undefined): Array<{ state: "unchecked" | "freed"; key: string }> {
   const out: Array<{ state: "unchecked" | "freed"; key: string }> = [];
@@ -2618,7 +2625,7 @@ export function computeCppFnSinkFacts(
     const all = [...ctx.fns.values()];
     for (const [name, cls] of ctx.globalTaint) {
       if (!(cls & ALL)) continue;
-      out.set(GLOBAL_PREFIX + name, [{ index: -2, isRest: false, id: "taint-global", sinkClass: cls & ALL, sinkExpr: `${name}|${cls & ALL}`, file: filePath, line: 1, via: [name] }]);
+      if (cls & CROSS_FILE_TAINT) out.set(GLOBAL_PREFIX + name, [{ index: -2, isRest: false, id: "taint-global", sinkClass: cls & CROSS_FILE_TAINT, sinkExpr: `${name}|${cls & CROSS_FILE_TAINT}`, file: filePath, line: 1, via: [name] }]);
     }
     const ranges = all.map(f => ({ name: f.name, start: f.decl.startPosition.row + 1, end: f.decl.endPosition.row + 1 }));
     const run = (f: LocalFn, env: Env): AstTaintCppFinding[] => {
@@ -2681,10 +2688,10 @@ export function computeCppFnSinkFacts(
       }
       // what it does to its arguments' taint: the classes its return carries (from input it reads itself, or from a parameter)
       // and what it stores in out-parameters; kept beside the memory facts, under their own key
-      const intrinsic = (ctx.intrinsic.get(f.id) ?? 0) & ALL;
+      const intrinsic = (ctx.intrinsic.get(f.id) ?? 0) & CROSS_FILE_TAINT;
       if (intrinsic) mem.push(memFact(-1, "taint-ret", String(intrinsic), intrinsic));
-      for (const [i, cls] of ctx.propagating.get(f.id) ?? []) if (cls & ALL) mem.push(memFact(i, "taint-prop", String(cls & ALL), cls & ALL));
-      for (const [i, bySource] of ctx.fills.get(f.id) ?? []) for (const [j, cls] of bySource) if (cls & ALL) mem.push(memFact(i, "taint-fill", `${j}|${cls & ALL}`, cls & ALL));
+      for (const [i, cls] of ctx.propagating.get(f.id) ?? []) if (cls & CROSS_FILE_TAINT && f.params[i]?.bufLike) mem.push(memFact(i, "taint-prop", String(cls & CROSS_FILE_TAINT), cls & CROSS_FILE_TAINT));
+      for (const [i, bySource] of ctx.fills.get(f.id) ?? []) for (const [j, cls] of bySource) if (cls & CROSS_FILE_TAINT && f.params[i]?.bufLike && (j < 0 || f.params[j]?.bufLike)) mem.push(memFact(i, "taint-fill", `${j}|${cls & CROSS_FILE_TAINT}`, cls & CROSS_FILE_TAINT));
       if (mem.length > 0) { const list = out.get(AUX_PREFIX + f.name) ?? []; mergeSinkFacts(list, mem); out.set(AUX_PREFIX + f.name, list); }
       if (f.params.length === 0) continue;
       const facts: ParamSinkFact[] = [];

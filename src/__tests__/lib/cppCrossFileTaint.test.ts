@@ -120,3 +120,19 @@ describe("the auxiliary facts stay out of a function's sink facts", () => {
     expect(batch(f)["src/main.c"]).not.toContain("command-injection");
   });
 });
+
+describe("a struct a helper fills from an argument is not attacker data across files (found scanning curl)", () => {
+  // Known limit, taken on purpose: taint stored into a struct member by a helper in ANOTHER file is not followed. On curl,
+  // `init(q, size)`-style helpers made every connection struct "tainted" (24 buffer-overflow reports, 3x the scan time).
+  const files = {
+    "src/q.c": `struct Q { char name[16]; };\nvoid q_set(struct Q *q, const char *name) {\n  strcpy(q->name, name);\n}\n`,
+    "src/main.c": `struct Q { char name[16]; };\nvoid q_set(struct Q *q, const char *name);\nvoid f(void) {\n  struct Q q;\n  q_set(&q, getenv("N"));\n  system(q.name);\n}\n`,
+  };
+  it("a helper that copies a string into a struct does not taint the struct for its callers", () => {
+    expect(batch(files)["src/main.c"]).not.toContain("command-injection");
+  });
+  it("but a helper that fills a char buffer argument with input still does", () => {
+    const f = { "src/in.c": `void read_name(char *buf) { recv(sock, buf, 15, 0); }\n`, "src/main.c": `void read_name(char *buf);\nvoid f(void) {\n  char name[16];\n  read_name(name);\n  system(name);\n}\n` };
+    expect(batch(f)["src/main.c"]).toContain("command-injection");
+  });
+});

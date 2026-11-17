@@ -8467,6 +8467,20 @@ function findAstTaintCppFindings(
 
 // ── analyzeFile ────────────────────────────────────────────────────────────────
 
+/** `nosem`, `nosemgrep`, `nosec` (optionally with a rule list): an author's note that a finding was reviewed. */
+const SUPPRESSION_COMMENT_RE = /\b(?:nosemgrep|nosem|nosec)\b(?::\s*[\w.,\- ]+)?/i;
+/** A quoted 40- or 64-digit hex value: a git commit / SHA-256 id. */
+const COMMIT_SHA_VALUE_RE = /["'](?:[0-9a-f]{40}|[0-9a-f]{64})["']/;
+function isPinFile(file_path: string): boolean {
+  return /(^|\/)\.github\/(?:workflows|actions)\//.test(file_path) || /(^|\/)[^/]*(?:lock|pins?|shas?)[^/]*\.(?:json|ya?ml)$/i.test(file_path);
+}
+/** A rule file of a pattern-matching analyser: a top-level `rules:` list whose entries carry `id:` and a pattern key. */
+function isRuleDefinitionFile(file_path: string, content: string): boolean {
+  if (!/\.(?:ya?ml|json)$/i.test(file_path)) return false;
+  return /^rules\s*:/m.test(content) && /^\s*-?\s*id\s*:/m.test(content)
+    && /^\s*(?:-\s*)?(?:pattern|patterns|pattern-either|pattern-regex|pattern-inside|pattern-not|metavariable-regex)\s*:/m.test(content);
+}
+
 export function analyzeFile(
   file_path: string, content: string, prPriorBias = 0,
   // Cross-file taint analysis (JS/TS only, Pass 2) -- both optional and
@@ -8858,7 +8872,18 @@ export function analyzeFile(
   // engine has already proven a flow into such a parser in this file, that finding is the same issue with more evidence: keep it alone.
   const pyXxeFlowProven = lang === "python" && rawIndicators.some(i => i.id === "xxe" && !!i.sourceExpr);
   const flowDeduped = pyXxeFlowProven ? rawIndicators.filter(i => !(i.id === "xxe" && !i.sourceExpr)) : rawIndicators;
-  const scoped = isDocFile ? flowDeduped.filter(i => /secret|credential|private-key|api-key|token|password/i.test(i.id)) : flowDeduped;
+  const SECRET_ID_RE = /secret|credential|private-key|api-key|token|password/i;
+  // A static-analysis rule file (Semgrep / Opengrep rules, ...) QUOTES vulnerable code as the pattern it looks for and in its
+  // message: that text is not code the project runs. Like a document, only a leaked credential in it counts.
+  const quotesCode = isDocFile || isRuleDefinitionFile(file_path, content);
+  // A pin file (a workflow's action SHAs, a lockfile of commit hashes) holds 40/64-hex commit ids under names like
+  // "configure-aws-credentials" / "create-github-app-token": the name is an action, the value is a public commit.
+  const pinFile = isPinFile(file_path);
+  const scoped = flowDeduped.filter(i => {
+    if (quotesCode && !SECRET_ID_RE.test(i.id)) return false;
+    if (pinFile && i.id === "hardcoded-secret" && i.line != null && COMMIT_SHA_VALUE_RE.test(lines[i.line - 1] ?? "")) return false;
+    return true;
+  });
   const byKey = new Map<string, ScanIndicator>();
   for (const i of scoped) {
     const k = `${i.id}:${i.line ?? ""}`;
@@ -8891,6 +8916,14 @@ export function analyzeFile(
   // One issue, one finding: merge findings for the same weakness on the same line, or on one another's
   // data-flow path, that the id+line dedup above can't see (see findingCorrelation.ts).
   const indicators = correlateFindings(Array.from(byKey.values()), file_path);
+  // `# nosem` / `// nosemgrep` / `# nosec` on the line (or on a comment line directly above): the author says they reviewed it.
+  // The finding stays -- this scanner reads pull requests, and a comment the author adds must not be able to hide a finding --
+  // but it says so, so a reviewer can look at the claim.
+  for (const ind of indicators) {
+    if (ind.line == null) continue;
+    const marker = SUPPRESSION_COMMENT_RE.exec(lines[ind.line - 1] ?? "") ?? (/^\s*(?:#|\/\/|\/\*|--|;)/.test(lines[ind.line - 2] ?? "") ? SUPPRESSION_COMMENT_RE.exec(lines[ind.line - 2]) : null);
+    if (marker && ind.severity !== "info") ind.detail = `${ind.detail ?? ind.label} [the author marked this line "${marker[0]}", which this scanner records but does not honor]`;
+  }
   // Canonical evidence for every data-flow finding: exact sink + argument role, files crossed, sanitisers on
   // the path (their steps are marked in the trace), canonical sink identity. Read by every surface.
   for (const ind of indicators) {
