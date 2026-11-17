@@ -120,7 +120,12 @@ import type { ParamSinkFact } from "./taint/taintCore";
 //     classes stay apart), an authorize()/assertOwner() helper counts only when given the record or id and run before the write,
 //     one finding per sink node, a failed parser init is retried.
 //     Cached results from 23 would keep the old findings.
-export const SCAN_CACHE_VERSION = 24;
+// 25: false positives found scanning ten public repositories: a license / notice file and a header the project puts on its
+//     own files are not license contamination; `compiled.re.exec(...)` (a property that is a RegExp) is not a command; a token a
+//     file decodes by hand is verified when it checks an HMAC (timingSafeEqual / createVerify / verifyToken); `IN (${keys.map(() =>
+//     "?").join(", ")})` interpolates bind placeholders, not data; `__html: constantScript` is not XSS.
+//     Cached results from 24 would keep the old findings.
+export const SCAN_CACHE_VERSION = 25;
 
 /** One file's reusable result. `analysis` is the post-analyzeFile, PRE-PR-level-post-pass snapshot. */
 export interface CachedFileResult {

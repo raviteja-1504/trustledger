@@ -126,7 +126,7 @@ import "./appsecDetectors";
 import { APPSEC_FIXES } from "./appsecRules";
 import { cweFor as cweEntryFor } from "./cweMap";
 import { scanHallucinatedMethodCalls } from "./hallucinatedMethodCall";
-import { scanLicenseContamination } from "./licenseContamination";
+import { scanLicenseContamination, dropProjectWideLicenseHeaders } from "./licenseContamination";
 import { isDockerfilePath } from "./scannableFiles";
 import { findKotlinTaintFindings } from "./kotlinTaint";
 import { findRubyTaintFindings } from "./rubyTaint";
@@ -2082,10 +2082,27 @@ function isJsonScriptBlock(lines: string[], idx: number): boolean {
   return /type\s*=\s*\{?\s*["']application\/(?:ld\+)?json["']/.test(lines.slice(Math.max(0, idx - 4), idx + 1).join("\n"));
 }
 
+/**
+ * `dangerouslySetInnerHTML={{ __html: themeScript }}` where `const themeScript = \`...\`` is a constant string (a theme or cookie
+ * bootstrap the app ships), or an inline literal: no request data reaches it. A literal may interpolate only CONSTANT_CASE names
+ * (`${JSON.stringify(THEME_KEY)}`); any other interpolation, or a `let` / reassigned value, is still reported.
+ */
+function isConstantHtml(lines: string[], idx: number): boolean {
+  const line = lines[idx] ?? "";
+  const onlyConstants = (literal: string) => templateInterpolations(literal).every(e => /^(?:JSON\.stringify\(\s*)?[A-Z][A-Z0-9_]*\s*\)?$/.test(e.trim()));
+  const inline = /__html\s*:\s*(`[^`]*`|"[^"]*"|'[^']*')\s*[,}]/.exec(line);
+  if (inline) return onlyConstants(inline[1]);
+  const named = /__html\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/.exec(line);
+  if (!named) return false;
+  const decl = new RegExp(String.raw`\bconst\s+${named[1].replace(/\$/g, "\\$")}\b\s*(?::[^=\n]+)?=\s*(` + "`[^`]*`" + String.raw`|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')\s*;?`).exec(lines.join("\n"));
+  return !!decl && onlyConstants(decl[1]);
+}
+
 function findXSS(lines: string[]): ScanIndicator[] {
   return runDetector(lines, XSS_RE, "xss", "Cross-Site Scripting (XSS)", "critical",
     "Unsanitised HTML written to DOM — sanitize with DOMPurify or avoid innerHTML")
-    .filter(f => !isJsonScriptBlock(lines, (f.line ?? 1) - 1));
+    .filter(f => !isJsonScriptBlock(lines, (f.line ?? 1) - 1))
+    .filter(f => !isConstantHtml(lines, (f.line ?? 1) - 1));
 }
 
 /**
@@ -2407,10 +2424,53 @@ function sqlConcatOnlyNumbers(lines: string[], idx: number): boolean {
   return operands.every(name => new RegExp(String.raw`\b${NUMERIC}\s+${name}\b|\b${name}\s*:\s*${NUMERIC}\b|\b${name}\s+${GO_NUMERIC}\b|\b${name}\b[^:\n]*:=\s*${GO_NUMERIC_CALL}`).test(window));
 }
 
+/** The `${...}` interpolations of a template-literal window, each with its braces balanced. */
+function templateInterpolations(text: string): string[] {
+  const out: string[] = [];
+  for (let i = text.indexOf("${"); i !== -1; i = text.indexOf("${", i)) {
+    let depth = 1, j = i + 2;
+    for (; j < text.length && depth > 0; j++) { if (text[j] === "{") depth++; else if (text[j] === "}") depth--; }
+    if (depth !== 0) break;
+    out.push(text.slice(i + 2, j - 1));
+    i = j;
+  }
+  return out;
+}
+
+// `keys.map(() => "?").join(", ")` / `"?".repeat(n)` / `Array(n).fill("?").join(",")`: a list of bind placeholders, never data.
+const PLACEHOLDER_STR = String.raw`(?:"[^"$\\]*\?[^"$\\]*"|'[^'$\\]*\?[^'$\\]*')`;
+const PLACEHOLDER_MAP_RE = new RegExp(String.raw`^[\w$.\[\]]+\s*\.map\(\s*\(?\s*[\w$,\s]*\)?\s*=>\s*${PLACEHOLDER_STR}\s*\)\s*\.join\(\s*(?:"[^"]*"|'[^']*')\s*\)$`);
+const PLACEHOLDER_REPEAT_RE = /^(?:"\?"|'\?')\.repeat\([^)]*\)$|^Array\([^)]*\)\.fill\(\s*(?:"\?"|'\?')\s*\)\.join\(\s*(?:"[^"]*"|'[^']*')\s*\)$/;
+function isPlaceholderListExpr(expr: string): boolean {
+  const e = expr.trim();
+  return PLACEHOLDER_MAP_RE.test(e) || PLACEHOLDER_REPEAT_RE.test(e);
+}
+
+/**
+ * `DELETE ... WHERE k IN (${keys.map(() => "?").join(", ")})` puts a list of `?` placeholders into the text and binds the values
+ * separately: that is a parameterised query, not interpolation of data. True only when EVERY `${...}` near the flagged line is such
+ * a list (inline, or a variable declared as one), and the flagged line itself does not join a value on with `+` / format.
+ */
+function sqlInterpolatesOnlyPlaceholders(lines: string[], idx: number): boolean {
+  const flagged = lines[idx] ?? "";
+  if (/["'`]\s*\+\s*[A-Za-z_$(]|[A-Za-z_$)\]]\s*\+\s*["'`]|\.concat\s*\(|\.format\s*\(|%s/.test(flagged)) return false;
+  const exprs = templateInterpolations(lines.slice(Math.max(0, idx - 4), Math.min(lines.length, idx + 7)).join("\n"));
+  if (exprs.length === 0) return false;
+  const decls = lines.slice(Math.max(0, idx - 40), Math.min(lines.length, idx + 7)).join("\n");
+  return exprs.every(e => {
+    if (isPlaceholderListExpr(e)) return true;
+    const name = e.trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
+    const m = new RegExp(String.raw`\b(?:const|let|var)\s+${name.replace(/\$/g, "\\$")}\b\s*(?::[^=]+)?=\s*([^;]+);`).exec(decls);
+    return !!m && isPlaceholderListExpr(m[1]);
+  });
+}
+
 function findSQLInjection(lines: string[]): ScanIndicator[] {
   return runDetector(lines, SQL_INJECTION_RE, "sql-injection", "SQL Injection", "critical",
     "Query built with string interpolation — use parameterised queries")
-    .filter(f => !sqlConcatOnlyNumbers(lines, (f.line ?? 1) - 1));
+    .filter(f => !sqlConcatOnlyNumbers(lines, (f.line ?? 1) - 1))
+    .filter(f => !sqlInterpolatesOnlyPlaceholders(lines, (f.line ?? 1) - 1));
 }
 
 // PHP-specific: unlike JS/Python, PHP interpolates a bare $var or {$var}
@@ -10353,6 +10413,17 @@ export function runScan(input: ScanInput): ScanOutput {
     }
   }
   const perFileEnd = Date.now();
+
+  // A header the project puts on many of its own files is its licence, not copied code (licenseContamination.ts).
+  {
+    const byPath = new Map(files.map(f => [f.file_path, f]));
+    for (const path of dropProjectWideLicenseHeaders(files, new Map(allFiles.map(f => [f.path, f.content ?? ""])))) {
+      const f = byPath.get(path);
+      if (!f) continue;
+      f.risk_indicators = Array.from(new Set(f.indicators.map(i => i.id)));
+      f.risk_score = calculateRisk(f.indicators, f.ai_percentage);
+    }
+  }
 
   // ── v7: Semantic graph (cross-file module dependency analysis) ────────────
   // Built early so cross-file taint propagation can inject indicators into

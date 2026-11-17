@@ -383,12 +383,17 @@ function isRegExpReceiver(callee: ts.Expression): boolean {
   const recv = unwrapExpr(callee.expression);
   if (ts.isRegularExpressionLiteral(recv)) return true;
   if (ts.isNewExpression(recv) && ts.isIdentifier(recv.expression) && recv.expression.text === "RegExp") return true;
+  // `compiled.re.exec(path)`, `this.pattern.exec(s)`, `route.regex.exec(s)`: judged by the property's name, like a bare name below
+  if (ts.isPropertyAccessExpression(recv)) return looksLikeRegExpName(recv.name.text);
   if (!ts.isIdentifier(recv)) return false;
   const name = recv.text;
   try {
     const declared = new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, "\\$")}\\b\\s*(?::[^=]+)?=\\s*(?:/(?![*/])|new\\s+RegExp\\b)`);
     if (declared.test(callee.getSourceFile().text)) return true;
   } catch { /* no source file: judge by the name */ }
+  return looksLikeRegExpName(name);
+}
+function looksLikeRegExpName(name: string): boolean {
   return /^(?:re|rx|regex|regexp|pattern|matcher)$/i.test(name) || /[a-z0-9](?:Re|Rx|Regex|RegExp|Pattern|Matcher)$/.test(name) || /_(?:re|rx|regex|regexp|pattern)$/i.test(name);
 }
 const FS_SINK_NAMES = new Set([
@@ -2861,7 +2866,9 @@ function structuralChecks(
   sf: ts.SourceFile, content: string,
   report: (id: AstTaintId, node: ts.Node, detail: string, sink: string) => void,
 ): void {
-  const fileHasVerify = /\.verify\s*\(|jwtVerify|jsonwebtoken|jose\b|passport/i.test(content);
+  // A constant-time compare of a MAC (`createHmac(...)` + `timingSafeEqual`), `createVerify` and `verifyToken/verifySignature(...)` are verification too:
+  // a signed token a file decodes by hand is not "unverified" when the same file checks that signature.
+  const fileHasVerify = /\.verify\s*\(|jwtVerify|jsonwebtoken|jose\b|passport|timingSafeEqual|createVerify\s*\(|\bverify(?:Token|Jwt|Signature|Hmac|Mac|Sig)\w*\s*\(/i.test(content);
   const visit = (n: ts.Node) => {
     if (isFunctionLike(n) && (n as ts.FunctionLikeDeclaration).body) {
       const fn = n as ts.FunctionLikeDeclaration;

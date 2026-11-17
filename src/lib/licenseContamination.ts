@@ -118,7 +118,17 @@ function lineNumberAt(content: string, index: number): number {
 
 // ── Entry point (registered via detectorRegistry) ──────────────────────────
 
+/**
+ * A project's own license / notice file (`LICENSE`, `LICENSE-MIT`, `COPYING`, `NOTICE`, `licenses/Apache-2.0.txt`): it IS the license
+ * text, so finding license text in it says nothing. (Found scanning ms, eve and others: the LICENSE file was the only finding.)
+ */
+export function isLicenseOrNoticeFile(filePath: string): boolean {
+  return /(?:^|\/)(?:LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT|PATENTS)(?:[-_.][\w.-]*)?$/i.test(filePath)
+    || /(?:^|\/)LICEN[CS]ES\//i.test(filePath);
+}
+
 export function scanLicenseContamination(ctx: DetectorContext): ScanIndicator[] {
+  if (isLicenseOrNoticeFile(ctx.file_path)) return [];
   const out: ScanIndicator[] = [];
 
   // SPDX identifiers + copyright notices -- per line, real line numbers.
@@ -173,4 +183,57 @@ export function scanLicenseContamination(ctx: DetectorContext): ScanIndicator[] 
   }
 
   return out;
+}
+
+// ── A header the whole project carries ──────────────────────────────────────
+
+/** The same notice on at least this many files of one scan is the project's own header (a Circle / Cloudflare / Apache file header
+ * on every source file: 388, 395 and 1,171 findings on three public repositories), not text copied into a file. */
+export const PROJECT_HEADER_MIN_FILES = 3;
+
+/** What a finding says, with the parts that differ per file (comment marker, year, spacing) removed. */
+function headerKey(ind: ScanIndicator, linesOf: (path: string) => string[] | undefined, path: string): string | null {
+  if (ind.detail?.startsWith("Verbatim ")) return `boilerplate:${ind.detail.split(" text found")[0]}`;
+  if (ind.line == null) return null;
+  const text = linesOf(path)?.[ind.line - 1];
+  if (text == null) return null;
+  const key = text.replace(/^[\s/*#;>"'!\-]+/, "").replace(/\d+/g, "0").replace(/\s+/g, " ").trim().toLowerCase();
+  return key ? `line:${key}` : null;
+}
+
+/**
+ * Drops the license findings whose notice appears on {@link PROJECT_HEADER_MIN_FILES}+ files of this scan, in place. A copied snippet
+ * carries one file's header; a project-wide header is on file after file. Returns the paths that lost findings (their risk is
+ * re-derived by the caller). A header on one or two files, or a different holder on each, is still reported.
+ */
+export function dropProjectWideLicenseHeaders(
+  files: Array<{ file_path: string; indicators: ScanIndicator[] }>,
+  contentOf: ReadonlyMap<string, string>,
+): Set<string> {
+  const cache = new Map<string, string[]>();
+  const linesOf = (path: string) => {
+    let l = cache.get(path);
+    if (!l) { l = (contentOf.get(path) ?? "").split("\n"); cache.set(path, l); }
+    return l;
+  };
+  const filesByKey = new Map<string, Set<string>>();
+  const keyOf = new Map<ScanIndicator, string>();
+  for (const f of files) {
+    for (const ind of f.indicators) {
+      if (ind.id !== ID) continue;
+      const key = headerKey(ind, linesOf, f.file_path);
+      if (!key) continue;
+      keyOf.set(ind, key);
+      (filesByKey.get(key) ?? filesByKey.set(key, new Set()).get(key)!).add(f.file_path);
+    }
+  }
+  const changed = new Set<string>();
+  for (const f of files) {
+    const kept = f.indicators.filter(ind => {
+      const key = keyOf.get(ind);
+      return !(key && (filesByKey.get(key)?.size ?? 0) >= PROJECT_HEADER_MIN_FILES);
+    });
+    if (kept.length !== f.indicators.length) { f.indicators = kept; changed.add(f.file_path); }
+  }
+  return changed;
 }
