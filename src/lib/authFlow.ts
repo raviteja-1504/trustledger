@@ -6,7 +6,7 @@
 /** Messages for the login page's ?error= codes. Anything else gets GENERIC — the param is never echoed,
  *  so a crafted link can't put its own text on the sign-in page. */
 export const LOGIN_ERROR_MESSAGES: Record<string, string> = {
-  session_timeout:    "You were signed out after 30 minutes of inactivity.",
+  session_timeout:    "You were signed out after 10 minutes of inactivity.",
   session_revoked:    "You were signed out because your account signed in somewhere else.",
   pkce_lost:          "Your sign-in attempt expired. Please try again.",
   missing_code:       "GitHub didn't complete the sign-in. Please try again.",

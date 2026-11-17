@@ -87,7 +87,7 @@ export function syncSessionCookie(session: Session | null) {
 
 // ── Idle timeout ─────────────────────────────────────────────────────────────
 // Auto sign-out after this much inactivity (no mouse/keyboard/touch events).
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 // ── Demo / skip-auth mode ──────────────────────────────────────────────────────
 const SKIP_AUTH = process.env.NEXT_PUBLIC_SKIP_AUTH === "true";
