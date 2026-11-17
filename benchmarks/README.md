@@ -1,6 +1,6 @@
 # Benchmark harness
 
-How the numbers on [/benchmarks](https://dashboard-psi-smoky-96.vercel.app/benchmarks) are produced, so anyone
+How the numbers on [/benchmarks](https://trustledgerapp.dev/benchmarks) are produced, so anyone
 with this repository can reproduce them.
 
 ## Corpora
