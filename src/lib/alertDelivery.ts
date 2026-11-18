@@ -97,6 +97,7 @@ export async function sendSlackAlert(
     const res = await fetch(webhookUrl, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
+      redirect: "manual",   // never follow a redirect off the vetted public URL (see outboundUrl.ts)
       body:    JSON.stringify({
         text:        `${SEV_EMOJI[alert.severity]} ${alert.severity}: ${alert.title}`,
         attachments: [{ color: SEV_COLOR[alert.severity], blocks }],
@@ -234,6 +235,7 @@ export async function sendTeamsAlert(webhookUrl: string, alert: AlertPayload): P
     const res = await fetch(webhookUrl, {
       method:  "POST",
       headers: { "Content-Type":"application/json" },
+      redirect: "manual",   // never follow a redirect off the vetted public URL (see outboundUrl.ts)
       body:    JSON.stringify(card),
     });
     return res.ok;

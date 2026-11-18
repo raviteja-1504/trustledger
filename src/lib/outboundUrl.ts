@@ -7,6 +7,9 @@
  *
  * This is a HOST-NAME check. It does not resolve DNS, so a public name that points at a private address still passes; closing that
  * needs a resolve-then-connect check (pin the resolved address for the request), which is a separate change.
+ *
+ * Redirects: the check only covers the URL typed in, so every caller must fetch with `redirect: "manual"`; otherwise a public host could
+ * answer 302 to a private address and fetch() would follow it. deliverWebhook / sendSlackAlert / sendTeamsAlert do (tested).
  */
 
 const BLOCKED_SUFFIXES = [".localhost", ".local", ".internal", ".intranet", ".lan", ".home", ".corp", ".private"];

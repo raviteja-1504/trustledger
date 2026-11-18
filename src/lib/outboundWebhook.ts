@@ -93,6 +93,9 @@ export async function deliverWebhook(
       headers,
       body,
       signal:  AbortSignal.timeout(10_000), // 10s timeout
+      // Never follow a redirect: isPublicHttpUrl() only vetted the URL typed in, and a public host could answer
+      // 302 -> http://169.254.169.254/ (cloud metadata) or a private address. A 3xx is reported as a failed delivery.
+      redirect: "manual",
     });
     return {
       success:     res.ok,

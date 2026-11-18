@@ -51,3 +51,27 @@ describe("delivery refuses private destinations without making a request", () =>
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("delivery never follows a redirect off the vetted URL", () => {
+  // isPublicHttpUrl() only vets the URL typed in. fetch() follows redirects by default, so a public host answering
+  // 302 -> http://169.254.169.254/ would reach cloud metadata unless every sender asks for redirect: "manual".
+  const fetchMock = jest.fn();
+  beforeEach(() => { fetchMock.mockReset(); fetchMock.mockResolvedValue({ ok: false, status: 302 }); global.fetch = fetchMock as unknown as typeof fetch; });
+  const alert: AlertPayload = { alert_id: "a1", severity: "P1", title: "t", body: "b", org_name: "Acme", app_url: "https://app.example.com" };
+  const event = { id: "e1", type: "scan.completed", created_at: "2026-11-12T00:00:00Z", data: {} } as unknown as Parameters<typeof deliverWebhook>[1];
+
+  it("a webhook is sent with redirect: manual, and a 302 reply is a failed delivery", async () => {
+    const r = await deliverWebhook({ url: "https://hooks.example.com/x", events: ["scan.completed"], enabled: true } as Parameters<typeof deliverWebhook>[0], event);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+    expect(r).toMatchObject({ success: false, status_code: 302 });
+  });
+  it("a Slack alert is sent with redirect: manual, and a 302 reply is not a success", async () => {
+    expect(await sendSlackAlert("https://hooks.example.com/slack", alert)).toBe(false);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+  it("a Teams alert is sent with redirect: manual, and a 302 reply is not a success", async () => {
+    expect(await sendTeamsAlert("https://hooks.example.com/teams", alert)).toBe(false);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+});

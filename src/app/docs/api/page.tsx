@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import Script from "next/script";
 import Link from "next/link";
+import { SWAGGER_CSS_URL, SWAGGER_CSS_SRI, SWAGGER_JS_URL, SWAGGER_JS_SRI } from "@/lib/swaggerAssets";
 
 /** The interactive API reference: Swagger UI over the OpenAPI spec served at /api/docs. */
 export default function ApiDocsPage() {
@@ -12,7 +13,9 @@ export default function ApiDocsPage() {
     const link = document.createElement("link");
     link.id   = "swagger-ui-css";
     link.rel  = "stylesheet";
-    link.href = "https://unpkg.com/swagger-ui-dist@5/swagger-ui.css";
+    link.href = SWAGGER_CSS_URL;
+    link.integrity   = SWAGGER_CSS_SRI;   // pinned version + hash: a tampered CDN file is refused
+    link.crossOrigin = "anonymous";       // required for the browser to check the hash
     document.head.appendChild(link);
   }, []);
 
@@ -40,7 +43,9 @@ export default function ApiDocsPage() {
 
       {/* next/script handles deduplication + proper load ordering */}
       <Script
-        src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"
+        src={SWAGGER_JS_URL}
+        integrity={SWAGGER_JS_SRI}
+        crossOrigin="anonymous"
         strategy="afterInteractive"
         onLoad={() => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
