@@ -131,7 +131,10 @@ function findAllNodes(root: CstNode, name: string, acc: CstNode[] = []): CstNode
 }
 
 /** Leftmost token anywhere under `node`, by lowest startOffset -- used to resolve a finding's line number. */
+const LEFTMOST_TOKEN_CACHE = new WeakMap<CstNode, IToken | null>();
 function leftmostToken(node: CstNode): IToken | null {
+  const hit = LEFTMOST_TOKEN_CACHE.get(node);
+  if (hit !== undefined) return hit;
   let best: IToken | null = null;
   const visit = (n: CstNode) => {
     for (const key of Object.keys(n.children)) {
@@ -145,6 +148,7 @@ function leftmostToken(node: CstNode): IToken | null {
     }
   };
   visit(node);
+  LEFTMOST_TOKEN_CACHE.set(node, best);
   return best;
 }
 function lineOf(node: CstNode): number {
@@ -432,8 +436,14 @@ function extractMethodInfo(methodDecl: CstNode): LocalMethod | null {
  * bare-name interprocedural policy (astTaint.ts's collectLocalFunctions,
  * astTaintPython.ts's collectLocalFunctionsPy) -- not a precision claim.
  */
+/** Per file: built once (the table is read-only afterwards). `makeJavaCtx` runs per method / per seeded parameter, and each used to
+ * rebuild every method's info with a whole-file walk. */
+const LOCAL_METHODS_CACHE = new WeakMap<CstNode, Map<string, LocalMethod>>();
 function collectLocalMethods(root: CstNode): Map<string, LocalMethod> {
+  const cached = LOCAL_METHODS_CACHE.get(root);
+  if (cached) return cached;
   const methods = new Map<string, LocalMethod>();
+  LOCAL_METHODS_CACHE.set(root, methods);
   const pkg = packageNameOf(root);
   const classes = typeRangesOf(root);
   for (const methodDecl of findAllNodes(root, "methodDeclaration")) {
@@ -447,9 +457,14 @@ function collectLocalMethods(root: CstNode): Map<string, LocalMethod> {
 }
 
 /** `package a.b.c;` of the file, or "". */
+const PACKAGE_NAME_CACHE = new WeakMap<CstNode, string>();
 function packageNameOf(root: CstNode): string {
+  const hit = PACKAGE_NAME_CACHE.get(root);
+  if (hit !== undefined) return hit;
   const decl = findAllNodes(root, "packageDeclaration")[0];
-  return decl ? collectAllTokens(decl).filter(t => t.tokenType?.name === "Identifier").map(t => t.image).join(".") : "";
+  const name = decl ? collectAllTokens(decl).filter(t => t.tokenType?.name === "Identifier").map(t => t.image).join(".") : "";
+  PACKAGE_NAME_CACHE.set(root, name);
+  return name;
 }
 
 interface TypeRange { name: string; start: number; end: number }
@@ -547,21 +562,27 @@ function collectAllTokens(node: CstNode, acc: IToken[] = []): IToken[] {
 /** `row` is 0-indexed, matching findNodeAtRowGo/findNodeAtRowPy's own
  * convention (scanner.ts always calls with `Math.max(0, line - 1)`).
  * java-parser's own IToken.startLine/endLine are 1-indexed. */
+const METHOD_LINE_RANGES = new WeakMap<CstNode, Array<{ name: string; start: number; end: number }>>();
 export function findEnclosingFunctionNameJava(cst: CstNode, row: number): string {
   const targetLine = row + 1;
-  const methods = collectLocalMethods(cst);
-  for (const method of methods.values()) {
-    const name = method.name;
-    if (!method.body) continue;
-    const tokens = collectAllTokens(method.body);
-    if (tokens.length === 0) continue;
-    let start = Infinity, end = -Infinity;
-    for (const t of tokens) {
-      if (t.startLine !== undefined && t.startLine < start) start = t.startLine;
-      if (t.endLine !== undefined && t.endLine > end) end = t.endLine;
+  // Called for every finding of the file: each method's line range is worked out once per tree, not once per finding.
+  let ranges = METHOD_LINE_RANGES.get(cst);
+  if (!ranges) {
+    ranges = [];
+    for (const method of collectLocalMethods(cst).values()) {
+      if (!method.body) continue;
+      const tokens = collectAllTokens(method.body);
+      if (tokens.length === 0) continue;
+      let start = Infinity, end = -Infinity;
+      for (const t of tokens) {
+        if (t.startLine !== undefined && t.startLine < start) start = t.startLine;
+        if (t.endLine !== undefined && t.endLine > end) end = t.endLine;
+      }
+      ranges.push({ name: method.name, start, end });
     }
-    if (targetLine >= start && targetLine <= end) return name;
+    METHOD_LINE_RANGES.set(cst, ranges);
   }
+  for (const r of ranges) if (targetLine >= r.start && targetLine <= r.end) return r.name;
   return "unknown";
 }
 
@@ -704,10 +725,28 @@ function isRequestVar(v: string | null, ctx: { varTypes: Map<string, string> }):
 /** Source-order text of every token under `node`, joined with no separators (`Map<String,String>`). */
 /** The trace resolver over this file's methods: the current method body as the scope, plus the interprocedural
  * hooks (a parameter continues at a caller's argument; a call of a local method continues at its `return`). */
+/** A file's method list and `primary` (call) nodes with their text, built ONCE per syntax tree. The tree never changes, but the
+ * resolver is created for every finding and `callSitesOf` runs for every traced parameter: each used to re-walk the whole file and
+ * rebuild every call's text, so a 5,000-line class (java-tron's `Wallet.java`) took over two minutes. */
+interface FileTraceIndex { methods: LocalMethod[]; primaries: Array<{ p: CstNode; text: string }> | null }
+const FILE_TRACE_INDEX = new WeakMap<CstNode, FileTraceIndex>();
+function fileTraceIndex(root: CstNode): FileTraceIndex {
+  let index = FILE_TRACE_INDEX.get(root);
+  if (!index) {
+    index = { methods: findAllNodes(root, "methodDeclaration").map(extractMethodInfo).filter((m): m is LocalMethod => !!m?.body), primaries: null };
+    FILE_TRACE_INDEX.set(root, index);
+  }
+  return index;
+}
+function primariesOf(root: CstNode): Array<{ p: CstNode; text: string }> {
+  const index = fileTraceIndex(root);
+  return index.primaries ??= findAllNodes(root, "primary").map(p => ({ p, text: tokensText(p) }));
+}
+
 function javaTraceResolver(ctx: EngineCtx): TraceResolver<CstNode> {
   // every method declaration (ctx.localMethods is keyed by name, so two classes' `read` methods would hide one)
-  const methods = (ctx.root ? findAllNodes(ctx.root, "methodDeclaration").map(extractMethodInfo) : [...ctx.localMethods.values()])
-    .filter((m): m is LocalMethod => !!m?.body);
+  const methods = ctx.root ? fileTraceIndex(ctx.root).methods
+    : [...ctx.localMethods.values()].filter((m): m is LocalMethod => !!m?.body);
   const params = (m: LocalMethod) => { const out: string[] = []; for (const s of m.paramShapes) out[s.index] = s.name; return Array.from(out, n => n ?? ""); };
   const methodOfBody = (scope: CstNode) => methods.find(m => m.body === scope) ?? null;
   const enclosingBody = (n: CstNode): CstNode | null => {
@@ -733,24 +772,34 @@ function javaTraceResolver(ctx: EngineCtx): TraceResolver<CstNode> {
     storeWrites: text => {
       const key = /^[\w.()]*\.\s*getAttribute\s*\(\s*"([^"]*)"\s*\)$/.exec(text.trim())?.[1];
       if (key === undefined || !ctx.root) return [];
-      return findAllNodes(ctx.root, "primary").flatMap(p => {
-        const t = tokensText(p);
-        const m = new RegExp(`\\.\\s*setAttribute\\s*\\(\\s*"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*,\\s*([\\s\\S]+)\\)$`).exec(t);
+      const re = new RegExp(`\\.\\s*setAttribute\\s*\\(\\s*"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*,\\s*([\\s\\S]+)\\)$`);
+      return primariesOf(ctx.root).flatMap(({ p, text: t }) => {
+        const m = re.exec(t);
         return m ? [{ scope: enclosingBody(p), position: startOf(p), line: lineOf(p), rhsText: m[1].trim(), label: t }] : [];
       });
     },
     // `name(…)`, `this.name(…)`, and calls on a receiver (`redirector.redirect(…)`, `new FileService().read(…)`): the
     // text from the method name on, so its arguments are this call's
-    callSitesOf: name => (ctx.root ? findAllNodes(ctx.root, "primary") : [])
-      .map(p => ({ p, text: tokensText(p) }))
-      .flatMap(({ p, text }) => {
-        const m = new RegExp(`(?:^|\\.\\s*)${name}\\s*\\(`).exec(text);
+    callSitesOf: name => {
+      const re = new RegExp(`(?:^|\\.\\s*)${name}\\s*\\(`);
+      return (ctx.root ? primariesOf(ctx.root) : []).flatMap(({ p, text }) => {
+        const m = re.exec(text);
         return m ? [{ scope: enclosingBody(p), position: startOf(p), line: lineOf(p), text: text.slice(m.index + m[0].indexOf(name)) }] : [];
-      }),
+      });
+    },
   };
 }
 
+/** `tokensText` per node: a node's tokens never change, and the same call / expression nodes are asked for over and over. */
+const TOKENS_TEXT_CACHE = new WeakMap<CstNode, string>();
 function tokensText(node: CstNode): string {
+  const cached = TOKENS_TEXT_CACHE.get(node);
+  if (cached !== undefined) return cached;
+  const text = computeTokensText(node);
+  TOKENS_TEXT_CACHE.set(node, text);
+  return text;
+}
+function computeTokensText(node: CstNode): string {
   const toks: IToken[] = [];
   const visit = (n: CstNode) => {
     for (const key of Object.keys(n.children)) for (const el of n.children[key]) { if (isToken(el)) toks.push(el); else visit(el as unknown as CstNode); }
@@ -858,14 +907,23 @@ function isHtmlEscaperBody(body: CstNode): boolean {
   return images.has('"<"') && (images.has('"&lt;"') || images.has('"&#60;"') || images.has('"&#x3C;"'));
 }
 
+/** The names a method body declares (locals, lambda parameters), per body: the walk is the cost, and the body never changes. */
+const BODY_NAMES_CACHE = new WeakMap<CstNode, string[]>();
 function localNamesOfMethod(method: { paramShapes: { name: string }[]; body: CstNode | null }): Set<string> {
   const names = new Set<string>(method.paramShapes.map(p => p.name));
   if (!method.body) return names;
-  for (const id of findAllNodes(method.body, "variableDeclaratorId")) {
-    const t = firstTok(id, "Identifier");
-    if (t) names.add(t.image);
+  let declared = BODY_NAMES_CACHE.get(method.body);
+  if (!declared) {
+    const found = new Set<string>();
+    for (const id of findAllNodes(method.body, "variableDeclaratorId")) {
+      const t = firstTok(id, "Identifier");
+      if (t) found.add(t.image);
+    }
+    for (const lam of findAllNodes(method.body, "lambdaExpression")) for (const p of lambdaParamNames(lam)) found.add(p);
+    declared = [...found];
+    BODY_NAMES_CACHE.set(method.body, declared);
   }
-  for (const lam of findAllNodes(method.body, "lambdaExpression")) for (const p of lambdaParamNames(lam)) names.add(p);
+  for (const n of declared) names.add(n);
   return names;
 }
 
@@ -1047,7 +1105,17 @@ function bareLocalNameJava(lhsUnary: CstNode): string | null {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(full) ? full : null;
 }
 
-function assignmentsInJava(scope: CstNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
+type JavaAssignment = { name: string; position: number; rhsText: string; line: number };
+/** A scope's assignments, once per scope node (the trace asks for them for every variable it follows; callers only filter). */
+const ASSIGNMENTS_CACHE = new WeakMap<CstNode, JavaAssignment[]>();
+function assignmentsInJava(scope: CstNode): JavaAssignment[] {
+  const hit = ASSIGNMENTS_CACHE.get(scope);
+  if (hit) return hit;
+  const out = computeAssignmentsInJava(scope);
+  ASSIGNMENTS_CACHE.set(scope, out);
+  return out;
+}
+function computeAssignmentsInJava(scope: CstNode): Array<{ name: string; position: number; rhsText: string; line: number }> {
   const out: Array<{ name: string; position: number; rhsText: string; line: number }> = [];
   const visit = (n: CstNode) => {
     if (n !== scope && n.name === "lambdaExpression") return; // a nested closure's own assignments aren't this scope's
@@ -2484,26 +2552,48 @@ function isLiteralCollectionExprJava(expr: CstNode, depth = 0): boolean {
 }
 
 /** A field/local EVERY declaration of which is a literal collection and which is never reassigned or mutated. */
-function isLiteralCollectionVarJava(name: string, root: CstNode): boolean {
-  const decls = findAllNodes(root, "variableDeclarator").filter(vd => {
+/** Per file: every declarator by name, every name assigned to, every name a collection mutator is called on. Built once --
+ * `isLiteralCollectionVarJava` runs for every container write and used to walk the whole file three times each time. */
+interface CollectionIndex { declsByName: Map<string, CstNode[]>; assigned: Set<string>; mutated: Set<string> }
+const COLLECTION_INDEX = new WeakMap<CstNode, CollectionIndex>();
+function collectionIndex(root: CstNode): CollectionIndex {
+  let index = COLLECTION_INDEX.get(root);
+  if (index) return index;
+  const declsByName = new Map<string, CstNode[]>();
+  for (const vd of findAllNodes(root, "variableDeclarator")) {
     const id = firstNode(vd, "variableDeclaratorId");
-    return (id ? firstTok(id, "Identifier")?.image : undefined) === name;
-  });
+    const declared = id ? firstTok(id, "Identifier")?.image : undefined;
+    if (declared === undefined) continue;
+    const list = declsByName.get(declared);
+    if (list) list.push(vd); else declsByName.set(declared, [vd]);
+  }
+  const assigned = new Set<string>();
+  for (const bin of findAllNodes(root, "binaryExpression")) {
+    if (tokenKids(bin, "AssignmentOperator").length === 0) continue;
+    const lhs = firstNode(bin, "unaryExpression");
+    const target = lhs ? bareIdentifierOf(lhs) : null;
+    if (target !== null) assigned.add(target);
+  }
+  const mutated = new Set<string>();
+  for (const primary of findAllNodes(root, "primary")) {
+    const chain = chainOfPrimary(primary);
+    if (chain && chain[1] && COLLECTION_MUTATORS.has(chain[1].name)) mutated.add(chain[0].name);
+  }
+  index = { declsByName, assigned, mutated };
+  COLLECTION_INDEX.set(root, index);
+  return index;
+}
+function isLiteralCollectionVarJava(name: string, root: CstNode): boolean {
+  const index = collectionIndex(root);
+  const decls = index.declsByName.get(name) ?? [];
   if (decls.length === 0) return false;
   for (const vd of decls) {
     const init = firstNode(vd, "variableInitializer");
     const expr = init ? firstNode(init, "expression") : undefined;
     if (!expr || !isLiteralCollectionExprJava(expr)) return false;
   }
-  for (const bin of findAllNodes(root, "binaryExpression")) {
-    if (tokenKids(bin, "AssignmentOperator").length === 0) continue;
-    const lhs = firstNode(bin, "unaryExpression");
-    if (lhs && bareIdentifierOf(lhs) === name) return false;
-  }
-  for (const primary of findAllNodes(root, "primary")) {
-    const chain = chainOfPrimary(primary);
-    if (chain && chain[0].name === name && chain[1] && COLLECTION_MUTATORS.has(chain[1].name)) return false;
-  }
+  if (index.assigned.has(name)) return false;
+  if (index.mutated.has(name)) return false;
   return true;
 }
 
@@ -3019,8 +3109,13 @@ function collectClassFieldNames(root: CstNode): Set<string> {
 }
 
 /** Class field name -> declared simple type (`private final UserService users;` -> users: UserService). */
+const FILE_FIELD_TYPES_CACHE = new WeakMap<CstNode, Map<string, string>>();
 function collectClassFieldTypes(root: CstNode): Map<string, string> {
-  const types = new Map<string, string>();
+  // a whole-file walk, asked for again by every method of a class the per-class table doesn't know (callers copy or only iterate it)
+  let types = FILE_FIELD_TYPES_CACHE.get(root);
+  if (types) return types;
+  types = new Map<string, string>();
+  FILE_FIELD_TYPES_CACHE.set(root, types);
   for (const fd of findAllNodes(root, "fieldDeclaration")) {
     const unannType = firstNode(fd, "unannType");
     const classType = unannType ? findAllNodes(unannType, "unannClassType")[0] : undefined;
