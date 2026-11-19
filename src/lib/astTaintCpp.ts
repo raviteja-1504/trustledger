@@ -736,7 +736,11 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
     if (cls && INPUT_CLASSES.has(cls)) return ALL;
   }
   // Apache / Qt / Boost plumbing: the result keeps what any argument holds
-  if (ANY_ARG_PASSTHROUGH.has(api)) return args.reduce((acc, a) => acc | mask(a, env, ctx), 0);
+  // A plain function this file defines itself (`static const char* get(const char* a)`, `parse(...)`, `load(...)`) is judged by what its own
+  // body returns, further down, never by its NAME appearing in a list of library methods: that list is for `x.get()` / `QString(x)`, and
+  // matching a user's `get(argv)` made every call to it carry its argument's taint even when it returns a literal.
+  const definedHere = !recv && resolveLocalFns(call, ctx.fnAlias.get(name) ?? name, recv, ctx).length > 0;
+  if (!definedHere && ANY_ARG_PASSTHROUGH.has(api)) return args.reduce((acc, a) => acc | mask(a, env, ctx), 0);
   // sqlite3_mprintf("... '%s'", x): a statement built from x -- unless every substitution is %q / %Q / %w (SQLite's own quoting)
   if (api === "sqlite3_mprintf" || api === "sqlite3_vmprintf") {
     const fmt = stringValue(args[0] ?? null);
@@ -745,7 +749,7 @@ function callMask(call: SyntaxNode, env: Env, ctx: EngineCtx): number {
     return quoted ? applySanitizer(m, SinkClass.SQL) : m;
   }
   // a conversion that keeps the text (`.toStdString()`, `.asString()`, `QString::fromUtf8(x)`, `.trimmed()`)
-  if (STRING_CARRY_METHODS.has(api) && (recv || args.length > 0)) {
+  if (!definedHere && STRING_CARRY_METHODS.has(api) && (recv || args.length > 0)) {
     const carried = recv ? mask(recv, env, ctx) : mask(args[0] ?? null, env, ctx);
     if (carried) return carried;
   }
