@@ -193,7 +193,7 @@ export default function TeamPage() {
           <form onSubmit={invite} className="animate-fade-up section-card p-5 space-y-4">
             <div>
               <p className="font-bold text-gray-900 text-sm">Invite a new member</p>
-              <p className="text-xs text-gray-400 mt-0.5">They will be added immediately. Email notification coming soon.</p>
+              <p className="text-xs text-gray-400 mt-0.5">They are added immediately, as long as your plan has room for another member, and get an email to set a password and sign in. If that address already has an account no email is sent: use Resend on their row to copy a sign-in link.</p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <input

@@ -67,3 +67,33 @@ function shadeColor(hex: string, percent: number): string {
 export function useBranding(): BrandingConfig {
   return loadBranding();
 }
+
+/** What a branding form is allowed to hold. Pure, so it is testable without a browser. */
+export interface BrandingCheck { ok: boolean; errors: Partial<Record<keyof BrandingConfig, string>>; cleaned: BrandingConfig }
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+const EMAIL     = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isWebUrl(v: string): boolean {
+  try { const u = new URL(v); return u.protocol === "https:" || u.protocol === "http:"; } catch { return false; }
+}
+
+/**
+ * Trim every field, drop the empty ones, and check what is left. Empty fields are not saved (they used to be stored as "" and the
+ * page still said "Applied"). Saving needs at least one real value, and each value must look right: a hex colour, an http(s) URL for the
+ * logo and favicon, a valid support email.
+ */
+export function validateBranding(input: BrandingConfig): BrandingCheck {
+  const cleaned: BrandingConfig = {};
+  const errors: BrandingCheck["errors"] = {};
+  for (const key of Object.keys(input) as Array<keyof BrandingConfig>) {
+    const v = (input[key] ?? "").trim();
+    if (v) cleaned[key] = v;
+  }
+  if (cleaned.primary_color && !HEX_COLOR.test(cleaned.primary_color)) errors.primary_color = "Use a 6-digit hex colour such as #6366f1.";
+  if (cleaned.logo_url && !isWebUrl(cleaned.logo_url))                 errors.logo_url = "Enter a full http(s) address, such as https://your-domain.com/logo.png.";
+  if (cleaned.favicon_url && !isWebUrl(cleaned.favicon_url))           errors.favicon_url = "Enter a full http(s) address, such as https://your-domain.com/favicon.ico.";
+  if (cleaned.support_email && !EMAIL.test(cleaned.support_email))     errors.support_email = "Enter a valid email address.";
+  if (Object.keys(cleaned).length === 0) errors.org_name = "Enter at least one value before applying.";
+  return { ok: Object.keys(errors).length === 0, errors, cleaned };
+}

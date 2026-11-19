@@ -1815,10 +1815,15 @@ function BrandingTab() {
   }, []);
   const [saved, setSaved] = useState(false);
   const [preview, setPreview] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
 
   async function save() {
-    const { saveBranding } = await import("@/lib/branding");
-    saveBranding(cfg);
+    const { saveBranding, validateBranding } = await import("@/lib/branding");
+    const check = validateBranding(cfg);
+    if (!check.ok) { setErrors(Object.values(check.errors) as string[]); setSaved(false); return; }   // nothing is stored or applied
+    setErrors([]);
+    setCfg(check.cleaned as Record<string, string>);
+    saveBranding(check.cleaned);
     setSaved(true); setTimeout(() => setSaved(false), 2500);
   }
 
@@ -1875,6 +1880,11 @@ function BrandingTab() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={cfg.logo_url} alt="Logo preview" className="h-10 object-contain" onError={() => {}} />
             </div>
+          )}
+          {errors.length > 0 && (
+            <ul role="alert" className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-4 py-3 space-y-1 list-disc list-inside">
+              {errors.map(e => <li key={e}>{e}</li>)}
+            </ul>
           )}
           <div className="flex items-center gap-3">
             <button onClick={save}

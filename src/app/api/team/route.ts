@@ -14,6 +14,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { safeError } from "@/lib/errors";
 import { ASSIGNABLE_ROLES as VALID_ROLES, type AssignableRole as MemberRole } from "@/lib/memberRoles";
 import { checkGrantable } from "@/lib/permissionResolver";
+import { checkMemberSlot } from "@/lib/planGate";
 import { memberPermissions, permissionsFromRow, type PermissionKey } from "@/lib/permissions";
 
 // ── GET — list members (any authenticated member of the org) ──────────────────
@@ -81,6 +82,11 @@ export async function POST(req: NextRequest) {
     .maybeSingle();
 
   if (existing) return NextResponse.json({ error: "already_member" }, { status: 409 });
+
+  // Plan limit on team size. Counts every row in org_members, so members who were invited but have not signed in yet are
+  // included. This runs before the auth invite is created so a blocked request never emails anyone.
+  const seat = await checkMemberSlot(db, auth.org_id);
+  if (!seat.allowed) return NextResponse.json({ error: "plan_limit_members", message: seat.message }, { status: 403 });
 
   // Ensure the Supabase auth user exists. inviteUserByEmail creates a new
   // user (or returns the existing one) and sends them a magic-link email so
